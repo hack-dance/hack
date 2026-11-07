@@ -6,7 +6,13 @@
 //! the complete stream has hashed to the same value; a file changed after validation
 //! cannot complete an import. Memory use is bounded by small metadata members, not by
 //! archive size.
-use super::{engine::Engine, image_platform::ImagePlatform, image_policy::ImagePolicy, state};
+use super::{
+    engine::Engine,
+    go_json::{GoJson, Unreadable},
+    image_platform::ImagePlatform,
+    image_policy::ImagePolicy,
+    state,
+};
 use crate::{Candidate, CandidateError};
 use flate2::read::MultiGzDecoder;
 use reqwest::Method;
@@ -481,14 +487,33 @@ fn validated(
             "Image configuration does not match the expected content ID.",
         ));
     }
-    let config: Value =
-        serde_json::from_slice(config_bytes).map_err(|_| error("Invalid image configuration."))?;
-    if config["architecture"] != platform.architecture() || config["os"] != "linux" {
+    // Read as the engine reads it: keys match case-insensitively and a field named more
+    // than once refuses (see `go_json`), so these checks see what the load will use.
+    let config = GoJson::parse(config_bytes).map_err(|_| error("Invalid image configuration."))?;
+    let unreadable = |reason: Unreadable| match reason {
+        Unreadable::Ambiguous => error("Image configuration names one field more than once."),
+        Unreadable::NonAsciiKey => error("Image configuration member names must be ASCII."),
+    };
+    let field = |document: &GoJson, name: &str| -> Result<Value, CandidateError> {
+        document
+            .field(name)
+            .map_err(unreadable)
+            .map(|value| value.map_or(Value::Null, GoJson::to_value))
+    };
+    if field(&config, "architecture")? != platform.architecture()
+        || field(&config, "os")? != "linux"
+    {
         return Err(error(
             "Image architecture is incompatible with this provider.",
         ));
     }
-    let diffs = config["rootfs"]["diff_ids"]
+    let rootfs = config
+        .field("rootfs")
+        .map_err(unreadable)?
+        .cloned()
+        .unwrap_or(GoJson::Null);
+    let diffs = field(&rootfs, "diff_ids")?;
+    let diffs = diffs
         .as_array()
         .filter(|v| v.len() == manifest.layers.len())
         .ok_or_else(|| error("Image layer identities are missing."))?;
@@ -841,15 +866,21 @@ pub(super) mod tests {
             "rootfs":{"type":"layers","diff_ids":[format!("sha256:{diff}")]}}),
         )
         .unwrap();
-        let image = format!("sha256:{}", hash(&config));
+        archive_with_config(&layer, &config, extra)
+    }
+
+    /// A docker-archive tarball with one already compressed layer and these exact
+    /// configuration bytes. Returns the archive and its config content ID.
+    fn archive_with_config(layer: &[u8], config: &[u8], extra: bool) -> (Vec<u8>, String) {
+        let image = format!("sha256:{}", hash(config));
         let manifest = serde_json::to_vec(
             &serde_json::json!([{"Config":"config.json","Layers":["layer"],"RepoTags":[]}]),
         )
         .unwrap();
         let mut archive = tar::Builder::new(Vec::new());
         let mut members = vec![
-            ("config.json", config.as_slice()),
-            ("layer", layer.as_slice()),
+            ("config.json", config),
+            ("layer", layer),
             ("manifest.json", manifest.as_slice()),
         ];
         if extra {
@@ -1187,6 +1218,65 @@ pub(super) mod tests {
             &serde_json::from_value(rebooted).unwrap(),
             &requested
         ));
+    }
+
+    #[test]
+    fn archive_configuration_fields_are_read_like_the_engine_and_refuse_repetition() {
+        let payload = [b'x'; 2048];
+        let layer = compress(Layer::Gzip, &payload);
+        let diff = format!("sha256:{}", hash(&payload));
+        let check = |config: String| {
+            let (bytes, image) = archive_with_config(&layer, config.as_bytes(), false);
+            validate(&bytes, &image, 4096)
+        };
+        // Case variants the engine accepts are read as it reads them.
+        assert!(
+            check(format!(
+                r#"{{"Architecture":"arm64","OS":"linux","RootFS":{{"type":"layers","DIFF_IDS":["{diff}"]}}}}"#
+            ))
+            .is_ok()
+        );
+        for config in [
+            format!(
+                r#"{{"architecture":"arm64","Architecture":"amd64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{diff}"]}}}}"#
+            ),
+            format!(
+                r#"{{"architecture":"arm64","os":"linux","os":"windows","rootfs":{{"type":"layers","diff_ids":["{diff}"]}}}}"#
+            ),
+            format!(
+                r#"{{"architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{diff}"]}},"RootFS":{{"diff_ids":[]}}}}"#
+            ),
+            format!(
+                r#"{{"architecture":"arm64","os":"linux","rootfs":{{"diff_ids":["{diff}"],"Diff_IDs":[]}}}}"#
+            ),
+        ] {
+            assert!(check(config.clone()).is_err(), "{config}");
+        }
+        // Non-ASCII member names (which Go may fold onto a field) refuse in the config
+        // and in rootfs; a real-looking configuration still validates.
+        for config in [
+            format!(
+                r#"{{"arch\u0131tecture":"amd64","architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{diff}"]}}}}"#
+            ),
+            format!(
+                r#"{{"architecture":"arm64","o\u017f":"windows","os":"linux","rootfs":{{"type":"layers","diff_ids":["{diff}"]}}}}"#
+            ),
+            format!(
+                r#"{{"architecture":"arm64","os":"linux","rootfs":{{"type":"layers","diff_ids":["{diff}"],"diff_\u0131ds":[]}}}}"#
+            ),
+            format!(
+                r#"{{"architecture":"arm64","os":"linux","rootfs":{{"\u212aind":"x","diff_ids":["{diff}"]}}}}"#
+            ),
+        ] {
+            let error = check(config.clone()).unwrap_err();
+            assert!(error.message.contains("ASCII"), "{config}: {error:?}");
+        }
+        assert!(
+            check(format!(
+                r#"{{"created":"2024-01-01T00:00:00Z","architecture":"arm64","os":"linux","config":{{"Env":["PATH=/usr/bin"],"Cmd":["/bin/sh"]}},"rootfs":{{"type":"layers","diff_ids":["{diff}"]}},"history":[{{"created_by":"ADD file:x in /"}}]}}"#
+            ))
+            .is_ok()
+        );
     }
 
     #[test]

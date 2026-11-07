@@ -56,18 +56,59 @@ export type NativeProjectRun = {
    * started with managed env files (or are legacy): a later missing file refuses.
    */
   readonly unmanagedEnvironment?: true;
+  /**
+   * Present only when startup selected a named env while the project had managed env
+   * files but not that env's overlay, so the base values applied. The overlay must
+   * still be absent; one that appears later is a changed selection.
+   */
+  readonly baseOnlyEnvironment?: true;
 };
+/** The startup environment markers a run mapping can carry; at most one is set. */
+export type NativeRunEnvironmentMarkers = Pick<
+  NativeProjectRun,
+  "unmanagedEnvironment" | "baseOnlyEnvironment"
+>;
+function overlayPresent(
+  envName: string,
+  environmentFiles: readonly string[]
+): boolean {
+  return environmentFiles.some((path) =>
+    [`hack.env.${envName}.yaml`, `hack.env.${envName}.local.yaml`].includes(
+      basename(path)
+    )
+  );
+}
 /**
- * Whether the managed env files a run's recorded selection needs are still present.
- * A base selection needs none. A named selection needs its overlay
- * (`hack.env.<env>.yaml` or `hack.env.<env>.local.yaml`), except for a run recorded
- * as started without any managed env file while there still is none. A legacy
- * mapping without a recorded selection never qualifies.
+ * The marker a fresh startup records for its selection: none for a base selection or
+ * a named env whose overlay exists, `unmanagedEnvironment` without any managed env
+ * file, and `baseOnlyEnvironment` when managed env files exist but not the overlay.
+ */
+export function nativeRunEnvironmentMarkers(opts: {
+  readonly effectiveEnvName: string | null;
+  readonly environmentFiles: readonly string[];
+}): NativeRunEnvironmentMarkers {
+  const selected = opts.effectiveEnvName;
+  if (selected === null) {
+    return {};
+  }
+  if (opts.environmentFiles.length === 0) {
+    return { unmanagedEnvironment: true };
+  }
+  return overlayPresent(selected, opts.environmentFiles)
+    ? {}
+    : { baseOnlyEnvironment: true };
+}
+/**
+ * Whether the managed env files a run's recorded selection needs are unchanged. A base
+ * selection needs none. A named selection needs its overlay (`hack.env.<env>.yaml` or
+ * `hack.env.<env>.local.yaml`), except a run recorded as started without any managed
+ * env file (there must still be none) or without the overlay (it must still be
+ * absent). A legacy mapping without a recorded selection never qualifies.
  */
 export function nativeRunEnvironmentAvailable(opts: {
   readonly run: Pick<
     NativeProjectRun,
-    "effectiveEnvName" | "unmanagedEnvironment"
+    "effectiveEnvName" | "unmanagedEnvironment" | "baseOnlyEnvironment"
   >;
   readonly environmentFiles: readonly string[];
 }): boolean {
@@ -78,17 +119,11 @@ export function nativeRunEnvironmentAvailable(opts: {
   if (selected === null) {
     return true;
   }
-  if (
-    opts.run.unmanagedEnvironment === true &&
-    opts.environmentFiles.length === 0
-  ) {
-    return true;
+  if (opts.run.unmanagedEnvironment === true) {
+    return opts.environmentFiles.length === 0;
   }
-  return opts.environmentFiles.some((path) =>
-    [`hack.env.${selected}.yaml`, `hack.env.${selected}.local.yaml`].includes(
-      basename(path)
-    )
-  );
+  const present = overlayPresent(selected, opts.environmentFiles);
+  return opts.run.baseOnlyEnvironment === true ? !present : present;
 }
 export type NativeProjectRunScope = {
   readonly projectRoot: string;
@@ -157,28 +192,46 @@ function validProfiles(value: unknown): boolean {
     return false;
   }
 }
+/** Mapping key sets written before the startup selectors were complete. */
+const LEGACY_KEY_SETS = [
+  "namespace,owner,planId,run",
+  "effectiveEnvName,namespace,owner,planId,run",
+  "aws,effectiveEnvName,namespace,owner,planId,run",
+];
+/** A complete mapping holds these keys plus any of {@link OPTIONAL_KEYS}. */
+const SELECTED_KEYS =
+  "aws,effectiveEnvName,namespace,owner,planId,profiles,run";
+const OPTIONAL_KEYS = new Set([
+  "baseOnlyEnvironment",
+  "gcloud",
+  "runtimeMetadata",
+  "unmanagedEnvironment",
+]);
+function validKeys(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value).sort();
+  return (
+    LEGACY_KEY_SETS.includes(keys.join()) ||
+    keys.filter((key) => !OPTIONAL_KEYS.has(key)).join() === SELECTED_KEYS
+  );
+}
+function validEnvironmentMarkers(value: Record<string, unknown>): boolean {
+  const unmanaged = Object.hasOwn(value, "unmanagedEnvironment");
+  const baseOnly = Object.hasOwn(value, "baseOnlyEnvironment");
+  return (
+    !(unmanaged && baseOnly) &&
+    (!unmanaged || value.unmanagedEnvironment === true) &&
+    (!baseOnly || value.baseOnlyEnvironment === true) &&
+    (!(unmanaged || baseOnly) || typeof value.effectiveEnvName === "string")
+  );
+}
 function valid(value: unknown): value is NativeProjectRun {
   return (
     isRecord(value) &&
-    [
-      "namespace,owner,planId,run",
-      "effectiveEnvName,namespace,owner,planId,run",
-      "aws,effectiveEnvName,namespace,owner,planId,run",
-      "aws,effectiveEnvName,namespace,owner,planId,profiles,run",
-      "aws,effectiveEnvName,namespace,owner,planId,profiles,run,runtimeMetadata",
-      "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run",
-      "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run,runtimeMetadata",
-      "aws,effectiveEnvName,namespace,owner,planId,profiles,run,unmanagedEnvironment",
-      "aws,effectiveEnvName,namespace,owner,planId,profiles,run,runtimeMetadata,unmanagedEnvironment",
-      "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run,unmanagedEnvironment",
-      "aws,effectiveEnvName,gcloud,namespace,owner,planId,profiles,run,runtimeMetadata,unmanagedEnvironment",
-    ].includes(Object.keys(value).sort().join()) &&
+    validKeys(value) &&
     (!Object.hasOwn(value, "gcloud") || validGcloud(value.gcloud)) &&
     (!Object.hasOwn(value, "runtimeMetadata") ||
       value.runtimeMetadata === true) &&
-    (!Object.hasOwn(value, "unmanagedEnvironment") ||
-      (value.unmanagedEnvironment === true &&
-        typeof value.effectiveEnvName === "string")) &&
+    validEnvironmentMarkers(value) &&
     (!Object.hasOwn(value, "aws") || validAws(value.aws)) &&
     (!Object.hasOwn(value, "profiles") || validProfiles(value.profiles)) &&
     (!Object.hasOwn(value, "effectiveEnvName") ||

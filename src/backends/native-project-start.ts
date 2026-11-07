@@ -111,7 +111,9 @@ import {
   loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  type NativeRunEnvironmentMarkers,
   nativeRunEnvironmentAvailable,
+  nativeRunEnvironmentMarkers,
   normalizeNativeProfiles,
   prepareNativeProjectRunStorage,
   removeNativeProjectRun,
@@ -1141,15 +1143,16 @@ async function selectNativeStartup(opts: {
  * Before any hook, refuse a retained run whose recorded env selection changed: its
  * env must resolve the same, and it keeps the managed env files it started with. Only
  * a run recorded as started without them may still find none, and a retained run never
- * becomes unmanaged after the fact. A legacy restore without a recorded selection keeps
- * its earlier behavior. Returns whether the new mapping records no managed env files.
+ * becomes unmanaged or base-only after the fact. A legacy restore without a recorded
+ * selection keeps its earlier behavior. Returns the environment markers the new mapping
+ * records: a fresh run's from its files, a retained run's unchanged.
  */
 function requireRetainedEnvironment(opts: {
   /** The retained env a resumed (not restored) run must still resolve to. */
   readonly retainedSelection: string | null | undefined;
   readonly restore: NativeProjectRun | undefined;
   readonly input: NativeProjectInput;
-}): boolean {
+}): NativeRunEnvironmentMarkers {
   const { restore, input } = opts;
   if (
     (opts.retainedSelection !== undefined &&
@@ -1164,10 +1167,20 @@ function requireRetainedEnvironment(opts: {
       "Native retained environment selection changed; data was not replaced."
     );
   }
-  return (
-    input.environmentFiles.length === 0 &&
-    (restore === undefined || restore.unmanagedEnvironment === true)
-  );
+  if (restore === undefined) {
+    return nativeRunEnvironmentMarkers({
+      effectiveEnvName: input.effectiveEnvName,
+      environmentFiles: input.environmentFiles,
+    });
+  }
+  return {
+    ...(restore.unmanagedEnvironment === true
+      ? { unmanagedEnvironment: true as const }
+      : {}),
+    ...(restore.baseOnlyEnvironment === true
+      ? { baseOnlyEnvironment: true as const }
+      : {}),
+  };
 }
 function selectedMapping(opts: {
   readonly ready: NativeProjectRun;
@@ -1176,8 +1189,8 @@ function selectedMapping(opts: {
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly gcloud?: NativeGcloudSelection;
   readonly runtimeMetadata: boolean;
-  /** Startup found no managed env file at all. */
-  readonly unmanagedEnvironment: boolean;
+  /** Which managed env files startup found; see {@link nativeRunEnvironmentMarkers}. */
+  readonly environmentMarkers: NativeRunEnvironmentMarkers;
 }): NativeProjectRun {
   return {
     ...opts.ready,
@@ -1193,10 +1206,8 @@ function selectedMapping(opts: {
     // earlier candidates; a mapping that carries it refuses there.
     ...(opts.gcloud ? { gcloud: { mode: opts.gcloud.mode } } : {}),
     ...(opts.runtimeMetadata ? { runtimeMetadata: true as const } : {}),
-    // Only a named env needs the distinction; a base selection delivers no values either way.
-    ...(opts.unmanagedEnvironment && opts.effectiveEnvName !== null
-      ? { unmanagedEnvironment: true as const }
-      : {}),
+    // Only a named env needs the distinction; a base selection delivers base values.
+    ...(opts.effectiveEnvName === null ? {} : opts.environmentMarkers),
   };
 }
 /**
@@ -1482,7 +1493,7 @@ export async function startNativeProject(opts: {
         envByService: input.managedEnvironment,
       })
     : undefined;
-  const unmanagedEnvironment = requireRetainedEnvironment({
+  const environmentMarkers = requireRetainedEnvironment({
     retainedSelection:
       retained && !opts.restore ? selection.envName : undefined,
     restore,
@@ -1912,7 +1923,7 @@ export async function startNativeProject(opts: {
                   aws: selection.aws,
                   gcloud: selection.gcloud,
                   runtimeMetadata: metadata !== undefined,
-                  unmanagedEnvironment,
+                  environmentMarkers,
                 });
                 // Enrollment must exist before taking a shared lease: release
                 // requires independent proof of this exact graph's cleanup.
@@ -2045,7 +2056,7 @@ export async function startNativeProject(opts: {
                 aws: selection.aws,
                 gcloud: selection.gcloud,
                 runtimeMetadata: metadata !== undefined,
-                unmanagedEnvironment,
+                environmentMarkers,
               },
               finalization,
               deps,

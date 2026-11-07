@@ -3899,14 +3899,15 @@ test("startup applies the per-env adaptation for the run's effective env, else t
 
 test("startup records the requested or default env and marks runs without managed env files", async () => {
   for (const [envName, defaultOverlay, managed] of [
-    ["qa", undefined, false],
-    [undefined, "qa", false],
-    ["qa", undefined, true],
+    ["qa", undefined, "none"],
+    [undefined, "qa", "none"],
+    ["qa", undefined, "overlay"],
+    ["qa", undefined, "base"],
   ] as const) {
     const { opts } = await fixture(false);
-    if (managed) {
-      // Value-free managed env files: the run is recorded as managed.
-      for (const name of ["default", "qa"]) {
+    if (managed !== "none") {
+      // Value-free managed env files: the base, and the qa overlay unless base-only.
+      for (const name of managed === "base" ? ["default"] : ["default", "qa"]) {
         await writeFile(
           join(opts.scope.projectDir, `hack.env.${name}.yaml`),
           JSON.stringify({
@@ -3959,6 +3960,7 @@ test("startup records the requested or default env and marks runs without manage
       recorded.push({
         effectiveEnvName: request.run.effectiveEnvName,
         unmanagedEnvironment: request.run.unmanagedEnvironment,
+        baseOnlyEnvironment: request.run.baseOnlyEnvironment,
       });
       return await save(request);
     };
@@ -3981,7 +3983,8 @@ test("startup records the requested or default env and marks runs without manage
     for (const mapping of recorded) {
       expect(mapping).toEqual({
         effectiveEnvName: "qa",
-        unmanagedEnvironment: managed ? undefined : true,
+        unmanagedEnvironment: managed === "none" ? true : undefined,
+        baseOnlyEnvironment: managed === "base" ? true : undefined,
       });
     }
   }
@@ -3989,10 +3992,18 @@ test("startup records the requested or default env and marks runs without manage
 
 test("a retained run that started with managed env files refuses before hooks once they are gone", async () => {
   const qaFile = "/fixture/.hack/hack.env.qa.yaml";
-  for (const [unmanaged, environmentFiles, expected] of [
-    [false, [], "refused"],
-    [true, [], "unmanaged"],
-    [false, [qaFile], "managed"],
+  const baseFile = "/fixture/.hack/hack.env.default.yaml";
+  for (const [marker, environmentFiles, expected] of [
+    [undefined, [], "refused"],
+    ["unmanagedEnvironment", [], "unmanaged"],
+    [undefined, [qaFile], "managed"],
+    // A base-only start survives while the overlay stays absent.
+    ["baseOnlyEnvironment", [baseFile], "baseOnly"],
+    // An overlay appearing after a base-only or unmanaged start is a change.
+    ["baseOnlyEnvironment", [baseFile, qaFile], "refused"],
+    ["unmanagedEnvironment", [qaFile], "refused"],
+    // A mapping without a marker that finds only the base lost its overlay.
+    [undefined, [baseFile], "refused"],
   ] as const) {
     const { opts, events } = await fixture(false);
     const restore: NativeProjectRun = {
@@ -4003,7 +4014,7 @@ test("a retained run that started with managed env files refuses before hooks on
       effectiveEnvName: "qa",
       profiles: [],
       aws: null,
-      ...(unmanaged ? { unmanagedEnvironment: true as const } : {}),
+      ...(marker === undefined ? {} : { [marker]: true as const }),
     };
     const prepare = opts.dependencies.prepare!;
     opts.dependencies.prepare = async (request) => ({
@@ -4034,9 +4045,12 @@ test("a retained run that started with managed env files refuses before hooks on
     expect(events).toContain("before");
     expect(saved.length).toBeGreaterThan(0);
     for (const mapping of saved) {
-      // A managed run is never relabeled unmanaged; an unmanaged one keeps its marker.
+      // A managed run is never relabeled; a marked run keeps its marker.
       expect(mapping.unmanagedEnvironment).toBe(
         expected === "unmanaged" ? true : undefined
+      );
+      expect(mapping.baseOnlyEnvironment).toBe(
+        expected === "baseOnly" ? true : undefined
       );
     }
   }

@@ -542,6 +542,81 @@ test("preflight keeps the retained env's per-env files without managed env files
   }
 });
 
+test("preflight keeps a base-only named env and refuses a changed overlay", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-restart-base-only-"))
+  );
+  try {
+    const projectDir = join(root, ".hack");
+    await mkdir(projectDir);
+    const composeFile = join(projectDir, "docker-compose.yml");
+    await writeFile(
+      composeFile,
+      JSON.stringify({
+        services: { app: { image: `sha256:${"9".repeat(64)}` } },
+      })
+    );
+    const envFile = async (name: string) =>
+      await writeFile(
+        join(projectDir, `hack.env.${name}.yaml`),
+        JSON.stringify({
+          version: 1,
+          environment: name,
+          secretsprovider: "project_key",
+          values: { global: {} },
+        })
+      );
+    // The project has a managed base env file but no qa overlay.
+    await envFile("default");
+    const selected: Record<string, string | undefined> = {};
+    const preflight = (markers: Record<string, true | undefined>) =>
+      preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope: { ...scope, projectRoot: root, projectDir },
+        composeFile,
+        run: {
+          ...run,
+          effectiveEnvName: "qa",
+          unmanagedEnvironment: undefined,
+          ...markers,
+        },
+        adaptationFile: "/fixture/.hack/native/adaptation.json",
+        adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+        dependencies: {
+          activeImages: async () => activeImageFixture(),
+          adapt: async ({ path }) => {
+            selected.adaptation = path;
+            throw new ClosedCliError("stop after adaptation selection");
+          },
+          invoke: async ({ args }) =>
+            args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        },
+      });
+    const changed =
+      "Native restart environment selection changed since startup; restart was refused. The current graph was not stopped.";
+    // Recorded as started with the base only: unchanged, so restart proceeds.
+    await expectClosedRefusal(
+      preflight({ baseOnlyEnvironment: true }),
+      "stop after adaptation selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.qa.json",
+    });
+    // A mapping without the marker started with the overlay, which is missing now.
+    await expectClosedRefusal(preflight({}), changed);
+    // An overlay that appears after a base-only start is a changed selection.
+    await envFile("qa");
+    await expectClosedRefusal(
+      preflight({ baseOnlyEnvironment: true }),
+      changed
+    );
+    // And one recorded with the overlay keeps working while it exists.
+    await expectClosedRefusal(preflight({}), "stop after adaptation selection");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("preflight refuses a stale host listener before restart cleanup", async () => {
   const { preflightNativeRestart } = await import(
     "../src/backends/native-project-restart-preflight.ts"

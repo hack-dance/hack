@@ -7,8 +7,16 @@ import { mapLegacyNativeImport } from "../src/lib/native-config-import-plan.ts";
 import { stringAdoptionWorkerSources } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
 
-const configTest =
+/**
+ * Each case runs the real compiler and `docker compose config`, and
+ * `normalized` allows the child 15 seconds, so the case budget must exceed
+ * that instead of using bun's 5 second default.
+ */
+const COMPOSE_CONFIG_TEST_TIMEOUT_MS = 30_000;
+const runConfigTest =
   process.env.HACK_TEST_COMPOSE_CONFIG === "1" ? test : test.skip;
+const configTest = (name: string, fn: () => Promise<void>) =>
+  runConfigTest(name, fn, COMPOSE_CONFIG_TEST_TIMEOUT_MS);
 const compiler = resolveTestConfigCompilerBinary();
 
 /** Uses configuration normalization only: no daemon connection, container start, pull or build. */

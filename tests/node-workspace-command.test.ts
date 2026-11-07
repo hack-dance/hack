@@ -56,10 +56,10 @@ test("resolveWorkspaceMapEntryBySelector falls back to project name", () => {
 test("deriveWorkspaceSource detects managed root ancestry", () => {
   process.env.HACK_GLOBAL_CONFIG_PATH = "/tmp/hack-global/hack.config.json";
   const managed = __testOnlyNodeWorkspace.deriveWorkspaceSource({
-    workspaceRoot: "/tmp/hack-global/projects/event-agent",
+    workspaceRoot: "/tmp/hack-global/projects/example-app",
   });
   const external = __testOnlyNodeWorkspace.deriveWorkspaceSource({
-    workspaceRoot: "/tmp/custom/event-agent",
+    workspaceRoot: "/tmp/custom/example-app",
   });
   expect(managed).toBe("managed");
   expect(external).toBe("external");

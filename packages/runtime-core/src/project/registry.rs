@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn canonical_scoped_default_and_environment_references() {
-        let input = "# discarded\nregistry=https://registry.npmjs.org\n@event-agent:registry = https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}\nalways-auth=true\n";
+        let input = "# discarded\nregistry=https://registry.npmjs.org\n@example-app:registry = https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}\nalways-auth=true\n";
         let parsed = parse(input).unwrap();
         assert_eq!(
             parsed.required_environment,
@@ -331,7 +331,7 @@ mod tests {
         );
         assert_eq!(
             parsed.template,
-            "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}\n@event-agent:registry=https://npm.pkg.github.com/\nalways-auth=true\nregistry=https://registry.npmjs.org/\n"
+            "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}\n@example-app:registry=https://npm.pkg.github.com/\nalways-auth=true\nregistry=https://registry.npmjs.org/\n"
         );
         assert_eq!(
             parsed.sha256,

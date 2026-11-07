@@ -366,7 +366,7 @@ fn owned_immutable_source_job_live() -> Result<(), CandidateError> {
         created_marker = false;
         let restored = capture()?;
         SyncSession::open(&candidate, &namespace, &source)?.apply(&restored, false)?;
-        evidence = json!({"scope":"actual selected source and durable journal; busybox job, not Event Agent service startup",
+        evidence = json!({"scope":"actual selected source and durable journal; busybox job, not real application service startup",
             "revision_a":revision_a,"revision_b":revision_b,"acceptance":acceptance,"receipt":receipt,
             "retry_identical":true,"stale_refusal":rejected.code,"unpublished_refusal":unready.code,
             "positive_events":positive_events,"stale_events":stale_events,"unpublished_events":unpublished_events});

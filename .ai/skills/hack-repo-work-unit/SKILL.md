@@ -19,9 +19,9 @@ Artifact: patch/docs/report and location of durable results
 Exit: completion criteria, experiment budget and any external evidence still required
 ```
 
-For v5, [Linear's Hack project](https://linear.app/hackdance/project/hack-8806a1b201f7/overview)
+For v5, Linear's Hack project (private workspace)
 is the planning/status source of truth. Start with the
-[program and issue index](https://linear.app/hackdance/document/hack-v5-program-measurable-acceptance-and-source-of-truth-26d5fb362f3e),
+program and issue index (the "Hack v5 program: measurable acceptance and source of truth" document),
 which is available even in a fresh checkout without local planning artifacts. Use the local
 `_docs/docs/plans/v5/linear-sync.md` mapping to find the existing issue and milestone;
 preserve `_docs/docs/plans/v5/work-units.md` and linked source/evidence documents.

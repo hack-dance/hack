@@ -564,13 +564,13 @@ test("doctor guidance preserves project-scoped prune commands", () => {
         name: "runtime hygiene",
         status: "warn",
         message:
-          "1 orphaned runtime project: msp--old (run: hack projects prune --project msp)",
+          "1 orphaned runtime project: sample--old (run: hack projects prune --project sample)",
       },
     ],
   });
 
   expect(guidance.temporaryBreakage).toEqual([
-    "hack projects prune --project msp",
+    "hack projects prune --project sample",
   ]);
 });
 
@@ -802,7 +802,7 @@ test("recovery next steps quote repo paths for copy-paste safety", () => {
 test("recovery next steps preserve already scoped projects prune", () => {
   const nextSteps = buildRecoveryNextSteps({
     guidance: {
-      temporaryBreakage: ["hack projects prune --project msp", "hack down"],
+      temporaryBreakage: ["hack projects prune --project sample", "hack down"],
       configurationRepair: ["hack doctor --fix", "hack env materialize"],
       followUp: [],
       verify: ["hack doctor"],
@@ -814,7 +814,7 @@ test("recovery next steps preserve already scoped projects prune", () => {
 
   expect(nextSteps).toEqual([
     "Run `hack doctor --path '/tmp/work repo'` to classify restart versus repair work.",
-    "Temporary breakage: `hack projects prune --project msp`.",
+    "Temporary breakage: `hack projects prune --project sample`.",
     "Temporary breakage: `hack down --path '/tmp/work repo'`.",
     "Configuration repair: `hack doctor --fix --path '/tmp/work repo'`.",
     "Configuration repair: `hack env materialize --path '/tmp/work repo'`.",

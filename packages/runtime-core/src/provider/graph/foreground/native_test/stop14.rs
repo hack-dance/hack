@@ -1,6 +1,6 @@
 //! HACK-1212 foreground-owner, fourteen-service retaining-cleanup baseline.
 //!
-//! Run only against a separately prepared, owned M3 development pool with a
+//! Run only against a separately prepared, owned macOS development pool with a
 //! pinned, already loaded local image and an external 240-second watchdog.
 //! Set HACK_STOP14_TEST_ROOT, HACK_STOP14_TEST_BINARY (current candidate CLI),
 //! and HACK_STOP14_TEST_IMAGE (sha256 content ID).
@@ -96,7 +96,7 @@ fn write_first_marker(engine: &graph::Engine<'_>, receipt: &graph::Receipt) -> S
 }
 
 #[test]
-#[ignore = "Separate owned M3 pool, pinned local image, and external 240-second watchdog required"]
+#[ignore = "Separate owned macOS development pool, pinned local image, and external 240-second watchdog required"]
 fn fourteen_services_retain_named_data_across_cleanup_and_restore() {
     let began = Instant::now();
     let candidate =

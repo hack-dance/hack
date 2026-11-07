@@ -1136,7 +1136,7 @@ confirmation boundaries; `graph/startup/native_test.rs` defines the separate ini
 application-health acceptance fixture. A test's presence is not a passing run.
 Record the exact source/artifact and result when claiming component or native proof;
 the synthetic startup fixture passed on September 17, 2026; its 64 KiB exchange,
-initial health and confirmed cleanup do not qualify Event Agent or all failure paths.
+initial health and confirmed cleanup do not qualify a real application or all failure paths.
 
 Keep the remaining acceptance questions explicit: lost acknowledgement and resend,
 stale owner/command evidence, death versus timeout, pre/post-effect crashes without

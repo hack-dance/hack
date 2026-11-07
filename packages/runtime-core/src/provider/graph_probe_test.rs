@@ -410,7 +410,7 @@ trap - EXIT
     })();
     state::write(
         &evidence_dir.join(format!("{owner}.json")),
-        &json!({"passed":result.is_ok() && cleanup.is_ok(),"network":network,"volume":volume,"containers":names,"image":image,"phase":phase,"failure":result.as_ref().err().map(|e| &e.code),"cleanup_confirmed":cleanup.is_ok(),"scope":"Synthetic init/SQLite/web/check pipeline and VM restart; not Event Agent or host-loopback acceptance"}),
+        &json!({"passed":result.is_ok() && cleanup.is_ok(),"network":network,"volume":volume,"containers":names,"image":image,"phase":phase,"failure":result.as_ref().err().map(|e| &e.code),"cleanup_confirmed":cleanup.is_ok(),"scope":"Synthetic init/SQLite/web/check pipeline and VM restart; not real application or host-loopback acceptance"}),
     )?;
     cleanup?;
     result

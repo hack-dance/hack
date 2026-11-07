@@ -68,14 +68,14 @@ const BASIC: &str = "services:\n  web:\n    image: alpine:3.21\n    command: [ec
 
 #[test]
 fn local_https_labels_have_typed_review_intent_without_publication() {
-    let labels = "    labels:\n      caddy: 'search.livenation.hack, search.livenation.hack.gy'\n      caddy.reverse_proxy: '{{upstreams 6980}}'\n      caddy.tls: internal\n";
+    let labels = "    labels:\n      caddy: 'search.example-app.hack, search.example-app.hack.gy'\n      caddy.reverse_proxy: '{{upstreams 6980}}'\n      caddy.tls: internal\n";
     let fixture = Fixture::new(&format!("{BASIC}{labels}"));
     let report = fixture.plan();
     let route = report.plan.services["web"].routing.as_ref().unwrap();
     assert_eq!(route.port, 6980);
     assert_eq!(
         route.hostnames,
-        ["search.livenation.hack", "search.livenation.hack.gy"]
+        ["search.example-app.hack", "search.example-app.hack.gy"]
     );
     assert!(
         report

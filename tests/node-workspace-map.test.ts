@@ -52,23 +52,23 @@ test("managed root and map path resolve under ~/.hack", () => {
 
 test("upsert writes map entry and lookup resolves by project name", async () => {
   await upsertNodeWorkspaceMapEntry({
-    projectName: "event-agent",
-    workspaceRoot: "/Users/remote-user/.hack/projects/event-agent",
-    workspaceProjectName: "event-agent",
-    workspaceProjectId: "remote-event-agent",
+    projectName: "example-app",
+    workspaceRoot: "/Users/remote-user/.hack/projects/example-app",
+    workspaceProjectName: "example-app",
+    workspaceProjectId: "remote-example-app",
     source: "managed",
-    repoUrl: "git@github.com:hack-dance/event-agent.git",
+    repoUrl: "git@github.com:example-org/example-app.git",
   });
 
   const map = await readNodeWorkspaceMap();
   expect(map.entries).toHaveLength(1);
   const mapped = findNodeWorkspaceMapEntry({
     map,
-    projectName: "event-agent",
+    projectName: "example-app",
   });
   expect(mapped).not.toBeNull();
   expect(mapped?.source).toBe("managed");
-  expect(mapped?.workspaceProjectId).toBe("remote-event-agent");
+  expect(mapped?.workspaceProjectId).toBe("remote-example-app");
 });
 
 test("upsert can migrate name-only entry to id-based mapping", async () => {
@@ -99,14 +99,14 @@ test("upsert can migrate name-only entry to id-based mapping", async () => {
 
 test("remove deletes matching map entries", async () => {
   await upsertNodeWorkspaceMapEntry({
-    projectName: "event-agent",
-    workspaceRoot: "/Users/remote-user/dev/event-agent",
-    workspaceProjectName: "event-agent",
+    projectName: "example-app",
+    workspaceRoot: "/Users/remote-user/dev/example-app",
+    workspaceProjectName: "example-app",
     source: "external",
   });
 
   const removed = await removeNodeWorkspaceMapEntry({
-    projectName: "event-agent",
+    projectName: "example-app",
   });
   expect(removed).toBeTrue();
 

@@ -1121,7 +1121,7 @@ fn launch(
     )
 }
 #[test]
-#[ignore = "Manual owned M3 development VM, pinned Bun image and external watchdog required"]
+#[ignore = "Manual owned macOS development VM, pinned Bun image and external watchdog required"]
 fn owned_driver_live() -> Result<(), CandidateError> {
     let candidate = Candidate::discover(Path::new(
         &std::env::var("HACK_LOCAL_TEST_ROOT").expect("root"),
@@ -1495,7 +1495,7 @@ fn owned_driver_live() -> Result<(), CandidateError> {
     })();
     state::write(
         &evidence.join(format!("driver-{run}.json")),
-        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"bidirectional_workload_admission":result.is_ok(),"restore_and_archive":result.is_ok()&&cleanup.is_ok(),"archive_export":cleanup.is_ok(),"retention_recovery":cleanup.is_ok(),"abrupt_vm_loss":result.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or Event Agent qualification"}),
+        &json!({"passed":result.is_ok()&&cleanup.is_ok(),"run":run,"failed_run":failed,"cleanup_confirmed":cleanup.is_ok(),"bidirectional_workload_admission":result.is_ok(),"restore_and_archive":result.is_ok()&&cleanup.is_ok(),"archive_export":cleanup.is_ok(),"retention_recovery":cleanup.is_ok(),"abrupt_vm_loss":result.is_ok(),"receipts":result.as_ref().ok(),"failure":result.as_ref().err().map(|e|(&e.code,&e.message)),"scope":"Public graph driver, explicit restart identity/persistence, simulated missing create receipt, foreign-name refusal; not actual process-kill or real application qualification"}),
     )?;
     cleanup?;
     result.map(|_| ())

@@ -124,32 +124,32 @@ mod tests {
     fn normalizes_search_pair_and_supported_ports() {
         for port in [1, 6980, 65535] {
             let value = labels(
-                "Search.Event-Agent.Hack., search.event-agent.localhost",
+                "Search.Example-App.Hack., search.example-app.localhost",
                 &port.to_string(),
             );
             let route = parse(Some(&value)).unwrap().unwrap();
             assert_eq!(route.port, port);
             assert_eq!(
                 route.hostnames,
-                ["search.event-agent.hack", "search.event-agent.localhost"]
+                ["search.example-app.hack", "search.example-app.localhost"]
             );
         }
     }
 
     #[test]
-    fn accepts_all_actual_event_agent_route_shapes() {
+    fn accepts_multi_subdomain_route_shapes() {
         for (prefix, port) in [
-            ("consumer-sessions.", 3333),
+            ("sessions.", 3333),
             ("chat.", 3001),
             ("", 3000),
             ("chat-2.", 9001),
-            ("data-sync.", 9002),
-            ("crawl.", 9007),
+            ("sync.", 9002),
+            ("worker.", 9007),
             ("core.", 6969),
             ("search.", 6980),
             ("ws.", 6970),
         ] {
-            let hosts = format!("{prefix}livenation.hack, {prefix}livenation.hack.gy");
+            let hosts = format!("{prefix}example-app.hack, {prefix}example-app.hack.gy");
             let route = parse(Some(&labels(&hosts, &port.to_string())))
                 .unwrap()
                 .unwrap();

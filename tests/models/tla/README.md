@@ -1070,6 +1070,7 @@ Three controls each remove one guard and must fail at the named action:
 `negative` (reclaim ignores retained references) fails `NoReclaimReferenced` at
 `Reclaim`; `foreign-adoption` (adoption without the label/incarnation check) fails
 `NoForeignAdoption` at `CompleteBuild`; `down-under-build` (down ignores the fence)
-fails `DownNotUnderBuild` at `Down`. The model does not cover an orphaned build client
-that outlives a crashed host process, real BuildKit or engine behavior, receipt
-durability, or more than one key and namespace.
+fails `DownNotUnderBuild` at `Down`. The model does not cover a build client that
+outlives a killed `hack-native` process (the implementation keeps the fence and key
+lock held by the inherited descriptors until that client exits), real BuildKit or
+engine behavior, receipt durability, or more than one key and namespace.

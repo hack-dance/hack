@@ -30,6 +30,7 @@ import { prepareNativeProjectInput } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
   applyNativeInternalHostAliases,
+  type NativeHostAliasSource,
   nativeServiceHostAliases,
   requireNativeHostAliasBindings,
 } from "./native-project-internal-hosts.ts";
@@ -375,6 +376,10 @@ export async function preflightNativeRestart(opts: {
   readonly internalExtraHosts?: Readonly<Record<string, string>>;
   /** Resolves owner-scoped dependency selections against the running instance. */
   readonly dependencyOwners?: NativeDependencyOwnerResolver;
+  /** Where each project-wide alias comes from, for refusal text only. */
+  readonly internalExtraHostSources?: Readonly<
+    Record<string, NativeHostAliasSource>
+  >;
   readonly allowedHosts?: readonly string[];
   /** Same public metadata selection the replacement startup will review. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
@@ -445,6 +450,7 @@ export async function preflightNativeRestart(opts: {
   input = applyNativeInternalHostAliases({
     input,
     hosts: opts.internalExtraHosts,
+    sources: opts.internalExtraHostSources,
     hasDependencySelection: opts.dependencyFile !== undefined,
   });
   const reviewedBranch = await prepareNativeReviewBranch({
@@ -498,6 +504,7 @@ export async function preflightNativeRestart(opts: {
   const hostAliases = nativeServiceHostAliases({
     services: specs,
     profiles: selected.profiles,
+    managedEnvironment: input.managedEnvironment,
   });
   const dependencies = stoppedRetry
     ? await readNativeRestartDependencyIntent({
@@ -527,7 +534,11 @@ export async function preflightNativeRestart(opts: {
             invoke: deps.invoke,
           }),
       });
-  requireNativeHostAliasBindings({ dependencies, hostAliases });
+  requireNativeHostAliasBindings({
+    dependencies,
+    hostAliases,
+    sources: opts.internalExtraHostSources,
+  });
   prepareNativeDependencyServices({ dependencies, services: specs });
   const activeImages = stoppedRetry
     ? undefined

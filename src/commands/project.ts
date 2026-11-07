@@ -50,7 +50,7 @@ import {
 } from "../backends/native-project-down.ts";
 import {
   requireNativeProjectInternalExtraHostsUnchanged,
-  resolveNativeInternalExtraHosts,
+  resolveNativeInternalExtraHostSelection,
 } from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import {
@@ -5862,7 +5862,10 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
       return;
     case "ready":
       logger.success({
-        message: `Project is ready (${event.services.join(", ")}). Use hack ps and hack logs from another terminal; press Ctrl-C to stop.`,
+        message: [
+          `Project is ready (${event.services.join(", ")}; run ${event.run}). Use hack ps and hack logs from another terminal; press Ctrl-C to stop.`,
+          ...event.endpoints,
+        ].join("\n"),
       });
       return;
     case "service-exited":
@@ -5879,7 +5882,7 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
       });
       return;
     case "stopped":
-      logger.info({ message: "Native project stopped." });
+      logger.info({ message: event.summary ?? "Native project stopped." });
       return;
     default:
       return;
@@ -5968,10 +5971,8 @@ async function handleNativeUp({
   };
   const envFingerprints =
     createNativeEnvFingerprintSession(envFingerprintScope);
-  const internalExtraHosts = await resolveNativeInternalExtraHosts({
-    project,
-    cfg,
-  });
+  const { hosts: internalExtraHosts, sources: internalExtraHostSources } =
+    await resolveNativeInternalExtraHostSelection({ project, cfg });
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -5994,6 +5995,7 @@ async function handleNativeUp({
     adaptationFile: adaptation.file,
     adaptationFileByEnv: adaptation.fileByEnv,
     internalExtraHosts,
+    internalExtraHostSources,
     allowedHosts: host.allowedHosts,
     preparedBase: host.preparedBase,
     https: host.https,
@@ -6195,6 +6197,7 @@ async function restartNativeImageProject({
         dependencyFileByEnv: startup.dependencyFileByEnv,
         internalExtraHosts: startup.internalExtraHosts,
         dependencyOwners: startup.dependencyOwners,
+        internalExtraHostSources: startup.internalExtraHostSources,
         allowedHosts: startup.allowedHosts,
         runtimeMetadata: startup.runtimeMetadata,
         httpsPort: startup.https?.httpsPort ?? null,

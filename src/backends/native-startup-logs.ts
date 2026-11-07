@@ -128,8 +128,10 @@ function needles(values: Iterable<string>): {
  *   JSON-escaped form and each line of a multi-line value that is long enough,
  *   with and without surrounding whitespace. Longer values are replaced first.
  * - A shorter value (one to three characters) is replaced only where it stands as
- *   a whole token, not next to a letter, digit or underscore, so a value such as
- *   `1` or `on` cannot shred unrelated output.
+ *   a whole token: not next to a letter, digit or underscore, and not joined to
+ *   one by a `.` or `-`. So a value such as `1`, `0` or `on` cannot shred
+ *   unrelated output such as a version string (`8.0.46`), a decimal or a
+ *   hyphenated word, while a value ending a sentence (`mode on.`) still matches.
  * - Remaining control characters except tab and newline become U+FFFD.
  */
 export function redactNativeStartupLog(
@@ -143,7 +145,7 @@ export function redactNativeStartupLog(
   }
   for (const value of tokens) {
     const pattern = new RegExp(
-      `(?<![\\p{L}\\p{N}_])${value.replace(SYNTAX, "\\$&")}(?![\\p{L}\\p{N}_])`,
+      `(?<![\\p{L}\\p{N}_])(?<![\\p{L}\\p{N}_][.\\-])${value.replace(SYNTAX, "\\$&")}(?![\\p{L}\\p{N}_])(?![.\\-][\\p{L}\\p{N}_])`,
       "gu"
     );
     result = result.replace(pattern, MARKER);

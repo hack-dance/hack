@@ -76,6 +76,7 @@ import {
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
   applyNativeInternalHostAliases,
+  type NativeHostAliasSource,
   nativeServiceHostAliases,
   requireNativeHostAliasBindings,
 } from "./native-project-internal-hosts.ts";
@@ -728,6 +729,74 @@ export async function verifyHttpsRoutes(
   }
 }
 
+const PRINTABLE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const PRINTABLE_HOST = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
+/**
+ * What a ready foreground graph serves on this host, from the reviewed plan
+ * only: each routed service's reviewed hostnames as HTTPS URLs when the
+ * native HTTPS frontend runs (with its port unless 443), and the published
+ * loopback ports. Names that fail their closed patterns are skipped.
+ */
+export function nativeReadySummary(opts: {
+  readonly plan: unknown;
+  readonly routed: ReadonlySet<string>;
+  readonly httpsPort: number | null;
+}): string[] {
+  const lines: string[] = [];
+  const services =
+    isRecord(opts.plan) && isRecord(opts.plan.services)
+      ? opts.plan.services
+      : {};
+  const suffix =
+    opts.httpsPort === null || opts.httpsPort === 443
+      ? ""
+      : `:${opts.httpsPort}`;
+  let unserved = false;
+  for (const name of [...opts.routed].sort()) {
+    const service = services[name];
+    const hostnames =
+      isRecord(service) &&
+      isRecord(service.routing) &&
+      Array.isArray(service.routing.hostnames)
+        ? service.routing.hostnames.filter(
+            (host): host is string =>
+              typeof host === "string" && PRINTABLE_HOST.test(host)
+          )
+        : [];
+    if (!PRINTABLE_NAME.test(name) || hostnames.length === 0) {
+      continue;
+    }
+    if (opts.httpsPort === null) {
+      unserved = true;
+      continue;
+    }
+    lines.push(
+      `  ${name}: ${hostnames.map((host) => `https://${host}${suffix}`).join(" ")}`
+    );
+  }
+  if (unserved) {
+    lines.push(
+      "  Routes are not served on this host: the native HTTPS frontend is not selected (HACK_NATIVE_CADDY_BINARY, HACK_NATIVE_CADDY_SHA256 and HACK_NATIVE_HTTPS_PORT)."
+    );
+  }
+  const ports = reviewedNativeLoopbackPorts(opts.plan);
+  if (ports.length > 0) {
+    lines.push(
+      `  Published ports: ${ports.map((port) => `127.0.0.1:${port}`).join(" ")}`
+    );
+  }
+  return lines;
+}
+/** One confirmed-stop line for an interrupted ready graph, from its final receipt. */
+export function nativeStoppedNotice(final: unknown): string {
+  const removed =
+    isRecord(final) &&
+    isRecord(final.receipt) &&
+    final.receipt.phase === "removed";
+  return removed
+    ? "Native project stopped; owned cleanup confirmed and no runtime data was retained."
+    : "Native project stopped; owned cleanup confirmed. Named volumes and the stopped run mapping are kept for the next hack up.";
+}
 function foregroundExitCode(opts: {
   aborted: boolean;
   interruptedExit: number;
@@ -901,40 +970,69 @@ function cleanupUnconfirmed(
   );
 }
 /**
- * The settled foreground start failed and fresh inspection proves this run never
- * reserved runtime state (no journal, no published owner). Nothing is retained,
- * so report the startup failure itself instead of uncertain cleanup.
+ * A fresh startup whose graph owner exited before reserving any runtime state.
+ * `graph inspect` refuses `graph_unreserved` only when the run's journals are
+ * exactly absent and no foreground owner is published; deps.serve settles only
+ * after the owned child exited, so nothing can still reserve state.
  */
-function unreservedStartupFailure(
-  startupFailure: unknown,
-  inspectionFailure: unknown
-): Error | undefined {
-  if (
-    startupFailure === undefined ||
-    !(
-      inspectionFailure instanceof NativeRuntimeRequestError &&
-      inspectionFailure.nativeCode === "graph_unreserved"
-    )
-  ) {
-    return;
-  }
-  return new ClosedCliError(
-    `Native graph startup failed before any runtime state was reserved; nothing was retained.${startupDiagnostic(startupFailure)}`
-  );
-}
+const GRAPH_UNRESERVED = "graph_unreserved";
 /**
- * Error for a failed final inspection. deps.serve settles only after the owned
- * child exited, so the consumer that could still reserve state is gone.
+ * The report when final inspection of a settled startup fails. For a fresh run
+ * that failed, never attempted a mapping and whose inspection reports
+ * {@link GRAPH_UNRESERVED}, nothing was created: report the startup failure
+ * itself (with its runtime reason) and mark graph cleanup confirmed. Every
+ * other case keeps the unconfirmed-cleanup report.
  */
-function finalInspectionFailure(
-  serveFailure: unknown,
-  inspectionFailure: unknown,
-  nativeExitCode: string | undefined
-): Error {
-  return (
-    unreservedStartupFailure(serveFailure, inspectionFailure) ??
-    cleanupUnconfirmed(serveFailure ?? inspectionFailure, nativeExitCode)
-  );
+function finalInspectionFailure(opts: {
+  readonly serveFailure: unknown;
+  readonly inspectionFailure: unknown;
+  readonly restored: boolean;
+  readonly mappingAttempted: boolean;
+  readonly nativeCode: string | undefined;
+}): { readonly error: Error; readonly nothingReserved: boolean } {
+  if (
+    opts.serveFailure === undefined ||
+    opts.restored ||
+    opts.mappingAttempted ||
+    !(opts.inspectionFailure instanceof NativeRuntimeRequestError) ||
+    opts.inspectionFailure.nativeCode !== GRAPH_UNRESERVED
+  ) {
+    return {
+      error: cleanupUnconfirmed(
+        opts.serveFailure ?? opts.inspectionFailure,
+        opts.nativeCode
+      ),
+      nothingReserved: false,
+    };
+  }
+  return {
+    error: new ClosedCliError(
+      `Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed.${startupDiagnostic(opts.serveFailure)}`
+    ),
+    nothingReserved: true,
+  };
+}
+/** The ready line's event: run id and what the ready graph serves on this host. */
+function readyProgress(opts: {
+  readonly services: readonly string[];
+  readonly run: string;
+  readonly plan: unknown;
+  readonly routed: ReadonlySet<string>;
+  readonly httpsPort: number | null;
+}): NativeStartupProgress {
+  return {
+    phase: "ready",
+    services: opts.services,
+    run: RUN.test(opts.run) ? opts.run : "unknown",
+    endpoints: nativeReadySummary(opts),
+  };
+}
+/** The HTTPS port routes are served on: only while the frontend lease runs. */
+function servedHttpsPort(
+  lease: unknown,
+  selection: NativeHttpsSelection | undefined
+): number | null {
+  return lease === undefined ? null : (selection?.httpsPort ?? null);
 }
 function requireConfirmedCleanup(
   final: unknown,
@@ -1367,12 +1465,24 @@ export type NativeStartupProgress =
         | "runtime"
         | "images"
         | "all-stopped"
-        | "stopping"
-        | "stopped";
+        | "stopping";
     }
   | {
-      readonly phase: "services" | "ready";
+      readonly phase: "stopped";
+      /** The confirmed-stop retention line when a run mapping was published. */
+      readonly summary?: string;
+    }
+  | {
+      readonly phase: "services";
       readonly services: readonly string[];
+    }
+  | {
+      readonly phase: "ready";
+      readonly services: readonly string[];
+      /** The run id, or `unknown` when it fails the run-id pattern. */
+      readonly run: string;
+      /** Indented route, unserved-route and published-port lines. */
+      readonly endpoints: readonly string[];
     }
   | ({ readonly phase: "service-exited" } & NativeServiceExit);
 
@@ -1419,13 +1529,20 @@ function watchServiceExits(opts: {
 }
 
 /** After confirmed cleanup, an interrupted foreground graph has stopped. */
-function reportStopped(
-  progress: (event: NativeStartupProgress) => void,
-  signal: AbortSignal,
-  infrastructureFailure: Error | undefined
-): void {
-  if (signal.aborted && !infrastructureFailure) {
-    progress({ phase: "stopped" });
+function reportStopped(opts: {
+  readonly progress: (event: NativeStartupProgress) => void;
+  readonly signal: AbortSignal;
+  readonly infrastructureFailure: Error | undefined;
+  /** Whether this run's mapping was published; only then is retention reported. */
+  readonly published: boolean;
+  readonly final: unknown;
+}): void {
+  if (opts.signal.aborted && !opts.infrastructureFailure) {
+    opts.progress(
+      opts.published
+        ? { phase: "stopped", summary: nativeStoppedNotice(opts.final) }
+        : { phase: "stopped" }
+    );
   }
 }
 
@@ -1455,6 +1572,10 @@ export async function startNativeProject(opts: {
    * override; each active pair then requires a reviewed dependency binding.
    */
   readonly internalExtraHosts?: Readonly<Record<string, string>>;
+  /** Where each project-wide alias comes from, for refusal text only. */
+  readonly internalExtraHostSources?: Readonly<
+    Record<string, NativeHostAliasSource>
+  >;
   readonly allowedHosts?: readonly string[];
   readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
@@ -1582,6 +1703,7 @@ export async function startNativeProject(opts: {
   input = applyNativeInternalHostAliases({
     input,
     hosts: opts.internalExtraHosts,
+    sources: opts.internalExtraHostSources,
     hasDependencySelection: opts.dependencyFile !== undefined,
   });
   input = (
@@ -1668,6 +1790,7 @@ export async function startNativeProject(opts: {
     const hostAliases = nativeServiceHostAliases({
       services: specs,
       profiles,
+      managedEnvironment: input.managedEnvironment,
     });
     const hostDependencies = await readNativeHostDependencies({
       path: selectedDependencyFile,
@@ -1703,6 +1826,7 @@ export async function startNativeProject(opts: {
     requireNativeHostAliasBindings({
       dependencies: hostDependencies,
       hostAliases,
+      sources: opts.internalExtraHostSources,
     });
     prepareNativeDependencyServices({
       dependencies: hostDependencies,
@@ -2081,7 +2205,15 @@ export async function startNativeProject(opts: {
                 }
                 await hooks?.ready?.();
                 await opts.onReady?.();
-                progress({ phase: "ready", services });
+                progress(
+                  readyProgress({
+                    services,
+                    run,
+                    plan: review.report.plan,
+                    routed: routes.services,
+                    httpsPort: servedHttpsPort(https, opts.https),
+                  })
+                );
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -2109,11 +2241,15 @@ export async function startNativeProject(opts: {
             try {
               final = await invokeInspect();
             } catch (inspectionFailure) {
-              throw finalInspectionFailure(
+              const settled = finalInspectionFailure({
                 serveFailure,
                 inspectionFailure,
-                nativeExitCode
-              );
+                restored: restore !== undefined,
+                mappingAttempted,
+                nativeCode: nativeExitCode,
+              });
+              graphCleanupConfirmed = settled.nothingReserved;
+              throw settled.error;
             }
             const confirmed = await confirmCleanupOrRecordOwner({
               confirm: {
@@ -2163,7 +2299,13 @@ export async function startNativeProject(opts: {
               mappingAttempted,
               invoke: deps.invoke,
             });
-            reportStopped(progress, controller.signal, httpsFailure);
+            reportStopped({
+              progress,
+              signal: controller.signal,
+              infrastructureFailure: httpsFailure,
+              published: mapping !== undefined,
+              final,
+            });
             return foregroundExitCode({
               aborted: controller.signal.aborted,
               interruptedExit: stopSignals.interruptedExit(),

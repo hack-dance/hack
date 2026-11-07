@@ -389,9 +389,14 @@ keep it open, use `hack ps` and `hack logs` from another terminal, and press
 Ctrl-C to stop it. For detached startup, use the Compose backend.
 
 Foreground image-project `up` prints each startup step (input, runtime, images,
-services) and one ready line, `Project is ready (SERVICES)`, after the graph is
-ready and its run mapping is published. Ctrl-C prints the stop sequence and
-`Native project stopped.` once owned cleanup is confirmed. Until the ready line,
+services) and one ready line, `Project is ready (SERVICES; run RUN)`, after the
+graph is ready and its run mapping is published. Under it, `up` lists each routed
+service's reviewed hostnames as HTTPS URLs (with the `HACK_NATIVE_HTTPS_PORT`
+port unless it is 443) and the published loopback ports. Without the native
+HTTPS frontend it says that routes are not served on this host. Ctrl-C prints the
+stop sequence and, once owned cleanup is confirmed, one stopped line that says
+whether named volumes and the stopped run mapping were kept (`Native project
+stopped.` when no run mapping was published). Until the ready line,
 startup holds the runtime's exclusive provider lease, so graph admission cannot
 interleave with another operation. A `hack ps` from another terminal during that
 window waits briefly, then reports that the runtime is busy (`runtime_busy`,
@@ -414,8 +419,8 @@ Runtime refusals print their code and, when the runtime marks its message as a f
 literal that cannot carry values, that message and the service it concerns (for
 example `Service web: Pinned image architecture or implicit volumes are
 incompatible.`). Formatted runtime messages stay omitted. A start refused before the
-runtime reserved any graph state reports that nothing was retained instead of
-unconfirmed cleanup.
+runtime reserved any graph state reports that nothing was created and no cleanup is
+needed, with the startup diagnostic, instead of unconfirmed cleanup.
 
 ### Network aliases and the Compose project name
 
@@ -1356,7 +1361,11 @@ run mapping before exiting, so `hack ps`, `hack down` and
 `hack doctor --native-cleanup inspect` select that run instead of reporting the
 project as not started; nothing is stopped or replayed to do so. When the
 receipt itself cannot be authenticated, nothing is recorded and the runtime
-journal keeps the graph for explicit recovery.
+journal keeps the graph for explicit recovery. When the graph owner exited
+before reserving any runtime state (for example a configuration refusal during
+execution compilation), inspection finds no journal for the run: startup then
+reports the failure code and that nothing was created, instead of an
+unconfirmed cleanup.
 
 Managed values are declared on every authored service, so the reviewed plan is the
 same for every profile selection, but they are delivered only to the services the
@@ -2149,12 +2158,27 @@ must then have a selected binding for each alias it declares. A missing binding
 refuses with `E_NATIVE_PROJECT_UNSUPPORTED` ("Native host alias has no reviewed
 host dependency binding; configuration was not dropped."), before any runtime
 work; with no dependency selection at all it refuses before lifecycle hooks.
+The refusal lists every unbound alias with the services that declare it and
+where it comes from: the service's Compose `extra_hosts`, `internal.extra_hosts`
+in project configuration, this checkout's `.hack/.internal/extra-hosts.json`, or
+the main checkout's map that a linked worktree inherits. It then names the
+`aliases` a binding needs and how to remove the alias instead
+(`hack internal extra-hosts unset <alias>` hides an inherited entry in this
+worktree). Listener values are never printed.
 An entry whose target is not `host-gateway` (for example a fixed address), a name
 that is not an exact lowercase DNS name, or a service that already maps the name
 to a different target also refuses. Service-declared names are matched in the
-form native review compiles them to (one trailing dot removed, lowercased), so a
-service that declares `API.Example.` is covered by a binding for `api.example` and
-does not receive a second spelling. Earlier native builds ignored these entries,
+form native execution compiles them to: Compose interpolation resolved as the
+native runtime resolves it (no ambient environment, so `${UNSET:-word}` selects
+`word` and `${UNSET:+word}` selects nothing), then one trailing dot removed and
+lowercased. So a service that declares `API.Example.` or
+`${UNSET_PREFIX:+x-}api.example` is covered by a binding for `api.example` and
+does not receive a second copy of a project-wide `api.example`. A service whose
+declarations compile to the same alias twice refuses with `E_CONFIG_INVALID`,
+naming the service and alias, before any runtime work; native execution would
+refuse it only after the VM started. A name that refers to a required variable,
+a Hack-managed value or `COMPOSE_PROJECT_NAME` is left to native review and
+execution. Earlier native builds ignored these entries,
 which let a container resolve the public name instead of the local listener.
 Native reads these aliases before lifecycle hooks, because they are part of the
 reviewed configuration; unlike the Compose backend, a hook that changes them makes

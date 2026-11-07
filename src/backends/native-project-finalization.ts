@@ -494,6 +494,8 @@ export async function waitNativeProjectFinalization(opts: {
   readonly run: NativeProjectRun;
   readonly token: NativeProjectFinalizationToken;
   readonly timeoutMs?: number;
+  /** Abandons this read-only wait; it changes no finalization state. */
+  readonly signal?: AbortSignal;
 }): Promise<void> {
   const timeout = opts.timeoutMs ?? 150_000;
   if (
@@ -522,7 +524,7 @@ export async function waitNativeProjectFinalization(opts: {
     ) {
       return;
     }
-    if (performance.now() >= end) {
+    if (performance.now() >= end || opts.signal?.aborted) {
       throw refused();
     }
     await Bun.sleep(Math.min(100, Math.max(1, end - performance.now())));

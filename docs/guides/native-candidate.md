@@ -252,6 +252,55 @@ rerun: `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. See
 refused by native image-project `up`, with the general refusal: it needs the
 authored native format.
 
+Native review reads Compose `ports` without reading environment values. Each
+entry may be short (`[host_ip:][published:]target[/protocol]`, with an IPv6 host
+in brackets such as `[::1]:8080:80`) or long (`target`, `published`, `host_ip`,
+`protocol`). The host IP and published port may each be one interpolation with a
+literal default, such as `"${SEARCH_BIND:-127.0.0.1}:${SEARCH_PORT:-8108}:8108"`.
+Native always uses the literal default, even when the variable is set, and warns
+with `interpolated_port_default`; the plan records only the variable names. A
+reference without a literal default (`${PORT}`, `${PORT:?message}`), a nested
+default, an interpolated target or protocol, or one reference that spans several
+components is an `unresolved_port_binding` error at
+`services.<name>.ports[<index>]`. The review still reports every other finding,
+and a service in an unselected profile does not block the plan.
+
+Native publishes only on host loopback. `127.0.0.1` and `::1` are kept. A bare
+port or an all-interface binding (`0.0.0.0`, `::`) is narrowed to `127.0.0.1` or
+`::1`, with a `proposed_loopback_binding` warning. Compose would bind every
+interface in that case; native does not expose development services to the
+network. A specific non-loopback address, such as a LAN address, is an
+`unsupported_host_binding` error. Keep such a project on the Compose backend.
+
+Native foreground `hack up` publishes the reviewed ports of active services on
+host `127.0.0.1`. Each published port is forwarded through an owned application
+bridge to the container's target port, after the graph is ready. The rules:
+
+- Only TCP with an explicit host port is published. UDP, an engine-assigned host
+  port (a bare `"3000"`), and IPv6 loopback (`::1`) publication are refused with
+  `graph_port_publication`; keep those projects on the Compose backend.
+- One graph publishes at most 16 ports. Routes and published ports share the
+  pool's 32 application bridge sockets.
+- Two active services, two graphs in the same pool, or a graph and any other
+  host process cannot hold the same host port. Before graph admission, and again
+  under the provider lease just before binding, native refuses a host port that
+  already accepts connections on `127.0.0.1` (`published_port_in_use`, or
+  `E_CONFIG_INVALID` from the frontend check). The other listener is left
+  untouched.
+- A connection is forwarded only to the container incarnation the bridge was
+  started for. A replaced container does not receive traffic from an older
+  publication.
+- Stopping the foreground owner (Ctrl-C) closes each host listener before its
+  bridge and the containers stop, then retires the publication. Dead-owner
+  cleanup retires a publication only after proving its owner is gone. A
+  retaining restart publishes the same ports again.
+- `graph run` and other non-foreground paths do not publish ports and keep
+  refusing them with `graph_subset`.
+
+The loopback check is point-in-time. A process that binds the same port on all
+interfaces between the check and native's own bind can still share loopback
+traffic with it; stop such listeners before `hack up`.
+
 `hack doctor` reports the same features for the current project in its
 `compose backend features` check. With `--json`, the check's `composeBackend.features`
 lists the closed names `external_network`, `external_volume`, `reserved_label`,
@@ -846,7 +895,32 @@ This shares the entire approved project, including ignored local files, with gue
 read/write access. Filtered source publication remains the default. Do not use the
 unfiltered mode for a checkout whose local files must remain hidden from its services.
 Only the exact canonical project root is accepted; home/credential directories,
-aliased roots, and changes to a retained pool's mount intent are refused.
+aliased roots, and changes to a running pool's mount intent are refused.
+
+One development pool can host several project roots and linked worktrees, so one
+installed native home serves every project on the machine. The first root is the
+pool's primary share. Native `up` in another root adds that root itself when the
+pool is **stopped**, before any lifecycle hook runs, with the same unfiltered-source
+consent the first root gave; the share is mounted at the next boot. The explicit
+form is `runtime project-share add --project-share /absolute/other-project --unfiltered-source --json`.
+A running pool's mounts never change: `up` in a root outside the set refuses before
+hooks and says to stop the projects using the pool (`down` in each), stop the pool
+(`runtime down --json` on the native home), and run `up` again. Remove an additional root (for
+example a deleted worktree) from a stopped pool with
+`runtime project-share remove --project-share /absolute/old-worktree --json`; removal
+refuses with `project_share_in_use` while any retained graph still names that
+share, and the primary share is never removed. A pool holds at most eight shares.
+Boot refuses with `project_share_stale` while any share's root moved, changed or
+was removed. Every update is journaled like the stopped network extension, and
+startup refuses while the journal is unfinished.
+
+Projects in one pool are separated the way Compose projects in one Docker VM are:
+each graph binds only its own root's share (bind paths stay under that share),
+graph namespaces derive from the canonical root and branch, cleanup acts on one
+run's own labelled resources, and resource admission is one budget per pool. The
+VM boundary between projects that separate pools gave no longer applies inside one
+pool. Legacy device-rebind and host-pin recovery stay single-root and refuse on a
+pool with additional shares.
 
 Shared-source graphs with dependency caches still require a freshly published
 source revision. Cache initializer services read that immutable publication through
@@ -1042,7 +1116,25 @@ resume, live inspection must still prove absent compute and present owned volume
 the existing restore selection pins the current boot and volume identities. Cancellation
 or timeout has an uncertain outcome and never replays runtime up or graph restore.
 It refuses an active, changed
-or uncertain mapping rather than allocating a new data volume. Down hooks resolve
+or uncertain mapping rather than allocating a new data volume. When a Compose edit changes
+the graph's images, volumes or other resources, the retained data cannot be adopted and
+`up` says so. Either revert the edit, or discard the data explicitly with
+`hack down --remove-data` (Compose parity: `docker compose down --volumes`). It works only
+on a stopped project: run `hack down` first. It asks for confirmation (`--yes` skips the
+question; `--json` requires `--yes`), runs no lifecycle hooks, and asks the graph owner to
+delete only the volumes that this run created. Shared dependency caches are released, not
+deleted. The request uses `graph cleanup --remove-data --retained-only`: the runtime
+re-checks that the graph is still stopped while holding the lock a restore also needs, so if `hack up` in
+another terminal restored the run in the meantime, removal refuses
+(`graph_cleanup_not_retained`) instead of stopping it, and nothing is deleted. The run
+mapping is retired only after every owned volume is confirmed absent, so
+the next `up` starts a new run with new empty volumes. If removal is interrupted or
+cannot be confirmed, the mapping is kept and running the same command again resumes from
+the owner's durable cleanup intent. Ctrl-C (SIGINT) or SIGTERM ends the owned runtime
+request and releases the operation lock before the command fails. If the process is
+killed outright, the rerun reclaims the abandoned lock only after its recorded process has
+exited; a live owner, or a lock held by restart or recovery, still refuses. Output names
+no volumes or paths. Down hooks resolve
 fresh managed host values using the environment selection saved by `up`; hook output goes to stderr with `--json`. A before-hook failure
 prevents cleanup; an after-hook failure reports that graph cleanup already completed.
 Environment/profile/target changes and cache pruning remain unsupported.

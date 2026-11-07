@@ -194,6 +194,7 @@ pub(super) fn recovery_selection(
             || resource.key != service
             || resource.name != intent.container_name
             || resource.routing.is_some()
+            || !resource.loopback_ports.is_empty()
             || resource.cache.is_some()
             || intent
                 .container_id

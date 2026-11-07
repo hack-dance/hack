@@ -191,7 +191,8 @@ hack down [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
-| `--yes` | Confirm --prune-caches without prompting |
+| `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
+| `--yes` | Confirm --prune-caches or --remove-data without prompting |
 | `--json` | Output JSON (machine-readable) |
 | `--recover` | Explicitly reconcile an interrupted native Compose stop while retaining data |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

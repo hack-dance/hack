@@ -5,6 +5,7 @@ mod fields;
 mod graph;
 mod one_shot;
 mod ownership_labels;
+mod ports;
 mod project_name;
 pub(super) mod routing;
 mod service;

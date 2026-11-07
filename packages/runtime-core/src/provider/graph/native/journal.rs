@@ -324,6 +324,7 @@ impl Receipt {
                 || network.name != format!("hkn-{run}-network-{index}")
                 || network.image.is_some()
                 || network.routing.is_some()
+                || !network.loopback_ports.is_empty()
                 || network.networks.is_some()
                 || network.outbound == *internal
                 || network.cache.is_some()
@@ -393,6 +394,7 @@ impl Receipt {
                     .as_deref()
                     .is_none_or(|image| !image_id(image))
                 || resource.routing.is_some()
+                || !resource.loopback_ports.is_empty()
                 || resource.networks.as_ref() != Some(&expected_networks)
                 || resource.outbound
                 || resource.cache.is_some()
@@ -684,6 +686,15 @@ pub(super) fn read_recovery(
         root,
         String::from_utf8(bytes).map_err(|_| refused())?,
     ))
+}
+/// Strict same-owner read of one run's journal, independent of the current boot:
+/// private ancestors, no pending staging file, the exact wire schema and owner.
+pub(super) fn load_owned(
+    candidate: &Candidate,
+    run: &str,
+    owner: &str,
+) -> Result<(Receipt, PathBuf), CandidateError> {
+    load_validated(candidate, run, Some(owner))
 }
 fn load_validated(
     candidate: &Candidate,

@@ -744,16 +744,21 @@ or application data contents.
 
 `native-cache-reconcile/CacheReconcile.tla` checks which volume backs a dependency
 cache key when a stopped graph is reconciled after a Compose edit. A cache is a
-shared volume named by an identity of its inputs; run-owned data uses the run's own
-names. Edits change the cache's own inputs (initializer definition, declaration,
-image, lockfiles, and every service mount of the cache volume, since any of those
-services can write it), anything else in the Compose file, or whether the key is
-declared as a cache. Two values for each explore 54 distinct states.
+volume named by an identity of its inputs; run-owned data uses the run's own names.
+Edits change the cache's own inputs (initializer definition, declaration, image,
+lockfiles, and every service mount of the cache volume), anything else in the
+Compose file, whether a non-initializer service mounts the cache read-write, or
+whether the key is declared as a cache. Such a writable consumer can change the
+contents with inputs the identity does not hash, so its cache is scoped to this
+checkout or branch instance; another instance with its own writable consumer may
+write into the caches it selects (`ForeignWrite`). Two values for each explore
+2,208 distinct states.
 
 | Model action | Implementation boundary |
 | --- | --- |
-| `EditInputs` / `EditOther` / `EditDeclaration` | Compose or lockfile edit between ups; `dependency_cache::resolve_with_legacy` computes the current identity |
-| `UpCache` | `plan_reconcile::prepare` refuses run data declared as a cache; `Verified::project` keeps a cache of the same identity or selects the new identity's shared cache, then `Session::create_resources` adopts it by labels or creates it |
+| `EditInputs` / `EditOther` / `EditConsumer` / `EditDeclaration` | Compose or lockfile edit between ups; `dependency_cache::resolve_with_legacy` computes the current identity and `instance_scoped_volumes` the scope |
+| `ForeignWrite` | A linked worktree or branch instance whose writable consumer changes the cache it mounts |
+| `UpCache` | `plan_reconcile::prepare` refuses run data declared as a cache; `Verified::project` keeps a cache of the same identity or selects the new identity's cache, then `Session::create_resources` adopts it by labels or creates it |
 | `UpData` | A key that is no longer a cache gets a fresh run-owned volume; the cache reference is released, never deleted |
 | `Stop` | Ctrl-C or `down` keeps every recorded volume |
 
@@ -762,14 +767,18 @@ earlier formula) and must fail `UnrelatedEditKeepsCache` in an `UpCache` state w
 `needlessRebuild = TRUE`. The `stale` control reattaches the recorded cache whatever
 its identity and must fail `CacheMatchesInputs` with `staleMounted = TRUE`. The
 `data-as-cache` control mounts retained run data newly declared as a cache and must
-fail `NoDataAsCache` with `dataMounted = TRUE`.
+fail `NoDataAsCache` with `dataMounted = TRUE`. The `poison` control keeps caches
+with a writable consumer shared across instances and must fail `NoForeignWrites`
+with `foreignMounted = TRUE`.
 
 Assumptions: identities are exact (no collisions), the initializer populates a newly
-selected cache before dependents start, and admission holds the provider lease. The
+selected cache before dependents start, read-only consumers and initializers only
+produce what the identity describes, and admission holds the provider lease. Within
+one instance the same author controls every input, so writes there are trusted. The
 compatibility path that keeps a receipt recorded under the earlier identity while
-its inputs still match is covered by `plan_reconcile.rs` tests, not this model. It
-does not prove initializer idempotence, cache content, capacity limits or cache-wide
-collection.
+its inputs still match (never for a writable consumer) is covered by
+`plan_reconcile.rs` tests, not this model. It does not prove initializer
+idempotence, cache content, capacity limits or cache-wide collection.
 
 ## Graph admission
 

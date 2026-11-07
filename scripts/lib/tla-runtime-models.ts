@@ -152,7 +152,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-cache-reconcile",
     module: "CacheReconcile",
-    states: 54,
+    states: 2208,
     invariant: "UnrelatedEditKeepsCache",
     action: "UpCache",
     fields: ["needlessRebuild = TRUE", "staleMounted = FALSE"],
@@ -168,6 +168,12 @@ const contracts: readonly ModelContract[] = [
         negative: true,
         invariant: "NoDataAsCache",
         fields: ["dataMounted = TRUE", "staleMounted = FALSE"],
+      },
+      {
+        name: "poison",
+        negative: true,
+        invariant: "NoForeignWrites",
+        fields: ["foreignMounted = TRUE", "staleMounted = FALSE"],
       },
     ],
   },

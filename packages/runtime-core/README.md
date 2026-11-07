@@ -1457,7 +1457,11 @@ definition and inputs plus every service mount of the cache volume, not the whol
 Compose digest) equals the recorded binding is
 kept with its provenance; a changed identity is selected like a fresh admission
 (adopted by labels or created) with a freshly published source revision, and the old
-shared cache is only released. A retained run-owned volume newly declared as a cache
+shared cache is only released. A cache that a non-initializer service mounts
+read-write (`dependency_cache::instance_scoped_volumes`) binds the plan namespace
+into its scope, so it is never shared across linked worktrees or branch instances;
+such graphs always re-prove the cache through reconciliation, and no earlier
+whole-document identity is matched for them. A retained run-owned volume newly declared as a cache
 refuses with `graph_plan_reconcile` and a `plan_change` diagnostic naming the service
 and field. A receipt recorded under the earlier whole-document identity keeps that
 cache while the review still resolves to it (`config::retain_recorded_legacy_caches`).

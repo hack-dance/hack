@@ -722,7 +722,14 @@ declared lockfile and runtime-file contents, and the cache volume layout: every
 service that mounts the cache volume, with its target, subpath and `:ro` mode. Any
 of those services can write the shared contents, so adding, removing or changing
 such a mount is a cache input; mounts stay as declared, as in Compose and v4, and
-are not forced read-only. Any other edit to another service, such as an
+are not forced read-only. Caches are shared across linked worktrees and branch
+instances only while every service other than the initializers mounts them
+read-only. A service that mounts the cache read-write can change its contents
+through its own image, command, environment or source, which the identity does not
+cover, so that cache is scoped to this checkout and branch instance and never
+shared. To share it again, mount it with `:ro` in the other services. A run created
+by an earlier build whose cache has such a writer moves to its own instance cache
+once instead of reusing the shared one. Any other edit to another service, such as an
 environment value on the app, keeps the cache. An edit to one of those inputs,
 including a lockfile, selects the cache for the new identity as a fresh `up` would, so the initializer installs into it; the old cache
 is shared and is only released by this run. Each such `up` publishes the current

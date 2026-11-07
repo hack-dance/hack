@@ -77,7 +77,17 @@ fn eligible(receipt: &Receipt) -> bool {
 /// declared set (a dependency cache takes an index but keeps its content name).
 /// Once a reconciliation reattached data out of that order, or retains data no
 /// longer declared, only this projection can restore the graph again.
+/// A cache with a writable consumer is scoped to this instance; a receipt recorded
+/// before that scoping names a shared cache that may hold another worktree's
+/// writes. Such graphs always take this path, which keeps the cache only when its
+/// freshly resolved instance-scoped identity equals the recorded binding exactly.
 fn ordinary_layout(receipt: &Receipt, plan: &project::PlanData) -> bool {
+    let scoped = dependency_cache::instance_scoped_volumes(plan);
+    if receipt.resources.values().any(|resource| {
+        resource.kind == Kind::Volume && resource.cache.is_some() && scoped.contains(&resource.key)
+    }) {
+        return false;
+    }
     let declared = active_volume_keys(plan);
     let recorded = receipt
         .resources
@@ -905,9 +915,18 @@ mod tests {
         assert_eq!(missing.code, "graph_data_missing");
     }
 
-    /// An initializer populating a shared dependency cache, beside an app that
-    /// mounts the cache and its own run-owned data.
+    /// An initializer populating a dependency cache, beside an app that mounts
+    /// the cache read-write (so the cache is instance-scoped) and its own data.
     fn cached(marker: &str, installer: &str) -> Value {
+        cached_with(marker, installer, "deps:/deps")
+    }
+
+    /// The same graph whose app only reads the cache, so the cache is shared.
+    fn cached_shared(marker: &str, installer: &str) -> Value {
+        cached_with(marker, installer, "deps:/deps:ro")
+    }
+
+    fn cached_with(marker: &str, installer: &str, consumer: &str) -> Value {
         json!({
             "services": {
                 "deps": {
@@ -926,7 +945,7 @@ mod tests {
                     "network_mode": "none",
                     "entrypoint": ["/bin/app"],
                     "environment": {"MARKER": marker},
-                    "volumes": ["deps:/deps", "data:/data"],
+                    "volumes": [consumer, "data:/data"],
                 },
             },
             "volumes": {"deps": {}, "data": {}},
@@ -934,10 +953,14 @@ mod tests {
     }
 
     fn cached_project() -> (Project, Receipt, config::Prepared) {
+        cached_project_with(cached("one", "/bin/install"))
+    }
+
+    fn cached_project_with(document: Value) -> (Project, Receipt, config::Prepared) {
         let project = Project::new();
         fs::write(project.root.join("lock.txt"), "v1").unwrap();
-        let (report, identity, prepared) =
-            project.prepared_with(cached("one", "/bin/install"), true);
+        let shared = document["services"]["app"]["volumes"][0] == "deps:/deps:ro";
+        let (report, identity, prepared) = project.prepared_with(document, true);
         let mut receipt = stopped(&prepared, &identity);
         // A completed first admission recorded the cache's provenance fence.
         let provenance: cache_provenance::CacheProvenance = serde_json::from_value(json!({
@@ -952,13 +975,12 @@ mod tests {
             .unwrap()
             .cache_provenance = Some(provenance);
         assert!(receipt.resources["volume:deps"].cache.is_some());
-        assert!(!applies(
-            &receipt,
-            &report.plan_id,
-            &report.plan,
-            &identity,
-            false
-        ));
+        // A shared cache keeps strict replay; an instance-scoped one always
+        // re-proves its identity through reconciliation.
+        assert_eq!(
+            applies(&receipt, &report.plan_id, &report.plan, &identity, false),
+            !shared
+        );
         (project, receipt, prepared)
     }
 
@@ -1119,7 +1141,8 @@ mod tests {
 
     #[test]
     fn legacy_cache_identity_is_kept_only_while_its_inputs_still_match() {
-        let (project, mut receipt, original) = cached_project();
+        let (project, mut receipt, original) =
+            cached_project_with(cached_shared("one", "/bin/install"));
         let legacy = original.legacy_caches["deps"].clone();
         assert_ne!(
             Some(&legacy),
@@ -1130,7 +1153,7 @@ mod tests {
         deps.name = legacy.name();
         // Unchanged review: strict replay keeps the recorded legacy cache.
         let (report, identity, mut prepared) =
-            project.prepared_with(cached("one", "/bin/install"), true);
+            project.prepared_with(cached_shared("one", "/bin/install"), true);
         // The review's source metadata is fresh; the receipt is that admission's.
         receipt.plan_id = report.plan_id.clone();
         assert!(!applies(
@@ -1145,11 +1168,38 @@ mod tests {
         assert!(mounts(&prepared, "app").contains(&legacy.name()));
         // An edit changes the legacy whole-document identity: the current one is
         // selected once, after which edits elsewhere keep it.
-        let (_, projection) = reconcile_cached(&project, &receipt, cached("two", "/bin/install"));
+        let (_, projection) =
+            reconcile_cached(&project, &receipt, cached_shared("two", "/bin/install"));
         let fresh = &projection.resources["volume:deps"];
         assert_ne!(fresh.name, legacy.name());
         assert_eq!(fresh.cache, original.resources["volume:deps"].cache);
         assert_eq!(fresh.phase, "reserved");
+    }
+
+    #[test]
+    fn an_earlier_shared_cache_with_a_writable_consumer_moves_to_this_instance() {
+        let (project, mut receipt, original) = cached_project();
+        // No earlier identity is ever matched for a writable consumer.
+        assert!(!original.legacy_caches.contains_key("deps"));
+        let scoped = original.resources["volume:deps"].cache.clone().unwrap();
+        // A receipt from an earlier build names a cache shared across worktrees.
+        let shared = dependency_cache::CacheBinding {
+            scope: dependency_cache::scope(&project.root).unwrap(),
+            fingerprint: "c".repeat(64),
+            image: scoped.image.clone(),
+        };
+        assert_ne!(shared.scope, scoped.scope);
+        let deps = receipt.resources.get_mut("volume:deps").unwrap();
+        deps.cache = Some(shared.clone());
+        deps.name = shared.name();
+        // Even the unchanged review re-proves identity and selects this
+        // instance's cache once; the shared one is never mounted again.
+        let (prepared, projection) =
+            reconcile_cached(&project, &receipt, cached("one", "/bin/install"));
+        let fresh = &projection.resources["volume:deps"];
+        assert_eq!(fresh.cache.as_ref(), Some(&scoped));
+        assert_eq!(fresh.phase, "reserved");
+        assert!(!mounts(&prepared, "app").contains(&shared.name()));
     }
 
     #[test]

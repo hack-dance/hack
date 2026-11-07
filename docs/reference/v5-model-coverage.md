@@ -67,7 +67,7 @@ liveness/reachability controls have their own documented assumptions.
 | Model | Positive distinct states | Configurations |
 | --- | ---: | ---: |
 | [native-plan-reconcile](../../tests/models/tla/native-plan-reconcile/Reconcile.tla) | 747,656 | 4 |
-| [native-cache-reconcile](../../tests/models/tla/native-cache-reconcile/CacheReconcile.tla) | 54 | 4 |
+| [native-cache-reconcile](../../tests/models/tla/native-cache-reconcile/CacheReconcile.tla) | 2,208 | 5 |
 | [pre-ready-retirement](../../tests/models/tla/pre-ready-retirement/Retirement.tla) | 10,965 | 8 |
 | [native-persistent-enrollment](../../tests/models/tla/native-persistent-enrollment/Enrollment.tla) | 38 | 6 |
 | [native-frontend-recovery](../../tests/models/tla/native-frontend-recovery/Recovery.tla) | 602 | 10 |

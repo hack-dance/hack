@@ -163,20 +163,24 @@ fn a_relay_left_by_a_killed_process_is_removed_and_a_live_one_is_kept() {
         .arg("30")
         .spawn()
         .unwrap();
-    let make = |pid: u32| {
+    // `other` is written before the socket, so a relay starting in a concurrent test never
+    // sees that directory holding only a socket.
+    let make = |pid: u32, other: bool| {
         let directory = temporary_root().join(format!("{DIRECTORY_PREFIX}{pid}-0123456789ab"));
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&directory)
             .unwrap();
+        if other {
+            fs::write(directory.join("other"), "x").unwrap();
+        }
         drop(UnixListener::bind(directory.join(SOCKET_NAME)).unwrap());
         directory
     };
-    let abandoned = make(dead);
-    let live = make(running.id());
+    let abandoned = make(dead, false);
+    let live = make(running.id(), false);
     // A directory holding anything besides the socket is never removed.
-    let kept = make(dead + 1_000_000);
-    fs::write(kept.join("other"), "x").unwrap();
+    let kept = make(dead + 1_000_000, true);
     let relay = ClientRelay::start(Path::new("/nonexistent/docker.sock")).unwrap();
     assert!(!abandoned.exists());
     assert!(live.join(SOCKET_NAME).exists());

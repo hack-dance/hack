@@ -25,6 +25,7 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import {
   markSharedHelperInstanceStopping,
   type ProjectSharedHelperConfig,
@@ -1049,4 +1050,240 @@ test("a committed native down marks shared helpers as stopping immediately befor
   ]);
   expect(await helpers.generation()).not.toBeNull();
   expect(await helpers.operation()).toStartWith("stopping:");
+});
+
+const receiptSha = "f".repeat(64);
+function ownerSelection(foreground: string, phase = "ready-observed") {
+  return {
+    version: 1,
+    run: run.run,
+    owner: run.owner,
+    phase,
+    receipt_sha256: receiptSha,
+    foreground,
+  };
+}
+
+test("down without --recover names the recovery when the foreground owner is gone", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  await expectClosedRefusal(
+    nativeProjectDown({
+      ...opts,
+      invoke: async (request) => {
+        calls.push(request.args[1]!);
+        if (request.args[1] === "cleanup") {
+          throw new NativeRuntimeRequestError({
+            message: "Native runtime request failed (graph_owner_recovery).",
+            nativeCode: "graph_owner_recovery",
+          });
+        }
+        return snapshot();
+      },
+    }),
+    "run hack down --recover"
+  );
+  expect(calls).toEqual(["inspect", "inspect", "cleanup"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("down --recover stops a ready run whose foreground owner exited, selected by its exact receipt", async () => {
+  const opts = await fixture();
+  const events: string[] = [];
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    before: async () => {
+      events.push("before");
+    },
+    retireHostProcesses: async () => {
+      events.push("retire-host");
+    },
+    after: async () => {
+      events.push("after");
+    },
+    invoke: async (request) => {
+      events.push(request.args[1]!);
+      if (request.args[1] === "foreground-owner") {
+        expect(request.args).toEqual([
+          "graph",
+          "foreground-owner",
+          "--run-id",
+          run.run,
+          "--json",
+        ]);
+        return ownerSelection("exited");
+      }
+      if (request.args[1] === "recover-live-owner") {
+        expect(request.args).toEqual([
+          "graph",
+          "recover-live-owner",
+          "--run-id",
+          run.run,
+          "--expect-receipt",
+          receiptSha,
+          "--json",
+        ]);
+        recovered = true;
+        return {
+          run: run.run,
+          phase: "stopped-data-retained",
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+          same_boot: true,
+        };
+      }
+      expect(request.args[1]).toBe("inspect");
+      return snapshot(recovered);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(result.dataPreserved).toBe(true);
+  expect(events).toEqual([
+    "inspect",
+    "foreground-owner",
+    "before",
+    "inspect",
+    "recover-live-owner",
+    "inspect",
+    "retire-host",
+    "after",
+  ]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("down --recover without a remaining publication takes the ordinary cleanup", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let cleaned = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      if (request.args[1] === "foreground-owner") {
+        return ownerSelection("absent");
+      }
+      if (request.args[1] === "cleanup") {
+        cleaned = true;
+        return {};
+      }
+      return snapshot(cleaned);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(calls).toEqual([
+    "inspect",
+    "foreground-owner",
+    "inspect",
+    "cleanup",
+    "inspect",
+  ]);
+});
+
+test.each([
+  {
+    name: "a running owner",
+    selection: ownerSelection("running"),
+    text: "found a running foreground owner",
+  },
+  {
+    name: "an owner that exited before its start was confirmed",
+    selection: ownerSelection("exited", "stopped-data-retained"),
+    text: "no supported command can prove and retire that attempt yet",
+  },
+  {
+    name: "an unclassified publication",
+    selection: ownerSelection("uncertain"),
+    text: "cannot confirm this run's foreground owner state",
+  },
+  {
+    name: "a selection for another owner",
+    selection: { ...ownerSelection("exited"), owner: "9".repeat(32) },
+    text: "cannot confirm this run's foreground owner state",
+  },
+  {
+    name: "a malformed receipt digest",
+    selection: { ...ownerSelection("exited"), receipt_sha256: "short" },
+    text: "cannot confirm this run's foreground owner state",
+  },
+])("down --recover refuses $name before hooks or any stop", async ({
+  selection,
+  text,
+}) => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  await expectClosedRefusal(
+    nativeProjectDown({
+      ...opts,
+      recover: true,
+      before: async () => {
+        calls.push("before");
+      },
+      invoke: async (request) => {
+        calls.push(request.args[1]!);
+        if (request.args[1] === "foreground-owner") {
+          return selection;
+        }
+        expect(request.args[1]).toBe("inspect");
+        return snapshot(selection.phase === "stopped-data-retained");
+      },
+    }),
+    text
+  );
+  expect(calls).toEqual(["inspect", "foreground-owner"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("down --recover names the exact frontend recovery when the owning frontend also exited", async () => {
+  const opts = await fixture();
+  // A frontend that began its finalization and exited without completing it.
+  const module = join(
+    import.meta.dir,
+    "../src/backends/native-project-finalization.ts"
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `const { beginNativeProjectFinalization } = await import(${JSON.stringify(module)});
+       const lifetime = await beginNativeProjectFinalization(JSON.parse(process.argv[1]));
+       process.stdout.write(lifetime.token.attempt);`,
+      JSON.stringify({ scope: opts.scope, run }),
+    ],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  const attempt = await new Response(child.stdout).text();
+  expect(await child.exited).toBe(0);
+  expect(attempt).toMatch(/^[a-f0-9]{32}$/);
+  let recovered = false;
+  const started = performance.now();
+  await expectClosedRefusal(
+    nativeProjectDown({
+      ...opts,
+      recover: true,
+      invoke: async (request) => {
+        if (request.args[1] === "foreground-owner") {
+          return ownerSelection("exited");
+        }
+        if (request.args[1] === "recover-live-owner") {
+          recovered = true;
+          return {
+            run: run.run,
+            recovered: true,
+            data_retained: true,
+            publisher_retired: true,
+          };
+        }
+        return snapshot(recovered);
+      },
+    }),
+    `hack restart --recover-frontend --expect-finalization-attempt ${attempt}`
+  );
+  expect(recovered).toBe(true);
+  // An exited frontend is not awaited for the ordinary finalization budget.
+  expect(performance.now() - started).toBeLessThan(10_000);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });

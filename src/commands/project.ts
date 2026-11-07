@@ -546,7 +546,7 @@ const downOptions = [
     type: "boolean",
     long: "--recover",
     description:
-      "Explicitly reconcile an interrupted native Compose stop while retaining data",
+      "Explicitly reconcile an interrupted native stop, or stop the services of a native run whose foreground owner exited, while retaining data",
   } as const),
 ] as const;
 const restartOptions = [
@@ -6861,15 +6861,18 @@ function writeDownNotice(opts: {
 
 function refuseLegacyNativeRecovery(recover: boolean): void {
   if (recover) {
-    throw new CliUsageError(
-      "--recover requires a native-authored Compose instance."
-    );
+    throw new CliUsageError("--recover requires the native backend.");
   }
 }
 
 /** Native down accepts --yes only to confirm --remove-data. */
 function refuseNativeDownOptions(options: DownArgs["options"]): void {
   const removeData = options.removeData === true;
+  if (removeData && options.recoverNativeCompose) {
+    throw new CliUsageError(
+      "Native down --recover retains data; it cannot be combined with --remove-data."
+    );
+  }
   if (
     [
       options.env,
@@ -6921,7 +6924,6 @@ async function handleDown({
   if (authored !== null) {
     return authored;
   }
-  refuseLegacyNativeRecovery(args.options.recoverNativeCompose);
   const native = resolveNativeRuntimeSelection();
   if (native) {
     if (args.options.json) {
@@ -6990,6 +6992,7 @@ async function handleDown({
     const result = await nativeProjectDown({
       runtime: native,
       scope,
+      recover: args.options.recoverNativeCompose,
       deferFinalization,
       retireHostProcesses: async () => {
         await stopLifecycleProcesses({
@@ -7033,6 +7036,7 @@ async function handleDown({
     }
     return 0;
   }
+  refuseLegacyNativeRecovery(args.options.recoverNativeCompose);
   const json = args.options.json === true;
   if (!json) {
     return await runDownCommand({ ctx, args, json: false });

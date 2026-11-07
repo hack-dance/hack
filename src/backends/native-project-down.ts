@@ -87,6 +87,147 @@ function verify(value: unknown, run: NativeProjectRun, stopped: boolean): void {
     }
   }
 }
+const RECEIPT_SHA = /^[a-f0-9]{64}$/;
+
+/** Only ESRCH proves a recorded frontend exited; a live or inaccessible PID does not. */
+function processExited(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return isRecord(error) && error.code === "ESRCH";
+  }
+}
+const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
+
+/** What `graph foreground-owner` selected; it grants no recovery authority. */
+type ForegroundOwnerSelection = {
+  readonly phase: string;
+  readonly receiptSha256: string;
+  readonly foreground: "absent" | "running" | "exited" | "uncertain";
+};
+
+function ownerRecoveryRefused(): Error {
+  return new ClosedCliError(
+    "Native down --recover cannot confirm this run's foreground owner state; retained data and runtime state were not changed."
+  );
+}
+
+async function selectForegroundOwner(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<ForegroundOwnerSelection> {
+  const value = await opts.invoke({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: ["graph", "foreground-owner", "--run-id", opts.run.run, "--json"],
+    timeoutMs: 15_000,
+  });
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    value.run !== opts.run.run ||
+    value.owner !== opts.run.owner ||
+    typeof value.phase !== "string" ||
+    typeof value.receipt_sha256 !== "string" ||
+    !RECEIPT_SHA.test(value.receipt_sha256) ||
+    typeof value.foreground !== "string" ||
+    !FOREGROUND_STATES.has(value.foreground)
+  ) {
+    throw ownerRecoveryRefused();
+  }
+  return {
+    phase: value.phase,
+    receiptSha256: value.receipt_sha256,
+    foreground: value.foreground as ForegroundOwnerSelection["foreground"],
+  };
+}
+
+/**
+ * The owned stop for `hack down --recover`. A run whose foreground owner exited
+ * while its graph was ready is stopped by the runtime's same-boot dead-owner
+ * recovery, selected by the exact receipt observed here; it revalidates the
+ * owner's death, its endpoints and the inventories itself, retains data and
+ * retires the stale publication. A run without a remaining publication takes
+ * the ordinary cleanup. Every other state refuses with nothing changed.
+ */
+async function requestOwnedStop(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly selection: ForegroundOwnerSelection | undefined;
+}): Promise<void> {
+  const selection = opts.selection;
+  if (selection === undefined || selection.foreground === "absent") {
+    try {
+      await opts.invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: ["graph", "cleanup", "--run-id", opts.run.run, "--json"],
+        timeoutMs: 590_000,
+      });
+    } catch (error) {
+      if (
+        selection === undefined &&
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "graph_owner_recovery"
+      ) {
+        throw new ClosedCliError(
+          "Native down cannot reach this run's foreground owner. If the hack up or hack restart that owned it has exited, run hack down --recover to stop its services with data retained. Nothing was stopped."
+        );
+      }
+      throw error;
+    }
+    return;
+  }
+  const result = await opts.invoke({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: [
+      "graph",
+      "recover-live-owner",
+      "--run-id",
+      opts.run.run,
+      "--expect-receipt",
+      selection.receiptSha256,
+      "--json",
+    ],
+    timeoutMs: 590_000,
+  });
+  if (
+    !isRecord(result) ||
+    result.run !== opts.run.run ||
+    result.recovered !== true ||
+    result.data_retained !== true ||
+    result.publisher_retired !== true
+  ) {
+    throw ownerRecoveryRefused();
+  }
+}
+
+/** Refuse `--recover` states that have no supported owned stop, before any hook. */
+function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
+  if (selection.foreground === "running") {
+    throw new ClosedCliError(
+      "Native down --recover found a running foreground owner for this run. Stop it with Ctrl-C in its terminal, or run hack down without --recover. Nothing was changed."
+    );
+  }
+  if (selection.foreground === "uncertain") {
+    throw ownerRecoveryRefused();
+  }
+  if (
+    selection.foreground === "exited" &&
+    selection.phase !== "ready-observed"
+  ) {
+    throw new ClosedCliError(
+      "Native down --recover found a foreground owner that exited before its start was confirmed. Data is retained, but no supported command can prove and retire that attempt yet; keep the native home unchanged for inspection. Nothing was changed."
+    );
+  }
+}
+
 /** Retaining cleanup only. Success follows confirmed compute absence and the
  * original frontend's finalizers, including a previously recovered stop.
  */
@@ -120,6 +261,11 @@ export async function nativeProjectDown(opts: {
     }) => Promise<void>;
   };
   readonly invoke?: typeof invokeNativeRuntime;
+  /**
+   * `hack down --recover`: also stop a ready run whose foreground owner exited
+   * without retiring its publication (see {@link requestOwnedStop}).
+   */
+  readonly recover?: boolean;
   /** Only the restart coordinator may defer to its already captured exact wait/recovery. */
   readonly deferFinalization?: boolean;
   readonly finalizationTimeoutMs?: number;
@@ -142,9 +288,27 @@ export async function nativeProjectDown(opts: {
     });
   const initial = await inspect();
   verify(initial, run, false);
+  const selection = opts.recover
+    ? await selectForegroundOwner({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        run,
+        invoke,
+      })
+    : undefined;
+  if (selection) {
+    requireRecoverableOwner(selection);
+  }
   const finalization = opts.deferFinalization
     ? undefined
     : await captureFinalization({ scope: opts.scope, run });
+  // `--recover`: a frontend that has exited cannot finish later, so its
+  // finalization is read once instead of awaited.
+  const frontendGone =
+    opts.recover === true &&
+    finalization !== undefined &&
+    finalization.version !== 1 &&
+    processExited(finalization.pid);
   const wait = async () => {
     if (finalization === undefined) {
       return;
@@ -154,10 +318,14 @@ export async function nativeProjectDown(opts: {
         scope: opts.scope,
         run,
         token: finalization,
-        timeoutMs: opts.finalizationTimeoutMs,
+        timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
       });
     } catch {
-      throw finalizationRefused();
+      throw frontendGone
+        ? new ClosedCliError(
+            `Native down --recover: this run's services are stopped with data retained, but the hack up or hack restart that owned it exited before confirming its own cleanup. Run hack restart --recover-frontend --expect-finalization-attempt ${finalization.attempt} to finish that recovery and start the project.`
+          )
+        : finalizationRefused();
     }
   };
   const hooks = opts.hooks;
@@ -242,11 +410,12 @@ export async function nativeProjectDown(opts: {
     throw finalizationRefused();
   }
   await opts.beforeCleanup?.(run);
-  await invoke({
+  await requestOwnedStop({
     runtime: opts.runtime,
-    cwd: opts.scope.projectRoot,
-    args: ["graph", "cleanup", "--run-id", run.run, "--json"],
-    timeoutMs: 590_000,
+    projectRoot: opts.scope.projectRoot,
+    run,
+    invoke,
+    selection,
   });
   verify(await inspect(), run, true);
   await opts.retireHostProcesses?.(run);

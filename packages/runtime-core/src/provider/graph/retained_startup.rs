@@ -12,6 +12,33 @@ fn refused() -> CandidateError {
     )
 }
 
+/// A remaining foreground publication blocks retained startup. Name the next
+/// step when its recorded owner is classified; the classification grants nothing.
+fn published_owner_refused(candidate: &Candidate, run: &str) -> CandidateError {
+    use foreground::transport::{PublishedOwner, published_owner};
+    match published_owner(candidate, run) {
+        Ok(PublishedOwner::Running) => error(
+            "graph_foreground_owner_running",
+            "Another foreground hack up or hack restart still owns this run. Stop it with Ctrl-C in its terminal, or run hack down, then start the project again.",
+        ),
+        Ok(PublishedOwner::Exited) if exited_ready(candidate, run) => error(
+            "graph_foreground_owner_exited",
+            "The previous foreground owner of this run exited while its services were running and did not retire its publication. Run hack down --recover to stop the orphaned services with data retained, then hack up.",
+        ),
+        Ok(PublishedOwner::Exited) => error(
+            "graph_foreground_owner_exited_unadmitted",
+            "The previous foreground owner of this run exited before its start was confirmed and did not retire its publication. Data is retained, but no supported command can prove and retire that attempt yet; keep the native home unchanged for inspection.",
+        ),
+        _ => refused(),
+    }
+}
+fn exited_ready(candidate: &Candidate, run: &str) -> bool {
+    Owner::load(candidate)
+        .ok()
+        .and_then(|owner| load_at(directory(candidate, run).ok()?, run, &owner.token).ok())
+        .is_some_and(|(receipt, _)| receipt.phase == "ready-observed")
+}
+
 fn no_file(root: &Path, name: &str) -> Result<(), CandidateError> {
     match fs::symlink_metadata(root.join(name)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -88,8 +115,8 @@ impl Guard {
         run: &str,
         expected: Option<&str>,
     ) -> Result<Self, CandidateError> {
-        let retired =
-            foreground::transport::Retired::acquire(candidate, run)?.ok_or_else(refused)?;
+        let retired = foreground::transport::Retired::acquire(candidate, run)?
+            .ok_or_else(|| published_owner_refused(candidate, run))?;
         let (owner, receipt) = checked(candidate, run)?;
         let selected = selection(&owner, &receipt)?;
         if expected.is_some_and(|value| !hex(value, 64) || value != selected) {
@@ -117,7 +144,12 @@ impl Guard {
 /// values or restore authority are returned. An absent/uncertain owner refuses.
 pub fn preflight(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let guard = Guard::acquire(candidate, run, None)?;
-    let _lease = state::Lock::acquire_existing(&candidate.state_root.join("run/smolvm"))?;
+    // Eligibility is read-only: wait out a brief holder such as the inspection behind
+    // `hack ps`, as runtime startup does, rather than failing the `up` that asked.
+    let _lease = state::Lock::acquire_existing_waiting(
+        &candidate.state_root.join("run/smolvm"),
+        lifecycle::STARTUP_LEASE_WAIT,
+    )?;
     guard.verify(candidate)?;
     let (owner, receipt) = checked(candidate, run)?;
     Ok(
@@ -421,6 +453,73 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn a_remaining_publication_names_its_owner_state_without_effects() {
+        let state = |fixture: &Fixture| {
+            let owner = fixture.candidate.state_root.join("run/smolvm/owner.json");
+            (
+                fs::read(owner).unwrap(),
+                fs::read(fixture.graph().join("state.json")).unwrap(),
+            )
+        };
+        let refusal = |fixture: &Fixture| {
+            let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+            assert!(
+                !fixture
+                    .candidate
+                    .state_root
+                    .join("run/smolvm/admission.json")
+                    .exists()
+            );
+            error.code
+        };
+        // A live foreground owner (this process) still holds the run.
+        let fixture = Fixture::new();
+        let live =
+            foreground::transport::fixture_live_publication(&fixture.candidate, &fixture.run);
+        let before = state(&fixture);
+        assert_eq!(refusal(&fixture), "graph_foreground_owner_running");
+        assert_eq!(state(&fixture), before);
+        drop(live);
+        // An owner that exited before its restore was admitted: the receipt is the
+        // unchanged stopped one, and no supported recovery is claimed.
+        let fixture = Fixture::new();
+        foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
+        let before = state(&fixture);
+        assert_eq!(
+            refusal(&fixture),
+            "graph_foreground_owner_exited_unadmitted"
+        );
+        assert_eq!(state(&fixture), before);
+        // An owner that exited while its graph was ready names `hack down --recover`.
+        let fixture = Fixture::new();
+        let mut receipt = fixture.receipt();
+        receipt.phase = "ready-observed".into();
+        state::write(&fixture.graph().join("state.json"), &receipt).unwrap();
+        foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
+        let before = state(&fixture);
+        let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+        assert_eq!(error.code, "graph_foreground_owner_exited");
+        assert!(error.message.contains("hack down --recover"));
+        assert_eq!(state(&fixture), before);
+    }
+
+    #[test]
+    fn preflight_waits_out_a_brief_provider_lease_holder() {
+        let fixture = Fixture::new();
+        let held = state::Lock::acquire_existing(&fixture.candidate.state_root.join("run/smolvm"))
+            .unwrap();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(held);
+        });
+        let started = std::time::Instant::now();
+        let value = preflight(&fixture.candidate, &fixture.run).unwrap();
+        worker.join().unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(150));
+        assert_eq!(value["runtime_phase"], "stopped");
+    }
+
     #[test]
     fn preflight_selection_and_held_guard_refuse_a_valid_replacement_owner_before_up() {
         let mut fixture = Fixture::new();

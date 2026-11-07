@@ -1668,6 +1668,30 @@ fn endpoint_network<'a>(
     Ok(Some(network))
 }
 
+/// Read-only selection for an explicit dead-owner recovery such as `hack down --recover`:
+/// the run's receipt phase, the SHA-256 of its exact receipt bytes and what its
+/// foreground publication shows (`absent`, `running`, `exited` or `uncertain`).
+///
+/// It takes no lease, contacts no guest and grants no authority. The digest only lets
+/// a caller select the receipt it observed; each recovery command revalidates its own
+/// evidence (owner death, endpoints, inventories) against that selection.
+#[cfg(target_os = "macos")]
+pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
+    use sha2::{Digest, Sha256};
+    let owner = state::Owner::load(candidate)?;
+    let (receipt, root) = load_at(directory(candidate, run)?, run, &owner.token)?;
+    let bytes = host_pin_recovery::read_raw(&root.join("state.json"), 1024 * 1024)?;
+    let publication = foreground::transport::published_owner(candidate, run)?;
+    Ok(json!({
+        "version": 1,
+        "run": receipt.run,
+        "owner": receipt.owner,
+        "phase": receipt.phase,
+        "receipt_sha256": format!("{:x}", Sha256::digest(&bytes)),
+        "foreground": publication.word(),
+    }))
+}
+
 /// Read-only recovery inspection; historical ready phase is not a current health assertion.
 /// Read-only inspection of one owned graph attempt.
 ///

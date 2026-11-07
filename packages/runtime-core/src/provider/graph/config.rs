@@ -265,7 +265,6 @@ pub(super) fn prepare_delivery(
             service,
             ready: graph.services[name].ready,
             managed_environment: inputs.service_requires_managed_environment(name),
-            published_ports: publications.contains_key(name),
             host_dependencies: !service.extra_hosts.is_empty()
                 || inputs
                     .services

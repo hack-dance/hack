@@ -14,11 +14,13 @@
 //! - Incarnation identity stays container ID plus `StartedAt`. A restart keeps
 //!   the ID and changes `StartedAt`, so every existing incarnation-bound proof
 //!   (endpoint generations, relay targets, completed-generation records) refuses
-//!   a restarted container instead of silently adopting it. Services whose
-//!   publication or delivery is bound to one incarnation (routes, loopback port
-//!   publications, HTTP probes, host dependencies, managed environment delivery,
-//!   dependency caches) are refused at admission until they can republish per
-//!   incarnation.
+//!   a restarted container instead of silently adopting it. Routed services and
+//!   services with published ports start without the policy (engine `no`, no
+//!   receipt policy) and review warns with `restart_policy_not_applied`, until
+//!   their bridges can follow a new incarnation (HACK-1935). Services whose
+//!   probe or delivery is bound to one incarnation (HTTP probes, host
+//!   dependencies, managed environment delivery, dependency caches) are refused
+//!   at admission.
 use super::{CandidateError, Kind, Resource, error, hex};
 use crate::project::{ServicePlan, execution::Condition};
 use serde::{Deserialize, Serialize};
@@ -140,14 +142,14 @@ pub(super) struct Admission<'a> {
     pub service: &'a ServicePlan,
     pub ready: Condition,
     pub managed_environment: bool,
-    /// The service owns admitted loopback port publications.
-    pub published_ports: bool,
     pub host_dependencies: bool,
 }
 
-/// Admit a declared policy for one active service, or refuse it with a fixed,
-/// value-free reason. Admission never weakens an incarnation-bound guard: those
-/// service classes refuse instead of running without their guard.
+/// Admit a declared policy for one active service, start it without one, or
+/// refuse it with a fixed, value-free reason. Admission never weakens an
+/// incarnation-bound guard: a routed or port-published service runs without
+/// the policy (its bridge is then never asked to follow a restart), and the
+/// other incarnation-bound classes refuse.
 pub(super) fn admit(admission: &Admission<'_>) -> Result<Option<RestartPolicy>, CandidateError> {
     let Some(policy) = RestartPolicy::parse(&admission.service.restart)? else {
         return Ok(None);
@@ -164,15 +166,10 @@ pub(super) fn admit(admission: &Admission<'_>) -> Result<Option<RestartPolicy>, 
             "Dependency cache initializers cannot use an automatic restart policy.",
         ));
     }
-    if service.routing.is_some() {
-        return Err(refused(
-            "Routed services cannot yet use an automatic restart policy: route publication is bound to one container incarnation.",
-        ));
-    }
-    if admission.published_ports {
-        return Err(refused(
-            "Services with published ports cannot yet use an automatic restart policy: the port bridge is bound to one container incarnation.",
-        ));
+    // Route and port bridges are bound to one incarnation (HACK-1935): the
+    // service starts with engine policy `no`, and review warned about it.
+    if service.restart_policy_not_applied() {
+        return Ok(None);
     }
     if service
         .healthcheck
@@ -392,7 +389,6 @@ mod tests {
             service,
             ready,
             managed_environment,
-            published_ports: false,
             host_dependencies,
         })
     }
@@ -439,24 +435,11 @@ mod tests {
         let plain = service("unless-stopped");
         assert!(admit_with(&plain, Condition::Started, true, false).is_err());
         assert!(admit_with(&plain, Condition::Started, false, true).is_err());
-        // A loopback port bridge is bound to one incarnation, like a route.
-        let published = |service: &ServicePlan| {
-            admit(&Admission {
-                service,
-                ready: Condition::Started,
-                managed_environment: false,
-                published_ports: true,
-                host_dependencies: false,
-            })
-        };
-        assert_eq!(published(&plain).unwrap_err().code, "graph_restart_policy");
-        assert_eq!(published(&service("no")).unwrap(), None);
         let mut routed = plain.clone();
         routed.routing = Some(
             serde_json::from_value(json!({"hostnames":["worker.example.test"],"port":3000}))
                 .unwrap(),
         );
-        assert!(admit_with(&routed, Condition::Healthy, false, false).is_err());
         let mut probed = plain.clone();
         probed.healthcheck = Some(
             serde_json::from_value(
@@ -475,7 +458,7 @@ mod tests {
         assert!(admit_with(&cache, Condition::Completed, false, false).is_err());
         // The same classes without a restart policy are unaffected.
         for (mut plan, ready) in [
-            (routed, Condition::Healthy),
+            (routed.clone(), Condition::Healthy),
             (probed, Condition::Healthy),
             (cache, Condition::Completed),
         ] {
@@ -488,6 +471,51 @@ mod tests {
         ] {
             assert_eq!(error.code, "graph_restart_policy");
         }
+    }
+
+    #[test]
+    fn routed_and_port_published_services_start_without_their_policy() {
+        let mut routed = service("unless-stopped");
+        routed.routing = Some(
+            serde_json::from_value(json!({"hostnames":["worker.example.test"],"port":3000}))
+                .unwrap(),
+        );
+        let mut published = service("always");
+        published.ports = vec![
+            serde_json::from_value(json!({"target":3000,"published":8787,"protocol":"tcp",
+                "declared_host_ip":"127.0.0.1","proposed_host_ip":"127.0.0.1"}))
+            .unwrap(),
+        ];
+        for plan in [&routed, &published] {
+            assert!(plan.restart_policy_not_applied());
+            // Their bridge never has to follow a restart, so the guards that
+            // otherwise refuse (managed delivery, host dependencies) do not apply.
+            for (managed, hosts) in [(false, false), (true, false), (false, true)] {
+                assert_eq!(
+                    admit_with(plan, Condition::Healthy, managed, hosts).unwrap(),
+                    None
+                );
+            }
+        }
+        // A conditional retry of a completion goal still refuses an unconditional
+        // policy first, whatever else the service declares.
+        assert_eq!(
+            admit_with(&published, Condition::Completed, false, false)
+                .unwrap_err()
+                .code,
+            "graph_restart_policy"
+        );
+        // Without ports or a route the policy is admitted as before.
+        let mut plain = published.clone();
+        plain.ports.clear();
+        assert!(!plain.restart_policy_not_applied());
+        assert_eq!(
+            admit_with(&plain, Condition::Healthy, false, false).unwrap(),
+            Some(RestartPolicy::Always)
+        );
+        let mut declared_no = published;
+        declared_no.restart = "no".into();
+        assert!(!declared_no.restart_policy_not_applied());
     }
 
     #[test]

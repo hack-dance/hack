@@ -944,12 +944,21 @@ the engine waits to start the next incarnation, `hack ps` reports the service as
 `restarting`, and it satisfies no readiness goal. A policy-restarted container
 keeps its container ID but gets a new start time, so Hack treats it as a new
 incarnation: any proof bound to the previous one refuses rather than adopting it.
-For that reason the graph refuses a restart policy, with `graph_restart_policy`,
-on routed services, services with published `ports`, services with a native HTTP
-probe, services with host dependencies, services that receive managed
-environment values (delivery is single-use and time-bounded) and
-dependency-cache initializers. Remove the `restart` key from those services, or
-keep them on the Compose backend.
+
+The port and route bridges that serve published `ports` and local HTTPS routes
+are bound to one incarnation and cannot yet follow a restart (HACK-1935). A
+routed service, or a service with published `ports`, therefore starts without its
+restart policy: the container runs with the engine policy `no`, and native
+review reports `restart_policy_not_applied` for it. Foreground `up` prints one
+line per affected service before startup, for example `Service web: restart:
+unless-stopped is not applied. Restart policies are not applied yet to services
+with published ports or routes (HACK-1935); the service starts without automatic
+restarts.` Other services in the same project keep their policy. For the same
+reason the graph refuses a restart policy, with `graph_restart_policy`, on other
+services with a native HTTP probe, services with host dependencies, services
+that receive managed environment values (delivery is single-use and
+time-bounded) and dependency-cache initializers. Remove the `restart` key from
+those services, or keep them on the Compose backend.
 
 Every owned stop first sets the engine policy back to `no` and confirms that with a
 fresh inspection, then requests the stop. A restart that was already pending is

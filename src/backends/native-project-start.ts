@@ -129,6 +129,7 @@ import {
 } from "./native-project-run.ts";
 import { selectNativeEnvFile } from "./native-project-selection.ts";
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
+import { reportNativeRestartPolicyNotices } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
@@ -1831,6 +1832,7 @@ export async function startNativeProject(opts: {
       input: pinned,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
+        reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,

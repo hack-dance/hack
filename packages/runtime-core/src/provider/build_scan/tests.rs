@@ -391,6 +391,42 @@ fn doubling_argument_defaults_stay_bounded() {
 }
 
 #[test]
+fn stage_names_match_case_insensitively_everywhere_the_frontend_looks_them_up() {
+    let dockerfile = "\
+FROM alpine:3.22 AS Base
+RUN true
+
+FROM BASE AS Tools
+COPY --from=Base /etc/os-release /x
+
+FROM busybox:1.37 AS Final
+COPY --from=TOOLS /x /y
+RUN --mount=type=bind,from=bAsE,target=/b true
+FROM fInAl
+";
+    let scan = scan_with(dockerfile, None, &[]).unwrap();
+    // `FROM BASE`, `FROM fInAl`, `--from=Base`, `--from=TOOLS` and `from=bAsE` are stages.
+    assert_eq!(names(&scan), ["alpine:3.22", "busybox:1.37"]);
+    for target in ["final", "FINAL", "Tools"] {
+        let scan = scan_with(dockerfile, Some(target), &[]).unwrap();
+        assert!(names(&scan).contains(&"alpine:3.22".to_owned()), "{target}");
+    }
+    let tools = scan_with(dockerfile, Some("tools"), &[]).unwrap();
+    assert_eq!(names(&tools), ["alpine:3.22"]);
+    // A name that matches no stage is an image reference, where uppercase is invalid.
+    assert_eq!(code("FROM Alpine:3.22\n"), "native_build_base_image");
+    assert_eq!(
+        code("FROM alpine:3.22 AS base\nFROM Busybox:1.37\nCOPY --from=Base / /\n"),
+        "native_build_base_image"
+    );
+    // A stage may only build on an earlier stage, as with the frontend.
+    assert_eq!(
+        code("FROM Later AS first\nFROM alpine:3.22 AS later\nFROM first\n"),
+        "native_build_base_image"
+    );
+}
+
+#[test]
 fn a_stage_may_not_be_named_scratch() {
     // The frontend links `FROM scratch` to an earlier stage of that name, so the
     // stage's image and platform would apply.

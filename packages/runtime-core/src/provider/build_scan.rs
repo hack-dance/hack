@@ -1200,17 +1200,22 @@ fn base_image(name: &str, line: usize) -> Result<BaseImage, CandidateError> {
 fn resolve(parsed: &Parsed, request: &ScanRequest<'_>) -> Result<DockerfileScan, CandidateError> {
     let env = global_env(parsed, request.args);
     // Each stage's base as the frontend registers it: an earlier stage of that name,
-    // `scratch`, or an image. `None` marks a name the scanner cannot expand.
+    // `scratch`, or an image. `None` marks a name the scanner cannot expand. Stage
+    // names are stored lowercase and the frontend lowercases a base name before its
+    // stage lookup (as `stage_by_name` does for `--from` and the target), so `FROM Base`
+    // names a stage declared `AS base`. A name that matches no stage stays an image
+    // reference, where uppercase is invalid.
     let mut bases: Vec<Option<Source>> = Vec::with_capacity(parsed.stages.len());
     for (index, stage) in parsed.stages.iter().enumerate() {
         let base = expand(&stage.base, &env, MAX_ARGUMENT_BYTES)
             .filter(|name| !name.is_empty())
             .map(|name| {
+                let lowered = name.to_ascii_lowercase();
                 if name == "scratch" {
                     Source::Scratch
                 } else if let Some(earlier) = parsed.stages[..index]
                     .iter()
-                    .position(|s| s.name.as_deref() == Some(name.as_str()))
+                    .position(|s| s.name.as_deref() == Some(lowered.as_str()))
                 {
                     Source::Stage(earlier)
                 } else {

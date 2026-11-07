@@ -9,12 +9,14 @@ import { readNativeComposeDocument } from "./native-compose-backend-features.ts"
  *
  * - `native_data_owner_handoff_unqualified`: the service runs a published
  *   image's own entrypoint (no `build` and no `entrypoint:` override), keeps
- *   data in a named volume and declares no `user:`. Native containers drop
- *   every capability, so an image entrypoint that starts as root, changes the
- *   data directory owner and then switches user (as many database images do)
- *   fails. An explicit `user:` matching the image's data user avoids that
- *   handoff; it also acknowledges a service that really runs as root. Image
- *   metadata is not read here, so this is advice, not a verdict.
+ *   data in a named volume, declares no `user:`, and its `cap_drop` removes a
+ *   capability the ownership handoff needs ({@link HANDOFF_CAPABILITIES}, or
+ *   `ALL`) without `cap_add` restoring it. Native Compose services otherwise get
+ *   Docker's default capabilities, so an image entrypoint that starts as root,
+ *   changes the data directory owner and then switches user (as many database
+ *   images do) works; with those capabilities dropped it fails. An explicit
+ *   `user:` matching the image's data user avoids that handoff. Image metadata
+ *   is not read here, so this is advice, not a verdict.
  * - `native_retained_data_mutable_image`: the service keeps data in a named
  *   volume and names its image by a mutable tag (`latest`, or no tag at all)
  *   without a digest. Restoring retained data requires the same image content
@@ -135,6 +137,51 @@ function isMutableImage(image: unknown): boolean {
   return separator < 0 || name.slice(separator + 1) === "latest";
 }
 
+/** Capabilities an image entrypoint's root-to-user data ownership handoff uses. */
+export const HANDOFF_CAPABILITIES = [
+  "CHOWN",
+  "DAC_OVERRIDE",
+  "FOWNER",
+  "SETGID",
+  "SETUID",
+] as const;
+
+const CAP_PREFIX = /^CAP_/;
+
+/** Docker's spelling rules: case-insensitive, `CAP_` prefix optional. */
+function capabilityNames(value: unknown): Set<string> | undefined {
+  if (value === undefined || value === null) {
+    return new Set();
+  }
+  if (!Array.isArray(value)) {
+    return;
+  }
+  const names = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") {
+      return;
+    }
+    names.add(item.trim().toUpperCase().replace(CAP_PREFIX, ""));
+  }
+  return names;
+}
+
+/**
+ * True when the service's capability lists leave out at least one handoff
+ * capability. Unreadable lists count as dropped, so the advice errs toward
+ * warning; native review still refuses invalid lists.
+ */
+function dropsHandoffCapability(service: Record<string, unknown>): boolean {
+  const dropped = capabilityNames(service.cap_drop);
+  const added = capabilityNames(service.cap_add);
+  if (!(dropped && added)) {
+    return true;
+  }
+  return HANDOFF_CAPABILITIES.some(
+    (name) => (dropped.has("ALL") || dropped.has(name)) && !added.has(name)
+  );
+}
+
 function hasExplicitUser(service: Record<string, unknown>): boolean {
   const user = service.user;
   return (
@@ -175,7 +222,11 @@ export function findNativeDataAdvisories(
     const imageEntrypoint =
       !Object.hasOwn(service, "build") &&
       (service.entrypoint === undefined || service.entrypoint === null);
-    if (imageEntrypoint && !hasExplicitUser(service)) {
+    if (
+      imageEntrypoint &&
+      !hasExplicitUser(service) &&
+      dropsHandoffCapability(service)
+    ) {
       found.native_data_owner_handoff_unqualified.add(name);
     }
     if (!Object.hasOwn(service, "build") && isMutableImage(service.image)) {
@@ -201,7 +252,7 @@ export async function readNativeDataAdvisories(
 
 const ADVICE: Readonly<Record<NativeDataAdvisoryCode, string>> = {
   native_data_owner_handoff_unqualified:
-    "named data volume with no explicit user:. Native containers drop all capabilities, so an image entrypoint that starts as root and hands the data directory to another user fails; set user: to the image's numeric data UID:GID, or 0:0 for a service that really runs as root",
+    "named data volume with no explicit user: while cap_drop removes CHOWN, DAC_OVERRIDE, FOWNER, SETUID or SETGID (or ALL). An image entrypoint that starts as root and hands the data directory to another user then fails; set user: to the image's numeric data UID:GID, or keep those capabilities",
   native_retained_data_mutable_image:
     "named data volume on an image tag that can change (latest or no tag). Retained data restores only with the same image, so pin a digest (image@sha256:...) or a fixed version tag",
 };

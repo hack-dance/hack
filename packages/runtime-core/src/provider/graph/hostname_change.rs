@@ -230,12 +230,14 @@ pub(super) mod tests {
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind,
             key: key.into(),
             name: format!("owned-{key}"),
             id: None,
             image: None,
             phase: "absent".into(),
+            amd64_emulation: None,
         };
         let mut volume = resource("data", Kind::Volume, None);
         volume.id = Some("retained-volume-id".into());

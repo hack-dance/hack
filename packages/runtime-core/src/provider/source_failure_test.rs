@@ -4,7 +4,7 @@ use crate::{Candidate, CandidateError, project};
 use serde_json::json;
 use std::{fs, path::Path};
 
-fn failure(message: &str) -> CandidateError {
+fn failure(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("source_failure_test", message)
 }
 

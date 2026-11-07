@@ -41,8 +41,8 @@ import {
 } from "../agents/onboarding-handoff.ts";
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
+import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
 import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
-import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
 import {
   nativeDownEnvironment,
   nativeProjectDown,
@@ -52,7 +52,6 @@ import {
   resolveNativeInternalExtraHosts,
 } from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
-import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
   type NativeProjectPsResult,
   nativeProjectLogs,
@@ -74,12 +73,18 @@ import {
   nativeRestartSelection,
   preflightNativeRestart,
 } from "../backends/native-project-restart-preflight.ts";
+import {
+  nativeAdaptationCandidates,
+  resolveNativeAdaptationSelection,
+  resolveNativeHostSettings,
+} from "../backends/native-project-settings.ts";
 import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
-  parseNativeHttpsSelection,
+  type NativeStartupProgress,
   startNativeProject,
 } from "../backends/native-project-start.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
+import type { NativeServiceExit } from "../backends/native-service-exit-monitor.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -5824,6 +5829,62 @@ async function runRemoteLifecycleCommand(opts: {
   });
 }
 
+/** Compose-style line for a service that stopped while `up` runs. */
+function nativeServiceExitMessage(exit: NativeServiceExit): string {
+  if (exit.state === "exited") {
+    return `${exit.service} exited with code ${exit.code}`;
+  }
+  return exit.state === "dead"
+    ? `${exit.service} died (dead or out of memory)`
+    : `${exit.service} container was removed`;
+}
+
+/**
+ * Foreground native progress, matching Compose's attached `up`: steps while the
+ * graph starts, one ready line, then the stop sequence after Ctrl-C.
+ */
+function reportNativeStartupProgress(event: NativeStartupProgress): void {
+  switch (event.phase) {
+    case "input":
+      logger.step({ message: "Preparing native project input…" });
+      return;
+    case "runtime":
+      logger.step({ message: "Starting the native runtime…" });
+      return;
+    case "images":
+      logger.step({ message: "Acquiring service images…" });
+      return;
+    case "services":
+      logger.step({
+        message: `Starting services: ${event.services.join(", ")}…`,
+      });
+      return;
+    case "ready":
+      logger.success({
+        message: `Project is ready (${event.services.join(", ")}). Use hack ps and hack logs from another terminal; press Ctrl-C to stop.`,
+      });
+      return;
+    case "service-exited":
+      logger.warn({ message: nativeServiceExitMessage(event) });
+      return;
+    case "all-stopped":
+      logger.info({
+        message: "All services have stopped; ending native up as Compose does.",
+      });
+      return;
+    case "stopping":
+      logger.step({
+        message: "Stopping the native project; waiting for owned cleanup…",
+      });
+      return;
+    case "stopped":
+      logger.info({ message: "Native project stopped." });
+      return;
+    default:
+      return;
+  }
+}
+
 async function handleNativeUp({
   ctx,
   args,
@@ -5857,11 +5918,22 @@ async function handleNativeUp({
   });
   // Before branch, config, env, lifecycle, storage or runtime work. `down`
   // stays available for any graph a project already has.
-  // The explicit adaptation applies first: a network it isolates is not
-  // external here, exactly as native start normalizes it.
+  // The selected adaptation applies first: a network it isolates is not
+  // external here, exactly as native start normalizes it. Without --env every
+  // committed per-env adaptation is a candidate (see nativeAdaptationCandidates).
+  const requestedEnvName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const adaptation = await resolveNativeAdaptationSelection({
+    env: process.env,
+    projectDir: project.projectDir,
+  });
   await refuseNativeComposeBackendFeatures({
     composeFile: project.composeFile,
-    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+    adaptationCandidates: nativeAdaptationCandidates({
+      selection: adaptation,
+      requestedEnvName,
+    }),
     restart,
   });
   const branch = await resolveEffectiveBranchForCommand({
@@ -5875,6 +5947,11 @@ async function handleNativeUp({
     );
   }
   const projectName = await resolveComposeProjectName({ project, cfg });
+  const host = await resolveNativeHostSettings({
+    env: process.env,
+    projectName,
+    projectRoot: project.projectRoot,
+  });
   const composeProject = resolveLifecycleComposeProjectName({
     projectName,
     branch,
@@ -5900,21 +5977,23 @@ async function handleNativeUp({
       branch,
     },
     composeFile: project.composeFile,
-    envName: resolveRequestedEnvName({ envOption: args.options.env }),
+    envName: requestedEnvName,
     profiles: parseCsvList(args.options.profile),
-    sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
-    dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
-    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+    sharedSource: host.sharedSource,
+    dependencyFile: host.dependencyFile,
+    dependencyFileByEnv: host.dependencyFileByEnv,
+    dependencyOwners: createNativeDependencyOwnerResolver({
+      projectDir: project.projectDir,
+      composeProject,
+      sharedHelpers: cfg.lifecycle?.sharedHelpers ?? [],
+    }),
+    adaptationFile: adaptation.file,
+    adaptationFileByEnv: adaptation.fileByEnv,
     internalExtraHosts,
-    allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
-    preparedBase: parseNativePreparedBase(process.env),
-    https: parseNativeHttpsSelection(process.env),
-    aws: process.env.HACK_NATIVE_AWS_PROFILE
-      ? {
-          profile: process.env.HACK_NATIVE_AWS_PROFILE,
-          region: process.env.HACK_NATIVE_AWS_REGION,
-        }
-      : undefined,
+    allowedHosts: host.allowedHosts,
+    preparedBase: host.preparedBase,
+    https: host.https,
+    aws: host.aws,
     gcloud: parseNativeGcloudSelection(process.env.HACK_NATIVE_GCLOUD_ADC),
     runtimeMetadata: {
       devHost,
@@ -5925,6 +6004,7 @@ async function handleNativeUp({
       await envFingerprints.record(
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
+    onProgress: reportNativeStartupProgress,
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
@@ -6007,7 +6087,7 @@ async function handleNativeUp({
     throw new HackCliError({
       code: "E_PERMISSION",
       message:
-        "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup; nothing was stopped. Set it to grant the project share and run the command again.",
+        "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings before cleanup; nothing was stopped. Grant the project share and run the command again.",
     });
   }
   try {
@@ -6106,8 +6186,11 @@ async function restartNativeImageProject({
         scope: startup.scope,
         composeFile: startup.composeFile,
         adaptationFile: startup.adaptationFile,
+        adaptationFileByEnv: startup.adaptationFileByEnv,
         dependencyFile: startup.dependencyFile,
+        dependencyFileByEnv: startup.dependencyFileByEnv,
         internalExtraHosts: startup.internalExtraHosts,
+        dependencyOwners: startup.dependencyOwners,
         allowedHosts: startup.allowedHosts,
         runtimeMetadata: startup.runtimeMetadata,
         httpsPort: startup.https?.httpsPort ?? null,
@@ -8583,6 +8666,13 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
+/** Compose-style state cell: an exited container shows its exit code. */
+function nativePsState(item: NativeProjectPsResult["items"][number]): string {
+  return item.state === "exited" && item.exitCode !== null
+    ? `exited (${item.exitCode})`
+    : item.state;
+}
+
 /**
  * Native ps output. `--json` prints the standard `{ok: true, data}` envelope
  * whose `data` is the native ps result, matching authored native ps.
@@ -8601,6 +8691,11 @@ async function displayNativePs(
     logger.info({
       message: "Native runtime is not running; no services are running.",
     });
+  } else if (result.status === "runtime_busy") {
+    logger.info({
+      message:
+        "Native runtime is busy with another operation, such as a starting hack up; service state is available once it finishes or reports ready.",
+    });
   } else if (result.status === "owner_unconfirmed") {
     logger.warn({
       message:
@@ -8617,7 +8712,7 @@ async function displayNativePs(
     rows: result.items.map((item) => [
       item.service,
       item.container ?? "",
-      item.state,
+      nativePsState(item),
       item.health ?? "",
     ]),
   });
@@ -9676,10 +9771,14 @@ async function handleNativeLogs({
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } else {
     process.stderr.write(
-      `Native logs: ${result.service}${result.truncated ? " (truncated)" : ""}\n`
+      `Native logs: ${result.service}${result.truncated ? " (truncated; older lines omitted)" : ""}\n`
     );
-    process.stdout.write(result.stdout);
-    process.stderr.write(result.stderr);
+    // Engine order interleaves the streams by time; each keeps its own descriptor.
+    for (const line of result.lines) {
+      (line.stream === "stdout" ? process.stdout : process.stderr).write(
+        line.text
+      );
+    }
   }
   return 0;
 }

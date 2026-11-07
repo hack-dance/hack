@@ -66,7 +66,7 @@ pub struct DependencySocketObservation {
     pub application_ready: bool,
 }
 
-fn refused(message: &str) -> CandidateError {
+fn refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("dependency_socket", message)
 }
 

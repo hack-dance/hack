@@ -646,6 +646,64 @@ behavior, repeated jobs, multiple slots and real one-off traffic remain separate
 implementation and runtime gates. The existing Rebind model covers original-target
 drain/revocation; this model checks the later commit-before-new-grant boundary.
 
+## Automatic dependency refresh
+
+`dependency-auto-refresh/AutoRefresh.tla` checks the foreground owner's
+schedule for automatic host dependency refresh. Its positive configuration
+(`MaxRetries = 2`, `MaxAttempts = 5`) exhausts 141 distinct states. A stale
+notice (traffic drift or a watched listener exit) arms one attempt; attempts are
+single-flight; a refusal before the rebind journal re-arms after a bounded
+backoff; a completed rebind clears it; and a failure after the journal closes
+the schedule. The negative control removes the close guard (`EnforceClose =
+FALSE`) and must fail `NoReplayAfterUnconfirmed` at `Start` with a second attempt
+after an unconfirmed rebind.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `ListenerExits` / `Traffic` | `foreground/signals.rs` `watch_listener_exit` and `Wake::ListenerExit`; relay owner identity notices drained in `foreground.rs` |
+| `Start` / `RefuseBeforeEffects` | `foreground/dependency_refresh.rs` `AutomaticRefresh` (`take_due`, `finish`, `AUTOMATIC_RETRY_DELAYS`) and `automatic_outcome` |
+| `WriteJournal` / `FailAfterJournal` | `startup/runtime/rebind.rs` sets the sticky `rebind_unconfirmed` flag before the first journal write; only a completed refresh clears it |
+| `Complete` | verified `refresh_dependencies` result; `ListenerWatches::sync` re-watches the admitted endpoints |
+
+The rebind protocol itself is `dependency-rebind/Rebind.tla`. This model does
+not prove the kqueue exit delivery, timer accuracy, provider lease acquisition
+or that a replacement listener appears; it abstracts the listener as live, gone
+or replaced, and the retry delays as an ordered bound.
+
+## Pool amd64 emulation
+
+`pool-emulation/Emulation.tla` checks the Rosetta 2 translation intent of one shared
+native VM pool. The positive control explores 13 states. A start that needs
+translation records `Owner.amd64_emulation` before any provider effect; `machine
+create` passes `--rosetta` exactly when it is recorded, and a stopped pool whose
+stored setting lacks it is updated (`machine update --rosetta`). An interrupted update
+is the absence of that step and is repeated by the next start. A foreign actor may
+flip the stored setting while the pool is stopped. Each boot runs the stored setting;
+the engine starts only when the stored setting, running configuration and guest
+`binfmt_misc` registration all equal the recorded intent, otherwise the boot is
+refused. An amd64 container needs the audited pool's intent, and a running pool
+without translation refuses a request for it instead of changing intent.
+
+Removing the boot audit must fail `NoUntranslatedAmd64` in one `StartAmd64` state
+with `amd64 = TRUE`, `intent = TRUE`, `config = FALSE`, `registered = FALSE` and
+`engine = TRUE`. Allowing a running pool to gain intent must fail
+`EngineMatchesIntent` in one `RequestRunning` state with `phase = "running"`,
+`intent = TRUE`, `config = FALSE` and `engine = TRUE`. Both controls require TLC
+exit 12, the named action and same-state witness.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `RecordIntent` | `provider/lifecycle.rs::enable_amd64_emulation` saves `Owner.amd64_emulation` before any provider command |
+| `Create` / `Update` | `start_pool` adds `--rosetta` to `machine create`; `enable_amd64_emulation` runs `machine update --rosetta` when `config_audit::recorded_amd64_emulation` is false |
+| `ForeignRecord` | A stopped machine changed outside Hack; `config_audit::verify_value` compares the stored `rosetta` setting with the owner |
+| `Boot` / `StartEngine` / `RefuseBoot` | `audit_boot` (running config `resources.rosetta`), then `guest-translation.sh` in `finish_boot` before the engine starts |
+| `RequestRunning` | `check_amd64_emulation_request` refuses `amd64_emulation_restart_required` |
+| `StartAmd64` | `graph::admitted_architecture` (opted-in service and `OwnedGuest::amd64_emulation`), and `image_load::load_for` for amd64 archives |
+
+The model omits image selection, the registry and Docker's own platform handling;
+those are covered by `registry_image`, `image_ensure` and graph admission unit tests.
+Actual Rosetta execution in the guest needs host evidence.
+
 ## Stopped retained-pool startup
 
 `native-startup-owner/Owner.tla` checks project ownership after a foreground

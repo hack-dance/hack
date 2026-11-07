@@ -41,6 +41,8 @@ const run = {
   effectiveEnvName: "qa",
   profiles: ["app"],
   aws: null,
+  // The stubbed input preparation reports no managed env file.
+  unmanagedEnvironment: true as const,
 };
 const token = {
   version: 1 as const,
@@ -397,6 +399,222 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
     }),
     "compatibility changed"
   );
+});
+
+test("preflight selects the per-env adaptation and dependency files by the retained env", async () => {
+  const { preflightNativeRestart } = await import(
+    "../src/backends/native-project-restart-preflight.ts"
+  );
+  const image = `sha256:${"9".repeat(64)}`;
+  const selected: Record<string, string | undefined> = {};
+  const preflight = (effectiveEnvName: string | null) =>
+    preflightNativeRestart({
+      runtime: { binary: "/unused", home: "/candidate" },
+      scope,
+      composeFile: "/fixture/.hack/docker-compose.yml",
+      run,
+      adaptationFile: "/fixture/.hack/native/adaptation.json",
+      adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+      dependencyFile: "/machine/dependencies.json",
+      dependencyFileByEnv: { qa: "/machine/dependencies.qa.json" },
+      dependencies: {
+        activeImages: async () => activeImageFixture(),
+        prepare: async () => ({
+          originalSha256: "1".repeat(64),
+          environmentFiles: [],
+          serviceNames: ["app"],
+          normalizedComposeJson: JSON.stringify({
+            services: { app: { image } },
+          }),
+          managedEnvironment: {},
+          lifecycleHostEnvironment: {},
+          effectiveEnvName,
+        }),
+        adapt: async ({ input: prepared, path }) => {
+          selected.adaptation = path;
+          return prepared;
+        },
+        dependencies: async ({ path }) => {
+          selected.dependencies = path;
+          throw new ClosedCliError("stop after dependency selection");
+        },
+        invoke: async ({ args }) =>
+          args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        review: async (options) =>
+          await options.run({
+            planId: run.planId,
+            namespace: run.namespace,
+            report: {},
+            projectArgs: [],
+          }),
+      },
+    });
+  await expectClosedRefusal(preflight("qa"), "stop after dependency selection");
+  expect(selected).toEqual({
+    adaptation: "/fixture/.hack/native/adaptation.qa.json",
+    dependencies: "/machine/dependencies.qa.json",
+  });
+  await expectClosedRefusal(preflight(null), "stop after dependency selection");
+  expect(selected).toEqual({
+    adaptation: "/fixture/.hack/native/adaptation.json",
+    dependencies: "/machine/dependencies.json",
+  });
+});
+
+const RESTART_OVERLAY_REMOVED =
+  "Native restart refused: .hack/hack.env.qa.yaml or .hack/hack.env.qa.local.yaml was removed since this run started. Restore it and run hack restart again, or run hack down (with it restored if the project has down hooks), then hack up, to start without it. The current graph was not stopped.";
+const RESTART_OVERLAY_APPEARED =
+  "Native restart refused: .hack/hack.env.qa.yaml appeared since this run started. Run hack down, then hack up, to start with it. The current graph was not stopped.";
+test("preflight keeps the retained env's per-env files without managed env files", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-restart-env-"))
+  );
+  try {
+    const projectDir = join(root, ".hack");
+    await mkdir(projectDir);
+    const composeFile = join(projectDir, "docker-compose.yml");
+    await writeFile(
+      composeFile,
+      JSON.stringify({
+        services: { app: { image: `sha256:${"9".repeat(64)}` } },
+      })
+    );
+    const selected: Record<string, string | undefined> = {};
+    const preflight = (
+      effectiveEnvName: string | null,
+      startedWithManagedFiles = false
+    ) =>
+      preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope: { ...scope, projectRoot: root, projectDir },
+        composeFile,
+        run: {
+          ...run,
+          effectiveEnvName,
+          unmanagedEnvironment: startedWithManagedFiles ? undefined : true,
+        },
+        adaptationFile: "/fixture/.hack/native/adaptation.json",
+        adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+        dependencyFile: "/machine/dependencies.json",
+        dependencyFileByEnv: { qa: "/machine/dependencies.qa.json" },
+        dependencies: {
+          activeImages: async () => activeImageFixture(),
+          adapt: async ({ input: prepared, path }) => {
+            selected.adaptation = path;
+            selected.env = prepared.effectiveEnvName ?? undefined;
+            return prepared;
+          },
+          dependencies: async ({ path }) => {
+            selected.dependencies = path;
+            throw new ClosedCliError("stop after dependency selection");
+          },
+          invoke: async ({ args }) =>
+            args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        },
+      });
+    // The project has no hack.env.* file, so the recorded env names only the files.
+    await expectClosedRefusal(
+      preflight("qa"),
+      "stop after dependency selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.qa.json",
+      env: "qa",
+      dependencies: "/machine/dependencies.qa.json",
+    });
+    await expectClosedRefusal(
+      preflight(null),
+      "stop after dependency selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.json",
+      env: undefined,
+      dependencies: "/machine/dependencies.json",
+    });
+    // A run that started with managed env files refuses once they are all gone,
+    // before any adaptation, dependency or cleanup step.
+    for (const key of Object.keys(selected)) {
+      delete selected[key];
+    }
+    await expectClosedRefusal(preflight("qa", true), RESTART_OVERLAY_REMOVED);
+    expect(selected).toEqual({});
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preflight keeps a base-only named env and refuses a changed overlay", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-restart-base-only-"))
+  );
+  try {
+    const projectDir = join(root, ".hack");
+    await mkdir(projectDir);
+    const composeFile = join(projectDir, "docker-compose.yml");
+    await writeFile(
+      composeFile,
+      JSON.stringify({
+        services: { app: { image: `sha256:${"9".repeat(64)}` } },
+      })
+    );
+    const envFile = async (name: string) =>
+      await writeFile(
+        join(projectDir, `hack.env.${name}.yaml`),
+        JSON.stringify({
+          version: 1,
+          environment: name,
+          secretsprovider: "project_key",
+          values: { global: {} },
+        })
+      );
+    // The project has a managed base env file but no qa overlay.
+    await envFile("default");
+    const selected: Record<string, string | undefined> = {};
+    const preflight = (markers: Record<string, true | undefined>) =>
+      preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope: { ...scope, projectRoot: root, projectDir },
+        composeFile,
+        run: {
+          ...run,
+          effectiveEnvName: "qa",
+          unmanagedEnvironment: undefined,
+          ...markers,
+        },
+        adaptationFile: "/fixture/.hack/native/adaptation.json",
+        adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+        dependencies: {
+          activeImages: async () => activeImageFixture(),
+          adapt: async ({ path }) => {
+            selected.adaptation = path;
+            throw new ClosedCliError("stop after adaptation selection");
+          },
+          invoke: async ({ args }) =>
+            args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        },
+      });
+
+    // Recorded as started with the base only: unchanged, so restart proceeds.
+    await expectClosedRefusal(
+      preflight({ baseOnlyEnvironment: true }),
+      "stop after adaptation selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.qa.json",
+    });
+    // A mapping without the marker started with the overlay, which is missing now.
+    await expectClosedRefusal(preflight({}), RESTART_OVERLAY_REMOVED);
+    // An overlay that appears after a base-only start is a changed selection.
+    await envFile("qa");
+    await expectClosedRefusal(
+      preflight({ baseOnlyEnvironment: true }),
+      RESTART_OVERLAY_APPEARED
+    );
+    // And one recorded with the overlay keeps working while it exists.
+    await expectClosedRefusal(preflight({}), "stop after adaptation selection");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("preflight refuses a stale host listener before restart cleanup", async () => {
@@ -1415,6 +1633,117 @@ test("active legacy restart preserves adapted labels and rechecks authenticated 
     }
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("active restart selects an image again when the service's emulation policy changed", async () => {
+  const oldImage = `sha256:${"7".repeat(64)}`;
+  const newImage = `sha256:${"8".repeat(64)}`;
+  for (const retainedPolicy of ["prefer-native", "amd64"] as const) {
+    const f = fixture();
+    const ensured: string[][] = [];
+    let reviewed: Record<string, Record<string, unknown>> = {};
+    const result = restartNativeProject({
+      ...f.options,
+      preflight: async () =>
+        await preflightNativeRestart({
+          runtime: { binary: "/unused", home: "/candidate" },
+          scope,
+          composeFile: "/fixture/.hack/docker-compose.yml",
+          run,
+          dependencies: {
+            // The adaptation now selects `amd64` for app; redis stays native.
+            prepare: async () => ({
+              originalSha256: "1".repeat(64),
+              environmentFiles: [],
+              serviceNames: ["app", "redis"],
+              normalizedComposeJson: JSON.stringify({
+                services: {
+                  app: {
+                    image: "app:latest",
+                    "x-hack-amd64-emulation": "amd64",
+                  },
+                  redis: { image: "redis:latest" },
+                },
+              }),
+              amd64Emulation: { app: "amd64" },
+              managedEnvironment: {},
+              lifecycleHostEnvironment: {},
+              effectiveEnvName: "qa",
+            }),
+            adapt: async ({ input }) => input,
+            dependencies: async () => [],
+            invoke: async ({ args }) => {
+              switch (args[1]) {
+                case "status":
+                  return { network: "internet" };
+                case "probe":
+                  return { admitted: true };
+                case "inspect": {
+                  const observed = activeImageObservation(oldImage);
+                  return {
+                    ...observed,
+                    receipt: {
+                      ...observed.receipt,
+                      resources: {
+                        "container:app": {
+                          ...observed.receipt.resources["container:app"],
+                          amd64_emulation: retainedPolicy,
+                        },
+                        "container:redis": {
+                          kind: "container",
+                          key: "redis",
+                          id: "4".repeat(64),
+                          image: oldImage,
+                        },
+                      },
+                    },
+                  };
+                }
+                case "run-selection":
+                  return { ok: true, ...activeImageFixture().proof };
+                case "ensure-image":
+                  ensured.push([...args]);
+                  return { image_id: newImage, platform: "linux/amd64" };
+                default:
+                  throw new Error("Unexpected effect");
+              }
+            },
+            review: async (options) => {
+              reviewed = JSON.parse(
+                options.input.normalizedComposeJson
+              ).services;
+              return await options.run({
+                planId: run.planId,
+                namespace: run.namespace,
+                report: {},
+                projectArgs: [],
+              });
+            },
+          },
+        }),
+    });
+    expect(await result).toBe(0);
+    // The image retained under `prefer-native` (possibly arm64) is not reused for the
+    // explicit amd64 request; the unchanged policy and the native service keep theirs.
+    const changed = retainedPolicy !== "amd64";
+    expect(reviewed.app?.image).toBe(changed ? newImage : oldImage);
+    expect(reviewed.redis?.image).toBe(oldImage);
+    expect(ensured).toEqual(
+      changed
+        ? [
+            [
+              "runtime",
+              "ensure-image",
+              "--reference",
+              "app:latest",
+              "--emulation",
+              "amd64",
+              "--json",
+            ],
+          ]
+        : []
+    );
   }
 });
 

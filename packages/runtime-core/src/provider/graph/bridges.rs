@@ -1055,12 +1055,14 @@ mod tests {
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Container,
             key: "web".into(),
             name: "owned-web".into(),
             id: None,
             image: None,
             phase: "running".into(),
+            amd64_emulation: None,
         };
         validate_loopback_publication(&resource, port, 3000, Some(8787), &[]).unwrap();
         for (upstream, host, hostnames) in [

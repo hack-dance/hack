@@ -344,7 +344,7 @@ fn check_observation_stage(output: &str) -> Result<(), CandidateError> {
         if output == format!("relay-observation-refused {}\n", index + 1) {
             return Err(error(
                 "graph_bridge_observation",
-                &format!(
+                format!(
                     "Bridge observation refused at stage {} ({stage}); no guest mutation was performed.",
                     index + 1
                 ),

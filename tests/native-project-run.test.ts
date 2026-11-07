@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   loadNativeProjectRun as load,
+  nativeRunEnvironmentAvailable,
+  nativeRunEnvironmentMarkers,
   normalizeNativeProfiles,
   removeNativeProjectRun as remove,
   saveNativeProjectRun as save,
@@ -280,6 +282,122 @@ test("profile selectors roundtrip canonically while legacy absence stays unknown
   }
   await save({ ...opts, run });
   expect((await load(opts))?.profiles).toBeUndefined();
+});
+
+test("the unmanaged environment marker roundtrips only beside a named env", async () => {
+  const opts = await fixture();
+  const selected = {
+    ...run,
+    effectiveEnvName: "qa",
+    aws: null,
+    profiles: [],
+    unmanagedEnvironment: true as const,
+  };
+  await save({ ...opts, run: selected });
+  expect(await load(opts)).toEqual(selected);
+  await remove({ ...opts, expected: selected });
+  for (const invalid of [
+    { ...selected, unmanagedEnvironment: false },
+    { ...selected, effectiveEnvName: null },
+    { ...run, effectiveEnvName: "qa", unmanagedEnvironment: true },
+  ]) {
+    await expect(save({ ...opts, run: invalid as never })).rejects.toThrow();
+    expect(await load(opts)).toBeNull();
+  }
+});
+
+test("environment markers roundtrip once, beside a named env, with optional selectors", async () => {
+  const selected = {
+    ...run,
+    effectiveEnvName: "qa",
+    aws: null,
+    profiles: [],
+  };
+  for (const extra of [
+    { baseOnlyEnvironment: true },
+    { baseOnlyEnvironment: true, gcloud: { mode: "file" } },
+    {
+      baseOnlyEnvironment: true,
+      gcloud: { mode: "file" },
+      runtimeMetadata: true,
+    },
+    { unmanagedEnvironment: true, runtimeMetadata: true },
+  ]) {
+    const opts = await fixture();
+    const mapping = { ...selected, ...extra };
+    await save({ ...opts, run: mapping as never });
+    expect(await load(opts)).toEqual(mapping as never);
+  }
+  for (const invalid of [
+    { ...selected, baseOnlyEnvironment: true, unmanagedEnvironment: true },
+    { ...selected, baseOnlyEnvironment: false },
+    { ...selected, effectiveEnvName: null, baseOnlyEnvironment: true },
+    { ...run, effectiveEnvName: "qa", baseOnlyEnvironment: true },
+  ]) {
+    const opts = await fixture();
+    await expect(save({ ...opts, run: invalid as never })).rejects.toThrow();
+    expect(await load(opts)).toBeNull();
+  }
+});
+
+test("startup env markers and their later availability follow the managed env files", () => {
+  const base = "/project/.hack/hack.env.default.yaml";
+  const overlay = "/project/.hack/hack.env.qa.yaml";
+  const local = "/project/.hack/hack.env.qa.local.yaml";
+  expect(
+    nativeRunEnvironmentMarkers({
+      effectiveEnvName: null,
+      environmentFiles: [],
+    })
+  ).toEqual({});
+  expect(
+    nativeRunEnvironmentMarkers({
+      effectiveEnvName: "qa",
+      environmentFiles: [],
+    })
+  ).toEqual({ unmanagedEnvironment: true });
+  expect(
+    nativeRunEnvironmentMarkers({
+      effectiveEnvName: "qa",
+      environmentFiles: [base],
+    })
+  ).toEqual({ baseOnlyEnvironment: true });
+  expect(
+    nativeRunEnvironmentMarkers({
+      effectiveEnvName: "qa",
+      environmentFiles: [base, local],
+    })
+  ).toEqual({});
+  const available = (
+    markers: Record<string, true>,
+    environmentFiles: string[]
+  ) =>
+    nativeRunEnvironmentAvailable({
+      run: { effectiveEnvName: "qa", ...markers },
+      environmentFiles,
+    });
+  // Recorded with the overlay: it must still exist.
+  expect(available({}, [base, overlay])).toBe(true);
+  expect(available({}, [base])).toBe(false);
+  expect(available({}, [])).toBe(false);
+  // Recorded base-only: the overlay must still be absent.
+  expect(available({ baseOnlyEnvironment: true }, [base])).toBe(true);
+  expect(available({ baseOnlyEnvironment: true }, [base, overlay])).toBe(false);
+  expect(available({ baseOnlyEnvironment: true }, [base, local])).toBe(false);
+  // Recorded without managed env files: there must still be none.
+  expect(available({ unmanagedEnvironment: true }, [])).toBe(true);
+  expect(available({ unmanagedEnvironment: true }, [overlay])).toBe(false);
+  expect(available({ unmanagedEnvironment: true }, [base])).toBe(false);
+  // A base selection needs nothing; a legacy mapping never qualifies.
+  expect(
+    nativeRunEnvironmentAvailable({
+      run: { effectiveEnvName: null },
+      environmentFiles: [],
+    })
+  ).toBe(true);
+  expect(
+    nativeRunEnvironmentAvailable({ run: {}, environmentFiles: [overlay] })
+  ).toBe(false);
 });
 
 test("restart intent survives mapping retirement and refuses mismatched removal", async () => {

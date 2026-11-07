@@ -21,7 +21,7 @@
 //! dedicated proofs and are not eligible here.
 use super::*;
 
-fn refused(message: &str) -> CandidateError {
+fn refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     error("graph_plan_reconcile", message)
 }
 

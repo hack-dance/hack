@@ -10,6 +10,7 @@ import {
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { scheduleNativeAwsExpiryWarnings } from "./native-aws-expiry.ts";
+import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import {
   adaptNativeGcloudEnvironment,
   type NativeGcloudSelection,
@@ -21,6 +22,10 @@ import {
   recoverNativeHttpsLease,
 } from "./native-https-owner.ts";
 import {
+  NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  nativeImagePolicyArgs,
+} from "./native-image-policy.ts";
+import {
   type NativePreparedBase,
   preparedBaseArguments,
 } from "./native-prepared-base.ts";
@@ -31,6 +36,7 @@ import {
 } from "./native-project-cache.ts";
 import {
   discoverNativeHostDependency,
+  discoverNativeOwnedHostDependency,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
@@ -69,6 +75,13 @@ import {
 } from "./native-project-interrupted-cleanup.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
 import {
+  ensuredPlatformAccepted,
+  type NativeEmulationPolicy,
+  nativeAmd64EmulationUpArgs,
+  nativeEmulationPolicy,
+  nativeEnsureImageArgs,
+} from "./native-project-platform.ts";
+import {
   checkNativeLoopbackPorts,
   nativeBridgeSocketCount,
   nativePortPublicationCount,
@@ -94,18 +107,27 @@ import {
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
 import {
+  describeNativeRunEnvironmentChange,
   loadNativeProjectRun,
   loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  type NativeRunEnvironmentMarkers,
+  nativeRunEnvironmentAvailable,
+  nativeRunEnvironmentChange,
+  nativeRunEnvironmentMarkers,
+  nativeRunEnvironmentRemedy,
   normalizeNativeProfiles,
   prepareNativeProjectRunStorage,
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "./native-project-run.ts";
+import { selectNativeEnvFile } from "./native-project-selection.ts";
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
+import { reportNativeRestartPolicyNotices } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 import {
@@ -113,6 +135,10 @@ import {
   type NativeRuntimeMetadataSelection,
   verifyNativeRuntimeMetadataRoutes,
 } from "./native-runtime-metadata.ts";
+import {
+  monitorNativeServiceExits,
+  type NativeServiceExit,
+} from "./native-service-exit-monitor.ts";
 import { formatNativeStartupLogReport } from "./native-startup-logs.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
@@ -307,6 +333,8 @@ type Dependencies = {
   discardFailedStart: typeof discardUnpublishedNativeStart;
   admitDownHooks: typeof admitNativeDownHookGeneration;
   downHooks: typeof createNativeForegroundDownHooks;
+  /** Poll interval of the ready graph's service exit monitor. */
+  exitMonitorIntervalMs: number;
 };
 const DEFAULTS: Dependencies = {
   prepare: prepareNativeProjectInput,
@@ -335,6 +363,7 @@ const DEFAULTS: Dependencies = {
   discardFailedStart: discardUnpublishedNativeStart,
   admitDownHooks: admitNativeDownHookGeneration,
   downHooks: createNativeForegroundDownHooks,
+  exitMonitorIntervalMs: 2000,
 };
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
@@ -393,7 +422,9 @@ export function prepareNativeProjectServices(
       value.build !== undefined ||
       (value.extra_hosts !== undefined && !hasHostDependencies) ||
       value.logging !== undefined ||
-      (value.restart !== undefined && value.restart !== "no") ||
+      // Restart policies are admitted (or refused with a fixed reason) by the
+      // runtime graph, which owns stop/restart interaction; only the type is checked here.
+      (value.restart !== undefined && typeof value.restart !== "string") ||
       !hasOnlyNativeSupportedLabels(value.labels)
     ) {
       throw refused();
@@ -404,13 +435,15 @@ export function prepareNativeProjectServices(
 }
 /** Fixed text of the refusal when the project share was not granted. */
 export const NATIVE_SHARED_SOURCE_REFUSAL =
-  "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 to share this exact project, including ignored files. Set it to grant that share and run the command again.";
+  "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly projectRoot: string;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
+  /** Opted-in services' platform policies; every other service resolves Linux arm64. */
+  readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly signal: AbortSignal;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
@@ -427,15 +460,21 @@ async function pinNativeProjectImages(opts: {
     if (IMAGE.test(image)) {
       continue;
     }
+    const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
     const ensured = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
-      args: ["runtime", "ensure-image", "--reference", image, "--json"],
+      args: [
+        ...nativeEnsureImageArgs(image, policy),
+        ...nativeImagePolicyArgs(),
+      ],
+      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
     });
     if (
       !isRecord(ensured) ||
       typeof ensured.image_id !== "string" ||
-      !IMAGE.test(ensured.image_id)
+      !IMAGE.test(ensured.image_id) ||
+      !ensuredPlatformAccepted(ensured.platform, policy)
     ) {
       throw unconfirmed("the runtime image selection");
     }
@@ -766,25 +805,69 @@ function withStartupLogReport(error: unknown, report: string): unknown {
   return error;
 }
 const SAFE_STARTUP_DIAGNOSTIC =
-  /^(Native (?:graph startup (?:failed|was interrupted or failed)|HTTPS verification failed)) \(([A-Za-z0-9_]{1,80})\); (?:inspect owned state before retrying\.|peer values omitted\.)$/;
-/** Preserve only the fixed diagnostic envelope emitted by the native clients. */
+  /^(Native (?:graph startup (?:failed|was interrupted or failed)|HTTPS verification failed)) \(([A-Za-z0-9_]{1,80})\); (?:inspect owned state before retrying\.|peer values omitted\.)( Service [A-Za-z0-9_.-]{1,128}: [\x20-\x7e]{1,400}| Runtime: [\x20-\x7e]{1,400}| Service: [A-Za-z0-9_.-]{1,128}\.)?$/;
+/**
+ * Preserve only the fixed diagnostic envelope emitted by the native clients,
+ * including the value-free runtime note they append (see `nativeFailureNote`).
+ */
+function startupDiagnostic(startupFailure: unknown): string {
+  if (startupFailure === undefined) {
+    return "";
+  }
+  const message = startupFailure instanceof Error ? startupFailure.message : "";
+  const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
+  if (!diagnostic) {
+    return " Startup diagnostic: STARTUP_FAILURE (details omitted).";
+  }
+  return ` Startup diagnostic: ${diagnostic[1]} (${diagnostic[2]}).${diagnostic[3] ?? ""}`;
+}
 function cleanupUnconfirmed(
   startupFailure?: unknown,
   nativeCode?: string,
   recordedRun?: string
 ): Error {
-  const message = startupFailure instanceof Error ? startupFailure.message : "";
-  const diagnostic = SAFE_STARTUP_DIAGNOSTIC.exec(message);
-  const startup =
-    startupFailure === undefined
-      ? ""
-      : ` Startup diagnostic: ${diagnostic ? `${diagnostic[1]} (${diagnostic[2]})` : "STARTUP_FAILURE (details omitted)"}.`;
   const recorded =
     recordedRun !== undefined && RUN.test(recordedRun)
       ? ` The failed run ${recordedRun} is recorded as this project's run mapping; hack ps, hack down and hack doctor --native-cleanup inspect select it.`
       : "";
   return new ClosedCliError(
-    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
+    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
+  );
+}
+/**
+ * The settled foreground start failed and fresh inspection proves this run never
+ * reserved runtime state (no journal, no published owner). Nothing is retained,
+ * so report the startup failure itself instead of uncertain cleanup.
+ */
+function unreservedStartupFailure(
+  startupFailure: unknown,
+  inspectionFailure: unknown
+): Error | undefined {
+  if (
+    startupFailure === undefined ||
+    !(
+      inspectionFailure instanceof NativeRuntimeRequestError &&
+      inspectionFailure.nativeCode === "graph_unreserved"
+    )
+  ) {
+    return;
+  }
+  return new ClosedCliError(
+    `Native graph startup failed before any runtime state was reserved; nothing was retained.${startupDiagnostic(startupFailure)}`
+  );
+}
+/**
+ * Error for a failed final inspection. deps.serve settles only after the owned
+ * child exited, so the consumer that could still reserve state is gone.
+ */
+function finalInspectionFailure(
+  serveFailure: unknown,
+  inspectionFailure: unknown,
+  nativeExitCode: string | undefined
+): Error {
+  return (
+    unreservedStartupFailure(serveFailure, inspectionFailure) ??
+    cleanupUnconfirmed(serveFailure ?? inspectionFailure, nativeExitCode)
   );
 }
 function requireConfirmedCleanup(
@@ -1059,6 +1142,63 @@ async function selectNativeStartup(opts: {
   const restore = opts.restore ?? retained ?? undefined;
   return { retained, restore, selection, retainedFlags };
 }
+/**
+ * Before any hook, refuse a retained run whose recorded env selection changed: its
+ * env must resolve the same, and it keeps the managed env files it started with. Only
+ * a run recorded as started without them may still find none, and a retained run never
+ * becomes unmanaged or base-only after the fact. A legacy restore without a recorded
+ * selection keeps its earlier behavior. Returns the environment markers the new mapping
+ * records: a fresh run's from its files, a retained run's unchanged.
+ */
+function requireRetainedEnvironment(opts: {
+  /** The retained env a resumed (not restored) run must still resolve to. */
+  readonly retainedSelection: string | null | undefined;
+  readonly restore: NativeProjectRun | undefined;
+  readonly input: NativeProjectInput;
+  readonly scope: NativeProjectRunScope;
+}): NativeRunEnvironmentMarkers {
+  const { restore, input } = opts;
+  const change =
+    restore &&
+    nativeRunEnvironmentChange({
+      run: restore,
+      environmentFiles: input.environmentFiles,
+      projectRoot: opts.scope.projectRoot,
+      projectDir: opts.scope.projectDir,
+    });
+  if (change) {
+    throw new ClosedCliError(
+      `Native up refused: ${describeNativeRunEnvironmentChange(change)}. ${nativeRunEnvironmentRemedy({ change, retry: "hack up" })}; retained data was not replaced.`
+    );
+  }
+  if (
+    (opts.retainedSelection !== undefined &&
+      input.effectiveEnvName !== opts.retainedSelection) ||
+    (restore?.effectiveEnvName !== undefined &&
+      !nativeRunEnvironmentAvailable({
+        run: restore,
+        environmentFiles: input.environmentFiles,
+      }))
+  ) {
+    throw new ClosedCliError(
+      "Native retained environment selection changed; data was not replaced."
+    );
+  }
+  if (restore === undefined) {
+    return nativeRunEnvironmentMarkers({
+      effectiveEnvName: input.effectiveEnvName,
+      environmentFiles: input.environmentFiles,
+    });
+  }
+  return {
+    ...(restore.unmanagedEnvironment === true
+      ? { unmanagedEnvironment: true as const }
+      : {}),
+    ...(restore.baseOnlyEnvironment === true
+      ? { baseOnlyEnvironment: true as const }
+      : {}),
+  };
+}
 function selectedMapping(opts: {
   readonly ready: NativeProjectRun;
   readonly effectiveEnvName: string | null;
@@ -1066,6 +1206,8 @@ function selectedMapping(opts: {
   readonly aws?: { readonly profile: string; readonly region?: string };
   readonly gcloud?: NativeGcloudSelection;
   readonly runtimeMetadata: boolean;
+  /** Which managed env files startup found; see {@link nativeRunEnvironmentMarkers}. */
+  readonly environmentMarkers: NativeRunEnvironmentMarkers;
 }): NativeProjectRun {
   return {
     ...opts.ready,
@@ -1081,6 +1223,8 @@ function selectedMapping(opts: {
     // earlier candidates; a mapping that carries it refuses there.
     ...(opts.gcloud ? { gcloud: { mode: opts.gcloud.mode } } : {}),
     ...(opts.runtimeMetadata ? { runtimeMetadata: true as const } : {}),
+    // Only a named env needs the distinction; a base selection delivers base values.
+    ...(opts.effectiveEnvName === null ? {} : opts.environmentMarkers),
   };
 }
 /**
@@ -1169,6 +1313,79 @@ async function requireAcknowledgedRetainedFinalization(opts: {
   }
 }
 /** Explicit unfiltered project sharing; foreground only. Native refusal never falls back to Compose. */
+/**
+ * Value-free foreground progress for the terminal. `services` are the reviewed
+ * service names. Observation only: a throwing observer never changes startup.
+ */
+export type NativeStartupProgress =
+  | {
+      readonly phase:
+        | "input"
+        | "runtime"
+        | "images"
+        | "all-stopped"
+        | "stopping"
+        | "stopped";
+    }
+  | {
+      readonly phase: "services" | "ready";
+      readonly services: readonly string[];
+    }
+  | ({ readonly phase: "service-exited" } & NativeServiceExit);
+
+function progressReporter(
+  observe: ((event: NativeStartupProgress) => void) | undefined
+): (event: NativeStartupProgress) => void {
+  return (event) => {
+    try {
+      observe?.(event);
+    } catch {
+      // Progress is advisory terminal output.
+    }
+  };
+}
+
+/**
+ * Watch a ready foreground graph for stopped services, as attached Compose `up`
+ * does. When every service has stopped, `up` ends like Compose: request the
+ * ordinary owned stop and exit 0. Returns the monitor's stop function.
+ */
+function watchServiceExits(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: string;
+  readonly intervalMs: number;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly progress: (event: NativeStartupProgress) => void;
+  readonly onAllStopped: () => void;
+}): () => Promise<void> {
+  const controller = new AbortController();
+  const monitoring = monitorNativeServiceExits({
+    ...opts,
+    signal: controller.signal,
+    onExit: (exit) => opts.progress({ phase: "service-exited", ...exit }),
+    onAllStopped: () => {
+      opts.progress({ phase: "all-stopped" });
+      opts.onAllStopped();
+    },
+  }).catch(() => undefined);
+  return async () => {
+    controller.abort();
+    await monitoring;
+  };
+}
+
+/** After confirmed cleanup, an interrupted foreground graph has stopped. */
+function reportStopped(
+  progress: (event: NativeStartupProgress) => void,
+  signal: AbortSignal,
+  infrastructureFailure: Error | undefined
+): void {
+  if (signal.aborted && !infrastructureFailure) {
+    progress({ phase: "stopped" });
+  }
+}
+
 export async function startNativeProject(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
@@ -1179,7 +1396,16 @@ export async function startNativeProject(opts: {
   readonly restore?: NativeProjectRun;
   readonly onReady?: () => Promise<void>;
   readonly dependencyFile?: string;
+  /** Per-env dependency files; the entry for the run's effective env replaces `dependencyFile`. */
+  readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
+  /**
+   * Resolves `host_lifecycle` / `host_shared_helper` owners after lifecycle
+   * hooks; without it such selections refuse.
+   */
+  readonly dependencyOwners?: NativeDependencyOwnerResolver;
   readonly adaptationFile?: string;
+  /** Per-env adaptations; the entry for the run's effective env replaces `adaptationFile`. */
+  readonly adaptationFileByEnv?: Readonly<Record<string, string>>;
   /**
    * Effective project-wide host aliases (`internal.extra_hosts` and
    * checkout-local entries). Declared on every service like the Compose
@@ -1209,8 +1435,11 @@ export async function startNativeProject(opts: {
   readonly signal?: AbortSignal;
   /** A second stop request: cancels a running down hook and forces cleanup. */
   readonly forceSignal?: AbortSignal;
+  /** Foreground progress and the ready line; see {@link NativeStartupProgress}. */
+  readonly onProgress?: (event: NativeStartupProgress) => void;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
+  const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
   requireActiveStartup(opts.signal);
   const allowedHosts = validateNativeAllowedHosts(opts.allowedHosts);
@@ -1260,6 +1489,7 @@ export async function startNativeProject(opts: {
   // one before any hook runs; any other leftover record is superseded.
   await deps.admitDownHooks(opts.scope);
   const profiles = selection.profiles;
+  progress({ phase: "input" });
   await preflightNativeProjectSource({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,
@@ -1280,18 +1510,32 @@ export async function startNativeProject(opts: {
         envByService: input.managedEnvironment,
       })
     : undefined;
-  if (
-    retained &&
-    !opts.restore &&
-    input.effectiveEnvName !== selection.envName
-  ) {
-    throw new ClosedCliError(
-      "Native retained environment selection changed; data was not replaced."
-    );
-  }
+  const environmentMarkers = requireRetainedEnvironment({
+    retainedSelection:
+      retained && !opts.restore ? selection.envName : undefined,
+    restore,
+    input,
+    scope: opts.scope,
+  });
+  // The effective env (requested, retained or project default) picks the per-env
+  // files, so a fresh start, a retained start and a restart select the same ones.
+  const selectedAdaptationFile = selectNativeEnvFile({
+    selection: {
+      file: opts.adaptationFile,
+      fileByEnv: opts.adaptationFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
+  const selectedDependencyFile = selectNativeEnvFile({
+    selection: {
+      file: opts.dependencyFile,
+      fileByEnv: opts.dependencyFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
   input = await prepareNativeProjectAdaptation({
     input,
-    path: opts.adaptationFile,
+    path: selectedAdaptationFile,
   });
   input = applyNativeInternalHostAliases({
     input,
@@ -1310,7 +1554,7 @@ export async function startNativeProject(opts: {
   ).input;
   let specs = prepareNativeProjectServices(
     input,
-    opts.dependencyFile !== undefined
+    selectedDependencyFile !== undefined
   );
   // Refuse malformed or unacquirable references before hooks, VM or provider start.
   await admitNativeProjectImages({
@@ -1341,6 +1585,11 @@ export async function startNativeProject(opts: {
     .digest("hex");
   const stopSignals = nativeForegroundStopSignals(opts);
   const controller = stopSignals.controller;
+  controller.signal.addEventListener(
+    "abort",
+    () => progress({ phase: "stopping" }),
+    { once: true }
+  );
   let hooks: Hooks | undefined;
   let foregroundStop: NativeForegroundStop | undefined;
   let failed = false;
@@ -1365,7 +1614,7 @@ export async function startNativeProject(opts: {
       input = credentials.input;
       specs = prepareNativeProjectServices(
         input,
-        opts.dependencyFile !== undefined
+        selectedDependencyFile !== undefined
       );
     }
     const dependencyDiscoveryDeadline = performance.now() + 60_000;
@@ -1374,7 +1623,7 @@ export async function startNativeProject(opts: {
       profiles,
     });
     const hostDependencies = await readNativeHostDependencies({
-      path: opts.dependencyFile,
+      path: selectedDependencyFile,
       services: Object.keys(specs),
       hostAliases,
       discover: (selection) =>
@@ -1383,6 +1632,19 @@ export async function startNativeProject(opts: {
           projectRoot: opts.scope.projectRoot,
           hostPort: selection.hostPort,
           executable: selection.executable,
+          invoke: deps.invoke,
+          wait: {
+            deadlineMs: dependencyDiscoveryDeadline,
+            signal: controller.signal,
+          },
+        }),
+      owners: opts.dependencyOwners,
+      discoverOwned: (selection) =>
+        discoverNativeOwnedHostDependency({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          hostPort: selection.hostPort,
+          ancestorPid: selection.ancestorPid,
           invoke: deps.invoke,
           wait: {
             deadlineMs: dependencyDiscoveryDeadline,
@@ -1405,6 +1667,7 @@ export async function startNativeProject(opts: {
       load: deps.load,
     });
     requireActiveStartup(controller.signal);
+    progress({ phase: "runtime" });
     await deps.invoke({
       runtime: opts.runtime,
       cwd: opts.scope.projectRoot,
@@ -1432,6 +1695,7 @@ export async function startNativeProject(opts: {
           ? allowedHosts.flatMap((host) => ["--allow-host", host])
           : ["--internet"]),
         ...preparedBaseArguments(opts.preparedBase),
+        ...nativeAmd64EmulationUpArgs(input.amd64Emulation),
         "--json",
       ],
       signal: controller.signal,
@@ -1468,7 +1732,7 @@ export async function startNativeProject(opts: {
     requireActiveStartup(controller.signal);
     specs = prepareNativeProjectServices(
       input,
-      opts.dependencyFile !== undefined
+      selectedDependencyFile !== undefined
     );
     prepareNativeDependencyServices({
       dependencies: hostDependencies,
@@ -1478,14 +1742,17 @@ export async function startNativeProject(opts: {
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       originalSha256: input.originalSha256,
+      amd64Emulation: input.amd64Emulation,
       restore,
       invoke: deps.invoke,
     });
+    progress({ phase: "images" });
     await pinNativeProjectImages({
       runtime: opts.runtime,
       projectRoot: opts.scope.projectRoot,
       specs,
       retainedImages,
+      amd64Emulation: input.amd64Emulation,
       signal: controller.signal,
       invoke: deps.invoke,
     });
@@ -1504,6 +1771,7 @@ export async function startNativeProject(opts: {
       input: pinned,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
+        reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,
@@ -1607,6 +1875,9 @@ export async function startNativeProject(opts: {
           let nativeExitCode: string | undefined;
           // Redacted at receipt; the raw tail is never retained or persisted.
           let startupLogReport = "";
+          const services = Object.keys(specs).sort();
+          progress({ phase: "services", services });
+          let stopWatching: (() => Promise<void>) | undefined;
           try {
             code = await deps.serve({
               runtime: opts.runtime,
@@ -1670,6 +1941,7 @@ export async function startNativeProject(opts: {
                   aws: selection.aws,
                   gcloud: selection.gcloud,
                   runtimeMetadata: metadata !== undefined,
+                  environmentMarkers,
                 });
                 // Enrollment must exist before taking a shared lease: release
                 // requires independent proof of this exact graph's cleanup.
@@ -1748,6 +2020,19 @@ export async function startNativeProject(opts: {
                 }
                 await hooks?.ready?.();
                 await opts.onReady?.();
+                progress({ phase: "ready", services });
+                stopWatching = watchServiceExits({
+                  runtime: opts.runtime,
+                  projectRoot: opts.scope.projectRoot,
+                  run,
+                  intervalMs: deps.exitMonitorIntervalMs,
+                  invoke: deps.invoke,
+                  progress,
+                  onAllStopped: () => {
+                    stopSignals.servicesStopped();
+                    controller.abort();
+                  },
+                });
                 // Last: only microtasks separate this from readiness.
                 await stop?.owe(() => controller.signal.aborted);
               },
@@ -1756,14 +2041,16 @@ export async function startNativeProject(opts: {
             serveFailure = error;
           } finally {
             delivery.payload?.fill(0);
+            await stopWatching?.();
           }
           try {
             let final: unknown;
             try {
               final = await invokeInspect();
             } catch (inspectionFailure) {
-              throw cleanupUnconfirmed(
-                serveFailure ?? inspectionFailure,
+              throw finalInspectionFailure(
+                serveFailure,
+                inspectionFailure,
                 nativeExitCode
               );
             }
@@ -1787,6 +2074,7 @@ export async function startNativeProject(opts: {
                 aws: selection.aws,
                 gcloud: selection.gcloud,
                 runtimeMetadata: metadata !== undefined,
+                environmentMarkers,
               },
               finalization,
               deps,
@@ -1814,6 +2102,7 @@ export async function startNativeProject(opts: {
               mappingAttempted,
               invoke: deps.invoke,
             });
+            reportStopped(progress, controller.signal, httpsFailure);
             return foregroundExitCode({
               aborted: controller.signal.aborted,
               interruptedExit: stopSignals.interruptedExit(),

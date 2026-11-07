@@ -14,6 +14,7 @@ import {
   invokeNativeRuntime,
   NATIVE_EXIT_DRAIN_BOUND_MS,
   type NativeRuntimeSelection,
+  nativeFailureNote,
   readNativeStartupFailure,
   rethrowNativeInputFailure,
   writeNativePrivateInput,
@@ -461,9 +462,7 @@ async function serveGraphProcess(
       nativeCode: failure,
     });
     if (timedOut || canceled || !ready) {
-      throw new ClosedCliError(
-        `Native graph startup was interrupted or failed${failure ? ` (${failure})` : ""}; inspect owned state before retrying.`
-      );
+      throw interruptedStartup(await failureCodes);
     }
     return code;
   } finally {
@@ -524,6 +523,15 @@ async function reportStartupLogs(
   } catch {
     // Observation must never replace the startup result or cleanup authority.
   }
+}
+
+/** Closed startup failure with the runtime's bounded code and value-free note. */
+function interruptedStartup(
+  failure: Awaited<ReturnType<typeof readNativeStartupFailure>>
+): Error {
+  return new ClosedCliError(
+    `Native graph startup was interrupted or failed${failure ? ` (${failure.code})` : ""}; inspect owned state before retrying.${failure ? nativeFailureNote(failure) : ""}`
+  );
 }
 
 /** An attached finite-hook owner must not retire while its captured detached group is present.

@@ -347,6 +347,7 @@ impl<'a> ObservedGuest<'a> {
             || current.additional_project_shares != self.owner.additional_project_shares
             || current.application_bridge != self.owner.application_bridge
             || current.dependency_sockets != self.owner.dependency_sockets
+            || current.amd64_emulation != self.owner.amd64_emulation
             || current.process != self.owner.process
         {
             return Err(CandidateError::new(
@@ -360,6 +361,12 @@ impl<'a> ObservedGuest<'a> {
     pub(super) fn engine_socket(&self) -> Result<std::path::PathBuf, CandidateError> {
         self.verify()?;
         socket(self.candidate, &self.owner, "docker.sock")
+    }
+
+    /// The observed runtime incarnation; receipts name the incarnation that owns them.
+    #[cfg(target_os = "macos")]
+    pub(super) fn incarnation(&self) -> &str {
+        &self.owner.token
     }
 }
 
@@ -449,6 +456,10 @@ impl<'a> OwnedGuest<'a> {
     /// Exact membership of one retained share in the pool's current share set.
     pub(super) fn has_project_share(&self, share: &super::ProjectShareIntent) -> bool {
         self.owner.project_shares().contains(&share)
+    }
+    /// Whether this audited boot runs with Rosetta 2 x86_64 translation.
+    pub(super) fn amd64_emulation(&self) -> bool {
+        self.owner.amd64_emulation
     }
     pub(super) fn before_effect(&self) -> Result<(), CandidateError> {
         if let Some(guard) = &self.guard {
@@ -652,6 +663,88 @@ impl<'a> OwnedGuest<'a> {
         Ok(result)
     }
 }
+/// The host's Rosetta 2 Linux runtime, which SmolVM shares into the guest for x86_64
+/// translation. Installed by `softwareupdate --install-rosetta` on Apple silicon.
+pub const HOST_ROSETTA_RUNTIME: &str = "/Library/Apple/usr/libexec/oah/RosettaLinux/rosetta";
+
+/// Whether this host can provide Rosetta 2 translation to the guest: Apple silicon macOS
+/// with the system-owned Rosetta Linux runtime installed. Read-only.
+pub fn host_translation_available() -> bool {
+    if !(cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")) {
+        return false;
+    }
+    fs::symlink_metadata(HOST_ROSETTA_RUNTIME).is_ok_and(|metadata| {
+        metadata.is_file()
+            && metadata.uid() == 0
+            && metadata.mode() & 0o022 == 0
+            && metadata.mode() & 0o111 != 0
+    })
+}
+
+fn require_host_translation() -> Result<(), CandidateError> {
+    if host_translation_available() {
+        return Ok(());
+    }
+    Err(CandidateError::new(
+        "amd64_emulation_unavailable",
+        "linux/amd64 services need Rosetta 2 on an Apple silicon Mac. Install it with `softwareupdate --install-rosetta`, or run the arm64 image variant. Nothing was started.",
+    ))
+}
+
+/// The refusal for an emulated platform in a pool booted without x86_64 translation.
+pub(super) fn amd64_emulation_not_enabled() -> CandidateError {
+    CandidateError::new(
+        "amd64_emulation_unavailable",
+        "This native VM pool was booted without x86_64 translation; a linux/amd64 image cannot run in it.",
+    )
+}
+
+/// A running pool cannot gain translation without a restart, and running workloads are never
+/// stopped implicitly to add it.
+fn check_amd64_emulation_request(owner: &Owner, requested: bool) -> Result<(), CandidateError> {
+    if requested && !owner.amd64_emulation && owner.phase == "running" {
+        return Err(CandidateError::new(
+            "amd64_emulation_restart_required",
+            "The running native VM pool was started without x86_64 translation. Stop every native project that uses it (`hack down`), then start again; nothing was stopped or started.",
+        ));
+    }
+    Ok(())
+}
+
+/// Record translation intent before its provider effect, then make the stopped machine match.
+/// A created machine whose provider record lacks translation is updated with `machine update
+/// --rosetta`; an interrupted update is repeated on the next start, and boot refuses any
+/// record, running config or guest registration that differs from the recorded intent.
+fn enable_amd64_emulation(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    requested: bool,
+    restart: &mut admission_pool::Restart<'_>,
+    lock: &state::Lock,
+) -> Result<(), CandidateError> {
+    let enabled = requested && !owner.amd64_emulation;
+    if enabled {
+        owner.amd64_emulation = true;
+        owner.save(candidate)?;
+    }
+    if owner.amd64_emulation {
+        require_host_translation()?;
+        if owner.created && !super::config_audit::recorded_amd64_emulation(candidate, owner)? {
+            invoke(
+                candidate,
+                owner,
+                &["machine", "update", "--name", &owner.machine, "--rosetta"],
+            )?;
+        }
+    }
+    if enabled {
+        // A reserve-qualified restart follows this authorized intent change, rechecked on
+        // the provider's updated configuration, instead of refusing it as a changed owner.
+        restart.requalify_amd64_emulation(candidate, lock)?;
+    }
+    Ok(())
+}
+
 fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     super::config_audit::verify(candidate, owner)?;
     super::dependency_socket::verify(candidate, owner)?;
@@ -686,7 +779,7 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
         || config["resources"]["memory_mib"] != owner.profile.memory_mib()
         || config["resources"]["gpu"] != false
         || config["resources"]["cuda"] != false
-        || config["resources"]["rosetta"] != false
+        || config["resources"]["rosetta"] != owner.amd64_emulation
         || config["resources"]["storage_gib"] != owner.profile.storage_gib()
         || config["resources"]["overlay_gib"] != owner.profile.overlay_gib()
         || config["forkable"] != false
@@ -1045,6 +1138,7 @@ fn up_selected(
         super::prepared_start::Start {
             retained,
             prepared: None,
+            amd64_emulation: false,
         },
     )
 }
@@ -1084,6 +1178,9 @@ fn start_pool(
     // any strict owner read below refuses it.
     restore_released_short_home_before_use(candidate)?;
     let retained = start.retained;
+    if start.amd64_emulation {
+        require_host_translation()?;
+    }
     #[cfg(target_os = "macos")]
     let retained_guard = retained
         .map(|(run, selection)| {
@@ -1122,6 +1219,7 @@ fn start_pool(
             .map_err(io)?
         {
             let owner = Owner::load(candidate)?;
+            check_amd64_emulation_request(&owner, start.amd64_emulation)?;
             super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
             bridge_request.check(owner.application_bridge)?;
             super::network_intent::check_request(&owner.network, network.as_ref())?;
@@ -1257,6 +1355,7 @@ fn start_pool(
             "Capacity profile changed before the operation lock was acquired.",
         ));
     }
+    check_amd64_emulation_request(&owner, start.amd64_emulation)?;
     if fresh_owner {
         super::graph::initialize_owner_registry(candidate, &owner)?;
     } else {
@@ -1277,7 +1376,7 @@ fn start_pool(
         return status(candidate);
     }
     // Only a clean stopped selection continues, as a restart of its verified retained disks.
-    let restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
+    let mut restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
     if ![
         "initializing",
         "stopped",
@@ -1303,6 +1402,13 @@ fn start_pool(
     }
     // The provider mounts every share at boot: each must still be its exact approved root.
     super::project_share::check_boot(&owner.project_shares())?;
+    enable_amd64_emulation(
+        candidate,
+        &mut owner,
+        start.amd64_emulation,
+        &mut restart,
+        &lock,
+    )?;
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
         // A reserve-qualified start never reaches `machine create`.
@@ -1336,6 +1442,9 @@ fn start_pool(
             "--volume".into(),
             mount,
         ];
+        if owner.amd64_emulation {
+            arguments.push("--rosetta".into());
+        }
         for share in owner.project_shares() {
             share.validate()?;
             arguments.extend(["--volume".into(), share.argument()]);
@@ -1586,6 +1695,24 @@ fn finish_boot(
     }
     owner.guest_boot_id = Some(boot.to_owned());
     owner.save(candidate)?;
+    let translation = if owner.amd64_emulation {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let observed = guest(
+        candidate,
+        owner,
+        include_str!("guest-translation.sh"),
+        &[&owner.token, boot, translation],
+        false,
+    )?;
+    if observed != format!("amd64-translation-{translation}-v1\n") {
+        return Err(CandidateError::new(
+            "amd64_emulation",
+            "Guest x86_64 translation differs from the pool's audited intent; engine startup refused.",
+        ));
+    }
     if let Some(intent) = owner.dependency_sockets {
         let paths = intent.paths(&owner.short_home);
         let mut args = vec![owner.token.as_str(), boot];
@@ -2585,6 +2712,41 @@ mod tests {
     }
 
     #[test]
+    fn amd64_emulation_is_never_added_to_a_running_pool_and_is_never_dropped() {
+        let owner = |phase: &str, emulation: bool| -> Owner {
+            serde_json::from_value(json!({
+                "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
+                "short_home":"/fixture","created":true,"phase":phase,"process":null,
+                "storage":null,"overlay":null,"guest_boot_id":null,
+                "daemon_pid":null,"daemon_start":null,"rootfs_digest":null,
+                "amd64_emulation":emulation
+            }))
+            .unwrap()
+        };
+        let refused = check_amd64_emulation_request(&owner("running", false), true).unwrap_err();
+        assert_eq!(refused.code, "amd64_emulation_restart_required");
+        for (phase, emulation, requested) in [
+            ("running", false, false),
+            ("running", true, true),
+            ("running", true, false),
+            ("stopped", false, true),
+            ("initializing", false, true),
+        ] {
+            check_amd64_emulation_request(&owner(phase, emulation), requested).unwrap();
+        }
+        // A pool without translation keeps its original receipt shape.
+        let saved = serde_json::to_value(owner("stopped", false)).unwrap();
+        assert!(saved.get("amd64_emulation").is_none());
+        let saved = serde_json::to_value(owner("stopped", true)).unwrap();
+        assert_eq!(saved["amd64_emulation"], json!(true));
+        // Detection is read-only and only ever true on Apple silicon macOS.
+        if !(cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")) {
+            assert!(!host_translation_available());
+        }
+        let _ = host_translation_available();
+    }
+
+    #[test]
     fn provider_command_enforces_strict_floor_for_public_egress_modes() {
         let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut owner: Owner = serde_json::from_value(json!({
@@ -2959,6 +3121,7 @@ printf 'verified-cache\n'
             super::super::prepared_start::Start {
                 retained: None,
                 prepared: Some(&request),
+                amd64_emulation: false,
             },
         )
         .unwrap_err();

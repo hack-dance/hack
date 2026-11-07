@@ -491,6 +491,9 @@ fn wrong_stale_and_wu01_preview_ids_are_rejected_before_enrollment() {
 fn unsupported_privileged_external_and_unknown_fields_block_enrollment() {
     for (extra, code) in [
         ("    privileged: true\n", "privileged_service"),
+        ("    cap_add: [SYS_ADMIN]\n", "capability_refused"),
+        ("    cap_add: [ALL]\n", "capability_refused"),
+        ("    cap_drop: [NOT_A_CAPABILITY]\n", "unknown_capability"),
         ("    devices: [/dev/null]\n", "unsupported_field"),
         ("    network_mode: host\n", "unsupported_network_mode"),
         (
@@ -521,6 +524,88 @@ fn unsupported_privileged_external_and_unknown_fields_block_enrollment() {
     ));
     assert!(fixture.codes().contains(&"external_volume".into()));
     assert!(fixture.codes().contains(&"external_network".into()));
+}
+
+#[test]
+fn compose_capability_adjustments_are_reviewed_into_the_plan() {
+    let fixture = Fixture::new(&format!(
+        "{BASIC}    cap_add: [net_admin, CAP_SYS_NICE]\n    cap_drop: [ALL]\n    privileged: false\n"
+    ));
+    let plan = fixture.plan();
+    assert!(
+        plan.plan.diagnostics.iter().all(|d| d.severity != "error"),
+        "{:?}",
+        plan.plan.diagnostics
+    );
+    let capabilities = plan.plan.services["web"].capabilities.as_ref().unwrap();
+    assert_eq!(capabilities.add, ["CAP_NET_ADMIN", "CAP_SYS_NICE"]);
+    assert_eq!(capabilities.drop, ["ALL"]);
+    // Plans without capability fields carry no capability entry.
+    let basic = Fixture::new(BASIC).plan();
+    assert!(basic.plan.services["web"].capabilities.is_none());
+    assert!(
+        !serde_json::to_string(&basic.plan)
+            .unwrap()
+            .contains("capabilities")
+    );
+}
+
+/// `x-hack-amd64-emulation` is a reviewed opt-in, not unexecuted extension metadata. Its
+/// policy (`prefer-native` or `amd64`) is recorded in the plan, so the two modes are distinct
+/// plans; it is absent otherwise, and it can never override a declared arm64 platform.
+#[test]
+fn amd64_emulation_opt_in_is_reviewed_and_never_overrides_declared_arm64() {
+    let plain = Fixture::new(BASIC).plan();
+    assert_eq!(plain.plan.services["web"].amd64_emulation, None);
+    let opted = Fixture::new(BASIC);
+    let mut plans = Vec::new();
+    for (mode, policy) in [
+        ("prefer-native", project::Amd64Emulation::PreferNative),
+        ("amd64", project::Amd64Emulation::Amd64),
+    ] {
+        fs::write(
+            opted.project.join("compose.yaml"),
+            format!("{BASIC}    platform: linux/amd64\n    x-hack-amd64-emulation: {mode}\n"),
+        )
+        .unwrap();
+        let report = opted.plan();
+        let service = &report.plan.services["web"];
+        assert_eq!(service.amd64_emulation, Some(policy));
+        assert_eq!(service.platform.as_deref(), Some("linux/amd64"));
+        assert_eq!(
+            serde_json::to_value(service).unwrap()["amd64_emulation"],
+            mode
+        );
+        assert!(
+            !report
+                .plan
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "compose_extension_metadata")
+        );
+        plans.push(report.plan_id);
+    }
+    // A changed policy is a changed reviewed plan of the same project.
+    assert_ne!(plans[0], plans[1]);
+    // Absent serializes nothing, so existing plan identities are unchanged.
+    let service = serde_json::to_value(&plain.plan.services["web"]).unwrap();
+    assert!(service.get("amd64_emulation").is_none());
+    for platform in ["linux/arm64", "linux/arm64/v8"] {
+        let conflicting = Fixture::new(&format!(
+            "{BASIC}    platform: {platform}\n    x-hack-amd64-emulation: amd64\n"
+        ));
+        assert_eq!(
+            project::plan(&conflicting.candidate, conflicting.options())
+                .unwrap_err()
+                .code,
+            "unsupported_platform"
+        );
+    }
+    // Only the two policies are reviewed values.
+    for value in ["yes", "true", "false", "native"] {
+        let invalid = Fixture::new(&format!("{BASIC}    x-hack-amd64-emulation: {value}\n"));
+        assert!(project::plan(&invalid.candidate, invalid.options()).is_err());
+    }
 }
 
 /// The candidate's own label review rejects Hack's ownership namespaces (the
@@ -2726,6 +2811,49 @@ fn disposable_cache_declarations_are_exact_volume_relative_and_review_bound() {
             .code,
         "invalid_disposable_cache"
     );
+}
+
+#[test]
+fn text_plan_exits_non_zero_on_error_diagnostics_and_json_keeps_the_report() {
+    let compiled = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let plan = |fixture: &Fixture, json: bool| {
+        let mut args = vec![
+            "--candidate-root".to_owned(),
+            compiled.to_str().unwrap().to_owned(),
+            "project".into(),
+            "plan".into(),
+            "--project".into(),
+            fixture.project.to_str().unwrap().to_owned(),
+            "--file".into(),
+            "compose.yaml".into(),
+        ];
+        if json {
+            args.push("--json".into());
+        }
+        Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"))
+            .env_clear()
+            .env("PATH", "")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let clean = Fixture::new(BASIC);
+    assert!(plan(&clean, false).status.success());
+    let failing = Fixture::new(&format!("{BASIC}    privileged: true\n"));
+    let text = plan(&failing, false);
+    assert!(!text.status.success());
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(stdout.contains("error [privileged_service]"), "{stdout}");
+    let refusal: serde_json::Value = serde_json::from_slice(&text.stderr).unwrap();
+    assert_eq!(refusal["code"], "plan_diagnostics");
+    assert_eq!(refusal["message_fixed"], true);
+    let json = plan(&failing, true);
+    assert!(json.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(report["plan"]["enrollment_compatible"], false);
 }
 
 fn diagnostic_codes(report: &PlanReport) -> Vec<&str> {

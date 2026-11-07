@@ -298,7 +298,9 @@ pub(super) fn attach(
             return Err(dependency_hosts::refused());
         }
         // Docker applies this only inside the isolated container network namespace.
-        // The helper retains the application's numeric UID and all capabilities stay dropped.
+        // The helper retains the application's numeric UID. CapDrop ALL proves the
+        // capability set is the explicit lowered profile (CapAdd), never an implicit
+        // engine default; this adds no capability.
         config["HostConfig"]["Sysctls"] = json!({"net.ipv4.ip_unprivileged_port_start":"0"});
     }
     for mount in config["HostConfig"]["Mounts"]

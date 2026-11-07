@@ -704,6 +704,7 @@ pub(super) fn compile(
                 "working_dir",
                 "user",
                 "platform",
+                "x-hack-amd64-emulation",
                 "labels",
                 "logging",
                 "stop_grace_period",
@@ -711,6 +712,8 @@ pub(super) fn compile(
                 "privileged",
                 "stdin_open",
                 "tty",
+                "cap_add",
+                "cap_drop",
             ],
             &field,
             diagnostics,
@@ -722,6 +725,12 @@ pub(super) fn compile(
                 "Privileged containers cannot be enrolled.",
             ));
         }
+        let capabilities = super::super::capabilities::review(
+            m.get("cap_add"),
+            m.get("cap_drop"),
+            &field,
+            diagnostics,
+        )?;
         let image = image(m.get("image"), diagnostics, &format!("{field}.image"))?;
         let build = build(
             project,
@@ -915,6 +924,29 @@ pub(super) fn compile(
                 "Only Linux arm64/amd64 image platform declarations are modeled.",
             ));
         }
+        let amd64_emulation = match m.get("x-hack-amd64-emulation") {
+            None => None,
+            Some(value) => Some(match value.as_str() {
+                Some("prefer-native") => Amd64Emulation::PreferNative,
+                Some("amd64") => Amd64Emulation::Amd64,
+                _ => {
+                    return Err(problem(
+                        "invalid_compose_field",
+                        "x-hack-amd64-emulation must be prefer-native or amd64.",
+                    ));
+                }
+            }),
+        };
+        if amd64_emulation.is_some()
+            && platform
+                .as_deref()
+                .is_some_and(|v| ["linux/arm64", "linux/arm64/v8"].contains(&v))
+        {
+            return Err(problem(
+                "unsupported_platform",
+                "x-hack-amd64-emulation cannot apply to a service that declares a Linux arm64 platform.",
+            ));
+        }
         let stdin_open = boolean(m.get("stdin_open"), false)?;
         let tty = boolean(m.get("tty"), false)?;
         if tty {
@@ -1020,8 +1052,20 @@ pub(super) fn compile(
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,one_shot,inert_route_labels,interactive,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
+            platform,amd64_emulation,labels,routing,dependency_cache,one_shot,inert_route_labels,interactive,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,capabilities,
         });
+        // Appended after the service's own findings, so plans without this case
+        // keep their identity. Graph admission applies the same rule.
+        if result
+            .get(name.as_str())
+            .is_some_and(|service| service.active && service.restart_policy_not_applied())
+        {
+            diagnostics.push(Diagnostic::warning(
+                "restart_policy_not_applied",
+                &format!("{field}.restart"),
+                "Restart policies are not applied yet to services with published ports or routes (HACK-1935); the service starts without automatic restarts.",
+            ));
+        }
     }
     Ok(result)
 }

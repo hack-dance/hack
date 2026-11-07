@@ -162,6 +162,23 @@ impl JobIntent {
 /// Validate an interrupted job against its original parent generation. Pending
 /// bytes never supply identity or effect authority; callers may retain them only
 /// after this published selection and foreground ownership have been checked.
+/// The receipt resource of a one-off job derived from its service's resource.
+/// The job keeps the service's image, networks and storage, but never its
+/// identity, route, published ports or restart policy: `hack run` containers
+/// run with the engine policy `no`, so their receipt admits no restart either.
+#[cfg(any(target_os = "macos", test))]
+fn job_resource(parent: &Resource, service: &str, name: String) -> Resource {
+    let mut resource = parent.clone();
+    resource.key = service.into();
+    resource.name = name;
+    resource.id = None;
+    resource.phase = "reserved".into();
+    resource.routing = None;
+    resource.loopback_ports = Vec::new();
+    resource.restart_policy = None;
+    resource
+}
+
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn recovery_selection(
     root: &std::path::Path,
@@ -195,6 +212,7 @@ pub(super) fn recovery_selection(
             || resource.name != intent.container_name
             || resource.routing.is_some()
             || !resource.loopback_ports.is_empty()
+            || resource.restart_policy.is_some()
             || resource.cache.is_some()
             || intent
                 .container_id
@@ -349,6 +367,14 @@ pub(super) mod tests {
             .unwrap()
             .name = "different".into();
         assert!(recovery_selection(&fixture.0, &changed, "boot").is_err());
+        // A job never holds restart authority, even when its service does.
+        let mut changed = receipt.clone();
+        changed
+            .resources
+            .get_mut(&format!("container:job-{}", intent.job))
+            .unwrap()
+            .restart_policy = Some(restart_policy::RestartPolicy::Always);
+        assert!(recovery_selection(&fixture.0, &changed, "boot").is_err());
         let mut changed = receipt.clone();
         changed
             .resources
@@ -356,6 +382,32 @@ pub(super) mod tests {
         assert!(recovery_selection(&fixture.0, &changed, "boot").is_err());
         fs::remove_file(fixture.0.join(FILE)).unwrap();
         assert!(recovery_selection(&fixture.0, &receipt, "boot").is_err());
+    }
+    #[test]
+    fn job_resource_drops_service_identity_publication_and_restart_policy() {
+        let (_, receipt, _) = interrupted();
+        let mut parent = receipt.resources["container:task"].clone();
+        parent.routing = Some(
+            serde_json::from_value(json!({"hostnames":["task.example.test"],"port":3000})).unwrap(),
+        );
+        parent.loopback_ports = vec![LoopbackPort {
+            host_port: 8787,
+            target: 3000,
+        }];
+        parent.restart_policy = Some(restart_policy::RestartPolicy::OnFailure {
+            maximum_retry_count: 3,
+        });
+        let job = job_resource(&parent, "job-x", "hkg-run-container-31".into());
+        assert_eq!(
+            (job.key.as_str(), job.name.as_str(), job.phase.as_str()),
+            ("job-x", "hkg-run-container-31", "reserved")
+        );
+        assert!(job.id.is_none() && job.routing.is_none() && job.restart_policy.is_none());
+        assert!(job.loopback_ports.is_empty());
+        assert_eq!(
+            (job.image, job.networks, job.kind),
+            (parent.image, parent.networks, parent.kind)
+        );
     }
     #[test]
     fn recovery_retains_partial_job_journal_without_using_it_as_authority() {

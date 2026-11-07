@@ -16,6 +16,7 @@ import {
   prepareNativeProjectInput,
   selectActiveNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
+import { HackCliError } from "../src/lib/cli-result.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
@@ -143,6 +144,26 @@ test("legacy dotenv refuses and unmanaged public projects preserve original fiel
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message: expect.stringContaining("values omitted"),
   });
+});
+
+test("the effective env is the requested or default env even without managed env files", async () => {
+  const opts = await fixture({ services: { api: { image: "bun:1" } } });
+  const effective = async (envName?: string | null) => {
+    const input = await prepareNativeProjectInput({ ...opts, envName });
+    expect(input.environmentFiles).toEqual([]);
+    expect(input.managedEnvironment).toEqual({});
+    return input.effectiveEnvName;
+  };
+  expect(await effective()).toBeNull();
+  expect(await effective("qa")).toBe("qa");
+  await writeFile(
+    join(opts.projectDir, "hack.config.json"),
+    JSON.stringify({ name: "fixture", env: { defaultOverlay: "qa" } })
+  );
+  expect(await effective()).toBe("qa");
+  expect(await effective("stage")).toBe("stage");
+  // An explicit base selection still overrides the project default.
+  expect(await effective(null)).toBeNull();
 });
 
 test("linked worktree inherits primary local environment and observes checkout overrides", async () => {
@@ -280,4 +301,66 @@ test("an absent or malformed reviewed plan delivers no managed values", () => {
       services: { app: { active: true }, other: { active: false } },
     }),
   ]).toEqual(["app"]);
+});
+
+test("input refusals name the cause, service and field without values", async () => {
+  const opts = await fixture({
+    services: { api: { env_file: "private-source", image: "bun:1" } },
+  });
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: expect.stringContaining("service api field env_file"),
+  });
+  await writeFile(
+    opts.composeFile,
+    JSON.stringify({
+      services: {
+        api: { image: "bun:1", environment: ["OK=1", "OK=private-dup"] },
+      },
+    })
+  );
+  await env(opts.projectDir, "default", { global: { TOKEN: "managed" } });
+  const duplicate = await prepareNativeProjectInput(opts).catch(
+    (error: unknown) => error
+  );
+  expect(duplicate).toBeInstanceOf(HackCliError);
+  expect((duplicate as HackCliError).code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+  expect((duplicate as HackCliError).message).toContain(
+    "service api field environment"
+  );
+  expect((duplicate as HackCliError).message).not.toContain("private-dup");
+  await writeFile(opts.composeFile, "services: [unclosed");
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    message: expect.stringContaining("not valid UTF-8 YAML"),
+  });
+  await writeFile(opts.composeFile, '{"name":"no-services"}');
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    message: expect.stringContaining("no services mapping"),
+  });
+  await rm(opts.composeFile);
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    message: expect.stringContaining("Compose file must be a regular"),
+  });
+});
+test("a missing project env key is reported as such, not as invalid Compose", async () => {
+  const oldKey = process.env.HACK_ENV_SECRET_KEY;
+  restoreEnv("HACK_ENV_SECRET_KEY", undefined);
+  try {
+    const opts = await fixture({ services: { api: { image: "bun:1" } } });
+    await env(opts.projectDir, "default", {
+      global: { TOKEN: { secure: "synthetic-ciphertext-canary" } },
+    });
+    const error = await prepareNativeProjectInput(opts).catch(
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(HackCliError);
+    const { code, message } = error as HackCliError;
+    expect(code).toBe("E_CONFIG_INVALID");
+    expect(message).toContain("project env key is missing");
+    expect(message).toContain("HACK_ENV_SECRET_KEY");
+    expect(message).not.toContain("unsupported or invalid Compose");
+    expect(message).not.toContain("synthetic-ciphertext-canary");
+  } finally {
+    restoreEnv("HACK_ENV_SECRET_KEY", oldKey);
+  }
 });

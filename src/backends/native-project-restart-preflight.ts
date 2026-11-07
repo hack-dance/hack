@@ -5,14 +5,20 @@ import { dirname, join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import type { NativeDependencyOwnerResolver } from "./native-dependency-owners.ts";
 import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
+import {
+  NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+  nativeImagePolicyArgs,
+} from "./native-image-policy.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   compileNativeHostDependencySelection,
   discoverNativeHostDependency,
+  discoverNativeOwnedHostDependency,
   type NativeHostDependency,
-  parseNativeHostDependencies,
   prepareNativeDependencyServices,
+  provisionalNativeHostDependencies,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
@@ -23,6 +29,12 @@ import {
   requireNativeHostAliasBindings,
 } from "./native-project-internal-hosts.ts";
 import { validateNativeAllowedHosts } from "./native-project-network.ts";
+import {
+  ensuredPlatformAccepted,
+  type NativeEmulationPolicy,
+  nativeEmulationPolicy,
+  nativeEnsureImageArgs,
+} from "./native-project-platform.ts";
 import {
   nativeReviewNeedsCompatibility,
   verifyNativeSourceCompatibility,
@@ -39,11 +51,18 @@ import {
   withNativeProjectReview,
 } from "./native-project-review.ts";
 import {
+  describeNativeRunEnvironmentChange,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeRunEnvironmentAvailable,
+  nativeRunEnvironmentChange,
+  nativeRunEnvironmentRemedy,
   normalizeNativeProfiles,
 } from "./native-project-run.ts";
-import { readNativeSelection } from "./native-project-selection.ts";
+import {
+  readNativeSelection,
+  selectNativeEnvFile,
+} from "./native-project-selection.ts";
 import {
   nativeRuntimeMetadataSelected,
   prepareNativeProjectServices,
@@ -157,23 +176,13 @@ async function readNativeRestartDependencyIntent(opts: {
     return [];
   }
   try {
-    const value = compileNativeHostDependencySelection({
-      value: await readNativeSelection(opts.path),
-      hostAliases: opts.hostAliases,
-    });
-    if (!(isRecord(value) && Array.isArray(value.dependencies))) {
-      throw new ClosedCliError("Invalid dependency intent");
-    }
-    return parseNativeHostDependencies({
+    // Owner and executable entries validate with a provisional PID only.
+    return provisionalNativeHostDependencies({
       services: opts.services,
-      value: {
-        ...value,
-        dependencies: value.dependencies.map((entry) =>
-          isRecord(entry) && entry.host_executable !== undefined
-            ? { ...entry, host_pid: entry.host_pid ?? 2 }
-            : entry
-        ),
-      },
+      value: compileNativeHostDependencySelection({
+        value: await readNativeSelection(opts.path),
+        hostAliases: opts.hostAliases,
+      }),
     });
   } catch {
     throw new ClosedCliError(
@@ -293,6 +302,7 @@ async function pinRestartImages(opts: {
   readonly projectRoot: string;
   readonly specs: Record<string, Record<string, unknown>>;
   readonly retainedImages: ReadonlyMap<string, string>;
+  readonly amd64Emulation?: Readonly<Record<string, NativeEmulationPolicy>>;
   readonly invoke: typeof invokeNativeRuntime;
 }): Promise<void> {
   for (const [name, spec] of Object.entries(opts.specs)) {
@@ -306,15 +316,21 @@ async function pinRestartImages(opts: {
       continue;
     }
     // Owned cache acquisition grants no authority to stop the current graph.
+    const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
     const pinned = await opts.invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
-      args: ["runtime", "ensure-image", "--reference", image, "--json"],
+      args: [
+        ...nativeEnsureImageArgs(image, policy),
+        ...nativeImagePolicyArgs(),
+      ],
+      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
     });
     if (
       !isRecord(pinned) ||
       typeof pinned.image_id !== "string" ||
-      !IMAGE.test(pinned.image_id)
+      !IMAGE.test(pinned.image_id) ||
+      !ensuredPlatformAccepted(pinned.platform, policy)
     ) {
       throw new ClosedCliError(
         "Native restart image selection failed before cleanup."
@@ -334,9 +350,15 @@ export async function preflightNativeRestart(opts: {
   /** Explicit frontend recovery may encounter a graph stopped before an intent was saved. */
   readonly recoverStopped?: boolean;
   readonly adaptationFile?: string;
+  /** Per-env adaptations; the retained run's effective env selects as start does. */
+  readonly adaptationFileByEnv?: Readonly<Record<string, string>>;
   readonly dependencyFile?: string;
+  /** Per-env dependency files; the retained run's effective env selects as start does. */
+  readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
   /** Same project-wide host aliases the replacement startup declares. */
   readonly internalExtraHosts?: Readonly<Record<string, string>>;
+  /** Resolves owner-scoped dependency selections against the running instance. */
+  readonly dependencyOwners?: NativeDependencyOwnerResolver;
   readonly allowedHosts?: readonly string[];
   /** Same public metadata selection the replacement startup will review. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
@@ -376,9 +398,44 @@ export async function preflightNativeRestart(opts: {
     composeFile: opts.composeFile,
     envName: selected.envName,
   });
+  const environmentChange = nativeRunEnvironmentChange({
+    run: opts.run,
+    environmentFiles: input.environmentFiles,
+    projectRoot: opts.scope.projectRoot,
+    projectDir: opts.scope.projectDir,
+  });
+  if (environmentChange) {
+    throw new ClosedCliError(
+      `Native restart refused: ${describeNativeRunEnvironmentChange(environmentChange)}. ${nativeRunEnvironmentRemedy({ change: environmentChange, retry: "hack restart" })}. The current graph was not stopped.`
+    );
+  }
+  if (
+    !nativeRunEnvironmentAvailable({
+      run: opts.run,
+      environmentFiles: input.environmentFiles,
+    })
+  ) {
+    throw new ClosedCliError(
+      "Native restart environment selection changed since startup; restart was refused. The current graph was not stopped."
+    );
+  }
+  const adaptationFile = selectNativeEnvFile({
+    selection: {
+      file: opts.adaptationFile,
+      fileByEnv: opts.adaptationFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
+  const dependencyFile = selectNativeEnvFile({
+    selection: {
+      file: opts.dependencyFile,
+      fileByEnv: opts.dependencyFileByEnv,
+    },
+    envName: input.effectiveEnvName,
+  });
   input = await deps.adapt({
     input,
-    path: opts.adaptationFile,
+    path: adaptationFile,
   });
   input = applyNativeInternalHostAliases({
     input,
@@ -415,7 +472,7 @@ export async function preflightNativeRestart(opts: {
   input = metadata?.input ?? input;
   const specs = prepareNativeProjectServices(
     input,
-    opts.dependencyFile !== undefined
+    dependencyFile !== undefined
   );
   const hostAliases = nativeServiceHostAliases({
     services: specs,
@@ -423,12 +480,12 @@ export async function preflightNativeRestart(opts: {
   });
   const dependencies = stoppedRetry
     ? await readNativeRestartDependencyIntent({
-        path: opts.dependencyFile,
+        path: dependencyFile,
         services: Object.keys(specs),
         hostAliases,
       })
     : await deps.dependencies({
-        path: opts.dependencyFile,
+        path: dependencyFile,
         services: Object.keys(specs),
         hostAliases,
         discover: (selection) =>
@@ -437,6 +494,15 @@ export async function preflightNativeRestart(opts: {
             projectRoot: opts.scope.projectRoot,
             hostPort: selection.hostPort,
             executable: selection.executable,
+            invoke: deps.invoke,
+          }),
+        owners: opts.dependencyOwners,
+        discoverOwned: (selection) =>
+          discoverNativeOwnedHostDependency({
+            runtime: opts.runtime,
+            projectRoot: opts.scope.projectRoot,
+            hostPort: selection.hostPort,
+            ancestorPid: selection.ancestorPid,
             invoke: deps.invoke,
           }),
       });
@@ -448,6 +514,7 @@ export async function preflightNativeRestart(opts: {
         runtime: opts.runtime,
         projectRoot: opts.scope.projectRoot,
         originalSha256: input.originalSha256,
+        amd64Emulation: input.amd64Emulation,
         restore: opts.run,
         invoke: deps.invoke,
       });
@@ -456,6 +523,7 @@ export async function preflightNativeRestart(opts: {
         runtime: opts.runtime,
         projectRoot: opts.scope.projectRoot,
         originalSha256: input.originalSha256,
+        amd64Emulation: input.amd64Emulation,
         restore: opts.run,
         invoke: deps.invoke,
       })
@@ -465,6 +533,7 @@ export async function preflightNativeRestart(opts: {
     projectRoot: opts.scope.projectRoot,
     specs,
     retainedImages,
+    amd64Emulation: input.amd64Emulation,
     invoke: deps.invoke,
   });
   const compose = JSON.parse(input.normalizedComposeJson);

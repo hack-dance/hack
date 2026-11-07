@@ -21,12 +21,74 @@ afterEach(async () => {
   }
 });
 
+/**
+ * Fixture services drop every capability unless they set their own lists, so
+ * the handoff advisory applies as it did before Compose services received
+ * Docker's default capabilities; see the default-capability test below.
+ */
 function project(
   services: Record<string, unknown>,
   volumes: Record<string, unknown> = { data: {} }
 ) {
-  return { services, volumes };
+  return {
+    services: Object.fromEntries(
+      Object.entries(services).map(([name, service]) => [
+        name,
+        typeof service === "object" &&
+        service !== null &&
+        !("cap_drop" in service) &&
+        !("cap_add" in service)
+          ? { ...service, cap_drop: ["ALL"] }
+          : service,
+      ])
+    ),
+    volumes,
+  };
 }
+
+test("a root data handoff needs a warning only when its capabilities are dropped", () => {
+  const db = { image: PINNED, volumes: ["data:/var/lib/data"] };
+  const handoff = [
+    {
+      code: "native_data_owner_handoff_unqualified" as const,
+      services: ["db"],
+    },
+  ];
+  // Docker's default capabilities keep CHOWN, DAC_OVERRIDE, FOWNER, SETUID and SETGID.
+  for (const lists of [
+    { cap_drop: [] },
+    { cap_drop: ["NET_RAW"] },
+    { cap_add: ["SYS_NICE"] },
+    {
+      cap_drop: ["ALL"],
+      cap_add: ["chown", "CAP_DAC_OVERRIDE", "fowner", "SETUID", "setgid"],
+    },
+    { cap_drop: ["CHOWN"], cap_add: ["CHOWN"] },
+  ]) {
+    expect(
+      findNativeDataAdvisories(project({ db: { ...db, ...lists } }))
+    ).toEqual([]);
+  }
+  for (const lists of [
+    { cap_drop: ["ALL"] },
+    { cap_drop: ["cap_chown"] },
+    { cap_drop: ["SETUID"] },
+    { cap_drop: ["ALL"], cap_add: ["CHOWN"] },
+    // Lists native review would refuse still get the advice.
+    { cap_drop: "ALL" },
+    { cap_drop: [1] },
+  ]) {
+    expect(
+      findNativeDataAdvisories(project({ db: { ...db, ...lists } }))
+    ).toEqual(handoff);
+  }
+  // An explicit user still clears it.
+  expect(
+    findNativeDataAdvisories(
+      project({ db: { ...db, cap_drop: ["ALL"], user: "999:999" } })
+    )
+  ).toEqual([]);
+});
 
 test("no named data volume means no advisory", () => {
   expect(findNativeDataAdvisories(null)).toEqual([]);

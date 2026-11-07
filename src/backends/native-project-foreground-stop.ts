@@ -35,6 +35,13 @@ export function nativeForegroundStopSignals(opts: {
     controller,
     force: force.signal,
     interruptedExit: () => interruptedExit,
+    /**
+     * Every service stopped on its own, as attached Compose `up` ends: the stop
+     * that follows exits 0 unless a later SIGTERM asks for 143.
+     */
+    servicesStopped: () => {
+      interruptedExit = 0;
+    },
     /** Apply stop requests that predate registration. */
     admitPending: () => {
       if (opts.signal?.aborted) {

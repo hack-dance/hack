@@ -189,11 +189,11 @@ Compose backend. Native support for them is planned after v5.
 
 | Compose feature | Kept on the Compose backend when |
 | --- | --- |
-| External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the `HACK_NATIVE_ADAPTATION` selection (see [Frontend integration status](#frontend-integration-status)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
+| External network | A top-level network sets `external: true` or `external: {name: ...}`. A reviewed `x-hack-isolated: true` replacement is not external: it creates an owned internal bridge. A network that the selected adaptation (`HACK_NATIVE_ADAPTATION` or the committed `.hack/native/adaptation.json`; see [Native settings files](#native-settings-files)) lists in `isolatedNetworks` gets the same replacement, so it is not external either. |
 | External volume | A top-level volume sets `external: true` or `external: {name: ...}`. The native runtime only creates volumes it owns, and there is no native replacement for an external volume. |
 | Reserved ownership label | A service, network or volume label key starts with `com.docker.compose.`, `io.hack-local.`, `io.hack.native-config.`, `io.hack.native-file.` or `io.hack.storage-witness.`. Compose, the native runtime and native-config Compose use these labels to prove which resources they own. |
 | Build outside the basic form | A service `build` is not the basic form that [`hack config import --dry-run`](../reference/native-config-import.md#pure-basic-build-preview) accepts (a relative context and optional relative `dockerfile` and `target`), or the service also sets `image`. Build arguments, secrets, SSH, cache options, platforms and other build options are outside the basic form. |
-| Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64 only. A missing or `null` `platform` is unset and passes. |
+| Non-native platform | A service sets a `platform` other than `linux/arm64` or `linux/arm64/v8`, for example `linux/amd64`. The native VM runs Linux arm64. A missing or `null` `platform` is unset and passes. `linux/amd64` passes only for a service that the `HACK_NATIVE_ADAPTATION` selection opts in to [amd64 emulation](#amd64-emulation-with-rosetta-2); every other platform value stays on the Compose backend. |
 
 Native `hack up` and `hack restart` check for these features after selecting the
 project and before branch, environment, lifecycle, storage or runtime work. They
@@ -208,14 +208,18 @@ defaults such as `DOCKER_DEFAULT_PLATFORM`: a platform counts only when a servic
 sets its `platform` field. The native runtime's own review reports `extends` and
 `include` as unsupported fields.
 
-The check applies the explicit `HACK_NATIVE_ADAPTATION` selection first, as native
-start does. An unchanged Compose file whose external network is listed in
+The check applies the selected adaptation first, as native start does:
+`HACK_NATIVE_ADAPTATION`, else the committed `.hack/native/adaptation.json` or the
+`adaptation.<env>.json` for `--env <env>`. Without `--env`, a network counts as
+isolated only when every committed adaptation that could apply isolates it, because
+the effective env is not known yet. An unchanged Compose file whose external network is listed in
 `isolatedNetworks` therefore stays on native, and native start replaces that
-network with an owned isolated one. The selection is read only when the Compose
-file has an external network. If it cannot be read, is not version 1, or its
-`isolatedNetworks` is not a list of unique names, the command refuses with the
-same one-line `E_CONFIG_INVALID` message native start gives, before any runtime
-request.
+network with an owned isolated one. A `linux/amd64` service that `amd64Emulation`
+opts in stays on native the same way. The selection is read only when the Compose
+file has an external network or a non-native platform. If it cannot be read, is not
+version 1, its `isolatedNetworks` is not a list of unique names, or its
+`amd64Emulation` is invalid, the command refuses with the same one-line
+`E_CONFIG_INVALID` message native start gives, before any runtime request.
 
 To run such a project, select the Compose backend:
 
@@ -306,9 +310,9 @@ traffic with it; stop such listeners before `hack up`.
 lists the closed names `external_network`, `external_volume`, `reserved_label`,
 `unsupported_build` and `foreign_platform`. On the native backend a found feature
 is a warning; on the Compose backend it is informational. Native doctor applies
-the same `HACK_NATIVE_ADAPTATION` selection before it reports. When it finds an
-external network, the message also names the `isolatedNetworks` selection above,
-which keeps that network's project on native.
+the same adaptation selection as native `up` without `--env` before it reports. When it
+finds an external network, the message also names the `isolatedNetworks` selection
+above, which keeps that network's project on native.
 
 A basic build is not one of these features, but native image-project `up` still
 refuses it, so doctor does not report it as ok. On the native backend the check
@@ -339,6 +343,35 @@ Native `up` and `restart` also stay in the foreground in every project:
 `--detach` refuses with one `E_USAGE` line. Run `hack up` in its own terminal and
 keep it open, use `hack ps` and `hack logs` from another terminal, and press
 Ctrl-C to stop it. For detached startup, use the Compose backend.
+
+Foreground image-project `up` prints each startup step (input, runtime, images,
+services) and one ready line, `Project is ready (SERVICES)`, after the graph is
+ready and its run mapping is published. Ctrl-C prints the stop sequence and
+`Native project stopped.` once owned cleanup is confirmed. Until the ready line,
+startup holds the runtime's exclusive provider lease, so graph admission cannot
+interleave with another operation. A `hack ps` from another terminal during that
+window waits briefly, then reports that the runtime is busy (`runtime_busy`,
+exit 0) instead of failing. After the ready line, `hack ps` and `hack logs` run
+alongside the foreground command.
+
+While the project runs, foreground `up` reports each service container that stops,
+as attached Compose `up` does (`SERVICE exited with code N`), including one-shot
+services. It keeps running while any service runs; once every service container has
+stopped, it prints that, stops the graph through the ordinary owned cleanup and exits
+0, like Compose `up` without `--abort-on-container-exit`. A service whose restart
+policy has a pending restart (`restarting`) is not stopped: `up` keeps running and
+reports the service only if it later exits for good, for example when `on-failure:N`
+runs out of retries. Unlike Compose, the exit that triggered an engine restart is
+not printed separately. The monitor reads
+`graph observe`, which takes no provider lease, so it never contends with `ps`, `logs`
+or `exec`.
+
+Runtime refusals print their code and, when the runtime marks its message as a fixed
+literal that cannot carry values, that message and the service it concerns (for
+example `Service web: Pinned image architecture or implicit volumes are
+incompatible.`). Formatted runtime messages stay omitted. A start refused before the
+runtime reserved any graph state reports that nothing was retained instead of
+unconfirmed cleanup.
 
 ### Network aliases and the Compose project name
 
@@ -648,6 +681,25 @@ For an existing owned graph, bounded service diagnostics use its run identifier:
 Both commands select the current container and recheck its boot, receipt generation
 and ownership before reading or executing. Logs include exited services, default to
 200 lines (maximum 1,000), and return bounded, UTF-8-lossy text with a truncation flag.
+`lines` lists the retained lines in engine order, so stdout and stderr interleave by
+time; `stdout` and `stderr` hold the same lines per stream. Retention keeps whole
+lines, newest first, within 32 KiB of JSON text and sets `truncated` when older lines
+were dropped. Only a single line longer than that budget is cut. `hack logs SERVICE
+--no-follow` prints `lines` in that order, each to its own stream. Authored projects
+return only `stdout` and `stderr`, and each stream also stays within 16 KiB of JSON
+text: older whole lines go first, and a newest line longer than that keeps its most
+recent bytes.
+
+`graph observe --run-id RUN_ID --json` reports each service container's current state
+(`running` with the engine's health, `exited` with its code, `dead`, `created`,
+`absent` or `unknown`) without taking the provider lease. It only reads, checks each
+recorded container's ownership, runs no probes and grants no authority; foreground
+`hack up` polls it to report service exits.
+
+`project plan` without `--json` exits non-zero (`plan_diagnostics`) after printing a
+report that contains an error diagnostic. With `--json` it exits 0 and the report is
+the result: `diagnostics` and `enrollment_compatible` carry the outcome, because Hack
+plans original input that its normalization adapts afterwards.
 Exec requires a running service and returns Base64 stdout/stderr to preserve arbitrary
 bytes, an exit code, and a truncation flag. The CLI also exits with the command's exit
 code. Retained exec output is limited to 1 MiB per stream.
@@ -760,6 +812,40 @@ layer. Removing the owned container discards that layer; use named volumes for
 durable data. Source bind mounts still require read-only publication. Writable
 container layers do not imply writable source synchronization.
 
+A service `restart` policy (`always`, `unless-stopped`, `on-failure` or
+`on-failure:N`) becomes the guest engine's own restart policy, so restart timing,
+backoff, retry counting and the manual-stop rule follow Docker. `no` or omission
+keeps automatic restarts off. A one-shot service with `service_completed_successfully`
+readiness accepts only `on-failure[:N]`, which retries until it succeeds or its
+retries run out; `always` and `unless-stopped` refuse there, as in Compose. While
+the engine waits to start the next incarnation, `hack ps` reports the service as
+`restarting`, and it satisfies no readiness goal. A policy-restarted container
+keeps its container ID but gets a new start time, so Hack treats it as a new
+incarnation: any proof bound to the previous one refuses rather than adopting it.
+
+The port and route bridges that serve published `ports` and local HTTPS routes
+are bound to one incarnation and cannot yet follow a restart (HACK-1935). A
+routed service, or a service with published `ports`, therefore starts without its
+restart policy: the container runs with the engine policy `no`, and native
+review reports `restart_policy_not_applied` for it. Foreground `up` prints one
+line per affected service before startup, for example `Service web: restart:
+unless-stopped is not applied. Restart policies are not applied yet to services
+with published ports or routes (HACK-1935); the service starts without automatic
+restarts.` Other services in the same project keep their policy. For the same
+reason the graph refuses a restart policy, with `graph_restart_policy`, on other
+services with a native HTTP probe, services with host dependencies, services
+that receive managed environment values (delivery is single-use and
+time-bounded) and dependency-cache initializers. Remove the `restart` key from
+those services, or keep them on the Compose backend.
+
+Every owned stop first sets the engine policy back to `no` and confirms that with a
+fresh inspection, then requests the stop. A restart that was already pending is
+cancelled by the stop, and cleanup still requires an observation that is neither
+running nor restarting before it deletes anything. A guest engine restart or VM
+reboot while a graph is still owned restarts its `always` and `unless-stopped`
+containers, as Docker does; owned cleanup or recovery stops and removes them.
+`hack run` one-off containers never inherit the service restart policy.
+
 An image that declares `VOLUME` (for example a database image) runs natively only
 when the service mounts a named volume at each declared path, as in
 `db-data:/var/lib/postgresql/data`. Hack never creates an anonymous volume: a declared
@@ -767,13 +853,72 @@ path without exactly one whole named volume of the project refuses with
 `graph_image_volume_uncovered`, and a read-only (`:ro`) mount, a bind mount, a
 `volume.subpath` mount or a dependency-cache volume at that path does not count. On first use the engine copies
 the image directory's contents, owner and mode into the new, empty volume; later runs
-mount the retained data unchanged. Native containers drop all capabilities, so an
-image entrypoint that starts as root and hands the data directory to another user
-(`chown` and then a user switch) fails. Set an explicit numeric `user:` that matches
-the image's data user (look it up in the image's `/etc/passwd`); the entrypoint then
-skips the handoff. `hack doctor` warns about this case and about data services on
-mutable image tags. A native graph can own at most 16 named volumes, dependency
-caches included.
+mount the retained data unchanged. With Docker's default capabilities (see
+[Container capabilities and the security model](#container-capabilities-and-the-security-model)),
+an image entrypoint that starts as root and hands the data directory to another
+user (`chown` and then a user switch) works. A service whose `cap_drop` removes a
+capability that handoff needs (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID` or
+`SETGID`, or `ALL`) without adding it back fails there; set an explicit numeric
+`user:` that matches the image's data user instead. `hack doctor` warns about that
+case and about data services on mutable image tags. A native graph can own at most
+16 named volumes, dependency caches included.
+
+### Container capabilities and the security model
+
+On the native backend, the development VM is the isolation boundary between
+project code and your Mac. Containers inside the VM are a compatibility layer: they
+give each service the process environment it would have under Docker, not a second
+security sandbox. This matches how the Compose backend runs on Docker.
+
+Compose-file services therefore get Docker's default Linux capability set for
+the pinned engine (Docker 29.5.2): `CHOWN`, `DAC_OVERRIDE`, `FSETID`, `FOWNER`,
+`MKNOD`, `NET_RAW`, `SETGID`, `SETUID`, `SETFCAP`, `SETPCAP`, `NET_BIND_SERVICE`,
+`SYS_CHROOT`, `KILL` and `AUDIT_WRITE`. Stock images that start as root, change the
+owner of their data directory and then switch to an unprivileged user (most
+database images do this) work without a `user:` override. `no-new-privileges`
+stays on, so a process cannot gain capabilities through setuid or file-capability
+binaries. `privileged: true` is refused.
+
+`cap_add` and `cap_drop` follow Docker's rules. Names are case-insensitive, and the
+`CAP_` prefix is optional. `cap_drop` removes names from the default set, and
+`cap_add` is applied after it, so a name in both lists is kept. `cap_drop: [ALL]`
+keeps only the names in `cap_add`. `cap_drop` accepts any capability the engine
+knows. Unknown names are refused, as Docker refuses them. Interpolated names are
+not resolved and are refused as unknown.
+
+`cap_add` accepts the default names plus a closed set whose effect stays inside
+the container's own namespaces or cgroup limits: `NET_ADMIN` and `NET_BROADCAST`
+(the container's own network namespace), `SYS_NICE` (scheduling and NUMA policy,
+often declared for database images), `IPC_LOCK` (memory locking, still charged to
+the memory limit) and `IPC_OWNER` (the container's own IPC namespace). Plan review
+refuses every other addition with `capability_refused`, including `cap_add: [ALL]`.
+One VM can host several projects and worktrees, and Hack runs its own helpers
+inside service containers. These refused capabilities would act on that shared
+kernel or on those helpers:
+
+- `SYS_ADMIN`, `SYS_MODULE`, `SYS_RAWIO`, `DAC_READ_SEARCH` and `BPF` are known
+  container escape or kernel attack primitives.
+- `SYS_TIME`, `SYS_PACCT`, `SYSLOG`, `PERFMON`, `AUDIT_CONTROL`, `AUDIT_READ`,
+  `MAC_ADMIN`, `MAC_OVERRIDE`, `WAKE_ALARM` and `BLOCK_SUSPEND` act on the VM as a
+  whole: its clock, accounting, kernel log, performance events, audit or security
+  modules, or power management.
+- `SYS_PTRACE` would let an application trace Hack's in-container helpers (the
+  dependency relay and the HTTP probe), bypassing the kernel's ptrace restrictions.
+- `LINUX_IMMUTABLE` could make files in Hack-owned volumes impossible to remove
+  during cleanup.
+- `SYS_RESOURCE`, `SYS_BOOT`, `SYS_TTY_CONFIG`, `LEASE` and `CHECKPOINT_RESTORE`
+  have no reviewed development use case yet.
+
+Hack always writes the effective set explicitly (`CapDrop: ["ALL"]` plus `CapAdd`),
+rather than relying on the engine's implicit default. Startup compares that exact
+set against the inspected container. Authored native services, persistent-data
+initializers and Hack's helper containers keep every capability dropped.
+
+A stopped graph whose containers were created by an earlier candidate (with every
+capability dropped) differs from this profile. `graph restart` on such a graph
+refuses with `graph_config_mismatch`; it never adopts the old containers. Normal
+`hack restart` and `hack up` recreate the containers around the retained volumes,
+so they use the new profile.
 
 The normal-CLI integration helpers prepare modern environment overlays and
 worktree inheritance in memory, with null declarations in public normalized
@@ -821,14 +966,16 @@ by an older bundle, so clean up such a graph with the bundle that started it.
   default is never used in their place. Declare the key bare (`TOKEN:` or `- TOKEN`)
   to receive the managed value.
 
-## Public image acquisition without Docker
+## Registry image acquisition without Docker
 
-The candidate can fetch a **digest-pinned public Docker Hub image** without Docker,
-OrbStack, registry credentials, or a running guest:
+The candidate can fetch a **digest-pinned image from any OCI distribution registry**
+without Docker, OrbStack or a running guest: Docker Hub, GitHub Container Registry,
+Google Artifact Registry and Container Registry, Quay, Amazon ECR, and private
+registries on their own host names.
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime fetch-image \
-  --reference '[namespace/]repository@sha256:REVIEWED_MANIFEST_DIGEST' \
+  --reference '[registry/]repository@sha256:REVIEWED_MANIFEST_DIGEST' \
   --archive /absolute/private/new-image.tar
 ```
 
@@ -836,15 +983,15 @@ For an existing mutable image declaration, resolve it explicitly first:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime resolve-image \
-  --reference '[namespace/]repository:tag' --json
+  --reference '[registry/]repository:tag' --json
 ```
 
 Image references are normalized as the Docker CLI does before any request:
 `alpine` is `docker.io/library/alpine:latest`, `alpine:3.21` is
 `docker.io/library/alpine:3.21`, and `user/img` is `docker.io/user/img:latest`.
-`index.docker.io` becomes `docker.io`. Tags, digests, other registries and
-ports are kept as written; only public Docker Hub `namespace/repository`
-references are acquired. Repository names must be lowercase, and a normalized
+`index.docker.io` becomes `docker.io`. Tags, digests, registries, ports and
+nested repository paths are kept as written; Docker Hub references must name a
+`namespace/repository`. Repository names must be lowercase, and a normalized
 name is limited to 255 bytes. Uppercase digests and malformed registry ports are
 refused. Check a reference without network, credentials or candidate state:
 
@@ -853,38 +1000,120 @@ refused. Check a reference without network, credentials or candidate state:
   --reference 'alpine:3.21' --json
 ```
 
-It returns the canonical `reference` and a `kind` of `docker_hub` or
-`image_id`; any other registry refuses with `registry_image`. Native foreground
-`hack up` runs this admission for every authored service image before startup
-hooks, the VM or any provider starts. Compose plan review applies the same
-syntax rules, keeps the authored image text in the reviewed plan, and does not
-change existing plan identities.
+It returns the canonical `reference` and a `kind` of `docker_hub`, `registry` or
+`image_id`; an unacquirable reference refuses with `registry_image`. Native
+foreground `hack up` runs this admission for every authored service image before
+startup hooks, the VM or any provider starts. Compose plan review applies the
+same syntax rules, keeps the authored image text in the reviewed plan, and does
+not change existing plan identities.
+
+### Local registries
+
+A registry on this host or its local network is refused unless it is named
+exactly: `localhost` and `*.localhost`, loopback, private, link-local, CGNAT and
+multicast IPv4 literals (including numeric spellings such as `0x7f.0.0.1`),
+single-label hosts such as `registry:5000`, and mDNS `.local` names. The same
+rule applies to the address a connection actually uses: a public-looking name
+that resolves to any address that is not globally reachable unicast is refused
+with `registry_local_address`. That includes loopback, private (including IPv6
+`fc00::/7`), link-local, CGNAT, benchmarking (`198.18.0.0/15`), documentation,
+multicast, reserved and other special-purpose blocks, local-use NAT64
+(`64:ff9b:1::/48`), and IPv6 forms that embed such an IPv4 address. IP literals
+follow the same rule. This covers the registry, its redirects
+and its token endpoint. A private registry on an internal network therefore
+also needs an explicit opt-in. Allow one
+with `--allow-local-registry [http://]host[:port]` (repeatable) on `admit-image`,
+`resolve-image`, `fetch-image` and `ensure-image`. Without `http://` the registry
+must serve HTTPS; with it, plain HTTP is used for that registry only. Native
+`hack up` reads a comma-separated list from `HACK_NATIVE_LOCAL_REGISTRIES`, for
+example `HACK_NATIVE_LOCAL_REGISTRIES=http://localhost:5000`.
+
+### Registry credentials
+
+Requests start anonymous. When a registry answers `401`, the candidate first
+requests an anonymous Bearer token, then uses the host user's existing Docker
+credentials, in the Docker CLI's order: a `credHelpers` entry for the registry,
+then `credsStore`, then an `auths` entry (`auth`, `username`/`password` or
+`identitytoken`). Helpers run as `docker-credential-NAME get` from `PATH`; a
+helper may show its own approval prompt, such as a keychain prompt, and is
+stopped with its process group after 60 seconds. Processes a helper leaves
+running cannot extend that wait. The configuration is `~/.docker/config.json`, or
+`--docker-config DIR` (native `hack up` passes `DOCKER_CONFIG` when set).
+
+Credential lookup is read-only: nothing is logged in, stored, erased or rewritten.
+Credentials and tokens stay in memory for one acquisition, are sent only to the
+registry's own origin or its token endpoint, never to a redirected blob host,
+and never appear in output, receipts or errors. Only a `401` from the registry
+origin itself is answered; a redirected blob host that refuses access fails with
+`registry_redirect_refused` and no token or credential request. Docker Hub
+tokens come only from `auth.docker.io`. For other registries, an anonymous token
+may come from the registry origin or a public HTTPS host, but Docker credentials
+are sent only to a token endpoint on the registry origin, or over HTTPS on port
+443 at the registry's own host name or a parent domain of it (for example
+`gitlab.com` for `registry.gitlab.com`). Any other token endpoint refuses with
+`registry_realm_refused` before credentials are read. Run `docker login` (or
+your registry's helper setup) yourself before acquiring a private image.
+
+### Content, budgets and limits
 
 Omitting the tag selects `latest`. Resolution returns `pinned_reference`,
 `source_digest`, `manifest_digest`, `image_id` and `platform`; it downloads only
 bounded metadata and verifies one unambiguous Linux ARM64 image configuration.
 Pass the returned **pinned reference** to `fetch-image`, not the original tag.
 Resolution creates no archive or runtime state and does not prove that all image
-layers fit the importer limits or that the application starts. A missing public
-tag/object reports `registry_image_not_found`; no replacement image is selected.
+layers fit the budget or that the application starts. A missing tag or object
+reports `registry_image_not_found`; no replacement image is selected.
 
 The archive must not already exist. The result reports `source_digest`, the selected
 Linux ARM64 `manifest_digest`, config `image_id`, `archive_sha256`, and archive size.
 Pass that exact archive, hash and image ID to `runtime load-image` after preparing
 the candidate guest. Fetching and importing remain separate operations.
 
-The fetch verifies the pinned index/manifest, the selected ARM64 manifest, every
-compressed blob and config digest, and the expanded layer identities. It supports
-only gzip layers, at most 128 layers, 256 MiB archived and 2 GiB expanded. HTTPS
-requests have a 60-second limit within a 300-second acquisition deadline; redirects
-are restricted to known Docker Hub HTTPS blob origins, with no bearer forwarding to
-CDNs. It never reads Docker credentials or proxy settings. Mutable tags passed directly to fetch, private
-registries, other registries and unsupported platforms fail closed. No implicit
-image refresh occurs. Keep the archive only as long as needed for owned imports;
-fetch does not install a background cache or cleanup daemon. The complete archive is synced and published without replacing an existing path.
-A failed write leaves no final archive; process interruption may retain a hidden
-temporary file beside the requested output. A directory-sync failure reports that
-a complete archive was published but durability could not be confirmed.
+The fetch accepts OCI and Docker v2 indexes and manifests. It verifies the pinned
+index or manifest, the selected ARM64 manifest, the config and every layer against
+its descriptor digest and size while streaming them to disk, then validates the
+assembled archive again before publishing it. Layers may be gzip, zstd (including
+multiple and skippable frames) or uncompressed tar, at most 128 per image; foreign,
+non-distributable and external-URL layers refuse. The importer checks each decoded
+layer against the config's `diff_ids`.
+
+Sizes are bounded by an explicit, configurable budget instead of a fixed cap:
+
+| Budget | Default | Range | Flag | `hack up` setting |
+| --- | --- | --- | --- | --- |
+| Compressed archive per image | 2 GiB | 16 MiB to 8 GiB | `--image-budget-mib N` | `HACK_NATIVE_IMAGE_BUDGET_MIB` |
+| Decoded content per image | 5 times the archive budget | follows the archive budget | none | none |
+| Image cache total | 16 GiB | 16 MiB to 256 GiB, at least one image budget | `--image-cache-mib N` | `HACK_NATIVE_IMAGE_CACHE_MIB` |
+
+The manifest states every layer size, so an image larger than the archive budget
+or the cache's remaining budget refuses before any layer transfer or disk write.
+`load-image` applies the same flags. The whole acquisition has a 360-second
+deadline; each layer request allows at least 1 MiB/s. Native `hack up` gives one
+`ensure-image` request 10 minutes for acquisition and import, and a completed
+archive is reused on the next attempt. Redirects stay on the registry origin,
+Docker Hub's known blob hosts, or (for other registries) public HTTPS hosts on
+port 443; local destinations and embedded credentials refuse. Proxy settings are
+not used. TLS uses the bundled public root certificates, so a registry signed by
+a private certificate authority is not reachable yet. Host names are classified
+before connecting, and resolved addresses are checked again before each
+connection (see [Local registries](#local-registries)).
+
+No implicit image refresh occurs. Keep the archive only as long as needed for owned
+imports; fetch does not install a background cache or cleanup daemon. The complete
+archive is synced, validated and published without replacing an existing path.
+A failed write or verification leaves no final archive; process interruption may
+retain a hidden temporary file beside the requested output. A directory-sync failure
+reports that a complete archive was published but durability could not be confirmed.
+
+`runtime ensure-image --reference REF [--emulation native|prefer-native|amd64] --json`
+resolves, caches and imports one image into the running pool; the image policy flags
+described above follow `--json`. Without `--emulation`
+(or with `native`) it admits Linux arm64 only. `prefer-native` selects arm64 when the
+index publishes it and otherwise the exact `linux/amd64` image; `amd64` selects only
+`linux/amd64`. The result's `platform` names the imported platform, which the image
+configuration must confirm. An amd64 archive is cached under its own address, never
+reused for arm64, and imports only into a pool booted with translation; see
+[amd64 emulation with Rosetta 2](#amd64-emulation-with-rosetta-2).
 
 ### Explicit writable development source
 
@@ -927,9 +1156,10 @@ source revision. Cache initializer services read that immutable publication thro
 read-only source mounts; their named cache volumes remain writable. This prevents
 concurrent host edits from changing the inputs halfway through installation.
 Other services use the direct host mount with their declared read/write mode.
-Because virtiofs preserves host ownership, those services receive `DAC_OVERRIDE`
-in addition to the otherwise empty capability set. This allows root processes to
-access the explicitly shared tree; it does not bypass a read-only mount.
+Because virtiofs preserves host ownership, those services keep `DAC_OVERRIDE`
+(part of the default capability set) even when `cap_drop` removes it. This allows
+root processes to access the explicitly shared tree; it does not bypass a read-only
+mount.
 An installer that needs to modify source files is not supported in this mode yet.
 Restart after dependency-input changes with a new review and publication.
 Moving or deleting a project prevents further activation, but does not prevent
@@ -970,22 +1200,28 @@ Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `hack logs SERVICE --no-follow`. They verify the project/branch run mapping
 against the current native graph. Logs do not support following or Loki options.
 A project with no admitted mapping reports not started. `hack ps` keeps container
-observations separate from the last graph receipt. For a ready foreground graph,
+observations separate from the last graph receipt; an exited container's state
+shows its exit code, as in Compose (`exited (1)`). For a ready foreground graph,
 it also checks the live owner: `owner_unconfirmed` means the
 owner could not be authenticated, while `runtime_degraded` means its runtime check
 failed. A stopped candidate runtime is an ordinary state for `ps`: with a mapping
 present it exits 0 and reports `runtime_not_running` (no phase, no service rows),
 and text output prints "Native runtime is not running; no services are running."
+A provider lease held for the whole bounded read, for example by a starting
+foreground `up`, is also an ordinary state: `ps` exits 0 and reports
+`runtime_busy` (no phase, no service rows). Reads retry brief lease contention.
 `hack ps --json` prints the standard `{ok: true, data}` envelope; `data` holds
-`backend: "native"`, `status` (`not_started`, `runtime_not_running`, `observed`,
-`owner_unconfirmed` or `runtime_degraded`), `run`, `phase` and `items`. Bounded
+`backend: "native"`, `status` (`not_started`, `runtime_not_running`,
+`runtime_busy`, `observed`, `owner_unconfirmed` or `runtime_degraded`), `run`,
+`phase` and `items`. Bounded
 logs refuse a stopped runtime with `E_DOCKER_UNAVAILABLE` and exit 1. Native `exec` and `run` refresh admitted host dependencies once before
 command selection and managed environment preparation. They proceed only with
 fresh ownership and runtime proof, even if containers still appear running.
 Unconfirmed ownership or an incomplete refresh requires inspection and explicit
 retaining recovery; command requests are never replayed.
 Foreground whole-project `hack up` additionally requires
-`HACK_NATIVE_SHARED_SOURCE=1`: it exposes the exact
+`HACK_NATIVE_SHARED_SOURCE=1` or `"sharedSource": true` in the
+[machine settings](#native-settings-files): it exposes the exact
 project tree, including ignored files, with each mount's declared write mode. Use
 an explicitly prepared candidate home and the binary from a complete native bundle.
 It acquires public images, privately supplies managed environment values, runs
@@ -1063,7 +1299,12 @@ form: run `hack up` in the foreground in its own terminal and use `hack ps` and
 `hack logs` from another. Routed services and host dependencies require the
 explicit native selections described below. Unsupported Compose or environment input
 (for example a service `env_file`, or a project `.env` without managed env) and
-unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`; invalid branch
+unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`. The input
+refusal names its cause and, where known, the service and Compose field (for
+example `service api field env_file`), never values or file contents. Secret
+managed env without a project env key refuses with `E_CONFIG_INVALID` and names the
+recovery actions; other unreadable managed env refuses with `E_CONFIG_INVALID`
+without layer excerpts. Invalid branch
 hosts, project adaptations, AWS selections and changed fresh-exec environments refuse
 with `E_CONFIG_INVALID`, as do an unbounded `--profile` selection, a malformed
 `HACK_NATIVE_DEPENDENCIES` listener selection and an occupied HTTPS port. A runtime
@@ -1250,12 +1491,15 @@ restored one-off remain open. An uncertain shutdown retains its mapping and evid
 for recovery; do not delete managed state to retry.
 
 After starting an owned native pool, `runtime ensure-image --reference REF --json`
-resolves a public Docker Hub tag (including shorthand such as `alpine:3.21`) or
+resolves a registry tag (including Docker Hub shorthand such as `alpine:3.21`) or
 accepts an explicit digest, reuses the verified
 archive cache, and imports through the existing content-ID-checked loader. Tags
 are resolved on each call; a warm explicit digest needs no registry request.
-The cache is limited to 16 archives and 2 GiB; an incomplete or conflicting entry
-requires inspection, and the command never prunes existing data. This command
+It accepts the [image policy flags](#registry-image-acquisition-without-docker).
+The cache holds at most 64 archives within its configured budget (16 GiB by
+default); an incomplete or conflicting entry requires inspection, and the command
+never prunes existing data. Lowering a budget keeps existing entries readable, but
+the loader refuses an archive larger than the current per-image budget. This command
 is a startup building block, not evidence of complete normal `hack up` support.
 
 Explicit Compose `shm_size` supports positive sizes up to 1 GiB, including
@@ -1480,8 +1724,9 @@ identity and no listener. Torn records and sockets without complete ownership
 evidence remain unavailable; do not delete them to force allocation. Recovery of an
 already enrolled graph requires verified graph cleanup instead.
 
-`HACK_NATIVE_DEPENDENCIES` selects an absolute path to a regular JSON file with
-explicit host listeners. The CLI reads it after lifecycle hooks, so a hook can
+`HACK_NATIVE_DEPENDENCIES`, or `dependencies` in the
+[machine settings](#native-settings-files), selects a regular JSON file with
+explicit host listeners; the variable takes an absolute path. The CLI reads it after lifecycle hooks, so a hook can
 prepare current listeners before selection. For example:
 
 ```json
@@ -1500,6 +1745,35 @@ prepare current listeners before selection. For example:
 
 Replace the example PID with the actual listener process. Up to 128 service-specific
 bindings and eight exact aliases per binding are supported, within 32 listening transports shared with the pool's route bridges.
+
+When several services need the same binding, version 2 lets one entry list them
+with `services` instead of repeating the entry for each `service`:
+
+```json
+{
+  "version": 2,
+  "dependencies": [{
+    "services": ["web", "worker", "api"],
+    "binding": "search",
+    "guest_port": 443,
+    "aliases": ["search.example.com"],
+    "host_executable": "/usr/local/bin/tunnel",
+    "host_port": 8443
+  }]
+}
+```
+
+Hack expands each such entry into one version 1 entry per listed service, in order,
+with the same binding, ports and host authority, and then validates the result exactly
+as version 1. Each listed service receives the binding's aliases that it declares as
+`host-gateway` extra hosts (native review accepts no others), so when every listed
+service declares every alias, both forms produce the same dependency plan. The limits
+count expanded entries: at most 128 bindings in all. An entry sets at most one of
+`service` and `services`; a version 2 entry that names neither applies to every service
+that declares one of its aliases, as described with project-wide host aliases
+below. A service listed twice, or a binding name used by more than one entry, refuses
+as a duplicate. Version 1 files keep working unchanged.
+
 For a listener started or rotated by a lifecycle hook, replace `host_pid` with
 `"host_executable": "/absolute/path/to/the/listener-binary"`. Hack discovers
 the current PID after the hooks and again before restart cleanup, requiring one
@@ -1524,6 +1798,34 @@ Bindings sharing one listening transport must select the same executable, depth
 and reviewed ownership policy. A replaced ancestor, changed chain, adopted
 listener or inconsistent shared selection refuses before relay grants change.
 
+A listener that Hack itself starts can instead be selected by its owner, with no
+PID, path or depth in the file. Replace the authority fields with exactly one of:
+
+- `"host_lifecycle": "NAME"`: a persistent `up.before` hook (its `name`, or
+  `hook-N` when unnamed) or a `lifecycle.processes` entry of this instance. Hack
+  reads the pane PID from its lifecycle state and requires the live tmux session
+  to carry the recorded ownership token and that pane to be alive. zellij
+  sessions record no pane PID and refuse.
+- `"host_shared_helper": "NAME"`: an enabled `lifecycle.sharedHelpers` entry
+  whose claim is `owned` and `ready`, lists this instance as a holder, and whose
+  PID and birth time are live. An adopted helper refuses.
+
+After the hooks, Hack asks native discovery for the one same-user exclusive IPv4
+loopback listener on `host_port` and requires it to be the owner process or its
+descendant within eight ancestry links; it then proves the owner again. A
+listener outside the owner's tree refuses with "Native host dependency listener
+does not run under its selected owner"; this includes a listener the hook only
+adopted, or one that detached (for example with `ssh -f`), even if it was started
+by the hook. Use a `host_executable` selection for those. A listener deeper than
+the owner is reviewed as an executable selection at the discovered depth whose
+final ancestor must be exactly that owner process (PID and native start time), so
+a refresh follows replacements only beneath it. An owner that is itself the
+listener is a fixed-PID selection without replacement authority. Bindings sharing
+a host port must name the same owner. The owner names never reach native review,
+and the frontend never persists the resolved PIDs. Restart preflight resolves the
+same owners against the running instance; a cleaned retry validates the intent
+only and resolves owners after its hooks.
+
 Startup allows up to 60 seconds total for persistent hooks to create all selected
 listeners, with cancellable waits and bounded read-only discovery requests. It
 retries only native endpoint-identity refusals; malformed selections and other
@@ -1544,7 +1846,8 @@ With a packaged candidate, invoke it as:
 ./hack-native --candidate-root /absolute/private/candidate-home graph refresh-dependencies --run-id RUN_ID --json
 ```
 
-Only `host_executable` selections can follow a replacement, using the original
+Only `host_executable` selections (including owner-scoped selections deeper than
+their owner) can follow a replacement, using the original
 executable, host port and unchanged same-user ancestor selected by
 `host_supervisor_depth`, retaining the reviewed intermediate executable chain. A matching
 executable or port alone is insufficient. Missing or ambiguous listeners,
@@ -1682,8 +1985,15 @@ Subprocess text and unknown codes remain omitted. These diagnostics do not confi
 whether refresh effects occurred or authorize replay; the command is not dispatched.
 `ps` and `logs` remain observations and do not request refresh. Authenticated relay
 traffic reports a stale endpoint to the foreground owner, which attempts bounded
-refresh without idle polling. The affected application request can fail; it is
-never replayed, and later traffic can use a verified replacement. The explicit
+refresh without idle polling. The owner also watches each admitted replaceable
+listener process for exit (a kernel exit notice, not a scan), so a replaced
+listener is refreshed before the next request reaches it. Attempts run one at a
+time. When no replacement is listening yet, the refusal happens before any
+effect, and the owner retries after 1, 2, 4, 8, 15 and 30 seconds; after that only
+a new stale notice re-arms it. Once a rebind has written its journal and not
+completed, the owner never retries automatically. The affected application
+request can fail; it is never replayed, and later traffic can use a verified
+replacement. The explicit
 operation is also available before traffic. Refresh does not renew startup
 environment allocations. A lost reply or interrupted transition is never replayed.
 Partial transitions remain fenced and refuse new admission; inspect owned state and
@@ -1751,12 +2061,14 @@ each binding once:
 
 Without `services`, the entry applies to every profile-active service that
 declares one of its aliases, and each service receives only the aliases it
-declares. `"services": ["web", "worker"]` limits it to those services, each of
-which must declare at least one of the aliases. The CLI expands the entry into
-the version 1 bindings shown above before discovery and review. The same listener
-authority applies to every expanded binding, and the 128-binding and 32-transport
-limits apply after expansion. A repeated binding name, an alias no selected service
-declares, a per-entry `service` key or an unknown or inactive service refuses.
+declares. `"services": ["web", "worker"]` limits it to those services, in that
+order, each of which must declare at least one of the aliases; `"service": "web"`
+is shorthand for a one-element list, and an entry sets at most one of the two.
+The CLI expands the entry into the version 1 bindings shown above before
+discovery and review. The same listener authority applies to every expanded
+binding, and the 128-binding and 32-transport limits apply after expansion. A
+repeated binding name, an alias no selected service declares, both `service` and
+`services`, or an unknown or inactive service refuses.
 
 Fresh pools reserve the number of distinct dependency transports from that
 selection. Existing pool capacity cannot be silently widened. The selection is copied into the temporary exact-plan
@@ -1811,9 +2123,10 @@ service when the native backend is selected. The `httpProbes` adaptation below
 accepts only `port` and `path` and fills the other four fields with the same values.
 
 For projects whose checked-in Compose file needs explicit native health probes,
-`HACK_NATIVE_ADAPTATION` selects an absolute JSON file. This leaves the source file
-unchanged and preserves its identity in native review. Only the following bounded
-adaptations are accepted:
+an adaptation file adds them. Commit it as `.hack/native/adaptation.json` (see
+[Native settings files](#native-settings-files)), or select any absolute JSON file
+with `HACK_NATIVE_ADAPTATION`. This leaves the Compose file unchanged and preserves
+its identity in native review. Only the following bounded adaptations are accepted:
 
 ```json
 {
@@ -1826,6 +2139,10 @@ adaptations are accepted:
     "volume": "node_modules",
     "root": "/app",
     "workspaces": ["apps/web", "packages/db"]
+  },
+  "amd64Emulation": {
+    "default": "prefer-native",
+    "services": {"legacy-worker": "amd64", "db": "native"}
   }
 }
 ```
@@ -1849,6 +2166,189 @@ including the root mount's read-only setting. Unrelated services are unchanged.
 The layout participates in native dependency-cache identity. This shares compatible
 workspace installations; it does not implement a cross-project package store or
 claim deduplication across different lockfiles.
+
+### amd64 emulation with Rosetta 2
+
+The native VM is Linux arm64. On an Apple silicon Mac with Rosetta 2 installed
+(`softwareupdate --install-rosetta`), `amd64Emulation` lets selected services run
+`linux/amd64` images under Rosetta 2 x86_64 translation inside the VM. It is off unless
+the selection opts a service in, and each service takes one mode:
+
+| Mode | Image platform |
+| --- | --- |
+| `native` (default) | Linux arm64 only. A declared `platform: linux/amd64` keeps the project on the Compose backend. |
+| `prefer-native` | The arm64 variant when the image publishes one, so multi-arch images stay native even when the service declares `linux/amd64`. An image that publishes only `linux/amd64` runs under emulation. |
+| `amd64` | The `linux/amd64` variant under emulation, even when the image also publishes arm64. Use it when the workload needs x86_64 binaries, for example prebuilt native modules. |
+
+`default` sets the mode for every service without its own entry in `services`; omit it
+to keep `native`. A named service must exist, a service that declares a Linux arm64
+`platform` cannot opt in, and an unknown mode refuses with `E_CONFIG_INVALID`. Only the
+exact `linux/amd64` platform is emulated; microarchitecture variants such as `v3` and
+other platforms are never selected.
+
+When any service opts in, native `up` requests a pool with translation
+(`runtime up --amd64-emulation`). A fresh pool is created with SmolVM's `--rosetta`;
+a stopped pool is updated with `machine update --rosetta` before it starts; a running
+pool without translation refuses with `amd64_emulation_restart_required` and nothing is
+stopped. Stop every native project that uses the pool, then start again. A pool keeps
+translation once it has it, so other projects sharing it are unaffected: their services
+still resolve arm64 images. Without Rosetta 2 the start refuses with
+`amd64_emulation_unavailable` before any VM effect.
+
+Every boot audits translation against the pool's recorded intent: the provider's
+stored machine setting, its running configuration, and the guest's `binfmt_misc`
+`rosetta` registration (the x86_64 ELF match with the fixed `rosetta-wrapper`
+interpreter). A pool without translation must have no such registration. The image
+cache keeps amd64 archives separate from arm64 ones. Under `prefer-native`, a cached
+amd64 archive is reused only after the pinned image is confirmed not to publish arm64.
+The runtime admits an amd64 image only for an opted-in service
+(`x-hack-amd64-emulation: prefer-native` or `amd64` in the reviewed Compose service,
+which the adaptation writes) in a pool booted with translation. A service that is not
+opted in still refuses a declared `linux/amd64` in native review.
+
+The mode is part of the reviewed plan. Restart and restored `up` reuse a service's
+retained image only when the retained graph recorded the same mode for it; after a mode
+change the service's image is selected again under the new mode.
+
+Emulated services are slower than native ones and can behave differently from arm64
+builds. `hack doctor` on the native backend reports an `amd64 emulation` warning with
+the number of opted-in services in each mode (counts only, no service names), and
+names the Rosetta 2 install command when it is missing.
+
+### Native settings files
+
+Every native selection above can also come from a file, so a project runs with plain
+`hack up` instead of a set of exported variables. There are two kinds of file, because
+they carry different authority:
+
+| File | Holds | Where | Commit it? |
+| --- | --- | --- | --- |
+| Project adaptation | The adaptation above (`isolatedNetworks`, `httpProbes`, `additionalHostnames`, `additionalHostAliases`, `workspaceCache`, `amd64Emulation`) | `.hack/native/adaptation.json`, and optionally `.hack/native/adaptation.<env>.json` | Yes. Every checkout and worktree shares it. |
+| Machine settings | Grants and host authority: the project share, the AWS profile, host dependency files, HTTPS, prepared base and approved hosts | `${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/settings.json` | Never. It is per machine. |
+
+The project adaptation has the same authority as the Compose file it adapts. It grants
+nothing: its schema is the closed adaptation schema above, so a grant such as
+`sharedSource` in it refuses with `E_CONFIG_INVALID`. Hack reads only
+`adaptation.json` and `adaptation.<env>.json` from `.hack/native/`, where `<env>` is
+a lowercase env name. `hack doctor` warns about any other file there.
+
+The machine settings file lives outside the project because the project tree is
+shared read/write with the native VM: a container could rewrite a grant stored in the
+tree before the next `up`. `<project>` is the project name Hack uses (the Compose
+`name:`, else `name` in `hack.config.json`, else the directory name), lowercased with
+other characters replaced by `-`. Linked worktrees and branch instances of one project
+therefore find the same machine file.
+
+Any checkout can claim a project name, so the file grants only the checkouts it lists
+in `projectRoots`: absolute paths of project roots (at most 16). Hack compares the
+canonical path of the current project root with the canonical path of each entry, so a
+symbolic link to a listed root works. An entry that no longer exists is skipped. Branch
+instances share their checkout's root; list each linked worktree you want to grant.
+Create the file once per machine:
+
+```sh
+dir="${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/my-app"
+mkdir -p -m 700 "$dir"
+chmod 700 "$dir"
+touch "$dir/settings.json" && chmod 600 "$dir/settings.json"
+```
+
+```json
+{
+  "version": 1,
+  "projectRoots": ["/absolute/path/to/my-app"],
+  "sharedSource": true,
+  "aws": {"profile": "dev-sso", "region": "us-east-1"},
+  "dependencies": "dependencies.json",
+  "dependenciesByEnv": {"qa": "dependencies.qa.json"},
+  "https": {"caddyBinary": "/opt/caddy/bin/caddy", "caddySha256": "<sha256>", "port": 443},
+  "preparedBase": {"mode": "prefer"},
+  "allowHosts": ["registry.npmjs.org"]
+}
+```
+
+Every field except `version` and `projectRoots` is optional. The other fields match
+the variables:
+
+| Field | Variable it stands for |
+| --- | --- |
+| `sharedSource` (`true` or `false`) | `HACK_NATIVE_SHARED_SOURCE=1` |
+| `aws.profile`, `aws.region` | `HACK_NATIVE_AWS_PROFILE`, `HACK_NATIVE_AWS_REGION` |
+| `dependencies`, `dependenciesByEnv` | `HACK_NATIVE_DEPENDENCIES` |
+| `https.caddyBinary`, `https.caddySha256`, `https.port` | `HACK_NATIVE_CADDY_BINARY`, `HACK_NATIVE_CADDY_SHA256`, `HACK_NATIVE_HTTPS_PORT` |
+| `preparedBase.mode` (`prefer`, `require` or `off`), `preparedBase.store` | `HACK_NATIVE_PREPARED_BASE`, `HACK_NATIVE_PREPARED_BASE_STORE` |
+| `allowHosts` (a list) | `HACK_NATIVE_ALLOW_HOSTS` (a comma-separated list) |
+
+`dependencies` and `dependenciesByEnv` name host dependency files (the format above)
+in the same directory: plain file names, never paths. The machine settings do not
+select the adaptation, the native binary or the native home. A `gcloud` field or any
+other field refuses.
+
+Hack refuses the machine file with `E_CONFIG_INVALID` before any branch, lifecycle,
+storage or runtime work unless all of these hold:
+
+- the directory is a real directory owned by you with mode `0700`;
+- the directory is outside the project root, and the project root is not inside it;
+- `settings.json` is a regular file owned by you with mode `0600`, not a symbolic or
+  hard link, at most 64 KiB, and unchanged while it is read;
+- every field is valid, including a field that a variable overrides. `aws.profile`
+  and `aws.region` must be selectors that native AWS adaptation accepts, and so must
+  `HACK_NATIVE_AWS_PROFILE` and `HACK_NATIVE_AWS_REGION`.
+
+Before it reads any other field, Hack refuses the file with `E_PERMISSION` when
+`projectRoots` is missing or does not list the current project root. The refusal
+happens before any lifecycle hook runs, even when variables override every setting.
+A file written before `projectRoots` existed therefore grants nothing: add the
+project root to it to grant that checkout again.
+
+A missing directory or file means no machine settings.
+
+**Precedence.** For each setting, a variable that is set wins entirely, even when it
+is empty, then the machine settings, then the committed project file. Values are never
+merged. For example, `HACK_NATIVE_ADAPTATION` replaces the committed adaptation, and
+`HACK_NATIVE_SHARED_SOURCE=0` withholds a share that the machine file grants. A
+non-empty `HACK_NATIVE_AWS_PROFILE` selects the AWS variables; `HACK_NATIVE_AWS_REGION`
+without it is ignored, as before. Existing scripts that export the variables keep
+their exact behavior.
+
+**Per-env files.** `adaptation.<env>.json` and `dependenciesByEnv.<env>` replace the
+base file for runs whose effective env is `<env>`: the `--env` you pass, the env a
+retained run recorded, or the project's default env. This holds even when the project
+has no `hack.env.*` files, or has `hack.env.default.yaml` but no `hack.env.<env>.yaml`.
+Otherwise the base file applies. A fresh start, a retained start and a restart of one
+run therefore always select the same files. The run records which managed env files
+its env had at startup (none, the base only, or the overlay). A later `restart`,
+retained `up` or fresh `exec` refuses when that changed, and names the file: an
+overlay that existed is gone, or an overlay (or, for a run started without any, a
+managed env file) appeared. To apply an appeared file, run `hack down`, then `hack up`.
+`down` hooks of such a run get the values it started with (none, or the base values),
+so `down` is not blocked. A removed overlay can be restored to keep the run; `down`
+hooks of a run that started with it refuse, naming the file, until it is restored.
+
+**Identity and recovery.** Settings resolution only reads files. It writes no state,
+so Ctrl-C needs no cleanup, and `down`, `ps`, `logs`, `exec` and `run` keep using the
+saved run mapping without reading the settings. A file-selected run and a
+variable-selected run with the same contents review the same native plan, so
+`restart` retains the run either way.
+
+`hack doctor` on the native backend adds a `native settings` check. It reports where
+each setting came from (`env`, `machine`, `project` or `unset`), never its value, and
+the machine settings path with your home shown as `~`. With `--json`, the check's
+`nativeSettings` holds `origins`, `adaptationFiles`, `machineSettings` and closed
+`warnings`:
+
+| Warning | Meaning |
+| --- | --- |
+| `shared_source_not_granted` | Native `up` and `restart` refuse until the project share is granted. |
+| `internal_dns_tls_not_applied` | `internal.dns` and `internal.tls` in `hack.config.json` are not applied on native, so containers cannot reach routes by their HTTPS names. Set both to `false` to silence it. |
+| `routes_without_probes` | `routesWithoutProbes` routed services have no native HTTP probe after the adaptation for the default env; native `up` refuses them. |
+| `compose_profiles_ignored` | `COMPOSE_PROFILES` is set in the environment, but native selects profiles only from `--profile`. Managed `COMPOSE_PROFILES` values are not inspected. |
+| `aws_region_without_profile` | `HACK_NATIVE_AWS_REGION` is set without `HACK_NATIVE_AWS_PROFILE` and is ignored. |
+| `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |
+
+An invalid settings file makes the check an error with the same closed line native
+`up` prints. Each adaptation file (the base and every `adaptation.<env>.json`) is
+checked against the Compose file with the validator native `up` uses. The check runs no runtime request, credential export or network call.
 
 ### Optional prepared base for a fresh pool
 

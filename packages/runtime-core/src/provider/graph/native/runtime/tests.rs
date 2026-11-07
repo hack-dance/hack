@@ -1016,7 +1016,8 @@ impl Backend for Fake {
                     failures: vec![crate::provider::engine::StopFailure {
                         id: selected[0].0.clone(),
                         stage: crate::error::StopFailureStage::Timeout,
-                    }],
+                    }]
+                    .into(),
                 },
                 admitted,
             ));

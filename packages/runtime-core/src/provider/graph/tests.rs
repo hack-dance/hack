@@ -138,6 +138,11 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
                     json!({"/tmp":"rw,noexec,nosuid,size=16777216"})
                 );
                 assert_eq!(host["CapDrop"], json!(["ALL"]));
+                // Compose-file services receive Docker's default set explicitly.
+                assert_eq!(
+                    host["CapAdd"],
+                    json!(project::capabilities::effective(None).unwrap())
+                );
                 assert_eq!(host["SecurityOpt"], json!(["no-new-privileges"]));
                 assert!(host.get("Privileged").is_none());
                 let mut changed = host.clone();
@@ -155,6 +160,518 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
         }
     }
     assert!(!candidate.state_root.exists());
+}
+#[test]
+fn compose_capabilities_lower_the_docker_default_profile_with_adjustments() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let defaults = project::capabilities::effective(None).unwrap();
+    let without = |names: &[&str]| -> Vec<String> {
+        defaults
+            .iter()
+            .filter(|name| !names.contains(&name.as_str()))
+            .cloned()
+            .collect()
+    };
+    let mut with_admin = without(&["CAP_NET_RAW"]);
+    with_admin.push("CAP_NET_ADMIN".into());
+    with_admin.sort();
+    for (add, drop, expected) in [
+        (None, None, Some(defaults.clone())),
+        (Some(json!([])), Some(json!([])), Some(defaults.clone())),
+        (
+            Some(json!(["net_admin"])),
+            Some(json!(["NET_RAW"])),
+            Some(with_admin),
+        ),
+        (
+            Some(json!(["CHOWN", "SETUID", "SETGID"])),
+            Some(json!(["ALL"])),
+            Some(vec![
+                "CAP_CHOWN".to_owned(),
+                "CAP_SETGID".into(),
+                "CAP_SETUID".into(),
+            ]),
+        ),
+        (Some(json!(["SYS_ADMIN"])), None, None),
+        (Some(json!(["SYS_PTRACE"])), None, None),
+        (Some(json!(["ALL"])), None, None),
+        (None, Some(json!(["NOT_A_CAPABILITY"])), None),
+    ] {
+        let mut document = compose(&format!("sha256:{}", "a".repeat(64)), "marker", false);
+        if let Some(add) = &add {
+            document["services"]["web"]["cap_add"] = add.clone();
+        }
+        if let Some(drop) = &drop {
+            document["services"]["web"]["cap_drop"] = drop.clone();
+        }
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        // Omitted and empty adjustments add nothing to the reviewed plan, so plans
+        // without capability fields keep their existing identity.
+        let declared = add.as_ref().is_some_and(|v| v != &json!([]))
+            || drop.as_ref().is_some_and(|v| v != &json!([]));
+        assert_eq!(
+            serde_json::to_value(&review.plan.services["web"])
+                .unwrap()
+                .get("capabilities")
+                .is_some(),
+            declared && expected.is_some()
+        );
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        );
+        let Some(expected) = expected else {
+            // Refused capabilities block the reviewed plan before any lowering.
+            assert!(!review.plan.enrollment_compatible, "{add:?} {drop:?}");
+            assert!(review.plan.diagnostics.iter().any(|d| {
+                d.severity == "error"
+                    && ["capability_refused", "unknown_capability"].contains(&d.code.as_str())
+            }));
+            assert!(inputs.is_err());
+            continue;
+        };
+        let prepared = config::prepare(
+            inputs.unwrap(),
+            &goals(),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+        )
+        .unwrap();
+        let host = &prepared.configs["web"]["HostConfig"];
+        assert_eq!(host["CapDrop"], json!(["ALL"]));
+        assert_eq!(host["CapAdd"], json!(expected));
+        assert_eq!(host["SecurityOpt"], json!(["no-new-privileges"]));
+        assert!(host.get("Privileged").is_none());
+        // Services without adjustments keep the default profile in the same graph.
+        assert_eq!(
+            prepared.configs["init"]["HostConfig"]["CapAdd"],
+            json!(defaults)
+        );
+        // Inspection that lost a capability, or gained one, is a config mismatch.
+        let mut observed = host.clone();
+        observed["CapAdd"] = json!(defaults[1..]);
+        if expected.len() == defaults.len() {
+            assert_eq!(
+                mismatch(host, &observed, "HostConfig").as_deref(),
+                Some("HostConfig.CapAdd")
+            );
+        }
+        observed["CapAdd"] = Value::Null;
+        if !expected.is_empty() {
+            assert_eq!(
+                mismatch(host, &observed, "HostConfig").as_deref(),
+                Some("HostConfig.CapAdd")
+            );
+        }
+    }
+}
+
+#[test]
+fn image_architecture_admission_follows_the_reviewed_emulation_policy() {
+    use crate::project::Amd64Emulation::{Amd64, PreferNative};
+    let arm64 = json!({"Os": "linux", "Architecture": "arm64"});
+    let amd64 = json!({"Os": "linux", "Architecture": "amd64"});
+    for translation in [false, true] {
+        // arm64 runs natively unless the reviewed policy requires amd64, whatever the
+        // image's origin (a pinned or an already-local content ID).
+        assert!(admitted_platform(&arm64, None, translation));
+        assert!(admitted_platform(&arm64, Some(PreferNative), translation));
+        assert!(!admitted_platform(&arm64, Some(Amd64), translation));
+        // amd64 needs an opted-in service and a translation pool.
+        assert!(!admitted_platform(&amd64, None, translation));
+        assert_eq!(
+            admitted_platform(&amd64, Some(PreferNative), translation),
+            translation
+        );
+        assert_eq!(
+            admitted_platform(&amd64, Some(Amd64), translation),
+            translation
+        );
+    }
+    for other in [
+        json!({"Os": "darwin", "Architecture": "arm64"}),
+        json!({"Os": "linux", "Architecture": "riscv64"}),
+        json!({"Os": "linux"}),
+    ] {
+        for policy in [None, Some(PreferNative), Some(Amd64)] {
+            assert!(!admitted_platform(&other, policy, true));
+        }
+    }
+}
+
+#[test]
+fn declared_amd64_requires_the_explicit_emulation_opt_in() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    for (platform, opted, admitted) in [
+        (None, false, true),
+        (Some("linux/arm64"), false, true),
+        (Some("linux/amd64"), false, false),
+        (Some("linux/amd64"), true, true),
+        (None, true, true),
+    ] {
+        let mut document = compose(&format!("sha256:{}", "a".repeat(64)), "marker", false);
+        if let Some(platform) = platform {
+            document["services"]["web"]["platform"] = json!(platform);
+        }
+        if opted {
+            document["services"]["web"]["x-hack-amd64-emulation"] = json!("prefer-native");
+        }
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        match config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32), None) {
+            Ok(prepared) => {
+                assert!(admitted, "{platform:?} {opted}");
+                let web = prepared
+                    .resources
+                    .values()
+                    .find(|resource| resource.key == "web" && resource.kind == Kind::Container)
+                    .unwrap();
+                // Only the opted-in service may later admit an amd64 image; the others stay
+                // arm64-only regardless of what the engine holds.
+                assert_eq!(
+                    web.amd64_emulation,
+                    opted.then_some(crate::project::Amd64Emulation::PreferNative)
+                );
+                assert!(
+                    prepared
+                        .resources
+                        .values()
+                        .filter(|resource| resource.key != "web")
+                        .all(|resource| resource.amd64_emulation.is_none())
+                );
+            }
+            Err(error) => {
+                assert!(!admitted, "{platform:?} {opted}");
+                assert_eq!(error.code, "graph_subset");
+            }
+        }
+    }
+    assert!(!candidate.state_root.exists());
+}
+#[test]
+fn compose_restart_policies_lower_to_engine_policies_with_receipt_authority() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    for (web, init, expected) in [
+        (None, None, Ok((json!({"Name":"no"}), None))),
+        (
+            Some("unless-stopped"),
+            Some("on-failure:2"),
+            Ok((
+                json!({"Name":"unless-stopped","MaximumRetryCount":0}),
+                Some(restart_policy::RestartPolicy::UnlessStopped),
+            )),
+        ),
+        (
+            Some("always"),
+            Some("no"),
+            Ok((
+                json!({"Name":"always","MaximumRetryCount":0}),
+                Some(restart_policy::RestartPolicy::Always),
+            )),
+        ),
+        (
+            Some("on-failure:3"),
+            None,
+            Ok((
+                json!({"Name":"on-failure","MaximumRetryCount":3}),
+                Some(restart_policy::RestartPolicy::OnFailure {
+                    maximum_retry_count: 3,
+                }),
+            )),
+        ),
+        // A completion goal cannot use an unconditional policy (review and graph).
+        (None, Some("unless-stopped"), Err(())),
+    ] {
+        let mut document = compose(&format!("sha256:{}", "a".repeat(64)), "marker", false);
+        if let Some(value) = web {
+            document["services"]["web"]["restart"] = json!(value);
+        }
+        if let Some(value) = init {
+            document["services"]["init"]["restart"] = json!(value);
+        }
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let compiled = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        );
+        let result = compiled.and_then(|inputs| {
+            config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32), None)
+        });
+        let Ok((policy, admitted)) = expected else {
+            assert!(result.is_err(), "{web:?} {init:?}");
+            continue;
+        };
+        let prepared = result.unwrap();
+        assert_eq!(
+            prepared.configs["web"]["HostConfig"]["RestartPolicy"],
+            policy
+        );
+        assert_eq!(prepared.resources["container:web"].restart_policy, admitted);
+        // `check` never declared a policy and keeps Docker's `no`.
+        assert_eq!(
+            prepared.configs["check"]["HostConfig"]["RestartPolicy"],
+            json!({"Name":"no"})
+        );
+        assert!(
+            prepared.resources["container:check"]
+                .restart_policy
+                .is_none()
+        );
+        let init_policy = prepared.resources["container:init"].restart_policy;
+        assert_eq!(
+            init_policy,
+            (init == Some("on-failure:2")).then_some(restart_policy::RestartPolicy::OnFailure {
+                maximum_retry_count: 2
+            })
+        );
+        // The admitted policy is part of the retained resource binding: a replay
+        // under a different policy cannot adopt these containers.
+        let mut changed = prepared.resources.clone();
+        changed.get_mut("container:web").unwrap().restart_policy = if admitted.is_some() {
+            None
+        } else {
+            Some(restart_policy::RestartPolicy::Always)
+        };
+        assert!(same_resource_bindings(
+            &prepared.resources,
+            &prepared.resources
+        ));
+        assert!(!same_resource_bindings(&changed, &prepared.resources));
+        // Receipt encoding omits an absent policy so existing receipts are unchanged.
+        let encoded = serde_json::to_value(&prepared.resources["container:check"]).unwrap();
+        assert!(encoded.get("restart_policy").is_none());
+    }
+}
+#[test]
+fn compose_restart_policy_refuses_managed_delivery_and_host_dependencies() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let document = json!({"services":{"worker":{
+        "image":image, "read_only":true, "network_mode":"none", "init":true,
+        "entrypoint":["/bin/worker"], "restart":"unless-stopped",
+        "environment":{"TOKEN":null}
+    }}});
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let managed = BTreeMap::from([(
+        "worker".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-restart-canary".into())]),
+    )]);
+    let scoped = project::inputs::compile_scoped(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &managed,
+    )
+    .unwrap();
+    let error = config::prepare_delivery(
+        scoped.executable,
+        &BTreeMap::from([("worker".into(), Condition::Started)]),
+        &token(),
+        &token(),
+        None,
+        config::DeliveryOptions {
+            environment: true,
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "graph_restart_policy");
+    assert!(!error.message.contains("synthetic-restart-canary"));
+    let document = json!({"services":{"worker":{
+        "image":image, "read_only":true, "init":true, "entrypoint":["/bin/worker"],
+        "restart":"always", "networks":["private"],
+        "extra_hosts":["db.example.test:host-gateway"]
+    }},"networks":{"private":{"internal":true}}});
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let inputs = project::inputs::compile(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let error = config::prepare_delivery(
+        inputs,
+        &BTreeMap::from([("worker".into(), Condition::Started)]),
+        &token(),
+        &token(),
+        None,
+        config::DeliveryOptions {
+            dependency_hosts: true,
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "graph_restart_policy");
+}
+#[test]
+fn restarting_observation_requires_receipt_admission() {
+    let restarting = json!({"State":{"Running":true,"Restarting":true,"Status":"restarting",
+        "Pid":0,"Dead":false,"OOMKilled":true,"ExitCode":137}});
+    assert_eq!(observation(&restarting).unwrap(), Observation::Restarting);
+    for (field, value) in [
+        ("Running", json!(false)),
+        ("Pid", json!(9)),
+        ("Dead", json!(true)),
+    ] {
+        let mut changed = restarting.clone();
+        changed["State"][field] = value;
+        assert!(observation(&changed).is_err(), "{field}");
+    }
+    // OOM evidence of a previous incarnation is not a terminal Dead state while
+    // the engine is restarting; once restarts stop it is an ordinary failure.
+    let mut stopped = restarting.clone();
+    stopped["State"]["Restarting"] = json!(false);
+    stopped["State"]["Running"] = json!(false);
+    stopped["State"]["Status"] = json!("exited");
+    assert_eq!(observation(&stopped).unwrap(), Observation::Dead);
+}
+#[test]
+fn receipt_restart_authority_excludes_incarnation_bound_publication() {
+    let container = Resource {
+        routing: None,
+        loopback_ports: Vec::new(),
+        networks: None,
+        outbound: false,
+        cache: None,
+        cache_provenance: None,
+        disposable_caches: Vec::new(),
+        restart_policy: Some(restart_policy::RestartPolicy::UnlessStopped),
+        kind: Kind::Container,
+        key: "worker".into(),
+        name: "owned-worker".into(),
+        id: None,
+        image: None,
+        phase: "absent".into(),
+        amd64_emulation: None,
+    };
+    assert!(restart_policy_valid(
+        &container,
+        false,
+        Some(&Condition::Started)
+    ));
+    let mut published = container.clone();
+    published.loopback_ports = vec![LoopbackPort {
+        host_port: 8787,
+        target: 3000,
+    }];
+    assert!(!restart_policy_valid(
+        &published,
+        false,
+        Some(&Condition::Started)
+    ));
+    // The planner never records a policy next to a route either.
+    let mut routed = container.clone();
+    routed.routing = Some(
+        serde_json::from_value(json!({"hostnames":["worker.example.test"],"port":3000})).unwrap(),
+    );
+    assert!(!restart_policy_valid(
+        &routed,
+        false,
+        Some(&Condition::Started)
+    ));
+    // Publication without a policy, and the existing refusals, are unchanged.
+    published.restart_policy = None;
+    assert!(restart_policy_valid(
+        &published,
+        true,
+        Some(&Condition::Completed)
+    ));
+    assert!(!restart_policy_valid(
+        &container,
+        true,
+        Some(&Condition::Started)
+    ));
+    assert!(!restart_policy_valid(
+        &container,
+        false,
+        Some(&Condition::Completed)
+    ));
+    let mut retrying = container.clone();
+    retrying.restart_policy = Some(restart_policy::RestartPolicy::OnFailure {
+        maximum_retry_count: 2,
+    });
+    assert!(restart_policy_valid(
+        &retrying,
+        false,
+        Some(&Condition::Completed)
+    ));
+    let mut network = container.clone();
+    network.kind = Kind::Network;
+    assert!(!restart_policy_valid(&network, false, None));
+}
+#[test]
+fn lock_free_observation_reports_restarting_only_under_an_admitted_policy() {
+    let container = |restart_policy| Resource {
+        routing: None,
+        loopback_ports: Vec::new(),
+        networks: None,
+        outbound: false,
+        cache: None,
+        cache_provenance: None,
+        disposable_caches: Vec::new(),
+        restart_policy,
+        kind: Kind::Container,
+        key: "worker".into(),
+        name: "owned-worker".into(),
+        id: Some("a".repeat(64)),
+        image: None,
+        phase: "started".into(),
+        amd64_emulation: None,
+    };
+    let admitted = container(Some(restart_policy::RestartPolicy::UnlessStopped));
+    let legacy = container(None);
+    let restarting = json!({"State":{"Running":true,"Restarting":true,"Status":"restarting",
+        "Pid":0,"Dead":false,"OOMKilled":false,"ExitCode":1}});
+    // A pending restart is neither running nor stopped for exit observers.
+    assert_eq!(
+        observed_service_state(&admitted, &restarting).unwrap(),
+        json!({"state":"restarting"})
+    );
+    assert_eq!(
+        observed_service_state(&legacy, &restarting).unwrap(),
+        json!({"state":"unknown"})
+    );
+    let exited = json!({"State":{"Running":false,"Restarting":false,"Status":"exited",
+        "Pid":0,"Dead":false,"OOMKilled":false,"ExitCode":1}});
+    for resource in [&admitted, &legacy] {
+        assert_eq!(
+            observed_service_state(resource, &exited).unwrap(),
+            json!({"state":"exited","code":1})
+        );
+    }
+    let paused = json!({"State":{"Running":false,"Restarting":false,"Status":"paused"}});
+    assert_eq!(
+        observed_service_state(&admitted, &paused).unwrap(),
+        json!({"state":"unknown"})
+    );
 }
 #[test]
 fn compose_pid_limit_is_opt_in_and_explicit_limits_remain_verified() {
@@ -485,6 +1002,7 @@ fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
                             cache: None,
                             cache_provenance: None,
                             disposable_caches: Vec::new(),
+                            restart_policy: None,
                             kind,
                             ..template.clone()
                         },
@@ -503,6 +1021,7 @@ fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
                         cache: None,
                         cache_provenance: None,
                         disposable_caches: Vec::new(),
+                        restart_policy: None,
                         kind,
                         ..template.clone()
                     },
@@ -563,7 +1082,10 @@ fn cli(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
         }
         return Err(error(
             "graph_test_cli",
-            value["code"].as_str().unwrap_or("unknown CLI failure"),
+            value["code"]
+                .as_str()
+                .unwrap_or("unknown CLI failure")
+                .to_owned(),
         ));
     }
     serde_json::from_slice(&output.stdout).map_err(|_| error("graph_test", "Invalid CLI receipt."))
@@ -2130,12 +2652,14 @@ fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
         cache: None,
         cache_provenance: None,
         disposable_caches: Vec::new(),
+        restart_policy: None,
         kind: Kind::Network,
         key: "default".into(),
         name: "owned-network".into(),
         id: None,
         image: None,
         phase: "reserved".into(),
+        amd64_emulation: None,
     };
     let resources = BTreeMap::from([("network:default".into(), resource)]);
     assert!(check_network_request(&super::super::NetworkIntent::Isolated, &resources).is_err());
@@ -2273,12 +2797,14 @@ fn endpoint_selects_service_primary_not_unrelated_first_graph_network() {
                 cache: None,
                 cache_provenance: None,
                 disposable_caches: Vec::new(),
+                restart_policy: None,
                 kind: Kind::Network,
                 key: key.into(),
                 name: name.into(),
                 id: Some(id.clone()),
                 image: None,
                 phase: "created".into(),
+                amd64_emulation: None,
             },
         );
         networks.insert(format!("network:{key}"), Some(json!({"Id":id,"Name":name,"Containers":{"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee":{"EndpointID":"f".repeat(64),"IPv4Address":"172.20.0.2/16"}}})));
@@ -2510,6 +3036,12 @@ fn cleanup_identity_is_independent_of_declared_root_mode() {
 
 #[test]
 fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
+    for drop_all in [false, true] {
+        shared_source_case(drop_all);
+    }
+}
+
+fn shared_source_case(drop_all: bool) {
     let fixture = Fixture::new();
     let home = Fixture::new();
     let candidate = Candidate::discover(&home.0).unwrap();
@@ -2525,6 +3057,12 @@ fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
             "depends_on":{"deps":{"condition":"service_completed_successfully"}}},
         "reader":{"image":image,"network_mode":"none","entrypoint":["/bin/true"],"command":[],"volumes":[".:/app:ro"]}
     },"volumes":{"deps":{}}});
+    let mut document = document;
+    if drop_all {
+        for name in ["deps", "app", "reader"] {
+            document["services"][name]["cap_drop"] = json!(["ALL"]);
+        }
+    }
     fs::write(fixture.0.join("compose.yaml"), document.to_string()).unwrap();
     let review = project::plan(&candidate, fixture.options()).unwrap();
     let snapshot = project::snapshot::capture_plan(&review.plan).unwrap();
@@ -2572,15 +3110,22 @@ fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
     assert_eq!(mounts("app")["Source"], path);
     assert_eq!(mounts("app")["ReadOnly"], false);
     assert_eq!(mounts("reader")["ReadOnly"], true);
-    assert_eq!(
-        prepared.configs["app"]["HostConfig"]["CapAdd"],
-        json!(["DAC_OVERRIDE"])
-    );
-    assert_eq!(
-        prepared.configs["reader"]["HostConfig"]["CapAdd"],
-        json!(["DAC_OVERRIDE"])
-    );
-    assert!(prepared.configs["deps"]["HostConfig"]["CapAdd"].is_null());
+    // Shared-source services and the frozen installer all receive the Compose
+    // default profile, which already includes DAC_OVERRIDE. With cap_drop: ALL, only
+    // services writing through the shared host tree keep DAC_OVERRIDE.
+    let defaults = json!(project::capabilities::effective(None).unwrap());
+    for name in ["app", "reader", "deps"] {
+        let expected = match (drop_all, name) {
+            (false, _) => defaults.clone(),
+            (true, "deps") => json!([]),
+            (true, _) => json!(["CAP_DAC_OVERRIDE"]),
+        };
+        assert_eq!(prepared.configs[name]["HostConfig"]["CapAdd"], expected);
+        assert_eq!(
+            prepared.configs[name]["HostConfig"]["CapDrop"],
+            json!(["ALL"])
+        );
+    }
     assert_eq!(mounts("deps")["ReadOnly"], true);
     assert_eq!(
         mounts("deps")["Source"],
@@ -2707,6 +3252,115 @@ fn loopback_ports_are_admitted_only_for_the_foreground_owner() {
 }
 
 #[test]
+fn restart_policy_is_not_applied_to_published_or_routed_services() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let review = |document: &Value| {
+        state::write(&fixture.0.join("compose.yaml"), document).unwrap();
+        project::plan(&candidate, fixture.options()).unwrap()
+    };
+    let prepare = |document: &Value, options: config::DeliveryOptions| {
+        let review = review(document);
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        config::prepare_delivery(
+            inputs,
+            &goals(),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+            options,
+        )
+        .unwrap()
+    };
+    let mut published = compose(&image, "marker", false);
+    published["services"]["web"]["ports"] = json!(["127.0.0.1:8787:3000"]);
+    let mut routed = compose(&image, "marker", false);
+    routed["services"]["web"]["labels"] = json!({"caddy":"web.example.test",
+        "caddy.reverse_proxy":"{{upstreams 3000}}","caddy.tls":"internal"});
+    // Routes require the native HTTP probe; a routed restart policy would also
+    // have been refused for the probe, so this proves the route degrade runs first.
+    routed["services"]["web"]["healthcheck"] = json!({"x-hack-http":{"port":3000,
+        "path":"/health","interval_ms":100,"timeout_ms":500,"retries":3,"start_period_ms":0}});
+    // Lowering a route's native HTTP probe needs the native-http-probe build
+    // (CI tests all features); review runs in every build.
+    for (mut document, options, lowered) in [
+        (
+            published,
+            config::DeliveryOptions {
+                loopback_ports: true,
+                ..Default::default()
+            },
+            true,
+        ),
+        (
+            routed,
+            config::DeliveryOptions {
+                routing_enrolled: true,
+                ..Default::default()
+            },
+            cfg!(feature = "native-http-probe"),
+        ),
+    ] {
+        document["services"]["web"]["restart"] = json!("unless-stopped");
+        // An unpublished, unrouted service in the same graph keeps its policy.
+        document["services"]["init"]["restart"] = json!("on-failure:2");
+        let reviewed = review(&document);
+        assert!(reviewed.plan.enrollment_compatible);
+        let warnings = reviewed
+            .plan
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "restart_policy_not_applied")
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].severity, "warning");
+        assert_eq!(warnings[0].field, "services.web.restart");
+        assert!(warnings[0].message.contains("HACK-1935"));
+        if !lowered {
+            continue;
+        }
+        let prepared = prepare(&document, options);
+        // The bridged service starts with the engine's `no` and no receipt
+        // policy, so no restart authority or `restarting` state is admitted.
+        assert_eq!(
+            prepared.configs["web"]["HostConfig"]["RestartPolicy"],
+            json!({"Name":"no"})
+        );
+        let web = &prepared.resources["container:web"];
+        assert!(web.restart_policy.is_none());
+        assert!(!restart_policy::admits_restarting(web));
+        assert_eq!(
+            prepared.resources["container:init"].restart_policy,
+            Some(restart_policy::RestartPolicy::OnFailure {
+                maximum_retry_count: 2
+            })
+        );
+        assert_eq!(
+            prepared.configs["init"]["HostConfig"]["RestartPolicy"],
+            json!({"Name":"on-failure","MaximumRetryCount":2})
+        );
+        // Declaring `no` produces no warning.
+        document["services"]["web"]["restart"] = json!("no");
+        assert!(
+            review(&document)
+                .plan
+                .diagnostics
+                .iter()
+                .all(|d| d.code != "restart_policy_not_applied")
+        );
+    }
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
 fn receipt_loopback_intent_is_bounded_unique_and_container_only() {
     let container = |key: &str, ports: Vec<LoopbackPort>| Resource {
         routing: None,
@@ -2716,12 +3370,14 @@ fn receipt_loopback_intent_is_bounded_unique_and_container_only() {
         cache: None,
         cache_provenance: None,
         disposable_caches: Vec::new(),
+        restart_policy: None,
         kind: Kind::Container,
         key: key.into(),
         name: format!("owned-{key}"),
         id: None,
         image: None,
         phase: "absent".into(),
+        amd64_emulation: None,
     };
     let port = |host_port, target| LoopbackPort { host_port, target };
     let resources = |entries: Vec<Resource>| {

@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 
 /// Common bounded container isolation. Input-family lowering owns all overrides;
 /// this does not select an image, grant ownership or authorize engine effects.
+/// Every capability is dropped here; only Compose-file lowering adds the explicit
+/// Docker default profile (`project::capabilities`). Authored native services and
+/// their persistent-data policy keep this empty set.
 pub(super) fn container_base(image: &str, labels: Value) -> Value {
     json!({"Image":image,"Labels":labels,"HostConfig":{
         "NetworkMode":"none","Memory":0,"NanoCpus":0,
@@ -88,7 +91,7 @@ fn retain_ownership(
 fn unsupported() -> CandidateError {
     error(
         "graph_subset",
-        "Graph driver requires pinned images, explicit managed environment delivery, internal networks, named volumes and no automatic restart; build, unbound/writable source, port, label and logging overrides remain gated.",
+        "Graph driver requires pinned images, explicit managed environment delivery, internal networks and named volumes; build, unbound/writable source, port, label and logging overrides remain gated.",
     )
 }
 pub(super) fn prepare(
@@ -118,7 +121,7 @@ pub(super) struct DeliveryOptions {
 /// bridge slot and one host listener, shared with route bridges.
 pub(super) const MAX_LOOPBACK_PORTS: usize = 16;
 
-fn port_refused(message: &str) -> CandidateError {
+fn port_refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     error("graph_port_publication", message)
 }
 
@@ -254,13 +257,29 @@ pub(super) fn prepare_delivery(
         BTreeMap::new()
     };
     let publications = loopback_publications(plan, loopback_ports)?;
+    // Restart policies lower to the engine's own policy only for service classes
+    // whose guards do not depend on a single container incarnation.
+    let mut restart_policies = BTreeMap::new();
+    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+        if let Some(policy) = super::restart_policy::admit(&super::restart_policy::Admission {
+            service,
+            ready: graph.services[name].ready,
+            managed_environment: inputs.service_requires_managed_environment(name),
+            host_dependencies: !service.extra_hosts.is_empty()
+                || inputs
+                    .services
+                    .get(name)
+                    .is_some_and(|values| !values.extra_hosts.is_empty()),
+        })? {
+            restart_policies.insert(name.clone(), policy);
+        }
+    }
     let mut networks = BTreeSet::new();
     let mut volumes = BTreeSet::new();
     let mut total_memory = 0u64;
     let mut total_cpus = 0f64;
     for service in plan.services.values().filter(|s| s.active) {
-        if service.restart != "no"
-            || (!service.ports.is_empty() && !loopback_ports)
+        if (!service.ports.is_empty() && !loopback_ports)
             || service.labels.keys().any(|key| {
                 !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
                     && !(service.one_shot && key == "hack.service.one-shot")
@@ -280,10 +299,10 @@ pub(super) fn prepare_delivery(
             })
             || service.logging.is_some()
             || service.image.as_deref().is_none_or(|v| !image_id(v))
-            || service
-                .platform
-                .as_deref()
-                .is_some_and(|p| !["linux/arm64", "linux/arm64/v8"].contains(&p))
+            || service.platform.as_deref().is_some_and(|p| {
+                !(["linux/arm64", "linux/arm64/v8"].contains(&p)
+                    || (p == "linux/amd64" && service.amd64_emulation.is_some()))
+            })
         {
             return Err(unsupported());
         }
@@ -392,6 +411,7 @@ pub(super) fn prepare_delivery(
                 cache: cache.cloned(),
                 cache_provenance: None,
                 disposable_caches,
+                restart_policy: None,
                 kind,
                 key: key.clone(),
                 name: cache.map_or_else(
@@ -401,6 +421,7 @@ pub(super) fn prepare_delivery(
                 id: None,
                 image: None,
                 phase: "reserved".into(),
+                amd64_emulation: None,
             };
             resources.insert(format!("{}:{key}", kind.word()), resource);
         }
@@ -418,12 +439,14 @@ pub(super) fn prepare_delivery(
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: restart_policies.get(name).copied(),
             kind: Kind::Container,
             key: name.clone(),
             name: format!("hkg-{run}-container-{index}"),
             id: None,
             image: Some(image.clone()),
             phase: "reserved".into(),
+            amd64_emulation: service.amd64_emulation,
         };
         let labels = labels(
             owner,
@@ -476,6 +499,8 @@ pub(super) fn prepare_delivery(
         // Writable roots are container-owned layers, not writable source binds.
         // Their contents are discarded when the container is removed; durable data uses named volumes.
         let mut config = container_base(image, labels);
+        config["HostConfig"]["RestartPolicy"] =
+            super::restart_policy::RestartPolicy::engine(resource.restart_policy.as_ref());
         for (field, value) in [
             ("NetworkMode", json!(network)),
             ("Memory", json!(service.limits.memory_bytes.unwrap_or(0))),
@@ -504,15 +529,22 @@ pub(super) fn prepare_delivery(
         if service.read_only {
             config["HostConfig"]["Tmpfs"] = json!({"/tmp":"rw,noexec,nosuid,size=16777216"});
         }
+        // Compose-file services get Docker's default capability set adjusted by the
+        // reviewed cap_add/cap_drop, emitted explicitly after CapDrop ALL so the request
+        // never depends on the engine's implicit default. no-new-privileges stays set.
+        let mut capabilities = project::capabilities::effective(service.capabilities.as_ref())?;
         // Virtiofs preserves the host uid. Root services need DAC_OVERRIDE to
-        // traverse/write an explicitly shared tree owned by that uid. Read-only
-        // mounts still enforce read-only access; no other capabilities are added.
+        // traverse/write an explicitly shared tree owned by that uid, so it is kept
+        // even when cap_drop removes it. Read-only mounts still enforce read-only access.
         if source.is_some_and(|s| s.binding.shared.is_some())
             && service.dependency_cache.is_none()
             && service.mounts.iter().any(|m| m.kind == "bind")
+            && !capabilities.iter().any(|name| name == "CAP_DAC_OVERRIDE")
         {
-            config["HostConfig"]["CapAdd"] = json!(["DAC_OVERRIDE"]);
+            capabilities.push("CAP_DAC_OVERRIDE".into());
+            capabilities.sort();
         }
+        config["HostConfig"]["CapAdd"] = json!(capabilities);
         // Only explicitly compiled public values enter engine metadata. Bare/null
         // managed inputs are delivered separately by the private launcher.
         // Omit Env when empty so image defaults remain the engine's responsibility.

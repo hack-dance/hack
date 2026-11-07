@@ -15,7 +15,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-fn failure(message: &str) -> CandidateError {
+fn failure(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("supervisor_loss_test", message)
 }
 fn now() -> u64 {

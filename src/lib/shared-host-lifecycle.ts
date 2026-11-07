@@ -557,6 +557,35 @@ export function isSharedHostProcessRunning(
 const isLive = isSharedHostProcessRunning;
 
 /**
+ * Read-only view of a helper Hack started and still owns: a strict `owned`
+ * claim in phase `ready` that records `holder`, whose PID and birth time are
+ * live in a usable census. Takes no lock and signals nothing. Adopted,
+ * starting, stale, unreadable or uncertain claims return null, so a caller can
+ * use the PID only as an ownership anchor that it rechecks later.
+ */
+export async function readOwnedSharedHostProcess(opts: {
+  readonly spec: Pick<SharedHostHelperSpec, "name" | "stateDir">;
+  readonly holder: string;
+  readonly processes?: SharedHostProcesses;
+}): Promise<{ readonly pid: number; readonly birth: string } | null> {
+  const read = await readClaim(opts.spec);
+  if (
+    read.kind !== "claim" ||
+    read.claim.ownership !== "owned" ||
+    read.claim.phase !== "ready" ||
+    !read.claim.holders.includes(opts.holder)
+  ) {
+    return null;
+  }
+  const census = await readCensus(opts.processes);
+  if (census === null) {
+    return null;
+  }
+  const identity = { pid: read.claim.pid, birth: read.claim.birth };
+  return isLive(census, identity) ? identity : null;
+}
+
+/**
  * Exit of a signalled tree member is observed only when its PID is gone from
  * the census or is a zombie. The same PID running with another birth time is
  * not proof: Linux `lstart` can drift with the wall clock, so it may be the

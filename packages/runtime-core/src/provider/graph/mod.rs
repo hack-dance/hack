@@ -113,6 +113,7 @@ pub use host_relay::{
     HostRelayService, cleanup_with_relay, confirm_relay_cleanup, resume_relay_cleanup,
 };
 mod relay;
+mod restart_policy;
 pub use bridges::{
     ReserveBridgeOptions, RouteSlot, inspect_bridges, publish_bridge, reconcile_bridges,
     release_bridge, reserve_bridge, start_bridge,
@@ -179,7 +180,7 @@ const MAX_TOTAL_MEMORY_BYTES: u64 =
     super::Profile::Development.memory_mib() as u64 * 1024 * 1024 - GUEST_MEMORY_RESERVE_BYTES;
 const MAX_VOLUMES: usize = 16;
 
-fn error(code: &'static str, message: &str) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 fn not_retained() -> CandidateError {
@@ -251,12 +252,21 @@ pub struct Resource {
     /// Fixed at admission; only these exact paths may be explicitly quarantined.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disposable_caches: Vec<String>,
+    /// Admitted engine restart policy of a container; absent means `no`.
+    /// Only this receipt field authorizes engine restart states during stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<restart_policy::RestartPolicy>,
     pub kind: Kind,
     pub key: String,
     pub name: String,
     pub id: Option<String>,
     pub image: Option<String>,
     pub phase: String,
+    /// The service's reviewed opt-in policy for running a `linux/amd64` image under Rosetta
+    /// translation. Admission still requires an amd64 image to come from a
+    /// translation-enabled pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amd64_emulation: Option<crate::project::Amd64Emulation>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -418,6 +428,15 @@ fn verify_resource_identity(
 }
 fn observation(value: &Value) -> Result<Observation, CandidateError> {
     let state = &value["State"];
+    // A restarting container keeps its previous exit facts (including OOM) while
+    // the engine waits to start the next incarnation. Callers decide whether the
+    // receipt admits this state; see `probes::observe`.
+    if state["Restarting"] == true {
+        if state["Running"] != true || state["Pid"] != 0 || state["Dead"] == true {
+            return Err(error("graph_state", "Unexpected owned service state."));
+        }
+        return Ok(Observation::Restarting);
+    }
     if state["Dead"] == true || state["OOMKilled"] == true {
         return Ok(Observation::Dead);
     }
@@ -478,6 +497,7 @@ fn same_resource_bindings(
                     && old.outbound == resource.outbound
                     && old.routing == resource.routing
                     && old.loopback_ports == resource.loopback_ports
+                    && old.restart_policy == resource.restart_policy
                     && (old.networks == resource.networks
                         // Old receipts predate attachment persistence and admitted at most
                         // one network. The caller also requires the unchanged plan identity.
@@ -489,6 +509,21 @@ fn same_resource_bindings(
 
 /// Receipt-load bound for loopback publication intent: containers only, unique
 /// non-zero host ports graph-wide, and the admission budget.
+/// Restart authority exists only on containers, never alongside an
+/// incarnation-bound route, loopback publication, cache or probe, or a completion
+/// goal that cannot retry. A resource without a policy is always valid here.
+fn restart_policy_valid(resource: &Resource, probed: bool, readiness: Option<&Condition>) -> bool {
+    resource.restart_policy.as_ref().is_none_or(|policy| {
+        resource.kind == Kind::Container
+            && policy.valid()
+            && resource.routing.is_none()
+            && resource.loopback_ports.is_empty()
+            && resource.cache.is_none()
+            && !probed
+            && (readiness != Some(&Condition::Completed)
+                || matches!(policy, restart_policy::RestartPolicy::OnFailure { .. }))
+    })
+}
 fn loopback_ports_valid(resources: &BTreeMap<String, Resource>) -> bool {
     let mut host_ports = BTreeSet::new();
     resources.values().all(|resource| {
@@ -600,6 +635,13 @@ fn load_at(
             })
         })
         || !loopback_ports_valid(&receipt.resources)
+        || !receipt.resources.values().all(|resource| {
+            restart_policy_valid(
+                resource,
+                receipt.probes.contains_key(&resource.key),
+                receipt.readiness.get(&resource.key),
+            )
+        })
         || ![
             "preparing",
             "ready-observed",
@@ -1589,9 +1631,98 @@ fn endpoint_network<'a>(
 }
 
 /// Read-only recovery inspection; historical ready phase is not a current health assertion.
+/// Read-only inspection of one owned graph attempt.
+///
+/// A run whose active, archived and consumed journals are all exactly absent and
+/// whose foreground owner is not published refuses `graph_unreserved` before any
+/// guest access. Absence is a point-in-time observation: only a caller that
+/// separately proved its own consumer settled may treat it as "never reserved"
+/// (for example a foreground start refused before admission). Every other journal
+/// state keeps the ordinary receipt validation.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
+    #[cfg(target_os = "macos")]
+    if unreserved(candidate, run)? {
+        return Err(error(
+            "graph_unreserved",
+            "No runtime state was reserved for this graph attempt: no journal exists and no foreground owner is published. Nothing was created, repaired or adopted.",
+        ));
+    }
     let engine = Engine::connect_cleanup(candidate)?;
     inspect_using(candidate, &engine, run)
+}
+
+/// Lock-free current service states for one owned graph attempt.
+///
+/// For observers that must not contend with an operation holding the provider
+/// lease, such as a foreground `up` reporting service exits while `exec` runs.
+/// It takes no lease, issues only engine GETs, verifies each recorded container's
+/// ownership labels and identity, runs no probes and grants no authority: the
+/// result is a point-in-time observation (`running` health is the engine's own).
+#[cfg(target_os = "macos")]
+pub fn observe(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
+    let observer = super::engine::Observer::connect(candidate)?;
+    let (receipt, _) = load_at(directory(candidate, run)?, run, observer.incarnation())?;
+    let mut services = serde_json::Map::new();
+    for resource in receipt
+        .resources
+        .values()
+        .filter(|resource| resource.kind == Kind::Container)
+    {
+        let state = match resource.id.as_deref() {
+            None => json!({"state":"absent"}),
+            Some(id) => match observer.get(&format!("/v1.53/containers/{id}/json")) {
+                Ok(value) => {
+                    verify_resource_identity(&receipt, resource, &value)?;
+                    observed_service_state(resource, &value)?
+                }
+                Err(error) if error.code == "engine_not_found" => json!({"state":"absent"}),
+                Err(error) => return Err(error),
+            },
+        };
+        services.insert(resource.key.clone(), state);
+    }
+    Ok(json!({"run":receipt.run,"phase":receipt.phase,"services":services}))
+}
+
+/// One lock-free service state. A pending engine restart is reported as
+/// `restarting` only when the receipt admitted a restart policy; it is never a
+/// stopped state, so exit observers keep the foreground graph up. Any other
+/// state the graph does not model (an unadmitted restart, a paused container)
+/// is `unknown`, which is neither running nor stopped.
+#[cfg(any(test, target_os = "macos"))]
+fn observed_service_state(resource: &Resource, value: &Value) -> Result<Value, CandidateError> {
+    match observation(value) {
+        Ok(Observation::Restarting) if !restart_policy::admits_restarting(resource) => {
+            Ok(json!({"state":"unknown"}))
+        }
+        Ok(observed) => serde_json::to_value(observed)
+            .map_err(|_| error("graph_output", "Cannot encode graph observation.")),
+        Err(_) => Ok(json!({"state":"unknown"})),
+    }
+}
+
+/// A foreground start binds its publication before it creates the journal, so
+/// the journal is checked on both sides of the publication check.
+#[cfg(target_os = "macos")]
+fn unreserved(candidate: &Candidate, run: &str) -> Result<bool, CandidateError> {
+    let absent = |path: &std::path::Path| match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Ok(_) => Ok(false),
+        Err(error) => Err(state::io(error)),
+    };
+    let journals_absent = || -> Result<bool, CandidateError> {
+        Ok(absent(&directory(candidate, run)?)?
+            && absent(&archive::path(candidate, run)?)?
+            && absent(&retention::consumed(candidate, run)?)?)
+    };
+    if !journals_absent()? {
+        return Ok(false);
+    }
+    let publication = foreground::transport::root(candidate, run)?;
+    if !(absent(&publication.join("owner.json"))? && absent(&publication.join("control.sock"))?) {
+        return Ok(false);
+    }
+    journals_absent()
 }
 
 fn unchanged_normalized_review(
@@ -2350,6 +2481,36 @@ fn check_cache_capacity(engine: &Engine<'_>, owner: &str) -> Result<(), Candidat
     Ok(())
 }
 
+/// An image is admitted for exactly the platform its service's reviewed policy may run:
+/// Linux arm64 for a native or `prefer-native` service, and Linux amd64 for an opted-in
+/// service (either policy) only in a pool whose audited boot enabled x86_64 translation. An
+/// `amd64` service never runs an arm64 image natively, even a local content ID.
+pub(super) fn admitted_architecture(
+    engine: &Engine<'_>,
+    resource: &Resource,
+    image: &Value,
+) -> bool {
+    admitted_platform(
+        image,
+        resource.amd64_emulation,
+        engine.guest().amd64_emulation(),
+    )
+}
+
+fn admitted_platform(
+    image: &Value,
+    policy: Option<crate::project::Amd64Emulation>,
+    translation: bool,
+) -> bool {
+    use crate::project::Amd64Emulation;
+    image["Os"] == "linux"
+        && match (image["Architecture"].as_str(), policy) {
+            (Some("arm64"), None | Some(Amd64Emulation::PreferNative)) => true,
+            (Some("amd64"), Some(_)) => translation,
+            _ => false,
+        }
+}
+
 fn verify_images(
     engine: &Engine<'_>,
     resources: &BTreeMap<String, Resource>,
@@ -2368,13 +2529,13 @@ fn verify_images(
             None,
         )?;
         if image["Id"].as_str() != resource.image.as_deref()
-            || image["Os"] != "linux"
-            || image["Architecture"] != "arm64"
+            || !admitted_architecture(engine, resource, &image)
         {
             return Err(error(
                 "graph_image",
                 "Pinned image identity, OS or architecture is incompatible.",
-            ));
+            )
+            .with_service(&resource.key));
         }
         // Image VOLUME targets are admitted only when covered by exactly one owned
         // named mount; the engine never allocates anonymous storage for a graph.

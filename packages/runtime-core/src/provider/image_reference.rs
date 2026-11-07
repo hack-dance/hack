@@ -79,8 +79,8 @@ impl NamedReference {
         value
     }
 
-    /// The `namespace/repository` path when this is a public Docker Hub reference
-    /// the anonymous acquisition path supports, otherwise `None`.
+    /// The `namespace/repository` path when this is a Docker Hub reference with the
+    /// two-component path Docker Hub serves, otherwise `None`.
     pub fn docker_hub_repository(&self) -> Option<&str> {
         (self.domain == DOCKER_HUB && self.path.len() <= 200 && self.path.split('/').count() == 2)
             .then_some(self.path.as_str())
@@ -156,7 +156,7 @@ fn path_component(value: &str) -> Result<(), ReferenceError> {
 }
 
 /// Lowercase DNS-style host labels, optionally followed by a decimal port in 1..=65535.
-fn domain(value: &str) -> Result<(), ReferenceError> {
+pub(crate) fn domain(value: &str) -> Result<(), ReferenceError> {
     let (host, port) = match value.split_once(':') {
         Some((host, port)) => (host, Some(port)),
         None => (value, None),

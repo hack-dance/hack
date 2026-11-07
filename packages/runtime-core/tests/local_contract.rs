@@ -42,13 +42,38 @@ fn image_admission_normalizes_shorthand_without_candidate_state_or_network() {
     let admitted: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(admitted["reference"], "docker.io/library/alpine:3.21");
     assert_eq!(admitted["kind"], "docker_hub");
-    for reference in ["Private-Canary", "ghcr.io/private-canary/app:1"] {
+    let output = admit("ghcr.io/private-canary/app:1");
+    assert_eq!(output.status.code(), Some(0));
+    let admitted: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(admitted["kind"], "registry");
+    for reference in ["Private-Canary", "localhost:5000/private-canary:1"] {
         let output = admit(reference);
         assert_eq!(output.status.code(), Some(2));
         let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(failure["code"], "registry_image");
         assert!(!String::from_utf8_lossy(&output.stderr).contains("anary"));
     }
+    // A local registry is admitted only by an explicit opt-in flag; malformed policy
+    // flags refuse with their own code.
+    let with_policy = |flags: &[&str]| {
+        let mut args = vec![
+            "runtime",
+            "admit-image",
+            "--reference",
+            "localhost:5000/private-canary:1",
+            "--json",
+        ];
+        args.extend_from_slice(flags);
+        invoke(&fixture, &args)
+    };
+    let output = with_policy(&["--allow-local-registry", "http://localhost:5000"]);
+    assert_eq!(output.status.code(), Some(0));
+    let admitted: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(admitted["kind"], "registry");
+    let output = with_policy(&["--image-budget-mib", "huge"]);
+    assert_eq!(output.status.code(), Some(2));
+    let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(failure["code"], "image_policy");
     // Admission never creates candidate or home state.
     for directory in [fixture.0.clone(), fixture.directory("fake-home")] {
         let mut names: Vec<_> = std::fs::read_dir(&directory)

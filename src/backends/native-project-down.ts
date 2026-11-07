@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -17,10 +16,12 @@ import { recoverNativeInterruptedStartupCleanup } from "./native-project-interru
 import { withNativeRemovalLock } from "./native-project-removal-lock.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import {
+  describeNativeRunEnvironmentChange,
   loadNativeProjectRun,
   loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeRunEnvironmentChange,
   removeNativeProjectRun,
 } from "./native-project-run.ts";
 import {
@@ -264,7 +265,13 @@ export async function nativeProjectDown(opts: {
   } as const;
 }
 
-/** Resolve fresh values with the original selection; never infer legacy/default overlays. */
+/**
+ * Resolve fresh values with the original selection; never infer legacy/default overlays.
+ * A run recorded as started without managed env files delivered none, and one started
+ * base-only delivered the base layers, so their hooks get exactly that even when env
+ * files appeared since: `hack down` stays the way to apply them. A run started with its
+ * overlay refuses before cleanup when the overlay is gone, naming it.
+ */
 export async function nativeDownEnvironment(opts: {
   readonly scope: NativeProjectRunScope;
   readonly run: NativeProjectRun;
@@ -275,37 +282,46 @@ export async function nativeDownEnvironment(opts: {
       "Native down lifecycle hooks require persisted startup environment selection; legacy mapping must not guess an overlay."
     );
   }
+  const recorded = opts.run.effectiveEnvName;
+  if (recorded !== null && opts.run.unmanagedEnvironment === true) {
+    return {};
+  }
+  const baseOnly = recorded !== null && opts.run.baseOnlyEnvironment === true;
+  let named: ClosedCliError | undefined;
   try {
     const resolved = await resolveProjectEnvConfig({
       projectRoot: opts.scope.projectRoot,
       projectDir: opts.scope.projectDir,
-      envName: opts.run.effectiveEnvName,
+      envName: baseOnly ? null : recorded,
       serviceNames: opts.serviceNames,
     });
-    if (!resolved) {
-      if (opts.run.effectiveEnvName !== null) {
-        throw refused();
+    const environmentFiles = resolved?.files ?? [];
+    if (!baseOnly) {
+      const change = nativeRunEnvironmentChange({
+        run: opts.run,
+        environmentFiles,
+        projectRoot: opts.scope.projectRoot,
+        projectDir: opts.scope.projectDir,
+      });
+      if (change) {
+        named = new ClosedCliError(
+          `Native down refused before cleanup: ${describeNativeRunEnvironmentChange(change)}, and the down hooks need the values this run started with. Restore it and run hack down again; nothing was stopped.`
+        );
+        throw named;
       }
-      return {};
     }
-    const selected = opts.run.effectiveEnvName;
-    if (
-      selected !== null &&
-      !resolved.files.some((path) =>
-        [
-          `hack.env.${selected}.yaml`,
-          `hack.env.${selected}.local.yaml`,
-        ].includes(basename(path))
-      )
-    ) {
-      throw refused();
+    if (!resolved) {
+      return {};
     }
     return selectProjectEnvValuesForExecutionTarget({
       resolved,
       scopeName: "global",
       target: "host",
     });
-  } catch {
+  } catch (error) {
+    if (named !== undefined && error === named) {
+      throw named;
+    }
     throw new ClosedCliError(
       "Native down lifecycle environment is unavailable; values omitted. No cleanup was requested."
     );

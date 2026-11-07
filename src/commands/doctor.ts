@@ -12,6 +12,12 @@ import {
   parseNativeRunMappingRecoveryOptions,
   runNativeProjectMappingCommand,
 } from "../backends/native-project-mapping-command.ts";
+import { hostRosettaAvailable } from "../backends/native-project-platform.ts";
+import { selectNativeEnvFile } from "../backends/native-project-selection.ts";
+import {
+  nativeAdaptationCandidates,
+  resolveNativeAdaptationSelection,
+} from "../backends/native-project-settings.ts";
 import {
   type NativeRuntimeSelection,
   resolveNativeRuntimeSelection,
@@ -104,6 +110,16 @@ import {
 } from "../lib/doctor-generated-files.ts";
 import { checkMacHostTlsTrust } from "../lib/doctor-host-tls.ts";
 import {
+  AMD64_EMULATION_CHECK,
+  type Amd64EmulationReport,
+  amd64EmulationCheckResult,
+} from "../lib/doctor-native-emulation.ts";
+import {
+  checkNativeSettings,
+  NATIVE_SETTINGS_CHECK,
+  type NativeSettingsReport,
+} from "../lib/doctor-native-settings.ts";
+import {
   findCrossCheckoutInstances,
   inspectWorktreeSecretKeys,
 } from "../lib/doctor-worktree.ts";
@@ -148,7 +164,10 @@ import {
   repairNativeCaTrust,
 } from "../lib/native-ca-doctor.ts";
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
-import { readComposeBackendReading } from "../lib/native-compose-backend-features.ts";
+import {
+  readComposeBackendReading,
+  readNativePlatformModes,
+} from "../lib/native-compose-backend-features.ts";
 import {
   NATIVE_DATA_CHECK,
   type NativeDataReport,
@@ -171,6 +190,7 @@ import {
   defaultProjectSlugFromPath,
   findProjectContext,
   readProjectConfig,
+  readProjectDefaultEnvConfig,
   readProjectDevHost,
 } from "../lib/project.ts";
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
@@ -251,6 +271,10 @@ interface CheckResult {
   readonly composeBackend?: ComposeBackendReport;
   /** Closed native data advisory codes and service names only. */
   readonly nativeData?: NativeDataReport;
+  /** Counts of services opted in to amd64 emulation; never service names. */
+  readonly amd64Emulation?: Amd64EmulationReport;
+  /** Native setting origins and closed warnings only; never setting values. */
+  readonly nativeSettings?: NativeSettingsReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -1146,13 +1170,25 @@ async function handleNativeDoctor(opts: {
         checkComposeBackendFeatures({
           startDir: opts.startDir,
           backend: "native",
-          adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
         })
       )
     );
     results.push(
       await runCheck(progress, NATIVE_DATA_CHECK, () =>
         checkNativeDataAdvisories({ startDir: opts.startDir })
+      )
+    );
+    results.push(
+      await runCheck(progress, AMD64_EMULATION_CHECK, () =>
+        checkNativeAmd64Emulation({ startDir: opts.startDir })
+      )
+    );
+    results.push(
+      await runCheck(
+        progress,
+        NATIVE_SETTINGS_CHECK,
+        () => checkNativeProjectSettings({ startDir: opts.startDir }),
+        { timeoutMs: 5000 }
       )
     );
   }
@@ -1344,6 +1380,10 @@ export type DoctorJsonCheck = {
   readonly composeBackend?: ComposeBackendReport;
   /** Present only on the native data-service check: closed codes and service names. */
   readonly nativeData?: NativeDataReport;
+  /** Present only on the native amd64 emulation check: counts only. */
+  readonly amd64Emulation?: Amd64EmulationReport;
+  /** Present only on the native settings check: origins and closed warnings. */
+  readonly nativeSettings?: NativeSettingsReport;
 };
 
 export type DoctorJsonData = {
@@ -1383,6 +1423,12 @@ export function buildDoctorJsonData(opts: {
         ? { composeBackend: result.composeBackend }
         : {}),
       ...(result.nativeData ? { nativeData: result.nativeData } : {}),
+      ...(result.amd64Emulation
+        ? { amd64Emulation: result.amd64Emulation }
+        : {}),
+      ...(result.nativeSettings
+        ? { nativeSettings: result.nativeSettings }
+        : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -2998,13 +3044,13 @@ export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
 /**
  * Reports which Compose features keep the current project on the Compose
  * backend (HACK-1291). Reads only the project's Compose file and, on the native
- * backend, the `HACK_NATIVE_ADAPTATION` selection native up applies. An
+ * backend, the adaptation selection native up applies without `--env`
+ * (`HACK_NATIVE_ADAPTATION`, else the committed `.hack/native/` files). An
  * invalid selection is the same value-free error native up gives.
  */
 async function checkComposeBackendFeatures(opts: {
   readonly startDir: string;
   readonly backend: "native" | "compose";
-  readonly adaptationFile?: string;
 }): Promise<CheckResult> {
   const ctx = await findProjectContext(opts.startDir);
   if (!ctx) {
@@ -3014,8 +3060,18 @@ async function checkComposeBackendFeatures(opts: {
       message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
     };
   }
+  const adaptationCandidates =
+    opts.backend === "native"
+      ? nativeAdaptationCandidates({
+          selection: await resolveNativeAdaptationSelection({
+            env: process.env,
+            projectDir: ctx.projectDir,
+          }),
+          requestedEnvName: undefined,
+        })
+      : undefined;
   const reading = await readComposeBackendReading(ctx.composeFile, {
-    adaptationFile: opts.adaptationFile,
+    adaptationCandidates,
   });
   return composeBackendCheckResult({
     backend: opts.backend,
@@ -3041,6 +3097,64 @@ async function checkNativeDataAdvisories(opts: {
     };
   }
   return nativeDataCheckResult(await readNativeDataAdvisories(ctx.composeFile));
+}
+
+/**
+ * Reports native services opted in to `linux/amd64` emulation and whether this
+ * host provides Rosetta 2. Reads only the Compose file and the adaptation native
+ * up applies for the project default env (`HACK_NATIVE_ADAPTATION`, else the
+ * committed `.hack/native/` files); counts only, no service names.
+ */
+async function checkNativeAmd64Emulation(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(opts.startDir);
+  if (!ctx) {
+    return {
+      name: AMD64_EMULATION_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  return amd64EmulationCheckResult({
+    modes: await readNativePlatformModes({
+      composeFile: ctx.composeFile,
+      adaptationFile: selectNativeEnvFile({
+        selection: await resolveNativeAdaptationSelection({
+          env: process.env,
+          projectDir: ctx.projectDir,
+        }),
+        envName: await readProjectDefaultEnvConfig({
+          projectDir: ctx.projectDir,
+        }),
+      }),
+    }),
+    hostRosetta: await hostRosettaAvailable(),
+  });
+}
+
+/** The `native settings` check: origins and closed warnings, never values. */
+async function checkNativeProjectSettings(opts: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(opts.startDir);
+  if (!ctx) {
+    return {
+      name: NATIVE_SETTINGS_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const cfg = await readProjectConfig(ctx);
+  if (cfg.parseError) {
+    return {
+      name: NATIVE_SETTINGS_CHECK,
+      status: "error",
+      message:
+        "Native settings require valid project configuration; values omitted.",
+    };
+  }
+  return await checkNativeSettings({ project: ctx, cfg, env: process.env });
 }
 
 /**

@@ -209,12 +209,14 @@ mod tests {
             cache: Some(cache.clone()),
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Volume,
             key: "deps".into(),
             name: cache.name(),
             id: None,
             image: None,
             phase: "created".into(),
+            amd64_emulation: None,
         };
         let volume = json!({"name":resource.name,"resource":"deps","observed_state":"present","classification":"referenced_by_graph"});
         let mut references = BTreeMap::new();

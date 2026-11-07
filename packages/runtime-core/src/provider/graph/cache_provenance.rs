@@ -283,12 +283,14 @@ mod tests {
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Container,
             key: "deps".into(),
             name: "owned".into(),
             id: Some("a".repeat(64)),
             image: Some(format!("sha256:{}", "b".repeat(64))),
             phase: "started".into(),
+            amd64_emulation: None,
         }
     }
     fn terminal() -> Value {
@@ -376,12 +378,14 @@ mod tests {
             cache: Some(cache.clone()),
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Volume,
             key: "data".into(),
             name: cache.name(),
             id: None,
             image: None,
             phase: "created".into(),
+            amd64_emulation: None,
         };
         let mut receipt = Receipt {
             normalized_input: None,

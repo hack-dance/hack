@@ -1565,7 +1565,7 @@ describe("published support list", () => {
       "pruning dependency caches",
       "modify source files",
       "Named users or groups",
-      "registries other than public Docker Hub",
+      "Local registries without an explicit opt-in",
       "Copied or relocated",
       "Downgrading onto newer state",
     ]) {

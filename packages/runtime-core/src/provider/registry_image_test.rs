@@ -1771,8 +1771,10 @@ fn build_bases_are_bounded_by_the_image_budget_before_the_build() {
     assert!(error.message.contains(&limit.to_string()), "{error:?}");
     let huge = u64::MAX.to_string();
     let overflow = manifest(&sized_manifest("1", &[&huge])).unwrap();
+    // A layer beyond the acquisition ceiling refuses as a descriptor before any sum.
     let error = bounded_build_base(&overflow, &reference, limit).unwrap_err();
-    assert!(error.message.contains("at least 2^64"), "{error:?}");
+    assert_eq!(error.code, "native_build_base_image");
+    assert!(error.message.contains("size limits"), "{error:?}");
     // Too many layers, or none.
     let many: Vec<&str> = vec!["1"; MAX_LAYERS + 1];
     let error = bounded_build_base(
@@ -1795,6 +1797,93 @@ fn build_bases_are_bounded_by_the_image_budget_before_the_build() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn build_base_descriptors_are_validated_like_direct_acquisition() {
+    let reference = format!("docker.io/library/alpine@sha256:{}", "b".repeat(64));
+    let digest_a = format!("sha256:{}", "a".repeat(64));
+    let limit = ImagePolicy::default().archive_limit;
+    let check = |config_type: &str, layer: &str| {
+        let text = format!(
+            r#"{{"schemaVersion":2,"config":{{"mediaType":"{config_type}","digest":"{digest_a}","size":1469}},"layers":[{layer}]}}"#
+        );
+        let manifest = parse_manifest(text.as_bytes(), &digest(text.as_bytes())).unwrap();
+        bounded_build_base(&manifest, &reference, limit)
+    };
+    let layer = |media_type: &str, extra: &str| {
+        format!(r#"{{"mediaType":"{media_type}","digest":"{digest_a}","size":1024{extra}}}"#)
+    };
+    let docker_config = "application/vnd.docker.container.image.v1+json";
+    let oci_config = "application/vnd.oci.image.config.v1+json";
+    // Normal Docker v2 and OCI layers pass.
+    for (config_type, media_type) in [
+        (
+            docker_config,
+            "application/vnd.docker.image.rootfs.diff.tar.gzip",
+        ),
+        (oci_config, "application/vnd.oci.image.layer.v1.tar+gzip"),
+        (oci_config, "application/vnd.oci.image.layer.v1.tar+zstd"),
+        (oci_config, "application/vnd.oci.image.layer.v1.tar"),
+    ] {
+        assert!(
+            check(config_type, &layer(media_type, "")).is_ok(),
+            "{media_type}"
+        );
+    }
+    // An empty `urls` is treated as absent, as direct acquisition does.
+    assert!(
+        check(
+            oci_config,
+            &layer(
+                "application/vnd.oci.image.layer.v1.tar+gzip",
+                r#","urls":[]"#
+            )
+        )
+        .is_ok()
+    );
+    for (config_type, bad_layer) in [
+        // Foreign-layer URLs.
+        (
+            oci_config,
+            layer(
+                "application/vnd.oci.image.layer.v1.tar+gzip",
+                r#","urls":["http://100.96.0.1:8080/layer"]"#,
+            ),
+        ),
+        // Foreign and non-distributable layer types.
+        (
+            docker_config,
+            layer(
+                "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip",
+                "",
+            ),
+        ),
+        (
+            oci_config,
+            layer(
+                "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip",
+                "",
+            ),
+        ),
+        // Unknown layer type, and an invalid layer digest.
+        (oci_config, layer("application/vnd.example.layer", "")),
+        (
+            oci_config,
+            r#"{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"md5:x","size":1}"#
+                .to_owned(),
+        ),
+        // A config descriptor that is not an image configuration.
+        (
+            "application/vnd.example.config+json",
+            layer("application/vnd.oci.image.layer.v1.tar", ""),
+        ),
+    ] {
+        let error = check(config_type, &bad_layer).unwrap_err();
+        assert_eq!(error.code, "native_build_base_image", "{bad_layer}");
+        assert!(error.message.contains(&reference), "{error:?}");
+        assert!(!error.message.contains("100.96.0.1"), "{error:?}");
+    }
 }
 
 #[test]

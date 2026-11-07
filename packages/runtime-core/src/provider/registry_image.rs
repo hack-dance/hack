@@ -1457,6 +1457,30 @@ fn bounded_build_base(
         .config
         .as_ref()
         .ok_or_else(|| error("Image config descriptor is missing."))?;
+    // The same descriptor checks direct acquisition applies: BuildKit fetches these
+    // itself, and a foreign-layer `urls` entry or a non-distributable layer would be
+    // fetched from the guest's own namespace, outside the build network's isolation.
+    let refused = |what: &str, reason: CandidateError| {
+        CandidateError::new(
+            "native_build_base_image",
+            format!(
+                "Build base image {reference} has an unsupported {what}: {} No build was run.",
+                reason.message
+            ),
+        )
+    };
+    if !config.media_type.is_empty() && !CONFIG_TYPES.contains(&config.media_type.as_str()) {
+        return Err(refused(
+            "config descriptor",
+            error("The manifest does not describe a container image."),
+        ));
+    }
+    Fetch::checked(config, MAX_METADATA as u64).map_err(|e| refused("config descriptor", e))?;
+    for layer in &manifest.layers {
+        layer_extension(&layer.media_type).map_err(|e| refused("layer", e))?;
+        Fetch::checked(layer, super::image_policy::ARCHIVE_CEILING)
+            .map_err(|e| refused("layer", e))?;
+    }
     let declared = manifest
         .layers
         .iter()

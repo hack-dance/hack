@@ -17,6 +17,19 @@ fn refused() -> CandidateError {
     )
 }
 
+/// Only a failed acquisition may defer a tick. The admitted operation runs
+/// once; even a provider_busy result from it is uncertainty, never a retry.
+fn with_available_lease<L, T>(
+    acquire: impl FnOnce() -> Result<L, CandidateError>,
+    operation: impl FnOnce(L) -> Result<T, CandidateError>,
+) -> Result<Option<T>, CandidateError> {
+    let lease = match acquire() {
+        Err(error) if error.code == "provider_busy" => return Ok(None),
+        result => result?,
+    };
+    operation(lease).map(Some)
+}
+
 /// A generation change is permission to retire only when the receipt admitted
 /// restarts and the complete endpoint still belongs to the original container.
 fn eligible(
@@ -79,59 +92,70 @@ pub(in crate::provider::graph) fn changed_publications(
     candidate: &Candidate,
     run: &str,
 ) -> Result<Vec<Rebind>, CandidateError> {
-    let engine = Engine::connect_cleanup(candidate)?;
-    let snapshot = inspect_using(candidate, &engine, run)?;
-    let store = load_store(candidate, &engine, false)?;
-    let mut changed = Vec::new();
-    for (&slot, assignment) in &store.slots {
-        if assignment.run != run || assignment.phase != "running" {
-            continue;
-        }
-        let resource = snapshot
-            .receipt
-            .resources
-            .get(&format!("container:{}", assignment.service))
-            .ok_or_else(refused)?;
-        let Some(endpoint) = bridge_endpoint(&snapshot, assignment) else {
-            continue;
-        };
-        if eligible(assignment, resource, endpoint, engine.guest().boot_id())? {
-            changed.push(Rebind {
-                slot,
-                previous: assignment.clone(),
-                endpoint: endpoint.clone(),
-            });
-        }
-    }
-    Ok(changed)
+    with_available_lease(
+        || Engine::connect_cleanup(candidate),
+        |engine| {
+            let snapshot = inspect_using(candidate, &engine, run)?;
+            let store = load_store(candidate, &engine, false)?;
+            let mut changed = Vec::new();
+            for (&slot, assignment) in &store.slots {
+                if assignment.run != run || assignment.phase != "running" {
+                    continue;
+                }
+                let resource = snapshot
+                    .receipt
+                    .resources
+                    .get(&format!("container:{}", assignment.service))
+                    .ok_or_else(refused)?;
+                let Some(endpoint) = bridge_endpoint(&snapshot, assignment) else {
+                    continue;
+                };
+                if eligible(assignment, resource, endpoint, engine.guest().boot_id())? {
+                    changed.push(Rebind {
+                        slot,
+                        previous: assignment.clone(),
+                        endpoint: endpoint.clone(),
+                    });
+                }
+            }
+            Ok(changed)
+        },
+    )
+    .map(Option::unwrap_or_default)
 }
 
 /// Fully retire exactly the selected old reservation before the owner reaps its
 /// publisher. The old target may already be absent; relay cleanup retains its
 /// original launch identity and never targets the restarted container process.
+/// Returns false only for pre-effect lease contention; retain the old publisher.
 #[cfg(target_os = "macos")]
 pub(in crate::provider::graph) fn retire_rebind(
     candidate: &Candidate,
     selected: &Rebind,
     check: &dyn Fn() -> Result<(), CandidateError>,
-) -> Result<(), CandidateError> {
-    let engine = Engine::connect_cleanup(candidate)?;
-    let mut store = load_store(candidate, &engine, false)?;
-    if store.slots.get(&selected.slot) != Some(&selected.previous) {
-        return Err(refused());
-    }
-    let fence = || current(candidate, &engine, selected, check);
-    stop_slot_fenced(
-        candidate,
-        &engine,
-        &mut store,
-        selected.slot,
-        &fence,
-        &|| Ok(()),
-    )?;
-    fence()?;
-    store.slots.remove(&selected.slot);
-    save(candidate, &store)
+) -> Result<bool, CandidateError> {
+    with_available_lease(
+        || Engine::connect_cleanup(candidate),
+        |engine| {
+            let mut store = load_store(candidate, &engine, false)?;
+            if store.slots.get(&selected.slot) != Some(&selected.previous) {
+                return Err(refused());
+            }
+            let fence = || current(candidate, &engine, selected, check);
+            stop_slot_fenced(
+                candidate,
+                &engine,
+                &mut store,
+                selected.slot,
+                &fence,
+                &|| Ok(()),
+            )?;
+            fence()?;
+            store.slots.remove(&selected.slot);
+            save(candidate, &store)
+        },
+    )
+    .map(|retired| retired.is_some())
 }
 
 /// Reuse the now-empty slot with a fresh reservation. The owner invokes this
@@ -215,48 +239,111 @@ pub(in crate::provider::graph) fn supervise_probes(
     check: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     check()?;
-    let engine = Engine::connect_cleanup(candidate)?;
-    let (mut receipt, root) = load(candidate, &engine, run)?;
-    let names = receipt
-        .resources
-        .values()
-        .filter(|r| r.routing.is_some() && r.restart_policy.is_some())
-        .map(|r| r.key.clone())
-        .collect::<Vec<_>>();
-    for name in names {
-        check()?;
-        let Some(endpoint) = route_endpoint(&engine, &receipt, &name)? else {
-            continue;
-        };
-        if initialize {
-            generations.insert(name, endpoint.generation);
-            continue;
-        }
-        let previous = generations.get(&name).ok_or_else(refused)?;
-        if *previous == endpoint.generation {
-            continue;
-        }
-        // Resolve again across each await using the retained original receipt.
-        let pinned = receipt.clone();
-        let fence = || {
+    let acquire = || Engine::connect_cleanup(candidate);
+    let operation = |engine: Engine<'_>| {
+        let (mut receipt, root) = load(candidate, &engine, run)?;
+        let names = receipt
+            .resources
+            .values()
+            .filter(|r| r.routing.is_some() && r.restart_policy.is_some())
+            .map(|r| r.key.clone())
+            .collect::<Vec<_>>();
+        for name in names {
             check()?;
-            if route_endpoint(&engine, &pinned, &name)?
-                .is_some_and(|e| e.generation == endpoint.generation)
-            {
-                check()
-            } else {
-                Err(refused())
+            let Some(endpoint) = route_endpoint(&engine, &receipt, &name)? else {
+                continue;
+            };
+            if initialize {
+                generations.insert(name, endpoint.generation);
+                continue;
             }
-        };
-        probes::rearm_route(&engine, &mut receipt, &root, &name, &fence)?;
-        generations.insert(name, endpoint.generation);
+            let previous = generations.get(&name).ok_or_else(refused)?;
+            if *previous == endpoint.generation {
+                continue;
+            }
+            // Resolve again across each await using the retained original receipt.
+            let pinned = receipt.clone();
+            let fence = || {
+                check()?;
+                if route_endpoint(&engine, &pinned, &name)?
+                    .is_some_and(|e| e.generation == endpoint.generation)
+                {
+                    check()
+                } else {
+                    Err(refused())
+                }
+            };
+            probes::rearm_route(&engine, &mut receipt, &root, &name, &fence)?;
+            generations.insert(name, endpoint.generation);
+        }
+        Ok(())
+    };
+    if initialize {
+        acquire().and_then(operation)
+    } else {
+        with_available_lease(acquire, operation).map(|_| ())
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspection_lease_contention_defers_ticks_without_effects_then_admits_once() {
+        use std::cell::Cell;
+        let fixture = super::super::super::tests::Fixture::new();
+        let root = fixture.0.join("provider");
+        let held = state::Lock::acquire(&root).unwrap();
+        let effects = Cell::new(0);
+        for _ in 0..3 {
+            let deferred = with_available_lease(
+                || state::Lock::acquire_existing(&root),
+                |_lease| {
+                    effects.set(effects.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(deferred.is_none());
+            assert_eq!(effects.get(), 0);
+        }
+        drop(held);
+        assert!(
+            with_available_lease(
+                || state::Lock::acquire_existing(&root),
+                |_lease| {
+                    effects.set(effects.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(effects.get(), 1);
+    }
+
+    #[test]
+    fn admitted_busy_or_unknown_outcome_is_not_deferred_or_replayed() {
+        use std::cell::Cell;
+        let attempts = Cell::new(0);
+        for code in ["provider_busy", "graph_foreign_resource", "bridge_relay"] {
+            let result = with_available_lease(
+                || Ok(()),
+                |_| {
+                    attempts.set(attempts.get() + 1);
+                    Err::<(), _>(error(code, "Uncertain admitted operation."))
+                },
+            );
+            assert_eq!(result.unwrap_err().code, code);
+        }
+        assert_eq!(attempts.get(), 3);
+        let invalid: Result<Option<()>, CandidateError> = with_available_lease(
+            || Err::<(), _>(error("provider_owner", "Foreign lease.")),
+            |_| panic!("foreign acquisition must not admit work"),
+        );
+        assert_eq!(invalid.unwrap_err().code, "provider_owner");
+    }
 
     #[test]
     fn changed_generation_requires_receipt_policy_and_original_identity() {

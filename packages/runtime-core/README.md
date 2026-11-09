@@ -2094,6 +2094,11 @@ a fresh bridge. Each reservation has one launch. A host port taken in the gap
 refuses without endpoint values and leaves that publication retired; the owner
 does not retry it automatically.
 
+Provider lease contention before observation or retirement defers that work to
+another tick, retaining the original publisher and reservation. Once a lease is
+acquired, failures remain errors; admitted or uncertain effects are never retried
+merely because their error happens to be `provider_busy`.
+
 Routes retain native HTTP healthy readiness. The owner rearms a dead probe exec
 with a fresh sample generation after an ownership-verified incarnation change.
 It keeps the mounted state directory and prepares only the prior generation’s

@@ -317,7 +317,9 @@ impl Publishers {
                 })
                 .ok_or_else(refused)?;
             check_deadline(signals, deadline)?;
-            graph::bridges::retire_rebind(candidate, &selected, &check)?;
+            if !graph::bridges::retire_rebind(candidate, &selected, &check)? {
+                continue;
+            }
             self.reap_one_after_cleanup(index, signals, deadline)?;
             let assignment = match graph::bridges::reserve_rebind(candidate, &selected, &check) {
                 Err(error) if error.code == "published_port_in_use" => {

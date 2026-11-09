@@ -177,8 +177,9 @@ import { writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args[0] === "info") { writeFileSync(${JSON.stringify(join(root, "ingress-read"))}, "unexpected ingress read"); process.exit(23); }
 if (args[0] !== "compose") process.exit(0);
-writeFileSync(${JSON.stringify(join(root, "started"))}, String(process.pid));
 process.on("SIGTERM", () => { writeFileSync(${JSON.stringify(join(root, "stopped"))}, "reaped"); process.exit(143); });
+// Publish readiness only after cancellation cleanup is installed.
+writeFileSync(${JSON.stringify(join(root, "started"))}, String(process.pid));
 await Bun.sleep(60_000);
 `
   );

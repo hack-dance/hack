@@ -11,8 +11,16 @@ function refused(): Error {
       "Native selection requires a bounded, unchanged regular JSON file; values omitted.",
   });
 }
-/** Selection files contain public intent, never credentials or durable process authority. */
-export async function readNativeSelection(path: string): Promise<unknown> {
+/**
+ * Selection files contain public intent, never credentials or durable process authority.
+ *
+ * `privateToUid` additionally requires the file to be owned by that user with no group
+ * or other permission bits, as per-machine native settings are.
+ */
+export async function readNativeSelection(
+  path: string,
+  opts?: { readonly privateToUid?: number }
+): Promise<unknown> {
   if (!isAbsolute(path)) {
     throw refused();
   }
@@ -27,7 +35,9 @@ export async function readNativeSelection(path: string): Promise<unknown> {
         !before.isFile() ||
         before.nlink !== 1 ||
         before.size === 0 ||
-        before.size > LIMIT
+        before.size > LIMIT ||
+        (opts?.privateToUid !== undefined &&
+          (before.uid !== opts.privateToUid || (before.mode & 0o077) !== 0))
       ) {
         throw refused();
       }
@@ -53,4 +63,30 @@ export async function readNativeSelection(path: string): Promise<unknown> {
   } catch {
     throw refused();
   }
+}
+
+/** A base file plus per-env replacements; the env file, when present, replaces the base. */
+export interface NativeEnvSelectedFile {
+  readonly file?: string;
+  readonly fileByEnv?: Readonly<Record<string, string>>;
+}
+
+/**
+ * The file that applies to a run's effective environment name. Native start and restart
+ * preflight call this with the prepared input's effective env, so a fresh start, a
+ * retained start and a restart of the same run always select the same file.
+ */
+export function selectNativeEnvFile(opts: {
+  readonly selection: NativeEnvSelectedFile;
+  readonly envName: string | null;
+}): string | undefined {
+  const byEnv = opts.selection.fileByEnv;
+  if (
+    opts.envName !== null &&
+    byEnv !== undefined &&
+    Object.hasOwn(byEnv, opts.envName)
+  ) {
+    return byEnv[opts.envName];
+  }
+  return opts.selection.file;
 }

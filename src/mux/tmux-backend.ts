@@ -1,6 +1,6 @@
+import { fileURLToPath } from "node:url";
 import type { ExecResult, RunOptions } from "../lib/shell.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
-
 import {
   type MuxBackend,
   MuxCommandTimeoutError,
@@ -8,6 +8,7 @@ import {
   type MuxSessionCreateResult,
   runMuxCommand,
 } from "./mux-backend.ts";
+import { stageMuxEnvironment } from "./private-environment.ts";
 
 const LIFECYCLE_OWNER_OPTION = "@hack_lifecycle_owner";
 const LIFECYCLE_OWNER_ENV = "HACK_LIFECYCLE_OWNER_TOKEN";
@@ -15,6 +16,53 @@ const NO_TMUX_SERVER = /^no server running on [^\r\n]+$/;
 const NUMERIC_FIELD = /^\d+$/;
 const MISSING_TMUX_SOCKET =
   /^error connecting to [^\r\n]+ \(No such file or directory\)$/;
+
+/** Quote one tmux source-file argument, without expanding environment variables. */
+function tmuxQuote(value: string): string {
+  return `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("$", "\\$")
+    .replaceAll("\t", "\\t")
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")}"`;
+}
+
+/**
+ * Send values over stdin; even a pre-existing server receives the new
+ * session's env. Runs under {@link runMuxCommand}'s bound with the `-u`
+ * client flag (HACK-1797); a timeout throws MuxCommandTimeoutError, whose
+ * message names only `tmux -u`. No command input ever reaches argv.
+ */
+async function execTmuxSource(
+  args: readonly string[],
+  opts: {
+    /** An exact diagnostic that carries no command input and may be kept. */
+    readonly safeDiagnostic?: string;
+  } = {}
+): Promise<ExecResult> {
+  if (args.some((arg) => arg.includes("\0"))) {
+    return { exitCode: 1, stdout: "", stderr: "Invalid tmux command input" };
+  }
+  const result = await runMuxCommand(
+    ["tmux", "-u", "start-server", ";", "source-file", "-"],
+    {
+      stdin: new Blob([`${args.map(tmuxQuote).join(" ")}\n`]),
+    }
+  );
+  if (result.exitCode === 0) {
+    return result;
+  }
+  // Parser diagnostics may quote command input, including private environment values.
+  const diagnostic = result.stderr.trim();
+  return {
+    ...result,
+    stderr:
+      opts.safeDiagnostic !== undefined && diagnostic === opts.safeDiagnostic
+        ? diagnostic
+        : "tmux command failed",
+  };
+}
 
 /** Accept only tmux's explicit absence diagnostics; other failures remain unknown. */
 export function classifyTmuxSessionPresence(opts: {
@@ -43,21 +91,6 @@ function parseIntOrNull(value: string | undefined): number | null {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function buildEnvInjectedCommand(opts: {
-  readonly command: string;
-  readonly env?: Readonly<Record<string, string>>;
-}): string {
-  if (!opts.env || Object.keys(opts.env).length === 0) {
-    return opts.command;
-  }
-
-  const assignments = Object.entries(opts.env)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${key}=${shellQuote(value)}`)
-    .join(" ");
-  return `env ${assignments} ${opts.command}`;
 }
 
 /**
@@ -146,7 +179,11 @@ export function createTmuxBackend(): MuxBackend {
       return { ok: false, error: "tmux_unavailable" };
     }
 
-    const args = ["tmux", "new-session", "-d", "-s", opts.name];
+    // These are source-file words sent over stdin, never tmux argv. The
+    // owner token and environment travel with the creating command itself,
+    // so no interrupted create leaves a live session without its token
+    // (createsWithOwnerToken) and no separate set-option/set-environment runs.
+    const args = ["new-session", "-d", "-s", opts.name];
     if (opts.cwd) {
       args.push("-c", opts.cwd);
     }
@@ -161,8 +198,10 @@ export function createTmuxBackend(): MuxBackend {
       args.push("-e", `${LIFECYCLE_OWNER_ENV}=${opts.lifecycleOwnerToken}`);
     }
 
-    const result = await runMuxCommand(args, {
-      stdin: "ignore",
+    const result = await execTmuxSource(args, {
+      // tmux's duplicate-session refusal names only the session: keep it
+      // visible (describeSessionCreateFailure), scrub everything else.
+      safeDiagnostic: `duplicate session: ${opts.name}`,
     });
     if (result.exitCode !== 0) {
       return {
@@ -170,30 +209,6 @@ export function createTmuxBackend(): MuxBackend {
         error: "create_failed",
         stderr: result.stderr.trim(),
       };
-    }
-
-    if (opts.lifecycleOwnerToken) {
-      const ownerResult = await runMuxCommand(
-        [
-          "tmux",
-          "set-option",
-          "-t",
-          opts.name,
-          LIFECYCLE_OWNER_OPTION,
-          opts.lifecycleOwnerToken,
-        ],
-        {}
-      );
-      if (ownerResult.exitCode !== 0) {
-        await runMuxCommand(["tmux", "kill-session", "-t", `=${opts.name}`], {
-          stdin: "ignore",
-        });
-        return {
-          ok: false,
-          error: "owner_metadata_failed",
-          stderr: ownerResult.stderr.trim(),
-        };
-      }
     }
 
     const sessions = await listSessions();
@@ -286,22 +301,42 @@ export function createTmuxBackend(): MuxBackend {
     readonly command: string;
     readonly env?: Readonly<Record<string, string>>;
   }): Promise<ExecResult> => {
-    return await runMuxCommand(
-      [
-        "tmux",
+    const privateInput =
+      opts.env && Object.keys(opts.env).length > 0
+        ? await stageMuxEnvironment(opts.env)
+        : undefined;
+    const entrypoint = fileURLToPath(
+      new URL("../../index.ts", import.meta.url)
+    );
+    const invocation = Bun.main.startsWith("/$bunfs/")
+      ? [process.execPath]
+      : [process.execPath, entrypoint];
+    const prefix = privateInput
+      ? `${[
+          ...invocation,
+          "--internal-mux-environment",
+          privateInput.path,
+          "--",
+        ]
+          .map(shellQuote)
+          .join(" ")} `
+      : "";
+    try {
+      const result = await execTmuxSource([
         "send-keys",
         "-t",
         opts.name,
-        buildEnvInjectedCommand({
-          command: opts.command,
-          env: opts.env,
-        }),
+        prefix + opts.command,
         "Enter",
-      ],
-      {
-        stdin: "ignore",
+      ]);
+      if (result.exitCode !== 0) {
+        await privateInput?.cleanup();
       }
-    );
+      return result;
+    } catch (error) {
+      await privateInput?.cleanup();
+      throw error;
+    }
   };
 
   const sendInput = async (opts: {

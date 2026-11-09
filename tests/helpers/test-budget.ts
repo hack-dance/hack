@@ -14,9 +14,9 @@ import { DEFAULT_FILE_TIMEOUT_SECONDS } from "../../scripts/test-shard.ts";
  * `TEST_BUDGET_SCALE` is the headroom for a loaded one. These fixtures are
  * spawn-bound (a retained adoption dispatch runs about 750 stub-engine
  * processes; an authored start runs the compiler several times), so their wall
- * time grows faster than the load average. On the M5 at 1-min load 15-40, and
- * on the M3 while another suite ran, they took three to four times their
- * unloaded time. With a second suite plus churn workers, the M5 at load 28-90
+ * time grows faster than the load average. On one development host at 1-min load 15-40, and
+ * on another while a second suite ran, they took three to four times their
+ * unloaded time. With a second suite plus churn workers, the first host at load 28-90
  * took more than ten times: one public retained `up` dispatch outlasted a
  * 200 s deadline, and a v7 dispatch case took 146 s even at load 22-50.
  * A deadline a case does not test must not expire first, so the scale keeps

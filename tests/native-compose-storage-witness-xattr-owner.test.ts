@@ -81,7 +81,7 @@ const artifact: NativeComposeStorageXattrArtifact = {
   version: 1,
   imageId: `sha256:${"a".repeat(64)}`,
   platform: "linux/arm64",
-  bunVersion: "1.4.2",
+  bunVersion: "1.4.4",
   bunHash: "b".repeat(64),
   libcHash: "c".repeat(64),
   helperHash: "e".repeat(64),
@@ -3054,6 +3054,7 @@ test.each([
   "engine",
   "birth",
   "artifact",
+  "earlier-bun",
   "owner",
   "generation",
   "pending",
@@ -3082,6 +3083,10 @@ test.each([
   }
   if (failure === "artifact") {
     intent.artifact.helperHash = "f".repeat(64);
+  }
+  if (failure === "earlier-bun") {
+    // An earlier helper pin still parses, but never verifies as the current one.
+    intent.artifact.bunVersion = "1.4.2";
   }
   if (failure === "owner") {
     intent.ownerToken = "f".repeat(32);

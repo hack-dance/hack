@@ -130,19 +130,22 @@ untracked candidate additions. Keep private artifacts excluded from the index.
 Read [CI](../../../.github/workflows/ci.yml) for current hosted gates. A local pass
 does not mean CI ran.
 
-Hosted CI runs the `bun run test` file set on four `test shard i/4` jobs;
-the required `test` check is their fan-in and passes only when every shard did.
+Hosted CI runs the `bun run test` file set on eight `test shard i/8` jobs;
+the required `test` check is their fan-in. It accepts success and cancelled-only
+results; failure or skipped shard results still fail. Prerelease gates separately
+require every shard to succeed. The aggregate cannot distinguish cancellation
+causes from the matrix result alone; it accepts every `cancelled` result.
 [`scripts/test-shard-plan.ts`](../../../scripts/test-shard-plan.ts) splits the files
 by the durations in `scripts/test-shard-durations.json`. A file with no recorded
 duration is planned at 5 s. Each shard runs each of its files in its own
 `bun test ./<file>` process and prints a start line and a result line per file.
 It stops a file after 12 min, and stops the shard at 30 min or on cancellation.
 When it stops early it names the running file, the files not started and the
-slowest files. Each shard first checks that the four shards cover the files
+slowest files. Each shard first checks that the eight shards cover the files
 `git ls-files` lists exactly once. To reproduce one shard locally, run
-`bun scripts/test-shard.ts plan --shard=i/4` or
-`bun scripts/test-shard.ts run --shard=i/4`. To check the split after adding
-or moving tests, run `bun scripts/test-shard.ts verify --count=4`. To refresh the
+`bun scripts/test-shard.ts plan --shard=i/8` or
+`bun scripts/test-shard.ts run --shard=i/8`. To check the split after adding
+or moving tests, run `bun scripts/test-shard.ts verify --count=8`. To refresh the
 durations, download the `test-shard-durations-<i>` artifacts and run
 `bun scripts/test-shard.ts update-durations --source=<run> <files>`. A per-file
 process does not share module state with other files, unlike one `bun test` run. Existing unsupported remote/gateway/native-app checks are

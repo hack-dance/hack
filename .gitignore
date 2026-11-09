@@ -78,6 +78,10 @@ zig-out/
 .hack/.internal/
 .hack/supervisor/
 
+# Hack-generated, machine-local runtime state in any project, including examples
+**/.hack/.internal/
+**/.hack/.branch/
+
 
 SPECS/
 _DOCS

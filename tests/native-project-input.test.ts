@@ -11,7 +11,14 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareNativeProjectInput } from "../src/backends/native-project-input.ts";
+import {
+  nativeReviewedActiveServices,
+  prepareNativeProjectInput,
+  selectActiveNativeProjectInput,
+} from "../src/backends/native-project-input.ts";
+import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
+import { HackCliError } from "../src/lib/cli-result.ts";
+import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
@@ -82,6 +89,40 @@ test("modern values stay private while original contracts and exact input hash s
   expect(await readFile(opts.composeFile)).toEqual(before);
   expect(await readdir(opts.projectDir)).toEqual(names);
 });
+test("only values stored as secrets are reported as managed secret values", async () => {
+  const opts = await fixture({
+    services: { web: { image: "bun:1" }, worker: { image: "bun:1" } },
+  });
+  await writeFile(
+    join(opts.projectRoot, PROJECT_ENV_KEY_FILENAME),
+    "synthetic-key"
+  );
+  const set = async (
+    scope: string,
+    key: string,
+    value: string,
+    secret: boolean
+  ) =>
+    await setProjectEnvValue({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      envName: null,
+      scope,
+      key,
+      value,
+      secret,
+    });
+  await set("global", "TOKEN", "synthetic-global-secret", true);
+  await set("worker", "WORKER_KEY", "synthetic-worker-secret", true);
+  await set("web", "MODE", "production", false);
+  const result = await prepareNativeProjectInput(opts);
+  expect([...(result.managedSecretValues ?? [])].sort()).toEqual([
+    "synthetic-global-secret",
+    "synthetic-worker-secret",
+  ]);
+  expect(result.normalizedComposeJson).not.toContain("synthetic-");
+});
+
 test("fourteen services and 110 managed variables each preserve overlay selection", async () => {
   const services = Object.fromEntries(
     Array.from({ length: 14 }, (_, i) => [`service${i}`, { image: "bun:1" }])
@@ -139,6 +180,26 @@ test("legacy dotenv refuses and unmanaged public projects preserve original fiel
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message: expect.stringContaining("values omitted"),
   });
+});
+
+test("the effective env is the requested or default env even without managed env files", async () => {
+  const opts = await fixture({ services: { api: { image: "bun:1" } } });
+  const effective = async (envName?: string | null) => {
+    const input = await prepareNativeProjectInput({ ...opts, envName });
+    expect(input.environmentFiles).toEqual([]);
+    expect(input.managedEnvironment).toEqual({});
+    return input.effectiveEnvName;
+  };
+  expect(await effective()).toBeNull();
+  expect(await effective("qa")).toBe("qa");
+  await writeFile(
+    join(opts.projectDir, "hack.config.json"),
+    JSON.stringify({ name: "fixture", env: { defaultOverlay: "qa" } })
+  );
+  expect(await effective()).toBe("qa");
+  expect(await effective("stage")).toBe("stage");
+  // An explicit base selection still overrides the project default.
+  expect(await effective(null)).toBeNull();
 });
 
 test("linked worktree inherits primary local environment and observes checkout overrides", async () => {
@@ -205,5 +266,137 @@ test("linked worktree inherits primary local environment and observes checkout o
   } finally {
     restoreEnv("CI", oldCI);
     restoreEnv("HACK_EXECUTION_MODE", oldMode);
+  }
+});
+
+test("managed values reach only the reviewed profile-active services", async () => {
+  // Synthetic shape: an always-on service and an optional profile service,
+  // both receiving one project-wide managed value.
+  const opts = await fixture({
+    services: {
+      app: { image: "alpine:3", entrypoint: ["/bin/sleep"], command: ["60"] },
+      extra: {
+        profiles: ["extra"],
+        image: "alpine:3",
+        entrypoint: ["/bin/sleep"],
+        command: ["60"],
+      },
+    },
+  });
+  await env(opts.projectDir, "default", {
+    global: { GREETING: "synthetic-hello" },
+  });
+  const input = await prepareNativeProjectInput(opts);
+  // Normalization still declares the key on every authored service, so the
+  // reviewed plan is identical whichever profiles are selected.
+  const parsed = JSON.parse(input.normalizedComposeJson);
+  expect(parsed.services.app.environment).toEqual({ GREETING: null });
+  expect(parsed.services.extra.environment).toEqual({ GREETING: null });
+  expect(Object.keys(input.managedEnvironment).sort()).toEqual([
+    "app",
+    "extra",
+  ]);
+
+  const inactive = selectActiveNativeProjectInput({
+    input,
+    reviewedPlan: {
+      services: { app: { active: true }, extra: { active: false } },
+    },
+  });
+  expect(inactive.managedEnvironment).toEqual({
+    app: { GREETING: "synthetic-hello" },
+  });
+  expect(inactive.normalizedComposeJson).toBe(input.normalizedComposeJson);
+  expect(inactive.serviceNames).toEqual(input.serviceNames);
+
+  const selected = selectActiveNativeProjectInput({
+    input,
+    reviewedPlan: {
+      services: { app: { active: true }, extra: { active: true } },
+    },
+  });
+  expect(Object.keys(selected.managedEnvironment).sort()).toEqual([
+    "app",
+    "extra",
+  ]);
+});
+
+test("an absent or malformed reviewed plan delivers no managed values", () => {
+  for (const reviewedPlan of [
+    undefined,
+    null,
+    {},
+    { services: [] },
+    { services: { app: { active: "true" } } },
+    { services: { app: null } },
+  ]) {
+    expect(nativeReviewedActiveServices(reviewedPlan).size).toBe(0);
+  }
+  expect([
+    ...nativeReviewedActiveServices({
+      services: { app: { active: true }, other: { active: false } },
+    }),
+  ]).toEqual(["app"]);
+});
+
+test("input refusals name the cause, service and field without values", async () => {
+  const opts = await fixture({
+    services: { api: { env_file: "private-source", image: "bun:1" } },
+  });
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: expect.stringContaining("service api field env_file"),
+  });
+  await writeFile(
+    opts.composeFile,
+    JSON.stringify({
+      services: {
+        api: { image: "bun:1", environment: ["OK=1", "OK=private-dup"] },
+      },
+    })
+  );
+  await env(opts.projectDir, "default", { global: { TOKEN: "managed" } });
+  const duplicate = await prepareNativeProjectInput(opts).catch(
+    (error: unknown) => error
+  );
+  expect(duplicate).toBeInstanceOf(HackCliError);
+  expect((duplicate as HackCliError).code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+  expect((duplicate as HackCliError).message).toContain(
+    "service api field environment"
+  );
+  expect((duplicate as HackCliError).message).not.toContain("private-dup");
+  await writeFile(opts.composeFile, "services: [unclosed");
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    message: expect.stringContaining("not valid UTF-8 YAML"),
+  });
+  await writeFile(opts.composeFile, '{"name":"no-services"}');
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    message: expect.stringContaining("no services mapping"),
+  });
+  await rm(opts.composeFile);
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    message: expect.stringContaining("Compose file must be a regular"),
+  });
+});
+test("a missing project env key is reported as such, not as invalid Compose", async () => {
+  const oldKey = process.env.HACK_ENV_SECRET_KEY;
+  restoreEnv("HACK_ENV_SECRET_KEY", undefined);
+  try {
+    const opts = await fixture({ services: { api: { image: "bun:1" } } });
+    await env(opts.projectDir, "default", {
+      global: { TOKEN: { secure: "synthetic-ciphertext-canary" } },
+    });
+    const error = await prepareNativeProjectInput(opts).catch(
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(HackCliError);
+    const { code, message } = error as HackCliError;
+    expect(code).toBe("E_CONFIG_INVALID");
+    expect(message).toContain("project env key is missing");
+    expect(message).toContain("HACK_ENV_SECRET_KEY");
+    expect(message).not.toContain("unsupported or invalid Compose");
+    expect(message).not.toContain("synthetic-ciphertext-canary");
+  } finally {
+    restoreEnv("HACK_ENV_SECRET_KEY", oldKey);
   }
 });

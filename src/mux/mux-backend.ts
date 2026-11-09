@@ -52,6 +52,8 @@ export class MuxCommandTimeoutError extends Error {
  * Run a non-interactive mux command under {@link muxCommandTimeoutMs}. The
  * call always returns within the bound; a timeout throws
  * {@link MuxCommandTimeoutError} (the server may still apply the command).
+ * Stdin is never inherited: it is ignored unless the caller supplies a
+ * finite Blob (tmux `source-file -` input that must stay off argv).
  */
 export async function runMuxCommand(
   command: readonly string[],
@@ -61,7 +63,7 @@ export async function runMuxCommand(
 ): Promise<ExecResult> {
   const result = await exec(command, {
     ...opts,
-    stdin: "ignore",
+    stdin: opts.stdin instanceof Blob ? opts.stdin : "ignore",
     timeoutMs: opts.timeoutMs ?? muxCommandTimeoutMs(),
   });
   if (result.exitCode === 124) {

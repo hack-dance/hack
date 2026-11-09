@@ -122,7 +122,7 @@ The maintained `native-config-routing` Docker fixture additionally observes a
 running one-off with no routing keys, exact exit 17 and removal, unchanged main
 and sibling container IDs and HTTPS markers, completed claims, retained data and
 recovery from a deliberately blocked one-off removal. This fixture passed on an
-M3 macOS host with the current compiled CLI and its matching compiler. That
+Apple silicon macOS host with the current compiled CLI and its matching compiler. That
 qualification is separate from unit tests and does not establish cold routed-run
 support or whole-product parity.
 

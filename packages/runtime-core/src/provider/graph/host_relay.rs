@@ -1005,18 +1005,21 @@ mod tests {
     fn fixture() -> (Receipt, Resource, Value) {
         let receipt: Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{},"resources":{}})).unwrap();
         let resource = Resource {
+            loopback_ports: Vec::new(),
             routing: None,
             networks: None,
             outbound: false,
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Container,
             key: "web".into(),
             name: "owned-web".into(),
             id: Some("e".repeat(64)),
             image: Some(format!("sha256:{}", "f".repeat(64))),
             phase: "started".into(),
+            amd64_emulation: None,
         };
         let value = json!({"Id":resource.id,"Image":resource.image,"State":{"Running":true,"StartedAt":"2026-09-17T00:00:00Z"}});
         (receipt, resource, value)

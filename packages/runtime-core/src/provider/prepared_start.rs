@@ -37,7 +37,7 @@ const SEED: &str = "prepared-seed.json";
 const TEMPLATE_DIR: &str = "home/.smolvm";
 const LIMIT: u64 = 64 * 1024;
 
-fn error(code: &'static str, message: impl Into<String>) -> CandidateError {
+fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 
@@ -76,6 +76,9 @@ pub struct Start<'a> {
     pub retained: Option<(&'a str, &'a str)>,
     /// Prepared-base request for a fresh pool; `None` keeps the stock templates.
     pub prepared: Option<&'a Request>,
+    /// Require Rosetta 2 x86_64 translation (`runtime up --amd64-emulation`). A pool that
+    /// already has it keeps it either way.
+    pub amd64_emulation: bool,
 }
 
 /// Where a pool's first-start templates come from.

@@ -802,7 +802,7 @@ describe("hosted test CI fan-in", () => {
     expect(matrix).toEqual(Array.from({ length: count }, (_, i) => i + 1));
     expect(shardJob?.strategy?.["fail-fast"]).toBe(false);
     expect(shardJob?.name).toBe(`test shard \${{ matrix.shard }}/${count}`);
-    expect(shardJob?.["runs-on"]).toBe("blacksmith-6vcpu-macos-15");
+    expect(shardJob?.["runs-on"]).toBe("macos-15");
     expect(shardJob?.["timeout-minutes"]).toBeLessThan(60);
     const steps = shardJob?.steps ?? [];
     const run = steps.find((step) => step.name === "Tests (shard)");
@@ -827,18 +827,35 @@ describe("hosted test CI fan-in", () => {
     expect(plan.shards).toHaveLength(count);
   });
 
-  test("test passes only when every shard succeeded and never skips", async () => {
+  test("test accepts success or cancellation and never skips failures", async () => {
     const workflow = await ciWorkflow();
     const fanIn = workflow.jobs.test;
     expect(fanIn?.name ?? "test").toBe("test");
     expect(fanIn?.needs).toBe("test-shard");
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
-      (step) => step.name === "Require every test shard to succeed"
+      (step) => step.name === "Reject failed or skipped test shards"
     );
     expect(gate?.env?.SHARD_RESULT).toBe("${{ needs.test-shard.result }}");
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
     expect(gate?.run).toContain("exit 1");
+    if (!gate?.run) {
+      throw new Error("Missing aggregate shell gate");
+    }
+    for (const [result, exitCode] of [
+      ["success", 0],
+      ["cancelled", 0],
+      ["failure", 1],
+      ["skipped", 1],
+      ["", 1],
+      ["unexpected", 1],
+    ] as const) {
+      const run = Bun.spawnSync(["bash", "-e", "-c", gate.run], {
+        env: { ...process.env, SHARD_RESULT: result },
+        timeout: 5000,
+      });
+      expect(run.exitCode).toBe(exitCode);
+    }
     const named = Object.entries(workflow.jobs).filter(
       ([key, job]) => (job.name ?? key) === "test"
     );

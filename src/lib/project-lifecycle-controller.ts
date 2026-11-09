@@ -248,8 +248,9 @@ export function createLifecycleProcessController(opts: {
     "withLock" | "record" | "runIfOwned"
   >;
   /**
-   * Bound for this controller's own tmux/zellij commands (environment setup,
-   * window creation, process start). Backend calls use muxCommandTimeoutMs().
+   * Bound for this controller's own tmux/zellij commands (window creation,
+   * process start). Backend calls, including tmux session creation with its
+   * environment, use muxCommandTimeoutMs().
    * A timed-out command's client is killed, so the caller stops waiting; the
    * server may still apply the command later (see runMuxCommand).
    */
@@ -435,6 +436,7 @@ export function createLifecycleProcessController(opts: {
         name: sessionName,
         cwd: opts.project.projectRoot,
         lifecycleOwnerToken: ownershipToken,
+        ...(backendName === "tmux" ? { env: opts.env } : {}),
       });
       if (!created.ok) {
         // A failed (possibly killed) create may still have created the
@@ -446,20 +448,16 @@ export function createLifecycleProcessController(opts: {
       sessionCreated = true;
       await opts.sessionOwnership?.record("created");
     };
-    // Environment setup and failed-creation cleanup belong to the same
+    // Environment delivery and failed-creation cleanup belong to the same
     // locked transition: a replacement (also under the lock) can neither
     // receive this start's environment nor have its session killed by this
     // start's name-based cleanup between the token read and the kill.
     const createAndPrepareSession = async (): Promise<void> => {
       try {
+        // tmux receives the session environment with the creating command
+        // (over source-file stdin, never argv), so it is applied inside this
+        // locked transition with no separate set-environment step.
         await createOwnedSession();
-        if (backendName === "tmux") {
-          await applyTmuxSessionEnvironment({
-            sessionName,
-            env: opts.env,
-            timeoutMs: muxTimeoutMs,
-          });
-        }
       } catch (error: unknown) {
         if (createdOwnershipToken === ownershipToken) {
           await releaseFailedSessionCreation({
@@ -881,22 +879,6 @@ export class LifecycleSessionDisplacedError extends Error {
       `Another hack up replaced lifecycle session ${sessionName} while this one was starting; this up stopped without taking it over. Run the command again.`
     );
     this.name = "LifecycleSessionDisplacedError";
-  }
-}
-
-async function applyTmuxSessionEnvironment(opts: {
-  readonly sessionName: string;
-  readonly env: Readonly<Record<string, string>>;
-  readonly timeoutMs: number;
-}): Promise<void> {
-  for (const [key, value] of Object.entries(opts.env)) {
-    await runMuxCommand(
-      ["tmux", "set-environment", "-t", opts.sessionName, key, value],
-      {
-        stdin: "ignore",
-        timeoutMs: opts.timeoutMs,
-      }
-    );
   }
 }
 

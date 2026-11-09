@@ -90,6 +90,8 @@ When `internal.dns` / `internal.tls` are enabled, `hack up` writes a Compose ove
   as a side effect of internal trust
 - injects `extra_hosts` mappings for `*.hack` → current Caddy IP (for runtimes that ignore custom DNS)
 - merges any repo-local `.hack/.internal/extra-hosts.json` entries (for host tunnels / dynamic domains)
+  (an absent file is empty; one that exists but cannot be read refuses with `E_CONFIG_INVALID`
+  instead of dropping its aliases)
 
 This lets containers use the same `https://*.hack` hostnames as the host machine. If Caddy’s IP changes,
 `hack status`, `hack doctor`, and the TUI will warn; `hack restart` refreshes the mapping.
@@ -387,7 +389,9 @@ one, or set `worktree.auto_branch=false` to opt into the base instance explicitl
   - `schemas/hack.branches.schema.json`
   - `certs/` (mkcert output for non-Caddy services)
   - `projects.json` (best-effort registry; `hack projects prune` removes stale entries and stops
-    orphaned containers)
+    orphaned containers). A missing file is an empty registry. A file that exists but cannot be
+    read refuses with `E_PERMISSION` (or `E_CONFIG_INVALID` for other read faults) instead of
+    being listed, targeted or rewritten as empty.
 
 - `<repo>/.hack/`
   - `docker-compose.yml`

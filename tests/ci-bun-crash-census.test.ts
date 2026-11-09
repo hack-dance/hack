@@ -519,8 +519,8 @@ describe("sharded test suite (HACK-1424)", () => {
         ? manifest.packageManager.replace(/^bun@/, "")
         : null;
     expect(pin).toMatch(/^\d+\.\d+\.\d+$/);
-    for (const shard of [1, 2, 3, 4]) {
-      expect(workflowJobBunVersion(workflow, `test shard ${shard}/4`)).toBe(
+    for (const shard of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      expect(workflowJobBunVersion(workflow, `test shard ${shard}/8`)).toBe(
         pin
       );
     }

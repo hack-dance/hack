@@ -241,6 +241,41 @@ static int stop_owned(long pid, long start) {
  * path could not be verified), and no readiness line is written for any refused
  * startup.
  */
+/* A bounded, one-shot pipe payload. Never accept token bytes from argv. */
+static int read_control_token(int fd, unsigned char token[32]) {
+    unsigned char payload[33];
+    size_t used = 0;
+    int valid = 0;
+    struct stat info;
+    int64_t deadline = now_ms();
+    if (deadline < 0 || fstat(fd, &info) || !S_ISFIFO(info.st_mode)) {
+        close(fd); return -1;
+    }
+    deadline += 1000;
+    for (;;) {
+        int64_t now = now_ms();
+        if (now < 0 || now >= deadline) break;
+        struct pollfd ready = { .fd = fd, .events = POLLIN };
+        int result = poll(&ready, 1, (int)(deadline-now));
+        if (result < 0 && errno == EINTR) continue;
+        if (result <= 0) break;
+        ssize_t n = read(fd, payload + used, sizeof(payload) - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) break;
+        if (n == 0) { valid = used == 32; break; }
+        used += (size_t)n;
+        if (used == sizeof(payload)) break;
+    }
+    if (close(fd)) valid = 0;
+    if (!valid) return -1;
+    for (size_t i = 0; i < 32; i++) {
+        if (!((payload[i] >= '0' && payload[i] <= '9') ||
+              (payload[i] >= 'a' && payload[i] <= 'f'))) return -1;
+    }
+    memcpy(token, payload, 32);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     char *publish_args[8];
     int ephemeral_port = 0;
@@ -253,11 +288,14 @@ int main(int argc, char **argv) {
     int control_fd = -1, control_bound = 0;
     if (argc >= 2 && (!strcmp(argv[1], "--publish") || !strcmp(argv[1], "--publish-unix"))) {
         publish_unix = !strcmp(argv[1], "--publish-unix");
-        if (argc != 6 && argc != 9) return 64;
-        if (argc == 9) {
+        if (argc != 6 && argc != 10) return 64;
+        if (argc == 10) {
             if (strcmp(argv[6], "--control") || argv[7][0] != '/' ||
-                strlen(argv[7]) >= sizeof(control.sun_path) || strlen(argv[8]) != 32 ||
-                strspn(argv[8], "0123456789abcdef") != 32) return 64;
+                strlen(argv[7]) >= sizeof(control.sun_path) ||
+                strcmp(argv[8], "--control-fd")) return 64;
+            long token_fd = 0;
+            if (strcmp(argv[9], "0") && number(argv[9], INT_MAX, &token_fd)) return 64;
+            if (read_control_token((int)token_fd, stop_message+7)) return 64;
             control.sun_family = AF_UNIX;
             strcpy(control.sun_path, argv[7]);
             char parent[sizeof(control.sun_path)];
@@ -268,7 +306,7 @@ int main(int argc, char **argv) {
             struct stat directory;
             if (lstat(parent, &directory) || !S_ISDIR(directory.st_mode) ||
                 directory.st_uid != geteuid() || (directory.st_mode & 0077)) return 78;
-            memcpy(stop_message, "HKSTOP1", 7); memcpy(stop_message+7, argv[8], 32);
+            memcpy(stop_message, "HKSTOP1", 7);
         }
         if (publish_unix) {
             if (argv[2][0] != '/' || strlen(argv[2]) >= sizeof(frontend.sun_path)) return 64;

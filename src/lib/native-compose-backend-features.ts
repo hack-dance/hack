@@ -1,5 +1,10 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
+import { NATIVE_BUILD_FIELDS } from "../backends/native-project-builds.ts";
+import {
+  type NativePlatformMode,
+  selectNativePlatformModes,
+} from "../backends/native-project-platform.ts";
 import { readNativeSelection } from "../backends/native-project-selection.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
@@ -44,8 +49,9 @@ export type ComposeBackendFeature = (typeof COMPOSE_BACKEND_FEATURES)[number];
  *   source of truth for the ownership labels Hack itself writes.
  *
  * Other labels, including Hack's routing (`caddy*`), dependency cache
- * (`hack.dependencies.*`) and one-shot markers, are not reserved: native `up`
- * reviews them as it did before.
+ * (`hack.dependencies.*`) and one-shot (`hack.service.one-shot`) markers, are not
+ * reserved: native `up` reviews them itself. The native review accepts only the
+ * exact one-shot key, as a completion role, and still refuses other `hack.*` keys.
  */
 export const RESERVED_OWNERSHIP_LABEL_PREFIXES = [
   "com.docker.compose.",
@@ -58,8 +64,12 @@ function reservedNamespaceList(): string {
   return `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`;
 }
 
-/** The native VM runs Linux arm64; registry admission selects only this platform. */
+/**
+ * The native VM runs Linux arm64; registry admission selects only this platform unless
+ * a service opts in to `linux/amd64` emulation through the native adaptation.
+ */
 const NATIVE_PLATFORMS = new Set(["linux/arm64", "linux/arm64/v8"]);
+const EMULATED_PLATFORM = "linux/amd64";
 
 /** The same bound native image-project input applies to the Compose file. */
 const COMPOSE_LIMIT = 256 * 1024;
@@ -71,6 +81,25 @@ const FEATURE_PHRASES: Readonly<Record<ComposeBackendFeature, string>> = {
   unsupported_build:
     "a Compose build outside the basic context, dockerfile and target form",
   foreign_platform: "a service platform other than linux/arm64",
+};
+
+/** "a, b, c and d" for the build fields native builds implement. */
+function nativeBuildFieldList(): string {
+  return `${NATIVE_BUILD_FIELDS.slice(0, -1).join(", ")} and ${NATIVE_BUILD_FIELDS.at(-1)}`;
+}
+
+/** The `unsupported_build` phrase while `HACK_NATIVE_BUILDS=1` is set. */
+const NATIVE_BUILDS_PHRASE = `a Compose build field other than ${nativeBuildFieldList()}, or image together with build`;
+
+/** Options shared by the classifier, its readers and its messages. */
+export type ComposeBackendFeatureOptions = {
+  /**
+   * Whether native builds are enabled (`HACK_NATIVE_BUILDS=1`). Then a build
+   * is a Compose-backend feature only when it declares a field native builds
+   * do not implement, or `image` together with `build`; native build
+   * admission reviews the rest, including `args` and the managed-secret check.
+   */
+  readonly buildsEnabled?: boolean;
 };
 
 function labelKeys(labels: unknown): readonly string[] {
@@ -109,29 +138,64 @@ function isExternalNetwork(network: unknown): boolean {
 }
 
 /**
- * A build is inside the supported path only when the import preview's basic
- * build mapper accepts it and the service names no image, exactly as
- * `hack config import --dry-run` reports `invalid_or_unsupported_build` and
- * `image_build_exclusive`.
+ * Without native builds, a build is inside the supported path only when the
+ * import preview's basic build mapper accepts it and the service names no
+ * image, exactly as `hack config import --dry-run` reports
+ * `invalid_or_unsupported_build` and `image_build_exclusive`.
+ *
+ * With native builds, the gate admits exactly the fields native builds
+ * implement ({@link NATIVE_BUILD_FIELDS}). Values in those fields, such as
+ * paths, interpolation and build args, are left to native build admission,
+ * which refuses with the service name and never suggests the Compose backend:
+ * a build arg that carries a secret would be recorded in the image history
+ * there too.
  */
-function isUnsupportedBuild(service: Record<string, unknown>): boolean {
+function isUnsupportedBuild(
+  service: Record<string, unknown>,
+  buildsEnabled: boolean
+): boolean {
   if (!Object.hasOwn(service, "build")) {
     return false;
   }
-  return (
-    Object.hasOwn(service, "image") ||
-    mapLegacyComposeBuild(service.build) === undefined
-  );
+  if (Object.hasOwn(service, "image")) {
+    return true;
+  }
+  const build = service.build;
+  if (buildsEnabled) {
+    const fields: ReadonlySet<string> = new Set(NATIVE_BUILD_FIELDS);
+    return (
+      isRecord(build) && Object.keys(build).some((key) => !fields.has(key))
+    );
+  }
+  return mapLegacyComposeBuild(build) === undefined;
+}
+
+/**
+ * A basic build is one the import preview's build mapper accepts for a service
+ * that names no image. It does not keep the project on the Compose backend,
+ * but without `HACK_NATIVE_BUILDS=1` native image-project `up` refuses it
+ * (`NATIVE_BUILDS_DISABLED_REFUSAL`).
+ */
+function isBasicBuild(service: Record<string, unknown>): boolean {
+  return Object.hasOwn(service, "build") && !isUnsupportedBuild(service, false);
 }
 
 /**
  * Compose takes an absent or `null` `platform` as unset, and native review
  * does the same, so only a declared value other than the native platform is
  * foreign. Environment defaults such as `DOCKER_DEFAULT_PLATFORM` are not read.
+ * `linux/amd64` is not foreign for a service the native adaptation opted in to
+ * emulation; every other value stays foreign.
  */
-function isForeignPlatform(service: Record<string, unknown>): boolean {
+function isForeignPlatform(
+  service: Record<string, unknown>,
+  emulated: boolean
+): boolean {
   const platform = service.platform;
   if (platform === undefined || platform === null) {
+    return false;
+  }
+  if (emulated && platform === EMULATED_PLATFORM) {
     return false;
   }
   return !(typeof platform === "string" && NATIVE_PLATFORMS.has(platform));
@@ -174,7 +238,12 @@ export function findComposeBackendFeatures(
      * {@link readAdaptedIsolatedNetworks}.
      */
     readonly isolatedNetworks?: ReadonlySet<string>;
-  }
+    /**
+     * Service names a valid native adaptation opts in to `linux/amd64`
+     * emulation; see {@link readAdaptedEmulatedServices}.
+     */
+    readonly emulatedServices?: ReadonlySet<string>;
+  } & ComposeBackendFeatureOptions
 ): ComposeBackendFeature[] {
   if (!isRecord(compose)) {
     return [];
@@ -205,10 +274,20 @@ export function findComposeBackendFeatures(
   ) {
     found.add("reserved_label");
   }
-  if (services.some(isUnsupportedBuild)) {
+  const buildsEnabled = opts?.buildsEnabled === true;
+  if (services.some((service) => isUnsupportedBuild(service, buildsEnabled))) {
     found.add("unsupported_build");
   }
-  if (services.some(isForeignPlatform)) {
+  const emulated = opts?.emulatedServices ?? new Set<string>();
+  const named = isRecord(compose.services)
+    ? Object.entries(compose.services)
+    : [];
+  if (
+    named.some(
+      ([name, service]) =>
+        isRecord(service) && isForeignPlatform(service, emulated.has(name))
+    )
+  ) {
     found.add("foreign_platform");
   }
   return COMPOSE_BACKEND_FEATURES.filter((feature) => found.has(feature));
@@ -220,7 +299,9 @@ export function findComposeBackendFeatures(
  * oversized, a symlink or not parseable returns `undefined`, so the existing
  * native input refusal still reports it.
  */
-async function readComposeDocument(composeFile: string): Promise<unknown> {
+export async function readNativeComposeDocument(
+  composeFile: string
+): Promise<unknown> {
   let text: string;
   try {
     const file = await open(
@@ -292,39 +373,217 @@ export async function readAdaptedIsolatedNetworks(
 }
 
 /**
+ * Whether any service, including one outside the selected profiles, declares a
+ * basic build (see {@link isBasicBuild}). Shapes this check does not recognize
+ * return false and stay with native review.
+ */
+export function hasBasicComposeBuild(compose: unknown): boolean {
+  if (!isRecord(compose)) {
+    return false;
+  }
+  return topLevelEntries(compose, "services")
+    .filter(isRecord)
+    .some(isBasicBuild);
+}
+
+/** What doctor reports for one Compose file: closed names and flags only. */
+export type ComposeBackendReading = {
+  readonly features: ComposeBackendFeature[];
+  /** A basic build that native image-project `up` refuses; see {@link hasBasicComposeBuild}. */
+  readonly basicBuild: boolean;
+};
+
+/**
+ * Reads one Compose file once and reports both its Compose-backend features
+ * (after the explicit native adaptation, as {@link readComposeBackendFeatures})
+ * and whether it declares a basic build. Read-only and value-free.
+ */
+export async function readComposeBackendReading(
+  composeFile: string,
+  opts?: {
+    readonly adaptationFile?: string;
+    /** See {@link readComposeBackendFeatures}; replaces `adaptationFile`. */
+    readonly adaptationCandidates?: readonly (string | undefined)[];
+  } & ComposeBackendFeatureOptions
+): Promise<ComposeBackendReading> {
+  const compose = await readNativeComposeDocument(composeFile);
+  const buildsEnabled = opts?.buildsEnabled === true;
+  return {
+    features: await classifyAdapted(
+      compose,
+      adaptationCandidates(opts),
+      buildsEnabled
+    ),
+    // With native builds enabled, native `up` builds a basic build itself.
+    basicBuild: !buildsEnabled && hasBasicComposeBuild(compose),
+  };
+}
+
+/** The adaptation candidates a reading applies: explicit candidates, else the one file. */
+function adaptationCandidates(opts?: {
+  readonly adaptationFile?: string;
+  readonly adaptationCandidates?: readonly (string | undefined)[];
+}): readonly (string | undefined)[] {
+  return (
+    opts?.adaptationCandidates ??
+    (opts?.adaptationFile === undefined ? [] : [opts.adaptationFile])
+  );
+}
+
+function intersect(
+  left: ReadonlySet<string> | undefined,
+  right: ReadonlySet<string>
+): ReadonlySet<string> {
+  return left === undefined
+    ? right
+    : new Set([...left].filter((name) => right.has(name)));
+}
+
+/**
+ * Classify after adaptation. With several candidates (the effective env is not yet
+ * known), a network counts as isolated and a service as emulated only when every
+ * candidate says so; `undefined` is "no adaptation". This never passes a project
+ * that the selected adaptation would leave unsupported.
+ */
+async function classifyAdapted(
+  compose: unknown,
+  candidates: readonly (string | undefined)[],
+  buildsEnabled: boolean
+): Promise<ComposeBackendFeature[]> {
+  const features = findComposeBackendFeatures(compose, { buildsEnabled });
+  const network = features.includes("external_network");
+  const platform = features.includes("foreign_platform");
+  if (
+    candidates.every((candidate) => candidate === undefined) ||
+    !(network || platform)
+  ) {
+    return features;
+  }
+  const services =
+    isRecord(compose) && isRecord(compose.services)
+      ? Object.keys(compose.services)
+      : [];
+  let isolated: ReadonlySet<string> | undefined;
+  let emulated: ReadonlySet<string> | undefined;
+  for (const candidate of new Set(candidates)) {
+    if (network) {
+      isolated = intersect(
+        isolated,
+        candidate === undefined
+          ? new Set()
+          : await readAdaptedIsolatedNetworks(candidate)
+      );
+    }
+    if (platform) {
+      emulated = intersect(
+        emulated,
+        candidate === undefined
+          ? new Set()
+          : await readAdaptedEmulatedServices(candidate, services)
+      );
+    }
+  }
+  return findComposeBackendFeatures(compose, {
+    isolatedNetworks: isolated,
+    emulatedServices: emulated,
+    buildsEnabled,
+  });
+}
+
+/**
+ * Reads the service names a `HACK_NATIVE_ADAPTATION` selection opts in to
+ * `linux/amd64` emulation (`amd64Emulation`, with mode `prefer-native` or
+ * `amd64`). The same closed `E_CONFIG_INVALID` refusal applies as native start
+ * gives, including for a service name the Compose file does not declare.
+ */
+export async function readAdaptedEmulatedServices(
+  adaptationFile: string,
+  services: readonly string[]
+): Promise<ReadonlySet<string>> {
+  const selection = await readNativeSelection(adaptationFile);
+  if (!isRecord(selection) || selection.version !== 1) {
+    throw adaptationRefused();
+  }
+  const modes = selectNativePlatformModes({
+    selection: selection.amd64Emulation,
+    services,
+  });
+  return new Set(
+    [...modes].filter(([, mode]) => mode !== "native").map(([name]) => name)
+  );
+}
+
+/**
  * Reads and classifies one Compose file after the explicit native adaptation.
  * Read-only: no lock, no write, no runtime request. A Compose file that is
  * missing, oversized, a symlink or not parseable returns no features, so the
  * existing native input refusal still reports it.
  *
  * `adaptationFile` is the `HACK_NATIVE_ADAPTATION` path native start applies.
- * It is read only when the unadapted file has an external network, so a
- * project without one keeps its existing order of refusals. An invalid
- * adaptation refuses with `E_CONFIG_INVALID` (see
- * {@link readAdaptedIsolatedNetworks}).
+ * It is read only when the unadapted file has an external network or a
+ * foreign platform, so a project without either keeps its existing order of
+ * refusals. An invalid adaptation refuses with `E_CONFIG_INVALID` (see
+ * {@link readAdaptedIsolatedNetworks} and {@link readAdaptedEmulatedServices}).
  */
 export async function readComposeBackendFeatures(
   composeFile: string,
-  opts?: { readonly adaptationFile?: string }
+  opts?: {
+    readonly adaptationFile?: string;
+    /**
+     * Every adaptation that could apply when the effective env is not yet known
+     * (`undefined` is "no adaptation"). A network counts as isolated only when
+     * every candidate isolates it, so the check never passes a project that the
+     * selected adaptation would leave external. Replaces `adaptationFile`.
+     */
+    readonly adaptationCandidates?: readonly (string | undefined)[];
+  } & ComposeBackendFeatureOptions
 ): Promise<ComposeBackendFeature[]> {
-  const compose = await readComposeDocument(composeFile);
-  const features = findComposeBackendFeatures(compose);
-  if (
-    opts?.adaptationFile === undefined ||
-    !features.includes("external_network")
-  ) {
-    return features;
+  const compose = await readNativeComposeDocument(composeFile);
+  return await classifyAdapted(
+    compose,
+    adaptationCandidates(opts),
+    opts?.buildsEnabled === true
+  );
+}
+
+/**
+ * Each declared service's native platform mode after the `HACK_NATIVE_ADAPTATION`
+ * selection, for doctor reporting. Read-only. Without a selection every service is
+ * `native`; an unreadable Compose file has no services. An invalid selection refuses
+ * with the same `E_CONFIG_INVALID` native start gives.
+ */
+export async function readNativePlatformModes(opts: {
+  readonly composeFile: string;
+  readonly adaptationFile?: string;
+}): Promise<ReadonlyMap<string, NativePlatformMode>> {
+  const compose = await readNativeComposeDocument(opts.composeFile);
+  const services =
+    isRecord(compose) && isRecord(compose.services)
+      ? Object.keys(compose.services)
+      : [];
+  if (opts.adaptationFile === undefined) {
+    return selectNativePlatformModes({ selection: undefined, services });
   }
-  return findComposeBackendFeatures(compose, {
-    isolatedNetworks: await readAdaptedIsolatedNetworks(opts.adaptationFile),
+  const selection = await readNativeSelection(opts.adaptationFile);
+  if (!isRecord(selection) || selection.version !== 1) {
+    throw adaptationRefused();
+  }
+  return selectNativePlatformModes({
+    selection: selection.amd64Emulation,
+    services,
   });
 }
 
 /** Value-free phrase list, such as "a and b" or "a, b and c". */
 export function describeComposeBackendFeatures(
-  features: readonly ComposeBackendFeature[]
+  features: readonly ComposeBackendFeature[],
+  opts?: ComposeBackendFeatureOptions
 ): string {
-  const phrases = features.map((feature) => FEATURE_PHRASES[feature]);
+  const phrases = features.map((feature) =>
+    feature === "unsupported_build" && opts?.buildsEnabled === true
+      ? NATIVE_BUILDS_PHRASE
+      : FEATURE_PHRASES[feature]
+  );
   if (phrases.length <= 1) {
     return phrases[0] ?? "";
   }
@@ -336,18 +595,31 @@ export const COMPOSE_BACKEND_SELECTION =
   "Set HACK_RUNTIME_BACKEND=compose (hack-next and hack-v5 accept it too)";
 
 /**
+ * The documented selection that keeps a project with an external network on
+ * native: native start replaces each listed network with an owned isolated one.
+ */
+export const ISOLATED_NETWORKS_SELECTION =
+  "An external network can stay on native instead: list it by name in `isolatedNetworks` of the `HACK_NATIVE_ADAPTATION` selection, and native start replaces it with an owned isolated network that does not join the external one";
+
+/** The next step for a basic build, which native image-project `up` refuses without native builds. */
+export const BASIC_BUILD_NEXT_STEP =
+  "Set HACK_NATIVE_BUILDS=1 to build it in the native runtime, or preview the authored native conversion with `hack config import --dry-run --path <project root>`";
+
+/**
  * The closed refusal for a project that needs the Compose backend: stable code
  * `E_NATIVE_PROJECT_UNSUPPORTED`, one line, and a `detail` that lists only the
  * closed feature names.
  */
-export function composeBackendRefusal(opts: {
-  readonly features: readonly ComposeBackendFeature[];
-  readonly restart: boolean;
-}): HackCliError {
+export function composeBackendRefusal(
+  opts: {
+    readonly features: readonly ComposeBackendFeature[];
+    readonly restart: boolean;
+  } & ComposeBackendFeatureOptions
+): HackCliError {
   const command = opts.restart ? "hack restart" : "hack up";
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features)}; this project runs on the Compose backend. ${COMPOSE_BACKEND_SELECTION} and run the command again. Nothing was started or stopped.`,
+    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. ${COMPOSE_BACKEND_SELECTION} and run the command again. Nothing was started or stopped.`,
     detail: { backend: "compose", features: [...opts.features] },
   });
 }
@@ -357,16 +629,22 @@ export function composeBackendRefusal(opts: {
  * needs the Compose backend. Call it after project selection and before any
  * runtime request, storage preparation, lifecycle hook or stop.
  */
-export async function refuseNativeComposeBackendFeatures(opts: {
-  readonly composeFile: string;
-  /** The `HACK_NATIVE_ADAPTATION` path native start applies, if any. */
-  readonly adaptationFile?: string;
-  readonly restart: boolean;
-}): Promise<void> {
+export async function refuseNativeComposeBackendFeatures(
+  opts: {
+    readonly composeFile: string;
+    /** The `HACK_NATIVE_ADAPTATION` path native start applies, if any. */
+    readonly adaptationFile?: string;
+    /** Every adaptation native start could apply; see {@link readComposeBackendFeatures}. */
+    readonly adaptationCandidates?: readonly (string | undefined)[];
+    readonly restart: boolean;
+  } & ComposeBackendFeatureOptions
+): Promise<void> {
   const features = await readComposeBackendFeatures(opts.composeFile, {
     adaptationFile: opts.adaptationFile,
+    adaptationCandidates: opts.adaptationCandidates,
+    buildsEnabled: opts.buildsEnabled,
   });
   if (features.length > 0) {
-    throw composeBackendRefusal({ features, restart: opts.restart });
+    throw composeBackendRefusal({ ...opts, features });
   }
 }

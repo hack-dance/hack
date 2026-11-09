@@ -77,7 +77,7 @@
   ],
   "workloads": [
     {
-      "id": "event-agent",
+      "id": "large-application",
       "lanes": [
         "candidate",
         "compose",

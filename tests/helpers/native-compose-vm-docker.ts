@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
+  NATIVE_COMPOSE_VM_FILE_IMAGE,
   VM_FILE_IMAGE_FORMAT,
   VM_FILE_OBSERVER_PROGRAM,
   VM_FILE_VERIFY_PROGRAM,
@@ -267,16 +268,20 @@ if (args[0] === "synthetic-program") {
 }
 if (args[0] === "image") {
   exact(["image", "inspect", "--format", VM_FILE_IMAGE_FORMAT, args[4]]);
-  if (!["oven/bun:1.4.2-slim", "synthetic/reader:1"].includes(args[4] ?? "")) {
+  if (
+    ![NATIVE_COMPOSE_VM_FILE_IMAGE, "synthetic/reader:1"].includes(
+      args[4] ?? ""
+    )
+  ) {
     refuse();
   }
   console.log(
     JSON.stringify({
-      id: args[4] === "oven/bun:1.4.2-slim" ? helper : app,
+      id: args[4] === NATIVE_COMPOSE_VM_FILE_IMAGE ? helper : app,
       user: (await has("named-user")) ? "named" : "",
       volumes: null,
       labels:
-        args[4] === "oven/bun:1.4.2-slim"
+        args[4] === NATIVE_COMPOSE_VM_FILE_IMAGE
           ? (await has("image-label-collision"))
             ? { "io.hack.native-file.role": "foreign" }
             : { "org.opencontainers.image.title": "Bun synthetic" }

@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+import { readFile, rm } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import type { ExecOptions } from "../src/lib/shell.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -8,6 +10,7 @@ const execCalls: Array<{
   readonly options: ExecOptions;
 }> = [];
 let presenceResult = { exitCode: 0, stdout: "", stderr: "" };
+let sourceResult = { exitCode: 0, stdout: "", stderr: "" };
 
 const shellMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -17,6 +20,9 @@ const shellMock = await registerScopedModuleMock({
       execCalls.push({ command: [...command], options });
       if (command.includes("has-session")) {
         return presenceResult;
+      }
+      if (command.includes("source-file")) {
+        return sourceResult;
       }
       if (command.includes("list-sessions")) {
         return {
@@ -48,6 +54,7 @@ beforeAll(() => {
 beforeEach(() => {
   execCalls.length = 0;
   presenceResult = { exitCode: 0, stdout: "", stderr: "" };
+  sourceResult = { exitCode: 0, stdout: "", stderr: "" };
 });
 
 afterAll(() => {
@@ -61,11 +68,12 @@ async function loadTmuxBackend() {
   return createTmuxBackend();
 }
 
-test("tmux creates lifecycle ownership atomically and reads the env fallback", async () => {
+test("tmux creates lifecycle ownership through stdin, never argv", async () => {
   const backend = await loadTmuxBackend();
   const created = await backend.createSession({
     name: "demo",
     cwd: "/repo",
+    env: { FAKE_API_KEY: "fake-test-key" },
     lifecycleOwnerToken: "owner-123",
   });
   const ownerToken = await backend.readLifecycleOwnerToken?.({ name: "demo" });
@@ -74,15 +82,27 @@ test("tmux creates lifecycle ownership atomically and reads the env fallback", a
   expect(ownerToken).toBe("owner-123");
   expect(execCalls[0]?.command).toEqual([
     "tmux",
-    "new-session",
-    "-d",
-    "-s",
-    "demo",
-    "-c",
-    "/repo",
-    "-e",
-    "HACK_LIFECYCLE_OWNER_TOKEN=owner-123",
+    "-u",
+    "start-server",
+    ";",
+    "source-file",
+    "-",
   ]);
+  expect(execCalls[0]?.options.timeoutMs).toBeGreaterThan(0);
+  const input = execCalls[0]?.options.stdin;
+  expect(input).toBeInstanceOf(Blob);
+  if (!(input instanceof Blob)) {
+    throw new Error("Expected private stdin payload");
+  }
+  expect(await input.text()).toContain(
+    '"HACK_LIFECYCLE_OWNER_TOKEN=owner-123"'
+  );
+  expect(await input.text()).toContain('"FAKE_API_KEY=fake-test-key"');
+  for (const { command } of execCalls) {
+    expect(command.join(" ")).not.toContain("owner-123");
+    expect(command.join(" ")).not.toContain("fake-test-key");
+    expect(command).not.toContain("set-option");
+  }
   expect(execCalls.map(({ command }) => command)).toContainEqual([
     "tmux",
     "show-environment",
@@ -90,6 +110,74 @@ test("tmux creates lifecycle ownership atomically and reads the env fallback", a
     "demo",
     "HACK_LIFECYCLE_OWNER_TOKEN",
   ]);
+});
+
+test("tmux keeps only the exact duplicate-session diagnostic from a failed create", async () => {
+  const backend = await loadTmuxBackend();
+  const create = () =>
+    backend.createSession({
+      name: "demo",
+      env: { FAKE_API_KEY: "fake-test-key" },
+      lifecycleOwnerToken: "owner-123",
+    });
+  sourceResult = {
+    exitCode: 1,
+    stdout: "",
+    stderr: "duplicate session: demo\n",
+  };
+  expect(await create()).toEqual({
+    ok: false,
+    error: "create_failed",
+    stderr: "duplicate session: demo",
+  });
+  // Parser diagnostics may quote command input: they never surface.
+  sourceResult = {
+    exitCode: 1,
+    stdout: "",
+    stderr: '-:1: invalid environment "FAKE_API_KEY=fake-test-key"',
+  };
+  expect(await create()).toEqual({
+    ok: false,
+    error: "create_failed",
+    stderr: "tmux command failed",
+  });
+});
+
+test("tmux sends command environment values over stdin with tmux quoting", async () => {
+  const backend = await loadTmuxBackend();
+  const fake = "fake-'\"$value\\line\nnext";
+  await backend.execInSession({
+    name: "demo",
+    command: "echo done",
+    env: { FAKE_API_KEY: fake },
+  });
+  expect(execCalls[0]?.command).toEqual([
+    "tmux",
+    "-u",
+    "start-server",
+    ";",
+    "source-file",
+    "-",
+  ]);
+  const input = execCalls[0]?.options.stdin;
+  if (!(input instanceof Blob)) {
+    throw new Error("Expected private stdin payload");
+  }
+  const source = await input.text();
+  expect(source).not.toContain("\\$value");
+  const path = source.match(/'([^']+\/env\.json)'/)?.[1];
+  if (!path) {
+    throw new Error("Expected a private input path");
+  }
+  try {
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      FAKE_API_KEY: fake,
+    });
+  } finally {
+    await rm(dirname(path), { recursive: true, force: true });
+  }
+  expect(source.split("\n")).toHaveLength(2);
+  expect(execCalls[0]?.command.join(" ")).not.toContain(fake);
 });
 
 test("tmux presence uses an exact session target and distinguishes unknown failures", async () => {

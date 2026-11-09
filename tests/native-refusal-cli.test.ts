@@ -220,6 +220,34 @@ const stoppedGraph = {
 };
 
 test(
+  "config adopt --dry-run on the native backend names the exact Compose rerun before any request",
+  async () => {
+    const f = await fixture();
+    const before = await readdir(f.projectDir);
+    for (const [args, command] of [
+      [["config", "adopt", "--dry-run"], "hack config adopt --dry-run"],
+      [["config", "adopt"], "hack config adopt"],
+      [["config", "adopt", "--rollback"], "hack config adopt --rollback"],
+      [["config", "adopt", "--recover"], "hack config adopt --recover"],
+      [["config", "adopt", "--stop"], "hack config adopt --stop"],
+      [
+        ["config", "adopt", "--recover", "--rollback"],
+        "hack config adopt --rollback --recover",
+      ],
+    ] as const) {
+      const result = await cli({ fixture: f, args });
+      expectOneClosedLine(
+        result,
+        `E_NATIVE_PROJECT_UNSUPPORTED: Native project configuration currently requires the Compose backend. The selected runtime was not changed. Rerun with HACK_RUNTIME_BACKEND=compose, for example: HACK_RUNTIME_BACKEND=compose ${command}`
+      );
+    }
+    expect(await f.calls()).toEqual([]);
+    expect(await readdir(f.projectDir)).toEqual(before);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "native-project-run: an unbounded profile is one coded line before any request",
   async () => {
     const f = await fixture();
@@ -284,7 +312,7 @@ test(
     });
     expectOneClosedLine(
       result,
-      "E_CONFIG_INVALID: Native host dependencies require a bounded explicit listener selection; values omitted."
+      "E_CONFIG_INVALID: Native host dependencies refused: the selection must be {version: 1, dependencies: [1..128 entries]} with no other fields; listener values omitted."
     );
     expect(await f.calls()).toEqual(["runtime check-project-share"]);
   },
@@ -385,7 +413,7 @@ test(
     const result = await cli({ fixture: f, args: ["up"], env: SHARED });
     expectOneClosedLine(
       result,
-      "Native restore selection changed; retained data was not adopted."
+      "Native restore selection changed; retained data was not adopted. Revert the change to keep that data, or run `hack down --remove-data` to discard it and start fresh."
     );
     expect((await f.calls()).at(-1)).toBe("graph restore-selection");
   },
@@ -458,12 +486,12 @@ test(
   SPAWN_TIMEOUT_MS
 );
 
-/** A project whose only service names a registry image the candidate refuses. */
+/** A project whose only service names a local registry the candidate refuses without an opt-in. */
 const REGISTRY_COMPOSE = JSON.stringify({
-  services: { web: { image: "ghcr.io/example/app:1" } },
+  services: { web: { image: "localhost:5000/example/app:1" } },
 });
 const IMAGE_REFUSAL =
-  "Native project image reference refused before runtime startup: use a public Docker Hub reference (shorthand such as alpine:3.21 is accepted) or a sha256 image ID; no VM, provider or image acquisition was started.";
+  "Native project image reference refused before runtime startup: use a Docker Hub or OCI registry reference (shorthand such as alpine:3.21 is accepted; local registries need HACK_NATIVE_LOCAL_REGISTRIES) or a sha256 image ID; no VM, provider or image acquisition was started.";
 
 test(
   "native-project-image-admission: a refused image reference is one coded line",
@@ -476,7 +504,7 @@ test(
       result,
       `E_NATIVE_PROJECT_UNSUPPORTED: ${IMAGE_REFUSAL}`
     );
-    expect(result.output).not.toContain("ghcr.io");
+    expect(result.output).not.toContain("localhost:5000");
     expect((await f.calls()).at(-1)).toBe("runtime admit-image");
   },
   SPAWN_TIMEOUT_MS
@@ -493,7 +521,7 @@ test(
       result,
       "Native runtime returned an invalid image admission response; no VM, provider or image acquisition was started."
     );
-    expect(result.output).not.toContain("ghcr.io");
+    expect(result.output).not.toContain("localhost:5000");
     expect((await f.calls()).at(-1)).toBe("runtime admit-image");
   },
   SPAWN_TIMEOUT_MS
@@ -540,4 +568,88 @@ test(
     expect(await f.calls()).toEqual(["runtime check-project-share"]);
   },
   SPAWN_TIMEOUT_MS
+);
+
+/** HACK-1952: home A stopped the run cleanly; home B is another launcher version's home. */
+async function stoppedInAnotherHome(f: Fixture, stop = true) {
+  const homeB = join(f.root, "native-home-b");
+  await mkdir(homeB, { mode: 0o700 });
+  await savedRun(f);
+  const lifetime = await beginNativeProjectFinalization({
+    scope: f.scope,
+    run,
+    httpsPort: null,
+  });
+  if (stop) {
+    await lifetime.complete();
+  }
+  return { HACK_NATIVE_HOME: homeB, ...SHARED };
+}
+
+test(
+  "native-project-run: another home's stopped mapping names the release, which then frees this home",
+  async () => {
+    const f = await fixture();
+    const homeB = await stoppedInAnotherHome(f);
+    const inspected = await cli({
+      fixture: f,
+      args: ["doctor", "--native-run-mapping", "inspect", "--json"],
+      env: homeB,
+    });
+    expect(inspected.code).toBe(0);
+    const inspection = JSON.parse(inspected.stdout).data;
+    expect(inspection).toMatchObject({
+      state: "foreign-home",
+      owner: "stopped",
+      ownerHome: f.scope.nativeHome,
+    });
+    const selection: string = inspection.selectionSha256;
+    expect(selection).toMatch(/^[a-f0-9]{64}$/);
+    for (const args of [
+      ["ps"],
+      ["up"],
+      ["down"],
+      ["doctor", "--native-cleanup", "inspect"],
+    ]) {
+      expectOneClosedLine(
+        await cli({ fixture: f, args, env: homeB }),
+        `Native project run mapping belongs to run ${run.run} in another native home (${f.scope.nativeHome}), which stopped it cleanly; its retained data stays in that home. To start this instance from this native home, release the mapping with hack doctor --native-run-mapping release --expect-selection ${selection}, or run hack down with the Hack version that owns that home.`
+      );
+    }
+    const released = await cli({
+      fixture: f,
+      args: [
+        "doctor",
+        "--native-run-mapping",
+        "release",
+        "--expect-selection",
+        selection,
+      ],
+      env: homeB,
+    });
+    expect(released.code).toBe(0);
+    expect(released.stdout).toContain(
+      "Native run mapping released from another native home"
+    );
+    const down = await cli({ fixture: f, args: ["down"], env: homeB });
+    expect(down.output).not.toContain("run mapping");
+    expect(down.code).toBe(0);
+  },
+  SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "native-project-run: another home's live owner is one closed line naming it",
+  async () => {
+    const f = await fixture();
+    const homeB = await stoppedInAnotherHome(f, false);
+    for (const args of [["ps"], ["up"], ["down"]]) {
+      expectOneClosedLine(
+        await cli({ fixture: f, args, env: homeB }),
+        `Native project run mapping is owned by live run ${run.run} in another native home (${f.scope.nativeHome}), frontend pid ${process.pid}. Stop it first: press Ctrl-C in that hack up, or run hack down with the Hack version that owns that home; then retry here.`
+      );
+    }
+    expect(await f.calls()).toEqual([]);
+  },
+  SPAWN_TIMEOUT_MS * 2
 );

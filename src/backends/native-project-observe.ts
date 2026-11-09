@@ -1,6 +1,11 @@
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  inspectNativeProjectGraph,
+  isNativeProviderBusy,
+  OBSERVER_BUSY_WAIT_MS,
+} from "./native-project-inspect.ts";
+import {
   loadNativeProjectRun,
   type NativeProjectRun,
   type NativeProjectRunScope,
@@ -42,11 +47,14 @@ function runtimeNotRunning(): HackCliError {
 /**
  * Native ps result. `runtime_not_running` means the project has an owned run
  * mapping but the candidate runtime is stopped: nothing was observed, so
- * `phase` is null and `items` is empty.
+ * `phase` is null and `items` is empty. `runtime_busy` means another operation
+ * held the exclusive provider lease for the whole bounded read (a starting
+ * foreground `up` holds it until its graph is ready): nothing was observed either.
  */
 export type NativeProjectPsStatus =
   | "not_started"
   | "runtime_not_running"
+  | "runtime_busy"
   | "observed"
   | "owner_unconfirmed"
   | "runtime_degraded";
@@ -128,16 +136,30 @@ function containerItem(
     exitCode: typeof observation.code === "number" ? observation.code : null,
   };
 }
+/** Read-only inspection retries brief provider lease contention, never effects. */
 async function inspect(opts: Options, run: NativeProjectRun) {
   return inspected(
-    await (opts.invoke ?? invokeNativeRuntime)({
+    await inspectNativeProjectGraph({
       runtime: opts.runtime,
-      cwd: opts.scope.projectRoot,
-      args: ["graph", "inspect", "--run-id", run.run, "--json"],
-      timeoutMs: 30_000,
+      projectRoot: opts.scope.projectRoot,
+      run: run.run,
+      invoke: opts.invoke,
+      busyWaitMs: OBSERVER_BUSY_WAIT_MS,
     }),
     run
   );
+}
+/** Ordinary states in which nothing was observed; every other refusal rethrows. */
+function unobservedStatus(
+  error: unknown
+): "runtime_not_running" | "runtime_busy" {
+  if (isNativeRuntimeNotRunning(error)) {
+    return "runtime_not_running";
+  }
+  if (isNativeProviderBusy(error)) {
+    return "runtime_busy";
+  }
+  throw error;
 }
 /**
  * Historical receipt phase is separated from current per-service observations.
@@ -161,12 +183,9 @@ export async function nativeProjectPs(
   try {
     snapshot = await inspect(opts, run);
   } catch (error: unknown) {
-    if (!isNativeRuntimeNotRunning(error)) {
-      throw error;
-    }
     return {
       backend: "native",
-      status: "runtime_not_running",
+      status: unobservedStatus(error),
       run: run.run,
       phase: null,
       items: [],
@@ -269,6 +288,7 @@ export async function nativeProjectLogs(
   ) {
     throw refused();
   }
+  const lines = logLines(result.lines, result.stdout, result.stderr);
   const after = await inspect(opts, run);
   if (
     after.items.find((item) => item.service === opts.service)?.container !==
@@ -283,8 +303,47 @@ export async function nativeProjectLogs(
     container: service.container,
     stdout: result.stdout,
     stderr: result.stderr,
+    lines,
     truncated: result.truncated,
   };
+}
+
+/** One retained log line in engine (time) order. */
+export type NativeLogLine = {
+  readonly stream: "stdout" | "stderr";
+  readonly text: string;
+};
+
+/**
+ * The runtime's whole lines in engine order. A runtime without `lines` returns
+ * the streams apart, so their order is unknown: keep stdout before stderr.
+ */
+function logLines(
+  value: unknown,
+  stdout: string,
+  stderr: string
+): NativeLogLine[] {
+  if (value === undefined) {
+    return [
+      ...(stdout ? [{ stream: "stdout" as const, text: stdout }] : []),
+      ...(stderr ? [{ stream: "stderr" as const, text: stderr }] : []),
+    ];
+  }
+  if (!Array.isArray(value) || value.length > 16_384) {
+    throw refused();
+  }
+  return value.map((line: unknown) => {
+    if (
+      !(
+        isRecord(line) &&
+        (line.stream === "stdout" || line.stream === "stderr") &&
+        typeof line.text === "string"
+      )
+    ) {
+      throw refused();
+    }
+    return { stream: line.stream, text: line.text };
+  });
 }
 
 /** Refuse before any legacy lifecycle effects until the native operation is wired. */

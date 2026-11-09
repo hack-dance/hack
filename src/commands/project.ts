@@ -41,13 +41,18 @@ import {
 } from "../agents/onboarding-handoff.ts";
 import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
-import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
+import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
+import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
+import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../backends/native-project-down.ts";
+import {
+  requireNativeProjectInternalExtraHostsUnchanged,
+  resolveNativeInternalExtraHostSelection,
+} from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
-import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
   type NativeProjectPsResult,
   nativeProjectLogs,
@@ -69,12 +74,18 @@ import {
   nativeRestartSelection,
   preflightNativeRestart,
 } from "../backends/native-project-restart-preflight.ts";
+import {
+  nativeAdaptationCandidates,
+  resolveNativeAdaptationSelection,
+  resolveNativeHostSettings,
+} from "../backends/native-project-settings.ts";
 import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
 import {
-  parseNativeHttpsSelection,
+  type NativeStartupProgress,
   startNativeProject,
 } from "../backends/native-project-start.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
+import type { NativeServiceExit } from "../backends/native-service-exit-monitor.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -119,7 +130,11 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
-import { renderCompose, TODO_IMAGE_SENTINEL } from "../init/compose.ts";
+import {
+  type InitComposeBackend,
+  renderCompose,
+  TODO_IMAGE_SENTINEL,
+} from "../init/compose.ts";
 import type { ServiceCandidate } from "../init/discovery.ts";
 import { discoverRepo } from "../init/discovery.ts";
 import {
@@ -159,6 +174,11 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import {
+  confirmComposeDownStopped,
+  describeUnconfirmedComposeDown,
+  listComposeProjectContainers,
+} from "../lib/compose-down-confirmation.ts";
 import {
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
@@ -214,6 +234,7 @@ import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
+import { runLifecycleCommandChild } from "../lib/lifecycle-command-child.ts";
 import {
   appendLifecycleLogRecord,
   readLifecycleState,
@@ -268,6 +289,7 @@ import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
   findUnmigratedLegacyDotenv,
+  finishImplicitLegacyEnvMigration,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hasUnmigratedLegacyDotenv,
   migrateLegacyProjectEnv,
@@ -354,6 +376,7 @@ import {
   reconcileImplicitDownBranch,
 } from "./project-down-safety.ts";
 import { runNativeProjectExec } from "./project-exec-native.ts";
+import { runNativeDownRemoveData } from "./project-native-remove-data.ts";
 
 /** Regex for valid TLD/service/subdomain labels (lowercase alphanumeric with hyphens). */
 const SLUG_LABEL_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -455,7 +478,7 @@ const optYes = defineOption({
   name: "yes",
   type: "boolean",
   long: "--yes",
-  description: "Confirm --prune-caches without prompting",
+  description: "Confirm --prune-caches or --remove-data without prompting",
 } as const);
 const optRecoverFrontend = defineOption({
   name: "recoverFrontend",
@@ -509,6 +532,13 @@ const downOptions = [
   optProfile,
   optTarget,
   optPruneCaches,
+  defineOption({
+    name: "removeData",
+    type: "boolean",
+    long: "--remove-data",
+    description:
+      "Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first)",
+  } as const),
   optYes,
   optJson,
   defineOption({
@@ -516,7 +546,7 @@ const downOptions = [
     type: "boolean",
     long: "--recover",
     description:
-      "Explicitly reconcile an interrupted native Compose stop while retaining data",
+      "Explicitly reconcile an interrupted native stop, or stop the services of a native run whose foreground owner exited, while retaining data",
   } as const),
 ] as const;
 const restartOptions = [
@@ -1319,10 +1349,13 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
     serviceNames: opts.serviceNames,
     materialize: false,
   });
-  if (migrated.wroteFiles.length > 0) {
-    logger.info({
-      message: `Migrated env config: ${migrated.wroteFiles.join(", ")}`,
-    });
+  const report = await finishImplicitLegacyEnvMigration({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    migrated,
+  });
+  for (const line of report.lines) {
+    logger.info({ message: line });
   }
   return migrated.legacyDetected;
 }
@@ -1747,6 +1780,36 @@ async function maybePromptToFixMissingEnv(opts: {
   return true;
 }
 
+/**
+ * One finite lifecycle command with its output logged. The signal cancels the
+ * command's whole owned process group (see {@link runLifecycleCommandChild}).
+ */
+function runLifecycleChild(opts: {
+  readonly command: string;
+  readonly cwd: string;
+  readonly env: Record<string, string>;
+  readonly output: "stdout" | "stderr";
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly service: string;
+  readonly signal?: AbortSignal;
+}): Promise<number> {
+  return runLifecycleCommandChild({
+    command: opts.command,
+    cwd: opts.cwd,
+    env: opts.env,
+    signal: opts.signal,
+    drain: (stream, source) =>
+      streamLifecycleCommandOutput({
+        stream,
+        output: source === "stdout" ? opts.output : "stderr",
+        projectDir: opts.projectDir,
+        composeProject: opts.composeProject,
+        service: opts.service,
+      }),
+  });
+}
+
 async function runLifecycleCommands(opts: {
   readonly title: string;
   readonly commands: readonly ProjectLifecycleCommand[] | undefined;
@@ -1760,6 +1823,11 @@ async function runLifecycleCommands(opts: {
     readonly index: number;
     readonly serviceName: string;
   }) => Promise<void>;
+  /**
+   * Cancels the running command's owned process group and the rest; the
+   * result is then 130.
+   */
+  readonly signal?: AbortSignal;
 }): Promise<number> {
   const commands = opts.commands ?? [];
   for (const [index, cmd] of commands.entries()) {
@@ -1810,31 +1878,16 @@ async function runLifecycleCommands(opts: {
       },
     });
 
-    const proc = Bun.spawn(["sh", "-c", cmd.command], {
+    const exitCode = await runLifecycleChild({
+      command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
-      stdin: "inherit",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    const stdoutTask = streamLifecycleCommandOutput({
-      stream: proc.stdout,
       output: opts.routeStdoutToStderr ? "stderr" : "stdout",
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
       service: serviceName,
+      signal: opts.signal,
     });
-    const stderrTask = streamLifecycleCommandOutput({
-      stream: proc.stderr,
-      output: "stderr",
-      projectDir: opts.projectDir,
-      composeProject: opts.composeProject,
-      service: serviceName,
-    });
-
-    const exitCode = await proc.exited;
-    await Promise.all([stdoutTask, stderrTask]);
 
     await appendLifecycleLogRecord({
       projectDir: opts.projectDir,
@@ -2194,18 +2247,38 @@ async function probeComposeContainers(opts: {
 }
 
 /**
- * The restart down phase's container outcome. A preserved Compose runtime
- * was never shut down: its containers are kept, so their helpers stay held.
- * Exported for tests.
+ * The container outcome of a `docker compose down` for the shared helper
+ * holders: "stopped" only when the down succeeded and no container labelled
+ * with the Compose project (orphans of services the current file no longer
+ * declares included) may still run. Warns with the remaining containers or
+ * the failed check. See compose-down-confirmation.ts. Never throws.
  */
-export function restartContainerShutdown(opts: {
-  readonly preserveComposeRuntime: boolean;
+async function confirmComposeDownForHelpers(opts: {
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  /** The holder instance (`<project>` or `<project>--<branch>`). */
+  readonly lifecycleComposeProject: string;
+  /** The Compose project label value of the instance's containers. */
+  readonly composeProject: string;
   readonly downCode: number;
-}): ContainerShutdown {
-  if (opts.preserveComposeRuntime) {
-    return "kept";
+}): Promise<ContainerShutdown> {
+  const confirmation = await confirmComposeDownStopped({
+    downCode: opts.downCode,
+    heldHelperNames: () =>
+      heldSharedHelperNames({
+        cfg: opts.cfg,
+        composeProject: opts.lifecycleComposeProject,
+      }),
+    listContainers: () =>
+      listComposeProjectContainers({ composeProject: opts.composeProject }),
+  });
+  const message = describeUnconfirmedComposeDown({
+    composeProject: opts.composeProject,
+    confirmation,
+  });
+  if (message !== null) {
+    logger.warn({ message });
   }
-  return opts.downCode === 0 ? "stopped" : "unconfirmed";
+  return confirmation.containers;
 }
 
 /**
@@ -3825,6 +3898,7 @@ export async function handleInit({
 
   const repoRoot = await findRepoRootForInit(startDir);
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
+  const backend = resolveInitComposeBackend();
 
   if (!io.canPrompt()) {
     requireInteractive({
@@ -3917,6 +3991,7 @@ export async function handleInit({
       projectSlug: slug,
       candidates: discovery.candidates,
       oauth: { enabled: oauth.enabled, tld: oauth.tld },
+      backend,
     },
   });
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
@@ -3985,6 +4060,7 @@ export async function handleInit({
     ...(io.agentPrompts ? { prompts: io.agentPrompts } : {}),
   });
 
+  const next = initNextSteps({ backend, devHost });
   note(
     [
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME}`,
@@ -3993,10 +4069,9 @@ export async function handleInit({
       `Wrote: ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_ENV_CONFIG_DEFAULT_FILENAME}`,
       "",
       "Next:",
-      "  hack up",
-      "  hack open",
+      ...next.commands.map((command) => `  ${command}`),
       "",
-      `Check DNS/TLS for ${devHost}; hack global install configures managed global domains (needs sudo).`,
+      next.routing,
     ].join("\n"),
     "Initialized"
   );
@@ -4025,6 +4100,7 @@ async function handleInitAuto({
   const startDir = resolveStartDir(ctx, args.options.path);
   const repoRoot = await findRepoRootForInit(startDir);
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
+  const backend = resolveInitComposeBackend();
 
   const slug = resolveInitSlug({
     repoRoot,
@@ -4085,12 +4161,14 @@ async function handleInitAuto({
         projectSlug: slug,
         candidates: discovery.candidates,
         oauth,
+        backend,
       })
     : await buildManualComposeAuto({
         repoRoot,
         devHost,
         projectSlug: slug,
         oauth,
+        backend,
       });
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   await ensureDir(hackDir);
@@ -4154,11 +4232,12 @@ async function handleInitAuto({
   logger.success({
     message: `Initialized ${HACK_PROJECT_DIR_PRIMARY}/ for ${slug}`,
   });
+  const next = initNextSteps({ backend, devHost });
   logger.info({
-    message: "Next: hack up --detach && hack open",
+    message: `Next: ${next.autoCommand}`,
   });
   logger.info({
-    message: `Check DNS/TLS for ${devHost}; hack global install configures managed global domains (needs sudo).`,
+    message: next.routing,
   });
 
   if (withValue) {
@@ -4344,6 +4423,51 @@ export interface ComposeWizardInput {
   readonly oauth: {
     readonly enabled: boolean;
     readonly tld: string;
+  };
+  /** Backend the scaffold targets; omitted means `compose`. */
+  readonly backend?: InitComposeBackend;
+}
+
+/**
+ * The backend `hack init` scaffolds for. Native is chosen only by the same
+ * explicit `HACK_RUNTIME_BACKEND=native` selection `hack up` reads (the
+ * `hack-next` launcher sets it); anything else keeps the Compose scaffold.
+ */
+export function resolveInitComposeBackend(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): InitComposeBackend {
+  return env.HACK_RUNTIME_BACKEND === "native" ? "native" : "compose";
+}
+
+/**
+ * Follow-up commands `hack init` prints, limited to ones the selected backend
+ * accepts. Native `up` runs in the foreground only, needs the explicit
+ * project-share grant, and refuses `--detach`; `hack global install` refuses
+ * on native, where routes use the optional native HTTPS frontend instead.
+ */
+export function initNextSteps(opts: {
+  readonly backend: InitComposeBackend;
+  readonly devHost: string;
+}): {
+  readonly commands: readonly string[];
+  readonly autoCommand: string;
+  readonly routing: string;
+} {
+  if (opts.backend === "native") {
+    const up = "HACK_NATIVE_SHARED_SOURCE=1 hack up";
+    return {
+      commands: [
+        `${up}   (foreground; keep it running)`,
+        "hack open   (from another terminal)",
+      ],
+      autoCommand: `${up} (foreground; keep it running), then hack open from another terminal`,
+      routing: `Routes for ${opts.devHost} need the optional native HTTPS frontend (HACK_NATIVE_CADDY_BINARY, HACK_NATIVE_CADDY_SHA256, HACK_NATIVE_HTTPS_PORT); check one with hack doctor --browser-url https://${opts.devHost}.`,
+    };
+  }
+  return {
+    commands: ["hack up", "hack open"],
+    autoCommand: "hack up --detach && hack open",
+    routing: `Check DNS/TLS for ${opts.devHost}; hack global install configures managed global domains (needs sudo).`,
   };
 }
 
@@ -4859,6 +4983,7 @@ async function buildDiscoveredCompose(
       detections: backingServices,
       existingComposeFiles,
     }),
+    backend: input.backend ?? "compose",
   });
 }
 
@@ -5032,6 +5157,7 @@ export async function buildDiscoveredComposeAuto(
       detections: backingServices,
       existingComposeFiles,
     }),
+    backend: input.backend ?? "compose",
   });
 }
 
@@ -5043,6 +5169,7 @@ interface ManualComposeWizardInput {
     readonly enabled: boolean;
     readonly tld: string;
   };
+  readonly backend?: InitComposeBackend;
 }
 
 function validateRepoRelativeWorkingDir(
@@ -5197,7 +5324,11 @@ async function buildManualCompose(
     oauth: input.oauth,
   });
 
-  return renderCompose({ name: input.projectSlug, services });
+  return renderCompose({
+    name: input.projectSlug,
+    services,
+    backend: input.backend ?? "compose",
+  });
 }
 
 function buildManualComposeAuto(input: ManualComposeWizardInput): string {
@@ -5219,7 +5350,11 @@ function buildManualComposeAuto(input: ManualComposeWizardInput): string {
     oauth: input.oauth,
   });
 
-  return renderCompose({ name: input.projectSlug, services });
+  return renderCompose({
+    name: input.projectSlug,
+    services,
+    backend: input.backend ?? "compose",
+  });
 }
 
 function formatCandidateLabel(c: ServiceCandidate): string {
@@ -5333,9 +5468,10 @@ function buildServicesFromDrafts(opts: {
 
     const labels = new Map<string, string>();
     const networks = d.role === "http" ? ["hack-dev", "default"] : [];
+    const httpPort = d.role === "http" ? (d.port ?? 3000) : undefined;
 
-    if (d.role === "http") {
-      const port = d.port ?? 3000;
+    if (httpPort !== undefined) {
+      const port = httpPort;
       const host =
         d.subdomain && d.subdomain.length > 0
           ? `${d.subdomain}.${opts.devHost}`
@@ -5357,6 +5493,7 @@ function buildServicesFromDrafts(opts: {
       env,
       labels,
       networks,
+      ...(httpPort === undefined ? {} : { httpPort }),
       ...(d.comments && d.comments.length > 0 ? { comments: d.comments } : {}),
     };
   });
@@ -5693,6 +5830,65 @@ async function runRemoteLifecycleCommand(opts: {
   });
 }
 
+/** Compose-style line for a service that stopped while `up` runs. */
+function nativeServiceExitMessage(exit: NativeServiceExit): string {
+  if (exit.state === "exited") {
+    return `${exit.service} exited with code ${exit.code}`;
+  }
+  return exit.state === "dead"
+    ? `${exit.service} died (dead or out of memory)`
+    : `${exit.service} container was removed`;
+}
+
+/**
+ * Foreground native progress, matching Compose's attached `up`: steps while the
+ * graph starts, one ready line, then the stop sequence after Ctrl-C.
+ */
+function reportNativeStartupProgress(event: NativeStartupProgress): void {
+  switch (event.phase) {
+    case "input":
+      logger.step({ message: "Preparing native project input…" });
+      return;
+    case "runtime":
+      logger.step({ message: "Starting the native runtime…" });
+      return;
+    case "images":
+      logger.step({ message: "Acquiring service images…" });
+      return;
+    case "services":
+      logger.step({
+        message: `Starting services: ${event.services.join(", ")}…`,
+      });
+      return;
+    case "ready":
+      logger.success({
+        message: [
+          `Project is ready (${event.services.join(", ")}; run ${event.run}). Use hack ps and hack logs from another terminal; press Ctrl-C to stop.`,
+          ...event.endpoints,
+        ].join("\n"),
+      });
+      return;
+    case "service-exited":
+      logger.warn({ message: nativeServiceExitMessage(event) });
+      return;
+    case "all-stopped":
+      logger.info({
+        message: "All services have stopped; ending native up as Compose does.",
+      });
+      return;
+    case "stopping":
+      logger.step({
+        message: "Stopping the native project; waiting for owned cleanup…",
+      });
+      return;
+    case "stopped":
+      logger.info({ message: event.summary ?? "Native project stopped." });
+      return;
+    default:
+      return;
+  }
+}
+
 async function handleNativeUp({
   ctx,
   args,
@@ -5726,12 +5922,26 @@ async function handleNativeUp({
   });
   // Before branch, config, env, lifecycle, storage or runtime work. `down`
   // stays available for any graph a project already has.
-  // The explicit adaptation applies first: a network it isolates is not
-  // external here, exactly as native start normalizes it.
+  // The selected adaptation applies first: a network it isolates is not
+  // external here, exactly as native start normalizes it. Without --env every
+  // committed per-env adaptation is a candidate (see nativeAdaptationCandidates).
+  // With native builds enabled, build fields native builds implement pass
+  // here and native build admission reviews them, secret-valued args included.
+  const requestedEnvName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const adaptation = await resolveNativeAdaptationSelection({
+    env: process.env,
+    projectDir: project.projectDir,
+  });
   await refuseNativeComposeBackendFeatures({
     composeFile: project.composeFile,
-    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
+    adaptationCandidates: nativeAdaptationCandidates({
+      selection: adaptation,
+      requestedEnvName,
+    }),
     restart,
+    buildsEnabled: nativeBuildsEnabled(),
   });
   const branch = await resolveEffectiveBranchForCommand({
     project,
@@ -5744,6 +5954,11 @@ async function handleNativeUp({
     );
   }
   const projectName = await resolveComposeProjectName({ project, cfg });
+  const host = await resolveNativeHostSettings({
+    env: process.env,
+    projectName,
+    projectRoot: project.projectRoot,
+  });
   const composeProject = resolveLifecycleComposeProjectName({
     projectName,
     branch,
@@ -5756,6 +5971,8 @@ async function handleNativeUp({
   };
   const envFingerprints =
     createNativeEnvFingerprintSession(envFingerprintScope);
+  const { hosts: internalExtraHosts, sources: internalExtraHostSources } =
+    await resolveNativeInternalExtraHostSelection({ project, cfg });
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -5765,20 +5982,25 @@ async function handleNativeUp({
       branch,
     },
     composeFile: project.composeFile,
-    envName: resolveRequestedEnvName({ envOption: args.options.env }),
+    envName: requestedEnvName,
     profiles: parseCsvList(args.options.profile),
-    sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
-    dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
-    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
-    allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
-    preparedBase: parseNativePreparedBase(process.env),
-    https: parseNativeHttpsSelection(process.env),
-    aws: process.env.HACK_NATIVE_AWS_PROFILE
-      ? {
-          profile: process.env.HACK_NATIVE_AWS_PROFILE,
-          region: process.env.HACK_NATIVE_AWS_REGION,
-        }
-      : undefined,
+    sharedSource: host.sharedSource,
+    dependencyFile: host.dependencyFile,
+    dependencyFileByEnv: host.dependencyFileByEnv,
+    dependencyOwners: createNativeDependencyOwnerResolver({
+      projectDir: project.projectDir,
+      composeProject,
+      sharedHelpers: cfg.lifecycle?.sharedHelpers ?? [],
+    }),
+    adaptationFile: adaptation.file,
+    adaptationFileByEnv: adaptation.fileByEnv,
+    internalExtraHosts,
+    internalExtraHostSources,
+    allowedHosts: host.allowedHosts,
+    preparedBase: host.preparedBase,
+    https: host.https,
+    aws: host.aws,
+    gcloud: parseNativeGcloudSelection(process.env.HACK_NATIVE_GCLOUD_ADC),
     runtimeMetadata: {
       devHost,
       aliasHost: resolveBranchAliasHost({ devHost, cfg }),
@@ -5788,6 +6010,7 @@ async function handleNativeUp({
       await envFingerprints.record(
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
+    onProgress: reportNativeStartupProgress,
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
@@ -5807,11 +6030,33 @@ async function handleNativeUp({
           message: "Native up lifecycle preparation failed; values omitted.",
         });
       }
+      // Native declares these before review; a hook cannot change them now.
+      // This re-reads hack.config.json, not the pre-hook `cfg` snapshot.
+      await requireNativeProjectInternalExtraHostsUnchanged({
+        project,
+        reviewed: internalExtraHosts,
+        cleanup,
+      });
       // The native backend launches services after this returns: refuse when a
       // concurrent down already released this instance's shared helpers.
       await assertNativeSharedHelpersCurrent({ lifecycle, cleanup });
+      // Ctrl-C runs these as `hack down` would (journaled, never replayed).
+      const down = cfg.lifecycle?.down;
+      const stopPhase = (phase: "before" | "after") => (signal: AbortSignal) =>
+        runLifecycleCommands({
+          title: `Lifecycle (native down ${phase})`,
+          commands: down?.[phase],
+          projectRoot: project.projectRoot,
+          env: input.lifecycleHostEnvironment,
+          projectDir: project.projectDir,
+          composeProject,
+          signal,
+        });
       return {
         cleanup,
+        ...(down?.before?.length || down?.after?.length
+          ? { stop: { before: stopPhase("before"), after: stopPhase("after") } }
+          : {}),
         ready: async () => {
           await assertNativeSharedHelpersCurrent({
             lifecycle,
@@ -5848,7 +6093,7 @@ async function handleNativeUp({
     throw new HackCliError({
       code: "E_PERMISSION",
       message:
-        "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup; nothing was stopped. Set it to grant the project share and run the command again.",
+        "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings before cleanup; nothing was stopped. Grant the project share and run the command again.",
     });
   }
   try {
@@ -5902,6 +6147,17 @@ async function restartNativeImageProject({
   };
   readonly dropEnvFingerprint: () => void;
 }): Promise<number> {
+  // One "Stopping…" line, whether the restart or its new start sees the request.
+  let stoppingReported = false;
+  const progress = (event: NativeStartupProgress): void => {
+    if (event.phase === "stopping") {
+      if (stoppingReported) {
+        return;
+      }
+      stoppingReported = true;
+    }
+    reportNativeStartupProgress(event);
+  };
   return await restartNativeProject({
     scope: startup.scope,
     envName: startup.envName,
@@ -5947,7 +6203,12 @@ async function restartNativeImageProject({
         scope: startup.scope,
         composeFile: startup.composeFile,
         adaptationFile: startup.adaptationFile,
+        adaptationFileByEnv: startup.adaptationFileByEnv,
         dependencyFile: startup.dependencyFile,
+        dependencyFileByEnv: startup.dependencyFileByEnv,
+        internalExtraHosts: startup.internalExtraHosts,
+        dependencyOwners: startup.dependencyOwners,
+        internalExtraHostSources: startup.internalExtraHostSources,
         allowedHosts: startup.allowedHosts,
         runtimeMetadata: startup.runtimeMetadata,
         httpsPort: startup.https?.httpsPort ?? null,
@@ -5971,6 +6232,7 @@ async function restartNativeImageProject({
             target: undefined,
             json: false,
             pruneCaches: false,
+            removeData: false,
             yes: false,
             recoverNativeCompose: false,
           },
@@ -5986,12 +6248,21 @@ async function restartNativeImageProject({
         });
       }
     },
-    start: ({ run, onReady }) =>
+    progress,
+    start: ({ run, onReady, signal, onStopSignals, onStopRequested }) =>
       startNativeProject({
         ...startup,
         ...nativeRestartSelection({ run }),
         restore: run,
         onReady,
+        signal,
+        onStopSignals,
+        onProgress: (event) => {
+          if (event.phase === "stopping") {
+            onStopRequested();
+          }
+          progress(event);
+        },
       }),
   });
 }
@@ -6610,8 +6881,31 @@ function writeDownNotice(opts: {
 
 function refuseLegacyNativeRecovery(recover: boolean): void {
   if (recover) {
+    throw new CliUsageError("--recover requires the native backend.");
+  }
+}
+
+/** Native down accepts --yes only to confirm --remove-data. */
+function refuseNativeDownOptions(options: DownArgs["options"]): void {
+  const removeData = options.removeData === true;
+  if (removeData && options.recoverNativeCompose) {
     throw new CliUsageError(
-      "--recover requires a native-authored Compose instance."
+      "Native down --recover retains data; it cannot be combined with --remove-data."
+    );
+  }
+  if (
+    [
+      options.env,
+      options.profile,
+      options.target,
+      options.pruneCaches,
+      !removeData && options.yes,
+    ].some(Boolean)
+  ) {
+    throw new CliUsageError(
+      removeData
+        ? "Native down --remove-data does not support --env, --profile, --target or --prune-caches."
+        : "Native down preserves data and does not support --env, --profile, --target, --prune-caches or --yes (--yes confirms --remove-data)."
     );
   }
 }
@@ -6643,31 +6937,19 @@ async function handleDown({
     unsupportedOptions: [
       args.options.target,
       args.options.pruneCaches,
+      args.options.removeData,
       args.options.yes,
     ].some(Boolean),
   });
   if (authored !== null) {
     return authored;
   }
-  refuseLegacyNativeRecovery(args.options.recoverNativeCompose);
   const native = resolveNativeRuntimeSelection();
   if (native) {
     if (args.options.json) {
       setLoggerBackendOverride({ backend: "console" });
     }
-    if (
-      [
-        args.options.env,
-        args.options.profile,
-        args.options.target,
-        args.options.pruneCaches,
-        args.options.yes,
-      ].some(Boolean)
-    ) {
-      throw new CliUsageError(
-        "Native down preserves data and does not support --env, --profile, --target, --prune-caches or --yes."
-      );
-    }
+    refuseNativeDownOptions(args.options);
     const project = await resolveProjectForArgs({
       ctx,
       pathOpt: args.options.path,
@@ -6679,19 +6961,28 @@ async function handleDown({
       branchOption: args.options.branch,
       noticeToStderr: args.options.json === true,
     });
-    const cfg = await readProjectConfig(project);
-    if (cfg.parseError) {
-      throw new CliUsageError(
-        "Native down requires valid lifecycle configuration; values omitted."
-      );
-    }
     const scope = {
       projectRoot: project.projectRoot,
       projectDir: project.projectDir,
       nativeHome: native.home,
       branch,
     };
-    let lifecycleEnv: Readonly<Record<string, string>> = {};
+    if (args.options.removeData) {
+      // Removal never stops compute or runs hooks; a running project refuses.
+      return await runNativeDownRemoveData({
+        runtime: native,
+        scope,
+        yes: args.options.yes === true,
+        json: args.options.json === true,
+      });
+    }
+    const cfg = await readProjectConfig(project);
+    if (cfg.parseError) {
+      throw new CliUsageError(
+        "Native down requires valid lifecycle configuration; values omitted."
+      );
+    }
+    let lifecycleEnv: Readonly<Record<string, string>> | undefined;
     const hasHooks = Boolean(
       cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
     );
@@ -6702,25 +6993,26 @@ async function handleDown({
       projectName,
       branch,
     });
-    const hook = async (phase: "before" | "after") => {
+    const hook = async (phase: "before" | "after", graphStopped: boolean) => {
       const code = await runLifecycleCommands({
         title: `Lifecycle (native down ${phase})`,
         commands: cfg.lifecycle?.down?.[phase],
         projectRoot: project.projectRoot,
         projectDir: project.projectDir,
         composeProject,
-        env: lifecycleEnv,
+        env: lifecycleEnv ?? {},
         routeStdoutToStderr: args.options.json === true,
       });
       if (code !== 0) {
         throw new Error(
-          `Native down ${phase} hook failed (exit ${code})${phase === "after" ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
+          `Native down ${phase} hook failed (exit ${code})${graphStopped ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
         );
       }
     };
     const result = await nativeProjectDown({
       runtime: native,
       scope,
+      recover: args.options.recoverNativeCompose,
       deferFinalization,
       retireHostProcesses: async () => {
         await stopLifecycleProcesses({
@@ -6731,26 +7023,26 @@ async function handleDown({
           composeProject,
         });
       },
-      before: async (run) => {
-        if (!hasHooks) {
-          return;
-        }
-        lifecycleEnv = await nativeDownEnvironment({
-          scope,
-          run,
-          serviceNames: await readComposeServiceNames(project.composeFile),
-        });
-        await hook("before");
+      // Journaled: a foreground Ctrl-C may already have run them, or left
+      // them owed after a crash; unknown completion refuses.
+      hooks: {
+        configured: hasHooks,
+        run: async ({ phase, run, graphStopped }) => {
+          if (!hasHooks) {
+            return;
+          }
+          lifecycleEnv ??= await nativeDownEnvironment({
+            scope,
+            run,
+            serviceNames: await readComposeServiceNames(project.composeFile),
+          });
+          await hook(phase, graphStopped);
+        },
       },
       // Only a committed down (its before hook succeeded and the ownership
       // and finalization rechecks passed) may supersede a concurrent up.
       beforeCleanup: () =>
         markLifecycleSharedHelpersStopping({ cfg, composeProject }),
-      after: async () => {
-        if (hasHooks) {
-          await hook("after");
-        }
-      },
     });
     if (args.options.json) {
       process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -6764,6 +7056,7 @@ async function handleDown({
     }
     return 0;
   }
+  refuseLegacyNativeRecovery(args.options.recoverNativeCompose);
   const json = args.options.json === true;
   if (!json) {
     return await runDownCommand({ ctx, args, json: false });
@@ -6817,6 +7110,11 @@ async function runDownCommand({
     noticeToStderr: json,
   });
   const profiles = parseCsvList(args.options.profile);
+  if (args.options.removeData) {
+    throw new CliUsageError(
+      "--remove-data applies to the native backend only; Compose-backend down keeps named volumes."
+    );
+  }
   const pruneCaches = args.options.pruneCaches === true;
   const confirmCachePrune = args.options.yes === true;
   if (confirmCachePrune && !pruneCaches) {
@@ -6987,7 +7285,12 @@ async function runDownCommand({
       routeStdoutToStderr: json,
     });
     helperReleaseFailures = await lifecycleDownCleanup(
-      code === 0 ? "stopped" : "unconfirmed"
+      await confirmComposeDownForHelpers({
+        cfg,
+        lifecycleComposeProject,
+        composeProject: composeProjectName ?? baseProjectName,
+        downCode: code,
+      })
     );
   } finally {
     signalCleanup.dispose();
@@ -7099,6 +7402,8 @@ async function runRestartDownPhase(opts: {
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly projectName: string;
   readonly composeProjectName: string | null;
+  /** The Compose project label value: `composeProjectName` or the base name. */
+  readonly composeProjectLabel: string;
   readonly lifecycleComposeProject: string;
   readonly profiles: readonly string[];
   readonly branch: string | null;
@@ -7158,11 +7463,17 @@ async function runRestartDownPhase(opts: {
           cwd: dirname(opts.project.composeFile),
           routeStdoutToStderr: opts.routeStdoutToStderr === true,
         });
+    // A preserved Compose runtime was never shut down: its containers are
+    // kept, so their helpers stay held.
     helperReleaseFailures = await lifecycleDownCleanup(
-      restartContainerShutdown({
-        preserveComposeRuntime: opts.preserveComposeRuntime === true,
-        downCode,
-      })
+      opts.preserveComposeRuntime
+        ? "kept"
+        : await confirmComposeDownForHelpers({
+            cfg: opts.cfg,
+            lifecycleComposeProject: opts.lifecycleComposeProject,
+            composeProject: opts.composeProjectLabel,
+            downCode,
+          })
     );
   } finally {
     signalCleanup.dispose();
@@ -8059,6 +8370,7 @@ async function runRestartCommand({
     cfg,
     projectName,
     composeProjectName,
+    composeProjectLabel: composeProjectName ?? baseProjectName,
     lifecycleComposeProject,
     profiles,
     branch,
@@ -8385,6 +8697,13 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
+/** Compose-style state cell: an exited container shows its exit code. */
+function nativePsState(item: NativeProjectPsResult["items"][number]): string {
+  return item.state === "exited" && item.exitCode !== null
+    ? `exited (${item.exitCode})`
+    : item.state;
+}
+
 /**
  * Native ps output. `--json` prints the standard `{ok: true, data}` envelope
  * whose `data` is the native ps result, matching authored native ps.
@@ -8403,6 +8722,11 @@ async function displayNativePs(
     logger.info({
       message: "Native runtime is not running; no services are running.",
     });
+  } else if (result.status === "runtime_busy") {
+    logger.info({
+      message:
+        "Native runtime is busy with another operation, such as a starting hack up; service state is available once it finishes or reports ready.",
+    });
   } else if (result.status === "owner_unconfirmed") {
     logger.warn({
       message:
@@ -8419,7 +8743,7 @@ async function displayNativePs(
     rows: result.items.map((item) => [
       item.service,
       item.container ?? "",
-      item.state,
+      nativePsState(item),
       item.health ?? "",
     ]),
   });
@@ -9478,10 +9802,14 @@ async function handleNativeLogs({
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } else {
     process.stderr.write(
-      `Native logs: ${result.service}${result.truncated ? " (truncated)" : ""}\n`
+      `Native logs: ${result.service}${result.truncated ? " (truncated; older lines omitted)" : ""}\n`
     );
-    process.stdout.write(result.stdout);
-    process.stderr.write(result.stderr);
+    // Engine order interleaves the streams by time; each keeps its own descriptor.
+    for (const line of result.lines) {
+      (line.stream === "stdout" ? process.stdout : process.stderr).write(
+        line.text
+      );
+    }
   }
   return 0;
 }

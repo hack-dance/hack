@@ -1,5 +1,6 @@
 use super::super::*;
 use super::fields::*;
+use super::ports::{port_number, ports};
 use serde_json::{Map, Value};
 use std::{collections::BTreeSet, fs, os::unix::fs::MetadataExt};
 
@@ -227,109 +228,6 @@ fn mounts(
     }
     Ok(result)
 }
-fn port_number(value: &str) -> Result<u16, CandidateError> {
-    value.parse::<u16>().ok().filter(|p| *p>0).ok_or_else(|| problem("invalid_port", "Ports must be literal integers from 1 to 65535; ranges/interpolation are not supported."))
-}
-fn port_scalar(value: &Value) -> Result<u16, CandidateError> {
-    match value {
-        Value::String(s) => port_number(s),
-        Value::Number(n) => port_number(&n.to_string()),
-        _ => Err(problem("invalid_port", "Invalid port value.")),
-    }
-}
-fn ports(
-    value: Option<&Value>,
-    field: &str,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Result<Vec<PortPlan>, CandidateError> {
-    let Some(value) = value else {
-        return Ok(vec![]);
-    };
-    let mut result = Vec::new();
-    for value in value
-        .as_array()
-        .ok_or_else(|| problem("invalid_port", "Ports must be a list."))?
-    {
-        let (target, published, protocol, host) = if let Value::Object(m) = value {
-            keys(
-                m,
-                &["target", "published", "protocol", "host_ip"],
-                field,
-                diagnostics,
-            );
-            (
-                port_scalar(
-                    m.get("target")
-                        .ok_or_else(|| problem("invalid_port", "Port target is required."))?,
-                )?,
-                m.get("published").map(port_scalar).transpose()?,
-                m.get("protocol")
-                    .map(string)
-                    .transpose()?
-                    .unwrap_or("tcp")
-                    .to_owned(),
-                m.get("host_ip")
-                    .map(string)
-                    .transpose()?
-                    .unwrap_or("0.0.0.0")
-                    .to_owned(),
-            )
-        } else {
-            let text = match value {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                _ => return Err(problem("invalid_port", "Invalid port form.")),
-            };
-            let (binding, protocol) = text.split_once('/').unwrap_or((&text, "tcp"));
-            let parts: Vec<_> = binding.split(':').collect();
-            match parts.as_slice() {
-                [target] => (
-                    port_number(target)?,
-                    None,
-                    protocol.into(),
-                    "0.0.0.0".into(),
-                ),
-                [published, target] => (
-                    port_number(target)?,
-                    Some(port_number(published)?),
-                    protocol.into(),
-                    "0.0.0.0".into(),
-                ),
-                [host, published, target] => (
-                    port_number(target)?,
-                    Some(port_number(published)?),
-                    protocol.into(),
-                    host.to_string(),
-                ),
-                _ => return Err(problem("invalid_port", "Unsupported port syntax.")),
-            }
-        };
-        if !["tcp", "udp"].contains(&protocol.as_str()) {
-            return Err(problem(
-                "invalid_port",
-                "Only TCP and UDP ports are modeled.",
-            ));
-        }
-        if !["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
-            diagnostics.push(Diagnostic::error("unsupported_host_binding",field,"Only explicit IPv4 loopback or an explicit proposal to restrict an all-interface binding is supported."));
-        }
-        if host == "0.0.0.0" {
-            diagnostics.push(Diagnostic::warning("proposed_loopback_binding",field,"Enrollment proposes restricting the declared all-interface publication to 127.0.0.1. No port is bound by this checkpoint."));
-        }
-        result.push(PortPlan {
-            target,
-            published,
-            protocol,
-            declared_host_ip: if ["0.0.0.0", "127.0.0.1"].contains(&host.as_str()) {
-                host
-            } else {
-                "[unsupported]".into()
-            },
-            proposed_host_ip: "127.0.0.1".into(),
-        });
-    }
-    Ok(result)
-}
 fn dependencies(
     value: Option<&Value>,
     field: &str,
@@ -347,6 +245,7 @@ fn dependencies(
                         name.into(),
                         DependencyPlan {
                             condition: "service_started".into(),
+                            required: true,
                         },
                     )
                     .is_some()
@@ -363,8 +262,13 @@ fn dependencies(
                 identifier(name)?;
                 let m = object(value)?;
                 keys(m, &["condition", "required", "restart"], field, diagnostics);
-                if !boolean(m.get("required"), true)? || boolean(m.get("restart"), false)? {
-                    diagnostics.push(Diagnostic::error("unsupported_dependency_option",field,"Optional or restart-propagating dependencies are not supported by this subset."));
+                let required = boolean(m.get("required"), true)?;
+                if boolean(m.get("restart"), false)? {
+                    diagnostics.push(Diagnostic::error(
+                        "unsupported_dependency_option",
+                        field,
+                        "Restart-propagating dependencies are not supported by this subset.",
+                    ));
                 }
                 let condition = m
                     .get("condition")
@@ -387,6 +291,7 @@ fn dependencies(
                     name.clone(),
                     DependencyPlan {
                         condition: condition.into(),
+                        required,
                     },
                 );
             }
@@ -548,18 +453,118 @@ pub(super) fn environment_files(
     }
     Ok(result)
 }
+/// Normalize one Compose network alias as an exact DNS name. Compose accepts
+/// underscores in names, so labels may contain them; case is folded because
+/// DNS lookups are case-insensitive. Interpolated aliases are not reviewable.
+pub(super) fn network_alias(value: &str) -> Option<String> {
+    let name = value.to_ascii_lowercase();
+    let valid = !name.is_empty()
+        && name.len() <= 253
+        && name.is_ascii()
+        && name.parse::<std::net::IpAddr>().is_err()
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with(['-', '_'])
+                && !label.ends_with(['-', '_'])
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        });
+    valid.then_some(name)
+}
+
+/// Declared attachments in order, plus normalized extra aliases per network.
+pub(super) type ServiceNetworks = (Vec<String>, BTreeMap<String, Vec<String>>);
+
+fn attachment_aliases(
+    service: &str,
+    value: &Value,
+    field: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Vec<String>, CandidateError> {
+    if value.is_null() {
+        return Ok(vec![]);
+    }
+    let attachment = object(value)?;
+    keys(attachment, &["aliases"], field, diagnostics);
+    let Some(declared) = attachment.get("aliases") else {
+        return Ok(vec![]);
+    };
+    let invalid = |diagnostics: &mut Vec<Diagnostic>, message: &str| {
+        diagnostics.push(Diagnostic::error(
+            "invalid_network_alias",
+            &format!("{field}.aliases"),
+            message,
+        ));
+    };
+    let Value::Array(entries) = declared else {
+        invalid(
+            diagnostics,
+            "Network aliases must be a list of literal DNS names.",
+        );
+        return Ok(vec![]);
+    };
+    if entries.len() > MAX_NETWORK_ALIASES {
+        invalid(
+            diagnostics,
+            "At most 8 network aliases are accepted per service attachment.",
+        );
+        return Ok(vec![]);
+    }
+    let own = service.to_ascii_lowercase();
+    let mut result = BTreeSet::new();
+    for entry in entries {
+        let Some(text) = entry.as_str() else {
+            invalid(
+                diagnostics,
+                "Network aliases must be a list of literal DNS names.",
+            );
+            continue;
+        };
+        if text.contains('$') {
+            invalid(
+                diagnostics,
+                "Interpolated network aliases are not reviewable; declare a literal DNS name.",
+            );
+            continue;
+        }
+        let Some(alias) = network_alias(text) else {
+            invalid(
+                diagnostics,
+                "A network alias must be an exact DNS name; values omitted.",
+            );
+            continue;
+        };
+        // The service name is always an alias; repeating it is a no-op.
+        if alias != own && !result.insert(alias) {
+            invalid(
+                diagnostics,
+                "Network aliases must be unique per attachment.",
+            );
+        }
+    }
+    Ok(result.into_iter().collect())
+}
+
 fn service_networks(
+    service: &str,
     value: Option<&Value>,
     diagnostics: &mut Vec<Diagnostic>,
     field: &str,
-) -> Result<Vec<String>, CandidateError> {
+) -> Result<ServiceNetworks, CandidateError> {
+    let mut aliases = BTreeMap::new();
     let result = match value {
         None => vec!["default".into()],
         Some(Value::Array(_)) => strings(value)?,
         Some(Value::Object(m)) => {
-            for value in m.values() {
-                if !value.is_null() {
-                    keys(object(value)?, &[], field, diagnostics);
+            for (network, value) in m {
+                identifier(network)?;
+                // Diagnostics keep the attachment-independent field path:
+                // network names are project details and stay out of reports.
+                let declared = attachment_aliases(service, value, field, diagnostics)?;
+                if !declared.is_empty() {
+                    aliases.insert(network.clone(), declared);
                 }
             }
             m.keys().cloned().collect()
@@ -585,7 +590,7 @@ fn service_networks(
             "Service network declarations must be unique.",
         ));
     }
-    Ok(result)
+    Ok((result, aliases))
 }
 fn limits(
     m: &Map<String, Value>,
@@ -699,11 +704,16 @@ pub(super) fn compile(
                 "working_dir",
                 "user",
                 "platform",
+                "x-hack-amd64-emulation",
                 "labels",
                 "logging",
                 "stop_grace_period",
                 "stop_signal",
                 "privileged",
+                "stdin_open",
+                "tty",
+                "cap_add",
+                "cap_drop",
             ],
             &field,
             diagnostics,
@@ -715,6 +725,12 @@ pub(super) fn compile(
                 "Privileged containers cannot be enrolled.",
             ));
         }
+        let capabilities = super::super::capabilities::review(
+            m.get("cap_add"),
+            m.get("cap_drop"),
+            &field,
+            diagnostics,
+        )?;
         let image = image(m.get("image"), diagnostics, &format!("{field}.image"))?;
         let build = build(
             project,
@@ -757,10 +773,15 @@ pub(super) fn compile(
                 "networks and network_mode cannot both own the service network.",
             ));
         }
-        let networks = if network_mode == "none" {
-            vec![]
+        let (networks, network_aliases) = if network_mode == "none" {
+            (vec![], BTreeMap::new())
         } else {
-            service_networks(m.get("networks"), diagnostics, &format!("{field}.networks"))?
+            service_networks(
+                name,
+                m.get("networks"),
+                diagnostics,
+                &format!("{field}.networks"),
+            )?
         };
         let restart = m
             .get("restart")
@@ -776,9 +797,20 @@ pub(super) fn compile(
             return Err(problem("invalid_restart", "Unsupported restart policy."));
         }
         let labels = redacted_map(m.get("labels"), false)?;
-        let parsed_routing = super::routing::parse(m.get("labels"));
+        let parsed_routing = super::routing::declaration(m.get("labels"));
         let routing_invalid = parsed_routing.is_err();
-        let routing = parsed_routing.ok().flatten();
+        let (routing, inert_route_labels) = match parsed_routing.ok().flatten() {
+            Some(super::routing::Declaration::Route(route)) => (Some(route), false),
+            Some(super::routing::Declaration::Inert) => (None, true),
+            None => (None, false),
+        };
+        if inert_route_labels {
+            diagnostics.push(Diagnostic::warning(
+                "inert_route_declaration",
+                &format!("{field}.labels"),
+                "Route hostnames without caddy.reverse_proxy carry no traffic; no route, hostname claim or relay is created, as with the Compose router.",
+            ));
+        }
         if routing.is_some() {
             diagnostics.push(Diagnostic::warning(
                 "route_binding_required",
@@ -803,13 +835,44 @@ pub(super) fn compile(
             }
             diagnostics.push(Diagnostic::warning("dependency_cache_binding_required", &format!("{field}.labels"), "Dependency cache execution requires a verified source revision, pinned installer image and shared cache binding; declaration alone is not a completed install."));
         }
+        // Hack's own one-shot marker is a completion role, not ownership: only
+        // its exact key is exempt below, and only its literal `true` value is a
+        // declaration. Other `hack.*` keys keep the ownership refusal.
+        let one_shot = match super::one_shot::parse(m.get("labels")) {
+            super::one_shot::Declaration::Absent => false,
+            super::one_shot::Declaration::OneShot => true,
+            super::one_shot::Declaration::Invalid => {
+                diagnostics.push(Diagnostic::error(
+                    "invalid_one_shot_label",
+                    &format!("{field}.labels"),
+                    "The one-shot label accepts only the literal string value true; values omitted.",
+                ));
+                false
+            }
+        };
+        if one_shot && ["always", "unless-stopped"].contains(&restart.as_str()) {
+            diagnostics.push(Diagnostic::error(
+                "nonterminating_one_shot",
+                &format!("{field}.restart"),
+                "A one-shot service cannot use an unconditional restart policy.",
+            ));
+        }
+        if one_shot && routing.is_some() {
+            diagnostics.push(Diagnostic::error(
+                "one_shot_route_conflict",
+                &format!("{field}.labels"),
+                "A one-shot service finishes, so it cannot also declare local HTTPS routing.",
+            ));
+        }
         if routing_invalid
             || labels.keys().any(|key| {
-                // Hack's ownership namespaces are never exempt: no routing or
-                // dependency cache declaration may carry ownership evidence.
+                // Hack's ownership namespaces are never exempt: no routing,
+                // dependency cache or one-shot declaration may carry ownership evidence.
                 super::ownership_labels::is_hack_ownership_label(key)
                     || (!(dependency_cache.is_some() && super::dependency_cache::recognized(key))
                         && !(routing.is_some() && super::routing::recognized(key))
+                        && !super::one_shot::recognized(key)
+                        && !(inert_route_labels && super::routing::recognized_inert(key))
                         && ["caddy", "traefik", "hack", "com.docker.compose"]
                             .iter()
                             .any(|prefix| key == prefix || key.starts_with(&format!("{prefix}."))))
@@ -861,12 +924,58 @@ pub(super) fn compile(
                 "Only Linux arm64/amd64 image platform declarations are modeled.",
             ));
         }
-        let exposed_ports = strings(m.get("expose"))?;
-        for value in &exposed_ports {
-            let (port, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
-            port_number(port)?;
-            if !["tcp", "udp"].contains(&protocol) {
-                return Err(problem("invalid_port", "Invalid exposed port protocol."));
+        let amd64_emulation = match m.get("x-hack-amd64-emulation") {
+            None => None,
+            Some(value) => Some(match value.as_str() {
+                Some("prefer-native") => Amd64Emulation::PreferNative,
+                Some("amd64") => Amd64Emulation::Amd64,
+                _ => {
+                    return Err(problem(
+                        "invalid_compose_field",
+                        "x-hack-amd64-emulation must be prefer-native or amd64.",
+                    ));
+                }
+            }),
+        };
+        if amd64_emulation.is_some()
+            && platform
+                .as_deref()
+                .is_some_and(|v| ["linux/arm64", "linux/arm64/v8"].contains(&v))
+        {
+            return Err(problem(
+                "unsupported_platform",
+                "x-hack-amd64-emulation cannot apply to a service that declares a Linux arm64 platform.",
+            ));
+        }
+        let stdin_open = boolean(m.get("stdin_open"), false)?;
+        let tty = boolean(m.get("tty"), false)?;
+        if tty {
+            diagnostics.push(Diagnostic::warning(
+                "terminal_not_allocated",
+                &format!("{field}.tty"),
+                "Native services run without a pseudo-terminal; stdout and stderr stay separate and no host input is attached.",
+            ));
+        }
+        let interactive = (stdin_open || tty).then_some(InteractivePlan { stdin_open, tty });
+        // Invalid entries are reported by pointer and omitted from the plan so
+        // authored text (including interpolation defaults) is never echoed.
+        let mut exposed_ports = Vec::new();
+        for (index, value) in strings(m.get("expose"))?.into_iter().enumerate() {
+            let (port, protocol) = value.split_once('/').unwrap_or((&value, "tcp"));
+            let message = match port_number(port) {
+                Err(error) => Some(error.message),
+                Ok(_) if !["tcp", "udp"].contains(&protocol) => {
+                    Some("Invalid exposed port protocol.".into())
+                }
+                Ok(_) => None,
+            };
+            match message {
+                Some(message) => diagnostics.push(Diagnostic::error(
+                    "invalid_port",
+                    &format!("{field}.expose[{index}]"),
+                    &message,
+                )),
+                None => exposed_ports.push(value),
             }
         }
         let stop_signal = optional_text(m.get("stop_signal"))?;
@@ -879,7 +988,23 @@ pub(super) fn compile(
         }) {
             return Err(problem("invalid_stop_signal", "Unsupported stop signal."));
         }
-        let extra_hosts = extra_host_entries(m.get("extra_hosts"))?
+        let host_entries = extra_host_entries(m.get("extra_hosts"))?;
+        // A container's /etc/hosts entry would shadow its own network alias:
+        // one owner per name, so the two declarations cannot share a name.
+        if host_entries.iter().any(|(hostname, _)| {
+            network_alias(hostname).is_some_and(|hostname| {
+                network_aliases
+                    .values()
+                    .any(|aliases| aliases.contains(&hostname))
+            })
+        }) {
+            diagnostics.push(Diagnostic::error(
+                "network_alias_collision",
+                &format!("{field}.networks"),
+                "A network alias cannot also be one of the service's extra_hosts names; values omitted.",
+            ));
+        }
+        let extra_hosts = host_entries
             .into_iter()
             .map(|(hostname, target)| {
                 Ok(ExtraHostPlan {
@@ -923,12 +1048,24 @@ pub(super) fn compile(
             environment_files:environment_files(project,base,m.get("env_file"),&format!("{field}.env_file"),diagnostics)?,
             environment_precedence:"Compose environment keys override explicitly listed env_file inputs; bare keys and references remain unresolved; no ambient/.env values are loaded".into(),
             healthcheck:health(m.get("healthcheck"),&format!("{field}.healthcheck"),diagnostics)?,
-            ports:ports(m.get("ports"),&format!("{field}.ports"),diagnostics)?,exposed_ports,networks,network_mode:if ["project-networks", "none"].contains(&network_mode) {network_mode.into()} else {"[unsupported]".into()},
+            ports:ports(m.get("ports"),&format!("{field}.ports"),diagnostics)?,exposed_ports,networks,network_aliases,network_mode:if ["project-networks", "none"].contains(&network_mode) {network_mode.into()} else {"[unsupported]".into()},
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
+            platform,amd64_emulation,labels,routing,dependency_cache,one_shot,inert_route_labels,interactive,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,capabilities,
         });
+        // Appended after the service's own findings, so plans without this case
+        // keep their identity. Graph admission applies the same rule.
+        if result
+            .get(name.as_str())
+            .is_some_and(|service| service.active && service.restart_policy_not_applied())
+        {
+            diagnostics.push(Diagnostic::warning(
+                "restart_policy_not_applied",
+                &format!("{field}.restart"),
+                "Restart policies are not applied yet to services with published ports or routes (HACK-1935); the service starts without automatic restarts.",
+            ));
+        }
     }
     Ok(result)
 }

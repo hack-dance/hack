@@ -20,7 +20,7 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Dead-owner recover-cleanup and same-boot recover-live-owner require --expect-receipt; retire-recovered-publisher requires --expect-owner. A missing publisher lock requires inspect-missing-publication-lock --run-id and explicitly selected retire-missing-publication-lock --run-id --expect-selection --accept-quiesced-candidate-home. Foreground serve may opt into --auto-dependency-slots for pool-wide transport allocation; dependency-reservations inspects claims and recover-dependency-reservation --run-id --expect-reservation releases a verified dead pre-admission claim. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index|auto for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and --executable; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims; unpublish-bridge requires --run-id and --expect-reservation.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. foreground-owner --run-id selects a run's receipt digest and publication state read-only. Dead-owner recover-cleanup and same-boot recover-live-owner require --expect-receipt; retire-recovered-publisher requires --expect-owner. A missing publisher lock requires inspect-missing-publication-lock --run-id and explicitly selected retire-missing-publication-lock --run-id --expect-selection --accept-quiesced-candidate-home. Foreground serve may opt into --auto-dependency-slots for pool-wide transport allocation; dependency-reservations inspects claims and recover-dependency-reservation --run-id --expect-reservation releases a verified dead pre-admission claim. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index|auto for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and exactly one of --executable or --ancestor-pid; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims; unpublish-bridge requires --run-id and --expect-reservation.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
@@ -120,6 +120,21 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (run, owner, receipt, publisher, reservation);
+            return Err(invalid());
+        }
+    }
+    if *action == "foreground-owner" {
+        let run = match *args {
+            ["--run-id", run] | ["--run-id", run, "--json"] => run,
+            _ => return Err(invalid()),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            return graph::foreground_owner(candidate, run);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = run;
             return Err(invalid());
         }
     }
@@ -564,6 +579,28 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             ));
         }
     }
+    if *action == "dependency-discover"
+        && matches!(
+            *args,
+            ["--host-port", _, "--ancestor-pid", _]
+                | ["--host-port", _, "--ancestor-pid", _, "--json"]
+        )
+    {
+        let port = args[1].parse::<u16>().map_err(|_| invalid())?;
+        let ancestor = args[3].parse::<i32>().map_err(|_| invalid())?;
+        #[cfg(target_os = "macos")]
+        {
+            return relay::discover_descendant(port, ancestor);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (port, ancestor);
+            return Err(CandidateError::new(
+                "unsupported_host",
+                "Graph dependency discovery requires macOS.",
+            ));
+        }
+    }
     if *action == "dependency-discover" {
         let (port, executable) = match *args {
             ["--host-port", port, "--executable", executable]
@@ -601,6 +638,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "restore-selection",
         "retained-preflight",
         "owner-status",
+        "observe",
         "restart",
         "restore",
         "inspect",
@@ -630,6 +668,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     let mut release_initializer_cache = std::collections::BTreeSet::new();
     let mut profiles = Vec::new();
     let mut remove_data = false;
+    let mut retained_only = false;
     let mut environment_stdin = false;
     let mut automatic_dependency_slots = false;
     let mut live_source = false;
@@ -694,6 +733,13 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 return Err(invalid());
             }
             remove_data = true;
+            continue;
+        }
+        if key == "--retained-only" {
+            if retained_only || *action != "cleanup" {
+                return Err(invalid());
+            }
+            retained_only = true;
             continue;
         }
         let value = *args.get(index).ok_or_else(invalid)?;
@@ -923,6 +969,16 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         "reconcile-export" => graph::reconcile_export(candidate, run),
         "inspect" => serde_json::to_value(graph::inspect(candidate, run)?)
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph snapshot.")),
+        "observe" => {
+            #[cfg(target_os = "macos")]
+            {
+                graph::observe(candidate, run)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(invalid())
+            }
+        }
         "export" => serde_json::to_value(graph::export(candidate, run)?)
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph export.")),
         "archive" => encode(graph::archive(candidate, run)?),
@@ -965,13 +1021,25 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             }
         }
         "cleanup" => {
+            // Stopped-only data removal never reaches a live owner, so a graph
+            // restored after the caller confirmed it stopped is never stopped by it.
+            if retained_only && !remove_data {
+                return Err(invalid());
+            }
             #[cfg(target_os = "macos")]
             if graph::inspect(candidate, run)?
                 .receipt
                 .relay_startup
                 .is_some()
             {
-                return graph::foreground::cleanup_request(candidate, run, remove_data);
+                return if retained_only {
+                    graph::foreground::remove_retained_data(candidate, run)
+                } else {
+                    graph::foreground::cleanup_request(candidate, run, remove_data)
+                };
+            }
+            if retained_only {
+                return encode(graph::remove_retained_data(candidate, run)?);
             }
             encode(graph::cleanup(candidate, run, remove_data)?)
         }
@@ -987,6 +1055,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             let values = BTreeMap::new();
             let options = graph::RunOptions {
                 routing_enrolled: !route_slots.is_empty(),
+                loopback_ports: ["serve", "serve-restore"].contains(action),
                 project: PlanOptions {
                     branch: singles.get("--branch").copied(),
                     project: Path::new(project),
@@ -1094,7 +1163,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                             candidate,
                             options,
                             runtime,
-                            managed.values(),
+                            graph::ManagedInput {
+                                values: managed.values(),
+                                files: managed.files(),
+                            },
                             managed.deadline(),
                             &route_slots,
                         )?
@@ -1103,7 +1175,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                             candidate,
                             options,
                             runtime,
-                            &BTreeMap::new(),
+                            graph::ManagedInput {
+                                values: &BTreeMap::new(),
+                                files: &graph::ManagedFiles::new(),
+                            },
                             std::time::Instant::now() + Duration::from_secs(120),
                             &route_slots,
                         )?

@@ -237,16 +237,34 @@ pub(super) fn stopped(candidate: &Candidate, owner: &Owner) -> Result<(), Stoppe
 /// machine (free VM lock, no open disk handle, no owned listener) and the provider's
 /// persisted configuration is still this pool's audited one. The VM lock is released on
 /// return; the provider's own `machine start` reacquires it.
+///
+/// Before the restart's translation repair ([`Audit::BeforeRepair`]), the provider may still
+/// lack the `rosetta` setting the receipt records after an interrupted `machine update`; the
+/// restart repeats that update. Every later release check audits the configuration exactly.
 fn released(
     candidate: &Candidate,
     owner: &Owner,
     lease: &state::Lock,
+    audit: Audit,
 ) -> Result<(), StoppedRefusal> {
     let check = |error: CandidateError| StoppedRefusal::from_check(&error);
     lease.verify_path(&root(candidate)).map_err(check)?;
     lock_absent_disks_within(candidate, owner, disk_handles::RELEASE_HANDLE_WAIT).map_err(check)?;
     sockets_absent(owner).map_err(check)?;
-    config_audit::verify(candidate, owner).map_err(check)
+    match audit {
+        Audit::BeforeRepair => config_audit::verify_before_translation_repair(candidate, owner),
+        Audit::Exact => config_audit::verify(candidate, owner),
+    }
+    .map_err(check)
+}
+
+/// How a release check audits the provider's persisted configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Audit {
+    /// Before any restart effect: a pending translation update is accepted (see [`released`]).
+    BeforeRepair,
+    /// After the restart's provider effects: exactly the receipt's configuration.
+    Exact,
 }
 
 fn changed() -> CandidateError {
@@ -291,9 +309,18 @@ impl Selection {
         candidate: &Candidate,
         lease: &state::Lock,
     ) -> Result<(), CandidateError> {
+        self.reverify_leased_with(candidate, lease, Audit::Exact)
+    }
+
+    fn reverify_leased_with(
+        &self,
+        candidate: &Candidate,
+        lease: &state::Lock,
+        audit: Audit,
+    ) -> Result<(), CandidateError> {
         self.reverify(candidate)?;
         if self.basis == Basis::Stopped {
-            released(candidate, &self.owner, lease).map_err(StoppedRefusal::error)?;
+            released(candidate, &self.owner, lease, audit).map_err(StoppedRefusal::error)?;
             // The receipt cannot have changed under the lease, but bind it after the
             // release probes as well.
             self.reverify(candidate)?;
@@ -378,7 +405,7 @@ pub(super) fn settle<'a>(
                 samples.iter_mut().for_each(admission::rebase_fresh);
                 choice.selection = None;
             } else {
-                selected.reverify_leased(candidate, lease)?;
+                selected.reverify_leased_with(candidate, lease, Audit::BeforeRepair)?;
             }
         }
     }
@@ -387,8 +414,7 @@ pub(super) fn settle<'a>(
 
 /// The admission basis this start settled under the startup lease. Only [`settle`] issues
 /// it, and [`restart_only`] needs it.
-#[derive(Clone, Copy)]
-pub(super) struct Settled<'a>(&'a Choice);
+pub(super) struct Settled<'a>(&'a mut Choice);
 
 impl Settled<'_> {
     pub(super) fn selected(&self) -> Option<&Selection> {
@@ -398,7 +424,7 @@ impl Settled<'_> {
 
 /// Authority for create or restart effects and for the pre-boot admission. Only
 /// [`restart_only`] issues it.
-pub(super) struct Restart<'a>(&'a Choice);
+pub(super) struct Restart<'a>(&'a mut Choice);
 
 /// Before a restart effect under the startup lease: a selection continues only as a
 /// restart of its clean stopped pool's verified retained disks.
@@ -418,8 +444,38 @@ pub(super) fn restart_only<'a>(
             "Reserve-qualified ownership no longer names its selected pool; no create or boot was admitted.",
         ));
     }
-    selected.reverify_leased(candidate, lease)?;
+    selected.reverify_leased_with(candidate, lease, Audit::BeforeRepair)?;
     Ok(Restart(choice))
+}
+
+impl Restart<'_> {
+    /// Follow the one owner change a restart itself authorizes: `runtime up
+    /// --amd64-emulation` records the translation intent on the stopped pool (and stores it
+    /// in the provider with `machine update --rosetta`) after [`restart_only`] and before
+    /// the pre-boot admission, under the same startup lease.
+    ///
+    /// A start without a selection needs nothing. A stopped selection is rebound only when
+    /// the current receipt differs from the selected one by gaining that intent and nothing
+    /// else; the full leased recheck (receipt and release checks, including the provider
+    /// configuration audit against the new intent) then runs on the rebound receipt. Any
+    /// other change still refuses `admission_owner_changed`.
+    pub(super) fn requalify_amd64_emulation(
+        &mut self,
+        candidate: &Candidate,
+        lease: &state::Lock,
+    ) -> Result<(), CandidateError> {
+        let Some(selected) = self.0.selection.as_mut() else {
+            return Ok(());
+        };
+        let current = Owner::load(candidate)?;
+        let mut expected = selected.owner.clone();
+        expected.amd64_emulation = true;
+        if !selected.is_stopped() || selected.owner.amd64_emulation || current != expected {
+            return Err(changed());
+        }
+        selected.owner = current;
+        selected.reverify_leased(candidate, lease)
+    }
 }
 
 /// Authority to run `machine create`: only a start without a reserve selection allocates
@@ -458,7 +514,7 @@ pub(super) enum BootGate<'a> {
 pub(super) fn admit_boot<'a>(
     candidate: &Candidate,
     profile: Profile,
-    restart: &Restart<'a>,
+    restart: &'a Restart<'_>,
     baseline_swapouts: Option<u64>,
 ) -> Result<BootGate<'a>, CandidateError> {
     admit_boot_with(candidate, restart.0, baseline_swapouts, |owned| {

@@ -39,7 +39,158 @@ const laterIncompleteMissingLockStages = [
   "socket",
   "owner",
 ] as const;
+// TLC's two-worker search does not always report the shortest trace: a deeper
+// first violation can be checked first. Each multi-root-share control therefore
+// accepts exactly the first violations its model can reach, as complete states
+// (graph a/b, bound a/b, recordSet, ownerSet, mounted, journal op/p, phase; a set
+// is written as its sorted members). The lists were enumerated from each control's
+// complete state graph restricted to steps from states that still satisfy the
+// invariant. The first entry is the shortest witness.
+type SharesFirstViolation = readonly [
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+];
+const sharesSet = (members: string): string =>
+  `{${[...members].map((member) => `"${member}"`).join(", ")}}`;
+const sharesFields = ([
+  graphA,
+  graphB,
+  boundA,
+  boundB,
+  recordSet,
+  ownerSet,
+  mounted,
+  op,
+  p,
+  phase,
+]: SharesFirstViolation): readonly string[] => [
+  `graph = [a |-> "${graphA}", b |-> "${graphB}"]`,
+  `recordSet = ${sharesSet(recordSet)}`,
+  `journal = [op |-> "${op}", p |-> "${p}"]`,
+  `bound = [a |-> "${boundA}", b |-> "${boundB}"]`,
+  `phase = "${phase}"`,
+  `mounted = ${sharesSet(mounted)}`,
+  `ownerSet = ${sharesSet(ownerSet)}`,
+];
+const sharesWitnesses = (
+  action: string,
+  [first, ...others]: readonly [SharesFirstViolation, ...SharesFirstViolation[]]
+) => ({
+  action,
+  fields: sharesFields(first),
+  alternativeWitnesses: others.map((state) => ({
+    action,
+    fields: sharesFields(state),
+  })),
+});
+const sharesOwnShareViolations = [
+  ["none", "live", "none", "a", "a", "a", "a", "idle", "a", "running"],
+  ["live", "live", "a", "a", "ab", "ab", "ab", "idle", "a", "running"],
+  ["live", "live", "b", "b", "ab", "ab", "ab", "idle", "a", "running"],
+  ["live", "live", "a", "a", "a", "a", "a", "idle", "a", "running"],
+  ["live", "none", "b", "none", "ab", "ab", "ab", "idle", "a", "running"],
+  ["live", "retained", "b", "b", "ab", "ab", "ab", "idle", "a", "running"],
+  ["none", "live", "none", "a", "ab", "ab", "ab", "idle", "a", "running"],
+  ["retained", "live", "a", "a", "ab", "ab", "ab", "idle", "a", "running"],
+  ["retained", "live", "a", "a", "a", "a", "a", "idle", "a", "running"],
+] as const;
+const sharesUnfencedBootViolations = [
+  ["none", "none", "none", "none", "a", "a", "a", "add", "b", "running"],
+  ["none", "none", "none", "none", "ab", "ab", "ab", "add", "b", "running"],
+  ["none", "none", "none", "none", "ab", "a", "ab", "add", "b", "running"],
+  ["none", "none", "none", "none", "ab", "ab", "ab", "remove", "b", "running"],
+  ["none", "none", "none", "none", "a", "ab", "a", "remove", "b", "running"],
+  ["none", "none", "none", "none", "a", "a", "a", "remove", "b", "running"],
+  ["retained", "none", "a", "none", "ab", "ab", "ab", "add", "b", "running"],
+  ["retained", "none", "a", "none", "ab", "a", "ab", "add", "b", "running"],
+  ["retained", "none", "a", "none", "ab", "ab", "ab", "remove", "b", "running"],
+  ["retained", "none", "a", "none", "a", "a", "a", "add", "b", "running"],
+  ["retained", "none", "a", "none", "a", "ab", "a", "remove", "b", "running"],
+  ["retained", "none", "a", "none", "a", "a", "a", "remove", "b", "running"],
+] as const;
+const sharesOwnerFirstViolations = [
+  ["none", "none", "none", "none", "a", "ab", "", "add", "b", "stopped"],
+  ["none", "none", "none", "none", "ab", "a", "", "remove", "b", "stopped"],
+  ["retained", "none", "a", "none", "ab", "a", "", "remove", "b", "stopped"],
+  ["retained", "none", "a", "none", "a", "ab", "", "add", "b", "stopped"],
+] as const;
+const sharesReferencedRemovalViolations = [
+  ["none", "retained", "none", "b", "a", "ab", "", "remove", "b", "stopped"],
+  ["retained", "retained", "a", "b", "a", "ab", "", "remove", "b", "stopped"],
+] as const;
+// TLC's two-worker search does not always report the shortest trace, so the
+// restart-policy controls accept every first violation the model can reach.
+// A stale use is a bound incarnation that is older than the current one, or
+// equal to it while the engine is no longer running.
+const restartPolicyStaleUses = [
+  { engine: "restarting", bound: 1 },
+  { engine: "exited", bound: 1 },
+  { engine: "running", bound: 1 },
+  { engine: "restarting", bound: 2 },
+  { engine: "exited", bound: 2 },
+  { engine: "running", bound: 2 },
+  { engine: "restarting", bound: 3 },
+  { engine: "exited", bound: 3 },
+] as const;
 const contracts: readonly ModelContract[] = [
+  {
+    name: "native-plan-reconcile",
+    module: "Reconcile",
+    states: 747_656,
+    invariant: "NoForeignAttach",
+    action: "Start",
+    fields: ["foreignAttach = TRUE", "unrecordedAttach = FALSE"],
+    additionalControls: [
+      {
+        name: "replacement",
+        negative: true,
+        invariant: "AttachSelected",
+        fields: ["unrecordedAttach = TRUE", "foreignAttach = FALSE"],
+      },
+      {
+        name: "drop-orphans",
+        negative: true,
+        invariant: "RetainedDataRecorded",
+        fields: ["lostData = TRUE", "foreignAttach = FALSE"],
+      },
+    ],
+  },
+  {
+    name: "native-cache-reconcile",
+    module: "CacheReconcile",
+    states: 2208,
+    invariant: "UnrelatedEditKeepsCache",
+    action: "UpCache",
+    fields: ["needlessRebuild = TRUE", "staleMounted = FALSE"],
+    additionalControls: [
+      {
+        name: "stale",
+        negative: true,
+        invariant: "CacheMatchesInputs",
+        fields: ["staleMounted = TRUE", "needlessRebuild = FALSE"],
+      },
+      {
+        name: "data-as-cache",
+        negative: true,
+        invariant: "NoDataAsCache",
+        fields: ["dataMounted = TRUE", "staleMounted = FALSE"],
+      },
+      {
+        name: "poison",
+        negative: true,
+        invariant: "NoForeignWrites",
+        fields: ["foreignMounted = TRUE", "staleMounted = FALSE"],
+      },
+    ],
+  },
   {
     name: "pre-ready-retirement",
     module: "Retirement",
@@ -689,6 +840,83 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-foreground-down-hooks",
+    module: "DownHooks",
+    states: 1246,
+    invariant: "Safe",
+    action: "DStart",
+    fields: [
+      "unsafeBefore = TRUE",
+      "beforeOpen = 2",
+      'jState = "beforeStarted"',
+      'jGen = "D"',
+    ],
+    alternativeWitnesses: [
+      {
+        action: "FInterrupt",
+        fields: [
+          "unsafeBefore = TRUE",
+          "beforeOpen = 2",
+          'jState = "beforeStarted"',
+          'jGen = "F"',
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "unknown-generation",
+        negative: true,
+        action: "NewUp",
+        fields: ["unsafeGen = TRUE", "newGen = TRUE", 'jState = "absent"'],
+      },
+      {
+        name: "owed-after-interrupt",
+        negative: true,
+        action: "FInterruptAtPublish",
+        fields: [
+          "unsafeOwe = TRUE",
+          "upInterrupted = TRUE",
+          'jState = "owed"',
+          'jGen = "F"',
+        ],
+      },
+      {
+        name: "complete-reachable",
+        negative: true,
+        invariant: "NeverComplete",
+        action: "FAfterDone",
+        fields: [
+          'jState = "complete"',
+          "afterDone = TRUE",
+          "unsafeAfter = FALSE",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "DAfterDone",
+            fields: [
+              'jState = "complete"',
+              "afterDone = TRUE",
+              "unsafeAfter = FALSE",
+            ],
+          },
+        ],
+      },
+      {
+        name: "recovery-reachable",
+        negative: true,
+        invariant: "NeverRecovered",
+        action: "DAfterDone",
+        fields: [
+          'fpc = "dead"',
+          'jState = "complete"',
+          'jGen = "D"',
+          "unsafeBefore = FALSE",
+          "unsafeAfter = FALSE",
+        ],
+      },
+    ],
+  },
+  {
     name: "native-route-stop",
     module: "Stop",
     states: 202,
@@ -1043,6 +1271,32 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-startup-owner",
+    module: "Owner",
+    states: 32,
+    invariant: "NoUnownedResources",
+    action: "ExitUnconfirmed",
+    fields: [
+      'mapping = "none"',
+      'phase = "exited"',
+      'receipt = "authenticated"',
+      'resources = "present"',
+    ],
+    additionalControls: [
+      {
+        name: "refused-inspection",
+        negative: true,
+        invariant: "NoUnrecordedRefusal",
+        fields: [
+          'mapping = "none"',
+          'phase = "exited"',
+          'receipt = "refused"',
+          'resources = "present"',
+        ],
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,
@@ -1070,6 +1324,33 @@ const contracts: readonly ModelContract[] = [
           "authority = FALSE",
           "locked = TRUE",
         ],
+      },
+    ],
+  },
+  {
+    name: "multi-root-share",
+    module: "Shares",
+    states: 55,
+    invariant: "OwnShareOnly",
+    ...sharesWitnesses("StartGraph", sharesOwnShareViolations),
+    additionalControls: [
+      {
+        name: "unfenced-boot",
+        negative: true,
+        invariant: "RunningMountsAudited",
+        ...sharesWitnesses("Boot", sharesUnfencedBootViolations),
+      },
+      {
+        name: "owner-first",
+        negative: true,
+        invariant: "OwnerNeverAhead",
+        ...sharesWitnesses("CommitOwner", sharesOwnerFirstViolations),
+      },
+      {
+        name: "referenced-removal",
+        negative: true,
+        invariant: "ReferencedSharesKept",
+        ...sharesWitnesses("CommitRecord", sharesReferencedRemovalViolations),
       },
     ],
   },
@@ -1138,6 +1419,20 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "dependency-auto-refresh",
+    module: "AutoRefresh",
+    states: 141,
+    invariant: "NoReplayAfterUnconfirmed",
+    action: "Start",
+    fields: [
+      "replayed = TRUE",
+      "unconfirmed = TRUE",
+      "closed = FALSE",
+      'journal = "none"',
+      "attempts = 2",
+    ],
+  },
+  {
     name: "relay-lifecycle-barrier",
     module: "Barrier",
     states: 1590,
@@ -1198,6 +1493,50 @@ const contracts: readonly ModelContract[] = [
     invariant: "Safe",
     action: "Recover",
     fields: ["alive = TRUE", "recoveredLive = TRUE"],
+  },
+  {
+    // Loopback TCP publication of Compose `ports`: one listener per host
+    // port, no forwarding to a replaced container, no recovery of a live
+    // owner, no listener after acknowledged stop; see tests/models/tla/README.md.
+    name: "loopback-port-publication",
+    module: "LoopbackPort",
+    states: 1008,
+    invariant: "Safe",
+    action: "Recover",
+    fields: ["retiredLive = TRUE", "alive = [a |-> TRUE, b |-> TRUE]"],
+    additionalControls: [
+      {
+        name: "no-probe",
+        negative: true,
+        action: "Publish",
+        fields: ["shared = TRUE", 'holders = {"a", "foreign"}'],
+        // TLC's two workers may report either owner as the second listener.
+        alternativeWitnesses: [
+          {
+            action: "Publish",
+            fields: ["shared = TRUE", 'holders = {"b", "foreign"}'],
+          },
+        ],
+      },
+      {
+        name: "stale-target",
+        negative: true,
+        action: "Forward",
+        fields: ["staleForward = TRUE", "target = [a |-> 0, b |-> 0]"],
+      },
+      {
+        name: "ack-before-close",
+        negative: true,
+        action: "Retire",
+        fields: ["ackedListening = TRUE", 'holders = {"a"}'],
+        alternativeWitnesses: [
+          {
+            action: "Retire",
+            fields: ["ackedListening = TRUE", 'holders = {"b"}'],
+          },
+        ],
+      },
+    ],
   },
   {
     name: "publication",
@@ -1441,6 +1780,128 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "service-restart-policy",
+    module: "RestartPolicy",
+    states: 134,
+    invariant: "NoIncarnationAfterStop",
+    action: "DaemonRestart",
+    fields: [
+      'phase = "stopping"',
+      'policy = "armed"',
+      'engine = "running"',
+      "lateStart = TRUE",
+    ],
+    // DaemonRestart needs a present container, so a stop-requested phase is
+    // either stopping or, after terminal proof, stopped.
+    alternativeWitnesses: [
+      {
+        action: "DaemonRestart",
+        fields: [
+          'phase = "stopped"',
+          'policy = "armed"',
+          'engine = "running"',
+          "lateStart = TRUE",
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "unproved-terminal",
+        negative: true,
+        invariant: "TerminalProof",
+        action: "ObserveTerminal",
+        fields: [
+          'phase = "stopped"',
+          'engine = "running"',
+          "cancelled = TRUE",
+          "unsafeTerminal = TRUE",
+        ],
+        // A non-terminal engine is either running or has a pending restart.
+        alternativeWitnesses: [
+          {
+            action: "ObserveTerminal",
+            fields: [
+              'phase = "stopped"',
+              'engine = "restarting"',
+              "cancelled = TRUE",
+              "unsafeTerminal = TRUE",
+            ],
+          },
+        ],
+      },
+      {
+        name: "stale-generation",
+        negative: true,
+        invariant: "NoStaleIncarnation",
+        action: "Use",
+        fields: [
+          'phase = "serving"',
+          'engine = "restarting"',
+          "bound = 1",
+          "staleUse = TRUE",
+        ],
+        alternativeWitnesses: restartPolicyStaleUses.slice(1).map((use) => ({
+          action: "Use",
+          fields: [
+            'phase = "serving"',
+            `engine = "${use.engine}"`,
+            `bound = ${use.bound}`,
+            "staleUse = TRUE",
+          ],
+        })),
+      },
+      {
+        name: "completion-reachable",
+        negative: true,
+        invariant: "NeverRemoved",
+        action: "Remove",
+        fields: [
+          'phase = "removed"',
+          'engine = "absent"',
+          'policy = "no"',
+          "unsafeTerminal = FALSE",
+          "lateStart = FALSE",
+        ],
+      },
+    ],
+  },
+  {
+    name: "native-build-retention",
+    module: "BuildRetention",
+    states: 6181,
+    invariant: "NoReclaimReferenced",
+    action: "Reclaim",
+    fields: ["refs = {1}", "removed = 1", "fence = FALSE"],
+    additionalControls: [
+      {
+        name: "foreign-adoption",
+        negative: true,
+        invariant: "NoForeignAdoption",
+        action: "CompleteBuild",
+        fields: [
+          'receipt = [phase |-> "verified", image |-> 2, inc |-> 1]',
+          "owner = <<1, 0, 0>>",
+        ],
+        alternativeWitnesses: [
+          {
+            action: "CompleteBuild",
+            fields: [
+              'receipt = [phase |-> "verified", image |-> 1, inc |-> 1]',
+              "owner = <<0, 1, 0>>",
+            ],
+          },
+        ],
+      },
+      {
+        name: "down-under-build",
+        negative: true,
+        invariant: "DownNotUnderBuild",
+        action: "Down",
+        fields: ['build = "running"', "engineUp = FALSE", "fence = TRUE"],
+      },
+    ],
+  },
+  {
     name: "relay-fence",
     module: "RelayFence",
     negativeModule: "RelayFenceBroken",
@@ -1448,6 +1909,34 @@ const contracts: readonly ModelContract[] = [
     invariant: "Safe",
     action: "Launch",
     fields: ["retired = <<1>>", "alive = 1"],
+  },
+  {
+    name: "pool-emulation",
+    module: "Emulation",
+    states: 13,
+    invariant: "NoUntranslatedAmd64",
+    action: "StartAmd64",
+    fields: [
+      "amd64 = TRUE",
+      "intent = TRUE",
+      "config = FALSE",
+      "registered = FALSE",
+      "engine = TRUE",
+    ],
+    additionalControls: [
+      {
+        name: "running-upgrade",
+        negative: true,
+        invariant: "EngineMatchesIntent",
+        action: "RequestRunning",
+        fields: [
+          'phase = "running"',
+          "intent = TRUE",
+          "config = FALSE",
+          "engine = TRUE",
+        ],
+      },
+    ],
   },
 ];
 

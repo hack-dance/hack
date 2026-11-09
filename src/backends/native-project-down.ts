@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -6,6 +5,7 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { openNativeDownHookSession } from "./native-project-down-hooks.ts";
 import {
   captureNativeProjectFinalization,
   type NativeProjectFinalizationToken,
@@ -13,13 +13,20 @@ import {
 } from "./native-project-finalization.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { recoverNativeInterruptedStartupCleanup } from "./native-project-interrupted-cleanup.ts";
+import { withNativeRemovalLock } from "./native-project-removal-lock.ts";
+import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import {
+  describeNativeRunEnvironmentChange,
   loadNativeProjectRun,
+  loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeRunEnvironmentChange,
+  removeNativeProjectRun,
 } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -80,6 +87,171 @@ function verify(value: unknown, run: NativeProjectRun, stopped: boolean): void {
     }
   }
 }
+const RECEIPT_SHA = /^[a-f0-9]{64}$/;
+
+/** Only ESRCH proves a recorded frontend exited; a live or inaccessible PID does not. */
+function processExited(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return isRecord(error) && error.code === "ESRCH";
+  }
+}
+const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
+
+/** What `graph foreground-owner` selected; it grants no recovery authority. */
+type ForegroundOwnerSelection = {
+  readonly phase: string;
+  readonly receiptSha256: string;
+  readonly foreground: "absent" | "running" | "exited" | "uncertain";
+  /** Original receipt digest of an interrupted same-boot dead-owner recovery. */
+  readonly liveOwnerRecovery: string | null;
+};
+
+function ownerRecoveryRefused(): Error {
+  return new ClosedCliError(
+    "Native down --recover cannot confirm this run's foreground owner state; retained data and runtime state were not changed."
+  );
+}
+
+async function selectForegroundOwner(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+}): Promise<ForegroundOwnerSelection> {
+  const value = await opts.invoke({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: ["graph", "foreground-owner", "--run-id", opts.run.run, "--json"],
+    timeoutMs: 15_000,
+  });
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    value.run !== opts.run.run ||
+    value.owner !== opts.run.owner ||
+    typeof value.phase !== "string" ||
+    typeof value.receipt_sha256 !== "string" ||
+    !RECEIPT_SHA.test(value.receipt_sha256) ||
+    typeof value.foreground !== "string" ||
+    !FOREGROUND_STATES.has(value.foreground) ||
+    !(
+      value.live_owner_recovery === null ||
+      (typeof value.live_owner_recovery === "string" &&
+        RECEIPT_SHA.test(value.live_owner_recovery))
+    )
+  ) {
+    throw ownerRecoveryRefused();
+  }
+  return {
+    phase: value.phase,
+    receiptSha256: value.receipt_sha256,
+    foreground: value.foreground as ForegroundOwnerSelection["foreground"],
+    liveOwnerRecovery: value.live_owner_recovery,
+  };
+}
+
+/**
+ * The owned stop for `hack down --recover`. A run whose foreground owner exited
+ * while its graph was ready is stopped by the runtime's same-boot dead-owner
+ * recovery, selected by the exact receipt observed here; it revalidates the
+ * owner's death, its endpoints and the inventories itself, retains data and
+ * retires the stale publication. A run without a remaining publication takes
+ * the ordinary cleanup. Every other state refuses with nothing changed.
+ */
+async function requestOwnedStop(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly selection: ForegroundOwnerSelection | undefined;
+}): Promise<void> {
+  const selection = opts.selection;
+  if (selection === undefined || selection.foreground === "absent") {
+    try {
+      await opts.invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: ["graph", "cleanup", "--run-id", opts.run.run, "--json"],
+        timeoutMs: 590_000,
+      });
+    } catch (error) {
+      if (
+        selection === undefined &&
+        error instanceof NativeRuntimeRequestError &&
+        error.nativeCode === "graph_owner_recovery"
+      ) {
+        throw new ClosedCliError(
+          "Native down cannot reach this run's foreground owner. If the hack up or hack restart that owned it has exited, run hack down --recover to stop its services with data retained. Nothing was stopped."
+        );
+      }
+      throw error;
+    }
+    return;
+  }
+  await recoverLiveOwner({ ...opts, expectReceipt: selection.receiptSha256 });
+}
+
+/** Same-boot dead-owner recovery of the exact selected receipt; it resumes its own intent. */
+async function recoverLiveOwner(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly expectReceipt: string;
+}): Promise<void> {
+  const result = await opts.invoke({
+    runtime: opts.runtime,
+    cwd: opts.projectRoot,
+    args: [
+      "graph",
+      "recover-live-owner",
+      "--run-id",
+      opts.run.run,
+      "--expect-receipt",
+      opts.expectReceipt,
+      "--json",
+    ],
+    timeoutMs: 590_000,
+  });
+  if (
+    !isRecord(result) ||
+    result.run !== opts.run.run ||
+    result.recovered !== true ||
+    result.data_retained !== true ||
+    result.publisher_retired !== true
+  ) {
+    throw ownerRecoveryRefused();
+  }
+}
+
+/** Refuse `--recover` states that have no supported owned stop, before any hook. */
+function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
+  if (selection.foreground === "running") {
+    throw new ClosedCliError(
+      "Native down --recover found a running foreground owner for this run. Stop it with Ctrl-C in its terminal, or run hack down without --recover. Nothing was changed."
+    );
+  }
+  // An interrupted recovery resumes by its own selection, whatever the receipt
+  // phase or partial publication retirement it left behind.
+  if (selection.liveOwnerRecovery !== null) {
+    return;
+  }
+  if (selection.foreground === "uncertain") {
+    throw ownerRecoveryRefused();
+  }
+  if (
+    selection.foreground === "exited" &&
+    selection.phase !== "ready-observed"
+  ) {
+    throw new ClosedCliError(
+      "Native down --recover found a foreground owner that exited before its start was confirmed. Data is retained, but no supported command can prove and retire that attempt yet; keep the native home unchanged for inspection. Nothing was changed."
+    );
+  }
+}
+
 /** Retaining cleanup only. Success follows confirmed compute absence and the
  * original frontend's finalizers, including a previously recovered stop.
  */
@@ -96,7 +268,28 @@ export async function nativeProjectDown(opts: {
   readonly beforeCleanup?: (run: NativeProjectRun) => Promise<void>;
   readonly retireHostProcesses?: (run: NativeProjectRun) => Promise<void>;
   readonly after?: (run: NativeProjectRun) => Promise<void>;
+  /**
+   * Journaled `down.before`/`down.after` (see `native-project-down-hooks.ts`).
+   * On a live graph they run around cleanup as before. On a graph that a
+   * foreground stop or recovery already stopped, only phases still owed run,
+   * once, after the original frontend's finalization. `run` rejects when the
+   * phase's commands fail. `configured` says whether the project declares
+   * down hooks; without a journal record nothing runs when it is false.
+   */
+  readonly hooks?: {
+    readonly configured: boolean;
+    readonly run: (phase: {
+      readonly phase: "before" | "after";
+      readonly run: NativeProjectRun;
+      readonly graphStopped: boolean;
+    }) => Promise<void>;
+  };
   readonly invoke?: typeof invokeNativeRuntime;
+  /**
+   * `hack down --recover`: also stop a ready run whose foreground owner exited
+   * without retiring its publication (see {@link requestOwnedStop}).
+   */
+  readonly recover?: boolean;
   /** Only the restart coordinator may defer to its already captured exact wait/recovery. */
   readonly deferFinalization?: boolean;
   readonly finalizationTimeoutMs?: number;
@@ -117,11 +310,42 @@ export async function nativeProjectDown(opts: {
       run: run.run,
       invoke,
     });
-  const initial = await inspect();
+  let initial = await inspect();
   verify(initial, run, false);
+  const selection = opts.recover
+    ? await selectForegroundOwner({
+        runtime: opts.runtime,
+        projectRoot: opts.scope.projectRoot,
+        run,
+        invoke,
+      })
+    : undefined;
+  if (selection) {
+    requireRecoverableOwner(selection);
+  }
+  if (selection?.liveOwnerRecovery) {
+    // Finish the interrupted recovery first; the stopped path below then retires
+    // host processes and runs only journaled owed hooks, never replaying a stop.
+    await recoverLiveOwner({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run,
+      invoke,
+      expectReceipt: selection.liveOwnerRecovery,
+    });
+    initial = await inspect();
+    verify(initial, run, false);
+  }
   const finalization = opts.deferFinalization
     ? undefined
     : await captureFinalization({ scope: opts.scope, run });
+  // `--recover`: a frontend that has exited cannot finish later, so its
+  // finalization is read once instead of awaited.
+  const frontendGone =
+    opts.recover === true &&
+    finalization !== undefined &&
+    finalization.version !== 1 &&
+    processExited(finalization.pid);
   const wait = async () => {
     if (finalization === undefined) {
       return;
@@ -131,11 +355,34 @@ export async function nativeProjectDown(opts: {
         scope: opts.scope,
         run,
         token: finalization,
-        timeoutMs: opts.finalizationTimeoutMs,
+        timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
       });
     } catch {
-      throw finalizationRefused();
+      throw frontendGone
+        ? new ClosedCliError(
+            `Native down --recover: this run's services are stopped with data retained, but the hack up or hack restart that owned it exited before confirming its own cleanup. Run hack restart --recover-frontend --expect-finalization-attempt ${finalization.attempt} to finish that recovery and start the project.`
+          )
+        : finalizationRefused();
     }
+  };
+  const hooks = opts.hooks;
+  const owedAfterStop = async () => {
+    if (!hooks) {
+      return;
+    }
+    // Read only after finalization: the frontend may still be finishing them.
+    const session = await openNativeDownHookSession({
+      scope: opts.scope,
+      run,
+      graphStopped: true,
+      configured: hooks.configured,
+    });
+    await session.before(() =>
+      hooks.run({ phase: "before", run, graphStopped: true })
+    );
+    await session.after(() =>
+      hooks.run({ phase: "after", run, graphStopped: true })
+    );
   };
   const recovered = await recoverNativeInterruptedStartupCleanup({
     runtime: opts.runtime,
@@ -148,6 +395,7 @@ export async function nativeProjectDown(opts: {
     verify(recovered, run, true);
     await opts.retireHostProcesses?.(run);
     await wait();
+    await owedAfterStop();
     return {
       backend: "native",
       status: "stopped",
@@ -160,10 +408,12 @@ export async function nativeProjectDown(opts: {
     isRecord(initial.receipt) &&
     initial.receipt.phase === "stopped-data-retained"
   ) {
-    // Recovery already stopped compute. User hooks and guest cleanup must not replay.
+    // Recovery or a foreground stop already stopped compute. Guest cleanup and
+    // completed hooks must not replay; only journaled owed phases run once.
     verify(initial, run, true);
     await opts.retireHostProcesses?.(run);
     await wait();
+    await owedAfterStop();
     return {
       backend: "native",
       status: "stopped",
@@ -171,7 +421,20 @@ export async function nativeProjectDown(opts: {
       dataPreserved: true,
     } as const;
   }
+  const session = hooks
+    ? await openNativeDownHookSession({
+        scope: opts.scope,
+        run,
+        graphStopped: false,
+        configured: hooks.configured,
+      })
+    : undefined;
   await opts.before?.(run);
+  if (hooks && session) {
+    await session.before(() =>
+      hooks.run({ phase: "before", run, graphStopped: false })
+    );
+  }
   // Recheck after hooks, which may run arbitrary user-authorized commands.
   verify(await inspect(), run, false);
   if (
@@ -184,15 +447,21 @@ export async function nativeProjectDown(opts: {
     throw finalizationRefused();
   }
   await opts.beforeCleanup?.(run);
-  await invoke({
+  await requestOwnedStop({
     runtime: opts.runtime,
-    cwd: opts.scope.projectRoot,
-    args: ["graph", "cleanup", "--run-id", run.run, "--json"],
-    timeoutMs: 590_000,
+    projectRoot: opts.scope.projectRoot,
+    run,
+    invoke,
+    selection,
   });
   verify(await inspect(), run, true);
   await opts.retireHostProcesses?.(run);
   await opts.after?.(run);
+  if (hooks && session) {
+    await session.after(() =>
+      hooks.run({ phase: "after", run, graphStopped: true })
+    );
+  }
   await wait();
   return {
     backend: "native",
@@ -202,7 +471,13 @@ export async function nativeProjectDown(opts: {
   } as const;
 }
 
-/** Resolve fresh values with the original selection; never infer legacy/default overlays. */
+/**
+ * Resolve fresh values with the original selection; never infer legacy/default overlays.
+ * A run recorded as started without managed env files delivered none, and one started
+ * base-only delivered the base layers, so their hooks get exactly that even when env
+ * files appeared since: `hack down` stays the way to apply them. A run started with its
+ * overlay refuses before cleanup when the overlay is gone, naming it.
+ */
 export async function nativeDownEnvironment(opts: {
   readonly scope: NativeProjectRunScope;
   readonly run: NativeProjectRun;
@@ -213,39 +488,314 @@ export async function nativeDownEnvironment(opts: {
       "Native down lifecycle hooks require persisted startup environment selection; legacy mapping must not guess an overlay."
     );
   }
+  const recorded = opts.run.effectiveEnvName;
+  if (recorded !== null && opts.run.unmanagedEnvironment === true) {
+    return {};
+  }
+  const baseOnly = recorded !== null && opts.run.baseOnlyEnvironment === true;
+  let named: ClosedCliError | undefined;
   try {
     const resolved = await resolveProjectEnvConfig({
       projectRoot: opts.scope.projectRoot,
       projectDir: opts.scope.projectDir,
-      envName: opts.run.effectiveEnvName,
+      envName: baseOnly ? null : recorded,
       serviceNames: opts.serviceNames,
     });
-    if (!resolved) {
-      if (opts.run.effectiveEnvName !== null) {
-        throw refused();
+    const environmentFiles = resolved?.files ?? [];
+    if (!baseOnly) {
+      const change = nativeRunEnvironmentChange({
+        run: opts.run,
+        environmentFiles,
+        projectRoot: opts.scope.projectRoot,
+        projectDir: opts.scope.projectDir,
+      });
+      if (change) {
+        named = new ClosedCliError(
+          `Native down refused before cleanup: ${describeNativeRunEnvironmentChange(change)}, and the down hooks need the values this run started with. Restore it and run hack down again; nothing was stopped.`
+        );
+        throw named;
       }
-      return {};
     }
-    const selected = opts.run.effectiveEnvName;
-    if (
-      selected !== null &&
-      !resolved.files.some((path) =>
-        [
-          `hack.env.${selected}.yaml`,
-          `hack.env.${selected}.local.yaml`,
-        ].includes(basename(path))
-      )
-    ) {
-      throw refused();
+    if (!resolved) {
+      return {};
     }
     return selectProjectEnvValuesForExecutionTarget({
       resolved,
       scopeName: "global",
       target: "host",
     });
-  } catch {
+  } catch (error) {
+    if (named !== undefined && error === named) {
+      throw named;
+    }
     throw new ClosedCliError(
       "Native down lifecycle environment is unavailable; values omitted. No cleanup was requested."
     );
   }
+}
+
+const NATIVE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+
+/** Value-free: at most a closed native refusal code, never its diagnostic. */
+function removalRefused(cause?: unknown): Error {
+  const code =
+    cause instanceof NativeRuntimeRequestError &&
+    cause.nativeCode !== undefined &&
+    NATIVE_CODE.test(cause.nativeCode)
+      ? ` (${cause.nativeCode})`
+      : "";
+  return new ClosedCliError(
+    `Native data removal is unconfirmed${code}; the run mapping is kept. Run \`hack down --remove-data\` again to resume from re-inspection.`
+  );
+}
+
+/** Canceled before the cleanup request: nothing was requested or removed. */
+function removalCanceled(): Error {
+  return new ClosedCliError(
+    "Native data removal was canceled before any cleanup request; nothing was removed and the run mapping is kept."
+  );
+}
+function requireActiveRemoval(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw removalCanceled();
+  }
+}
+
+/** Thrown when the graph still runs: removal never stops compute itself. */
+function removalRequiresStop(): Error {
+  return new ClosedCliError(
+    "Native data removal requires a stopped project; run `hack down` first, then `hack down --remove-data`. Nothing was removed."
+  );
+}
+
+type RemovalStart = "retained" | "resume" | "removed";
+
+function sameRun(receipt: Record<string, unknown>, run: NativeProjectRun) {
+  return (
+    receipt.run === run.run &&
+    receipt.owner === run.owner &&
+    receipt.namespace === run.namespace &&
+    receipt.plan_id === run.planId &&
+    isRecord(receipt.resources)
+  );
+}
+
+/**
+ * Classify the exact saved run before any removal. A retained stopped graph
+ * starts removal. A durable cleanup intent with all compute absent, or an
+ * already removed receipt, resumes an interrupted earlier removal. Anything
+ * else (running, starting, foreign or unreadable) refuses without effects.
+ */
+function removalStart(value: unknown, run: NativeProjectRun): RemovalStart {
+  if (confirmedNativeRetainedGraph(value, run)) {
+    return "retained";
+  }
+  if (
+    !(
+      isRecord(value) &&
+      value.journal_incomplete === false &&
+      isRecord(value.receipt) &&
+      isRecord(value.observations) &&
+      sameRun(value.receipt, run)
+    )
+  ) {
+    throw removalRefused();
+  }
+  const { receipt, observations } = value;
+  if (receipt.phase === "stopped-data-retained") {
+    // Stopped, but its resources no longer match the retained receipt.
+    throw removalRefused();
+  }
+  if (receipt.phase !== "cleanup-intent" && receipt.phase !== "removed") {
+    throw removalRequiresStop();
+  }
+  for (const resource of Object.values(
+    receipt.resources as Record<string, unknown>
+  )) {
+    if (!isRecord(resource) || typeof resource.key !== "string") {
+      throw removalRefused();
+    }
+    const observed = observations[`${resource.kind}:${resource.key}`];
+    if (
+      resource.kind === "container" &&
+      !(isRecord(observed) && observed.state === "absent")
+    ) {
+      throw removalRequiresStop();
+    }
+  }
+  return receipt.phase === "removed" ? "removed" : "resume";
+}
+
+/**
+ * Confirms the owner removed every graph-owned volume of the exact run:
+ * receipt `removed`, compute and networks absent, each owned volume recorded
+ * and observed absent, and each shared dependency cache only `released`
+ * (a graph never deletes a shared cache).
+ */
+function confirmRemoved(value: unknown, run: NativeProjectRun): void {
+  if (
+    !(
+      isRecord(value) &&
+      value.journal_incomplete === false &&
+      isRecord(value.receipt) &&
+      isRecord(value.observations) &&
+      sameRun(value.receipt, run) &&
+      value.receipt.phase === "removed"
+    )
+  ) {
+    throw removalRefused();
+  }
+  const { observations } = value;
+  for (const resource of Object.values(
+    value.receipt.resources as Record<string, unknown>
+  )) {
+    if (!isRecord(resource) || typeof resource.key !== "string") {
+      throw removalRefused();
+    }
+    const observed = observations[`${resource.kind}:${resource.key}`];
+    const absent = isRecord(observed) && observed.state === "absent";
+    if (resource.kind === "volume" && resource.cache !== undefined) {
+      if (resource.phase !== "released") {
+        throw removalRefused();
+      }
+      continue;
+    }
+    if (
+      !["container", "network", "volume"].includes(String(resource.kind)) ||
+      resource.phase !== "absent" ||
+      !absent
+    ) {
+      throw removalRefused();
+    }
+  }
+}
+
+/**
+ * Explicit retained-data removal for a stopped native Compose-file project
+ * (Compose parity: `down --volumes`). It never stops compute or runs hooks:
+ * a running graph refuses, so `hack down` must stop it first. Under the
+ * native operation lock and after the original frontend's finalization, it
+ * asks the graph owner for `graph cleanup --remove-data --retained-only`,
+ * which deletes only receipt-owned volumes behind a durable cleanup intent
+ * and releases shared dependency caches without deleting them.
+ * `--retained-only` makes the owner re-check the stopped state atomically, so
+ * a `hack up` elsewhere that restored the run after these frontend checks
+ * makes it refuse instead of stopping that run; the frontend lock alone cannot
+ * exclude that restore. The run mapping is retired only after every owned
+ * volume is confirmed absent, so the next `up` starts a fresh run with new
+ * empty volumes.
+ *
+ * Failure keeps the mapping. A rerun resumes from re-inspection: a durable
+ * cleanup intent or an already removed receipt continues without replaying
+ * deletion decisions. Cancellation (`signal`) before the runtime request has
+ * no effect; after it the owned request is killed and awaited, the outcome is
+ * unknown and the mapping stays until a rerun confirms removal. Either way
+ * the lock is released before this returns. A process killed outright leaves
+ * the lock behind; the rerun reclaims it once the recorded owner has exited
+ * (see {@link withNativeRemovalLock}).
+ */
+export async function nativeProjectRemoveData(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeProjectRunScope;
+  /**
+   * Asked once, after a read-only check that the exact saved run is stopped
+   * and before any lock or effect. `false` keeps everything.
+   */
+  readonly confirm?: () => Promise<boolean>;
+  readonly invoke?: typeof invokeNativeRuntime;
+  readonly finalizationTimeoutMs?: number;
+  /** Ordinary cancellation (SIGINT/SIGTERM in the command). */
+  readonly signal?: AbortSignal;
+}) {
+  const invoke = opts.invoke ?? invokeNativeRuntime;
+  const { signal } = opts;
+  const inspect = (run: NativeProjectRun) =>
+    inspectNativeProjectGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run: run.run,
+      invoke,
+      signal,
+    });
+  const notStarted = {
+    backend: "native",
+    status: "not_started",
+    dataPreserved: true,
+  } as const;
+  const selected = await loadNativeProjectRun(opts.scope);
+  if (!selected) {
+    return notStarted;
+  }
+  removalStart(await inspect(selected), selected);
+  if (opts.confirm && !(await opts.confirm())) {
+    return {
+      backend: "native",
+      status: "kept",
+      run: selected.run,
+      dataPreserved: true,
+    } as const;
+  }
+  requireActiveRemoval(signal);
+  return await withNativeRemovalLock(opts.scope, async () => {
+    if (await loadNativeRestartIntent(opts.scope)) {
+      throw new ClosedCliError(
+        "Native data removal refused: a native restart is pending; finish or recover it first. Nothing was removed."
+      );
+    }
+    // The confirmed run must still be the saved one; never remove a replacement.
+    const run = await loadNativeProjectRun(opts.scope);
+    if (!run) {
+      return notStarted;
+    }
+    if (!isDeepStrictEqual(run, selected)) {
+      throw removalRefused();
+    }
+    const start = removalStart(await inspect(run), run);
+    const finalization = await captureFinalization({ scope: opts.scope, run });
+    try {
+      await waitNativeProjectFinalization({
+        scope: opts.scope,
+        run,
+        token: finalization,
+        timeoutMs: opts.finalizationTimeoutMs,
+        signal,
+      });
+    } catch {
+      requireActiveRemoval(signal);
+      throw finalizationRefused();
+    }
+    requireActiveRemoval(signal);
+    try {
+      if (start !== "removed") {
+        await invoke({
+          runtime: opts.runtime,
+          cwd: opts.scope.projectRoot,
+          args: [
+            "graph",
+            "cleanup",
+            "--run-id",
+            run.run,
+            "--remove-data",
+            // Atomic stopped-only gate: the owner refuses a run restored since
+            // the checks above instead of stopping it and deleting its data.
+            "--retained-only",
+            "--json",
+          ],
+          timeoutMs: 590_000,
+          signal,
+        });
+      }
+      confirmRemoved(await inspect(run), run);
+      await removeNativeProjectRun({ ...opts.scope, expected: run });
+    } catch (error) {
+      // Native diagnostics may carry private values; the mapping stays for a rerun.
+      throw removalRefused(error);
+    }
+    return {
+      backend: "native",
+      status: "removed",
+      run: run.run,
+      dataPreserved: false,
+    } as const;
+  });
 }

@@ -898,3 +898,121 @@ fn closed_accepted_descriptor_cannot_prove_peer_identity() {
         "host_endpoint_timeout"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn owner_scoped_discovery_requires_a_listener_in_the_owner_tree() {
+    // Discovery scans every same-user process; keep the fixture away from parallel forks.
+    isolated_endpoint_fixture("provider::host_endpoint::tests::owner_scoped_discovery_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated discovery fixture launched by owner_scoped_discovery_requires_a_listener_in_the_owner_tree"]
+fn owner_scoped_discovery_child() {
+    use std::process::{Child, Command, Stdio};
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let own = super::super::identity::observe(std::process::id() as i32).unwrap();
+    // The owner itself may be the listener (depth 0).
+    let (listener, endpoint) = fixture();
+    let local = listener.local_addr().unwrap().port();
+    let found = HostEndpoint::discover_descendant(local, own.pid).unwrap();
+    assert_eq!(found.pid, own.pid);
+    assert_eq!(found.depth, 0);
+    assert_eq!(found.ancestor_start_micros, own.start_micros);
+    assert_eq!(found.fingerprint, endpoint.fingerprint().unwrap());
+    drop(listener);
+    assert_eq!(
+        HostEndpoint::discover_descendant(local, own.pid)
+            .unwrap_err()
+            .code,
+        "host_endpoint_identity"
+    );
+
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let port = crate::provider::test_socket::unallocated_tcp_port();
+    let mut child = OwnedChild(
+        Command::new(&executable)
+            .args([
+                "--ignored",
+                "--exact",
+                "provider::host_endpoint::tests::discovery_listener_child",
+                "--test-threads=1",
+            ])
+            .env("HACK_DISCOVERY_LISTENER_PORT", port.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
+    let found = loop {
+        if let Ok(found) = HostEndpoint::discover_descendant(port, own.pid) {
+            break found;
+        }
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "listener child exited"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "listener child was not discovered"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(found.pid, child.0.id() as i32);
+    assert_eq!(found.depth, 1);
+    assert_eq!(found.executable, executable);
+    assert_eq!(found.ancestor_start_micros, own.start_micros);
+
+    // Review pins exactly the resolved owner at the discovered depth.
+    let captured = HostEndpoint::capture(found.pid, port).unwrap();
+    let policy =
+        crate::provider::graph::RefreshPolicy::capture(&captured, &executable, port, found.depth)
+            .unwrap();
+    policy
+        .require_supervisor(own.pid, own.start_micros)
+        .unwrap();
+    assert!(
+        policy
+            .require_supervisor(own.pid, own.start_micros + 1)
+            .is_err()
+    );
+    assert!(
+        policy
+            .require_supervisor(found.pid, own.start_micros)
+            .is_err()
+    );
+
+    // A live same-user process that did not start the listener is not its owner.
+    let mut unrelated = OwnedChild(
+        Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let unrelated_pid = unrelated.0.id() as i32;
+    assert_eq!(
+        HostEndpoint::discover_descendant(port, unrelated_pid)
+            .unwrap_err()
+            .code,
+        "host_endpoint_owner"
+    );
+    assert!(HostEndpoint::discover_descendant(0, own.pid).is_err());
+    assert!(HostEndpoint::discover_descendant(port, 1).is_err());
+    unrelated.0.kill().unwrap();
+    let _ = unrelated.0.wait();
+    child.0.kill().unwrap();
+    let _ = child.0.wait();
+    assert!(HostEndpoint::discover_descendant(port, own.pid).is_err());
+}

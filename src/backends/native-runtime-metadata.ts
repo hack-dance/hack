@@ -7,6 +7,7 @@ import {
   readDeclaredEnvironmentKeys,
   runtimeHostMetadataComposeProject,
 } from "../lib/runtime-host-metadata.ts";
+import { declareNativeComposeProjectName } from "./native-compose-project-name.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 
 const LIMIT = 256 * 1024;
@@ -55,6 +56,25 @@ function routeHosts(labels: unknown): string[] {
   return hosts;
 }
 
+/**
+ * True when the labels name an upstream (`caddy.reverse_proxy`). Hostnames
+ * declared without one are inert in native review, as with the Compose router:
+ * they still feed runtime host metadata but never become a reviewed route.
+ */
+function proxiesUpstream(labels: unknown): boolean {
+  if (isRecord(labels)) {
+    return Object.hasOwn(labels, "caddy.reverse_proxy");
+  }
+  return (
+    Array.isArray(labels) &&
+    labels.some(
+      (entry) =>
+        typeof entry === "string" &&
+        (entry.split("=", 1)[0] ?? "").trim() === "caddy.reverse_proxy"
+    )
+  );
+}
+
 /** Compose interpolation treats `$` specially; `$$` is its literal escape. */
 function literal(value: string): string {
   return value.replaceAll("$", () => "$$");
@@ -69,7 +89,10 @@ function literal(value: string): string {
  * the returned routes against the reviewed plan with
  * {@link verifyNativeRuntimeMetadataRoutes} before starting anything. Keys a
  * service already declares, including Hack-managed project values (bare keys),
- * are left untouched, so explicit project values win. Call this after branch
+ * are left untouched, so explicit project values win. A document that
+ * references `COMPOSE_PROJECT_NAME` also gets the instance's Compose project
+ * name as its top-level `name` (see {@link declareNativeComposeProjectName}).
+ * Call this after branch
  * rewriting and every other normalization so the reviewed bytes are final.
  */
 export function applyNativeRuntimeMetadata(opts: {
@@ -91,7 +114,7 @@ export function applyNativeRuntimeMetadata(opts: {
       throw refused();
     }
     const hosts = routeHosts(service.labels);
-    if (hosts.length > 0) {
+    if (hosts.length > 0 && proxiesUpstream(service.labels)) {
       routes.set(name, hosts);
     }
     records.set(name, service);
@@ -102,15 +125,16 @@ export function applyNativeRuntimeMetadata(opts: {
       }),
     });
   }
+  const composeProject = runtimeHostMetadataComposeProject({
+    projectName: opts.selection.projectName,
+    branch: opts.branch,
+  });
   const environments = buildRuntimeHostMetadataEnvironments({
     services,
     branch: opts.branch,
     devHost: opts.selection.devHost,
     aliasHost: opts.selection.aliasHost,
-    composeProject: runtimeHostMetadataComposeProject({
-      projectName: opts.selection.projectName,
-      branch: opts.branch,
-    }),
+    composeProject,
     httpsPort: opts.httpsPort,
   });
   for (const [name, values] of environments) {
@@ -133,6 +157,9 @@ export function applyNativeRuntimeMetadata(opts: {
       throw refused();
     }
   }
+  // Compose interpolates COMPOSE_PROJECT_NAME from the same instance name the
+  // metadata reports; only documents that reference it change.
+  declareNativeComposeProjectName({ compose, composeProject });
   const normalizedComposeJson = JSON.stringify(compose);
   if (Buffer.byteLength(normalizedComposeJson) > LIMIT) {
     throw refused();

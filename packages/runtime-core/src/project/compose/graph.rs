@@ -24,6 +24,7 @@ pub(super) fn validate(
             "No service is active for the selected profiles.",
         ));
     }
+    network_aliases(services, diagnostics);
     let mut publications = BTreeSet::new();
     for (name, service) in services {
         let field = format!("services.{name}");
@@ -45,11 +46,26 @@ pub(super) fn validate(
                 ));
                 continue;
             };
-            if service.active && !target.active {
+            if service.active && !target.active && condition.required {
                 diagnostics.push(Diagnostic::error(
                     "inactive_dependency",
                     &field,
                     "An active service depends on a service disabled by the selected profiles.",
+                ));
+            } else if service.active && !target.active {
+                diagnostics.push(Diagnostic::warning(
+                    "optional_dependency_inactive",
+                    &field,
+                    "An optional dependency is disabled by the selected profiles; the edge is skipped, as with Compose.",
+                ));
+                // The execution graph drops this edge, so its target is never
+                // started or awaited: its condition requirements do not apply.
+                continue;
+            } else if service.active && !condition.required {
+                diagnostics.push(Diagnostic::warning(
+                    "optional_dependency_enforced",
+                    &field,
+                    "An active optional dependency is waited for like a required one; startup fails if its condition is never met, where Compose may only warn.",
                 ));
             }
             if condition.condition == "service_healthy"
@@ -122,6 +138,71 @@ pub(super) fn validate(
                 "The dependency graph contains a cycle.",
             ));
             break;
+        }
+    }
+}
+
+/// One owner per DNS name on each network. A name is owned by a service's own
+/// name and by its declared aliases on that network; Docker would otherwise
+/// round-robin the name between containers. Only collisions that involve an
+/// alias are reported, so documents without aliases review as before. A
+/// collision with a service the selected profiles leave inactive is a
+/// warning: that container never runs with this plan, and selecting its
+/// profile makes the collision an error.
+fn network_aliases(services: &BTreeMap<String, ServicePlan>, diagnostics: &mut Vec<Diagnostic>) {
+    // (network, name) -> [(service, is_alias)]
+    let mut owners: BTreeMap<(&str, String), Vec<(&str, bool)>> = BTreeMap::new();
+    for (name, service) in services {
+        for network in &service.networks {
+            owners
+                .entry((network, name.to_ascii_lowercase()))
+                .or_default()
+                .push((name, false));
+            for alias in service.network_aliases.get(network).into_iter().flatten() {
+                owners
+                    .entry((network, alias.clone()))
+                    .or_default()
+                    .push((name, true));
+            }
+        }
+    }
+    let mut reported = BTreeSet::new();
+    for claims in owners.values() {
+        if claims.len() < 2 || !claims.iter().any(|(_, alias)| *alias) {
+            continue;
+        }
+        for (index, (first, _)) in claims.iter().enumerate() {
+            for (second, _) in &claims[index + 1..] {
+                if first == second {
+                    continue;
+                }
+                let both_active = services[*first].active && services[*second].active;
+                let (code, message) = if both_active {
+                    (
+                        "network_alias_collision",
+                        "Network aliases must have one owner per network and cannot replace another service name; values omitted.",
+                    )
+                } else {
+                    (
+                        "inactive_network_alias_collision",
+                        "A network alias collides with a service the selected profiles leave inactive; selecting both is refused.",
+                    )
+                };
+                for service in [*first, *second] {
+                    if reported.insert((code, service)) {
+                        let diagnostic = if both_active {
+                            Diagnostic::error
+                        } else {
+                            Diagnostic::warning
+                        };
+                        diagnostics.push(diagnostic(
+                            code,
+                            &format!("services.{service}.networks"),
+                            message,
+                        ));
+                    }
+                }
+            }
         }
     }
 }

@@ -34,19 +34,18 @@ pub fn begin(
     let job = probes::token()?;
     let service = format!("job-{job}");
     let key = format!("container:{service}");
-    let mut resource = original
-        .resources
-        .get(&format!("container:{}", selection.service))
-        .ok_or_else(refused)?
-        .clone();
-    resource.key = service.clone();
-    resource.name = (0..32)
+    let name = (0..32)
         .map(|index| format!("hkg-{}-container-{index}", original.run))
         .find(|name| original.resources.values().all(|r| &r.name != name))
         .ok_or_else(refused)?;
-    resource.id = None;
-    resource.phase = "reserved".into();
-    resource.routing = None;
+    let resource = job_resource(
+        original
+            .resources
+            .get(&format!("container:{}", selection.service))
+            .ok_or_else(refused)?,
+        &service,
+        name,
+    );
     let template = runtime.job_template(&selection.service)?;
     let config = config::prepare(&template, &original, &resource, argv, workdir)?;
     let mut configs = BTreeMap::from([(service.clone(), config)]);
@@ -59,9 +58,10 @@ pub fn begin(
     };
     let expected_environment = verify_images(
         &engine,
-        &BTreeMap::from([(key.clone(), resource.clone())]),
+        &config::verification_resources(&original, &key, &resource),
         &mut configs,
         &private,
+        &BTreeSet::new(),
     )?;
     let mut environments = BTreeMap::new();
     if let Some(values) = values.filter(|v| !v.is_empty()) {

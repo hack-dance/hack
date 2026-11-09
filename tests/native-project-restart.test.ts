@@ -27,6 +27,7 @@ import {
   saveNativeRestartIntent,
   withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
+import { NativeStartupCanceledError } from "../src/backends/native-project-start.ts";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
   expectClosedRefusal,
@@ -41,6 +42,8 @@ const run = {
   effectiveEnvName: "qa",
   profiles: ["app"],
   aws: null,
+  // The stubbed input preparation reports no managed env file.
+  unmanagedEnvironment: true as const,
 };
 const token = {
   version: 1 as const,
@@ -297,7 +300,11 @@ test("legacy unknown selections refuse and omitted flags preserve saved values",
     envName: "qa",
     profiles: ["app"],
     aws: undefined,
+    gcloud: undefined,
   });
+  expect(
+    nativeRestartSelection({ run: { ...run, gcloud: { mode: "file" } } }).gcloud
+  ).toEqual({ mode: "file" });
   expect(() =>
     nativeRestartSelection({ run: { ...run, profiles: undefined } })
   ).toThrow("legacy");
@@ -393,6 +400,222 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
     }),
     "compatibility changed"
   );
+});
+
+test("preflight selects the per-env adaptation and dependency files by the retained env", async () => {
+  const { preflightNativeRestart } = await import(
+    "../src/backends/native-project-restart-preflight.ts"
+  );
+  const image = `sha256:${"9".repeat(64)}`;
+  const selected: Record<string, string | undefined> = {};
+  const preflight = (effectiveEnvName: string | null) =>
+    preflightNativeRestart({
+      runtime: { binary: "/unused", home: "/candidate" },
+      scope,
+      composeFile: "/fixture/.hack/docker-compose.yml",
+      run,
+      adaptationFile: "/fixture/.hack/native/adaptation.json",
+      adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+      dependencyFile: "/machine/dependencies.json",
+      dependencyFileByEnv: { qa: "/machine/dependencies.qa.json" },
+      dependencies: {
+        activeImages: async () => activeImageFixture(),
+        prepare: async () => ({
+          originalSha256: "1".repeat(64),
+          environmentFiles: [],
+          serviceNames: ["app"],
+          normalizedComposeJson: JSON.stringify({
+            services: { app: { image } },
+          }),
+          managedEnvironment: {},
+          lifecycleHostEnvironment: {},
+          effectiveEnvName,
+        }),
+        adapt: async ({ input: prepared, path }) => {
+          selected.adaptation = path;
+          return prepared;
+        },
+        dependencies: async ({ path }) => {
+          selected.dependencies = path;
+          throw new ClosedCliError("stop after dependency selection");
+        },
+        invoke: async ({ args }) =>
+          args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        review: async (options) =>
+          await options.run({
+            planId: run.planId,
+            namespace: run.namespace,
+            report: {},
+            projectArgs: [],
+          }),
+      },
+    });
+  await expectClosedRefusal(preflight("qa"), "stop after dependency selection");
+  expect(selected).toEqual({
+    adaptation: "/fixture/.hack/native/adaptation.qa.json",
+    dependencies: "/machine/dependencies.qa.json",
+  });
+  await expectClosedRefusal(preflight(null), "stop after dependency selection");
+  expect(selected).toEqual({
+    adaptation: "/fixture/.hack/native/adaptation.json",
+    dependencies: "/machine/dependencies.json",
+  });
+});
+
+const RESTART_OVERLAY_REMOVED =
+  "Native restart refused: .hack/hack.env.qa.yaml or .hack/hack.env.qa.local.yaml was removed since this run started. Restore it and run hack restart again, or run hack down (with it restored if the project has down hooks), then hack up, to start without it. The current graph was not stopped.";
+const RESTART_OVERLAY_APPEARED =
+  "Native restart refused: .hack/hack.env.qa.yaml appeared since this run started. Run hack down, then hack up, to start with it. The current graph was not stopped.";
+test("preflight keeps the retained env's per-env files without managed env files", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-restart-env-"))
+  );
+  try {
+    const projectDir = join(root, ".hack");
+    await mkdir(projectDir);
+    const composeFile = join(projectDir, "docker-compose.yml");
+    await writeFile(
+      composeFile,
+      JSON.stringify({
+        services: { app: { image: `sha256:${"9".repeat(64)}` } },
+      })
+    );
+    const selected: Record<string, string | undefined> = {};
+    const preflight = (
+      effectiveEnvName: string | null,
+      startedWithManagedFiles = false
+    ) =>
+      preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope: { ...scope, projectRoot: root, projectDir },
+        composeFile,
+        run: {
+          ...run,
+          effectiveEnvName,
+          unmanagedEnvironment: startedWithManagedFiles ? undefined : true,
+        },
+        adaptationFile: "/fixture/.hack/native/adaptation.json",
+        adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+        dependencyFile: "/machine/dependencies.json",
+        dependencyFileByEnv: { qa: "/machine/dependencies.qa.json" },
+        dependencies: {
+          activeImages: async () => activeImageFixture(),
+          adapt: async ({ input: prepared, path }) => {
+            selected.adaptation = path;
+            selected.env = prepared.effectiveEnvName ?? undefined;
+            return prepared;
+          },
+          dependencies: async ({ path }) => {
+            selected.dependencies = path;
+            throw new ClosedCliError("stop after dependency selection");
+          },
+          invoke: async ({ args }) =>
+            args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        },
+      });
+    // The project has no hack.env.* file, so the recorded env names only the files.
+    await expectClosedRefusal(
+      preflight("qa"),
+      "stop after dependency selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.qa.json",
+      env: "qa",
+      dependencies: "/machine/dependencies.qa.json",
+    });
+    await expectClosedRefusal(
+      preflight(null),
+      "stop after dependency selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.json",
+      env: undefined,
+      dependencies: "/machine/dependencies.json",
+    });
+    // A run that started with managed env files refuses once they are all gone,
+    // before any adaptation, dependency or cleanup step.
+    for (const key of Object.keys(selected)) {
+      delete selected[key];
+    }
+    await expectClosedRefusal(preflight("qa", true), RESTART_OVERLAY_REMOVED);
+    expect(selected).toEqual({});
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preflight keeps a base-only named env and refuses a changed overlay", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-restart-base-only-"))
+  );
+  try {
+    const projectDir = join(root, ".hack");
+    await mkdir(projectDir);
+    const composeFile = join(projectDir, "docker-compose.yml");
+    await writeFile(
+      composeFile,
+      JSON.stringify({
+        services: { app: { image: `sha256:${"9".repeat(64)}` } },
+      })
+    );
+    const envFile = async (name: string) =>
+      await writeFile(
+        join(projectDir, `hack.env.${name}.yaml`),
+        JSON.stringify({
+          version: 1,
+          environment: name,
+          secretsprovider: "project_key",
+          values: { global: {} },
+        })
+      );
+    // The project has a managed base env file but no qa overlay.
+    await envFile("default");
+    const selected: Record<string, string | undefined> = {};
+    const preflight = (markers: Record<string, true | undefined>) =>
+      preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope: { ...scope, projectRoot: root, projectDir },
+        composeFile,
+        run: {
+          ...run,
+          effectiveEnvName: "qa",
+          unmanagedEnvironment: undefined,
+          ...markers,
+        },
+        adaptationFile: "/fixture/.hack/native/adaptation.json",
+        adaptationFileByEnv: { qa: "/fixture/.hack/native/adaptation.qa.json" },
+        dependencies: {
+          activeImages: async () => activeImageFixture(),
+          adapt: async ({ path }) => {
+            selected.adaptation = path;
+            throw new ClosedCliError("stop after adaptation selection");
+          },
+          invoke: async ({ args }) =>
+            args[1] === "probe" ? { admitted: true } : { network: "internet" },
+        },
+      });
+
+    // Recorded as started with the base only: unchanged, so restart proceeds.
+    await expectClosedRefusal(
+      preflight({ baseOnlyEnvironment: true }),
+      "stop after adaptation selection"
+    );
+    expect(selected).toEqual({
+      adaptation: "/fixture/.hack/native/adaptation.qa.json",
+    });
+    // A mapping without the marker started with the overlay, which is missing now.
+    await expectClosedRefusal(preflight({}), RESTART_OVERLAY_REMOVED);
+    // An overlay that appears after a base-only start is a changed selection.
+    await envFile("qa");
+    await expectClosedRefusal(
+      preflight({ baseOnlyEnvironment: true }),
+      RESTART_OVERLAY_APPEARED
+    );
+    // And one recorded with the overlay keeps working while it exists.
+    await expectClosedRefusal(preflight({}), "stop after adaptation selection");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("preflight refuses a stale host listener before restart cleanup", async () => {
@@ -858,7 +1081,7 @@ test("frontend recovery on an active graph still requires live host listeners", 
           }),
       }),
       "E_CONFIG_INVALID",
-      "bounded explicit listener selection; values omitted"
+      "Native host dependencies refused for dependency #1"
     );
     expect(listener.calls).toEqual([
       "runtime status",
@@ -943,6 +1166,92 @@ test("stopped recovery reviews retained image IDs and resolves tags only after o
       expect(imageResolutions).toBe(changedOriginal ? 1 : 0);
     }
   } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("restart pins an active build service to its retained image, drops its build declaration and leaves inactive ones unbuilt", async () => {
+  const listener = await listenerIntentFixture();
+  const previous = process.env.HACK_NATIVE_BUILDS;
+  process.env.HACK_NATIVE_BUILDS = "1";
+  try {
+    let reviewed: Record<string, unknown> | undefined;
+    let inactive: Record<string, unknown> | undefined;
+    const builtImage = `sha256:${"7".repeat(64)}`;
+    await preflightNativeRestart({
+      ...listener.options,
+      recoverStopped: true,
+      dependencies: {
+        ...listener.options.dependencies,
+        retainedImages: selectNativeRetainedImages,
+        prepare: async () => ({
+          originalSha256: "1".repeat(64),
+          environmentFiles: [],
+          serviceNames: ["app"],
+          normalizedComposeJson: JSON.stringify({
+            services: {
+              app: { build: { context: "..", args: { A: "1" } } },
+              // Outside the run's profiles: never built, pinned or required.
+              tools: { build: "..", profiles: ["tools"] },
+            },
+          }),
+          managedEnvironment: {},
+          lifecycleHostEnvironment: {},
+          effectiveEnvName: "qa",
+        }),
+        invoke: async (options) => {
+          if (options.args[1] === "inspect") {
+            const observed = stoppedRetainedGraph();
+            return {
+              ...observed,
+              receipt: {
+                ...observed.receipt,
+                normalized_input: {
+                  namespace: run.namespace,
+                  original_compose_sha256: "1".repeat(64),
+                  normalized_compose_sha256: "3".repeat(64),
+                },
+                resources: {
+                  default: observed.receipt.resources.default,
+                  data: observed.receipt.resources.data,
+                  "container:app": {
+                    kind: "container",
+                    key: "app",
+                    image: builtImage,
+                  },
+                },
+              },
+            };
+          }
+          if (options.args[1] === "ensure-image") {
+            throw new Error("restart must not resolve or build images");
+          }
+          return await listener.options.dependencies!.invoke!(options);
+        },
+        review: async (review) => {
+          const services = JSON.parse(
+            review.input.normalizedComposeJson
+          ).services;
+          reviewed = services.app;
+          inactive = services.tools;
+          return await review.run({
+            planId: run.planId,
+            namespace: run.namespace,
+            report: {},
+            projectArgs: [],
+          });
+        },
+      },
+    });
+    expect(reviewed?.image).toBe(builtImage);
+    expect(reviewed).not.toHaveProperty("build");
+    expect(inactive).toEqual({ build: "..", profiles: ["tools"] });
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NATIVE_BUILDS");
+    } else {
+      process.env.HACK_NATIVE_BUILDS = previous;
+    }
     await rm(listener.directory, { recursive: true, force: true });
   }
 });
@@ -1225,7 +1534,7 @@ test("active restart still refuses absent or wrong-executable listeners before c
         },
       }),
       "E_CONFIG_INVALID",
-      "bounded explicit listener selection; values omitted"
+      "Native host dependencies refused for dependency #1"
     );
     expect(listener.calls).toEqual([
       "runtime status",
@@ -1414,6 +1723,117 @@ test("active legacy restart preserves adapted labels and rechecks authenticated 
   }
 });
 
+test("active restart selects an image again when the service's emulation policy changed", async () => {
+  const oldImage = `sha256:${"7".repeat(64)}`;
+  const newImage = `sha256:${"8".repeat(64)}`;
+  for (const retainedPolicy of ["prefer-native", "amd64"] as const) {
+    const f = fixture();
+    const ensured: string[][] = [];
+    let reviewed: Record<string, Record<string, unknown>> = {};
+    const result = restartNativeProject({
+      ...f.options,
+      preflight: async () =>
+        await preflightNativeRestart({
+          runtime: { binary: "/unused", home: "/candidate" },
+          scope,
+          composeFile: "/fixture/.hack/docker-compose.yml",
+          run,
+          dependencies: {
+            // The adaptation now selects `amd64` for app; redis stays native.
+            prepare: async () => ({
+              originalSha256: "1".repeat(64),
+              environmentFiles: [],
+              serviceNames: ["app", "redis"],
+              normalizedComposeJson: JSON.stringify({
+                services: {
+                  app: {
+                    image: "app:latest",
+                    "x-hack-amd64-emulation": "amd64",
+                  },
+                  redis: { image: "redis:latest" },
+                },
+              }),
+              amd64Emulation: { app: "amd64" },
+              managedEnvironment: {},
+              lifecycleHostEnvironment: {},
+              effectiveEnvName: "qa",
+            }),
+            adapt: async ({ input }) => input,
+            dependencies: async () => [],
+            invoke: async ({ args }) => {
+              switch (args[1]) {
+                case "status":
+                  return { network: "internet" };
+                case "probe":
+                  return { admitted: true };
+                case "inspect": {
+                  const observed = activeImageObservation(oldImage);
+                  return {
+                    ...observed,
+                    receipt: {
+                      ...observed.receipt,
+                      resources: {
+                        "container:app": {
+                          ...observed.receipt.resources["container:app"],
+                          amd64_emulation: retainedPolicy,
+                        },
+                        "container:redis": {
+                          kind: "container",
+                          key: "redis",
+                          id: "4".repeat(64),
+                          image: oldImage,
+                        },
+                      },
+                    },
+                  };
+                }
+                case "run-selection":
+                  return { ok: true, ...activeImageFixture().proof };
+                case "ensure-image":
+                  ensured.push([...args]);
+                  return { image_id: newImage, platform: "linux/amd64" };
+                default:
+                  throw new Error("Unexpected effect");
+              }
+            },
+            review: async (options) => {
+              reviewed = JSON.parse(
+                options.input.normalizedComposeJson
+              ).services;
+              return await options.run({
+                planId: run.planId,
+                namespace: run.namespace,
+                report: {},
+                projectArgs: [],
+              });
+            },
+          },
+        }),
+    });
+    expect(await result).toBe(0);
+    // The image retained under `prefer-native` (possibly arm64) is not reused for the
+    // explicit amd64 request; the unchanged policy and the native service keep theirs.
+    const changed = retainedPolicy !== "amd64";
+    expect(reviewed.app?.image).toBe(changed ? newImage : oldImage);
+    expect(reviewed.redis?.image).toBe(oldImage);
+    expect(ensured).toEqual(
+      changed
+        ? [
+            [
+              "runtime",
+              "ensure-image",
+              "--reference",
+              "app:latest",
+              "--emulation",
+              "amd64",
+              "--json",
+            ],
+          ]
+        : []
+    );
+  }
+});
+
 test("active restart preserves admitted images despite moved tags and refuses changed input or generation before cleanup", async () => {
   const oldImage = `sha256:${"7".repeat(64)}`;
   const newImage = `sha256:${"8".repeat(64)}`;
@@ -1530,3 +1950,351 @@ test("active restart preserves admitted images despite moved tags and refuses ch
     }
   }
 });
+
+function stopFixture(abortAt: "preflight" | "down" | "start" | "never") {
+  const events: string[] = [];
+  const controller = new AbortController();
+  let exit = 130;
+  let disposed = 0;
+  const signals = {
+    signal: controller.signal,
+    interruptedExit: () => exit,
+    dispose: () => {
+      disposed++;
+    },
+  };
+  const interrupt = (code = 130) => {
+    exit = code;
+    controller.abort();
+  };
+  let pending: NativeRestartIntent | null = null;
+  const options: Parameters<typeof restartNativeProject>[0] = {
+    scope,
+    preflight: async () => {
+      events.push("preflight");
+      if (abortAt === "preflight") {
+        interrupt();
+      }
+    },
+    down: async () => {
+      if (abortAt === "down") {
+        interrupt();
+      }
+      events.push("down");
+    },
+    progress: (event) =>
+      events.push(event.phase === "stopping" ? "stopping" : "stopped"),
+    start: async ({ signal, onStopSignals }) => {
+      events.push("start");
+      if (abortAt === "start") {
+        interrupt();
+      }
+      if (signal.aborted) {
+        throw new ClosedCliError("canceled before hand-off");
+      }
+      onStopSignals();
+      return 0;
+    },
+    dependencies: {
+      signals: () => signals,
+      load: async () => run,
+      pending: async () => pending,
+      save: async ({ intent }) => {
+        pending = intent;
+        events.push("intent");
+      },
+      cleaned: async ({ expected }) => {
+        pending = { ...expected, phase: "cleaned" };
+        return pending;
+      },
+      remove: async () => {
+        pending = null;
+        events.push("remove");
+      },
+      capture: async () => token,
+      wait: async () => {
+        events.push("finalized");
+      },
+      lock: async (_scope, action) => await action(async () => undefined),
+    },
+  };
+  return {
+    options,
+    events,
+    interrupt,
+    disposed: () => disposed,
+    pending: () => pending,
+  };
+}
+
+test("a stop request during preflight cancels the restart before anything is stopped", async () => {
+  const f = stopFixture("preflight");
+  expect(await restartNativeProject(f.options)).toBe(130);
+  expect(f.events).toEqual(["preflight", "stopped"]);
+  expect(f.pending()).toBeNull();
+  expect(f.disposed()).toBeGreaterThan(0);
+});
+
+test("a stop request during cleanup finishes the owned stop and does not start the new run", async () => {
+  const f = stopFixture("down");
+  expect(await restartNativeProject(f.options)).toBe(130);
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "stopping",
+    "down",
+    "finalized",
+    "remove",
+    "stopped",
+  ]);
+  // A plain `hack up` resumes the retained run; no restart stays pending.
+  expect(f.pending()).toBeNull();
+});
+
+test("a stop request before the start's own handlers ends as a stopped project", async () => {
+  const f = stopFixture("start");
+  expect(await restartNativeProject(f.options)).toBe(130);
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "down",
+    "finalized",
+    "start",
+    "stopping",
+    "remove",
+    "stopped",
+  ]);
+  expect(f.pending()).toBeNull();
+});
+
+test("after the hand-off the restart's handlers are gone and the start owns the stop", async () => {
+  const f = stopFixture("never");
+  let disposedAtHandOff = -1;
+  const start = f.options.start;
+  const options = {
+    ...f.options,
+    start: async (input: Parameters<typeof start>[0]) =>
+      await start({
+        ...input,
+        onStopSignals: () => {
+          input.onStopSignals();
+          disposedAtHandOff = f.disposed();
+          // A later request reaches only the start; the restart must not react.
+          f.interrupt();
+        },
+      }),
+  };
+  expect(await restartNativeProject(options)).toBe(0);
+  expect(disposedAtHandOff).toBeGreaterThan(0);
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "down",
+    "finalized",
+    "start",
+  ]);
+});
+
+test("a new start stopped by request before ready leaves no pending restart", async () => {
+  const f = stopFixture("never");
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals, onStopRequested }) => {
+        onStopSignals();
+        onStopRequested();
+        return 130;
+      },
+    })
+  ).toBe(130);
+  expect(f.pending()).toBeNull();
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "down",
+    "finalized",
+    "remove",
+  ]);
+});
+
+test("a start canceled after the hand-off before any service retires the intent so up resumes", async () => {
+  const f = stopFixture("never");
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals }) => {
+        onStopSignals();
+        // Ctrl-C while discovering host dependencies or waiting for runtime up.
+        throw new NativeStartupCanceledError(130, true);
+      },
+    })
+  ).toBe(130);
+  expect(f.pending()).toBeNull();
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "down",
+    "finalized",
+    "remove",
+    "stopping",
+    "stopped",
+  ]);
+});
+
+test.each([
+  { name: "uncertain cleanup", error: new Error("lifecycle cleanup failed") },
+  {
+    name: "a cancellation without confirmed cleanup",
+    error: new NativeStartupCanceledError(130, false),
+  },
+])("a start that ends in $name after the hand-off keeps the pending restart", async ({
+  error,
+}) => {
+  const f = stopFixture("never");
+  await expect(
+    restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals }) => {
+        onStopSignals();
+        throw error;
+      },
+    })
+  ).rejects.toBe(error);
+  expect(f.pending()).toMatchObject({ phase: "cleaned" });
+});
+
+test("a new start that fails without a stop request keeps the pending restart", async () => {
+  const f = stopFixture("never");
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals }) => {
+        onStopSignals();
+        return 1;
+      },
+    })
+  ).toBe(1);
+  expect(f.pending()).toMatchObject({ phase: "cleaned" });
+});
+
+test("SIGTERM during cleanup exits 143 after the owned stop", async () => {
+  const f = stopFixture("never");
+  const down = f.options.down;
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      down: async () => {
+        f.interrupt(143);
+        await down();
+      },
+    })
+  ).toBe(143);
+  expect(f.events.at(-1)).toBe("stopped");
+});
+
+test.each([
+  {
+    hold: "preflight",
+    lines: [
+      "phase preflight",
+      "stopped: Native restart canceled before cleanup; nothing was stopped.",
+    ],
+    absent: ["phase down", "phase start"],
+  },
+  {
+    hold: "down",
+    lines: [
+      "phase down",
+      "stopping",
+      "old run stopped",
+      "old frontend finalized",
+      "intent removed",
+      "stopped: Native project stopped; owned cleanup confirmed.",
+    ],
+    absent: ["phase start"],
+  },
+  {
+    hold: "start",
+    lines: [
+      "phase start",
+      "stopping",
+      "intent removed",
+      "stopped: Native project stopped; owned cleanup confirmed.",
+    ],
+    absent: ["ready"],
+  },
+  {
+    hold: "starting",
+    lines: [
+      "phase starting",
+      "new run stopped by its own owner",
+      "intent removed",
+    ],
+    absent: ["ready", "stopping", "stopped:"],
+  },
+  {
+    hold: "serving",
+    lines: ["ready", "phase serving", "new run stopped by its own owner"],
+    absent: ["stopping", "stopped:"],
+  },
+])("the first real SIGINT stops a restart held in $hold, even when inherited as ignored", async ({
+  hold,
+  lines,
+  absent,
+}) => {
+  // A background job in a non-interactive shell starts with SIGINT ignored;
+  // the restart must still handle the first one. Its own process group keeps
+  // the signal from reaching this test runner.
+  const worker = join(
+    import.meta.dir,
+    "fixtures/native-restart-signal-worker.ts"
+  );
+  const child = Bun.spawn(
+    [
+      "/bin/sh",
+      "-c",
+      'trap "" INT; exec "$0" "$1" "$2"',
+      process.execPath,
+      worker,
+      hold,
+    ],
+    { stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true }
+  );
+  const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+  try {
+    let output = "";
+    const reader = child.stdout.getReader();
+    const decoder = new TextDecoder();
+    while (!output.includes(`phase ${hold}`)) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        break;
+      }
+      output += decoder.decode(chunk.value);
+    }
+    child.kill("SIGINT");
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        break;
+      }
+      output += decoder.decode(chunk.value);
+    }
+    const code = await child.exited;
+    expect({ code, stderr: await new Response(child.stderr).text() }).toEqual({
+      code: 130,
+      stderr: "",
+    });
+    for (const line of lines) {
+      expect(output).toContain(line);
+    }
+    for (const line of absent) {
+      expect(output).not.toContain(line);
+    }
+    // One "stopping" line at most, and no handler left behind by the restart.
+    expect(output.split("stopping").length).toBeLessThanOrEqual(2);
+    expect(output).toContain("exit 130 listeners=0");
+  } finally {
+    clearTimeout(timer);
+  }
+}, 20_000);

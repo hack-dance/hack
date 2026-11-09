@@ -174,6 +174,16 @@ test("local test, check and typecheck entry points run the Bun guard", async () 
 });
 
 test("Turbo separates override cache hashes from pinned runs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hack-bun-cache-hash-"));
+  owned.push(directory);
+  await mkdir(join(directory, "packages/cli"), { recursive: true });
+  // Exercise the actual config, lockfile and CLI task without hashing the entire
+  // checkout three times. Repository size is unrelated to the env-hash contract.
+  await Promise.all(
+    ["package.json", "bun.lock", "turbo.json", "packages/cli/package.json"].map(
+      (path) => copyFile(join(root, path), join(directory, path))
+    )
+  );
   const hash = async (override: string | undefined) => {
     const env = { ...process.env };
     delete env[BUN_VERSION_OVERRIDE_ENV];
@@ -188,7 +198,7 @@ test("Turbo separates override cache hashes from pinned runs", async () => {
         "--filter=@hack/cli",
         "--dry=json",
       ],
-      { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] }
+      { cwd: directory, env, stdio: ["ignore", "pipe", "pipe"] }
     );
     const [exit, stdout, stderr] = await Promise.all([
       child.exited,

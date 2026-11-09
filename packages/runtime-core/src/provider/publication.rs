@@ -8,12 +8,62 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
+    os::fd::{AsRawFd, FromRawFd},
     os::unix::{
         fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt},
         process::CommandExt,
     },
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
+
+/// The relay does not consume interactive stdin: fd 0 is its one-shot control pipe.
+/// Both ends are owned here, and the writer closes before exec so the reader sees EOF.
+fn control_command(executable: &Path, token: &str) -> Result<Command, CandidateError> {
+    if !hex(token, 32) {
+        return Err(error());
+    }
+    let mut fds = [-1; 2];
+    // SAFETY: fds holds two writable descriptors; successful pipe transfers ownership.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(state::io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: these are distinct, newly opened pipe ends, each adopted exactly once.
+    let (reader, mut writer) = unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
+    for fd in [reader.as_raw_fd(), writer.as_raw_fd()] {
+        // SAFETY: both owned pipe ends are live; only the child stdin mapping survives exec.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(state::io(std::io::Error::last_os_error()));
+        }
+    }
+    writer.write_all(token.as_bytes()).map_err(state::io)?;
+    drop(writer);
+    let mut command = Command::new(executable);
+    command.env_clear().stdin(Stdio::from(reader));
+    Ok(command)
+}
+
+fn publication_command(e: &Entry, upstream: &Path) -> Result<Command, CandidateError> {
+    let dir = directory(e);
+    let endpoint = if e.unix {
+        dir.join("frontend").into_os_string()
+    } else {
+        e.port.to_string().into()
+    };
+    let mut command = control_command(&e.process.executable, &e.token)?;
+    command
+        .arg(if e.unix {
+            "--publish-unix"
+        } else {
+            "--publish"
+        })
+        .arg(endpoint)
+        .arg(upstream)
+        .args([&e.reservation, "60000", "--control"])
+        .arg(dir.join("control"))
+        .args(["--control-fd", "0"]);
+    Ok(command)
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -526,7 +576,7 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     identity::verify(&e.process, &observed, &e.process.executable, unsafe {
         libc::geteuid()
     })?;
-    if !e.unix || !verify_directory(e)? || !e.binary.as_ref().is_some_and(|b| b.ready) {
+    if !verify_directory(e)? || !e.binary.as_ref().is_some_and(|b| b.ready) {
         return Err(error());
     }
     let file = OpenOptions::new()
@@ -553,7 +603,12 @@ fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
     if format!("{:x}", Sha256::digest(bytes)) != e.digest {
         return Err(error());
     }
-    check_socket(e, "frontend", "HKPF1", &e.reservation, false)?;
+    // A TCP frontend has no filesystem identity. The publisher binds its
+    // control socket only after the frontend listener is bound and listening,
+    // so an owned control socket also proves the TCP listener exists.
+    if e.unix {
+        check_socket(e, "frontend", "HKPF1", &e.reservation, false)?;
+    }
     check_socket(e, "control", "HKPC1", &e.token, false)?;
     // A second observation refuses death or identity change during filesystem checks.
     let after = identity::observe(e.process.pid)?;
@@ -601,6 +656,62 @@ pub fn lookup_hostname(c: &Candidate, value: &str) -> Result<serde_json::Value, 
         "endpoint":directory(entry).join("frontend"),"state":"publication-observed",
         "scope":"point-in-time-host-publication"}),
     )
+}
+
+/// Point-in-time observation of one owned loopback TCP publication, selected by
+/// its exact run and reservation. Not proof of guest reachability.
+pub fn lookup_port(
+    c: &Candidate,
+    run: &str,
+    reservation: &str,
+    port: u16,
+) -> Result<serde_json::Value, CandidateError> {
+    if !hex(run, 32) || !hex(reservation, 32) || port == 0 {
+        return Err(error());
+    }
+    let owner = state::Owner::load(c)?;
+    let entries = load(c, &owner.token)?;
+    let entry = entries
+        .get(reservation)
+        .filter(|e| !e.unix && e.port == port && e.run == run)
+        .ok_or_else(error)?;
+    observe_publication(entry)?;
+    let after_owner = state::Owner::load(c)?;
+    let after = load(c, &after_owner.token)?;
+    verify_claim_snapshot(entry, &after, &after_owner.token)?;
+    Ok(
+        serde_json::json!({"host":"127.0.0.1","port":port,"run":entry.run,
+        "reservation":entry.reservation,"state":"publication-observed",
+        "scope":"point-in-time-host-publication"}),
+    )
+}
+
+fn port_in_use() -> CandidateError {
+    CandidateError::new(
+        "published_port_in_use",
+        "A published host port is already accepting connections on loopback; stop the other listener or change the published port. Nothing was published.",
+    )
+}
+
+/// Refuse a loopback publication whose host port already accepts loopback
+/// connections. The publisher binds 127.0.0.1 with `SO_REUSEADDR`, which BSD
+/// lets coexist with another process's wildcard listener on the same port;
+/// that would silently take loopback traffic from it. A connect probe sees
+/// exactly that case (and an exact 127.0.0.1 or dual-stack listener).
+/// Point-in-time only: the publisher's own exclusive bind is the final check.
+pub fn require_loopback_port_free(port: u16) -> Result<(), CandidateError> {
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    if port == 0 {
+        return Err(error());
+    }
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    match TcpStream::connect_timeout(&address, std::time::Duration::from_millis(250)) {
+        Ok(_) => Err(port_in_use()),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => Ok(()),
+        // A loopback connect that neither connects nor is refused is not
+        // evidence that the port is free.
+        Err(_) => Err(port_in_use()),
+    }
 }
 
 pub(super) struct Launch<'a> {
@@ -719,31 +830,49 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
     e.binary.as_mut().expect("recorded staged file").ready = true;
     entries.insert(e.reservation.clone(), e.clone());
     save(c, &entries)?;
-    let endpoint = if e.unix {
-        dir.join("frontend").into_os_string()
-    } else {
-        e.port.to_string().into()
-    };
     if e.unix {
         eprintln!(
             "Unix publication endpoint (await ready): {}",
             dir.join("frontend").display()
         );
     }
-    let failure = std::process::Command::new(&e.process.executable)
-        .env_clear()
-        .arg(if e.unix {
-            "--publish-unix"
-        } else {
-            "--publish"
-        })
-        .arg(endpoint)
-        .arg(options.upstream)
-        .args([&e.reservation, "60000", "--control"])
-        .arg(dir.join("control"))
-        .arg(&e.token)
-        .exec();
+    let failure = publication_command(&e, options.upstream)?.exec();
     Err(state::io(failure))
+}
+
+#[cfg(test)]
+mod port_probe_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, TcpListener};
+
+    #[test]
+    fn loopback_probe_refuses_exact_and_wildcard_listeners_and_accepts_a_free_port() {
+        let exact = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = exact.local_addr().unwrap().port();
+        assert_eq!(
+            require_loopback_port_free(port).unwrap_err().code,
+            "published_port_in_use"
+        );
+        drop(exact);
+        // Parallel tests can take a just-released ephemeral port, and a loaded
+        // runner can time out the probe's connect. Either reads as in use, so
+        // accept the first of several freshly released ports the probe clears.
+        let freed = (0..20).any(|_| {
+            let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = probe.local_addr().unwrap().port();
+            drop(probe);
+            require_loopback_port_free(port).is_ok()
+        });
+        assert!(freed, "the probe never accepted a released loopback port");
+        // A wildcard listener would share loopback traffic under SO_REUSEADDR.
+        let wildcard = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let port = wildcard.local_addr().unwrap().port();
+        assert_eq!(
+            require_loopback_port_free(port).unwrap_err().code,
+            "published_port_in_use"
+        );
+        assert!(require_loopback_port_free(0).is_err());
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -754,6 +883,22 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    #[test]
+    fn control_token_is_only_delivered_on_the_pipe() {
+        let token = "a1".repeat(16);
+        let mut command = control_command(Path::new("/bin/cat"), &token).unwrap();
+        assert!(
+            command
+                .get_args()
+                .all(|arg| !arg.to_string_lossy().contains(&token))
+        );
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, token.as_bytes());
+        for invalid in ["", "short", &"g".repeat(32), &"a".repeat(33)] {
+            assert!(control_command(Path::new("/bin/cat"), invalid).is_err());
+        }
+    }
     fn fixture() -> (Candidate, Entry) {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let base = PathBuf::from(format!(
@@ -785,6 +930,21 @@ mod tests {
         };
         e.process.executable = directory(&e).join("publisher");
         (candidate, e)
+    }
+    #[test]
+    fn publication_argv_never_contains_control_token() {
+        let (candidate, mut entry) = fixture();
+        for unix in [false, true] {
+            entry.unix = unix;
+            let command = publication_command(&entry, Path::new("/upstream")).unwrap();
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy())
+                .collect();
+            assert!(!args.iter().any(|arg| arg.contains(&entry.token)));
+            assert_eq!(&args[args.len() - 2..], &["--control-fd", "0"]);
+        }
+        fs::remove_dir_all(&candidate.checkout).unwrap();
     }
     #[test]
     fn hostname_transition_preflight_keeps_foreign_and_pending_claims_intact() {

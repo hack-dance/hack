@@ -693,6 +693,89 @@ pub(super) fn unchanged(
     Ok(())
 }
 
+/// Rearm an admitted route probe after an independently observed container
+/// incarnation change. Keep the existing mounted state: reset would unmount it
+/// while the running container still holds the old mount. A new random probe
+/// generation rejects every old sample. An uncertain exec intent is never replayed.
+#[cfg(target_os = "macos")]
+pub(super) fn rearm_route(
+    engine: &Engine<'_>,
+    receipt: &mut Receipt,
+    root: &std::path::Path,
+    name: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    fence()?;
+    let resource = receipt
+        .resources
+        .get(&format!("container:{name}"))
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route container."))?;
+    let id = resource
+        .id
+        .clone()
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route container."))?;
+    let probe = receipt
+        .probes
+        .get(name)
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route probe."))?;
+    if resource.restart_policy.is_none()
+        || resource.routing.is_none()
+        || probe.phase != "running"
+        || !inactive_exec(exec(engine, receipt, name)?.as_ref())
+    {
+        return Err(error(
+            "graph_probe_replay",
+            "Prior route probe is live or uncertain; no rearm was attempted.",
+        ));
+    }
+    fence()?;
+    let probe = receipt
+        .probes
+        .get_mut(name)
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route probe."))?;
+    probe.generation = token()?;
+    probe.exec_id = None;
+    probe.started_ms = 0;
+    probe.phase = "exec-intent".into();
+    state::write(&root.join("state.json"), receipt)?;
+    fence()?;
+    let probe = &receipt.probes[name];
+    let mut args = vec!["/run/hack-http-probe".to_owned()];
+    args.extend(
+        probe
+            .config
+            .arguments("/run/hack-http-probe-state", &probe.generation)?,
+    );
+    let value = engine.request(Method::POST, &format!("/v1.53/containers/{id}/exec"), Some(&json!({"AttachStdout":false,"AttachStderr":false,"User":format!("{}:{}",probe.uid,probe.gid),"Cmd":args})))?;
+    let exec_id = value["Id"]
+        .as_str()
+        .filter(|id| hex(id, 64))
+        .ok_or_else(|| error("graph_probe_identity", "Missing created probe identity."))?
+        .to_owned();
+    fence()?;
+    let probe = receipt
+        .probes
+        .get_mut(name)
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route probe."))?;
+    probe.exec_id = Some(exec_id.clone());
+    probe.started_ms = now()?;
+    probe.phase = "starting".into();
+    state::write(&root.join("state.json"), receipt)?;
+    fence()?;
+    engine.request(
+        Method::POST,
+        &format!("/v1.53/exec/{exec_id}/start"),
+        Some(&json!({"Detach":true,"Tty":false})),
+    )?;
+    fence()?;
+    receipt
+        .probes
+        .get_mut(name)
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route probe."))?
+        .phase = "running".into();
+    state::write(&root.join("state.json"), receipt)
+}
+
 #[cfg(test)]
 mod storage_tests {
     use super::STORAGE;

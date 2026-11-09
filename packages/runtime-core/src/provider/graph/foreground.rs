@@ -326,6 +326,10 @@ fn serve_input<'a>(
             .map_err(|_| refused())?;
         drop(stdout);
         let mut queued = None;
+        let supervise_restarts = receipt.resources.values().any(|r| {
+            r.restart_policy.is_some() && (r.routing.is_some() || !r.loopback_ports.is_empty())
+        });
+        let mut restart_tick = Instant::now() + Duration::from_secs(1);
         let mut automatic = dependency_refresh::AutomaticRefresh::default();
         let mut watches = dependency_refresh::ListenerWatches::default();
         if watches.sync(&signals, &runtime) {
@@ -333,7 +337,16 @@ fn serve_input<'a>(
         }
         loop {
             if queued.is_none() {
-                match signals.wait_until(automatic.deadline())? {
+                let wake = if supervise_restarts {
+                    Some(
+                        automatic
+                            .deadline()
+                            .map_or(restart_tick, |due| due.min(restart_tick)),
+                    )
+                } else {
+                    automatic.deadline()
+                };
+                match signals.wait_until(wake)? {
                     signals::Wake::Signal => {
                         cleanup_attempted = true;
                         return runtime.cleanup(candidate, false);
@@ -343,6 +356,11 @@ fn serve_input<'a>(
                     signals::Wake::ListenerExit => automatic.stale(Instant::now()),
                     signals::Wake::Ready | signals::Wake::Timeout => {}
                 }
+            }
+            if queued.is_none() && supervise_restarts && Instant::now() >= restart_tick {
+                publication.verify()?;
+                publishers.supervise_restarts(candidate, &receipt.run, &signals)?;
+                restart_tick = Instant::now() + Duration::from_secs(1);
             }
             if queued.is_none() && runtime.drain_dependency_notifications()? {
                 // Authenticated traffic reports drift once; there is no idle scan.

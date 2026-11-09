@@ -22,7 +22,7 @@ model of the stop/restart interaction, not an implementation-refinement proof.
 | --- | --- |
 | `Exit` / `EngineRestart` | Engine policy behavior. A scheduled restart fires even after a policy update; only the stop's restart-manager cancel prevents it. The graph observes the pending state as `Observation::Restarting` (`provider/graph/mod.rs` `observation`), admitted only with a receipt policy (`probes::observe`). |
 | `DaemonRestart` | Guest engine restore: an armed `always` container restarts even after a manual stop. |
-| `Bind` / `Use` / `RefuseStale` | Existing generation checks: endpoint generations hash `StartedAt` (`endpoints.rs`), bridge relays bind target PID and start ticks (`bridges.rs`), completed and relay services compare `StartedAt` (`startup/runtime.rs`). Routed and port-published services start without their policy (engine `no`, no receipt policy) with the review warning `restart_policy_not_applied`, because their route and loopback port bridges bind one endpoint generation and relay target (`bridges.rs`); rebinding them per incarnation is HACK-1935. Admission refuses restart policies for the other HTTP-probed, host-dependency, managed-environment and dependency-cache services, whose guards cannot yet rebind per incarnation. Receipt load rejects a policy next to a route or loopback port, which the planner never records. |
+| `Bind` / `Use` / `RefuseStale` / `Rebind` | Endpoint generations hash `StartedAt` (`endpoints.rs`). The foreground supervision tick uses `bridges/restart_rebind.rs`: fresh receipt policy, unchanged container ID, owned labels and complete network attachment; fenced retirement, publication removal and publisher reaping precede a fresh reservation and one launch. `RefuseStale` abstracts full retirement and `Rebind` abstracts fresh admission/reservation/start/publication. Relay lifecycle, fence and publication staging models retain the expanded intermediate states and uncertainty. Route probes rearm only after the old exec is independently inactive, using a new sample generation without unmounting the running container’s probe state. Other HTTP probes, host dependencies, managed environment delivery and dependency caches remain refused. |
 | `Disarm` | `shutdown::disarm_owned` / `disarm_one`: `update RestartPolicy=no` on every receipt-admitted container, confirmed by a fresh ownership-verified inspection, before any stop request. A policy the receipt never admitted refuses. |
 | `RequestStop` / `EngineStop` | `shutdown::stop_owned` batch stop; `shutdown::prepare` accepts the engine `restarting` state only for a receipt-admitted policy. |
 | `ObserveTerminal` / `RefuseNonTerminal` | `shutdown::terminal` requires a fresh observation that is neither running nor restarting before evidence is written. |
@@ -44,6 +44,7 @@ the model can reach, and nothing else:
 - `stale-generation.cfg` (no generation recheck): `Use` acts on a bound
   incarnation that is older than the current one, or on the current one after
   it stopped running (`NoStaleIncarnation`).
+- `rebind-reachable.cfg`: `Rebind` reaches an incarnation after the first; this prevents vacuous restart coverage.
 - `completion-reachable.cfg`: cleanup reaches removal with every guard enforced.
 
 ## Omissions
@@ -51,6 +52,7 @@ the model can reach, and nothing else:
 The model does not cover transport timeouts or uncertain stop outcomes (existing
 shutdown evidence and its tests own those), several services, the engine's backoff
 timing or `on-failure` retry counting, durability of the receipt, or the real guest
-engine. Real-engine behavior (a crashing `unless-stopped` service restarted by the
+engine. Ownership/labels/network validation and probe rearming are implementation
+obligations, not modeled facts. A busy port has no successful Rebind transition. Real-engine behavior (a crashing `unless-stopped` service restarted by the
 guest engine, a stop during restart backoff, and disarm before deletion) still
 needs host evidence from a native foreground test on a prepared candidate VM.

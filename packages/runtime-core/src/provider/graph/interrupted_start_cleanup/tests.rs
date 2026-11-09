@@ -59,6 +59,7 @@ fn selected(original: &Receipt) -> Selection {
         reservation_sha256: "6".repeat(64),
         failed_key: "container:failed".into(),
         failed_id: "d".repeat(64),
+        owner_stopped: false,
     }
 }
 
@@ -319,4 +320,179 @@ fn ack_boundary_rechecks_absent_publication_after_confirmed_receipt_write() {
     assert!(host_relay::verify_selected_relay(Some(&witness)).is_ok());
     fs::write(control.join("control.sock"), b"replacement").unwrap();
     assert!(host_relay::verify_selected_relay(Some(&witness)).is_err());
+}
+
+fn dead_observation(id: &str) -> Value {
+    json!({
+        "Id":id,"RestartCount":0,
+        "Config":{"StopTimeout":10,"StopSignal":null},
+        "State":{"Paused":false,"Restarting":false,"Dead":true,"OOMKilled":false,
+            "ExitCode":1,"Running":false,"Pid":0,"Status":"dead",
+            "StartedAt":"2026-10-02T12:00:00Z"}
+    })
+}
+
+/// HACK-1968: selections journaled before the owner-stopped kind existed keep their
+/// exact digest, and the new kind is bound into the digest when present.
+#[test]
+fn owner_stopped_selection_is_backward_compatible_and_digest_bound() {
+    let original = original();
+    let legacy = selected(&original);
+    let encoded = serde_json::to_value(&legacy).unwrap();
+    assert!(encoded.get("owner_stopped").is_none());
+    let decoded: Selection = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, legacy);
+    assert!(!decoded.owner_stopped);
+    let mut stopped = legacy.clone();
+    stopped.owner_stopped = true;
+    assert_ne!(stopped.digest().unwrap(), legacy.digest().unwrap());
+    let roundtrip: Selection =
+        serde_json::from_value(serde_json::to_value(&stopped).unwrap()).unwrap();
+    assert_eq!(roundtrip, stopped);
+}
+
+#[test]
+fn owner_stopped_journal_admits_the_started_failed_container_only_for_that_kind() {
+    let mut original = original();
+    original
+        .resources
+        .get_mut("container:failed")
+        .unwrap()
+        .phase = "started".into();
+    let mut selection = selected(&original);
+    selection.owner_stopped = true;
+    let expected = selection.digest().unwrap();
+    let mut journal = Journal {
+        version: 1,
+        selection,
+        selection_sha256: expected.clone(),
+        steps: steps(&original, &[]).unwrap(),
+        original,
+        cursor: 0,
+        pending: false,
+        graph_complete: false,
+        publisher_retired: false,
+        reservation_released: false,
+    };
+    assert!(journal.validate_basic(&"a".repeat(32), &expected).is_ok());
+    // The created-failure kind still requires the uncertain create it selected.
+    journal.selection.owner_stopped = false;
+    journal.selection_sha256 = journal.selection.digest().unwrap();
+    let legacy = journal.selection_sha256.clone();
+    assert!(journal.validate_basic(&"a".repeat(32), &legacy).is_err());
+}
+
+#[test]
+fn owner_stop_records_bind_run_owner_plan_and_container_keys() {
+    let root = ShortRoot::new();
+    let receipt = original();
+    assert!(owner_stop_records(&root.0, &receipt).unwrap().is_none());
+    let write = |value: Value| {
+        state::write(&root.0.join("shutdown.json"), &value).unwrap();
+    };
+    let record = |run: &str, owner: &str, plan: &str, key: &str, id: &str| {
+        json!({"version":1,"run":run,"owner":owner,"plan":plan,"containers":{
+            key:{"id":id,"exit_code":1,"oom_killed":false,"stop_requested":false}}})
+    };
+    let (run, owner, plan) = (
+        receipt.run.clone(),
+        receipt.owner.clone(),
+        receipt.plan_id.clone(),
+    );
+    let id = "d".repeat(64);
+    write(record(&run, &owner, &plan, "container:failed", &id));
+    assert_eq!(
+        owner_stop_records(&root.0, &receipt).unwrap().unwrap(),
+        BTreeMap::from([("container:failed".to_owned(), id.clone())])
+    );
+    for invalid in [
+        record("other", &owner, &plan, "container:failed", &id),
+        record(&run, "other", &plan, "container:failed", &id),
+        record(&run, &owner, "other", "container:failed", &id),
+        record(&run, &owner, &plan, "volume:data", &id),
+        record(&run, &owner, &plan, "container:missing", &id),
+        record(&run, &owner, &plan, "container:failed", "not-an-id"),
+    ] {
+        write(invalid);
+        assert!(owner_stop_records(&root.0, &receipt).is_err());
+    }
+}
+
+#[test]
+fn a_dead_generation_is_stopped_terminal_and_a_removal_retry_target() {
+    let receipt = original();
+    let resource = &receipt.resources["container:failed"];
+    let id = resource.id.clone().unwrap();
+    let dead = dead_observation(&id);
+    assert!(stopped_terminal(resource, &dead).is_ok());
+    assert!(recovery::dead_terminal(resource, &dead));
+    assert_eq!(
+        stop_decision(resource, &dead, false).unwrap(),
+        StopDecision::AlreadyTerminal
+    );
+    // A dead container is never the created failure the original kind selects.
+    assert!(failed_created(resource, &dead).is_err());
+    // Another generation, or one with a process, is neither.
+    let other = dead_observation(&"e".repeat(64));
+    assert!(stopped_terminal(resource, &other).is_err());
+    assert!(!recovery::dead_terminal(resource, &other));
+    let mut running = dead.clone();
+    running["State"]["Dead"] = json!(false);
+    running["State"]["Running"] = json!(true);
+    running["State"]["Status"] = json!("running");
+    running["State"]["Pid"] = json!(42);
+    assert!(stopped_terminal(resource, &running).is_err());
+    assert!(!recovery::dead_terminal(resource, &running));
+    let mut exited = running;
+    exited["State"]["Running"] = json!(false);
+    exited["State"]["Status"] = json!("exited");
+    exited["State"]["Pid"] = json!(0);
+    assert!(stopped_terminal(resource, &exited).is_ok());
+    assert!(!recovery::dead_terminal(resource, &exited));
+}
+
+/// A run restored after a finished recovery and failed again keeps its run identity
+/// but has new container generations; only then is the old journal history.
+#[test]
+fn only_a_finished_journal_of_replaced_generations_is_superseded() {
+    let original = original();
+    let selection = selected(&original);
+    let journal = Journal {
+        version: 1,
+        selection_sha256: selection.digest().unwrap(),
+        selection,
+        steps: steps(&original, &[]).unwrap(),
+        cursor: 0,
+        pending: false,
+        graph_complete: true,
+        publisher_retired: true,
+        reservation_released: true,
+        original: original.clone(),
+    };
+    let mut restored = original.clone();
+    restored.resources.get_mut("container:failed").unwrap().id = Some("9".repeat(64));
+    assert!(superseded(&journal, &restored));
+    // The same generation is the journal's own run, never history.
+    assert!(!superseded(&journal, &original));
+    // Every step must have finished.
+    for unfinished in 0..3 {
+        let mut partial = journal.clone();
+        match unfinished {
+            0 => partial.graph_complete = false,
+            1 => partial.publisher_retired = false,
+            _ => partial.reservation_released = false,
+        }
+        assert!(!superseded(&partial, &restored));
+    }
+    // The new generation must itself be a pending cleanup of the same run and plan.
+    for change in ["phase", "owner", "namespace", "plan"] {
+        let mut other = restored.clone();
+        match change {
+            "phase" => other.phase = "ready-observed".into(),
+            "owner" => other.owner = "e".repeat(32),
+            "namespace" => other.namespace = "other".into(),
+            _ => other.plan_id = "e".repeat(64),
+        }
+        assert!(!superseded(&journal, &other), "{change}");
+    }
 }

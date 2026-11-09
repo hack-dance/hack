@@ -2043,8 +2043,29 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             stop_silent_guest(candidate, &mut owner)?;
             status(candidate)
         }
+        Err(error) if error.code == QUIESCE_STALLED => {
+            stop_silent_guest(candidate, &mut owner)?;
+            status(candidate)
+        }
         Err(error) => Err(error),
     }
+}
+
+/// The code `guest_stop` returns when the engine quiesce failed again on a resumed stop.
+const QUIESCE_STALLED: &str = "engine_quiesce_stalled";
+
+/// Whether a failed engine quiesce means the engine cannot be quiesced from the guest.
+///
+/// A first attempt that times out or exits nonzero leaves the pool `quiescing` and is
+/// reported as is: the engine may still be finishing its own shutdown. A resumed attempt
+/// (the pool was already `quiescing` before this stop began) that fails the same way has
+/// now sent TERM to the same engine identity twice without it exiting, or found the guest
+/// unable to finish the bounded quiesce command at all. The guest agent may still answer
+/// pings, so the silent-guest rule cannot apply; waiting longer gives no further evidence,
+/// and the only remaining way out is a provider stop. Identity refusals (any other code)
+/// are never treated as a stall.
+fn quiesce_stalled(error: &CandidateError, resumed: bool) -> bool {
+    resumed && ["agent_protocol_uncertain", "guest_command_failed"].contains(&error.code)
 }
 
 /// The outcome of `runtime repair-provider-tree`.
@@ -2135,7 +2156,8 @@ fn agent_silent_at(path: &Path) -> bool {
     true
 }
 
-/// Stop the verified provider of a guest whose agent stopped responding. Nothing in the
+/// Stop the verified provider of a guest whose agent stopped responding, or whose engine did
+/// not quiesce on a resumed stop (see [`quiesce_stalled`]). Nothing in the
 /// guest is quiesced or flushed, so the pool is recorded `recovered-unclean`, as after a
 /// provider exit; the next start checks its retained disks as usual. The signal reaches
 /// only this home's recorded provider, rechecked by PID, start time, user and executable
@@ -2215,11 +2237,8 @@ sync"#,
                 CandidateError::new("recovery_required", "Engine start time unavailable.")
             })?
             .to_string();
-        let quiesce_mode = if owner.phase == "quiescing" {
-            "resume"
-        } else {
-            "initial"
-        };
+        let resumed = owner.phase == "quiescing";
+        let quiesce_mode = if resumed { "resume" } else { "initial" };
         phase(candidate, owner, "quiescing")?;
         let quiescence = guest(
             candidate,
@@ -2233,7 +2252,17 @@ sync"#,
                 quiesce_mode,
             ],
             false,
-        )?;
+        )
+        .map_err(|error| {
+            if quiesce_stalled(&error, resumed) {
+                CandidateError::new(
+                    QUIESCE_STALLED,
+                    "The guest engine did not finish quiescing after a resumed stop.",
+                )
+            } else {
+                error
+            }
+        })?;
         state::write(
             &root(candidate).join("quiescence.json"),
             &json!({
@@ -2561,7 +2590,20 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         // Refuse first, without probing, while a build is admitted.
         require_no_build_for_silent_stop(candidate)?;
         verify_live(candidate, &owner)?;
-        if !agent_silent(candidate, &owner)? {
+        let silent = agent_silent(candidate, &owner)?;
+        if !silent && owner.phase == "quiescing" {
+            // A stop already began quiescing the engine and did not finish. Resume it once;
+            // an engine that still does not quiesce is stopped with the provider, unclean.
+            return match guest_stop(candidate, &mut owner) {
+                Ok(()) => status(candidate),
+                Err(error) if error.code == QUIESCE_STALLED => {
+                    stop_silent_guest(candidate, &mut owner)?;
+                    status(candidate)
+                }
+                Err(error) => Err(error),
+            };
+        }
+        if !silent {
             return Err(CandidateError::new(
                 "recovery_required",
                 "Recovery only accepts a confirmed dead recorded process or a guest that stopped responding. Use down for a responsive guest.",
@@ -3320,6 +3362,30 @@ printf 'verified-cache\n'
         });
         assert!(agent_silent_at(&path));
         closing.join().unwrap();
+    }
+
+    /// HACK-1968: a guest whose agent still answers pings, but whose engine never finishes
+    /// quiescing, is stopped only after a resumed quiesce failed the same way; a first
+    /// failure, and any identity or protocol refusal, keep the ordinary report.
+    #[test]
+    fn only_a_resumed_quiesce_failure_is_a_stall() {
+        for code in ["agent_protocol_uncertain", "guest_command_failed"] {
+            let error = CandidateError::new(code, "Fixed.");
+            assert!(quiesce_stalled(&error, true), "{code}");
+            assert!(!quiesce_stalled(&error, false), "{code}");
+        }
+        for code in [
+            "process_identity_mismatch",
+            "foreign_state",
+            "recovery_required",
+            "stop_uncertain",
+            QUIESCE_STALLED,
+        ] {
+            assert!(
+                !quiesce_stalled(&CandidateError::new(code, "Fixed."), true),
+                "{code}"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]

@@ -339,10 +339,11 @@ export async function nativeProjectDown(opts: {
   const finalization = opts.deferFinalization
     ? undefined
     : await captureFinalization({ scope: opts.scope, run });
-  // `--recover`: a frontend that has exited cannot finish later, so its
-  // finalization is read once instead of awaited.
+  // A frontend that has exited cannot finish later, so its finalization is read
+  // once instead of awaited. Only ESRCH proves the exit; PID reuse can only make
+  // an exited frontend look live, which keeps the ordinary wait. HACK-1968: a
+  // failed `hack up` that recorded its run for down exits without finishing it.
   const frontendGone =
-    opts.recover === true &&
     finalization !== undefined &&
     finalization.version !== 1 &&
     processExited(finalization.pid);
@@ -358,11 +359,14 @@ export async function nativeProjectDown(opts: {
         timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
       });
     } catch {
-      throw frontendGone
-        ? new ClosedCliError(
-            `Native down --recover: this run's services are stopped with data retained, but the hack up or hack restart that owned it exited before confirming its own cleanup. Run hack restart --recover-frontend --expect-finalization-attempt ${finalization.attempt} to finish that recovery and start the project.`
-          )
-        : finalizationRefused();
+      if (!frontendGone) {
+        throw finalizationRefused();
+      }
+      throw new ClosedCliError(
+        opts.recover === true
+          ? `Native down --recover: this run's services are stopped with data retained, but the hack up or hack restart that owned it exited before confirming its own cleanup. Run hack restart --recover-frontend --expect-finalization-attempt ${finalization.attempt} to finish that recovery and start the project.`
+          : `Native down frontend finalization is unconfirmed: this run's services are stopped with data retained, but the hack up or hack restart that owned it exited before confirming its own cleanup. Run hack restart --recover-frontend --expect-finalization-attempt ${finalization.attempt} to finish that recovery and start the project.`
+      );
     }
   };
   const hooks = opts.hooks;

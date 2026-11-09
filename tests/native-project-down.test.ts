@@ -306,17 +306,22 @@ test("already-stopped unacknowledged frontend refuses without replaying compute"
   );
   await rm(join(root, "completed.json"));
   const calls: string[] = [];
+  // HACK-1968: an exited frontend (a failed `hack up` that recorded this run) can
+  // never finish; plain down reports the recovery command instead of waiting.
+  const started = performance.now();
+  const result = nativeProjectDown({
+    ...opts,
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      return snapshot(true);
+    },
+  });
+  await expectClosedRefusal(result, "frontend finalization is unconfirmed");
   await expectClosedRefusal(
-    nativeProjectDown({
-      ...opts,
-      finalizationTimeoutMs: 1,
-      invoke: async (request) => {
-        calls.push(request.args[1]!);
-        return snapshot(true);
-      },
-    }),
-    "frontend finalization is unconfirmed"
+    result,
+    `hack restart --recover-frontend --expect-finalization-attempt ${token.attempt}`
   );
+  expect(performance.now() - started).toBeLessThan(10_000);
   expect(calls).toEqual(["inspect"]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });

@@ -1,11 +1,16 @@
 //! A fresh journal for one interrupted cleanup. A pending step is never sent
-//! again: only independently observed terminal or absent state advances it.
+//! again: only independently observed terminal or absent state advances it, except
+//! the removal of an exact `dead` generation of an owner-stopped selection, which is
+//! the only effect that applies to it (see `advance_delete`).
 use super::*;
 use crate::provider::relay_owner::lifecycle_intent::Coordinator;
 
+/// The code of [`stale_generation`].
+pub(super) const STALE: &str = "graph_interrupted_start_cleanup_stale";
+
 fn stale_generation() -> CandidateError {
     error(
-        "graph_interrupted_start_cleanup_stale",
+        STALE,
         "Completed interrupted cleanup evidence belongs to an earlier resource generation; no old cleanup effect was replayed.",
     )
 }
@@ -151,7 +156,8 @@ impl Journal {
                 .get(&self.selection.failed_key)
                 .is_some_and(|resource| {
                     resource.kind == Kind::Container
-                        && resource.phase == "uncertain"
+                        && (resource.phase == "uncertain"
+                            || (self.selection.owner_stopped && resource.phase == "started"))
                         && resource.id.as_deref() == Some(self.selection.failed_id.as_str())
                 })
             || digest(&serde_json::to_vec_pretty(&self.original).map_err(|_| refused())?)
@@ -229,6 +235,23 @@ fn absent(proof: &Proof<'_>, resource: &Resource) -> Result<bool, CandidateError
     Ok(inspect_resource(&proof.engine, &proof.current, &by_name)?.is_none())
 }
 
+/// The recorded generation is still present and the engine reports it dead: an earlier
+/// removal began and failed. Any other observation (absent, running, another ID) is not.
+fn removal_failed(proof: &Proof<'_>, resource: &Resource) -> Result<bool, CandidateError> {
+    let Some(value) = inspect_resource(&proof.engine, &proof.current, resource)? else {
+        return Ok(false);
+    };
+    Ok(value["Id"].as_str() == resource.id.as_deref() && dead_terminal(resource, &value))
+}
+
+/// Whether an observation is the exact recorded generation in the engine's `dead` state.
+pub(super) fn dead_terminal(resource: &Resource, value: &Value) -> bool {
+    value["State"]["Status"] == "dead"
+        && shutdown::prepare(resource, value).is_ok_and(|prepared| {
+            !prepared.running && resource.id.as_deref() == Some(prepared.id.as_str())
+        })
+}
+
 fn advance_stop(
     proof: &Proof<'_>,
     coordinator: &Coordinator,
@@ -236,9 +259,20 @@ fn advance_stop(
     key: &str,
 ) -> Result<(), CandidateError> {
     let resource = proof.original.resources.get(key).ok_or_else(refused)?;
-    let value = inspect_resource(&proof.engine, &proof.current, resource)?.ok_or_else(refused)?;
-    if key == proof.selected.failed_key {
+    let Some(value) = inspect_resource(&proof.engine, &proof.current, resource)? else {
+        // Selection proved the owner stopped this generation before removing it; an
+        // absent container needs no stop. Any other selection requires it present.
+        if !proof.selected.owner_stopped || journal.pending || !absent(proof, resource)? {
+            return Err(refused());
+        }
+        journal.cursor += 1;
+        return journal.write(&proof.root);
+    };
+    if key == proof.selected.failed_key && !proof.selected.owner_stopped {
         failed_created(resource, &value)?;
+    }
+    if proof.selected.owner_stopped && !journal.pending {
+        stopped_terminal(resource, &value)?;
     }
     if !journal.pending {
         // Disarming is idempotent and reducing, so it precedes the journaled
@@ -274,7 +308,33 @@ fn advance_delete(
     if resource.kind != Kind::Container && resource.kind != Kind::Network {
         return Err(refused());
     }
-    if journal.pending || resource.id.is_none() {
+    let retry_dead = journal.pending
+        && proof.selected.owner_stopped
+        && resource.kind == Kind::Container
+        && removal_failed(proof, resource)?;
+    // An owner-stopped selection may find a container its owner already removed.
+    let removed_by_owner = proof.selected.owner_stopped
+        && !journal.pending
+        && resource.kind == Kind::Container
+        && absent(proof, resource)?;
+    if (journal.pending && !retry_dead) || resource.id.is_none() || removed_by_owner {
+        if !absent(proof, resource)? {
+            return Err(refused());
+        }
+    } else if retry_dead {
+        // The engine refused an earlier removal of this exact generation and left it
+        // dead. Removing a dead container is the only effect that applies to it, and
+        // repeating it for the same immutable ID cannot reach anything else, so a
+        // retry may ask again; it never stops or starts anything.
+        fence(proof, coordinator, journal)?;
+        proof.engine.request(
+            Method::DELETE,
+            &format!(
+                "/v1.53/containers/{}?v=true",
+                resource.id.as_deref().ok_or_else(refused)?
+            ),
+            None,
+        )?;
         if !absent(proof, resource)? {
             return Err(refused());
         }

@@ -521,6 +521,15 @@ data, and requires inspection before retry. No guest is started by alias recover
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
 
+`runtime down` first quiesces the guest engine, which leaves the pool in phase
+`quiescing` until the engine exits. A guest agent that answers no ping lets `down`
+or `recover` stop the provider. A guest that still answers pings but whose engine
+did not finish quiescing is reported on the first attempt and stays `quiescing`.
+The next `runtime down`, or `runtime recover`, resumes the quiesce once; if the
+engine again does not exit, it stops this home's verified provider and records
+`recovered-unclean`, so the pool never needs a manual signal. As after any unclean
+stop, the next start checks the retained disks.
+
 A physical macOS reboot may also renumber the mounted filesystem device. Strict
 disk and source checks still refuse a changed device number; missing-HOME recovery
 does not waive them. For an offline **stock pool**, inspect the separate migration:
@@ -2182,6 +2191,24 @@ volume provenance rechecked at effect and completion boundaries.
 An uncertain stop is never sent again merely because the container still appears
 running. A crash between stop intent and request can therefore require later
 terminal evidence before recovery can advance.
+
+The same controls select a failed start whose foreground owner had already stopped
+every container and committed that stop (its `shutdown.json` terminal records match
+the current container generations), and then exited before its removals finished.
+This happens when the engine cannot remove a container and leaves it `dead`, for
+example a failed dependency initializer whose writable layer could not be deleted.
+The receipt's recorded startup failure names the failed container; containers the
+owner already removed are accepted as absent, and a `dead` container is terminal.
+Removing a `dead` container of that exact generation is the one deletion recovery
+may ask for again after a failed attempt; nothing is stopped or started. `hack down`
+selects this recovery on the same guest boot, and `hack doctor --native-cleanup
+inspect` reports such a run as `interrupted_startup_candidate` with a `dead` count.
+If the engine still cannot remove the container, `hack down` refuses and keeps the
+run. Once the graph is stopped with data retained, `hack down` names the
+`hack restart --recover-frontend --expect-finalization-attempt` command that
+finishes the failed `hack up`'s own finalization. A run restored from that
+retained data that fails again treats the earlier, finished recovery journal as
+history (`interrupted-start-cleanup-retired-<selection>.json`).
 Likewise, a pending guest helper, probe or environment deletion advances only
 after complete absence is independently verified. An interruption partway through
 a guest cleanup script can remain fenced; this control does not replay that

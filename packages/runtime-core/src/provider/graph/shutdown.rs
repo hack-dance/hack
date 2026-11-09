@@ -299,9 +299,17 @@ pub(super) fn prepare(resource: &Resource, inspected: &Value) -> Result<Prepared
         && state["Running"] == true
         && state["Status"] == "restarting"
         && state["Pid"] == 0;
+    // The engine marks a container dead when it begins removing it, and leaves it dead
+    // when that removal fails (for example when its writable layer cannot be deleted).
+    // A dead container has no process and can never run again: it is terminal, and only
+    // a further removal applies to it.
+    let dead = state["Dead"].as_bool() == Some(true)
+        && state["Running"] == false
+        && state["Status"] == "dead"
+        && state["Pid"] == 0;
     if state["Paused"].as_bool() != Some(false)
         || (state["Restarting"].as_bool() != Some(false) && !restarting)
-        || state["Dead"].as_bool() != Some(false)
+        || (state["Dead"].as_bool() != Some(false) && !dead)
         || state["OOMKilled"].as_bool().is_none()
         || state["ExitCode"]
             .as_u64()
@@ -319,6 +327,7 @@ pub(super) fn prepare(resource: &Resource, inspected: &Value) -> Result<Prepared
         (true, Some("running"), 1..) => {}
         (true, Some("restarting"), 0) if restarting => {}
         (false, Some("exited"), 0) => {}
+        (false, Some("dead"), 0) if dead => {}
         // Docker may assign a nonzero exit code when startup fails before the
         // container ever runs. Preserve that failure without requesting a stop.
         (false, Some("created"), 0) if state["OOMKilled"] == false => {}
@@ -516,6 +525,41 @@ mod tests {
             assert!(prepare(&resource, &changed).is_err(), "{field}");
         }
         assert!(terminal(&resource, &value, true).is_err());
+    }
+
+    /// HACK-1968: a failed layer removal leaves the engine reporting the container dead.
+    fn dead(value: &mut Value) {
+        value["State"]["Running"] = json!(false);
+        value["State"]["Status"] = json!("dead");
+        value["State"]["Pid"] = json!(0);
+        value["State"]["Dead"] = json!(true);
+        value["State"]["ExitCode"] = json!(1);
+    }
+
+    #[test]
+    fn a_dead_container_is_terminal_with_its_exit_evidence() {
+        let (resource, mut value) = fixture();
+        dead(&mut value);
+        let prepared = prepare(&resource, &value).unwrap();
+        assert!(!prepared.running, "a dead container is never a stop target");
+        for stop_requested in [false, true] {
+            let evidence = terminal(&resource, &value, stop_requested).unwrap();
+            assert_eq!(evidence.exit_code, 1);
+            assert_eq!(evidence.stop_requested, stop_requested);
+        }
+        // Dead with any sign of a process, or an inconsistent status, stays uncertain.
+        for (field, invalid) in [
+            ("Running", json!(true)),
+            ("Pid", json!(42)),
+            ("Status", json!("running")),
+            ("Status", json!("removing")),
+            ("Paused", json!(true)),
+            ("Dead", json!(null)),
+        ] {
+            let mut changed = value.clone();
+            changed["State"][field] = invalid;
+            assert!(prepare(&resource, &changed).is_err(), "{field}");
+        }
     }
 
     fn restarting(value: &mut Value) {

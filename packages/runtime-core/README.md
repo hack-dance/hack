@@ -2096,7 +2096,8 @@ does not retry it automatically.
 
 Routes retain native HTTP healthy readiness. The owner rearms a dead probe exec
 with a fresh sample generation after an ownership-verified incarnation change.
-It keeps the mounted state directory; the stopped-container reset path would
+It keeps the mounted state directory and prepares only the prior generation’s
+private samples under the existing probe lock; the stopped-container reset path would
 unmount state still held by a running replacement. Uncertain exec intent is not
 replayed. Other native HTTP probes, host dependencies, managed environment
 delivery and dependency caches still refuse restart policies.

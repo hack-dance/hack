@@ -129,6 +129,16 @@ fn execute(
     name: &str,
     action: &str,
 ) -> Result<(), CandidateError> {
+    execute_with_generation(engine, receipt, name, action, "")
+}
+
+fn execute_with_generation(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    name: &str,
+    action: &str,
+    previous: &str,
+) -> Result<(), CandidateError> {
     let p = &receipt.probes[name];
     let path = path(p);
     let marker = marker(receipt, name, p);
@@ -141,11 +151,13 @@ fn execute(
         uid.as_str(),
         gid.as_str(),
         p.binary.as_str(),
+        previous,
     ];
+    let script = STORAGE.replace("# PROBE_REARM_SAMPLES", REARM_SAMPLES);
     let output = if action == "remove" {
-        engine.guest().execute_cleanup(STORAGE, &args)?
+        engine.guest().execute_cleanup(&script, &args)?
     } else {
-        engine.guest().execute(STORAGE, &args, None)?
+        engine.guest().execute(&script, &args, None)?
     };
     if output != "probe-storage-ready\n" {
         return Err(error(
@@ -588,6 +600,12 @@ test ! -L "$root/owner"
 test "$(stat -c %u:%g:%a:%h "$root/owner")" = 0:0:400:1
 test "$(cat "$root/owner")" = "$marker"
 test ! -L "$root/state"
+if test "$action" = rearm; then
+ test "$(findmnt -n -o FSTYPE --mountpoint "$root/state")" = tmpfs
+ state="$root/state"; previous="$7"
+ # PROBE_REARM_SAMPLES
+ exit 0
+fi
 if findmnt -n --mountpoint "$root/state" >/dev/null; then
  test "$(findmnt -n -o FSTYPE --mountpoint "$root/state")" = tmpfs
  test "$action" != create
@@ -608,6 +626,7 @@ fi
 printf 'probe-storage-ready
 '
 "#;
+const REARM_SAMPLES: &str = include_str!("probe-rearm-samples.sh");
 #[cfg(feature = "native-http-probe")]
 pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
     let bytes = super::super::http_probe::guest_binary();
@@ -733,11 +752,14 @@ pub(super) fn rearm_route(
         .probes
         .get_mut(name)
         .ok_or_else(|| error("graph_probe_identity", "Missing owned route probe."))?;
+    let previous = probe.generation.clone();
     probe.generation = token()?;
     probe.exec_id = None;
     probe.started_ms = 0;
     probe.phase = "exec-intent".into();
     state::write(&root.join("state.json"), receipt)?;
+    fence()?;
+    execute_with_generation(engine, receipt, name, "rearm", &previous)?;
     fence()?;
     let probe = &receipt.probes[name];
     let mut args = vec!["/run/hack-http-probe".to_owned()];

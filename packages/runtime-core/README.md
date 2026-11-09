@@ -2100,7 +2100,9 @@ acquired, failures remain errors; admitted or uncertain effects are never retrie
 merely because their error happens to be `provider_busy`.
 
 Routes retain native HTTP healthy readiness. The owner rearms a dead probe exec
-with a fresh sample generation after an ownership-verified incarnation change.
+with a fresh sample generation after an ownership-verified incarnation change,
+using a normally admitted allocation-capable engine lease. Cleanup-only
+connections continue to reject exec create/start requests.
 It keeps the mounted state directory and prepares only the prior generation’s
 private samples under the existing probe lock; the stopped-container reset path would
 unmount state still held by a running replacement. Uncertain exec intent is not

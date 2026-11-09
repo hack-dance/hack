@@ -729,10 +729,6 @@ pub(super) fn rearm_route(
         .resources
         .get(&format!("container:{name}"))
         .ok_or_else(|| error("graph_probe_identity", "Missing owned route container."))?;
-    let id = resource
-        .id
-        .clone()
-        .ok_or_else(|| error("graph_probe_identity", "Missing owned route container."))?;
     let probe = receipt
         .probes
         .get(name)
@@ -747,6 +743,42 @@ pub(super) fn rearm_route(
             "Prior route probe is live or uncertain; no rearm was attempted.",
         ));
     }
+    rearm_after_inactive(
+        receipt,
+        root,
+        name,
+        fence,
+        |receipt, previous| execute_with_generation(engine, receipt, name, "rearm", previous),
+        |method, path, body| engine.request(method, path, body),
+    )
+}
+
+/// One non-replayable preparation/create/start protocol after inactive-exec proof.
+/// Request dispatch is injected so the actual connection-mode guard is tested.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn rearm_after_inactive(
+    receipt: &mut Receipt,
+    root: &std::path::Path,
+    name: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+    prepare: impl FnOnce(&Receipt, &str) -> Result<(), CandidateError>,
+    mut request: impl FnMut(Method, &str, Option<&Value>) -> Result<Value, CandidateError>,
+) -> Result<(), CandidateError> {
+    let id = receipt
+        .resources
+        .get(&format!("container:{name}"))
+        .and_then(|r| r.id.clone())
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route container."))?;
+    if receipt
+        .probes
+        .get(name)
+        .is_none_or(|p| p.phase != "running")
+    {
+        return Err(error(
+            "graph_probe_replay",
+            "Probe rearm cannot replay an uncertain intent.",
+        ));
+    }
     fence()?;
     let probe = receipt
         .probes
@@ -759,7 +791,7 @@ pub(super) fn rearm_route(
     probe.phase = "exec-intent".into();
     state::write(&root.join("state.json"), receipt)?;
     fence()?;
-    execute_with_generation(engine, receipt, name, "rearm", &previous)?;
+    prepare(receipt, &previous)?;
     fence()?;
     let probe = &receipt.probes[name];
     let mut args = vec!["/run/hack-http-probe".to_owned()];
@@ -768,7 +800,13 @@ pub(super) fn rearm_route(
             .config
             .arguments("/run/hack-http-probe-state", &probe.generation)?,
     );
-    let value = engine.request(Method::POST, &format!("/v1.53/containers/{id}/exec"), Some(&json!({"AttachStdout":false,"AttachStderr":false,"User":format!("{}:{}",probe.uid,probe.gid),"Cmd":args})))?;
+    let value = request(
+        Method::POST,
+        &format!("/v1.53/containers/{id}/exec"),
+        Some(
+            &json!({"AttachStdout":false,"AttachStderr":false,"User":format!("{}:{}",probe.uid,probe.gid),"Cmd":args}),
+        ),
+    )?;
     let exec_id = value["Id"]
         .as_str()
         .filter(|id| hex(id, 64))
@@ -784,7 +822,7 @@ pub(super) fn rearm_route(
     probe.phase = "starting".into();
     state::write(&root.join("state.json"), receipt)?;
     fence()?;
-    engine.request(
+    request(
         Method::POST,
         &format!("/v1.53/exec/{exec_id}/start"),
         Some(&json!({"Detach":true,"Tty":false})),

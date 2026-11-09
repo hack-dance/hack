@@ -1,6 +1,7 @@
 //! Owner-only replacement of one retired publication. Every mutation reacquires
 //! the provider lease and verifies the same admitted container and attachment.
 use super::*;
+use crate::provider::engine::ConnectionMode;
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
@@ -28,6 +29,21 @@ fn with_available_lease<L, T>(
         result => result?,
     };
     operation(lease).map(Some)
+}
+
+/// Route rearm creates/starts an exec, so its lease must admit allocation.
+/// Initial enrollment cannot defer; subsequent ticks defer acquisition only.
+fn with_probe_lease<L, T>(
+    initialize: bool,
+    acquire: impl FnOnce(ConnectionMode) -> Result<L, CandidateError>,
+    operation: impl FnOnce(L) -> Result<T, CandidateError>,
+) -> Result<Option<T>, CandidateError> {
+    let acquire = || acquire(ConnectionMode::Allocation);
+    if initialize {
+        acquire().and_then(operation).map(Some)
+    } else {
+        with_available_lease(acquire, operation)
+    }
 }
 
 /// A generation change is permission to retire only when the receipt admitted
@@ -239,7 +255,7 @@ pub(in crate::provider::graph) fn supervise_probes(
     check: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     check()?;
-    let acquire = || Engine::connect_cleanup(candidate);
+    let acquire = |mode| Engine::connect_in_mode(candidate, mode);
     let operation = |engine: Engine<'_>| {
         let (mut receipt, root) = load(candidate, &engine, run)?;
         let names = receipt
@@ -278,16 +294,148 @@ pub(in crate::provider::graph) fn supervise_probes(
         }
         Ok(())
     };
-    if initialize {
-        acquire().and_then(operation)
-    } else {
-        with_available_lease(acquire, operation).map(|_| ())
-    }
+    with_probe_lease(initialize, acquire, operation).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rearm_fixture() -> (super::super::super::tests::Fixture, Receipt, PathBuf) {
+        let fixture = super::super::super::tests::Fixture::new();
+        let root = fixture.0.join("rearm");
+        state::private_directory(&root).unwrap();
+        let receipt = serde_json::from_value(json!({
+            "version":2,"run":"b".repeat(32),"owner":"c".repeat(32),"namespace":"synthetic",
+            "plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{},
+            "resources":{"container:web":{"kind":"container","key":"web","name":"owned",
+                "id":"e".repeat(64),"phase":"started","routing":{"hostnames":["web.example.test"],"port":8080},"restart_policy":{"name":"always"}}},
+            "probes":{"web":{"config":{"port":8080,"path":"/health","interval_ms":100,"timeout_ms":40,"retries":3,"start_period_ms":0},
+                "allocation":"b".repeat(32),"generation":"a".repeat(32),"binary":format!("/storage/hack-native-http-probe/{}","f".repeat(64)),"uid":1000,"gid":1000,"exec_id":"c".repeat(64),"started_ms":1,"phase":"running"}}
+        })).unwrap();
+        (fixture, receipt, root)
+    }
+
+    #[test]
+    fn probe_connection_mode_admits_exactly_one_journaled_exec_create_and_start() {
+        use std::cell::RefCell;
+        let (_fixture, mut receipt, root) = rearm_fixture();
+        let posts = RefCell::new(Vec::new());
+        let result = with_probe_lease(
+            false,
+            |mode| {
+                assert_eq!(mode, ConnectionMode::Allocation);
+                Ok(mode)
+            },
+            |mode| {
+                probes::rearm_after_inactive(
+                    &mut receipt,
+                    &root,
+                    "web",
+                    &|| Ok(()),
+                    |saved, previous| {
+                        assert_eq!(previous, "a".repeat(32));
+                        assert_eq!(saved.probes["web"].phase, "exec-intent");
+                        let journal: Receipt =
+                            state::read_bounded(&root.join("state.json"), 65536)?;
+                        assert_eq!(journal.probes["web"].phase, "exec-intent");
+                        Ok(())
+                    },
+                    |method, path, _body| {
+                        // This is the same method guard used by Engine::request and request_until.
+                        mode.admit(&method)?;
+                        assert_eq!(method, Method::POST);
+                        posts.borrow_mut().push(path.to_owned());
+                        Ok(if path.ends_with("/exec") {
+                            json!({"Id":"f".repeat(64)})
+                        } else {
+                            Value::Null
+                        })
+                    },
+                )
+            },
+        )
+        .unwrap();
+        assert!(result.is_some());
+        assert_eq!(
+            *posts.borrow(),
+            vec![
+                format!("/v1.53/containers/{}/exec", "e".repeat(64)),
+                format!("/v1.53/exec/{}/start", "f".repeat(64))
+            ]
+        );
+        assert_eq!(receipt.probes["web"].phase, "running");
+        assert_ne!(receipt.probes["web"].generation, "a".repeat(32));
+        for method in [Method::GET, Method::HEAD, Method::DELETE] {
+            assert!(ConnectionMode::Cleanup.admit(&method).is_ok());
+        }
+        assert!(ConnectionMode::Cleanup.admit(&Method::POST).is_err());
+    }
+
+    #[test]
+    fn probe_acquisition_contention_precedes_intent_preparation_and_dispatch() {
+        let (_fixture, mut receipt, root) = rearm_fixture();
+        let before = serde_json::to_vec(&receipt).unwrap();
+        let result = with_probe_lease(
+            false,
+            |mode| {
+                assert_eq!(mode, ConnectionMode::Allocation);
+                Err::<(), _>(error("provider_busy", "Busy lease."))
+            },
+            |_| {
+                probes::rearm_after_inactive(
+                    &mut receipt,
+                    &root,
+                    "web",
+                    &|| Ok(()),
+                    |_, _| panic!("busy acquisition must not prepare samples"),
+                    |_, _, _| panic!("busy acquisition must not dispatch"),
+                )
+            },
+        )
+        .unwrap();
+        assert!(result.is_none());
+        assert_eq!(serde_json::to_vec(&receipt).unwrap(), before);
+        assert!(!root.join("state.json").exists());
+        let initial: Result<Option<()>, _> = with_probe_lease(
+            true,
+            |_| Err::<(), _>(error("provider_busy", "Busy lease.")),
+            |_| panic!("initial enrollment must not silently defer"),
+        );
+        assert_eq!(initial.unwrap_err().code, "provider_busy");
+    }
+
+    #[test]
+    fn unknown_exec_create_cannot_replay_preparation_or_another_post() {
+        use std::cell::Cell;
+        let (_fixture, mut receipt, root) = rearm_fixture();
+        let posts = Cell::new(0);
+        assert!(
+            probes::rearm_after_inactive(
+                &mut receipt,
+                &root,
+                "web",
+                &|| Ok(()),
+                |_, _| Ok(()),
+                |_, _, _| {
+                    posts.set(posts.get() + 1);
+                    Err(error("engine_response", "Unknown exec creation."))
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(receipt.probes["web"].phase, "exec-intent");
+        let refused = probes::rearm_after_inactive(
+            &mut receipt,
+            &root,
+            "web",
+            &|| Ok(()),
+            |_, _| panic!("uncertain intent cannot prepare again"),
+            |_, _, _| panic!("uncertain intent cannot dispatch again"),
+        );
+        assert_eq!(refused.unwrap_err().code, "graph_probe_replay");
+        assert_eq!(posts.get(), 1);
+    }
 
     #[test]
     fn inspection_lease_contention_defers_ticks_without_effects_then_admits_once() {

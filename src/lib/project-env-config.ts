@@ -3035,6 +3035,7 @@ async function setLockedProjectEnvValue(opts: {
     path: filePath,
     config: nextConfig,
     expectedExisting: text,
+    machineLocal: opts.local === true,
   });
   return {
     filePath,
@@ -3132,6 +3133,7 @@ async function unsetLockedProjectEnvValue(opts: {
       values: nextValues,
     },
     expectedExisting: text,
+    machineLocal: opts.local === true,
   });
   return { changed, filePath };
 }
@@ -3407,6 +3409,7 @@ async function hydrateLockedProjectEnvLayer(opts: {
         values: nextValues,
       },
       expectedExisting: layer.text,
+      machineLocal: true,
     });
   } catch (error: unknown) {
     if (error instanceof AtomicWriteConflictError) {
@@ -3715,6 +3718,12 @@ async function writeProjectEnvConfigFile(opts: {
   readonly config: ProjectEnvConfig;
   /** Compare-and-swap guard; see `writeTextFileAtomicIfChanged`. */
   readonly expectedExisting?: string | null;
+  /**
+   * A machine-local layer, which may hold plaintext values: when this write
+   * creates it, it is private (0600) from creation. An existing layer keeps
+   * its mode.
+   */
+  readonly machineLocal?: boolean;
 }): Promise<boolean> {
   const text = serializeProjectEnvConfig(opts.config);
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
@@ -3724,6 +3733,7 @@ async function writeProjectEnvConfigFile(opts: {
       ...(opts.expectedExisting === undefined
         ? {}
         : { expectedExisting: opts.expectedExisting }),
+      ...(opts.machineLocal === true ? { createMode: 0o600 } : {}),
       validatePath: async (path) =>
         await assertProjectEnvLayerPath({
           projectRoot: opts.projectRoot,

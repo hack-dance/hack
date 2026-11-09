@@ -620,7 +620,12 @@ hosts, use the `encrypted_file` secrets backend with its key file in place or
 
 `--local` writes to the worktree-local override file (`.hack/hack.env.local.yaml` or
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
-per-checkout values you don't want to commit.
+per-checkout values you don't want to commit. A machine-local layer that `hack env set --local`,
+`hack env unset --local` or `hack env hydrate` creates is private (mode 0600) from creation,
+whatever your umask, because it can hold plaintext values. An existing layer keeps its mode;
+tighten it yourself with `chmod 600` if it was created by an older version. Tracked layers
+keep the umask default. These commands create no new directory for values: the layers live
+in the existing `.hack` directory, whose mode they don't change.
 
 With no env layers yet, `hack env set --local` writes legacy `.hack/.env` (or
 `.hack/.env.<overlay>`), including when a `hack.env.json` contract exists.

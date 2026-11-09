@@ -859,9 +859,12 @@ type CompletedJobCaptureOptions = {
   readonly timeoutMs: number;
   /**
    * Optional startup barrier: the captured child (or its descendant) creates
-   * `path` once it is ready. Until then only `budgetMs` applies; exceeding it
-   * expires the capture exactly like the main deadline (owned group stop,
-   * withheld settlement), so a child that never becomes ready stays bounded.
+   * `path` once it is ready. From spawn until then only `budgetMs` applies;
+   * exceeding it expires the capture exactly like the main deadline (owned group
+   * stop, withheld settlement), so a child that never becomes ready stays bounded.
+   * A leader exit with closed pipes, capture failure or oversize before readiness
+   * refuses at once rather than waiting out the budget. `budgetMs + timeoutMs`
+   * must stay within the fixture's overall capture cap.
    */
   readonly ready?: { readonly path: string; readonly budgetMs: number };
   readonly stdin?: Uint8Array;
@@ -928,7 +931,7 @@ async function captureCompletedJobFixtureChild(
         (snapshot.ready.path.startsWith("/") &&
           Number.isSafeInteger(snapshot.ready.budgetMs) &&
           snapshot.ready.budgetMs > 0 &&
-          snapshot.ready.budgetMs <= TIMEOUT)) &&
+          snapshot.ready.budgetMs + snapshot.timeoutMs <= TIMEOUT)) &&
       !snapshot.signal?.aborted &&
       (snapshot.stdin === undefined || snapshot.stdin.byteLength <= 8192) &&
       (snapshot.maxStreamBytes === undefined ||
@@ -978,22 +981,30 @@ async function captureCompletedJobFixtureChild(
   }
 }
 
+function capturedIdentityAbsent(identity: number) {
+  try {
+    // Read-only existence probe; an exited leader grants no former-group signal authority.
+    process.kill(identity, 0);
+    return false;
+  } catch (error: unknown) {
+    if (isRecord(error) && error.code === "ESRCH") {
+      return true;
+    }
+    throw error;
+  }
+}
+
 /**
  * Pipe EOF precedes reaping: an exited descendant reparented to the subreaper
- * still answers the group probe until it is reaped. Re-probe only within the
- * caller's settlement budget; presence at its end still refuses.
+ * still answers the group probe until it is reaped. Re-probe only before the
+ * caller's deadline; presence at its end still refuses. Every identity must be
+ * absent in the same pass, so a receipt never carries a stale absence.
  */
-async function awaitCapturedAbsence(identity: number, deadline: number) {
-  for (;;) {
-    try {
-      // Read-only existence probe; an exited leader grants no former-group signal authority.
-      process.kill(identity, 0);
-    } catch (error: unknown) {
-      if (isRecord(error) && error.code === "ESRCH") {
-        return;
-      }
-      throw error;
-    }
+async function awaitCapturedAbsence(
+  identities: readonly number[],
+  deadline: number
+) {
+  while (!identities.every(capturedIdentityAbsent)) {
     requireValue(deadline > Date.now());
     await Bun.sleep(5);
   }
@@ -1188,9 +1199,12 @@ async function captureInterruptedPipes(
             leaderExited && openPipes === 0 && !captureFailure && !groupFailure
           );
           requireValue(child.pid !== undefined);
-          for (const identity of [child.pid, -child.pid]) {
-            await awaitCapturedAbsence(identity, settlementDeadline);
-          }
+          // Bounded by this 2 s settlement budget; a capture whose own deadline
+          // passes meanwhile is still refused by the final timedOut check.
+          await awaitCapturedAbsence(
+            [child.pid, -child.pid],
+            settlementDeadline
+          );
           // Flush/close the capture handles inside the same settlement budget.
           await Promise.all([opts.output.close(), opts.errors.close()]);
           requireValue(settlementDeadline > Date.now());
@@ -1249,17 +1263,35 @@ async function captureInterruptedPipes(
     requireValue(child.pid !== undefined);
     const ready = opts.ready;
     if (ready !== undefined) {
-      // An owned bounded poll, not caller work: it stops within one tick of expiry.
+      // An owned bounded poll, not caller work: it stops within one tick of
+      // expiry, and at once when nothing owned can still become ready or the
+      // capture already failed, so a real exit is never reported as expiry.
+      let isReady = false;
       const observed = (async () => {
         while (
-          !(admission.signal.aborted || (await Bun.file(ready.path).exists()))
+          !(
+            admission.signal.aborted ||
+            oversized ||
+            captureFailure ||
+            (leaderExited && openPipes === 0)
+          )
         ) {
+          if (await Bun.file(ready.path).exists()) {
+            isReady = true;
+            return;
+          }
           await Bun.sleep(5);
         }
       })();
       await Promise.race([observed, expired]);
       requireValue(
-        !(timedOut || oversized || admission.signal.aborted) &&
+        isReady &&
+          !(
+            timedOut ||
+            oversized ||
+            captureFailure ||
+            admission.signal.aborted
+          ) &&
           deadline > Date.now()
       );
       arm(Date.now() + opts.timeoutMs);

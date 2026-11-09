@@ -700,7 +700,10 @@ test("a child that never becomes ready is bounded by the startup budget and its 
         },
       })
     ).rejects.toThrow("deadline expired");
-    expect(Date.now() - started).toBeLessThan(5000);
+    const elapsed = Date.now() - started;
+    // The 400 ms startup budget itself fired: not the 250 ms capture deadline, not an unbounded wait.
+    expect(elapsed).toBeGreaterThanOrEqual(350);
+    expect(elapsed).toBeLessThan(5000);
     expect(interrupted).toBe(false);
     expect(await Bun.file(`${captures}.owner.json`).exists()).toBe(false);
     const [group] = groups;
@@ -709,6 +712,47 @@ test("a child that never becomes ready is bounded by the startup budget and its 
     expect(unconfirmed).toBe(false);
   } finally {
     signals.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a leader that exits before readiness refuses with its real exit instead of waiting out the startup budget", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "completed-job-exit-before-ready-")
+  );
+  const captures = join(root, "capture");
+  let interrupted = false,
+    unconfirmed = false;
+  let failure: unknown;
+  try {
+    await captureCompletedJobFixtureInterrupt({
+      argv: [process.execPath, "-e", "process.exit(17)"],
+      cwd: root,
+      env: {},
+      captures,
+      ready: { path: join(root, "ready"), budgetMs: 60_000 },
+      timeoutMs: 250,
+      beforeInterrupt: async () => {
+        interrupted = true;
+      },
+      onUnconfirmed: () => {
+        unconfirmed = true;
+      },
+    }).catch((error: unknown) => {
+      failure = error;
+    });
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain("values omitted");
+    expect(String(failure)).not.toContain("deadline expired");
+    expect(interrupted).toBe(false);
+    // Settlement still confirmed the real exit; nothing timed out.
+    const receipt = JSON.parse(
+      await Bun.file(`${captures}.settlement.json`).text()
+    );
+    expect(receipt.exitCode).toBe(17);
+    expect(receipt.interrupted).toBe(false);
+    expect(unconfirmed).toBe(false);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

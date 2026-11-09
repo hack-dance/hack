@@ -27,64 +27,59 @@ export const MAX_SHARD_COUNT = 32;
 export const DEFAULT_DURATION_HINT_SECONDS = 60;
 
 /**
- * Measured hosted Docker durations in seconds (Blacksmith 4 vCPU Ubuntu 24.04,
- * next CI run 38181288374). Hints only balance shards; they never bound or
- * skip a scenario, so a stale value costs wall time, not coverage. Refresh
- * them from a docker-e2e summary when a scenario's runtime changes materially.
+ * Measured hosted Docker durations in seconds (GitHub-hosted ubuntu-24.04,
+ * docker-e2e shards of next CI run 42634804251, 2026-11-09; the PASS line of
+ * each scenario, rounded, minimum 1). Hints only balance shards; they never
+ * bound or skip a scenario, so a stale value costs wall time, not coverage.
+ * Refresh them from the shard logs when a scenario's runtime changes
+ * materially. `native-config-networks` alone is longer than any other shard's
+ * whole load, so it always runs by itself and sets the docker-e2e wall time.
  */
 export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
-  "native-config-networks": 3409,
-  "native-config-compose": 973,
-  "native-config-routing": 571,
-  "native-config-build": 209,
-  "native-config-down-hooks": 158,
-  "native-config-process-policy": 136,
-  "native-compose-adoption-job-worktrees": 108,
-  "native-compose-adoption-local-worktrees": 52,
-  "native-compose-adoption-network-health-worktrees": 48,
-  "native-compose-adoption-managed-worktrees": 46,
-  "lifecycle-session-recovery": 46,
-  "dependency-cache-bootstrap": 44,
-  "native-compose-adoption-dependency-worktrees": 39,
-  "dependency-cache": 37,
+  "native-config-networks": 3090,
+  "native-config-compose": 736,
+  "native-config-routing": 558,
+  "native-compose-adoption-job-worktrees": 177,
+  "native-config-build": 155,
+  "native-config-down-hooks": 155,
+  "native-config-process-policy": 122,
+  "native-compose-adoption-local-worktrees": 90,
+  "pattern-p01-dependency-bootstrap": 66,
+  "native-compose-adoption-managed-worktrees": 64,
+  "native-compose-adoption-network-health-worktrees": 56,
+  "native-compose-adoption-network-worktrees": 55,
+  "pattern-p07-capability-overlays": 54,
+  "dependency-cache-bootstrap": 49,
+  "native-compose-adoption-dependency-worktrees": 49,
+  "native-compose-adoption-plural-network-worktrees": 44,
+  "dependency-cache": 43,
+  "native-compose-adoption-branch-worktrees": 38,
+  "portable-bootstrap-negatives": 38,
+  "dependency-cache-package": 37,
+  "shared-host-helpers": 36,
+  "native-compose-adoption-string-worktrees": 35,
   "worktree-parallel-up": 35,
-  "native-compose-adoption-network-worktrees": 34,
-  "native-compose-adoption-plural-network-worktrees": 33,
-  "native-compose-adoption-branch-worktrees": 33,
-  "portable-multiservice": 30,
-  // Estimate until a hosted docker-e2e summary measures it: eleven cached-alpine stages.
-  "portable-bootstrap-negatives": 45,
-  // Estimate (no measured run yet): two cached-alpine ups plus four run/exec probes.
-  "compose-config-hash-drift": 25,
-  // Estimate (no measured run yet): one up, ~15 s of bounded tails, a 12 MiB
-  // log snapshot, one container restart and two one-off runs.
-  "mcp-logs-compose": 60,
-  "dependency-cache-package": 30,
-  "native-compose-adoption-worktrees": 28,
-  "native-compose-adoption-string-worktrees": 28,
-  "native-config-files": 20,
-  doctor: 18,
-  "lifecycle-host-process": 13,
-  // Estimate until a hosted docker-e2e summary measures it: ~20 CLI ups/downs.
-  "shared-host-helpers": 40,
-  "up-down": 12,
-  // Estimate until a hosted docker-e2e summary measures it.
-  "exec-stale-env": 20,
-  "cache-prune": 12,
-  "dependency-cache-protocol": 11,
-  // Estimates until a hosted docker-e2e summary measures them: P01 runs six
-  // locked-v1 starts plus a killed installer; P02 seven one-shot runs; P07
-  // two health-gated stacks plus value-free explain calls.
-  "pattern-p01-dependency-bootstrap": 90,
-  "pattern-p02-portable-toolchain": 45,
-  "pattern-p07-capability-overlays": 45,
-  "worktree-branch-default": 2,
+  "native-compose-adoption-worktrees": 34,
+  "portable-multiservice": 33,
+  "native-config-files": 30,
+  "exec-stale-env": 29,
+  "mcp-logs-compose": 24,
+  "lifecycle-session-recovery": 21,
+  "cache-prune": 18,
+  "up-down": 16,
+  "dependency-cache-protocol": 14,
+  "lifecycle-host-process": 14,
+  "agent-surface-freeze": 12,
+  "pattern-p02-portable-toolchain": 9,
+  "compose-config-hash-drift": 5,
+  "worktree-branch-default": 5,
+  doctor: 3,
   "agent-docs-sync": 2,
-  "domain-migration-files": 1,
-  "automation-check": 1,
-  "worktree-secrets": 1,
-  "worktree-registry": 1,
+  "automation-check": 2,
+  "domain-migration-files": 2,
   "env-secrets": 1,
+  "worktree-registry": 1,
+  "worktree-secrets": 1,
   init: 1,
 };
 

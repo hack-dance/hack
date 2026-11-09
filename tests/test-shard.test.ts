@@ -28,13 +28,19 @@ import {
   listGitTestFiles,
   MAX_TEST_SHARD_COUNT,
   PER_FILE_START_SECONDS,
+  POOLED_MACOS_SHARDS,
   parseDurationTable,
   parseShardSelection,
+  parseTestFocus,
+  parseTestLayout,
   partitionTestFiles,
   plannedSeconds,
+  pooledSelection,
+  poolPlatform,
   shardCoverage,
   suiteForFile,
   type TestSuite,
+  testSourceMatches,
 } from "../scripts/test-shard-plan.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
@@ -400,6 +406,201 @@ describe("test shard coverage check", () => {
     await expect(assertSuiteInputs({ repoRoot: root })).rejects.toThrow(
       "[test].root must be ./tests"
     );
+  });
+});
+
+describe("pooled layout and focused runs (HACK-1960)", () => {
+  async function sourceRepo(sources: Record<string, string>): Promise<string> {
+    const root = await fixtureRepo({ files: Object.keys(sources) });
+    for (const [path, text] of Object.entries(sources)) {
+      await mkdir(dirname(join(root, path)), { recursive: true });
+      await writeFile(join(root, path), text);
+    }
+    return root;
+  }
+
+  test("parses layouts and focus lists, refusing anything else", () => {
+    expect(parseTestLayout(undefined)).toBe("full");
+    expect(parseTestLayout("full")).toBe("full");
+    expect(parseTestLayout("pooled")).toBe("pooled");
+    for (const invalid of ["", "Pooled", "macos", "pooled,full"]) {
+      expect(() => parseTestLayout(invalid)).toThrow(
+        "--layout must be full or pooled"
+      );
+    }
+    expect(parseTestFocus("docs")).toEqual(["docs"]);
+    expect(parseTestFocus("runtime-core,docs")).toEqual([
+      "docs",
+      "runtime-core",
+    ]);
+    for (const invalid of [
+      "",
+      "docs,",
+      "docs,docs",
+      "rust",
+      "docs runtime-core",
+    ]) {
+      expect(() => parseTestFocus(invalid)).toThrow("--focus must list");
+    }
+  });
+
+  test("maps global shards to the macOS pool first, then the Linux pool", () => {
+    const count = 8;
+    const mapped = Array.from({ length: count }, (_, i) =>
+      pooledSelection({ index: i + 1, count })
+    );
+    expect(mapped.map((entry): string => entry.pool)).toEqual([
+      ...Array.from({ length: POOLED_MACOS_SHARDS }, () => "macos"),
+      ...Array.from({ length: count - POOLED_MACOS_SHARDS }, () => "linux"),
+    ]);
+    // Every pool-local index 1..n appears exactly once.
+    for (const pool of ["macos", "linux"] as const) {
+      const local = mapped.filter((entry) => entry.pool === pool);
+      expect(local.map((entry) => entry.selection.index)).toEqual(
+        Array.from({ length: local.length }, (_, i) => i + 1)
+      );
+      for (const entry of local) {
+        expect(entry.selection.count).toBe(local.length);
+      }
+    }
+    expect(poolPlatform("macos")).toBe("darwin");
+    expect(poolPlatform("linux")).toBe("linux");
+    expect(() =>
+      pooledSelection({ index: 1, count: POOLED_MACOS_SHARDS })
+    ).toThrow("needs more than");
+  });
+
+  test("keeps platform-sensitive files, directly or through test helpers, in the macOS pool", async () => {
+    const root = await sourceRepo({
+      "tests/direct.test.ts":
+        'test.skipIf(process.platform !== "darwin")("x", () => {});\n',
+      "tests/indirect.test.ts": 'import { lsofRows } from "./helpers/lsof";\n',
+      "tests/helpers/lsof.ts": 'export const lsofRows = ["lsof", "-nP"];\n',
+      "tests/product.test.ts": 'import { x } from "../src/x.ts";\n',
+      "src/x.ts": "export const x = process.platform;\n",
+      "tests/plain.test.ts": 'import { expect, test } from "bun:test";\n',
+      "packages/db/tests/smoke.test.ts": "",
+    });
+    const macos = await buildVerifiedPlan({
+      repoRoot: root,
+      count: 1,
+      suites: FIXTURE_SUITES,
+      pool: "macos",
+    });
+    const linux = await buildVerifiedPlan({
+      repoRoot: root,
+      count: 2,
+      suites: FIXTURE_SUITES,
+      pool: "linux",
+    });
+    expect(macos.scope).toEqual([
+      "tests/direct.test.ts",
+      "tests/indirect.test.ts",
+    ]);
+    // Product code is not read: the test decides what it observes.
+    expect(linux.scope).toEqual([
+      "packages/db/tests/smoke.test.ts",
+      "tests/plain.test.ts",
+      "tests/product.test.ts",
+    ]);
+    expectExactPartition({ shards: linux.shards, files: linux.scope });
+    // An explicit entry moves a file the pattern misses.
+    const pinned = await buildVerifiedPlan({
+      repoRoot: root,
+      count: 1,
+      suites: FIXTURE_SUITES,
+      pool: "macos",
+      macosFiles: { "tests/plain.test.ts": "fixture reason" },
+    });
+    expect(pinned.scope).toContain("tests/plain.test.ts");
+  });
+
+  test("focus selects files naming the sources directly, through helpers or scripts, not scenario fixtures", async () => {
+    const root = await sourceRepo({
+      "tests/cli-docs.test.ts": 'const path = "docs/reference/cli.md";\n',
+      "tests/helper-docs.test.ts": 'import { links } from "./helpers/links";\n',
+      "tests/helpers/links.ts": 'export const links = ["README.md"];\n',
+      "tests/script-docs.test.ts": 'import { gen } from "../scripts/gen.ts";\n',
+      "scripts/gen.ts": 'export const gen = join(root, "docs", "x.md");\n',
+      "tests/scenario.test.ts": 'import { fixture } from "./e2e/fixture";\n',
+      "tests/e2e/fixture.ts": 'export const fixture = "README.md";\n',
+      "tests/core.test.ts":
+        'const source = "packages/runtime-core/src/x.rs";\n',
+      "tests/plain.test.ts": "",
+    });
+    const docs = await buildVerifiedPlan({
+      repoRoot: root,
+      count: 1,
+      suites: FIXTURE_SUITES,
+      focus: ["docs"],
+    });
+    expect(docs.scope).toEqual([
+      "tests/cli-docs.test.ts",
+      "tests/helper-docs.test.ts",
+      "tests/script-docs.test.ts",
+    ]);
+    const both = await buildVerifiedPlan({
+      repoRoot: root,
+      count: 1,
+      suites: FIXTURE_SUITES,
+      focus: ["docs", "runtime-core"],
+    });
+    expect(both.scope).toEqual([...docs.scope, "tests/core.test.ts"].sort());
+    await expect(
+      buildVerifiedPlan({
+        repoRoot: root,
+        count: 1,
+        suites: FIXTURE_SUITES,
+        focus: ["docs"],
+        pool: "linux",
+      })
+    ).rejects.toThrow("a pool and a focus cannot combine");
+  });
+
+  test("an import cycle between helpers terminates", async () => {
+    const root = await sourceRepo({
+      "tests/a.test.ts": 'import "./helpers/a";\n',
+      "tests/helpers/a.ts": 'import "./b";\n',
+      "tests/helpers/b.ts": 'import "./a";\n',
+    });
+    expect(
+      await testSourceMatches({
+        repoRoot: root,
+        file: "tests/a.test.ts",
+        pattern: /darwin/,
+      })
+    ).toBe(false);
+  });
+
+  test("the current checkout's CI pools partition every git test file exactly once", async () => {
+    const tracked = listGitTestFiles({ repoRoot });
+    const count = 8;
+    const macos = pooledSelection({ index: 1, count });
+    const linux = pooledSelection({ index: count, count });
+    const macosPlan = await buildVerifiedPlan({
+      repoRoot,
+      count: macos.selection.count,
+      pool: "macos",
+    });
+    const linuxPlan = await buildVerifiedPlan({
+      repoRoot,
+      count: linux.selection.count,
+      pool: "linux",
+    });
+    expectExactPartition({
+      shards: [...macosPlan.shards, ...linuxPlan.shards],
+      files: tracked,
+    });
+    for (const shard of [...macosPlan.shards, ...linuxPlan.shards]) {
+      expect(shard.length).toBeGreaterThan(0);
+    }
+    // The darwin-gated suites stay on macOS.
+    for (const file of [
+      "tests/global-command.macos.test.ts",
+      "tests/native-authored-process-census.test.ts",
+    ]) {
+      expect(macosPlan.scope).toContain(file);
+    }
   });
 });
 
@@ -798,17 +999,26 @@ describe("hosted test CI fan-in", () => {
     const shardJob = (await ciWorkflow()).jobs["test-shard"];
     const matrix = shardJob?.strategy?.matrix?.shard ?? [];
     const count = matrix.length;
-    expect(count).toBeGreaterThanOrEqual(3);
+    expect(count).toBeGreaterThan(POOLED_MACOS_SHARDS);
     expect(matrix).toEqual(Array.from({ length: count }, (_, i) => i + 1));
     expect(shardJob?.strategy?.["fail-fast"]).toBe(false);
     expect(shardJob?.name).toBe(`test shard \${{ matrix.shard }}/${count}`);
-    expect(shardJob?.["runs-on"]).toBe("macos-15");
+    expect(shardJob?.needs).toBe("changes");
+    expect(shardJob?.if).toBe("${{ needs.changes.outputs.suite == 'true' }}");
+    // Full layout: every shard on macOS. Pooled: the macOS pool's shards on
+    // macOS, the rest on Linux; the runner refuses a shard on the wrong host.
+    expect(shardJob?.["runs-on"]).toBe(
+      `\${{ (needs.changes.outputs.test_layout == 'pooled' && matrix.shard > ${POOLED_MACOS_SHARDS}) && 'ubuntu-latest' || 'macos-15' }}`
+    );
     expect(shardJob?.["timeout-minutes"]).toBeLessThan(60);
     const steps = shardJob?.steps ?? [];
     const run = steps.find((step) => step.name === "Tests (shard)");
     expect(run?.env?.HACK_TEST_SHARD).toBe(`\${{ matrix.shard }}/${count}`);
+    expect(run?.env?.HACK_TEST_LAYOUT).toBe(
+      "${{ needs.changes.outputs.test_layout }}"
+    );
     expect(run?.run).toContain(
-      'bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD"'
+      'bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT"'
     );
     const commands = steps.map((step) => step.run ?? step.uses ?? "");
     expect(commands.indexOf("bun run build:config-compiler")).toBeLessThan(
@@ -825,36 +1035,92 @@ describe("hosted test CI fan-in", () => {
     }
     const plan = await buildVerifiedPlan({ repoRoot, count });
     expect(plan.shards).toHaveLength(count);
+    for (let index = 1; index <= count; index += 1) {
+      const pooled = pooledSelection({ index, count });
+      expect(pooled.pool).toBe(
+        index <= POOLED_MACOS_SHARDS ? "macos" : "linux"
+      );
+    }
   });
 
-  test("test accepts success or cancellation and never skips failures", async () => {
+  test("the focus job always reports and runs only for a focused scope", async () => {
+    const focus = (await ciWorkflow()).jobs["test-focus"];
+    expect(focus?.name).toBe("test focus");
+    expect(focus?.needs).toBe("changes");
+    // No job-level condition: a push run must show it as a success, not a skip.
+    expect(focus?.if).toBeUndefined();
+    const steps = focus?.steps ?? [];
+    expect(steps[0]?.if).toBeUndefined();
+    for (const step of steps.slice(1)) {
+      expect(step.if).toBe("${{ needs.changes.outputs.test_focus != '' }}");
+    }
+    const run = steps.find((step) => step.name === "Focused tests");
+    expect(run?.run).toBe(
+      'bun scripts/test-shard.ts run --focus="$TEST_FOCUS"'
+    );
+    expect(steps.map((step) => step.run ?? "")).toContain(
+      "bun run privacy:check"
+    );
+  });
+
+  test("test gates on the job in scope, accepts cancellation and never skips failures", async () => {
     const workflow = await ciWorkflow();
     const fanIn = workflow.jobs.test;
     expect(fanIn?.name ?? "test").toBe("test");
-    expect(fanIn?.needs).toBe("test-shard");
+    expect(fanIn?.needs).toEqual(["changes", "test-shard", "test-focus"]);
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
       (step) => step.name === "Reject failed or skipped test shards"
     );
     expect(gate?.env?.SHARD_RESULT).toBe("${{ needs.test-shard.result }}");
+    expect(gate?.env?.FOCUS_RESULT).toBe("${{ needs.test-focus.result }}");
+    expect(gate?.env?.CHANGES_RESULT).toBe("${{ needs.changes.result }}");
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
     expect(gate?.run).toContain("exit 1");
     if (!gate?.run) {
       throw new Error("Missing aggregate shell gate");
     }
-    for (const [result, exitCode] of [
-      ["success", 0],
-      ["cancelled", 0],
-      ["failure", 1],
-      ["skipped", 1],
-      ["", 1],
-      ["unexpected", 1],
+    // [scope result, suite, focus, shard result, focus result, exit code]
+    for (const [changes, suite, focus, shards, focused, exitCode] of [
+      ["success", "true", "", "success", "success", 0],
+      ["success", "true", "", "cancelled", "success", 0],
+      ["success", "true", "", "failure", "success", 1],
+      ["success", "true", "", "skipped", "success", 1],
+      ["success", "true", "", "", "success", 1],
+      ["success", "true", "", "unexpected", "success", 1],
+      // The no-op focus job must still succeed when the suite runs.
+      ["success", "true", "", "success", "skipped", 1],
+      ["success", "true", "", "success", "failure", 1],
+      // Focused scopes gate on the focus job; skipped shards are expected.
+      ["success", "false", "docs", "skipped", "success", 0],
+      ["success", "false", "docs", "skipped", "cancelled", 0],
+      ["success", "false", "docs", "skipped", "failure", 1],
+      ["success", "false", "docs", "skipped", "skipped", 1],
+      ["success", "false", "", "skipped", "success", 1],
+      ["success", "", "", "skipped", "success", 1],
+      // A failed or skipped scope fails closed; a cancelled run does not.
+      ["failure", "", "", "skipped", "skipped", 1],
+      ["skipped", "", "", "skipped", "skipped", 1],
+      ["", "", "", "skipped", "skipped", 1],
+      ["cancelled", "", "", "skipped", "skipped", 0],
     ] as const) {
       const run = Bun.spawnSync(["bash", "-e", "-c", gate.run], {
-        env: { ...process.env, SHARD_RESULT: result },
+        env: {
+          ...process.env,
+          CHANGES_RESULT: changes,
+          SCOPE: "fixture",
+          SUITE: suite,
+          TEST_FOCUS: focus,
+          SHARD_RESULT: shards,
+          FOCUS_RESULT: focused,
+        },
+        stdout: "ignore",
         timeout: 5000,
       });
-      expect(run.exitCode).toBe(exitCode);
+      expect(
+        run.exitCode,
+        `changes=${changes} suite=${suite} focus=${focus} shards=${shards} focused=${focused}`
+      ).toBe(exitCode);
     }
     const named = Object.entries(workflow.jobs).filter(
       ([key, job]) => (job.name ?? key) === "test"

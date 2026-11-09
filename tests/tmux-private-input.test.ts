@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -73,23 +73,23 @@ test.skipIf(!tmux)(
       });
       expect(created.ok).toBe(true);
       expect(await backend.readLifecycleOwnerToken?.({ name })).toBe(token);
-      // `-u`: without a UTF-8 locale tmux prints control characters in the
-      // value as `_` (HACK-1797); the stored value itself is intact.
+      // Read the session environment through a child, not show-environment's
+      // version-dependent shell escaping or locale-dependent display (HACK-1797).
+      const environmentPath = join(root, `environment-${name}`);
       const environment = await privateExec(
         [
           tmux ?? "tmux",
           "-S",
           socket,
-          "-u",
-          "show-environment",
+          "run-shell",
           "-t",
           name,
-          "FAKE_TEST_VALUE",
+          `/usr/bin/printenv FAKE_TEST_VALUE > '${environmentPath}'`,
         ],
         { stdin: "ignore" }
       );
       expect(environment.exitCode).toBe(0);
-      expect(environment.stdout).toBe(`FAKE_TEST_VALUE=${value}\n`);
+      expect(await readFile(environmentPath, "utf8")).toBe(`${value}\n`);
       expect(
         calls.every(
           (args) =>
@@ -112,6 +112,10 @@ test.skipIf(!tmux)(
       FAKE_TEST_VALUE: value,
     };
     const outputPath = join(root, "injected-values");
+    const bashRc = join(root, "bashrc");
+    // tmux's default shell may be noninteractive Bash, which clears inherited PS1.
+    // Set it in the interactive shell itself, without loading the user's startup files.
+    await writeFile(bashRc, 'PS1="HACK_TEST_READY> "\n');
     // Bash's readonly UID/EUID must not intercept the command's selected environment.
     const bashSession = await privateExec([
       tmux ?? "tmux",
@@ -121,9 +125,11 @@ test.skipIf(!tmux)(
       "-d",
       "-s",
       "readonly",
-      "-e",
-      "PS1=HACK_TEST_READY> ",
-      "/bin/bash --noprofile --norc",
+      "/bin/bash",
+      "--noprofile",
+      "--rcfile",
+      bashRc,
+      "-i",
     ]);
     expect(bashSession.exitCode).toBe(0);
     // A new pane exists before Bash switches its terminal into interactive input mode.
@@ -139,6 +145,7 @@ test.skipIf(!tmux)(
         "-t",
         "readonly",
       ]);
+      expect(pane.exitCode).toBe(0);
       ready = pane.stdout.includes("HACK_TEST_READY>");
       if (!ready) {
         await Bun.sleep(20);

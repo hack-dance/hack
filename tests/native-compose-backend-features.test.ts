@@ -12,6 +12,7 @@ import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "../src/lib/hack-ownership-label
 import {
   composeBackendRefusal,
   findComposeBackendFeatures,
+  hasBasicComposeBuild,
   RESERVED_OWNERSHIP_LABEL_PREFIXES,
   readComposeBackendFeatures,
   refuseNativeComposeBackendFeatures,
@@ -166,6 +167,64 @@ test("builds follow the import preview's basic build path", () => {
   }
 });
 
+test("with native builds enabled, exactly the fields native builds implement pass", () => {
+  const enabled = { buildsEnabled: true } as const;
+  // HACK-1925: args and the other implemented fields reach native build admission,
+  // which reviews values (paths, interpolation, managed secrets) itself.
+  for (const build of [
+    "..",
+    "/absolute/context",
+    { context: "../app", args: { GREETING: "synthetic" } },
+    { context: "..", args: ["A=1"], dockerfile: "Dockerfile", target: "dev" },
+    { context: "../../outside" },
+    { args: { A: "${HOST_VALUE}" } },
+    {},
+  ]) {
+    expect(findComposeBackendFeatures(services({ build }), enabled)).toEqual(
+      []
+    );
+  }
+  for (const service of [
+    { build: { context: "..", platforms: ["linux/amd64"] } },
+    { build: { context: "..", ssh: ["default"] } },
+    { build: { context: "..", secrets: ["token"] } },
+    { build: { context: "..", args: { A: "1" }, cache_from: ["x"] } },
+    { build: "..", image: IMAGE },
+  ]) {
+    expect(findComposeBackendFeatures(services(service), enabled)).toEqual([
+      "unsupported_build",
+    ]);
+  }
+  // Without native builds, today's basic-form classification is unchanged.
+  expect(
+    findComposeBackendFeatures(
+      services({ build: { context: "..", args: { A: "1" } } })
+    )
+  ).toEqual(["unsupported_build"]);
+});
+
+test("the build refusal phrase follows whether native builds are enabled", () => {
+  const features = ["unsupported_build"] as const;
+  expect(composeBackendRefusal({ features, restart: false }).message).toContain(
+    "does not support a Compose build outside the basic context, dockerfile and target form;"
+  );
+  const enabled = composeBackendRefusal({
+    features,
+    restart: false,
+    buildsEnabled: true,
+  }).message;
+  expect(enabled).toContain(
+    "does not support a Compose build field other than context, dockerfile, target and args, or image together with build;"
+  );
+  expect(
+    composeBackendCheckResult({
+      backend: "native",
+      features,
+      buildsEnabled: true,
+    }).message
+  ).toContain("a Compose build field other than context, dockerfile");
+});
+
 test("only the native linux/arm64 platform passes", () => {
   for (const platform of ["linux/arm64", "linux/arm64/v8"]) {
     expect(
@@ -300,6 +359,73 @@ test("doctor reports the same features value-free for each backend", () => {
       composeBackend: { features: [] },
     });
   }
+});
+
+test("doctor names the isolatedNetworks adaptation for an external network", () => {
+  for (const backend of ["native", "compose"] as const) {
+    const result = composeBackendCheckResult({
+      backend,
+      features: ["external_network"],
+    });
+    expect(result.message).toContain("`isolatedNetworks`");
+    expect(result.message).toContain("`HACK_NATIVE_ADAPTATION`");
+    expect(result.composeBackend).toEqual({ features: ["external_network"] });
+  }
+  // Features with no native replacement do not suggest the adaptation.
+  expect(
+    composeBackendCheckResult({
+      backend: "native",
+      features: ["external_volume"],
+    }).message
+  ).not.toContain("isolatedNetworks");
+});
+
+test("doctor warns for a basic build that native image-project up refuses", () => {
+  const native = composeBackendCheckResult({
+    backend: "native",
+    features: [],
+    basicBuild: true,
+  });
+  expect(native).toMatchObject({
+    status: "warn",
+    composeBackend: { features: [], nativeUpRefusals: ["basic_build"] },
+  });
+  expect(native.message).toContain("HACK_NATIVE_BUILDS");
+  expect(native.message).toContain("hack config import --dry-run");
+  expect(native.message).toContain("HACK_RUNTIME_BACKEND=compose");
+  const compose = composeBackendCheckResult({
+    backend: "compose",
+    features: [],
+    basicBuild: true,
+  });
+  expect(compose.status).toBe("ok");
+  expect(compose.message).toContain("hack config import --dry-run");
+  const both = composeBackendCheckResult({
+    backend: "native",
+    features: ["external_volume"],
+    basicBuild: true,
+  });
+  expect(both.status).toBe("warn");
+  expect(both.message).toContain("basic Compose build");
+  expect(both.composeBackend.nativeUpRefusals).toEqual(["basic_build"]);
+  expect(
+    composeBackendCheckResult({ backend: "native", features: [] })
+      .composeBackend
+  ).toEqual({ features: [] });
+});
+
+test("basic build detection matches the import preview's basic form", () => {
+  for (const build of ["..", ".", { context: "../app" }, {}]) {
+    expect(hasBasicComposeBuild(services({ build }))).toBe(true);
+  }
+  for (const service of [
+    { image: IMAGE },
+    { build: { context: "..", args: { A: "1" } } },
+    { build: "..", image: IMAGE },
+  ]) {
+    expect(hasBasicComposeBuild(services(service))).toBe(false);
+  }
+  expect(hasBasicComposeBuild(null)).toBe(false);
 });
 
 const ADAPTATION_REFUSAL =

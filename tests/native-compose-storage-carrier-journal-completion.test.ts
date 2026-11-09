@@ -79,7 +79,7 @@ async function fixture(recordCreated = true) {
       kernelAbi: 1,
       platform: "linux/arm64",
       imageId: `sha256:${"e".repeat(64)}`,
-      bunVersion: "1.4.2",
+      bunVersion: "1.4.4",
       bunHash: "e".repeat(64),
       libcHash: "f".repeat(64),
       helperHash: "e".repeat(64),

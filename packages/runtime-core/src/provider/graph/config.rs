@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 
 /// Common bounded container isolation. Input-family lowering owns all overrides;
 /// this does not select an image, grant ownership or authorize engine effects.
+/// Every capability is dropped here; only Compose-file lowering adds the explicit
+/// Docker default profile (`project::capabilities`). Authored native services and
+/// their persistent-data policy keep this empty set.
 pub(super) fn container_base(image: &str, labels: Value) -> Value {
     json!({"Image":image,"Labels":labels,"HostConfig":{
         "NetworkMode":"none","Memory":0,"NanoCpus":0,
@@ -16,12 +19,53 @@ pub(super) fn container_base(image: &str, labels: Value) -> Value {
 pub(super) struct Prepared {
     pub graph: Graph,
     pub cache_initializers: BTreeMap<String, String>,
+    /// Earlier whole-document identities of this review's cache volumes, keyed by
+    /// logical volume. Only [`retain_recorded_legacy_caches`] may select one.
+    pub legacy_caches: BTreeMap<String, dependency_cache::CacheBinding>,
     pub configs: BTreeMap<String, Value>,
     pub probes: BTreeMap<String, super::super::http_probe::HttpProbe>,
     pub resources: BTreeMap<String, Resource>,
     pub namespace: String,
     pub plan_id: String,
 }
+/// A receipt recorded before cache identities bound only the initializer's own
+/// definition keeps its exact cache volume while the review still resolves to
+/// that recorded identity under the earlier formula. Nothing else is projected:
+/// a changed input yields a different legacy identity and the current one stays.
+pub(super) fn retain_recorded_legacy_caches(prepared: &mut Prepared, receipt: &Receipt) {
+    let mut renamed = BTreeMap::new();
+    for (volume, legacy) in &prepared.legacy_caches {
+        let key = format!("volume:{volume}");
+        let Some(resource) = prepared.resources.get_mut(&key) else {
+            continue;
+        };
+        if resource.cache.as_ref() == Some(legacy)
+            || receipt
+                .resources
+                .get(&key)
+                .and_then(|old| old.cache.as_ref())
+                != Some(legacy)
+        {
+            continue;
+        }
+        renamed.insert(resource.name.clone(), legacy.name());
+        resource.name = legacy.name();
+        resource.cache = Some(legacy.clone());
+    }
+    if renamed.is_empty() {
+        return;
+    }
+    for config in prepared.configs.values_mut() {
+        if let Some(mounts) = config["HostConfig"]["Mounts"].as_array_mut() {
+            for mount in mounts.iter_mut().filter(|m| m["Type"] == "volume") {
+                if let Some(name) = mount["Source"].as_str().and_then(|s| renamed.get(s)) {
+                    mount["Source"] = json!(name);
+                }
+            }
+        }
+    }
+}
+
 /// After source replay admission, preserve the original graph ownership identity
 /// on restored requests. Never change resource names, images, routes or cache keys.
 pub(super) fn retain_replay_ownership(
@@ -44,6 +88,7 @@ fn retain_ownership(
     receipt: &Receipt,
     change: Option<&hostname_change::Verified>,
 ) -> Result<(), CandidateError> {
+    retain_recorded_legacy_caches(prepared, receipt);
     let same = change.map_or_else(
         || same_resource_bindings(&prepared.resources, &receipt.resources),
         |change| change.matches_resources(&prepared.resources, receipt),
@@ -88,7 +133,7 @@ fn retain_ownership(
 fn unsupported() -> CandidateError {
     error(
         "graph_subset",
-        "Graph driver requires pinned images, explicit managed environment delivery, internal networks, named volumes and no automatic restart; build, unbound/writable source, port, label and logging overrides remain gated.",
+        "Graph driver requires pinned images, explicit managed environment delivery, internal networks and named volumes; build, unbound/writable source, port, label and logging overrides remain gated.",
     )
 }
 pub(super) fn prepare(
@@ -112,6 +157,73 @@ pub(super) struct DeliveryOptions {
     pub environment: bool,
     pub dependency_hosts: bool,
     pub routing_enrolled: bool,
+    pub loopback_ports: bool,
+}
+/// Most loopback publications one graph may own. Each uses one application
+/// bridge slot and one host listener, shared with route bridges.
+pub(super) const MAX_LOOPBACK_PORTS: usize = 16;
+
+fn port_refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
+    error("graph_port_publication", message)
+}
+
+/// Admit reviewed Compose `ports` of active services as owned host-loopback TCP
+/// publications. Only the foreground owner, which starts and retires the host
+/// publishers, admits them; every other path keeps refusing `ports` with
+/// `graph_subset`. Review already narrowed all-interface bindings to loopback.
+pub(super) fn loopback_publications(
+    plan: &project::PlanData,
+    enabled: bool,
+) -> Result<BTreeMap<String, Vec<LoopbackPort>>, CandidateError> {
+    let mut result = BTreeMap::new();
+    if !enabled {
+        return Ok(result);
+    }
+    let mut host_ports = BTreeSet::new();
+    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+        let mut ports = Vec::new();
+        for port in &service.ports {
+            if port.protocol != "tcp" {
+                return Err(port_refused(
+                    "Native publishes only TCP ports; keep UDP publication on the Compose backend.",
+                ));
+            }
+            if port.proposed_host_ip != "127.0.0.1" {
+                return Err(port_refused(
+                    "Native publishes ports only on IPv4 loopback (127.0.0.1); IPv6 loopback publication is not available yet.",
+                ));
+            }
+            let Some(host_port) = port.published else {
+                return Err(port_refused(
+                    "Native requires an explicit published host port; an engine-assigned host port is not modeled.",
+                ));
+            };
+            if service.network_mode != "project-networks" || service.networks.is_empty() {
+                return Err(port_refused(
+                    "A published port requires a service attached to a project network.",
+                ));
+            }
+            if !host_ports.insert(host_port) {
+                return Err(port_refused(
+                    "Two active publications request the same host port.",
+                ));
+            }
+            ports.push(LoopbackPort {
+                host_port,
+                target: port.target,
+            });
+        }
+        ports.sort();
+        if !ports.is_empty() {
+            result.insert(name.clone(), ports);
+        }
+    }
+    if host_ports.len() > MAX_LOOPBACK_PORTS {
+        return Err(port_refused(
+            "At most 16 published ports fit one native graph.",
+        ));
+    }
+    Ok(result)
 }
 pub(super) fn prepare_delivery(
     inputs: ExecutionInputs,
@@ -125,6 +237,7 @@ pub(super) fn prepare_delivery(
         environment: delivery,
         dependency_hosts,
         routing_enrolled,
+        loopback_ports,
     } = options;
     if inputs.requires_managed_environment() && !delivery {
         return Err(unsupported());
@@ -148,6 +261,12 @@ pub(super) fn prepare_delivery(
                 "Dependency cache initializers require successful completion readiness.",
             ));
         }
+        if service.one_shot && graph.services[name].ready != Condition::Completed {
+            return Err(error(
+                "graph_one_shot_readiness",
+                "One-shot services require successful completion readiness.",
+            ));
+        }
     }
     if graph.services.len() > MAX_SERVICES {
         return Err(error(
@@ -155,7 +274,10 @@ pub(super) fn prepare_delivery(
             "At most 32 services fit this driver profile; aggregate resource limits also apply.",
         ));
     }
-    let caches = if plan
+    let dependency_cache::Resolved {
+        current: caches,
+        legacy: legacy_caches,
+    } = if plan
         .services
         .values()
         .any(|service| service.active && service.dependency_cache.is_some())
@@ -170,24 +292,50 @@ pub(super) fn prepare_delivery(
             || dependency_cache::scope(&plan.source),
             |scope| scope.scope(&plan.source),
         )?;
-        dependency_cache::resolve(
+        dependency_cache::resolve_with_legacy(
             plan,
             source.current_manifest.as_ref().unwrap_or(&source.manifest),
             &scope,
             &inputs.services,
         )?
     } else {
-        BTreeMap::new()
+        dependency_cache::Resolved {
+            current: BTreeMap::new(),
+            legacy: BTreeMap::new(),
+        }
     };
+    let publications = loopback_publications(plan, loopback_ports)?;
+    // Restart policies lower to the engine's own policy only for service classes
+    // whose guards do not depend on a single container incarnation.
+    let mut restart_policies = BTreeMap::new();
+    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+        if let Some(policy) = super::restart_policy::admit(&super::restart_policy::Admission {
+            service,
+            ready: graph.services[name].ready,
+            managed_environment: inputs.service_requires_managed_environment(name),
+            host_dependencies: !service.extra_hosts.is_empty()
+                || inputs
+                    .services
+                    .get(name)
+                    .is_some_and(|values| !values.extra_hosts.is_empty()),
+        })? {
+            restart_policies.insert(name.clone(), policy);
+        }
+    }
     let mut networks = BTreeSet::new();
     let mut volumes = BTreeSet::new();
     let mut total_memory = 0u64;
     let mut total_cpus = 0f64;
     for service in plan.services.values().filter(|s| s.active) {
-        if service.restart != "no"
-            || !service.ports.is_empty()
+        if (!service.ports.is_empty() && !loopback_ports)
             || service.labels.keys().any(|key| {
                 !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
+                    && !(service.one_shot && key == "hack.service.one-shot")
+                    // Inert hostname declarations carry no traffic; they never
+                    // reach the engine (graph labels are ownership-only).
+                    && !(service.inert_route_labels
+                        && service.routing.is_none()
+                        && matches!(key.as_str(), "caddy" | "caddy.tls"))
                     && !(service.dependency_cache.is_some()
                         && matches!(
                             key.as_str(),
@@ -199,10 +347,10 @@ pub(super) fn prepare_delivery(
             })
             || service.logging.is_some()
             || service.image.as_deref().is_none_or(|v| !image_id(v))
-            || service
-                .platform
-                .as_deref()
-                .is_some_and(|p| !["linux/arm64", "linux/arm64/v8"].contains(&p))
+            || service.platform.as_deref().is_some_and(|p| {
+                !(["linux/arm64", "linux/arm64/v8"].contains(&p)
+                    || (p == "linux/amd64" && service.amd64_emulation.is_some()))
+            })
         {
             return Err(unsupported());
         }
@@ -283,7 +431,7 @@ pub(super) fn prepare_delivery(
     {
         return Err(error(
             "graph_budget",
-            "Graph exceeds 32 networks, eight volumes, four CPUs or the development guest memory reservation budget.",
+            "Graph exceeds 32 networks, 16 volumes, four CPUs or the development guest memory reservation budget.",
         ));
     }
     let mut resources = BTreeMap::new();
@@ -305,11 +453,13 @@ pub(super) fn prepare_delivery(
             }
             let resource = Resource {
                 routing: None,
+                loopback_ports: Vec::new(),
                 networks: None,
                 outbound: kind == Kind::Network && !plan.networks[&key].internal,
                 cache: cache.cloned(),
                 cache_provenance: None,
                 disposable_caches,
+                restart_policy: None,
                 kind,
                 key: key.clone(),
                 name: cache.map_or_else(
@@ -319,6 +469,7 @@ pub(super) fn prepare_delivery(
                 id: None,
                 image: None,
                 phase: "reserved".into(),
+                amd64_emulation: None,
             };
             resources.insert(format!("{}:{key}", kind.word()), resource);
         }
@@ -330,17 +481,20 @@ pub(super) fn prepare_delivery(
         let image = service.image.as_ref().expect("checked image");
         let resource = Resource {
             routing: service.routing.clone(),
+            loopback_ports: publications.get(name).cloned().unwrap_or_default(),
             networks: Some(service.networks.clone()),
             outbound: false,
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: restart_policies.get(name).copied(),
             kind: Kind::Container,
             key: name.clone(),
             name: format!("hkg-{run}-container-{index}"),
             id: None,
             image: Some(image.clone()),
             phase: "reserved".into(),
+            amd64_emulation: service.amd64_emulation,
         };
         let labels = labels(
             owner,
@@ -393,6 +547,8 @@ pub(super) fn prepare_delivery(
         // Writable roots are container-owned layers, not writable source binds.
         // Their contents are discarded when the container is removed; durable data uses named volumes.
         let mut config = container_base(image, labels);
+        config["HostConfig"]["RestartPolicy"] =
+            super::restart_policy::RestartPolicy::engine(resource.restart_policy.as_ref());
         for (field, value) in [
             ("NetworkMode", json!(network)),
             ("Memory", json!(service.limits.memory_bytes.unwrap_or(0))),
@@ -421,15 +577,22 @@ pub(super) fn prepare_delivery(
         if service.read_only {
             config["HostConfig"]["Tmpfs"] = json!({"/tmp":"rw,noexec,nosuid,size=16777216"});
         }
+        // Compose-file services get Docker's default capability set adjusted by the
+        // reviewed cap_add/cap_drop, emitted explicitly after CapDrop ALL so the request
+        // never depends on the engine's implicit default. no-new-privileges stays set.
+        let mut capabilities = project::capabilities::effective(service.capabilities.as_ref())?;
         // Virtiofs preserves the host uid. Root services need DAC_OVERRIDE to
-        // traverse/write an explicitly shared tree owned by that uid. Read-only
-        // mounts still enforce read-only access; no other capabilities are added.
+        // traverse/write an explicitly shared tree owned by that uid, so it is kept
+        // even when cap_drop removes it. Read-only mounts still enforce read-only access.
         if source.is_some_and(|s| s.binding.shared.is_some())
             && service.dependency_cache.is_none()
             && service.mounts.iter().any(|m| m.kind == "bind")
+            && !capabilities.iter().any(|name| name == "CAP_DAC_OVERRIDE")
         {
-            config["HostConfig"]["CapAdd"] = json!(["DAC_OVERRIDE"]);
+            capabilities.push("CAP_DAC_OVERRIDE".into());
+            capabilities.sort();
         }
+        config["HostConfig"]["CapAdd"] = json!(capabilities);
         // Only explicitly compiled public values enter engine metadata. Bare/null
         // managed inputs are delivered separately by the private launcher.
         // Omit Env when empty so image defaults remain the engine's responsibility.
@@ -479,6 +642,19 @@ pub(super) fn prepare_delivery(
         }
         if let Some(dir) = &service.working_dir {
             config["WorkingDir"] = json!(dir);
+        }
+        // Compose `stdin_open` keeps stdin open so it never reaches EOF. Host
+        // input is never attached and no pseudo-terminal is allocated, even for
+        // `tty: true` (reviewed with a warning), so logs stay multiplexed.
+        if service
+            .interactive
+            .as_ref()
+            .is_some_and(|interactive| interactive.stdin_open)
+        {
+            config["OpenStdin"] = json!(true);
+            config["StdinOnce"] = json!(false);
+            config["AttachStdin"] = json!(false);
+            config["Tty"] = json!(false);
         }
         if let Some(signal) = &service.stop_signal {
             config["StopSignal"] = json!(signal);
@@ -555,6 +731,7 @@ pub(super) fn prepare_delivery(
         .collect();
     Ok(Prepared {
         cache_initializers,
+        legacy_caches,
         graph,
         configs,
         probes,
@@ -739,5 +916,88 @@ mod network_tests {
                 .len(),
             MAX_NETWORKS
         );
+    }
+}
+
+#[cfg(test)]
+mod compose_field_tests {
+    use super::*;
+    use crate::{Candidate, project::PlanOptions};
+    use std::path::Path;
+
+    fn prepared(document: &Value) -> Result<Prepared, CandidateError> {
+        let fixture = super::super::tests::Fixture::new();
+        let candidate_root = super::super::tests::Fixture::new();
+        let candidate = Candidate::discover(&candidate_root.0).unwrap();
+        state::write(&fixture.0.join("compose.yaml"), document).unwrap();
+        let options = || PlanOptions {
+            branch: None,
+            project: &fixture.0,
+            compose_file: Path::new("compose.yaml"),
+            profiles: &[],
+        };
+        let review = project::plan(&candidate, options())?;
+        let inputs =
+            project::inputs::compile(&candidate, options(), &review.plan_id, &BTreeMap::new())?;
+        prepare(
+            inputs,
+            &BTreeMap::from([("web".into(), Condition::Started)]),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+        )
+    }
+
+    fn document(web: Value) -> Value {
+        let mut service = json!({"image":format!("sha256:{}","a".repeat(64)),"command":["/bin/app"],"networks":["private"]});
+        for (key, value) in web.as_object().unwrap() {
+            service[key] = value.clone();
+        }
+        json!({"services":{"web":service},"networks":{"private":{"internal":true}}})
+    }
+
+    #[test]
+    fn stdin_open_keeps_unattached_stdin_and_never_allocates_a_terminal() {
+        for (fields, open) in [
+            (json!({"stdin_open":true}), true),
+            (json!({"stdin_open":true,"tty":true}), true),
+            (json!({"tty":true}), false),
+            (json!({}), false),
+        ] {
+            let prepared = prepared(&document(fields.clone())).unwrap();
+            let config = &prepared.configs["web"];
+            if open {
+                assert_eq!(config["OpenStdin"], true, "{fields}");
+                assert_eq!(config["StdinOnce"], false);
+                assert_eq!(config["AttachStdin"], false);
+                assert_eq!(config["Tty"], false);
+            } else {
+                for key in ["OpenStdin", "StdinOnce", "AttachStdin", "Tty"] {
+                    assert!(config.get(key).is_none(), "{fields} {key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inert_route_labels_are_admitted_without_a_route_and_partial_forms_refuse() {
+        let inert = prepared(&document(
+            json!({"labels":{"caddy":"web.example","caddy.tls":"internal"}}),
+        ))
+        .unwrap();
+        assert!(inert.resources["container:web"].routing.is_none());
+        let labels = inert.configs["web"]["Labels"].as_object().unwrap();
+        assert!(labels.keys().all(|key| !key.starts_with("caddy")));
+        for labels in [
+            json!({"caddy":"web.example"}),
+            json!({"caddy.tls":"internal"}),
+            json!({"caddy":"web.example","caddy.tls":"internal","caddy.header":"x"}),
+            json!({"caddy":"web.example","caddy.tls":"internal","hack.owner":"x"}),
+        ] {
+            let error = prepared(&document(json!({ "labels": labels })))
+                .err()
+                .unwrap();
+            assert_eq!(error.code, "execution_incompatible", "{labels}");
+        }
     }
 }

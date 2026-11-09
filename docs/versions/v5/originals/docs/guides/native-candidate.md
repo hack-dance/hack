@@ -641,7 +641,7 @@ explicit native selections described below. Existing
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;
 workspace installs that write elsewhere still require explicit volume mappings.
-An isolated Event Agent trial reached 14-service native readiness, completed Google
+An isolated trial of a real 14-service application reached native readiness, completed Google
 sign-in, and rendered authenticated search results and images over browser-trusted
 HTTPS. A normal `restart` kept its run and Redis data after a source edit. This does
 not establish every application workflow, crash recovery or comparative performance.
@@ -763,7 +763,7 @@ without blocking owned cleanup. Missing or malformed delivery refuses, as do
 values for another service; ordinary graph startup environment delivery retains
 its nonempty requirement.
 
-The running-project noninteractive path has a live Event Agent smoke check:
+The running-project noninteractive path has a live smoke check against a real multi-service application:
 `hack run www -- bun --version` completed after a same-run restart, and a command
 exiting 7 returned its stdout and exit status. Both left no job resource and
 preserved the healthy parent graph and its volume identities. An

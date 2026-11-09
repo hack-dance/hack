@@ -44,6 +44,22 @@ test("repair requires both an exact inspection selection and explicit legacy acc
   }
 });
 
+test("foreign-home release requires the exact selection and refuses device-rebind acceptance", () => {
+  expect(
+    parse({ action: "release", expectSelection: selected, otherOptions: false })
+  ).toEqual({ action: "release", expectSelection: selected });
+  for (const options of [
+    {},
+    { expectSelection: "a".repeat(63) },
+    { expectSelection: `${selected}\n` },
+    { expectSelection: selected, acceptLegacyDeviceRebind: true },
+  ]) {
+    expect(() =>
+      parse({ action: "release", ...options, otherOptions: false })
+    ).toThrow("Run-mapping release requires");
+  }
+});
+
 test("unknown actions and orphaned selectors refuse before project lookup", () => {
   expect(() => parse({ action: "force", otherOptions: false })).toThrow(
     "requires"
@@ -60,7 +76,7 @@ test("unknown actions and orphaned selectors refuse before project lookup", () =
 });
 
 test("mapping migration cannot combine with ordinary repair, domain or browser flows", () => {
-  for (const action of ["inspect", "repair"]) {
+  for (const action of ["inspect", "repair", "release"]) {
     expect(() =>
       parse({
         action,

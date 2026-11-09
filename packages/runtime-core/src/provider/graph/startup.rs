@@ -188,6 +188,12 @@ pub(super) trait Driver {
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         Ok(())
     }
+    /// Services whose process this driver wraps behind its release barrier.
+    /// Their inherited image process is materialized before admission, exactly
+    /// as for private environment delivery, so the wrapper runs what Docker would.
+    fn process_services(&self) -> std::collections::BTreeSet<String> {
+        std::collections::BTreeSet::new()
+    }
     fn validate_inputs(
         &self,
         inputs: &project::inputs::ExecutionInputs,
@@ -298,7 +304,9 @@ pub(super) fn attach(
             return Err(dependency_hosts::refused());
         }
         // Docker applies this only inside the isolated container network namespace.
-        // The helper retains the application's numeric UID and all capabilities stay dropped.
+        // The helper retains the application's numeric UID. CapDrop ALL proves the
+        // capability set is the explicit lowered profile (CapAdd), never an implicit
+        // engine default; this adds no capability.
         config["HostConfig"]["Sysctls"] = json!({"net.ipv4.ip_unprivileged_port_start":"0"});
     }
     for mount in config["HostConfig"]["Mounts"]

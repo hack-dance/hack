@@ -63,6 +63,15 @@ impl CacheProvenance {
                     && bounded(&c.finished_at)
             })
     }
+    /// Keep only initializers the reconciled graph still declares. The volume
+    /// identity fence is unchanged; removed services' history is dropped so the
+    /// receipt never names a container it no longer records.
+    pub(super) fn retain_initializers(&mut self, mut present: impl FnMut(&str) -> bool) {
+        self.initializers.retain(|service| present(service));
+        let initializers = &self.initializers;
+        self.completed
+            .retain(|service, _| initializers.contains(service));
+    }
     pub(super) fn needs_completion(&self, service: &str) -> bool {
         self.origin == Origin::CreatedHere
             && self.initializers.contains(service)
@@ -276,18 +285,21 @@ mod tests {
     }
     fn container() -> Resource {
         Resource {
+            loopback_ports: Vec::new(),
             routing: None,
             networks: None,
             outbound: false,
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Container,
             key: "deps".into(),
             name: "owned".into(),
             id: Some("a".repeat(64)),
             image: Some(format!("sha256:{}", "b".repeat(64))),
             phase: "started".into(),
+            amd64_emulation: None,
         }
     }
     fn terminal() -> Value {
@@ -368,18 +380,21 @@ mod tests {
             image: format!("sha256:{}", "d".repeat(64)),
         };
         let volume = Resource {
+            loopback_ports: Vec::new(),
             routing: None,
             networks: None,
             outbound: false,
             cache: Some(cache.clone()),
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Volume,
             key: "data".into(),
             name: cache.name(),
             id: None,
             image: None,
             phase: "created".into(),
+            amd64_emulation: None,
         };
         let mut receipt = Receipt {
             normalized_input: None,

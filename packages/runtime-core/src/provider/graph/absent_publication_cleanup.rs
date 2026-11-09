@@ -316,6 +316,8 @@ fn current_owner(
         || owner.storage.as_ref() != Some(&inspection.storage)
         || owner.overlay.as_ref() != Some(&inspection.overlay)
         || owner.project_share != inspection.project_share
+        // Legacy migration is defined only for a single-root pool.
+        || !owner.additional_project_shares.is_empty()
         || pool.ino() != inspection.pool_inode
         || pool.dev() != inspection.new_device
     {

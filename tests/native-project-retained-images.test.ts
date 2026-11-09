@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { confirmedNativeRetainedGraph } from "../src/backends/native-project-retained.ts";
 import {
   selectNativeActiveImages,
   selectNativeRetainedImages,
@@ -60,6 +61,54 @@ test("unchanged retained input selects verified content IDs without resolving ta
   ]);
 });
 
+function withRetainedPolicy<T extends ReturnType<typeof observation>>(
+  observed: T,
+  policy: unknown
+): T {
+  return {
+    ...observed,
+    receipt: {
+      ...observed.receipt,
+      resources: {
+        ...observed.receipt.resources,
+        "container:web": {
+          ...observed.receipt.resources["container:web"],
+          amd64_emulation: policy,
+        },
+      },
+    },
+  };
+}
+test("retained images are reused only under the platform policy they were selected with", async () => {
+  const cases = [
+    // [retained receipt policy, current policy, reused]
+    [undefined, undefined, true],
+    ["prefer-native", "prefer-native", true],
+    ["amd64", "amd64", true],
+    ["prefer-native", "amd64", false],
+    ["amd64", "prefer-native", false],
+    [undefined, "amd64", false],
+    ["prefer-native", undefined, false],
+  ] as const;
+  for (const [retained, current, reused] of cases) {
+    const selected = await selectNativeRetainedImages({
+      ...options,
+      amd64Emulation: current === undefined ? undefined : { web: current },
+      invoke: async () => withRetainedPolicy(observation(), retained),
+    });
+    expect([...selected]).toEqual(reused ? [["web", image]] : []);
+  }
+  // A receipt value that is not a reviewed policy refuses.
+  for (const invalid of [true, false, "native", null]) {
+    await expectClosedRefusal(
+      selectNativeRetainedImages({
+        ...options,
+        invoke: async () => withRetainedPolicy(observation(), invalid),
+      }),
+      "Native retained image identity is invalid; no images were resolved."
+    );
+  }
+});
 function activeObservation() {
   const baseline = observation();
   return {
@@ -117,6 +166,24 @@ test("active images use fresh native authority, including completed initializers
     "inspect",
     "run-selection",
   ]);
+});
+test("active images are not reused after a service's platform policy changed", async () => {
+  for (const [retained, current] of [
+    ["prefer-native", "amd64"],
+    ["amd64", "amd64"],
+  ] as const) {
+    const selected = await selectNativeActiveImages({
+      ...options,
+      amd64Emulation: { web: current },
+      invoke: async ({ args }) =>
+        args[1] === "inspect"
+          ? withRetainedPolicy(activeObservation(), retained)
+          : activeSelection(),
+    });
+    expect([...selected.images]).toEqual(
+      retained === current ? [["web", image]] : []
+    );
+  }
 });
 test("active edited or legacy input receives no old image pins", async () => {
   const legacy = activeObservation();
@@ -405,4 +472,96 @@ test("malformed provenance or image and mismatched resource keys refuse reuse", 
         : "image selection changed"
     );
   }
+});
+
+test("a reconciled stopped graph's never-created volume must be absent, settled data present", () => {
+  const baseline = observation();
+  const reconciled = {
+    ...baseline,
+    receipt: {
+      ...baseline.receipt,
+      resources: {
+        ...baseline.receipt.resources,
+        "volume:added": { kind: "volume", key: "added", phase: "reserved" },
+      },
+    },
+    observations: {
+      ...baseline.observations,
+      "volume:added": { state: "absent" },
+    },
+  };
+  expect(confirmedNativeRetainedGraph(reconciled, saved)).toBe(true);
+  expect(
+    confirmedNativeRetainedGraph(
+      {
+        ...reconciled,
+        observations: {
+          ...reconciled.observations,
+          "volume:added": { state: "present" },
+        },
+      },
+      saved
+    )
+  ).toBe(false);
+  expect(
+    confirmedNativeRetainedGraph(
+      {
+        ...reconciled,
+        observations: {
+          ...reconciled.observations,
+          "volume:data": { state: "absent" },
+        },
+      },
+      saved
+    )
+  ).toBe(false);
+});
+test("restart of a stopped graph points at up instead of reporting image drift", async () => {
+  await expectClosedRefusal(
+    selectNativeActiveImages({
+      ...options,
+      invoke: async () => observation(),
+    }),
+    "stopped with data retained. Run hack up"
+  );
+});
+
+test("a reconciled graph's reserved shared cache may already exist; reserved run data may not", () => {
+  const baseline = observation();
+  const withCache = (state: string, cache: boolean) => ({
+    ...baseline,
+    receipt: {
+      ...baseline.receipt,
+      resources: {
+        ...baseline.receipt.resources,
+        "volume:deps": {
+          kind: "volume",
+          key: "deps",
+          phase: "reserved",
+          ...(cache
+            ? {
+                cache: {
+                  scope: "1".repeat(64),
+                  fingerprint: "2".repeat(64),
+                  image,
+                },
+              }
+            : {}),
+        },
+      },
+    },
+    observations: { ...baseline.observations, "volume:deps": { state } },
+  });
+  expect(confirmedNativeRetainedGraph(withCache("present", true), saved)).toBe(
+    true
+  );
+  expect(confirmedNativeRetainedGraph(withCache("absent", true), saved)).toBe(
+    true
+  );
+  expect(confirmedNativeRetainedGraph(withCache("unknown", true), saved)).toBe(
+    false
+  );
+  expect(confirmedNativeRetainedGraph(withCache("present", false), saved)).toBe(
+    false
+  );
 });

@@ -19,7 +19,7 @@ cannot meet this protocol is reported as inconclusive, not adjusted after the fa
 ## Artifacts
 
 Every lane runs an exact released artifact, installed into its own isolated home and
-state paths. A lane never uses whatever `hack` is on `PATH`; the M3 host currently has
+state paths. A lane never uses whatever `hack` is on `PATH`; the benchmark host currently has
 4.2.0 installed, and that installation is not a lane. Before each cohort, the harness
 must verify the SHA-256 digest of each downloaded asset and record the executable's
 reported version. A mismatch refuses the cohort.
@@ -50,7 +50,7 @@ read from the host on 2026-10-19:
 
 Before each cohort, the harness records these values again. If any of them differs,
 the cohort is refused and a new revision is needed. Results from another host,
-including the M5 Max development host, are not revision-1 results.
+including other development hosts, are not revision-1 results.
 
 Only one stateful benchmark owner may use the host and its runtimes at a time. Other
 agents' runtime tests, builds and Docker work must not overlap a cohort. Independent
@@ -96,7 +96,7 @@ Two workloads run in every lane, and each workload is compared against every req
 baseline. A cohort records each workload's pin, and every lane in that cohort uses the
 same pin.
 
-**Event Agent.** The actual application configuration, not a reduced copy. The cohort
+**Large application.** The actual application configuration, not a reduced copy. The cohort
 records the application commit and a digest of its configuration. Its expected shape is
 14 services, 9 HTTP health checks and 2 initializers. A different shape refuses the
 cohort until the protocol is revised. Credentials come only through authorized managed

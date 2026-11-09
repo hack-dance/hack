@@ -88,6 +88,10 @@ This does not create an immutable snapshot or publish a new source revision.
 Source consumption requires the provider pool to already contain the exact
 explicitly approved unfiltered project share. The consumer never approves that
 whole-tree writable share, changes pool mounts or enrolls a project implicitly.
+A pool's share set holds its primary root plus up to seven additional roots; a
+graph selects only the share whose root equals its reviewed source. The set
+changes only through the journaled stopped-pool `runtime project-share add|remove`
+update (`provider::share_update`, modeled by `tests/models/tla/multi-root-share`).
 Individual workload binds are read-only and `rprivate`. Selection pins the source
 root, every selected path and its ancestors by device, inode, type, UID and full
 mode; aliases, hardlinked selected files and permission changes refuse. Startup
@@ -245,7 +249,13 @@ retire frontend start/ready/source artifacts or enable ordinary `up` takeover.
 
 Guarded native cleanup checks its retained authority before and after every
 engine observation, removal request and admitted stop batch, including failed
-calls. The existing stop batch retains its concurrent HTTP-stop semantics. Cleanup
+calls. The stop batch sends at most four HTTP stops at a time from one shared
+queue and joins every worker, so 14 or more services do not open one engine
+connection each at once. A connect that fails or times out sent no request, so the
+batch retries it with capped backoff inside the batch deadline and a 30-second
+window from that stop's first connect failure. Once one stop exhausts the window,
+the batch treats the engine as unreachable and later connect failures return at
+once. Any other stop failure is never retried. Cleanup
 checks authority before each journal publication. It also
 checks each private-environment absence and retirement call. A lost guard refuses
 before the next request or journal transition; an already attempted effect remains
@@ -477,6 +487,25 @@ pinned package preparation, ownership, resource admission, lifecycle commands, a
 The default private build includes native HTTP graph probes (local `_docs/docs/plans/v5/native-http-probe-20260915.md`)
 and requires Zig 0.15.2 plus a host C compiler.
 [Provider pins](provider-pins.json) record the exact package inputs; the engine runs inside the VM.
+The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
+image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
+(`provider/image_build.rs`), which builds one Compose-style image in the guest engine
+from a private request file. Its build key, receipts, leases, the `runtime down`
+build fence, cancellation and timeout rules are documented in that module. Egress
+pools give dockerd a fixed default bridge (`10.213.255.0/24`, `icc=false`) that only
+BuildKit `RUN` steps use; `guest-build-network.sh` isolates it from the guest, the host
+gateway and link-local metadata, and the engine client refuses any container create
+that does not name an owned network or `none`. Cold builds need free guest storage
+(at least 6 GiB, or twice the key's last image), successful builds prune BuildKit
+cache to 8 GiB, and `runtime reclaim-build-images` removes only owned, superseded,
+unreferenced images (`provider/image_build/reclaim.rs`; model
+`tests/models/tla/native-build-retention`). Native `up` calls the build operation
+for Compose `build:` services only when `HACK_NATIVE_BUILDS=1` is set. The client reaches
+the engine through a private relay (`provider/image_build/client_relay.rs`): the pinned
+provider's macOS socket forwarding can loop forever when a host client closes a forwarded
+connection while the guest is still sending, which saturated the guest and stopped every later
+agent and engine request. The relay always drains guest bytes, forwards a client's end of
+stream only as a half-close, and closes a provider connection only after the guest ended it.
 
 Three Cargo features build guest helpers with Zig: `native-http-probe`,
 `native-stream-relay` and `environment-launcher`. For each one, [`build.rs`](build.rs)
@@ -498,6 +527,12 @@ tests; Cargo reporting a cached binary as fresh does not qualify that identity.
 native process/disk identity, guest protocol, and lifecycle decisions. Guest requests use a bounded
 connection to the existing socket; they cannot silently start or recover a VM. Failed operations
 retain their phase and receipts. Recovery preserves disks and labels an unclean exit explicitly.
+When the guest agent stops responding (three pings over about 13 seconds start no reply),
+`runtime down` and `runtime recover` stop this home's recorded provider after verifying its PID,
+start time, user and executable, without guest quiescence, and record `recovered-unclean`; a
+guest that answers keeps the normal clean stop, and `recover` still refuses it. Both refuse with
+`provider_busy` while a native image build holds its fence; finishing or canceling that build
+(Ctrl-C its `hack up`) releases the fence, also when a build process was killed.
 
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.
@@ -628,14 +663,16 @@ compatibility window beyond what follows.
   whether it understands a receipt.
 - **Some fields are always written.** `previous_guest_boot_id`, `reclamation`,
   `profile` and `network` are written on every save, as `null` or their default
-  value when unset. `clean_stop`, `project_share`, `application_bridge` and
-  `dependency_sockets` are written only when set.
+  value when unset. `clean_stop`, `project_share`, `application_bridge`,
+  `dependency_sockets` and `amd64_emulation` are written only when set
+  (`amd64_emulation` only when `true`).
 
 Schema history: every current field except `clean_stop` was present in
 `v5.0.0-next.1`. `clean_stop` was added by
 [#344](https://github.com/hack-dance/hack/pull/344) and first shipped in
 `v5.0.0-next.6`. The owner schema is unchanged from `v5.0.0-next.6` through
-`v5.0.0-next.8` and the current `next` branch. What this means in practice:
+`v5.0.0-next.8`. `amd64_emulation` (Rosetta 2 x86_64 translation for the pool's VM)
+was added after `v5.0.0-next.8`. What this means in practice:
 
 - **Upgrade works.** A `next.6` or later binary reads receipts written by `next.1`
   through `next.5`. Those receipts have no clean-stop marker, so their stopped pools
@@ -652,6 +689,11 @@ Schema history: every current field except `clean_stop` was present in
   whose last stop was not a completed clean `down`. The [candidate guide](../../docs/guides/native-candidate.md#manual-candidate-upgrade-and-rollback)
   treats a prior binary refusing newer state as an unsupported downgrade. Keep that
   state as it is and do not edit the receipt.
+- **A translation pool cannot be downgraded.** A pool started with
+  `runtime up --amd64-emulation` records `amd64_emulation: true` before any provider
+  effect and keeps it. Binaries from before that field refuse its receipt with
+  `invalid_receipt`; they would also refuse its provider configuration, which now
+  enables Rosetta. Pools that never opted in write no new field and stay readable.
 - **Future fields follow the same rule.** Under this code, adding an always-written
   field means every earlier binary refuses every receipt the new binary saves. Adding
   a field that is written only when set means earlier binaries refuse only the
@@ -849,7 +891,7 @@ two concurrent routed graphs still require native acceptance. A bounded native
 reference control qualifies one graph with two networks and two declared hostnames:
 both forward real HTTP over Unix publication, followed by authenticated cleanup,
 foreground exit and independently verified resource absence. This does not qualify
-actual Event Agent routing, TLS, two routed graphs, restore, publisher-exit/partial
+real application routing, TLS, two routed graphs, restore, publisher-exit/partial
 startup failure, owner-crash recovery, scale or performance. No global Caddy
 configuration or trust installation is performed by this contract.
 
@@ -914,6 +956,15 @@ selection. Discovery refuses a missing, ambiguous, wildcard, shared or
 wrong-executable listener. It does not authorize a port by itself; `dependency-plan`
 and `serve` recapture the selected process and socket generation.
 
+For a listener started by a process the frontend owns, `graph dependency-discover
+--host-port PORT --ancestor-pid PID --json` returns the one same-user exclusive
+listener on that port only when it is the selected owner process or descends from
+it within eight ancestry links, with its executable, depth and the owner's native
+start time. A listener outside that tree refuses as `host_endpoint_owner`; a
+missing or ambiguous one as `host_endpoint_identity`. The frontend then selects
+`host_executable` and `host_supervisor_depth` plus `host_ancestor_pid` and
+`host_ancestor_start_micros`; review refuses any other anchor at that depth.
+
 Run `graph serve` with the usual `graph run` project/file/plan/run/readiness options,
 plus `--dependencies FILE --expect-dependencies ID`. It remains foreground, prints
 one compact `graph_foreground_ready` JSON line after startup, and prints its final
@@ -970,6 +1021,35 @@ Missing/extra service keys, ownership conflicts and expiry refuse before relay
 construction; fresh admission revalidates project inputs. The existing guest tmpfs
 and startup launcher deliver values under the selected UID/GID. Cleanup retains
 value-free allocation identities and verifies the selected tmpfs has been retired.
+
+Envelope `version: 2` additionally requires a nonempty `files` map from service name
+to one to four members, each `{"name", "target", "mode": "0400", "content_b64"}`. A
+version 1 envelope with `files`, a version 2 envelope without them, and unknown or
+duplicate member fields refuse, so an older runtime refuses file delivery instead of
+dropping it. Names use the service-name alphabet. Targets are absolute, normalized
+container paths outside `/proc`, `/sys`, `/dev`, `/run` and `/var/run`; within one
+service they are unique and never nest. Each member holds 1 to 16 KiB of decoded bytes,
+and the encoded values plus every member of a service share the 32 KiB payload budget.
+A service may receive files without values. Members are decoded into zeroized memory,
+staged in the same per-container tmpfs allocation as `values.json` (directory `files`,
+root-owned 0700; each member owned by the container's numeric UID with mode 0400), and
+bound read-only at their targets. A compiled mount or tmpfs target that equals,
+contains or sits under a member target refuses before effects. Members carry no
+separate deadline: they live as long as the allocation, which is the container's, and
+are retired with it by the existing allocation cleanup. A service with values keeps the
+launcher contract: a numeric user, a non-empty selected process and an exec-form
+`CMD` health test. The selected process is the image or Compose `Entrypoint ++ Cmd`
+(with no entrypoint, `Cmd` alone), and a `CMD-SHELL` test becomes the exec form
+Docker runs (the image `SHELL`, default `/bin/sh -c`). Executables may be bare
+names such as `docker-entrypoint.sh`: the launcher resolves them through the
+container's PATH after applying the environment, as Docker does. Host-dependency
+services get the same materialized process behind their release barrier. Every
+wrapped service is checked before any runtime state is reserved; a refusal keeps
+its code and lists each service and closed field (`entrypoint`, `healthcheck`,
+`user`, `stop_signal`, `mounts`) in `process_refusals`. A files-only service keeps its own process and needs only a numeric image
+or Compose user. Live-owner restore and normalized serve-restore deliver fresh members
+into new allocations. `graph exec` and one-off runs refuse envelopes with files; files
+already in a running container are never re-delivered or renewed.
 
 Expiry prevents new staging or execution; it does not revoke an already-running
 process's environment. Ordinary environment-bound restart/restore still require
@@ -1083,8 +1163,9 @@ Aliasless bindings retain `127.0.0.1`. Named bindings use `127.0.0.(slot+2)` and
 publish those exact addresses through container extra hosts. Applications keep the
 original hostname and selected port; the relay does not terminate TLS or rewrite
 Host/SNI. Separate bindings can therefore use the same destination port. Ports below
-1024 require an isolated graph network namespace, dropped capabilities and the
-container-only `net.ipv4.ip_unprivileged_port_start=0` setting. An isolated native
+1024 require an isolated graph network namespace, the explicitly lowered capability
+profile (`CapDrop: ALL` plus the reviewed `CapAdd` set, never an implicit engine
+default) and the container-only `net.ipv4.ip_unprivileged_port_start=0` setting. An isolated native
 fixture verifies nonroot port 443, original Host/SNI, certificate rejection and
 cleanup. Actual application hostname/TLS acceptance remains open.
 
@@ -1223,6 +1304,25 @@ copy-up; newly created directories use root-owned mode 0755. Applications requir
 other ownership or image-populated volume content need a separate explicit contract.
 Root-only volume mounts without subpaths keep their existing behavior. Native
 workspace installation and engine subpath confinement require separate qualification.
+
+An image that declares `VOLUME` targets is admitted on a Compose-file graph only when
+each declared target is covered by exactly one explicit mount, and that mount is a
+whole (no subpath), writable named volume owned by the same graph receipt. A missing,
+duplicate, read-only, bind, subpath, tmpfs or dependency-cache cover refuses with
+`graph_image_volume_uncovered` before any container is created; a foreign OS,
+architecture or image identity still refuses with `graph_image`. Start, restart,
+restore and one-off share the same predicate, and it reads only reviewed
+configuration, so plan and receipt identities do not change. The engine therefore
+never allocates an anonymous volume for a graph. Because these covers have no subpath,
+Docker copy-up gives a freshly created, empty owned volume the image directory's
+contents, owner and mode; a retained, non-empty volume is mounted unchanged. Copy-up
+runs before a read-only mount applies, so a read-only cover would still receive image
+content, which is why it refuses. No
+capability is added: an image entrypoint that starts as root and changes ownership
+(`chown` followed by a user switch) still fails under the dropped capability set, so
+declare an explicit numeric `user:` matching the image's data user instead. A graph
+may own at most 16 volumes, dependency caches included, beside 32 networks and 32
+services.
 
 Fresh `graph run` or `graph serve` may explicitly select
 `--release-initializer-cache <service>` (repeatable). The service must be a reviewed
@@ -1394,11 +1494,39 @@ changed or uncertain mapping refuses before new graph effects. Earlier candidate
 builds removed the mapping on down; their retained volumes are not guessed or
 silently adopted by a fresh up and require explicit owned-state recovery.
 
+When the reviewed plan changed and the strict replay layout no longer applies,
+`serve-restore` reconciles instead (`provider/graph/plan_reconcile.rs`): after the
+same generation, absence and label checks, compute is prepared exactly as a fresh
+admission would, retained volumes are projected by logical key onto their recorded
+names, newly declared volumes receive unused `reserved` names in this run and are
+created exclusively, and retained volumes the plan no longer declares stay in the
+receipt. Run, owner, namespace and the ownership plan on every label are unchanged.
+`graph source-compatibility` reports `"reconcile": true` for this path. Dependency
+caches reconcile too: a cache whose freshly resolved identity (the initializer's own
+definition and inputs plus every service mount of the cache volume, not the whole
+Compose digest) equals the recorded binding is
+kept with its provenance; a changed identity is selected like a fresh admission
+(adopted by labels or created) with a freshly published source revision, and the old
+shared cache is only released. A cache that a non-initializer service mounts
+read-write (`dependency_cache::instance_scoped_volumes`) binds the plan namespace
+into its scope, so it is never shared across linked worktrees or branch instances;
+such graphs always re-prove the cache through reconciliation, and no earlier
+whole-document identity is matched for them. A retained run-owned volume newly declared as a cache
+refuses with `graph_plan_reconcile` and a `plan_change` diagnostic naming the service
+and field. A receipt recorded under the earlier whole-document identity keeps that
+cache while the review still resolves to it (`config::retain_recorded_legacy_caches`).
+Receipts with live source, a carried cache scope, pending initializer cache release
+or a pending source-device rebind keep the hostname/shared-source proofs; a
+non-hostname edit there refuses with `graph_plan_change_unsupported`. A volume still
+`reserved` in a stopped receipt was never created; selection requires it absent and
+restore creates it, except a reserved dependency cache, which may already exist as a
+shared cache.
+
 Selection binds the receipt, current VM boot and verified current volume
 observations. Restoration rechecks these before effects, requires the old owner
 publication and lock to be retired, and verifies the historical cleanup
-acknowledgment in its original boot context. A changed plan, missing volume,
-active owner, or stale selection is refused. The prior stopped receipt is archived
+acknowledgment in its original boot context. A changed plan outside the
+reconciliation path above, missing volume, active owner, or stale selection is refused. The prior stopped receipt is archived
 before fresh dependency ownership is admitted. This does not enable file-based
 `graph restart`/`restore` or normalized live-owner redelivery, and does not replay
 initializer cache-release effects. Native same-run restoration and cross-boot

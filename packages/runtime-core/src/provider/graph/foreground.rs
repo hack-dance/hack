@@ -79,7 +79,10 @@ pub fn serve_with_environment(
         candidate,
         options,
         runtime,
-        managed,
+        super::ManagedInput {
+            values: managed,
+            files: &super::ManagedFiles::new(),
+        },
         deadline,
         &BTreeMap::new(),
     )
@@ -90,7 +93,7 @@ pub fn serve_with_routes(
     candidate: &Candidate,
     options: RunOptions<'_>,
     runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: super::ManagedInput<'_>,
     deadline: Instant,
     route_slots: &BTreeMap<String, super::RouteSlot>,
 ) -> Result<Receipt, CandidateError> {
@@ -112,7 +115,7 @@ pub fn serve_normalized_with_routes(
     candidate: &Candidate,
     options: super::NormalizedRunOptions<'_>,
     runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: super::ManagedInput<'_>,
     deadline: Instant,
     route_slots: &BTreeMap<String, super::RouteSlot>,
 ) -> Result<Receipt, CandidateError> {
@@ -132,7 +135,7 @@ pub fn serve_restore_normalized_with_routes(
     candidate: &Candidate,
     options: super::NormalizedRunOptions<'_>,
     runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: super::ManagedInput<'_>,
     deadline: Instant,
     route_slots: &BTreeMap<String, super::RouteSlot>,
     generation: &str,
@@ -159,7 +162,12 @@ pub fn restore_selection(candidate: &Candidate, run: &str) -> Result<Value, Cand
     for resource in receipt.resources.values() {
         let observed = super::inspect_resource(&engine, &receipt, resource)?;
         if resource.kind == super::Kind::Volume {
-            if observed.is_none() {
+            // A never-created (`reserved`) volume must be absent; settled data present.
+            // A not-yet-selected shared dependency cache may already exist.
+            let retained = super::plan_reconcile::retained_volume(resource);
+            if (retained && observed.is_none())
+                || (!retained && resource.cache.is_none() && observed.is_some())
+            {
                 return Err(refused());
             }
         } else if resource.phase != "absent" || observed.is_some() {
@@ -187,7 +195,7 @@ fn serve_input<'a>(
     candidate: &Candidate,
     options: RunOptions<'a>,
     mut runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
+    managed: super::ManagedInput<'_>,
     deadline: Instant,
     route_slots: &BTreeMap<String, super::RouteSlot>,
     normalized: Option<(crate::project::NormalizedComposeOptions<'a>, Option<&str>)>,
@@ -195,8 +203,10 @@ fn serve_input<'a>(
     if options.routing_enrolled != !route_slots.is_empty() {
         return Err(refused());
     }
+    let input = managed;
+    let (managed, files) = (input.values, input.files);
     if let Some((compose, _)) = normalized {
-        super::compile_normalized_inputs(
+        let compiled = super::compile_normalized_inputs(
             candidate,
             &super::NormalizedRunOptions {
                 run: redelivery::options(&options),
@@ -204,10 +214,13 @@ fn serve_input<'a>(
             },
             managed,
         )?;
-    } else if !managed.is_empty() {
+        if !files.is_empty() {
+            super::pending_environments(&compiled, files, deadline)?;
+        }
+    } else if !managed.is_empty() || !files.is_empty() {
         // Refuse invalid scoped ownership or payload before publishing an owner.
         // Runtime admission compiles again to detect intervening project changes.
-        super::compile_environment_inputs_until(candidate, &options, managed, deadline)?;
+        super::compile_environment_inputs_until(candidate, &options, managed, files, deadline)?;
     }
     let run_id = options.run_id.to_owned();
     let fresh_generation = normalized.and_then(|(_, generation)| generation);
@@ -236,7 +249,7 @@ fn serve_input<'a>(
                 run: redelivery::options(&options),
                 compose,
             },
-            managed,
+            input,
             deadline,
             &mut runtime,
             generation,
@@ -251,6 +264,7 @@ fn serve_input<'a>(
             },
             &mut runtime,
             managed,
+            files,
             deadline,
         )
     } else {
@@ -259,6 +273,7 @@ fn serve_input<'a>(
             redelivery::options(&options),
             &mut runtime,
             managed,
+            files,
             deadline,
         )
     };
@@ -266,6 +281,9 @@ fn serve_input<'a>(
     let receipt = match attempt {
         Ok(receipt) => receipt,
         Err(error) => {
+            // Read failed services' bounded output before cleanup removes their
+            // containers. It travels only in this reply and is never persisted.
+            let error = error.with_startup_logs(super::startup_logs::capture(candidate, &run_id));
             if fresh_generation.is_some() && !runtime.admission_started() {
                 let engine = Engine::connect_cleanup(candidate)?;
                 let (retained, root) = super::load(candidate, &engine, &run_id)?;
@@ -308,16 +326,45 @@ fn serve_input<'a>(
             .map_err(|_| refused())?;
         drop(stdout);
         let mut queued = None;
+        let mut automatic = dependency_refresh::AutomaticRefresh::default();
+        let mut watches = dependency_refresh::ListenerWatches::default();
+        if watches.sync(&signals, &runtime) {
+            automatic.stale(Instant::now());
+        }
         loop {
-            if queued.is_none() && signals.wait()? {
-                cleanup_attempted = true;
-                return runtime.cleanup(candidate, false);
+            if queued.is_none() {
+                match signals.wait_until(automatic.deadline())? {
+                    signals::Wake::Signal => {
+                        cleanup_attempted = true;
+                        return runtime.cleanup(candidate, false);
+                    }
+                    // A watched refreshable listener exited: a stale notice
+                    // without traffic. Its replacement may still be starting.
+                    signals::Wake::ListenerExit => automatic.stale(Instant::now()),
+                    signals::Wake::Ready | signals::Wake::Timeout => {}
+                }
             }
             if queued.is_none() && runtime.drain_dependency_notifications()? {
                 // Authenticated traffic reports drift once; there is no idle scan.
-                // A refusal preserves the graph and leaves changed grants closed.
-                let _ =
+                automatic.stale(Instant::now());
+            }
+            if queued.is_none() && automatic.take_due(Instant::now()) {
+                // One attempt at a time. A refusal preserves the graph and leaves
+                // changed grants closed; only a pre-effect refusal is retried,
+                // after a bounded backoff, and an unconfirmed rebind never is.
+                let result =
                     dependency_refresh::automatic(candidate, &mut runtime, &receipt.run, &signals);
+                let outcome = dependency_refresh::automatic_outcome(
+                    &result,
+                    runtime.dependency_rebind_unconfirmed(),
+                );
+                automatic.finish(outcome, Instant::now());
+                if outcome == dependency_refresh::AutomaticOutcome::Refreshed
+                    && watches.sync(&signals, &runtime)
+                {
+                    automatic.stale(Instant::now());
+                }
+                continue;
             }
             let (mut stream, request) = if let Some(pending) = queued.take() {
                 pending
@@ -352,6 +399,9 @@ fn serve_input<'a>(
                     Err(error) => json!({"ok":false,"run":receipt.run,"code":error.code}),
                 };
                 let _ = transport::write(&mut stream, &response, Duration::from_secs(5));
+                if response["ok"] == true && watches.sync(&signals, &runtime) {
+                    automatic.stale(Instant::now());
+                }
                 continue;
             }
             if let Some(job) = request.job {
@@ -495,14 +545,35 @@ pub fn cleanup_request(
     remove_data: bool,
 ) -> Result<Value, CandidateError> {
     if remove_data {
-        if let Some(guard) = transport::Retired::acquire(candidate, run)? {
-            return retained_data::remove(candidate, run, guard);
-        }
-        if let Ok(guard) = transport::DeadOwner::acquire(candidate, run) {
-            return retained_data::remove_recovered(candidate, run, guard);
+        if let Some(removed) = remove_without_live_owner(candidate, run)? {
+            return Ok(removed);
         }
     }
     request(candidate, run, Some(remove_data))
+}
+
+/// Remove data only under the exact guard of a retired or dead owner. Each
+/// guard holds the run's operation lock, which a restoring owner must take
+/// before it publishes, and removal itself admits only a stopped receipt.
+fn remove_without_live_owner(
+    candidate: &Candidate,
+    run: &str,
+) -> Result<Option<Value>, CandidateError> {
+    if let Some(guard) = transport::Retired::acquire(candidate, run)? {
+        return retained_data::remove(candidate, run, guard).map(Some);
+    }
+    if let Ok(guard) = transport::DeadOwner::acquire(candidate, run) {
+        return retained_data::remove_recovered(candidate, run, guard).map(Some);
+    }
+    Ok(None)
+}
+
+/// Stopped-only data removal (`graph cleanup --remove-data --retained-only`).
+/// Unlike [`cleanup_request`] it never falls back to the live-owner request:
+/// a live owner, including one restored after the caller confirmed the graph
+/// stopped, refuses before any request reaches it, so nothing is stopped.
+pub fn remove_retained_data(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
+    remove_without_live_owner(candidate, run)?.ok_or_else(super::not_retained)
 }
 
 /// Status is None; cleanup is Some(remove_data). Missing/stale owners refuse; this

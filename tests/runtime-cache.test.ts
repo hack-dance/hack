@@ -555,8 +555,8 @@ test("runtime cache gives a clear next step when reset repair cannot restore pri
 test("getPsPayload matches normalized compose project names", async () => {
   const runtime: RuntimeProject[] = [
     {
-      project: "dimitrisubstrate",
-      workingDir: "/tmp/personal-substrate/.hack",
+      project: "sampledotted",
+      workingDir: "/tmp/sample-dotted/.hack",
       services: new Map([
         [
           "app",
@@ -565,13 +565,13 @@ test("getPsPayload matches normalized compose project names", async () => {
             containers: [
               {
                 id: "container-app",
-                project: "dimitrisubstrate",
+                project: "sampledotted",
                 service: "app",
                 state: "running",
                 status: "Up 3 minutes",
-                name: "dimitrisubstrate-app-1",
+                name: "sampledotted-app-1",
                 ports: "3000/tcp",
-                workingDir: "/tmp/personal-substrate/.hack",
+                workingDir: "/tmp/sample-dotted/.hack",
                 image: "imbios/bun-node:latest",
                 labels: null,
                 mounts: [],
@@ -606,14 +606,14 @@ test("getPsPayload matches normalized compose project names", async () => {
   await cache.refresh({ reason: "ps" });
 
   const payload = cache.getPsPayload({
-    composeProject: "dimitri.substrate",
-    project: "dimitri.substrate",
+    composeProject: "sample.dotted",
+    project: "sample.dotted",
     branch: null,
   });
   expect(payload.items).toEqual([
     {
       Service: "app",
-      Name: "dimitrisubstrate-app-1",
+      Name: "sampledotted-app-1",
       Status: "Up 3 minutes",
       Ports: "3000/tcp",
     },

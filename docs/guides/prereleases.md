@@ -45,9 +45,10 @@ These limits still apply to a packaged candidate:
 - Named users or groups for private environment delivery. They refuse instead of
   running as root. See the private delivery notes at the end of
   [explicit cleanup after a dead foreground owner](native-candidate.md#explicit-cleanup-after-a-dead-foreground-owner).
-- Private registries, registries other than public Docker Hub, mutable tags passed
-  directly to `fetch-image`, and images without a Linux ARM64 variant. See
-  [public image acquisition without Docker](native-candidate.md#public-image-acquisition-without-docker).
+- Local registries without an explicit opt-in, registries signed by a private
+  certificate authority, mutable tags passed directly to `fetch-image`, images over
+  the configured image budget, and images without a Linux ARM64 variant. See
+  [registry image acquisition without Docker](native-candidate.md#registry-image-acquisition-without-docker).
 - Copied or relocated candidate pools. See
   [manual candidate upgrade and rollback](native-candidate.md#manual-candidate-upgrade-and-rollback).
 - Downgrading onto newer state: an older candidate that refuses state written by

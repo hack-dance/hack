@@ -225,12 +225,16 @@ pub(super) fn prepare_mode(
     if !shared {
         return prepare(candidate, engine, plan, revision, live);
     }
-    let share = engine.guest().project_share().ok_or_else(|| {
-        error(
-            "graph_shared_source",
-            "Runtime has no approved project share.",
-        )
-    })?;
+    // Select only this plan's own root: a pool may share other projects' roots too.
+    let share = engine
+        .guest()
+        .project_share_for(&plan.source)
+        .ok_or_else(|| {
+            error(
+                "graph_shared_source",
+                "Runtime has no approved project share for this project root.",
+            )
+        })?;
     let selected = shared_paths(engine, plan, share)?;
     let (manifest, archive_sha256) = if let Some(revision) = revision {
         let publication =
@@ -390,7 +394,11 @@ pub(super) fn prepare_replay(
         .as_ref()
         .and_then(|source| source.live.as_ref());
     if !live || retained.is_none() {
-        if live || retained.is_some() || inputs.review.plan_id != receipt.plan_id {
+        if live
+            || retained.is_some()
+            || (inputs.review.plan_id != receipt.plan_id
+                && !super::normalized::source_independent_review(receipt, &inputs.review.plan))
+        {
             return Err(error(
                 "graph_source_changed",
                 "Replay source mode or immutable review changed.",
@@ -519,7 +527,7 @@ fn prepare_shared_review(
         .shared
         .as_ref()
         .ok_or_else(|| error("graph_shared_source", "Retained project share is missing."))?;
-    if engine.guest().project_share() != Some(share) {
+    if !engine.guest().has_project_share(share) {
         return Err(error(
             "graph_shared_source",
             "Retained project share changed.",
@@ -879,6 +887,7 @@ mod tests {
             resources: BTreeMap::from([(
                 "container:web".into(),
                 Resource {
+                    loopback_ports: Vec::new(),
                     kind: Kind::Container,
                     key: "web".into(),
                     name: format!("hkg-{run}-container-0"),
@@ -891,6 +900,8 @@ mod tests {
                     cache: None,
                     cache_provenance: None,
                     disposable_caches: Vec::new(),
+                    amd64_emulation: None,
+                    restart_policy: None,
                 },
             )]),
         };

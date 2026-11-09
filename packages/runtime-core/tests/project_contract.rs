@@ -68,14 +68,14 @@ const BASIC: &str = "services:\n  web:\n    image: alpine:3.21\n    command: [ec
 
 #[test]
 fn local_https_labels_have_typed_review_intent_without_publication() {
-    let labels = "    labels:\n      caddy: 'search.livenation.hack, search.livenation.hack.gy'\n      caddy.reverse_proxy: '{{upstreams 6980}}'\n      caddy.tls: internal\n";
+    let labels = "    labels:\n      caddy: 'search.example-app.hack, search.example-app.hack.gy'\n      caddy.reverse_proxy: '{{upstreams 6980}}'\n      caddy.tls: internal\n";
     let fixture = Fixture::new(&format!("{BASIC}{labels}"));
     let report = fixture.plan();
     let route = report.plan.services["web"].routing.as_ref().unwrap();
     assert_eq!(route.port, 6980);
     assert_eq!(
         route.hostnames,
-        ["search.livenation.hack", "search.livenation.hack.gy"]
+        ["search.example-app.hack", "search.example-app.hack.gy"]
     );
     assert!(
         report
@@ -491,6 +491,9 @@ fn wrong_stale_and_wu01_preview_ids_are_rejected_before_enrollment() {
 fn unsupported_privileged_external_and_unknown_fields_block_enrollment() {
     for (extra, code) in [
         ("    privileged: true\n", "privileged_service"),
+        ("    cap_add: [SYS_ADMIN]\n", "capability_refused"),
+        ("    cap_add: [ALL]\n", "capability_refused"),
+        ("    cap_drop: [NOT_A_CAPABILITY]\n", "unknown_capability"),
         ("    devices: [/dev/null]\n", "unsupported_field"),
         ("    network_mode: host\n", "unsupported_network_mode"),
         (
@@ -521,6 +524,88 @@ fn unsupported_privileged_external_and_unknown_fields_block_enrollment() {
     ));
     assert!(fixture.codes().contains(&"external_volume".into()));
     assert!(fixture.codes().contains(&"external_network".into()));
+}
+
+#[test]
+fn compose_capability_adjustments_are_reviewed_into_the_plan() {
+    let fixture = Fixture::new(&format!(
+        "{BASIC}    cap_add: [net_admin, CAP_SYS_NICE]\n    cap_drop: [ALL]\n    privileged: false\n"
+    ));
+    let plan = fixture.plan();
+    assert!(
+        plan.plan.diagnostics.iter().all(|d| d.severity != "error"),
+        "{:?}",
+        plan.plan.diagnostics
+    );
+    let capabilities = plan.plan.services["web"].capabilities.as_ref().unwrap();
+    assert_eq!(capabilities.add, ["CAP_NET_ADMIN", "CAP_SYS_NICE"]);
+    assert_eq!(capabilities.drop, ["ALL"]);
+    // Plans without capability fields carry no capability entry.
+    let basic = Fixture::new(BASIC).plan();
+    assert!(basic.plan.services["web"].capabilities.is_none());
+    assert!(
+        !serde_json::to_string(&basic.plan)
+            .unwrap()
+            .contains("capabilities")
+    );
+}
+
+/// `x-hack-amd64-emulation` is a reviewed opt-in, not unexecuted extension metadata. Its
+/// policy (`prefer-native` or `amd64`) is recorded in the plan, so the two modes are distinct
+/// plans; it is absent otherwise, and it can never override a declared arm64 platform.
+#[test]
+fn amd64_emulation_opt_in_is_reviewed_and_never_overrides_declared_arm64() {
+    let plain = Fixture::new(BASIC).plan();
+    assert_eq!(plain.plan.services["web"].amd64_emulation, None);
+    let opted = Fixture::new(BASIC);
+    let mut plans = Vec::new();
+    for (mode, policy) in [
+        ("prefer-native", project::Amd64Emulation::PreferNative),
+        ("amd64", project::Amd64Emulation::Amd64),
+    ] {
+        fs::write(
+            opted.project.join("compose.yaml"),
+            format!("{BASIC}    platform: linux/amd64\n    x-hack-amd64-emulation: {mode}\n"),
+        )
+        .unwrap();
+        let report = opted.plan();
+        let service = &report.plan.services["web"];
+        assert_eq!(service.amd64_emulation, Some(policy));
+        assert_eq!(service.platform.as_deref(), Some("linux/amd64"));
+        assert_eq!(
+            serde_json::to_value(service).unwrap()["amd64_emulation"],
+            mode
+        );
+        assert!(
+            !report
+                .plan
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "compose_extension_metadata")
+        );
+        plans.push(report.plan_id);
+    }
+    // A changed policy is a changed reviewed plan of the same project.
+    assert_ne!(plans[0], plans[1]);
+    // Absent serializes nothing, so existing plan identities are unchanged.
+    let service = serde_json::to_value(&plain.plan.services["web"]).unwrap();
+    assert!(service.get("amd64_emulation").is_none());
+    for platform in ["linux/arm64", "linux/arm64/v8"] {
+        let conflicting = Fixture::new(&format!(
+            "{BASIC}    platform: {platform}\n    x-hack-amd64-emulation: amd64\n"
+        ));
+        assert_eq!(
+            project::plan(&conflicting.candidate, conflicting.options())
+                .unwrap_err()
+                .code,
+            "unsupported_platform"
+        );
+    }
+    // Only the two policies are reviewed values.
+    for value in ["yes", "true", "false", "native"] {
+        let invalid = Fixture::new(&format!("{BASIC}    x-hack-amd64-emulation: {value}\n"));
+        assert!(project::plan(&invalid.candidate, invalid.options()).is_err());
+    }
 }
 
 /// The candidate's own label review rejects Hack's ownership namespaces (the
@@ -618,6 +703,102 @@ fn hack_ownership_label_namespaces_block_enrollment() {
     ));
     assert!(!owner_label(&fixture));
     assert!(fixture.plan().plan.enrollment_compatible);
+}
+
+/// Hack's documented one-shot marker (`hack.service.one-shot: "true"`, the
+/// label `hack config import` maps to a native job) is a completion role, not
+/// an ownership or router label. Only that exact key and literal value are
+/// consumed; ownership namespaces next to it and every other `hack.*` key stay
+/// refused, so the marker never widens the `hack.*` reservation.
+#[test]
+fn hack_one_shot_marker_is_a_completion_role_not_an_owner_label() {
+    const INIT: &str = "services:\n  init:\n    image: alpine:3.20\n    command: [\"true\"]\n";
+    let owner_label = |fixture: &Fixture| {
+        fixture
+            .codes()
+            .iter()
+            .any(|code| code == "external_route_or_owner_label")
+    };
+    for labels in [
+        "    labels: {hack.service.one-shot: \"true\"}\n",
+        "    labels: ['hack.service.one-shot=true']\n",
+    ] {
+        let fixture = Fixture::new(&format!("{INIT}{labels}"));
+        let plan = fixture.plan();
+        assert!(!owner_label(&fixture), "{labels}");
+        assert!(plan.plan.enrollment_compatible, "{labels}");
+        assert!(plan.plan.services["init"].one_shot, "{labels}");
+    }
+    // Without the marker the plan carries no one-shot field, so existing plan
+    // identities are unchanged.
+    let plain = Fixture::new(INIT);
+    assert!(!plain.plan().plan.services["init"].one_shot);
+    assert!(
+        !serde_json::to_string(&plain.plan())
+            .unwrap()
+            .contains("one_shot")
+    );
+    // Ownership namespaces next to the marker are never exempt.
+    for key in [
+        "com.docker.compose.project",
+        "io.hack-local.owner",
+        "io.hack.native-config.owner",
+        "io.hack.native-file.token",
+        "io.hack.storage-witness.carrier",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "{INIT}    labels:\n      hack.service.one-shot: 'true'\n      '{key}': owner-canary\n"
+        ));
+        let plan = fixture.plan();
+        assert!(owner_label(&fixture), "{key}");
+        assert!(!plan.plan.enrollment_compatible, "{key}");
+        assert!(
+            !serde_json::to_string(&plan)
+                .unwrap()
+                .contains("owner-canary")
+        );
+    }
+    // Any other `hack.*` key, including siblings of the marker, keeps the
+    // ownership refusal: only the exact marker key is recognized.
+    for key in [
+        "hack.x",
+        "hack.service.other",
+        "hack.service.one-shot.extra",
+        "hack.service",
+    ] {
+        let fixture = Fixture::new(&format!("{INIT}    labels: {{'{key}': 'true'}}\n"));
+        assert!(owner_label(&fixture), "{key}");
+        assert!(!fixture.plan().plan.services["init"].one_shot, "{key}");
+    }
+    // The marker only accepts the literal string `true`.
+    for labels in [
+        "    labels: {hack.service.one-shot: 'false'}\n",
+        "    labels: {hack.service.one-shot: true}\n",
+        "    labels: ['hack.service.one-shot']\n",
+    ] {
+        let fixture = Fixture::new(&format!("{INIT}{labels}"));
+        let plan = fixture.plan();
+        assert!(
+            fixture.codes().contains(&"invalid_one_shot_label".into()),
+            "{labels}"
+        );
+        assert!(!plan.plan.services["init"].one_shot, "{labels}");
+        assert!(!plan.plan.enrollment_compatible, "{labels}");
+    }
+    // A one-shot must be able to finish and cannot serve a route.
+    let restarting = Fixture::new(&format!(
+        "{INIT}    restart: always\n    labels: {{hack.service.one-shot: 'true'}}\n"
+    ));
+    assert!(
+        restarting
+            .codes()
+            .contains(&"nonterminating_one_shot".into())
+    );
+    let routed = Fixture::new(&format!(
+        "{INIT}    labels:\n      hack.service.one-shot: 'true'\n      caddy: init.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n"
+    ));
+    assert!(routed.codes().contains(&"one_shot_route_conflict".into()));
+    assert!(!routed.plan().plan.enrollment_compatible);
 }
 
 #[test]
@@ -823,8 +1004,6 @@ fn invalid_limits_ports_commands_and_conflicting_owners_are_rejected() {
         "    cpus: -1\n",
         "    mem_limit: -1\n",
         "    pids_limit: 0\n",
-        "    ports: ['70000:80']\n",
-        "    ports: ['8000-8001:80']\n",
         "    environment: [A=one, A=two]\n",
     ] {
         let fixture = Fixture::new(&format!("{BASIC}{extra}"));
@@ -833,6 +1012,23 @@ fn invalid_limits_ports_commands_and_conflicting_owners_are_rejected() {
             "{extra}"
         );
     }
+    for extra in [
+        "    ports: ['70000:80']\n",
+        "    ports: ['8000-8001:80']\n",
+        "    ports: ['80/sctp']\n",
+    ] {
+        let fixture = Fixture::new(&format!("{BASIC}{extra}"));
+        let plan = fixture.plan().plan;
+        assert!(!plan.enrollment_compatible, "{extra}");
+        assert!(
+            plan.diagnostics.iter().any(|d| d.severity == "error"
+                && d.code == "invalid_port"
+                && d.field == "services.web.ports[0]"),
+            "{extra}: {:?}",
+            plan.diagnostics
+        );
+        assert!(plan.services["web"].ports.is_empty(), "{extra}");
+    }
     let fixture = Fixture::new(
         "services:\n  web:\n    image: alpine:3.21\n    command: echo hello\n    network_mode: none\n    networks: [default]\n    cpus: 1\n    deploy: {resources: {limits: {cpus: '2'}}}\n",
     );
@@ -840,6 +1036,108 @@ fn invalid_limits_ports_commands_and_conflicting_owners_are_rejected() {
     for code in ["conflicting_network_owners", "conflicting_limits"] {
         assert!(codes.contains(&code.into()));
     }
+}
+
+/// An unsupported port is one located review finding, not a whole-review abort:
+/// the review still reports every other problem, names the service and entry,
+/// and never echoes the authored text (including interpolation defaults).
+#[test]
+fn unsupported_ports_are_located_diagnostics_collected_with_the_rest_of_the_review() {
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    privileged: true\n    ports: ['8080:80']\n    expose: ['3000', '${EXPOSED:-4000}']\n  debug:\n    image: alpine:3.21\n    profiles: [debug]\n    ports: ['${BIND}:9090:80', '9091:81', '${OTHER_BIND:-10.9.8.7}:9092:82', '${DEBUG_PORT:-9093}:${TARGET:-83}']\n",
+    );
+    let report = project::plan(&fixture.candidate, fixture.options()).unwrap();
+    let plan = &report.plan;
+    assert!(!plan.enrollment_compatible);
+    let located: Vec<_> = plan
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error" && d.field.contains('['))
+        .map(|d| (d.code.as_str(), d.field.as_str()))
+        .collect();
+    assert_eq!(
+        located,
+        vec![
+            ("invalid_port", "services.web.expose[1]"),
+            ("unresolved_port_binding", "services.debug.ports[0]"),
+            ("unresolved_port_binding", "services.debug.ports[3]"),
+            ("unsupported_host_binding", "services.debug.ports[2]"),
+        ]
+    );
+    assert!(
+        plan.diagnostics
+            .iter()
+            .any(|d| d.code == "privileged_service" && d.field == "services.web")
+    );
+    assert!(!plan.services["debug"].active);
+    let debug_ports = &plan.services["debug"].ports;
+    assert_eq!(debug_ports.len(), 2);
+    assert_eq!(debug_ports[0].published, Some(9091));
+    assert_eq!(debug_ports[1].declared_host_ip, "[unsupported]");
+    assert_eq!(
+        debug_ports[1].host_ip_reference.as_deref(),
+        Some("OTHER_BIND")
+    );
+    assert_eq!(plan.services["web"].ports[0].published, Some(8080));
+    assert_eq!(plan.services["web"].exposed_ports, vec!["3000"]);
+    let serialized = serde_json::to_string(&report).unwrap();
+    for authored in [
+        "10.9.8.7",
+        "EXPOSED",
+        "${EXPOSED:-4000}",
+        "DEBUG_PORT",
+        "TARGET",
+    ] {
+        assert!(!serialized.contains(authored), "{authored}");
+    }
+    // Report paths and hashes may contain numeric substrings by coincidence.
+    // The authored default must stay out of diagnostic text specifically.
+    let diagnostics = serde_json::to_string(&plan.diagnostics).unwrap();
+    for authored in ["4000", "BIND", "9093"] {
+        assert!(!diagnostics.contains(authored), "{authored}");
+    }
+    assert_eq!(
+        project::enroll(&fixture.candidate, fixture.options(), &report.plan_id)
+            .unwrap_err()
+            .code,
+        "incompatible_compose"
+    );
+    assert!(!fixture.candidate.state_root.exists());
+}
+
+/// A profile-gated service whose ports use literal interpolation defaults no
+/// longer aborts the review: the default profile plan is enrollment compatible,
+/// records the variable names only, and selecting the profile still leaves
+/// publication to graph admission.
+#[test]
+fn interpolated_port_defaults_review_to_their_literal_and_keep_literal_plans_stable() {
+    let literal = Fixture::new(&format!("{BASIC}    ports: ['127.0.0.1:8108:8108']\n"));
+    let literal_report = project::plan(&literal.candidate, literal.options()).unwrap();
+    assert!(literal_report.plan.enrollment_compatible);
+    let literal_text = serde_json::to_string(&literal_report.plan).unwrap();
+    assert!(
+        !literal_text.contains("published_reference")
+            && !literal_text.contains("host_ip_reference")
+    );
+
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    command: [echo, hello]\n  search:\n    image: alpine:3.21\n    profiles: [local-search]\n    ports: ['${SEARCH_BIND:-127.0.0.1}:${SEARCH_PORT:-8108}:8108']\n",
+    );
+    let report = project::plan(&fixture.candidate, fixture.options()).unwrap();
+    let plan = &report.plan;
+    assert!(plan.enrollment_compatible, "{:?}", plan.diagnostics);
+    assert!(!plan.services["search"].active);
+    let port = &plan.services["search"].ports[0];
+    assert_eq!(
+        (port.declared_host_ip.as_str(), port.published, port.target),
+        ("127.0.0.1", Some(8108), 8108)
+    );
+    assert_eq!(port.host_ip_reference.as_deref(), Some("SEARCH_BIND"));
+    assert_eq!(port.published_reference.as_deref(), Some("SEARCH_PORT"));
+    assert!(plan.diagnostics.iter().any(|d| d.severity == "warning"
+        && d.code == "interpolated_port_default"
+        && d.field == "services.search.ports[0]"));
+    assert!(!fixture.candidate.state_root.exists());
 }
 
 #[test]
@@ -1825,7 +2123,9 @@ fn scoped_environment_cannot_interpolate_into_any_executable_field() {
         )
         .err()
         .unwrap();
-        assert_eq!(failure.code, "execution_environment_missing", "{field}");
+        // A reference to a managed name is refused as an ownership conflict
+        // (it is never looked up in the public map or replaced by a default).
+        assert_eq!(failure.code, "execution_environment_owner", "{field}");
         assert!(
             !serde_json::to_string(&failure)
                 .unwrap()
@@ -2093,7 +2393,9 @@ fn extra_hosts_conditional_prefix_and_environment_default_use_only_explicit_inpu
     }
     for expression in [
         "${INPUT:?required}",
-        "${INPUT:+${OTHER}}",
+        // Nested braced defaults are supported (see compose_fields_contract.rs);
+        // nested operators outside :- and :+ stay refused.
+        "${INPUT:+${OTHER:?required}}",
         "${INPUT:-$OTHER}",
         "${INPUT-fallback}",
     ] {
@@ -2509,6 +2811,49 @@ fn disposable_cache_declarations_are_exact_volume_relative_and_review_bound() {
             .code,
         "invalid_disposable_cache"
     );
+}
+
+#[test]
+fn text_plan_exits_non_zero_on_error_diagnostics_and_json_keeps_the_report() {
+    let compiled = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let plan = |fixture: &Fixture, json: bool| {
+        let mut args = vec![
+            "--candidate-root".to_owned(),
+            compiled.to_str().unwrap().to_owned(),
+            "project".into(),
+            "plan".into(),
+            "--project".into(),
+            fixture.project.to_str().unwrap().to_owned(),
+            "--file".into(),
+            "compose.yaml".into(),
+        ];
+        if json {
+            args.push("--json".into());
+        }
+        Command::new(env!("CARGO_BIN_EXE_hack-runtime-candidate"))
+            .env_clear()
+            .env("PATH", "")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let clean = Fixture::new(BASIC);
+    assert!(plan(&clean, false).status.success());
+    let failing = Fixture::new(&format!("{BASIC}    privileged: true\n"));
+    let text = plan(&failing, false);
+    assert!(!text.status.success());
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(stdout.contains("error [privileged_service]"), "{stdout}");
+    let refusal: serde_json::Value = serde_json::from_slice(&text.stderr).unwrap();
+    assert_eq!(refusal["code"], "plan_diagnostics");
+    assert_eq!(refusal["message_fixed"], true);
+    let json = plan(&failing, true);
+    assert!(json.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(report["plan"]["enrollment_compatible"], false);
 }
 
 fn diagnostic_codes(report: &PlanReport) -> Vec<&str> {

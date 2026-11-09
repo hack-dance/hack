@@ -22,7 +22,7 @@ Usage:
   hack-local project publish-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--reconcile] [--json]
   hack-local project verify-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
   hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
-  hack-local graph inspect|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
+  hack-local graph inspect|observe|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
   hack-local graph native plan --source-file <absolute-v2-native-source.json> [--json]
   hack-local graph native run|serve --source-file <absolute-v2-native-source.json> --expect-review <64-hex> [--environment-stdin] [--timeout-seconds <1..300>] [--json]
@@ -50,6 +50,7 @@ Usage:
   hack-local graph dependency-reservations [--json]
   hack-local graph recover-dependency-reservation --run-id <32-hex> --expect-reservation <sha256> [--json]
   hack-local graph dependency-discover --host-port <port> --executable <absolute-path> [--json]
+  hack-local graph dependency-discover --host-port <port> --ancestor-pid <pid> [--json]
   hack-local graph serve --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... --dependencies <reviewed.json> --expect-dependencies <sha256> [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph owner-status --run-id <32-hex> [--json]
   hack-local graph refresh-dependencies --run-id <32-hex> [--json]
@@ -91,24 +92,32 @@ Usage:
   hack-local runtime up --profile research|development [--bridge-sockets <1..32> | --minimum-bridge-sockets <1..32>] [--dependency-sockets <1..32> | --minimum-dependency-sockets <1..32>] [--json]
   hack-local runtime up --profile development --project-share <exact-project-root> --unfiltered-source [--json]
   hack-local runtime check-project-share --project-share <exact-project-root> --unfiltered-source --json
+  hack-local runtime project-share add --project-share <exact-project-root> --unfiltered-source --json
+  hack-local runtime project-share remove --project-share <absolute-recorded-root> --json
   hack-local graph serve|run ... --shared-source
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
+  hack-local runtime prepare-builder --archive <pinned-docker-buildx>
   hack-local runtime prepare-network-tools --directory <private-pinned-apk-directory>
   hack-local runtime up --profile research|development --prepared-base prefer|require [--prepared-base-store <absolute-private-store>] [--json]
   hack-local runtime prepared-base build --profile research|development [--base-id <id>] [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base verify --base-id <id> [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base status --profile research|development [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
-  hack-local runtime admit-image --reference <[namespace/]repository[:tag][@sha256:digest]|sha256:image-id> --json
-  hack-local runtime ensure-image --reference <[namespace/]repository[:tag]|[namespace/]repository@sha256:digest> --json
-  hack-local runtime resolve-image --reference <[namespace/]repository[:tag]> --json
-  hack-local runtime fetch-image --reference <[namespace/]repository@sha256:digest> --archive <new-flat-image.tar> [--json]
-  hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
+  hack-local runtime admit-image --reference <[registry/]repository[:tag][@sha256:digest]|sha256:image-id> --json [IMAGE-POLICY]
+  hack-local runtime build-image --request <private-0600-request.json> --json
+  hack-local runtime reclaim-build-images --json
+  hack-local runtime ensure-image --reference <[registry/]repository[:tag]|[registry/]repository@sha256:digest> [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY]
+  hack-local runtime up ... --amd64-emulation [--json]
+  hack-local runtime resolve-image --reference <[registry/]repository[:tag]> --json [IMAGE-POLICY]
+  hack-local runtime fetch-image --reference <[registry/]repository@sha256:digest> --archive <new-flat-image.tar> [--json] [IMAGE-POLICY]
+  hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash> [IMAGE-POLICY]
+    IMAGE-POLICY: [--image-budget-mib N] [--image-cache-mib N] [--allow-local-registry [http://]host[:port]]... [--docker-config <absolute-dir>]
   hack-local runtime network internet --json
   hack-local runtime up --profile development --internet --json
   hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
+  hack-local runtime repair-provider-tree [--json]
   hack-local runtime host-filesystem-recovery [--json]
   hack-local runtime recover-host-filesystem --expect-sha256 <sha256> --accept-legacy-device-rebind [--json]
   hack-local node serve|status|inspect
@@ -404,6 +413,34 @@ fn run() -> Result<(), CandidateError> {
                 &share,
             )?)?;
         }
+        [
+            "runtime",
+            "project-share",
+            "add",
+            "--project-share",
+            project,
+            "--unfiltered-source",
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::add_project_share(
+                &discover_candidate(&requested)?,
+                Path::new(project),
+                true,
+            )?)?;
+        }
+        [
+            "runtime",
+            "project-share",
+            "remove",
+            "--project-share",
+            project,
+            "--json",
+        ] => {
+            print_json(&hack_runtime_core::provider::remove_project_share(
+                &discover_candidate(&requested)?,
+                Path::new(project),
+            )?)?;
+        }
         ["runtime", "up", arguments @ ..]
             if arguments.contains(&"--bridge-sockets")
                 || arguments.contains(&"--minimum-bridge-sockets")
@@ -413,7 +450,8 @@ fn run() -> Result<(), CandidateError> {
                 || arguments.contains(&"--internet")
                 || arguments.contains(&"--project-share")
                 || arguments.contains(&"--unfiltered-source")
-                || arguments.contains(&"--prepared-base") =>
+                || arguments.contains(&"--prepared-base")
+                || arguments.contains(&"--amd64-emulation") =>
         {
             let options = runtime_up_cli::parse(arguments)?;
             let share = options
@@ -434,8 +472,12 @@ fn run() -> Result<(), CandidateError> {
                 dependencies: options.dependencies,
                 minimum_dependencies: options.minimum_dependencies,
             };
-            let started = if let Some((mode, store)) = &options.prepared {
-                let request = prepared_base_request(&candidate, *mode, store.as_deref())?;
+            let request = options
+                .prepared
+                .as_ref()
+                .map(|(mode, store)| prepared_base_request(&candidate, *mode, store.as_deref()))
+                .transpose()?;
+            let started = if request.is_some() || options.amd64_emulation {
                 hack_runtime_core::provider::up_with_prepared_base(
                     &candidate,
                     options.profile,
@@ -444,7 +486,8 @@ fn run() -> Result<(), CandidateError> {
                     share,
                     hack_runtime_core::provider::prepared_start::Start {
                         retained,
-                        prepared: Some(&request),
+                        prepared: request.as_ref(),
+                        amd64_emulation: options.amd64_emulation,
                     },
                 )
             } else {
@@ -929,22 +972,77 @@ fn run() -> Result<(), CandidateError> {
                 Path::new(archive),
             )?)?;
         }
+        ["runtime", "prepare-builder", "--archive", archive] => {
+            print_json(&hack_runtime_core::provider::prepare_builder(
+                &discover_candidate(&requested)?,
+                Path::new(archive),
+            )?)?;
+        }
         [
             "runtime",
             "ensure-image",
             "--reference",
             reference,
             "--json",
+            policy @ ..,
         ] => {
             print_json(&hack_runtime_core::provider::image_ensure::ensure(
                 &discover_candidate(&requested)?,
                 reference,
+                &image_policy(policy)?,
             )?)?;
         }
-        ["runtime", "admit-image", "--reference", reference, "--json"] => {
+        [
+            "runtime",
+            "ensure-image",
+            "--reference",
+            reference,
+            "--emulation",
+            emulation,
+            "--json",
+            policy @ ..,
+        ] => {
+            let emulation =
+                hack_runtime_core::provider::image_platform::PlatformPolicy::parse(emulation)
+                    .ok_or_else(|| {
+                        CandidateError::new(
+                            "invalid_arguments",
+                            "Use runtime ensure-image --reference REF [--emulation native|prefer-native|amd64] --json [IMAGE-POLICY].",
+                        )
+                    })?;
+            print_json(&hack_runtime_core::provider::image_ensure::ensure_with(
+                &discover_candidate(&requested)?,
+                reference,
+                &image_policy(policy)?,
+                emulation,
+            )?)?;
+        }
+        ["runtime", "build-image", "--request", request, "--json"] => {
+            // Build output streams to stderr; only the result is printed on stdout.
+            print_json(&hack_runtime_core::provider::image_build::build_image(
+                &discover_candidate(&requested)?,
+                Path::new(request),
+            )?)?;
+        }
+        ["runtime", "reclaim-build-images", "--json"] => {
+            print_json(
+                &hack_runtime_core::provider::image_build::reclaim::reclaim_build_images(
+                    &discover_candidate(&requested)?,
+                )?,
+            )?;
+        }
+        [
+            "runtime",
+            "admit-image",
+            "--reference",
+            reference,
+            "--json",
+            policy @ ..,
+        ] => {
             // Pure: no candidate discovery, network, credentials or runtime effects.
             print_json(&hack_runtime_core::provider::registry_image::admit(
                 reference,
+                &image_policy(policy)?,
             )?)?;
         }
         [
@@ -953,9 +1051,11 @@ fn run() -> Result<(), CandidateError> {
             "--reference",
             reference,
             "--json",
+            policy @ ..,
         ] => {
             print_json(&hack_runtime_core::provider::registry_image::resolve(
                 reference,
+                &image_policy(policy)?,
             )?)?;
         }
         [
@@ -965,19 +1065,14 @@ fn run() -> Result<(), CandidateError> {
             reference,
             "--archive",
             archive,
-        ]
-        | [
-            "runtime",
-            "fetch-image",
-            "--reference",
-            reference,
-            "--archive",
-            archive,
-            "--json",
+            rest @ ..,
         ] => {
+            let policy = image_policy(rest.strip_prefix(&["--json"]).unwrap_or(rest))?;
             print_json(&hack_runtime_core::provider::registry_image::acquire(
                 reference,
                 Path::new(archive),
+                &policy,
+                policy.archive_limit,
             )?)?;
         }
         [
@@ -989,12 +1084,14 @@ fn run() -> Result<(), CandidateError> {
             digest,
             "--image-id",
             image,
+            policy @ ..,
         ] => {
-            print_json(&hack_runtime_core::provider::load_image(
+            print_json(&hack_runtime_core::provider::load_image_with(
                 &discover_candidate(&requested)?,
                 Path::new(archive),
                 digest,
                 image,
+                &image_policy(policy)?,
             )?)?;
         }
         ["runtime", "host-filesystem-recovery"]
@@ -1021,6 +1118,11 @@ fn run() -> Result<(), CandidateError> {
             print_json(&hack_runtime_core::provider::host_filesystem::recover(
                 &discover_candidate(&requested)?,
                 hash,
+            )?)?;
+        }
+        ["runtime", "repair-provider-tree"] | ["runtime", "repair-provider-tree", "--json"] => {
+            print_json(&hack_runtime_core::provider::repair_provider_trees(
+                &discover_candidate(&requested)?,
             )?)?;
         }
         ["runtime", action] | ["runtime", action, "--json"] => {
@@ -1257,7 +1359,11 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
                     println!("  build: {} using {}", build.context, build.dockerfile);
                 }
                 for (dependency, detail) in &service.dependencies {
-                    println!("  depends on {dependency}: {}", detail.condition);
+                    println!(
+                        "  depends on {dependency}: {}{}",
+                        detail.condition,
+                        if detail.required { "" } else { " (optional)" }
+                    );
                 }
                 for mount in &service.mounts {
                     println!(
@@ -1358,7 +1464,28 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
             println!(
                 "Planning has no effects. Enrollment saves metadata only; project execution remains gated."
             );
+            // A human review that reports errors fails like `compose config` does.
+            // JSON keeps exit 0: the report is the result, and its consumers read
+            // `diagnostics` and `enrollment_compatible` (Hack plans original input
+            // that normalization later adapts).
+            plan_text_result(&report.plan.diagnostics)?;
         }
+    }
+    Ok(())
+}
+
+/// Text-mode `project plan` exits non-zero when any diagnostic is an error.
+fn plan_text_result(
+    diagnostics: &[hack_runtime_core::project::Diagnostic],
+) -> Result<(), CandidateError> {
+    if diagnostics
+        .iter()
+        .any(|finding| finding.severity == "error")
+    {
+        return Err(CandidateError::new(
+            "plan_diagnostics",
+            "The project plan reported error diagnostics; review them above.",
+        ));
     }
     Ok(())
 }
@@ -1496,6 +1623,12 @@ fn print_sync_event(
     println!("{}", serde_json::to_string(&serde_json::json!({ "sync": receipt, "watching": watching, "total_millis": total_millis, "native_rescan": native_rescan }))
         .map_err(|_| CandidateError::new("serialization_failed", "Cannot encode source acknowledgement."))?);
     Ok(())
+}
+
+fn image_policy(
+    flags: &[&str],
+) -> Result<hack_runtime_core::provider::image_policy::ImagePolicy, CandidateError> {
+    hack_runtime_core::provider::image_policy::ImagePolicy::from_flags(flags)
 }
 
 fn print_json(value: &impl Serialize) -> Result<(), CandidateError> {

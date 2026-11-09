@@ -61,6 +61,7 @@ fn owner_child() {
             shared_source: false,
             release_initializer_cache: BTreeSet::new(),
             routing_enrolled: false,
+            loopback_ports: false,
             project: options(&project),
             expected_plan: &plan.plan_id,
             source_revision: None,
@@ -71,6 +72,7 @@ fn owner_child() {
         },
         &mut runtime,
         &BTreeMap::new(),
+        &graph::ManagedFiles::new(),
         Instant::now() + Duration::from_secs(90),
     )
     .unwrap();

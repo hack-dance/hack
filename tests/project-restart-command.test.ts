@@ -65,24 +65,24 @@ test("restart preserves an explicit base env selection over stored runtime state
 test("restart from the primary checkout targets only the base compose instance", () => {
   expect(
     resolveRestartTarget({
-      baseProjectName: "event-agent",
+      baseProjectName: "example-app",
       branch: null,
     })
   ).toEqual({
     composeProjectName: null,
-    lifecycleComposeProject: "event-agent",
+    lifecycleComposeProject: "example-app",
   });
 });
 
 test("restart with an explicit branch targets only that branch instance", () => {
   expect(
     resolveRestartTarget({
-      baseProjectName: "event-agent",
-      branch: "feat-msp-human-handoff",
+      baseProjectName: "example-app",
+      branch: "feat-sample-handoff",
     })
   ).toEqual({
-    composeProjectName: "event-agent--feat-msp-human-handoff",
-    lifecycleComposeProject: "event-agent--feat-msp-human-handoff",
+    composeProjectName: "example-app--feat-sample-handoff",
+    lifecycleComposeProject: "example-app--feat-sample-handoff",
   });
 });
 

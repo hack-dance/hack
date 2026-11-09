@@ -1,14 +1,24 @@
-import { basename } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
+import { adaptNativeGcloudEnvironment } from "./native-gcloud-environment.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
-import type {
-  NativeProjectRun,
-  NativeProjectRunScope,
+import {
+  describeNativeRunEnvironmentChange,
+  type NativeProjectRun,
+  type NativeProjectRunScope,
+  nativeRunEnvironmentAvailable,
+  nativeRunEnvironmentChange,
+  nativeRunEnvironmentRemedy,
 } from "./native-project-run.ts";
 
 /** Marks a selection that no longer matches the run's recorded startup selection. */
-class SelectionChanged extends Error {}
+class SelectionChanged extends Error {
+  readonly detail: string | undefined;
+  constructor(detail?: string) {
+    super("selection changed");
+    this.detail = detail;
+  }
+}
 
 /**
  * Both refusals keep `E_CONFIG_INVALID` for JSON callers. The messages differ:
@@ -28,6 +38,7 @@ export async function prepareNativeExecEnvironment(opts: {
   readonly service: string;
   readonly prepare?: typeof prepareNativeProjectInput;
   readonly adaptAws?: typeof adaptNativeAwsEnvironment;
+  readonly adaptGcloud?: typeof adaptNativeGcloudEnvironment;
 }): Promise<Readonly<Record<string, string>>> {
   if (
     !(
@@ -54,15 +65,22 @@ export async function prepareNativeExecEnvironment(opts: {
     ) {
       throw new SelectionChanged();
     }
-    const selected = opts.run.effectiveEnvName;
+    const change = nativeRunEnvironmentChange({
+      run: opts.run,
+      environmentFiles: input.environmentFiles,
+      projectRoot: opts.scope.projectRoot,
+      projectDir: opts.scope.projectDir,
+    });
+    if (change) {
+      throw new SelectionChanged(
+        `Native fresh exec selection changed since startup: ${describeNativeRunEnvironmentChange(change)}. ${nativeRunEnvironmentRemedy({ change, retry: "hack exec" })}; no command was requested. Values omitted.`
+      );
+    }
     if (
-      selected !== null &&
-      !input.environmentFiles.some((path) =>
-        [
-          `hack.env.${selected}.yaml`,
-          `hack.env.${selected}.local.yaml`,
-        ].includes(basename(path))
-      )
+      !nativeRunEnvironmentAvailable({
+        run: opts.run,
+        environmentFiles: input.environmentFiles,
+      })
     ) {
       throw new SelectionChanged();
     }
@@ -74,13 +92,24 @@ export async function prepareNativeExecEnvironment(opts: {
         })
       ).input;
     }
+    if (opts.run.gcloud) {
+      // Files already live in the running container; exec only rechecks the
+      // mount and selectors so its values match startup. Nothing is re-delivered.
+      input = (
+        await (opts.adaptGcloud ?? adaptNativeGcloudEnvironment)({
+          input,
+          mode: opts.run.gcloud.mode,
+          deliver: false,
+        })
+      ).input;
+    }
     return input.managedEnvironment[opts.service] ?? {};
   } catch (error) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
       message:
         error instanceof SelectionChanged
-          ? SELECTION_CHANGED_MESSAGE
+          ? (error.detail ?? SELECTION_CHANGED_MESSAGE)
           : ENVIRONMENT_UNAVAILABLE_MESSAGE,
     });
   }

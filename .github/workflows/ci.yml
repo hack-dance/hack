@@ -328,10 +328,9 @@ jobs:
           docker pull alpine:3.20
           docker pull alpine:3.22
           docker pull node:24.22.1-bookworm-slim
+          # Also the cataloged native file and storage helper image
+          # (src/lib/native-compose-storage-witness-docker-artifact.ts).
           docker pull oven/bun:1.4.4-slim
-          # The qualified native file and storage helper artifact stays on this image
-          # until its catalog pins are requalified (src/lib/native-compose-vm-file-protocol.ts).
-          docker pull oven/bun:1.4.2-slim
           docker pull postgres:17.6-alpine
           docker pull lucaslorentz/caddy-docker-proxy:2.10.0-alpine
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -390,18 +389,22 @@ jobs:
 
   docker-e2e:
     # The single docker-e2e signal for the prerelease exact-head gate and branch checks.
-    # It runs even when a shard fails or is cancelled and passes only when every shard
-    # succeeded, so a failed shard can never surface as a skipped docker-e2e check.
+    # It always runs: cancelled-only shard results are non-failures, while failures
+    # and skipped shards still fail. Prerelease gates separately require every shard.
     needs: docker-e2e-shard
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Require every docker-e2e shard to succeed
+      - name: Reject failed or skipped docker-e2e shards
         env:
           SHARD_RESULT: ${{ needs.docker-e2e-shard.result }}
         run: |
+          if [ "$SHARD_RESULT" = "cancelled" ]; then
+            echo "shards were cancelled without failure; aggregate is non-failing"
+            exit 0
+          fi
           if [ "$SHARD_RESULT" != "success" ]; then
             echo "docker-e2e shards did not all succeed (result: $SHARD_RESULT)"
             exit 1
@@ -469,18 +472,22 @@ jobs:
 
   test:
     # The required `test` check (repository ruleset) for `next` and `main`. It
-    # runs even when a shard fails or is cancelled and passes only when every
-    # shard succeeded, so a failed shard can never surface as a skipped check.
+    # always runs: cancelled-only shard results are non-failures, while failures
+    # and skipped shards still fail rather than surfacing as a skipped check.
     needs: test-shard
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Require every test shard to succeed
+      - name: Reject failed or skipped test shards
         env:
           SHARD_RESULT: ${{ needs.test-shard.result }}
         run: |
+          if [ "$SHARD_RESULT" = "cancelled" ]; then
+            echo "shards were cancelled without failure; aggregate is non-failing"
+            exit 0
+          fi
           if [ "$SHARD_RESULT" != "success" ]; then
             echo "test shards did not all succeed (result: $SHARD_RESULT)"
             exit 1

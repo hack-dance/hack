@@ -38,6 +38,7 @@ fn execute(
         shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
+        loopback_ports: false,
         project: project(),
         expected_plan: &plan.plan_id,
         source_revision: None,

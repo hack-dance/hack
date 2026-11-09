@@ -288,14 +288,14 @@ class NegativeProtocolControls(unittest.TestCase):
         .update(statistic="window_mean"),
         "budget_statistic_mismatch:idle": lambda d: budget(d, "absolute", "idle_control_plane_core_fraction")
         .update(statistic="median"),
-        "budget_scope_narrowed:watcher": _set_scope("watcher_ack_ms", "event-agent"),
+        "budget_scope_narrowed:watcher": _set_scope("watcher_ack_ms", "large-application"),
         "budget_scope_narrowed:info": _set_scope("info_latency_ms", "small-fixture"),
         "budget_scope_narrowed:idle": _set_scope("idle_control_plane_core_fraction", "small-fixture"),
         "budget_scope_narrowed:unknown": _set_scope("watcher_ack_ms", "nowhere"),
         "budget_scope_narrowed:additional": lambda d: d["budgets"]["absolute"].append(
             {"metric": "exec_ms", "statistic": "p95", "max": 50, "inclusive": True, "workload": "nowhere"}),
-        "workload_baseline_missing": lambda d: workload(d, "event-agent")["lanes"].remove("compose"),
-        "workload_shape_mismatch": lambda d: workload(d, "event-agent")["shape"].update(services=13),
+        "workload_baseline_missing": lambda d: workload(d, "large-application")["lanes"].remove("compose"),
+        "workload_shape_mismatch": lambda d: workload(d, "large-application")["shape"].update(services=13),
         "phases_mismatch": lambda d: d["phases"].remove("restore"),
         "scale_points_mismatch:instances": lambda d: d["scale_points"].update(branch_instances=[1, 8]),
         "scale_points_mismatch:clients": lambda d: d["scale_points"].update(mcp_clients=[1]),
@@ -322,7 +322,7 @@ class NegativeProtocolControls(unittest.TestCase):
         "observer_policy_missing:window": lambda d: d["observer"].update(control_window_seconds=599),
         "cache_class_missing": lambda d: d["cache_classes"].update(budget_class="cold-cache"),
         "workload_lane_unknown": lambda d: d["workloads"][0]["lanes"].append("hack-3.0.0"),
-        "workloads_malformed:id": lambda d: d["workloads"][0].update(id=["event-agent"]),
+        "workloads_malformed:id": lambda d: d["workloads"][0].update(id=["large-application"]),
         "host_incomplete": lambda d: d["host"]["orbstack"].pop("build"),
         "protocol_revision_mismatch": lambda d: d.update(revision=2),
         "protocol_revision_mismatch:bool": lambda d: d.update(revision=True),
@@ -356,7 +356,7 @@ class NegativeProtocolControls(unittest.TestCase):
         "host_mismatch:cpu": lambda d: d["host"].update(cpu="Apple M5 Max", logical_cpus=18),
         "host_mismatch:orbstack": lambda d: d["host"]["orbstack"].update(memory_mib=32768),
         "workload_pin_mismatch": lambda d: workload(d, "small-fixture").update(pin="image oven/bun:latest"),
-        "workload_correctness_weakened": lambda d: workload(d, "event-agent")["correctness"].pop(),
+        "workload_correctness_weakened": lambda d: workload(d, "large-application")["correctness"].pop(),
     }
 
     def test_each_weakening_is_refused_with_its_closed_code(self):
@@ -836,7 +836,7 @@ class BudgetEvaluationTest(unittest.TestCase):
 
     def test_workload_scoped_budgets_only_apply_to_their_workload(self):
         summary = small_summary()
-        summary["workload"] = "event-agent"
+        summary["workload"] = "large-application"
         records = self.judge(summary)
         metrics = {record["metric"] for record in records if "baseline" not in record}
         self.assertEqual(metrics, set(ABSOLUTE) - {"watcher_ack_ms"})

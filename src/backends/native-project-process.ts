@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import type { NativeProcessRefusal } from "../lib/native-process-wrappers.ts";
 import {
   type NativeAuthoredReceipt,
   type NativeAuthoredReview,
@@ -14,10 +15,12 @@ import {
   invokeNativeRuntime,
   NATIVE_EXIT_DRAIN_BOUND_MS,
   type NativeRuntimeSelection,
-  readNativeFailureCodes,
+  nativeFailureNote,
+  readNativeStartupFailure,
   rethrowNativeInputFailure,
   writeNativePrivateInput,
 } from "./native-runtime-client.ts";
+import type { NativeStartupLogTail } from "./native-startup-logs.ts";
 
 const RUN = /^[a-f0-9]{32}$/;
 const MAX_OUTPUT = 16 * 1024 * 1024;
@@ -28,6 +31,8 @@ export type NativeExitDiagnostic = {
   readonly nativeCode?: string;
   /** Bounded cause the runtime allows with `nativeCode`, such as a wrapped stopped runtime. */
   readonly nativeCauseCode?: string;
+  /** Every service and closed field a process wrapper refused; value-free. */
+  readonly processRefusals?: readonly NativeProcessRefusal[];
 };
 
 type ProcessOptions = {
@@ -38,6 +43,13 @@ type ProcessOptions = {
   readonly startupTimeoutMs: number;
   readonly signal?: AbortSignal;
   readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
+  /**
+   * Failed services' bounded output from a startup failure reply, before the
+   * failure is thrown. It may contain managed values: the callback must redact
+   * them before retaining or printing anything and must never persist it.
+   * Without a callback the output is discarded.
+   */
+  readonly onStartupLogs?: (logs: readonly NativeStartupLogTail[]) => void;
   /** Finite frontend hooks intercept the first stop; failed hooks retain the live owner. */
   readonly beforeStop?: () => Promise<boolean>;
   /** No-host frontend stop reuses this original foreground owner; no hook permit. */
@@ -45,6 +57,12 @@ type ProcessOptions = {
   /** Original owner only: emitted after captured exit/drain and group absence. */
   readonly onSettled?: () => undefined | Promise<undefined>;
   readonly forceSignal?: AbortSignal;
+  /**
+   * With `beforeStop` or `liveStopOwner`, settlement requires the owner's
+   * detached group to be absent (default). The Compose-import foreground keeps
+   * its final graph inspection as cleanup authority and passes false.
+   */
+  readonly requireGroupSettlement?: boolean;
   readonly onStopFailure?: () => void;
   /** Durable capture in the existing frontend owner, before private input delivery. */
   readonly onGroup?: (group: number) => Promise<void>;
@@ -339,7 +357,7 @@ async function serveGraphProcess(
       opts.exitDrainBoundMs ?? NATIVE_EXIT_DRAIN_BOUND_MS
     );
   });
-  const failureCodes = readNativeFailureCodes(child.stderr, drain.signal);
+  const failureCodes = readNativeStartupFailure(child.stderr, drain.signal);
   const failureCode = failureCodes.then((failure) => failure?.code);
   let ready = false;
   let canceled = false;
@@ -440,15 +458,14 @@ async function serveGraphProcess(
     });
     const code = await child.exited;
     const failure = await failureCode;
+    await reportStartupLogs(opts, ready, failureCodes);
     rethrowNativeInputFailure(inputFailure, {
       interrupted: timedOut || canceled,
       code,
       nativeCode: failure,
     });
     if (timedOut || canceled || !ready) {
-      throw new ClosedCliError(
-        `Native graph startup was interrupted or failed${failure ? ` (${failure})` : ""}; inspect owned state before retrying.`
-      );
+      throw interruptedStartup(await failureCodes);
     }
     return code;
   } finally {
@@ -467,6 +484,7 @@ async function serveGraphProcess(
     const failure = await failureCodes;
     const nativeCode = failure?.code;
     const nativeCauseCode = failure?.causeCode;
+    const processRefusals = failure?.processRefusals;
     clearTimeout(drainTimer);
     drain.abort();
     try {
@@ -474,15 +492,51 @@ async function serveGraphProcess(
         exitCode,
         ...(nativeCode ? { nativeCode } : {}),
         ...(nativeCauseCode ? { nativeCauseCode } : {}),
+        ...(processRefusals ? { processRefusals } : {}),
       });
     } catch {
       // Observation must never replace the startup result or cleanup authority.
     }
-    if (opts.beforeStop || opts.liveStopOwner) {
+    if (requiresGroupSettlement(opts)) {
       await requireGroupAbsent(child.pid);
     }
     await opts.onSettled?.();
   }
+}
+
+function requiresGroupSettlement(opts: ProcessOptions): boolean {
+  return (
+    (opts.beforeStop !== undefined || opts.liveStopOwner !== undefined) &&
+    opts.requireGroupSettlement !== false
+  );
+}
+
+/** Pass a failed startup's bounded output to the caller; ready owners report none. */
+async function reportStartupLogs(
+  opts: ProcessOptions,
+  ready: boolean,
+  failure: Promise<
+    { readonly startupLogs?: readonly NativeStartupLogTail[] } | undefined
+  >
+): Promise<void> {
+  const logs = (await failure)?.startupLogs;
+  if (ready || !logs) {
+    return;
+  }
+  try {
+    opts.onStartupLogs?.(logs);
+  } catch {
+    // Observation must never replace the startup result or cleanup authority.
+  }
+}
+
+/** Closed startup failure with the runtime's bounded code and value-free note. */
+function interruptedStartup(
+  failure: Awaited<ReturnType<typeof readNativeStartupFailure>>
+): Error {
+  return new ClosedCliError(
+    `Native graph startup was interrupted or failed${failure ? ` (${failure.code})` : ""}; inspect owned state before retrying.${failure ? nativeFailureNote(failure) : ""}`
+  );
 }
 
 /** An attached finite-hook owner must not retire while its captured detached group is present.

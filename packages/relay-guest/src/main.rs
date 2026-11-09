@@ -30,7 +30,7 @@ use std::{
     time::Duration,
 };
 
-const USAGE: &str = "hack-relay-guest --slot <0..31> --application-fd <3..2147483647>\nhack-relay-guest --slot <0..31> --listen-port <1..65535> [--listen-address <slot-loopback>]\nhack-relay-guest --await-release <generation> -- <absolute executable> [args...]\nhack-relay-guest --check-release <generation> -- <absolute executable> [args...]\nRelay credential: one private stdin descriptor. Listener address is 127.0.0.1 or 127.0.0.(slot+2).\n";
+const USAGE: &str = "hack-relay-guest --slot <0..31> --application-fd <3..2147483647>\nhack-relay-guest --slot <0..31> --listen-port <1..65535> [--listen-address <slot-loopback>]\nhack-relay-guest --await-release <generation> -- <executable> [args...]\nhack-relay-guest --check-release <generation> -- <executable> [args...]\nRelay credential: one private stdin descriptor. Listener address is 127.0.0.1 or 127.0.0.(slot+2).\n";
 mod options;
 use options::{Mode, Options, options};
 fn credential() -> Result<relay_auth::Credential, CandidateError> {

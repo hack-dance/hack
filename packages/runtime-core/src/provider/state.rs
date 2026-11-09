@@ -11,6 +11,17 @@ pub fn io(error: std::io::Error) -> CandidateError {
     CandidateError::new("provider_state", error.to_string())
 }
 
+fn missing_alias() -> CandidateError {
+    CandidateError::new(
+        "provider_home_missing",
+        "Temporary provider HOME alias is absent. Use runtime recover to verify the stopped pool before restoring it.",
+    )
+}
+
+fn replaced_alias() -> CandidateError {
+    CandidateError::new("foreign_state", "Short provider HOME alias was replaced.")
+}
+
 pub fn private_directory(path: &Path) -> Result<(), CandidateError> {
     reject_aliased_state(path)?;
     fs::DirBuilder::new()
@@ -215,12 +226,24 @@ impl Default for ReclamationPolicy {
 pub struct Owner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_share: Option<super::ProjectShareIntent>,
+    /// Further project roots shared into the same development pool, in admission order.
+    /// Added or removed only by the journaled stopped-pool share update; empty for
+    /// single-root pools, whose receipt bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_project_shares: Vec<super::ProjectShareIntent>,
     #[serde(default)]
     pub network: super::NetworkIntent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application_bridge: Option<super::BridgeIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_sockets: Option<super::DependencySocketIntent>,
+    /// Rosetta 2 x86_64 translation for this pool's VM, so opted-in `linux/amd64` services
+    /// can run. Recorded before the provider effect that enables it (`machine create
+    /// --rosetta`, or `machine update --rosetta` on a stopped pool) and never cleared
+    /// implicitly; every boot audits the provider record, running config and guest
+    /// registration against it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub amd64_emulation: bool,
     pub version: u32,
     pub checkout: PathBuf,
     pub token: String,
@@ -276,9 +299,50 @@ impl CleanStop {
     }
 }
 
+/// What occupies a receipt's temporary HOME alias path, observed with `lstat` only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alias {
+    /// This user's symlink to this pool's private provider home.
+    Owned,
+    Missing,
+    /// Anything else: another user's entry, a file, a directory or another link. It is
+    /// never followed, adopted, replaced or removed.
+    Foreign,
+}
+
+/// The only accepted alias shape: `/private/tmp/hkl-` and 12 lowercase hex digits. Pool
+/// creation derives the name from the token; a squatted name is replaced by a fresh one.
+fn valid_short_home(path: &Path) -> bool {
+    path.parent() == Some(Path::new("/private/tmp"))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("hkl-"))
+            .is_some_and(|suffix| {
+                suffix.len() == 12
+                    && suffix
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+}
+
+/// A fresh random alias path. Creating it is still exclusive; a collision tries another.
+fn fresh_short_home() -> Result<PathBuf, CandidateError> {
+    let mut bytes = [0_u8; 6];
+    File::open("/dev/urandom")
+        .map_err(io)?
+        .read_exact(&mut bytes)
+        .map_err(io)?;
+    let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(Path::new("/private/tmp").join(format!("hkl-{suffix}")))
+}
+
+/// Attempts at a fresh alias name before a squatted restore gives up.
+const FRESH_ALIAS_ATTEMPTS: usize = 4;
+
 impl Owner {
     pub fn load(candidate: &Candidate) -> Result<Self, CandidateError> {
-        Self::load_with_short_home(candidate, false)
+        Self::load_with_short_home(candidate, false, false)
     }
 
     /// Explicit recovery may inspect a missing temporary alias, never a replaced one.
@@ -286,31 +350,39 @@ impl Owner {
     pub(super) fn load_for_short_home_recovery(
         candidate: &Candidate,
     ) -> Result<Self, CandidateError> {
-        Self::load_with_short_home(candidate, true)
+        Self::load_with_short_home(candidate, true, false)
+    }
+
+    /// Only for [`Owner::restore_released_short_home`] under the pool lock: a clean stop
+    /// whose alias path another entry holds loads, so it can move to a fresh alias. The
+    /// returned receipt's alias must not be used until that restore succeeds.
+    pub(super) fn load_for_alias_restore(candidate: &Candidate) -> Result<Self, CandidateError> {
+        Self::load_with_short_home(candidate, false, true)
     }
 
     fn load_with_short_home(
         candidate: &Candidate,
         allow_missing: bool,
+        allow_squatted: bool,
     ) -> Result<Self, CandidateError> {
         let root = candidate.state_root.join("run/smolvm");
         reject_aliased_state(&root)?;
-        if allow_missing {
-            match fs::symlink_metadata(root.join("owner.pending")) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => {
-                    return Err(CandidateError::new(
-                        "recovery_required",
-                        "Provider owner update is pending or unobservable; HOME alias was not restored.",
-                    ));
-                }
-            }
+        let no_pending_update = matches!(
+            fs::symlink_metadata(root.join("owner.pending")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        );
+        if allow_missing && !no_pending_update {
+            return Err(CandidateError::new(
+                "recovery_required",
+                "Provider owner update is pending or unobservable; HOME alias was not restored.",
+            ));
         }
         let owner: Self = read(&root.join("owner.json"))?;
         owner.network.validate()?;
-        if let Some(share) = &owner.project_share {
-            share.validate_receipt()?;
-        }
+        super::project_share::validate_set(
+            owner.project_share.as_ref(),
+            &owner.additional_project_shares,
+        )?;
         if owner.created
             && matches!(&owner.network, super::NetworkIntent::ApprovedHosts { cidrs, .. } if cidrs.is_empty())
         {
@@ -335,49 +407,153 @@ impl Owner {
             || owner.token.len() != 32
             || !owner.token.bytes().all(|b| b.is_ascii_hexdigit())
             || owner.machine != format!("hack-{}", &owner.token[..12])
-            || owner.short_home
-                != Path::new("/private/tmp").join(format!("hkl-{}", &owner.token[..12]))
+            || !valid_short_home(&owner.short_home)
         {
             return Err(CandidateError::new(
                 "foreign_state",
                 "Provider owner identity does not match this checkout.",
             ));
         }
-        owner.check_short_home(candidate, allow_missing)?;
+        // A clean stop's alias may be absent, after host cleanup of `/private/tmp`; the next
+        // mutating operation restores it under the pool lock before using it.
+        let released = owner.short_home_releasable() && no_pending_update;
+        match owner.alias(candidate)? {
+            Alias::Owned => {}
+            Alias::Missing if allow_missing || released => {}
+            Alias::Missing => return Err(missing_alias()),
+            Alias::Foreign if released && allow_squatted => {}
+            Alias::Foreign if released => {
+                return Err(CandidateError::new(
+                    "foreign_state",
+                    "Temporary provider HOME alias path is held by another entry, which is never used. Run runtime up or runtime recover to restore the stopped pool under a new alias.",
+                ));
+            }
+            Alias::Foreign => return Err(replaced_alias()),
+        }
         check_private_directory(&root.join("home"))?;
         Ok(owner)
     }
+
+    /// Whether this receipt is a clean stop: the `stopped` phase with the clean-stop marker,
+    /// which only `down` writes, after proving provider and socket absence, in one receipt
+    /// write. Only such a receipt may exist without its temporary HOME alias, or move to a
+    /// fresh alias. Any other phase write clears the marker, so every later phase needs
+    /// the alias again.
+    pub(super) fn short_home_releasable(&self) -> bool {
+        self.phase == "stopped" && self.clean_stop.is_some()
+    }
+
+    /// Restore the HOME alias of a clean stop before a mutating operation uses it. Called
+    /// under the pool lock. A clean `down` keeps its alias, so this acts only after host
+    /// cleanup removed it, or when another entry took its path:
+    ///
+    /// - the exact owned alias is kept as it is;
+    /// - an absent alias is created exclusively after the durable receipt is rechecked;
+    /// - an alias path held by anything else (another user's entry, a file, a directory,
+    ///   another link) is never followed, replaced or removed. The receipt records a fresh
+    ///   random alias first, and then that alias is created exclusively.
+    ///
+    /// A pool with dependency sockets refuses a fresh alias: its provider record pins
+    /// those socket paths under the original alias.
+    pub(super) fn restore_released_short_home(
+        &mut self,
+        candidate: &Candidate,
+    ) -> Result<(), CandidateError> {
+        let alias = self.alias(candidate)?;
+        if alias == Alias::Owned {
+            return Ok(());
+        }
+        if !self.short_home_releasable() || Self::load_for_alias_restore(candidate)? != *self {
+            return Err(CandidateError::new(
+                "foreign_state",
+                "Provider owner changed before HOME alias restoration; no alias was restored.",
+            ));
+        }
+        if alias == Alias::Missing {
+            match std::os::unix::fs::symlink(self.home(candidate), &self.short_home) {
+                Ok(()) => return self.check_short_home(candidate, false),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Another entry took the path between the check and the creation.
+                    if self.alias(candidate)? == Alias::Owned {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    return Err(CandidateError::new(
+                        "socket_alias_collision",
+                        "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
+                    ));
+                }
+            }
+        }
+        self.move_to_fresh_short_home(candidate)
+    }
+
+    /// Record a fresh alias, then create it exclusively. A crash in between leaves a clean
+    /// stop whose recorded alias is absent, which the next restore creates.
+    fn move_to_fresh_short_home(&mut self, candidate: &Candidate) -> Result<(), CandidateError> {
+        if self.dependency_sockets.is_some() {
+            return Err(CandidateError::new(
+                "socket_alias_collision",
+                "Provider HOME alias path is held by another entry, and this pool's provider record pins its dependency socket paths there. Nothing was followed or replaced; remove that entry, then retry.",
+            ));
+        }
+        for _ in 0..FRESH_ALIAS_ATTEMPTS {
+            let mut next = self.clone();
+            next.short_home = fresh_short_home()?;
+            if next.short_home == self.short_home {
+                continue;
+            }
+            next.save(candidate)?;
+            *self = next;
+            match std::os::unix::fs::symlink(self.home(candidate), &self.short_home) {
+                Ok(()) => return self.check_short_home(candidate, false),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(io(error)),
+            }
+        }
+        Err(CandidateError::new(
+            "socket_alias_collision",
+            "Cannot exclusively create a fresh provider HOME alias; no existing path was replaced.",
+        ))
+    }
+
+    fn home(&self, candidate: &Candidate) -> PathBuf {
+        candidate.state_root.join("run/smolvm/home")
+    }
+
+    /// Classify the alias path with `lstat`. A link is read, never followed.
+    fn alias(&self, candidate: &Candidate) -> Result<Alias, CandidateError> {
+        let alias = match fs::symlink_metadata(&self.short_home) {
+            Ok(alias) => alias,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Alias::Missing);
+            }
+            Err(error) => return Err(io(error)),
+        };
+        // SAFETY: geteuid has no preconditions.
+        if alias.file_type().is_symlink()
+            && alias.uid() == unsafe { libc::geteuid() }
+            && fs::read_link(&self.short_home).map_err(io)? == self.home(candidate)
+        {
+            Ok(Alias::Owned)
+        } else {
+            Ok(Alias::Foreign)
+        }
+    }
+
     /// The only permitted alias is the exact receipt-bound HOME for Unix sockets.
     fn check_short_home(
         &self,
         candidate: &Candidate,
         allow_missing: bool,
     ) -> Result<(), CandidateError> {
-        let alias = match fs::symlink_metadata(&self.short_home) {
-            Ok(alias) => alias,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return if allow_missing {
-                    Ok(())
-                } else {
-                    Err(CandidateError::new(
-                        "provider_home_missing",
-                        "Temporary provider HOME alias is absent. Use runtime recover to verify the stopped pool before restoring it.",
-                    ))
-                };
-            }
-            Err(error) => return Err(io(error)),
-        };
-        if !alias.file_type().is_symlink()
-            || alias.uid() != unsafe { libc::geteuid() }
-            || fs::read_link(&self.short_home).map_err(io)?
-                != candidate.state_root.join("run/smolvm/home")
-        {
-            return Err(CandidateError::new(
-                "foreign_state",
-                "Short provider HOME alias was replaced.",
-            ));
+        match self.alias(candidate)? {
+            Alias::Owned => Ok(()),
+            Alias::Missing if allow_missing => Ok(()),
+            Alias::Missing => Err(missing_alias()),
+            Alias::Foreign => Err(replaced_alias()),
         }
-        Ok(())
     }
 
     /// Called only while the lifecycle owns the pool and VM locks and has audited absence.
@@ -393,11 +569,7 @@ impl Owner {
                 "Provider owner changed during HOME recovery; no alias was restored.",
             ));
         }
-        std::os::unix::fs::symlink(
-            candidate.state_root.join("run/smolvm/home"),
-            &self.short_home,
-        )
-        .map_err(|_| {
+        std::os::unix::fs::symlink(self.home(candidate), &self.short_home).map_err(|_| {
             CandidateError::new(
                 "socket_alias_collision",
                 "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
@@ -440,14 +612,18 @@ impl Owner {
         dependency_sockets: Option<super::DependencySocketIntent>,
         project_share: Option<super::ProjectShareIntent>,
     ) -> Result<Self, CandidateError> {
-        if let Some(share) = &project_share {
-            share.validate()?;
-        }
         super::dependency_socket::check_capacity(application_bridge, dependency_sockets)?;
         let root = candidate.state_root.join("run/smolvm");
         let owner_path = root.join("owner.json");
         if owner_path.try_exists().map_err(io)? {
+            // Reuse never live-checks the recorded primary root: callers compare the loaded
+            // share set with the one they read, the requested share is checked live by
+            // `check_request`, and boot checks every share live. A moved or deleted primary
+            // root must not block another project's share on a running pool.
             return Self::load(candidate);
+        }
+        if let Some(share) = &project_share {
+            share.validate()?;
         }
         for name in ["home", "tmp", "docker-config"] {
             private_directory(&root.join(name))?;
@@ -470,10 +646,12 @@ impl Owner {
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let owner = Self {
             project_share,
+            additional_project_shares: Vec::new(),
             network,
             profile,
             application_bridge,
             dependency_sockets,
+            amd64_emulation: false,
             version: 1,
             checkout: candidate.checkout.clone(),
             machine: format!("hack-{}", &token[..12]),
@@ -514,6 +692,19 @@ impl Owner {
             ));
         }
         Ok(owner)
+    }
+    /// The pool's whole share set: the primary share first, then additional roots.
+    pub fn project_shares(&self) -> Vec<&super::ProjectShareIntent> {
+        self.project_share
+            .iter()
+            .chain(&self.additional_project_shares)
+            .collect()
+    }
+    /// The exact share approved for one project root, if this pool shares it.
+    pub fn project_share_for(&self, project: &Path) -> Option<&super::ProjectShareIntent> {
+        self.project_shares()
+            .into_iter()
+            .find(|share| share.project == project)
     }
     pub fn real_data_dir(&self, candidate: &Candidate) -> Result<PathBuf, CandidateError> {
         let relative = self

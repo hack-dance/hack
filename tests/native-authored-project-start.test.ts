@@ -694,7 +694,7 @@ macTest(
 macTest(
   "HACK-1272: a consumer refused before journal reservation retires its exact start intent",
   async () => {
-    // M3 next.5 repro: a repository@digest image passes planning, then the
+    // next.5 host repro: a repository@digest image passes planning, then the
     // native consumer refuses native_graph_admission before reserving a journal.
     // Retirement inspection can never authenticate a Removed receipt; only the
     // exact native_graph_unreserved refusal may retire the attempt.

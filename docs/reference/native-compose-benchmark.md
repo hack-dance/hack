@@ -22,7 +22,8 @@ Actual trials require a separately qualified compiled CLI and companion compiler
 their exact SHA-256 hashes and qualified source revision. Reserve the Docker test
 slot before starting: the flag acknowledges coordination; it cannot detect every
 other engine user. There must be no competing stateful tests. The harness requires
-an existing local Unix Docker endpoint, cached `oven/bun:1.4.2-slim`, and the exact
+an existing local Unix Docker endpoint, the cached `oven/bun:1.4.2-slim` workload image
+and `oven/bun:1.4.4-slim` storage helper image, and the exact
 already-running proxy with curl. By default that proxy must expose standard HTTP
 port 80. The explicit fixture mode below accepts a separately qualified proxy with
 no published ports. The harness does not pull images, start/repair global services,

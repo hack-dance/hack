@@ -281,6 +281,57 @@ Implementation regressions and the registered `native-config-routing` Docker
 scenario supply separate evidence. The model does not prove those checks,
 browser access, performance or whole NC03 completion.
 
+## Native foreground down hooks
+
+`native-foreground-down-hooks/DownHooks.tla` checks the value-free down-hook journal
+that a native Compose-import foreground `up` shares with `hack down`. One generation
+whose project declares down hooks starts with the frontend running `up.after`. The
+frontend owes the hooks, publishes readiness, and on the first interrupt claims its
+owed record, runs `down.before`, stops the graph, retires lifecycle processes and runs
+`down.after`. A second interrupt cancels a running `down.before` (known, unsuccessful
+completion). The graph can also end by itself. One `hack down` client may run, and be
+retried once, from another terminal: on a live graph it claims an owed record, or no
+record (an older frontend, or one still in `up.after`); on a stopped graph it waits for
+the frontend's finalization and runs only what is still owed. A known `down.before`
+failure of `down` restores the claimed record so an explicit retry may run it, as on
+Compose. Either process may crash at any step; a crash keeps the durable record, so a
+started phase becomes unknown. A later `up` (`NewUp`) supersedes any record except a
+started one. The journal is one record replaced by compare-and-swap; the model treats
+each replacement as atomic.
+
+The positive configuration explores **1,246 distinct states**. `Safe` requires that
+`down.before` never starts while another start is running or unknown, or after a known
+success; that `down.after` starts once, only after the graph stopped and a known
+successful `down.before`; that a started-unknown phase blocks a new generation; and
+that an interrupt during `up.after` never runs, or leaves owed, the frontend's down
+hooks. No fairness or eventual cleanup is asserted.
+
+The main negative control removes the journal guard (claims ignore the record) and
+must fail `Safe` when `DStart` or `FInterrupt` starts a second concurrent
+`down.before`. `unknown-generation` removes the started-phase refusal and must fail at
+`NewUp` with `unsafeGen = TRUE`. `owed-after-interrupt` removes the owe withdrawal and
+must fail at `FInterruptAtPublish` with the frontend's owed record left behind.
+`complete-reachable` and `recovery-reachable` assert `NeverComplete` and
+`NeverRecovered` and must fail at a safe `FAfterDone`/`DAfterDone`, and at `DAfterDone`
+after a frontend crash: the positive model does not pass by disabling the stop or the
+crash-recovery path.
+
+| Model action | Implementation boundary under `src/backends/` |
+| --- | --- |
+| `FOwe` / `FPublish` / `FInterruptAtPublish` | `native-project-start.ts` calls the journal's `owe` as the last step of readiness publication; `native-project-down-hooks.ts` withdraws it when an interrupt was observed. |
+| `FUpAfterInterrupted` | `native-project-process.ts` takes the forced stop path for a stop request before readiness; no `beforeStop`. |
+| `FInterrupt` / `FBeforeFinish` / `FCancelBefore` | `beforeStop` from `native-project-foreground-stop.ts`; the second interrupt aborts the force signal that cancels the hook (`runLifecycleCommands` in `src/commands/project.ts`). |
+| `FCleanup` / `FAfter` / `FAfterDone` | Confirmed foreground cleanup, `hooks.cleanup` and then the journal's `after`, before the finalization acknowledgement. |
+| `DStart` / `DBeforeFinish` / `DCleanup` / `DAfter` / `DAfterDone` | `openNativeDownHookSession` in `native-project-down-hooks.ts`, used by `native-project-down.ts`; the stopped path reads the journal only after `waitNativeProjectFinalization`. |
+| `NewUp` | `admitNativeDownHookGeneration`, called before `up.before`. |
+| `FCrash` / `DCrash` / `OrphanStops` | Process death leaves the record; a detached graph owner may finish stopping or be stopped by recovery. |
+
+The model does not cover real fsync or power-loss durability, a journal lock left by a
+crash inside the lock (it refuses closed and needs inspection), multiple generations,
+more than two `down` invocations, environment resolution, or the graph owner's process
+group on a real host. Ordinary tests map its counterexamples: concurrent claim,
+second-interrupt cancellation, failure, crash recovery and unknown refusal.
+
 ## Projects registry writer ownership
 
 `registry-writer/RegistryWriter.tla` models two one-shot writers, two independent
@@ -595,7 +646,80 @@ behavior, repeated jobs, multiple slots and real one-off traffic remain separate
 implementation and runtime gates. The existing Rebind model covers original-target
 drain/revocation; this model checks the later commit-before-new-grant boundary.
 
+## Automatic dependency refresh
+
+`dependency-auto-refresh/AutoRefresh.tla` checks the foreground owner's
+schedule for automatic host dependency refresh. Its positive configuration
+(`MaxRetries = 2`, `MaxAttempts = 5`) exhausts 141 distinct states. A stale
+notice (traffic drift or a watched listener exit) arms one attempt; attempts are
+single-flight; a refusal before the rebind journal re-arms after a bounded
+backoff; a completed rebind clears it; and a failure after the journal closes
+the schedule. The negative control removes the close guard (`EnforceClose =
+FALSE`) and must fail `NoReplayAfterUnconfirmed` at `Start` with a second attempt
+after an unconfirmed rebind.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `ListenerExits` / `Traffic` | `foreground/signals.rs` `watch_listener_exit` and `Wake::ListenerExit`; relay owner identity notices drained in `foreground.rs` |
+| `Start` / `RefuseBeforeEffects` | `foreground/dependency_refresh.rs` `AutomaticRefresh` (`take_due`, `finish`, `AUTOMATIC_RETRY_DELAYS`) and `automatic_outcome` |
+| `WriteJournal` / `FailAfterJournal` | `startup/runtime/rebind.rs` sets the sticky `rebind_unconfirmed` flag before the first journal write; only a completed refresh clears it |
+| `Complete` | verified `refresh_dependencies` result; `ListenerWatches::sync` re-watches the admitted endpoints |
+
+The rebind protocol itself is `dependency-rebind/Rebind.tla`. This model does
+not prove the kqueue exit delivery, timer accuracy, provider lease acquisition
+or that a replacement listener appears; it abstracts the listener as live, gone
+or replaced, and the retry delays as an ordered bound.
+
+## Pool amd64 emulation
+
+`pool-emulation/Emulation.tla` checks the Rosetta 2 translation intent of one shared
+native VM pool. The positive control explores 13 states. A start that needs
+translation records `Owner.amd64_emulation` before any provider effect; `machine
+create` passes `--rosetta` exactly when it is recorded, and a stopped pool whose
+stored setting lacks it is updated (`machine update --rosetta`). An interrupted update
+is the absence of that step and is repeated by the next start. A foreign actor may
+flip the stored setting while the pool is stopped. Each boot runs the stored setting;
+the engine starts only when the stored setting, running configuration and guest
+`binfmt_misc` registration all equal the recorded intent, otherwise the boot is
+refused. An amd64 container needs the audited pool's intent, and a running pool
+without translation refuses a request for it instead of changing intent.
+
+Removing the boot audit must fail `NoUntranslatedAmd64` in one `StartAmd64` state
+with `amd64 = TRUE`, `intent = TRUE`, `config = FALSE`, `registered = FALSE` and
+`engine = TRUE`. Allowing a running pool to gain intent must fail
+`EngineMatchesIntent` in one `RequestRunning` state with `phase = "running"`,
+`intent = TRUE`, `config = FALSE` and `engine = TRUE`. Both controls require TLC
+exit 12, the named action and same-state witness.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `RecordIntent` | `provider/lifecycle.rs::enable_amd64_emulation` saves `Owner.amd64_emulation` before any provider command |
+| `Create` / `Update` | `start_pool` adds `--rosetta` to `machine create`; `enable_amd64_emulation` runs `machine update --rosetta` when `config_audit::recorded_amd64_emulation` is false |
+| `ForeignRecord` | A stopped machine changed outside Hack; `config_audit::verify_value` compares the stored `rosetta` setting with the owner |
+| `Boot` / `StartEngine` / `RefuseBoot` | `audit_boot` (running config `resources.rosetta`), then `guest-translation.sh` in `finish_boot` before the engine starts |
+| `RequestRunning` | `check_amd64_emulation_request` refuses `amd64_emulation_restart_required` |
+| `StartAmd64` | `graph::admitted_architecture` (opted-in service and `OwnedGuest::amd64_emulation`), and `image_load::load_for` for amd64 archives |
+
+The model omits image selection, the registry and Docker's own platform handling;
+those are covered by `registry_image`, `image_ensure` and graph admission unit tests.
+Actual Rosetta execution in the guest needs host evidence.
+
 ## Stopped retained-pool startup
+
+`native-startup-owner/Owner.tla` checks project ownership after a foreground
+Compose startup fails (HACK-1917). The positive control explores 32 states.
+Readiness publishes the run mapping. A failure before readiness lets the graph
+owner's retaining cleanup either complete or be refused; the frontend then makes
+one read-only inspection that authenticates the exact receipt or is refused.
+`NoUnownedResources` requires resources that outlive the frontend under an
+authenticated receipt to have a published mapping; the `negative` control (no
+recording on failure) violates it with an unowned started graph. `NoUnprovenOwner`
+allows only readiness or an authenticated receipt to publish. The
+`refused-inspection` control violates `NoUnrecordedRefusal` to keep the remaining
+gap explicit: when inspection itself is refused, nothing can be authenticated and
+only the runtime journal retains the graph. The model does not cover crashes
+between finalization registration and mapping publication, concurrent starts, or
+the later dead-owner recovery, which other models and runtime tests own.
 
 `stopped-pool-startup/Resume.tla` checks one explicit startup from shape-valid
 stopped owner/retained receipt evidence. The positive control explores 71 states.
@@ -638,6 +762,81 @@ volume integrity and live application behavior remain separate tests. `Cancel`
 represents an observed abort check, not arbitrary OS signal delivery; cancellation
 does not reverse an already-admitted boot. There is no fairness or eventual-start
 claim, and a model pass is not native startup qualification.
+
+## Retained-data handoff across plan changes
+
+`native-plan-reconcile/Reconcile.tla` checks how a stopped native graph hands its
+named data to the next admission after a Compose edit. Two interchangeable
+instances (checked up to permutation), two logical volume keys and three volume
+identities explore 747,656 distinct states. Every admission recreates compute from
+the current plan, so command, image and environment edits are abstracted; the model
+varies only the declared volume set. A declared key that the run already records is
+reattached; a newly declared key gets an exclusively created volume; recorded data
+the plan no longer declares stays recorded and unmounted until explicit removal.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `Edit` | Compose edit between ups; a new review and normalized identity |
+| `Select` | `provider/graph/foreground.rs::restore_selection` generation over the receipt and observed volume identities |
+| `Replace` / `Substitute` | Volume replaced between selection and admission, or a foreign-labeled volume under a recorded name |
+| `Admit` | `provider/graph/restore.rs::restore_inputs`: `plan_reconcile::Verified::verify_fresh` generation recheck and label/presence checks under the provider lease |
+| `CreateDeclared` | `plan_reconcile::Verified::project` fresh `reserved` names, then `Session::create_resources` exclusive create |
+| `Start` / `Stop` / `RemoveData` | Container creation with projected mounts; ordinary stop keeps volumes; `down --remove-data` deletes recorded volumes |
+
+The `negative` control adopts any live volume with a declared key and must fail
+`NoForeignAttach` in a `Start` state with `foreignAttach = TRUE`. The `replacement`
+control skips the generation recheck and must fail `AttachSelected` with
+`unrecordedAttach = TRUE`. The `drop-orphans` control forgets undeclared retained
+data and must fail `RetainedDataRecorded` with `lostData = TRUE`.
+
+Assumptions: admission through startup holds the provider mutation lease, so no
+replacement happens inside it. A replacement with copied ownership labels before
+selection is indistinguishable from the recorded volume by name and labels, as in
+the implementation; the generation fence protects only the selection-to-admission
+window. Dependency caches are checked by the next model; live source and
+source-device rebinding keep their own proofs and are outside this model. It does
+not prove engine mount behavior, crash durability of the receipt, image resolution
+or application data contents.
+
+## Dependency caches across plan changes
+
+`native-cache-reconcile/CacheReconcile.tla` checks which volume backs a dependency
+cache key when a stopped graph is reconciled after a Compose edit. A cache is a
+volume named by an identity of its inputs; run-owned data uses the run's own names.
+Edits change the cache's own inputs (initializer definition, declaration, image,
+lockfiles, and every service mount of the cache volume), anything else in the
+Compose file, whether a non-initializer service mounts the cache read-write, or
+whether the key is declared as a cache. Such a writable consumer can change the
+contents with inputs the identity does not hash, so its cache is scoped to this
+checkout or branch instance; another instance with its own writable consumer may
+write into the caches it selects (`ForeignWrite`). Two values for each explore
+2,208 distinct states.
+
+| Model action | Implementation boundary |
+| --- | --- |
+| `EditInputs` / `EditOther` / `EditConsumer` / `EditDeclaration` | Compose or lockfile edit between ups; `dependency_cache::resolve_with_legacy` computes the current identity and `instance_scoped_volumes` the scope |
+| `ForeignWrite` | A linked worktree or branch instance whose writable consumer changes the cache it mounts |
+| `UpCache` | `plan_reconcile::prepare` refuses run data declared as a cache; `Verified::project` keeps a cache of the same identity or selects the new identity's cache, then `Session::create_resources` adopts it by labels or creates it |
+| `UpData` | A key that is no longer a cache gets a fresh run-owned volume; the cache reference is released, never deleted |
+| `Stop` | Ctrl-C or `down` keeps every recorded volume |
+
+The `negative` control binds the whole Compose document into the identity (the
+earlier formula) and must fail `UnrelatedEditKeepsCache` in an `UpCache` state with
+`needlessRebuild = TRUE`. The `stale` control reattaches the recorded cache whatever
+its identity and must fail `CacheMatchesInputs` with `staleMounted = TRUE`. The
+`data-as-cache` control mounts retained run data newly declared as a cache and must
+fail `NoDataAsCache` with `dataMounted = TRUE`. The `poison` control keeps caches
+with a writable consumer shared across instances and must fail `NoForeignWrites`
+with `foreignMounted = TRUE`.
+
+Assumptions: identities are exact (no collisions), the initializer populates a newly
+selected cache before dependents start, read-only consumers and initializers only
+produce what the identity describes, and admission holds the provider lease. Within
+one instance the same author controls every input, so writes there are trusted. The
+compatibility path that keeps a receipt recorded under the earlier identity while
+its inputs still match (never for a writable consumer) is covered by
+`plan_reconcile.rs` tests, not this model. It does not prove initializer
+idempotence, cache content, capacity limits or cache-wide collection.
 
 ## Graph admission
 
@@ -752,6 +951,7 @@ have canonical copies and were not duplicated.
 | authority-lifetime | 9 | Authority cannot outlive completed runtime shutdown; removing the startup lease permits a late bind | `hostname_authority.rs` startup lock and shutdown |
 | publication-journal | 50 | Recovery cannot adopt a live writer's pending entry; unsafe recovery violates that condition | `publication.rs` journal recovery |
 | publication | 16 | A live native publication retains its intent, directory and guest; early retirement breaks ownership | `publication.rs`, `publication_stage.rs` |
+| loopback-port-publication | 1008 | One listener per published host port, forwarding only to the pinned container incarnation, recovery only for a dead owner, and no listener after acknowledged stop. Negative controls: recovery without the dead-owner check (`negative`), no loopback probe (`no-probe`), no endpoint identity check (`stale-target`), acknowledging stop before closing the listener (`ack-before-close`) | `publication.rs` (`require_loopback_port_free`, `release`), `graph/bridges.rs` loopback bridges, `graph/foreground/publishers.rs` |
 | fence-first | 24 | First recovery needs terminal prior state, no occupied slot, and complete evidence; ignoring occupancy fails | `graph/relay-fence.sh` initial recovery |
 | fence-pending | 7 | Recover only permitted pending transitions; accepting launching-to-stopped leaves a live process | `graph/relay-fence.sh` pending recovery |
 | relay-staging | 9 | Discarded preparation cannot contain a live child; discarding an authorized launch fails | `publication_stage.rs` and `graph/relay-fence.sh` launch ordering |
@@ -763,6 +963,11 @@ other models use finite phase/boolean sets. No fairness or eventual-progress cla
 is made. The first-fence model checks an admission predicate, not an interleaving
 proof. Journal `skipped` is constrained by the recovery guard and its negative
 control specifically tests live-writer recovery, not every corruption condition.
+Loopback port publication uses two owners and one foreign listener for one host
+port, and one container replacement per publication. Publish is one step: the
+real interval between the loopback probe and the publisher's own bind is not
+modeled, so a foreign wildcard listener that binds inside it is a documented
+residual risk rather than a checked property.
 OS process identity, file locks, fsync, symlink races, host mounts, credentials,
 network behavior and actual crash recovery require implementation tests and live
 qualification. A passing abstract model does not close those runtime gates.
@@ -931,7 +1136,7 @@ confirmation boundaries; `graph/startup/native_test.rs` defines the separate ini
 application-health acceptance fixture. A test's presence is not a passing run.
 Record the exact source/artifact and result when claiming component or native proof;
 the synthetic startup fixture passed on September 17, 2026; its 64 KiB exchange,
-initial health and confirmed cleanup do not qualify Event Agent or all failure paths.
+initial health and confirmed cleanup do not qualify a real application or all failure paths.
 
 Keep the remaining acceptance questions explicit: lost acknowledgement and resend,
 stale owner/command evidence, death versus timeout, pre/post-effect crashes without
@@ -1049,3 +1254,63 @@ Closing the residual needs a mutation fence rather than a timeout: target tmux
 mutations by session ID (`#{session_id}`, never reused by a server) captured with
 the token read. That fence, and full zellij support for shared-helper lifecycle
 sessions, are tracked in HACK-1849 and are not in this slice.
+
+## Multi-root pool shares
+
+`multi-root-share/Shares.tla` models one development pool that hosts several
+project roots. The share set is the pool's mount intent. It changes only through
+the journaled stopped-pool update in `provider::share_update`: the provider record
+commits before the owner receipt, and startup refuses while the journal exists.
+Boot mounts exactly the audited set. A graph binds only the share whose root equals
+its own reviewed source, and a share stays while any graph of that project is live
+or retained.
+
+The positive configuration (three roots, a two-share bound) exhausts **55 distinct
+states**. Four guard-removal controls must fail at the named action with the exact
+same-state witness: `negative` (a graph may select any mounted share) fails
+`OwnShareOnly` at `StartGraph`; `unfenced-boot` fails `RunningMountsAudited` at
+`Boot`; `owner-first` fails `OwnerNeverAhead` at `CommitOwner`; and
+`referenced-removal` fails `ReferencedSharesKept` at `CommitRecord`. The controls
+check two roots (`a`, `b`), so no symmetric third root can stand in for `b`.
+TLC's two-worker search also does not always report the shortest trace, so each
+control accepts exactly the first violations its model can reach (9, 12, 4 and 2
+complete states). They were enumerated from each control's complete state graph,
+restricted to steps from states that still satisfy the invariant, and are listed in
+`scripts/lib/tla-runtime-models.ts`.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `BeginAdd` / `BeginRemove` | `share_update::plan`: owned stopped pool (`network_update::stopped_with`), primary share kept, bounded set, removal refused while a graph record names the share (`require_unreferenced`). An interrupted add resumes from its recorded share without a live root check (`addition`). |
+| `CommitRecord` / `CommitOwner` / `Finish` | `network_update::apply_record`, then the owner save, then journal removal; `validate_sides` refuses an owner ahead of its record. |
+| `Boot` | `share_update::require_complete`, `project_share::check_boot` and `config_audit` mount verification before `machine start`. |
+| `CleanGraph` | One run's own cleanup; a native receipt that the pool owner proves `Removed` (`graph::native::retired`) no longer counts as a reference. |
+| `StartGraph` | `OwnedGuest::project_share_for(plan.source)` in shared source selection; `ProjectShareIntent::bind_path` keeps every bind under that share. |
+
+The model does not cover provider behavior: that the pinned provider mounts an
+updated record at the next boot, virtio-fs device limits, or live multi-project
+graphs on a host VM. Cleanup is abstracted to one run's own resources.
+
+## Native image build retention
+
+`native-build-retention/BuildRetention.tla` follows `provider::image_build` and its
+`reclaim` module for one build key in one namespace, with three content IDs and two
+storage incarnations. The positive configuration exhausts **6,181 distinct states**.
+
+| Model operation | Source boundary |
+| --- | --- |
+| `BeginBuild` | Under the provider lease: shared build fence, per-key lock, `building` receipt. |
+| `RunBuild` / `ForeignImage` | Unleased BuildKit run writing an image with this pool's labels; a forged or foreign image may appear at any time. |
+| `CompleteBuild` | Under the lease: the reported ID is adopted only with this incarnation's labels and the admitted incarnation; otherwise `failed`. |
+| `Cancel` / `CrashHost` / `RecordDeadAttempt` | Cancellation and host death release the fence; a `building` receipt under the key lock is recorded `indeterminate`. |
+| `Down` / `RecreateStorage` | `runtime down` refuses while the fence is held; recreated storage is a new incarnation with an empty engine. |
+| `StartGraph` / `RemoveContainers` / `Restore` | Graphs use only a verified image of this incarnation and keep a reference to it; data-retaining cleanup removes containers but not the reference; restore never builds. |
+| `Reclaim` / `PruneCache` | Owned, non-current, unreferenced, unused images only, with no build admitted; cache pruning never touches images. |
+
+Three controls each remove one guard and must fail at the named action:
+`negative` (reclaim ignores retained references) fails `NoReclaimReferenced` at
+`Reclaim`; `foreign-adoption` (adoption without the label/incarnation check) fails
+`NoForeignAdoption` at `CompleteBuild`; `down-under-build` (down ignores the fence)
+fails `DownNotUnderBuild` at `Down`. The model does not cover a build client that
+outlives a killed `hack-native` process (the implementation keeps the fence and key
+lock held by the inherited descriptors until that client exits), real BuildKit or
+engine behavior, receipt durability, or more than one key and namespace.

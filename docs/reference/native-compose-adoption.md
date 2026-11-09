@@ -8,6 +8,14 @@ instance to native authored selection while retaining its original resources.
 existing-resource counts without writing private state or active inputs. Neither
 path copies data, creates replacement volumes, relabels resources or changes engines.
 
+`hack config adopt`, including `--dry-run`, requires the Compose backend: the
+preview reads the Compose backend's existing containers and volumes, and adoption
+hands them to native configuration on that backend. With another
+`HACK_RUNTIME_BACKEND` (such as the `hack-next` default, `native`), both refuse
+with `E_NATIVE_PROJECT_UNSUPPORTED` before reading anything and name the rerun,
+for example `HACK_RUNTIME_BACKEND=compose hack config adopt --dry-run`. The
+selected runtime is not changed.
+
 ## Authored identity and storage intent
 
 The owner shares the [import preview](native-config-import.md) source acquisition:

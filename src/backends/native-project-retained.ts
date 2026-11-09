@@ -44,11 +44,7 @@ export function confirmedNativeRetainedGraph(
       return false;
     }
     expected.add(key);
-    const observed = observations[key];
-    if (
-      !isRecord(observed) ||
-      observed.state !== (resource.kind === "volume" ? "present" : "absent")
-    ) {
+    if (!observedAsRecorded(resource, observations[key])) {
       return false;
     }
   }
@@ -56,4 +52,28 @@ export function confirmedNativeRetainedGraph(
     Object.keys(observations).length === expected.size &&
     Object.keys(observations).every((key) => expected.has(key))
   );
+}
+
+/**
+ * Compute must be absent and settled data present. A `reserved` volume never
+ * received a create intent: it holds no data and must be absent. A reserved
+ * dependency cache is shared and content-addressed: admission adopts an
+ * existing one by labels or creates it, so either observation is valid.
+ */
+function observedAsRecorded(
+  resource: Record<string, unknown>,
+  observed: unknown
+): boolean {
+  if (!isRecord(observed)) {
+    return false;
+  }
+  if (resource.kind !== "volume") {
+    return observed.state === "absent";
+  }
+  if (resource.phase !== "reserved") {
+    return observed.state === "present";
+  }
+  return isRecord(resource.cache)
+    ? observed.state === "present" || observed.state === "absent"
+    : observed.state === "absent";
 }

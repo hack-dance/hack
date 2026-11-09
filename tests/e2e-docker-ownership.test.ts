@@ -136,7 +136,7 @@ describe("e2e docker ownership", () => {
       false
     );
     expect(isOwnedComposeProject({ project: "e2e-ffff", names })).toBe(false);
-    expect(isOwnedComposeProject({ project: "mhof_default", names })).toBe(
+    expect(isOwnedComposeProject({ project: "otherproj_default", names })).toBe(
       false
     );
   });
@@ -153,7 +153,7 @@ describe("e2e docker ownership", () => {
       network("e2e-abc1--feat"),
       { kind: "volume", id: "v1", name: "e2e-abc1_data", project: "e2e-abc1" },
       network("e2e-other"),
-      network("mhof"),
+      network("otherproj"),
     ]);
     const result = await sweepOwnedComposeResources({
       docker: fake.docker,
@@ -169,7 +169,7 @@ describe("e2e docker ownership", () => {
     ]);
     expect(fake.resources.map((resource) => resource.project)).toEqual([
       "e2e-other",
-      "mhof",
+      "otherproj",
     ]);
     expect(fake.calls.some((call) => call.includes("prune"))).toBe(false);
   });
@@ -202,7 +202,7 @@ describe("e2e docker ownership", () => {
   });
 
   test("runScenarios fails a docker scenario that leaves a network", async () => {
-    const fake = fakeDocker([network("mhof")]);
+    const fake = fakeDocker([network("otherproj")]);
     const outcomes = await runScenarios({
       dockerEnabled: true,
       docker: fake.docker,
@@ -231,7 +231,7 @@ describe("e2e docker ownership", () => {
     expect(outcomes.map((outcome) => outcome.status)).toEqual(["fail", "pass"]);
     expect(outcomes[0]?.reason).toContain("e2e-1eaced--feat_default");
     expect(fake.resources.map((resource) => resource.project)).toEqual([
-      "mhof",
+      "otherproj",
     ]);
   });
 

@@ -37,16 +37,18 @@ fn freshValues(value: std.json.Value, started: u64, now: u64) !std.json.ObjectMa
     }
     return values.object;
 }
-/// Resolve a user exec in this container after applying its environment. Never
-/// consult a host PATH or start a shell. Startup and health still require an
-/// absolute executable and do not call this function.
+/// Exec the selected process in this container after applying its environment,
+/// as Docker does: a name containing `/` is executed as given (relative to the
+/// working directory), and a bare name is resolved through the container's PATH
+/// (Docker's default PATH when none is set). Never consult a host PATH or start
+/// a shell. Startup, health and exec all use this.
 fn execCommand(args: []const [:0]u8, env: *const std.process.EnvMap) !void {
     if (args.len == 0 or args[0].len == 0) return error.Arguments;
     const command = args[0];
     if (std.mem.indexOfScalar(u8, command, '/') != null) {
         return std.process.execve(allocator, args, env);
     }
-    const path = env.get("PATH") orelse "/usr/local/bin:/bin:/usr/bin";
+    const path = env.get("PATH") orelse "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
     if (path.len > 8192) return error.Arguments;
     const argv = try allocator.alloc([]const u8, args.len);
     defer allocator.free(argv);
@@ -120,7 +122,7 @@ fn run() !void {
         try std.posix.dup2(null_fd, 2);
     }
     const args = if (health or mounted_exec) raw[1..] else raw;
-    if (args.len < 4 or args.len > 4100 or (!mounted_exec and !std.fs.path.isAbsolute(args[3]))) return error.Arguments;
+    if (args.len < 4 or args.len > 4100 or args[3].len == 0) return error.Arguments;
     const payload = try privateFile(args[1], 32768);
     const expiry = try privateFile(args[2], 32);
     const deadline = try std.fmt.parseInt(u64, expiry, 10);
@@ -135,8 +137,7 @@ fn run() !void {
     const now = try std.posix.clock_gettime(.BOOTTIME);
     if (now.sec < 0 or @as(u64, @intCast(now.sec)) >= deadline) return error.Expired;
     // Successful exec replaces this process: no resident wrapper and no signal forwarding shim.
-    if (mounted_exec) return execCommand(args[3..], &env);
-    return std.process.execve(allocator, args[3..], &env);
+    return execCommand(args[3..], &env);
 }
 pub fn main() void {
     run() catch {

@@ -343,7 +343,7 @@ test("source CLI reports and explicitly stops saved resources for unknown enroll
         version: 1,
         imageId: `sha256:${"a".repeat(64)}`,
         platform: "linux/arm64",
-        bunVersion: "1.4.2",
+        bunVersion: "1.4.4",
         bunHash: "b".repeat(64),
         libcHash: "c".repeat(64),
         helperHash: "e".repeat(64),

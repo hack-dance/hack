@@ -22,12 +22,39 @@ pub(super) fn verify(candidate: &Candidate, owner: &Owner) -> Result<(), Candida
     verify_value(candidate, owner, &record)
 }
 
+/// [`verify`] for a stopped pool before its restart repairs translation: it also accepts the
+/// one pending transition an interrupted `runtime up --amd64-emulation` leaves, where the
+/// receipt already records the intent but the provider has not stored `rosetta` yet. The
+/// record must then be exactly this pool's audited configuration without translation. The
+/// reverse (a provider with translation the receipt does not record) is still refused, and
+/// the strict [`verify`] runs again after `machine update --rosetta` and before boot.
+pub(super) fn verify_before_translation_repair(
+    candidate: &Candidate,
+    owner: &Owner,
+) -> Result<(), CandidateError> {
+    let home = candidate.state_root.join("run/smolvm/home");
+    #[cfg(target_os = "macos")]
+    let database = home.join("Library/Application Support/smolvm/server/smolvm.db");
+    #[cfg(not(target_os = "macos"))]
+    let database = home.join(".local/share/smolvm/server/smolvm.db");
+    let record = read_database(&database, &owner.machine)?;
+    if owner.amd64_emulation && !record_amd64_emulation(&record)? {
+        let mut pending = owner.clone();
+        pending.amd64_emulation = false;
+        return verify_value(candidate, &pending, &record);
+    }
+    verify_value(candidate, owner, &record)
+}
+
 pub(super) fn verify_value(
     candidate: &Candidate,
     owner: &Owner,
     record: &Value,
 ) -> Result<(), CandidateError> {
     verify_mounts(candidate, owner, record)?;
+    if record_amd64_emulation(record)? != owner.amd64_emulation {
+        return Err(invalid());
+    }
     verify_record(
         record,
         &owner.machine,
@@ -94,6 +121,9 @@ pub(super) fn pin_created_network(
     let database = home.join(".local/share/smolvm/server/smolvm.db");
     let record = read_database(&database, &owner.machine)?;
     verify_mounts(candidate, owner, &record)?;
+    if record_amd64_emulation(&record)? != owner.amd64_emulation {
+        return Err(invalid());
+    }
     let network = owner.network.pin(&record)?;
     verify_record(
         &record,
@@ -109,6 +139,31 @@ pub(super) fn pin_created_network(
     Ok(())
 }
 
+/// SmolVM's stored `rosetta` setting. The pinned default record may omit it (disabled); any
+/// value other than a boolean is refused.
+fn record_amd64_emulation(record: &Value) -> Result<bool, CandidateError> {
+    match record.get("rosetta") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(invalid()),
+    }
+}
+
+/// Whether this pool's stored machine record enables Rosetta translation for its next start.
+pub(super) fn recorded_amd64_emulation(
+    candidate: &Candidate,
+    owner: &Owner,
+) -> Result<bool, CandidateError> {
+    let home = candidate.state_root.join("run/smolvm/home");
+    #[cfg(target_os = "macos")]
+    let database = home.join("Library/Application Support/smolvm/server/smolvm.db");
+    #[cfg(not(target_os = "macos"))]
+    let database = home.join(".local/share/smolvm/server/smolvm.db");
+    let record = read_database(&database, &owner.machine)?;
+    verify_mounts(candidate, owner, &record)?;
+    record_amd64_emulation(&record)
+}
+
 fn verify_mounts(
     candidate: &Candidate,
     owner: &Owner,
@@ -119,7 +174,7 @@ fn verify_mounts(
         "/opt/hack-engine",
         true
     ])];
-    if let Some(share) = &owner.project_share {
+    for share in owner.project_shares() {
         share.validate_receipt()?;
         mounts.push(share.database_mount());
     }
@@ -508,6 +563,25 @@ mod tests {
             let mut record = fixture();
             record.as_object_mut().unwrap().remove(field);
             assert!(verify_isolated_record(&record, "owned", "token", None).is_err());
+        }
+    }
+    #[test]
+    fn stored_rosetta_setting_is_a_closed_boolean_with_a_disabled_default() {
+        // The pinned default record stores `rosetta: null`; `machine update --rosetta` stores true.
+        let mut record = fixture();
+        assert!(!record_amd64_emulation(&record).unwrap());
+        record["rosetta"] = Value::Null;
+        assert!(!record_amd64_emulation(&record).unwrap());
+        record["rosetta"] = json!(false);
+        assert!(!record_amd64_emulation(&record).unwrap());
+        record["rosetta"] = json!(true);
+        assert!(record_amd64_emulation(&record).unwrap());
+        for value in [json!("true"), json!(1), json!({})] {
+            record["rosetta"] = value;
+            assert_eq!(
+                record_amd64_emulation(&record).unwrap_err().code,
+                "unaudited_provider_config"
+            );
         }
     }
     #[test]

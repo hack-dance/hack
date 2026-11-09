@@ -5619,3 +5619,40 @@ test("wrong pinned host port names the binding before VM boot", async () => {
   expect(events).not.toContain("runtime up");
   expect(events).not.toContain("runtime ensure-image");
 });
+
+test("an exited frontend marker does not survive a later completed start as pending", async () => {
+  const { opts } = await fixture(false);
+  const modulePath = new URL(
+    "../src/backends/native-project-run.ts",
+    import.meta.url
+  ).pathname;
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `
+    const { beginNativeProjectStartupObservation } = await import(${JSON.stringify(modulePath)});
+    await beginNativeProjectStartupObservation(JSON.parse(process.env.HACK_TEST_SCOPE));
+    // Exit without the returned finalizer, as a terminated frontend would.
+  `,
+    ],
+    {
+      env: { HACK_TEST_SCOPE: JSON.stringify(opts.scope) },
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 10_000,
+    }
+  );
+  expect(await child.exited).toBe(0);
+  expect((await nativeProjectPs(opts)).status).toBe("not_started");
+  await startNativeProject(opts);
+  expect((await nativeProjectPs(opts)).status).toBe("not_started");
+});
+
+test("invalid startup arguments refuse before creating advisory storage", async () => {
+  const { opts } = await fixture(false);
+  await expect(
+    startNativeProject({ ...opts, allowedHosts: ["bad host"] })
+  ).rejects.toThrow();
+  expect(await readdir(opts.scope.projectDir)).toEqual([]);
+});

@@ -1437,9 +1437,14 @@ A provider lease held for the whole bounded read, for example by a starting
 foreground `up`, is also an ordinary state: `ps` exits 0 and reports
 `runtime_busy` (no phase, no service rows). Reads retry brief lease contention.
 `hack ps --json` prints the standard `{ok: true, data}` envelope; `data` holds
-`backend: "native"`, `status` (`not_started`, `runtime_not_running`,
+`backend: "native"`, `status` (`not_started`, `pending`, `runtime_not_running`,
 `runtime_busy`, `observed`, `owner_unconfirmed` or `runtime_degraded`), `run`,
-`phase` and `items`. Bounded
+`phase` and `items`. Before a mapping exists, `pending` means a frontend start's
+advisory marker still has a possibly present owner; run and phase are null and
+items is empty. It proves neither process liveness nor service readiness. A crashed
+owner proven absent no longer counts as pending; PID reuse or inaccessible owners
+remain uncertain. Reading `ps` never retires runtime resources or deletes markers.
+Bounded
 logs refuse a stopped runtime with `E_DOCKER_UNAVAILABLE` and exit 1. Native `exec` and `run` refresh admitted host dependencies once before
 command selection and managed environment preparation. They proceed only with
 fresh ownership and runtime proof, even if containers still appear running.

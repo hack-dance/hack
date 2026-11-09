@@ -1677,7 +1677,7 @@ function reportStopped(opts: {
   }
 }
 
-async function startNativeProjectAttempt(opts: {
+type NativeProjectStartOptions = {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
@@ -1740,7 +1740,12 @@ async function startNativeProjectAttempt(opts: {
   /** Foreground progress and the ready line; see {@link NativeStartupProgress}. */
   readonly onProgress?: (event: NativeStartupProgress) => void;
   readonly dependencies?: Partial<Dependencies>;
-}): Promise<number> {
+};
+
+async function startNativeProjectAttempt(
+  opts: NativeProjectStartOptions,
+  observeStartup: () => Promise<void>
+): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
   requireActiveStartup(opts.signal);
@@ -1799,6 +1804,7 @@ async function startNativeProjectAttempt(opts: {
     invoke: deps.invoke,
   });
   await deps.prepareStorage(opts.scope);
+  await observeStartup();
   let input = await deps.prepare({
     ...opts.scope,
     composeFile: opts.composeFile,
@@ -2559,15 +2565,14 @@ function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
 
 /** Publish advisory startup evidence until this foreground invocation settles. */
 export async function startNativeProject(
-  opts: Parameters<typeof startNativeProjectAttempt>[0]
+  opts: NativeProjectStartOptions
 ): Promise<number> {
-  if (!opts.sharedSource || opts.signal?.aborted) {
-    return await startNativeProjectAttempt(opts);
-  }
-  const finish = await beginNativeProjectStartupObservation(opts.scope);
+  let finish: (() => Promise<void>) | undefined;
   try {
-    return await startNativeProjectAttempt(opts);
+    return await startNativeProjectAttempt(opts, async () => {
+      finish = await beginNativeProjectStartupObservation(opts.scope);
+    });
   } finally {
-    await finish();
+    await finish?.();
   }
 }

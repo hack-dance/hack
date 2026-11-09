@@ -2193,7 +2193,17 @@ export async function startNativeProject(opts: {
             | undefined;
           // Redacted at receipt; the raw tail is never retained or persisted.
           let startupLogReport = "";
-          const services = Object.keys(specs).sort();
+          const reviewedServices =
+            isRecord(review.report.plan) &&
+            isRecord(review.report.plan.services)
+              ? review.report.plan.services
+              : {};
+          const services = Object.entries(reviewedServices)
+            .filter(
+              ([, service]) => isRecord(service) && service.active === true
+            )
+            .map(([name]) => name)
+            .sort();
           progress({ phase: "services", services });
           let stopWatching: (() => Promise<void>) | undefined;
           try {

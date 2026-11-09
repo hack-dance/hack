@@ -5463,3 +5463,42 @@ test("restart preflight ignores inactive-profile services a wrapper cannot run",
   // The same preflight without the profile completes.
   await preflight([]);
 });
+
+test("startup and ready progress list only reviewed active services", async () => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.extra = { ...compose.services.web, profiles: ["extra"] };
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) =>
+    review({
+      ...request,
+      run: (result) =>
+        request.run({
+          ...result,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                web: { active: true },
+                extra: { active: false },
+              },
+            },
+          },
+        }),
+    });
+  const lists: (readonly string[])[] = [];
+  await startNativeProject({
+    ...opts,
+    onProgress: (event) => {
+      if (event.phase === "services" || event.phase === "ready") {
+        lists.push(event.services);
+      }
+    },
+  });
+  expect(lists).toEqual([["web"], ["web"]]);
+});

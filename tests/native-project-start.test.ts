@@ -44,6 +44,7 @@ import {
 import {
   NATIVE_CONFIGURATION_REFUSAL,
   NATIVE_SHARED_SOURCE_REFUSAL,
+  NativeStartupCanceledError,
   type NativeStartupProgress,
   nativeReadinessArgs,
   nativeReadySummary,
@@ -1165,6 +1166,72 @@ test("cancellation while runtime up waits on a held lease issues no later runtim
   expect(after).toEqual([]);
   expect(events.at(-1)).toBe("cleanup");
   expect(events).not.toContain("save");
+});
+
+function heldRuntimeUp(
+  invoke: NonNullable<
+    Parameters<typeof startNativeProject>[0]["dependencies"]
+  >["invoke"],
+  controller: AbortController
+) {
+  return async (call: Parameters<NonNullable<typeof invoke>>[0]) => {
+    if (call.args[0] === "runtime" && call.args[1] === "up") {
+      queueMicrotask(() => controller.abort());
+      await new Promise((_, reject) =>
+        call.signal?.addEventListener(
+          "abort",
+          () => reject(new Error("runtime killed while waiting")),
+          { once: true }
+        )
+      );
+    }
+    return await invoke!(call);
+  };
+}
+
+test("a stop request before any service is a confirmed cancellation once cleanup completes", async () => {
+  const { opts, events } = await fixture(false);
+  const controller = new AbortController();
+  opts.dependencies.invoke = heldRuntimeUp(
+    opts.dependencies.invoke,
+    controller
+  );
+  const error = await startNativeProject({
+    ...opts,
+    signal: controller.signal,
+  }).then(
+    () => undefined,
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(NativeStartupCanceledError);
+  expect(error).toMatchObject({ beforeServices: true, interruptedExit: 130 });
+  expect(events.at(-1)).toBe("cleanup");
+});
+
+test("a stop request whose cleanup fails is not reported as a confirmed cancellation", async () => {
+  const { opts } = await fixture(false);
+  const controller = new AbortController();
+  opts.dependencies.invoke = heldRuntimeUp(
+    opts.dependencies.invoke,
+    controller
+  );
+  const error = await startNativeProject({
+    ...opts,
+    signal: controller.signal,
+    before: async () => ({
+      cleanup: async () => {
+        throw new Error("lifecycle cleanup failed");
+      },
+      ready: async () => undefined,
+    }),
+  }).then(
+    () => undefined,
+    (caught: unknown) => caught
+  );
+  expect(error).toBeDefined();
+  expect(
+    error instanceof NativeStartupCanceledError && error.beforeServices
+  ).toBe(false);
 });
 
 test("cancellation after readiness retains mapping when data is preserved", async () => {

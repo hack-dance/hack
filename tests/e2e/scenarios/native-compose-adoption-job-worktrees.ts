@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { lstat, mkdir, open, readFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../../../src/lib/guards.ts";
 import { legacyComposeTimestampInstant } from "../../../src/lib/native-compose-adoption-jobs.ts";
@@ -995,17 +995,58 @@ function capturedIdentityAbsent(identity: number) {
 }
 
 /**
- * Pipe EOF precedes reaping: an exited descendant reparented to the subreaper
- * still answers the group probe until it is reaped. Re-probe only before the
- * caller's deadline; presence at its end still refuses. Every identity must be
- * absent in the same pass, so a receipt never carries a stale absence.
+ * Linux only: true when every process still in group `pgid` that /proc shows is
+ * a zombie, i.e. it already exited and only awaits its reaper. Any live member,
+ * or a platform/proc read that cannot classify membership, returns false. This
+ * only chooses between re-probing and refusing now; acceptance still requires an
+ * ESRCH group probe.
  */
-async function awaitCapturedAbsence(
-  identities: readonly number[],
-  deadline: number
-) {
-  while (!identities.every(capturedIdentityAbsent)) {
-    requireValue(deadline > Date.now());
+async function capturedGroupOnlyAwaitsReaping(pgid: number) {
+  if (process.platform !== "linux") {
+    return false;
+  }
+  let entries: string[];
+  try {
+    entries = await readdir("/proc");
+  } catch {
+    return false;
+  }
+  for (const name of entries) {
+    if (!/^\d+$/.test(name)) {
+      continue;
+    }
+    let stat: string;
+    try {
+      stat = await readFile(`/proc/${name}/stat`, "utf8");
+    } catch {
+      // Gone between listing and reading: no longer a member.
+      continue;
+    }
+    // "pid (comm) state ppid pgrp ...": comm may contain spaces or parentheses.
+    const [state, , pgrp] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    if (Number(pgrp) === pgid && state !== "Z") {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Pipe EOF precedes reaping: a descendant reparented to the subreaper still
+ * answers the group probe as a zombie until it is reaped. Re-probe only while
+ * every remaining member has already exited and only before the caller's
+ * deadline; a live survivor, or presence at the deadline, refuses at once. The
+ * leader and group must both be absent in the same pass.
+ */
+async function awaitCapturedAbsence(leader: number, deadline: number) {
+  for (;;) {
+    requireValue(capturedIdentityAbsent(leader));
+    if (capturedIdentityAbsent(-leader)) {
+      return;
+    }
+    requireValue(
+      deadline > Date.now() && (await capturedGroupOnlyAwaitsReaping(leader))
+    );
     await Bun.sleep(5);
   }
 }
@@ -1201,10 +1242,7 @@ async function captureInterruptedPipes(
           requireValue(child.pid !== undefined);
           // Bounded by this 2 s settlement budget; a capture whose own deadline
           // passes meanwhile is still refused by the final timedOut check.
-          await awaitCapturedAbsence(
-            [child.pid, -child.pid],
-            settlementDeadline
-          );
+          await awaitCapturedAbsence(child.pid, settlementDeadline);
           // Flush/close the capture handles inside the same settlement budget.
           await Promise.all([opts.output.close(), opts.errors.close()]);
           requireValue(settlementDeadline > Date.now());

@@ -19,6 +19,16 @@ export function isNativeProviderBusy(error: unknown): boolean {
     (error instanceof Error && error.message === BUSY)
   );
 }
+/**
+ * How long an inspection waits out lease contention by default. Inspections
+ * inside `up`, `restart`, `down` and recovery outlast a polling `hack ps` or
+ * `hack logs` (each holds the lease briefly), so a concurrent read never fails
+ * the mutating command. Those observers pass {@link OBSERVER_BUSY_WAIT_MS}.
+ */
+export const INSPECT_BUSY_WAIT_MS = 15_000;
+/** Read-only observers report a busy runtime quickly instead of waiting. */
+export const OBSERVER_BUSY_WAIT_MS = 2000;
+
 /** Concurrent cleanup observers share a provider lease. Retry only read-only lease contention. */
 export async function inspectNativeProjectGraph(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -26,8 +36,11 @@ export async function inspectNativeProjectGraph(opts: {
   readonly run: string;
   readonly invoke?: typeof invokeNativeRuntime;
   readonly signal?: AbortSignal;
+  /** Bound for retrying `provider_busy`; see {@link INSPECT_BUSY_WAIT_MS}. */
+  readonly busyWaitMs?: number;
 }): Promise<unknown> {
-  const deadline = performance.now() + 2000;
+  const deadline =
+    performance.now() + (opts.busyWaitMs ?? INSPECT_BUSY_WAIT_MS);
   for (;;) {
     try {
       return await (opts.invoke ?? invokeNativeRuntime)({
@@ -38,7 +51,11 @@ export async function inspectNativeProjectGraph(opts: {
         signal: opts.signal,
       });
     } catch (error) {
-      if (!isNativeProviderBusy(error) || performance.now() >= deadline) {
+      if (
+        !isNativeProviderBusy(error) ||
+        performance.now() >= deadline ||
+        opts.signal?.aborted
+      ) {
         throw error;
       }
       await Bun.sleep(50);

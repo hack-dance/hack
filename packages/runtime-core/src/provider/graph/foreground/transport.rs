@@ -843,6 +843,53 @@ pub(in crate::provider::graph) struct LegacyPublisher {
     pub process: ProcessIdentity,
 }
 
+/// What a remaining foreground publication shows about its recorded process.
+/// Presentation only: it names the next step for a refused start and grants no
+/// retirement, cleanup or adoption authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::provider::graph) enum PublishedOwner {
+    /// Neither the owner record nor its control socket exists.
+    Absent,
+    /// The recorded owner process is alive with its exact identity.
+    Running,
+    /// The recorded owner process is gone and nothing listens on its socket.
+    Exited,
+    /// The publication is partial, foreign or otherwise unclassified.
+    Uncertain,
+}
+impl PublishedOwner {
+    pub(in crate::provider::graph) fn word(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Running => "running",
+            Self::Exited => "exited",
+            Self::Uncertain => "uncertain",
+        }
+    }
+}
+pub(in crate::provider::graph) fn published_owner(
+    candidate: &Candidate,
+    run: &str,
+) -> Result<PublishedOwner, CandidateError> {
+    let root = root(candidate, run)?;
+    let present = |name: &str| match fs::symlink_metadata(root.join(name)) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(refused()),
+    };
+    if !present("owner.json")? && !present("control.sock")? {
+        return Ok(PublishedOwner::Absent);
+    }
+    let Ok(pin) = Pin::read(candidate, run) else {
+        return Ok(PublishedOwner::Uncertain);
+    };
+    Ok(match identity::alive(pin.record.process.pid) {
+        Ok(true) if pin.verify().is_ok() => PublishedOwner::Running,
+        Ok(false) if no_listener(&pin.root.join("control.sock")).is_ok() => PublishedOwner::Exited,
+        _ => PublishedOwner::Uncertain,
+    })
+}
+
 /// Select an exact dead current-device publisher without requiring its missing
 /// operation lock. This observation grants no file or guest effect.
 pub(in crate::provider::graph) fn dead_publisher_without_lock(
@@ -878,6 +925,29 @@ pub(in crate::provider::graph) fn fixture_dead_publisher_without_lock(
     )
     .unwrap();
     fs::remove_file(root.join("operation.lock")).unwrap();
+}
+/// Bind a retired run's next publication in this test process. The returned value
+/// keeps it alive (its owner is this process) until dropped.
+#[cfg(test)]
+pub(in crate::provider::graph) fn fixture_live_publication(
+    candidate: &Candidate,
+    run: &str,
+) -> Box<dyn std::any::Any> {
+    Box::new(Publication::bind_retired(candidate, run).unwrap())
+}
+/// Leave a retired run's next publication behind with an exited owner process:
+/// the listener is closed and the record names a process that does not exist.
+#[cfg(test)]
+pub(in crate::provider::graph) fn fixture_exited_publication(candidate: &Candidate, run: &str) {
+    drop(Publication::bind_retired(candidate, run).unwrap());
+    let root = root(candidate, run).unwrap();
+    let mut record: Record = state::read(&root.join("owner.json")).unwrap();
+    record.process.pid = 2_000_000;
+    fs::write(
+        root.join("owner.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
 }
 #[cfg(test)]
 pub(in crate::provider::graph) fn fixture_next_publication(candidate: &Candidate, run: &str) {

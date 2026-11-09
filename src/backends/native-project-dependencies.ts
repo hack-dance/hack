@@ -940,7 +940,7 @@ async function readSelectedHostDependencies(
     selection = await readNativeSelection(opts.path);
   } catch (error) {
     throw refused(
-      error instanceof NativeSelectionSyntaxError ? error.message : FILE_REASON
+      error instanceof NativeSelectionSyntaxError ? error.reason : FILE_REASON
     );
   }
   const value = compileNativeHostDependencySelection({

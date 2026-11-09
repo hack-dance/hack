@@ -1,0 +1,10 @@
+services:
+  app:
+    image: alpine:3.21
+    command: [sleep, infinity]
+    volumes: [data:/data]
+  api:
+    image: alpine:3.21
+    command: [sleep, infinity]
+volumes:
+  data: {}

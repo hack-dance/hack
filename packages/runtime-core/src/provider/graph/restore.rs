@@ -616,6 +616,9 @@ fn restore_inputs(
     if fresh.is_none() && receipt.relay_cleanup.is_none() {
         super::restore_history::retain(&root, &receipt)?;
     }
+    // All prior compute was inspected absent above and its receipt is retained.
+    // Reset stop observations before projection drops keys or recreates instances.
+    shutdown::rebase_stopped(&root, &receipt)?;
     // The complete previous attempt is retained above; current failure evidence
     // belongs only to this newly admitted generation.
     if let Some(change) = &hostname_change {

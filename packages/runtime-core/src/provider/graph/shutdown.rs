@@ -30,7 +30,7 @@ pub(super) struct Terminal {
     pub(super) stop_requested: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Evidence {
     version: u8,
@@ -63,21 +63,7 @@ pub(super) fn stop_owned(
             containers: BTreeMap::new(),
         }
     };
-    if evidence.version != 1
-        || evidence.run != receipt.run
-        || evidence.owner != receipt.owner
-        || evidence.plan != receipt.plan_id
-        || evidence.containers.len() > super::MAX_SERVICES
-        || evidence.containers.iter().any(|(key, value)| {
-            !hex(&value.id, 64)
-                || !receipt
-                    .resources
-                    .get(key)
-                    .is_some_and(|r| r.kind == Kind::Container)
-        })
-    {
-        return Err(refused());
-    }
+    validate_current(&evidence, receipt)?;
     // Stop wins against engine restarts: disarm every admitted policy and
     // confirm it with a fresh observation before the first stop request. A
     // restart already pending in the engine is cancelled by the stop itself.
@@ -122,6 +108,275 @@ pub(super) fn stop_owned(
         );
     }
     state::write(&path, &evidence)
+}
+
+fn validate(evidence: &Evidence, receipt: &Receipt) -> Result<(), CandidateError> {
+    if evidence.version != 1
+        || evidence.run != receipt.run
+        || evidence.owner != receipt.owner
+        || evidence.plan != receipt.plan_id
+        || evidence.containers.len() > super::MAX_SERVICES
+        || evidence
+            .containers
+            .iter()
+            .any(|(key, value)| !hex(&value.id, 64) || !key.starts_with("container:"))
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+fn validate_current(evidence: &Evidence, receipt: &Receipt) -> Result<(), CandidateError> {
+    validate(evidence, receipt)?;
+    if evidence.containers.keys().any(|key| {
+        !receipt
+            .resources
+            .get(key)
+            .is_some_and(|r| r.kind == Kind::Container)
+    }) {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Retain the last eight distinct observations before superseding current evidence.
+/// Publication of history precedes replacement; either write can be retried after
+/// interruption without losing the sole committed copy. History is diagnostic only.
+fn replace(
+    root: &Path,
+    previous: &Evidence,
+    next: &Evidence,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    let path = root.join("shutdown-history.json");
+    let mut history: Vec<Evidence> = if path.exists() || path.is_symlink() {
+        state::read_bounded(&path, 1024 * 1024)?
+    } else {
+        Vec::new()
+    };
+    if history.len() > 8 {
+        return Err(refused());
+    }
+    for entry in &history {
+        validate(entry, receipt)?;
+    }
+    if history.last() != Some(previous) {
+        history.push(previous.clone());
+    }
+    if history.len() > 8 {
+        history.remove(0);
+    }
+    super::journal::retain_file(
+        root,
+        "shutdown-history.pending",
+        "shutdown-recovery",
+        1024 * 1024,
+    )?;
+    state::write(&path, &history)?;
+    super::journal::retain_file(root, "shutdown.pending", "shutdown-recovery", 64 * 1024)?;
+    state::write(&root.join("shutdown.json"), next)
+}
+
+/// Called under the provider lease only after restore confirms all prior compute
+/// absent and retains its stopped receipt. No previous stop claim crosses into
+/// the freshly admitted generation, including when logical service keys survive.
+pub(super) fn rebase_stopped(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
+    if receipt.phase != "stopped-data-retained"
+        || receipt
+            .resources
+            .values()
+            .any(|resource| resource.kind != Kind::Volume && resource.phase != "absent")
+    {
+        return Err(refused());
+    }
+    let path = root.join("shutdown.json");
+    if !path.exists() && !path.is_symlink() {
+        return Ok(());
+    }
+    let previous: Evidence = state::read(&path)?;
+    validate(&previous, receipt)?;
+    for (key, terminal) in &previous.containers {
+        if !receipt.resources.get(key).is_some_and(|resource| {
+            resource.kind == Kind::Container
+                && resource.phase == "absent"
+                && resource.id.as_deref() == Some(&terminal.id)
+        }) {
+            return Err(refused());
+        }
+    }
+    let next = Evidence {
+        containers: BTreeMap::new(),
+        ..previous.clone()
+    };
+    if previous != next {
+        replace(root, &previous, &next, receipt)?;
+    }
+    Ok(())
+}
+
+/// Read-only selection or explicit repair of historical shutdown entries. This
+/// never stops compute, changes a receipt, or acknowledges a foreground owner.
+fn rebase_selection(
+    engine: &Engine<'_>,
+    root: &Path,
+    receipt: &Receipt,
+) -> Result<(String, Evidence, Evidence), CandidateError> {
+    rebase_selection_with(root, receipt, |old, resource| {
+        Ok(inspect_resource(engine, old, resource)?.is_none())
+    })
+}
+
+fn rebase_selection_with(
+    root: &Path,
+    receipt: &Receipt,
+    absent: impl Fn(&Receipt, &Resource) -> Result<bool, CandidateError>,
+) -> Result<(String, Evidence, Evidence), CandidateError> {
+    use sha2::{Digest, Sha256};
+    if receipt.phase != "cleanup-intent"
+        || root.join("state.pending").exists()
+        || root.join("state.pending").is_symlink()
+        || root.join("shutdown.pending").exists()
+        || root.join("shutdown.pending").is_symlink()
+    {
+        return Err(refused());
+    }
+    let previous: Evidence = state::read(&root.join("shutdown.json"))?;
+    validate(&previous, receipt)?;
+    let mut next = previous.clone();
+    for (key, terminal) in &previous.containers {
+        if receipt
+            .resources
+            .get(key)
+            .is_some_and(|r| r.kind == Kind::Container && r.id.as_deref() == Some(&terminal.id))
+        {
+            continue;
+        }
+        let old = super::restore_history::shutdown_generation(root, receipt, key, &terminal.id)?
+            .ok_or_else(refused)?;
+        let resource = old.resources.get(key).ok_or_else(refused)?;
+        // Inspect the immutable old ID, not its possibly reused name. A live,
+        // terminal-but-present, foreign or unobservable ID all refuse repair.
+        if !absent(&old, resource)? {
+            return Err(refused());
+        }
+        next.containers.remove(key);
+    }
+    if next == previous || !next.containers.is_empty() {
+        return Err(refused());
+    }
+    let bytes = serde_json::to_vec(&(receipt, &previous)).map_err(|_| refused())?;
+    Ok((format!("{:x}", Sha256::digest(bytes)), previous, next))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RebaseProof {
+    version: u8,
+    selection: String,
+    receipt: String,
+    evidence: String,
+}
+fn digest(value: &impl Serialize) -> Result<String, CandidateError> {
+    use sha2::{Digest, Sha256};
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(value).map_err(|_| refused())?)
+    ))
+}
+
+/// Exact receipt-bound evidence of an explicit repair. It admits only selection
+/// into the separately fenced interrupted cleanup engine, never graph effects.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn repaired(root: &Path, receipt: &Receipt) -> Result<bool, CandidateError> {
+    Ok(repaired_selection(root, receipt)?.is_some())
+}
+fn repaired_selection(root: &Path, receipt: &Receipt) -> Result<Option<String>, CandidateError> {
+    let path = root.join("shutdown-rebase.json");
+    if !path.exists() && !path.is_symlink() {
+        return Ok(None);
+    }
+    for name in [
+        "state.pending",
+        "shutdown.pending",
+        "shutdown-rebase.pending",
+    ] {
+        if root.join(name).exists() || root.join(name).is_symlink() {
+            return Err(refused());
+        }
+    }
+    let proof: RebaseProof = state::read(&path)?;
+    if proof.version != 1
+        || !hex(&proof.selection, 64)
+        || !hex(&proof.receipt, 64)
+        || !hex(&proof.evidence, 64)
+    {
+        return Err(refused());
+    }
+    if receipt.phase != "cleanup-intent" || proof.receipt != digest(receipt)? {
+        return Ok(None);
+    }
+    let evidence: Evidence = state::read(&root.join("shutdown.json"))?;
+    validate(&evidence, receipt)?;
+    if proof.evidence != digest(&evidence)? || !evidence.containers.is_empty() {
+        return Ok(None);
+    }
+    validate_current(&evidence, receipt)?;
+    Ok(Some(proof.selection))
+}
+
+/// Inspect the stale evidence repair selection without modifying any files.
+pub fn inspect_rebase(candidate: &super::Candidate, run: &str) -> Result<Value, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = super::load(candidate, &engine, run)?;
+    let (selection, previous, next) = rebase_selection(&engine, &root, &receipt)?;
+    Ok(serde_json::json!({"run":run,"selection":selection,
+        "retired_entries":previous.containers.len() - next.containers.len(),
+        "current_entries":next.containers.len(),"repaired":false}))
+}
+
+/// Explicitly replace only selected historical entries proven absent under the
+/// provider lease. Normal cleanup/recovery must still stop all current containers.
+pub fn recover_rebase(
+    candidate: &super::Candidate,
+    run: &str,
+    expected: &str,
+) -> Result<Value, CandidateError> {
+    let engine = Engine::connect_cleanup(candidate)?;
+    let (receipt, root) = super::load(candidate, &engine, run)?;
+    if let Some(selection) = repaired_selection(&root, &receipt)? {
+        if !hex(expected, 64) || selection != expected {
+            return Err(refused());
+        }
+        return Ok(
+            serde_json::json!({"run":run,"selection":selection,"repaired":true,"cleanup_required":true}),
+        );
+    }
+    let (selection, previous, next) = rebase_selection(&engine, &root, &receipt)?;
+    if !hex(expected, 64) || selection != expected {
+        return Err(refused());
+    }
+    // Bind a narrowly admitted foreground recovery to this exact original receipt
+    // and its empty replacement. Publish the proof first so a crash can retry.
+    if !next.containers.is_empty() {
+        return Err(refused());
+    }
+    super::journal::retain_file(
+        &root,
+        "shutdown-rebase.pending",
+        "shutdown-recovery",
+        64 * 1024,
+    )?;
+    state::write(
+        &root.join("shutdown-rebase.json"),
+        &RebaseProof {
+            version: 1,
+            selection: selection.clone(),
+            receipt: digest(&receipt)?,
+            evidence: digest(&next)?,
+        },
+    )?;
+    replace(&root, &previous, &next, &receipt)?;
+    Ok(serde_json::json!({"run":run,"selection":selection,"repaired":true,"cleanup_required":true}))
 }
 
 /// Disarm the engine restart policy of every owned container that still has one.
@@ -206,6 +461,8 @@ pub(super) fn record_terminal(
 
 #[cfg(test)]
 mod native_test;
+#[cfg(test)]
+mod rebase_tests;
 
 fn refused() -> CandidateError {
     error(
@@ -452,7 +709,7 @@ mod tests {
         assert_eq!(recovered.containers.len(), 1);
     }
 
-    fn fixture() -> (Resource, Value) {
+    pub(super) fn fixture() -> (Resource, Value) {
         let resource = Resource {
             loopback_ports: Vec::new(),
             routing: None,

@@ -3374,3 +3374,59 @@ never triggers a retry: transport loss still leaves the outcome unconfirmed.
 For example, an observed `graph-verification: provider_busy` would locate the
 refusal without exposing native stderr; it would not prove cleanup completed or
 permit another owner to start. Preserve the original records while investigating.
+
+### Shutdown evidence after Compose reconciliation
+
+Restoring a stopped graph recreates compute, including when a service keeps its
+logical name. After verifying all old containers and networks absent, restore
+retains the stopped receipt and resets `shutdown.json` before admitting the new
+compute generation. Removed services cannot poison the next retaining stop.
+`shutdown-history.json` keeps the last eight distinct superseded observations,
+including exit codes and stop-request evidence; it never authorizes cleanup.
+This applies to unchanged restores too. Interrupted publication retains pending
+bytes; normal stop still refuses unknown resource keys or uncertain observations.
+
+For an older graph already stuck in `cleanup-intent` with
+`graph_shutdown_uncertain`, first run `hack doctor --native-cleanup inspect --json` and
+inspect the mapped run. Use the candidate executable belonging to that same native
+home; do not create another home or edit its files. The following private runtime
+commands repair only historical shutdown observations:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-shutdown-rebase --run-id RUN --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-shutdown-rebase --run-id RUN --expect-selection SELECTION --json
+```
+
+Copy `selection` from the inspection. Repair rechecks the receipt and shutdown
+selection under the provider lease. Each removed observation must match an exact
+immutable container ID in retained stopped restore history, and that ID must be
+freshly absent from the engine. An old container still present (even exited), an
+unknown ID, missing/truncated-away history, foreign identity, pending journal or
+failed inspection refuses repair. For an enrolled foreground run on the same pool boot, use the existing explicit
+interrupted-cleanup engine after repair (the command name also covers this narrow
+repaired-shutdown case):
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-interrupted-start-cleanup --run-id RUN --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-interrupted-start-cleanup --run-id RUN --expect-selection CLEANUP_SELECTION --retain-data --json
+```
+
+Copy `selection_sha256` from that second inspection. Recovery checks the dead
+foreground owner, holds its publication locks, verifies the pending coordinator
+operation and exact bridge/environment inventories, and journals each new stop
+request. It never replays the old coordinator effect or retries a stop with an
+unknown outcome. The rebase proof admits this path only for an unchanged
+`cleanup-intent` receipt with fully started container records and no remaining
+current shutdown observations. It does not admit arbitrary partial shutdowns.
+Inspect again to confirm `stopped-data-retained` and no containers; `hack down`
+can then finish the frontend mapping. A graph without foreground enrollment can
+use ordinary retaining `graph cleanup --run-id RUN --json` instead. Do not stop
+or restart a shared pool to perform this recovery: the foreground repair path
+requires the original boot. Previous-boot owner/coordinator failures retain their
+existing dedicated recovery gates and may still require operator investigation.
+
+Repair itself never stops containers, deletes volumes, clears owner or relay
+acknowledgements, or turns an uncertain stop into success. It archives the old
+shutdown observations before replacing only the proven retired entries. If repair
+refuses, preserve the native home and follow the existing owned recovery process;
+do not delete `shutdown.json` or drop current container evidence.

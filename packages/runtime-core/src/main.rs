@@ -28,6 +28,8 @@ Usage:
   hack-local graph native run|serve --source-file <absolute-v2-native-source.json> --expect-review <64-hex> [--environment-stdin] [--timeout-seconds <1..300>] [--json]
   hack-local graph native inspect|cleanup --run-id <32-hex> [--json]
   hack-local graph native control --run-id <32-hex> --action status|cleanup [--json]
+  hack-local graph inspect-shutdown-rebase --run-id <32-hex> [--json]
+  hack-local graph recover-shutdown-rebase --run-id <32-hex> --expect-selection <64-hex> [--json]
   hack-local graph recover-cleanup --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph recover-live-owner --run-id <32-hex> --expect-receipt <sha256> [--json]
   hack-local graph retire-recovered-publisher --run-id <32-hex> --expect-owner <32-hex> [--json]

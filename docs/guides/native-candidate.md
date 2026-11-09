@@ -646,6 +646,48 @@ graph history, remove data or establish browser readiness. Doctor's ordinary
 `--fix` never applies it. Run the normal project command separately after reviewing
 the result; its existing native graph and ownership checks still apply.
 
+#### A run mapping from another native home
+
+Each launcher version has its own native home, but the run mapping lives in the
+project. After an upgrade, a mapping the previous version left behind names that
+version's home. Project commands from the new home (`ps`, `up`, `down`,
+`doctor --native-cleanup inspect`) refuse it with a line that names the owning home
+and what to do:
+
+- **Stopped cleanly.** The owning home's frontend records show that the run's latest
+  `hack up` acknowledged confirmed graph cleanup, HTTPS retirement and down hooks.
+  The refusal names the exact release command. Inspection reports
+  `state: "foreign-home"`, `owner: "stopped"` and the `selectionSha256` it needs:
+
+  ```sh
+  ./hack-v5 doctor --path /absolute/project --native-run-mapping inspect --json
+  ./hack-v5 doctor --path /absolute/project --native-run-mapping release --expect-selection <selectionSha256> --json
+  ```
+
+- **Live.** The owning frontend's PID still exists. The refusal names the home and
+  PID. Stop it with Ctrl-C in that `hack up`, or run `hack down` with the version
+  that owns that home, then retry. Release refuses.
+- **Interrupted or unproven.** The frontend exited without acknowledging cleanup, or
+  the home has no readable record for the run (for example a legacy mapping, or a
+  home that was moved or replaced). Use the owning version's
+  `hack doctor --native-cleanup inspect` and `hack down`. Release refuses.
+
+Release proves ownership; it never just overwrites. The stored scope must differ
+from this checkout in its native home only, that home must still be the recorded
+directory, and the release holds the owning home's finalization lock, so that home
+cannot start the run again meanwhile. A retained `hack up` in the owning home records
+an admission under that same lock before its last mapping check and before any
+runtime effect, and keeps it until it registers its own frontend lifetime. Release
+refuses while an admission exists (a live startup is reported as live; one whose
+startup exited is reported as interrupted). Owning homes from versions without this
+admission record are not covered by it. A changed selection, held project locks or a
+pending restart refuse, as does a down-hook journal that is owed, unknown or another
+run's. A completed record of the same run, which a successful stop keeps, is allowed.
+Release removes only the project's mapping and keeps its exact bytes in an audit
+file beside it. The previous home's
+graph and named volumes stay in that home; this home's next `hack up` starts the
+instance with fresh data.
+
 Compatibility is qualified for specific bundle hashes and state formats. The
 displayed version alone does not establish frontend/executor or downgrade
 compatibility. V4 and candidate homes remain separate; this procedure does not
@@ -661,6 +703,30 @@ Provider setup is separate and explicit. Obtain the exact archives identified in
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-network-tools --directory /absolute/private/pinned-apks
 ./hack-native --candidate-root /absolute/private/candidate-home runtime probe --json
 ```
+
+Preparation keeps each archive it extracted (`providers/smolvm-installing/release.tar.gz`
+and `providers/docker-installing/release.tgz`). If something outside Hack changes a
+prepared tree, for example a cleanup or backup tool that prunes empty directories,
+every start refuses with `artifact_digest_mismatch` and the message names the repair.
+A stopped runtime's `runtime status` and `runtime down` still work, because they run
+nothing from the tree, so an installer quiescence check is not blocked. To repair the
+tree, stop the runtime and run:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime repair-provider-tree --json
+```
+
+The repair holds the provider lock and requires a stopped (or uninitialized) runtime.
+It requires the preparation record to match this executor's pins and the kept archive
+to be an owned regular file with the pinned SHA-256. It then copies and hashes the
+archive again, extracts it, checks the code signature (SmolVM), and requires the fresh
+tree to match the digest recorded at preparation. Only then does it rename the changed
+tree aside as `providers/<tree>-changed-<id>` and put the fresh tree in its place. It
+keeps the changed tree for inspection and never deletes it; remove it yourself once
+you no longer need it. Runtime state, disks and volumes under `run/` are not touched.
+An intact tree is reported with `repaired: false`. A repair that fails a check changes
+no tree and keeps its private `-repairing-` staging directory. Without a kept archive the repair
+refuses (`provider_repair_unavailable`); prepare a fresh candidate home instead.
 
 The pins also name a BuildKit client (`buildx`, `darwin-arm64`) for native image
 builds. Prepare it before using `HACK_NATIVE_BUILDS=1`; it is optional otherwise:
@@ -3013,6 +3079,24 @@ also does not prove that application routes work; check the public route
 separately after restart.
 
 ### Explicit cleanup after a dead foreground owner
+
+`hack up` and `hack restart` refuse a run whose foreground publication is still
+present and name the next step: a running owner must be stopped with Ctrl-C or
+`hack down`; an owner that exited while its services were running is stopped by
+`hack down --recover`. That command selects the run's exact receipt with the
+read-only `graph foreground-owner --run-id RUN --json` and then uses the
+same-boot `graph recover-live-owner` described below, retaining data and
+retiring the stale publication. If the frontend that owned the run also exited
+before confirming its cleanup, `hack down --recover` prints the exact
+`hack restart --recover-frontend --expect-finalization-attempt ATTEMPT` step.
+An owner that exited before its restore was admitted is reported, with data
+retained, but no command retires that attempt yet.
+
+Read-only `hack ps` and `hack logs` hold the provider lease only briefly. Native
+startup, retained-start eligibility, restore admission, inspections inside
+mutating commands and owned foreground cleanup wait out such a holder within a
+bound instead of failing, so polling status during `up` or `restart` does not
+make them fail or strand a foreground publication.
 
 For a fully ready graph whose foreground owner died while its pool remains on the
 same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects

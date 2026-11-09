@@ -61,6 +61,7 @@ import {
 } from "./native-project-down-hooks.ts";
 import { discardUnpublishedNativeStart } from "./native-project-failed-start.ts";
 import {
+  admitNativeProjectFinalization,
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
   waitNativeProjectFinalization,
@@ -345,6 +346,7 @@ type Dependencies = {
   save: typeof saveNativeProjectRun;
   remove: typeof removeNativeProjectRun;
   finalization: typeof beginNativeProjectFinalization;
+  admitFinalization: typeof admitNativeProjectFinalization;
   captureFinalization: typeof captureNativeProjectFinalization;
   waitFinalization: typeof waitNativeProjectFinalization;
   discardFailedStart: typeof discardUnpublishedNativeStart;
@@ -376,6 +378,7 @@ const DEFAULTS: Dependencies = {
   save: saveNativeProjectRun,
   remove: removeNativeProjectRun,
   finalization: beginNativeProjectFinalization,
+  admitFinalization: admitNativeProjectFinalization,
   captureFinalization: captureNativeProjectFinalization,
   waitFinalization: waitNativeProjectFinalization,
   discardFailedStart: discardUnpublishedNativeStart,
@@ -1246,6 +1249,38 @@ async function confirmCleanupOrRecordOwner(opts: {
   }
 }
 
+/**
+ * HACK-1952: admit a retained startup in its native home before its last mapping
+ * check, so another home's release of the mapping either finished first (the check
+ * refuses) or sees this admission and refuses. The caller retires it once it
+ * registers its own frontend lifetime; it is retired here if startup ends before any
+ * runtime effect.
+ */
+async function admitRetainedStartup(opts: {
+  readonly retained: NativeProjectRun | null;
+  readonly scope: NativeProjectRunScope;
+  readonly deps: Pick<Dependencies, "admitFinalization" | "load">;
+  readonly signal: AbortSignal;
+}): Promise<{ readonly retire: () => Promise<void> } | undefined> {
+  const admission = opts.retained
+    ? await opts.deps.admitFinalization({
+        scope: opts.scope,
+        run: opts.retained,
+      })
+    : undefined;
+  try {
+    await verifyNativeRetainedMapping({
+      run: opts.retained,
+      scope: opts.scope,
+      load: opts.deps.load,
+    });
+    requireActiveStartup(opts.signal);
+  } catch (error) {
+    await admission?.retire();
+    throw error;
+  }
+  return admission;
+}
 async function refusePendingFreshStart(
   restore: NativeProjectRun | undefined,
   scope: NativeProjectRunScope,
@@ -1927,12 +1962,12 @@ export async function startNativeProject(opts: {
       managedFiles: input.managedFiles,
       dependencyServices: hostDependencies.map((binding) => binding.service),
     });
-    await verifyNativeRetainedMapping({
-      run: retained,
+    const admission = await admitRetainedStartup({
+      retained,
       scope: opts.scope,
-      load: deps.load,
+      deps,
+      signal: controller.signal,
     });
-    requireActiveStartup(controller.signal);
     progress({ phase: "runtime" });
     await deps.invoke({
       runtime: opts.runtime,
@@ -2277,6 +2312,8 @@ export async function startNativeProject(opts: {
                   httpsPort: https ? opts.https?.httpsPort : null,
                   httpsLease: https?.identity,
                 });
+                // The registered lifetime now describes this startup.
+                await admission?.retire();
                 requireActiveStartup(controller.signal);
                 await verifyHttpsRoutes(
                   https,

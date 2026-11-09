@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { inspectNativeProjectGraph } from "../src/backends/native-project-inspect.ts";
+import {
+  INSPECT_BUSY_WAIT_MS,
+  inspectNativeProjectGraph,
+  OBSERVER_BUSY_WAIT_MS,
+} from "../src/backends/native-project-inspect.ts";
 
 const opts = {
   runtime: { binary: "/unused", home: "/unused" },
@@ -36,4 +40,54 @@ test("unknown inspection failures are never retried", async () => {
     })
   ).rejects.toThrow("unknown");
   expect(calls).toBe(1);
+});
+test("inspections inside mutating commands outlast contention that ends an observer's budget", async () => {
+  const busy = () => {
+    throw new Error(
+      "Native runtime request failed (provider_busy); inspect owned state before retrying."
+    );
+  };
+  // A holder that keeps the lease longer than the ps/logs budget.
+  const contended = (until: number) => async () => {
+    if (performance.now() < until) {
+      busy();
+    }
+    return { ready: true };
+  };
+  const started = performance.now();
+  expect(
+    await inspectNativeProjectGraph({
+      ...opts,
+      invoke: contended(started + OBSERVER_BUSY_WAIT_MS + 300),
+    })
+  ).toEqual({ ready: true });
+  expect(performance.now() - started).toBeGreaterThan(OBSERVER_BUSY_WAIT_MS);
+  const observer = performance.now();
+  await expect(
+    inspectNativeProjectGraph({
+      ...opts,
+      busyWaitMs: OBSERVER_BUSY_WAIT_MS,
+      invoke: contended(observer + OBSERVER_BUSY_WAIT_MS + 1000),
+    })
+  ).rejects.toThrow("provider_busy");
+  expect(INSPECT_BUSY_WAIT_MS).toBeGreaterThan(OBSERVER_BUSY_WAIT_MS);
+}, 15_000);
+test("an aborted caller stops waiting out lease contention", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const pending = inspectNativeProjectGraph({
+    ...opts,
+    signal: controller.signal,
+    invoke: async () => {
+      calls++;
+      if (calls === 2) {
+        controller.abort();
+      }
+      throw new Error(
+        "Native runtime request failed (provider_busy); inspect owned state before retrying."
+      );
+    },
+  });
+  await expect(pending).rejects.toThrow("provider_busy");
+  expect(calls).toBe(2);
 });

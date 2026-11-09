@@ -194,7 +194,7 @@ hack down [options]
 | `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
 | `--yes` | Confirm --prune-caches or --remove-data without prompting |
 | `--json` | Output JSON (machine-readable) |
-| `--recover` | Explicitly reconcile an interrupted native Compose stop while retaining data |
+| `--recover` | Explicitly reconcile an interrupted native stop, or stop the services of a native run whose foreground owner exited, while retaining data |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -1431,7 +1431,7 @@ hack doctor [options]
 | `--browser-result unknown|works|fails|permission-denied` | Your manual browser observation for --browser-url (default: unknown) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--native-cleanup inspect` | Inspect one mapped native graph's pending cleanup without recovery or stop replay |
-| `--native-run-mapping inspect|repair` | Inspect a native run mapping, or explicitly repair it after filesystem device renumbering |
+| `--native-run-mapping inspect|repair|release` | Inspect a native run mapping, explicitly repair it after filesystem device renumbering, or release one another native home left after a clean stop |
 | `--expect-selection <64-hex>` | Require the exact run-mapping recovery inspection selection |
 | `--accept-legacy-device-rebind` | Explicitly accept legacy migration without proof of original filesystem volume continuity |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

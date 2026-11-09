@@ -82,6 +82,8 @@ async function retireOrphanedHttpsLock(path: string): Promise<void> {
   }
 }
 
+/** Lifecycle state records no process: absent (a project that never started one,
+ * as the lifecycle runtime reads it) or an exact empty entry list. */
 async function noLifecycleEntries(projectDir: string): Promise<void> {
   const path = join(projectDir, ".internal/lifecycle/state.json");
   let file: Awaited<ReturnType<typeof open>>;
@@ -90,7 +92,10 @@ async function noLifecycleEntries(projectDir: string): Promise<void> {
       path,
       constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW
     );
-  } catch {
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return;
+    }
     throw refused();
   }
   try {

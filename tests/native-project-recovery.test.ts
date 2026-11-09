@@ -6,6 +6,7 @@ import {
   mkdtemp,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -181,6 +182,29 @@ test("recovery requires stopped owned graph, vacant HTTPS, and empty lifecycle",
   const f = await fixture();
   await verifyNativeFrontendRecovery(f.opts);
   expect(f.events).toEqual(["processes", "graph", "authority", "port"]);
+});
+
+test("recovery accepts a project that never recorded lifecycle processes, but not an unsafe record", async () => {
+  const f = await fixture();
+  // Absent state reads as no entries, as the lifecycle runtime treats it.
+  await rm(f.lifecycle, { recursive: true });
+  await verifyNativeFrontendRecovery(f.opts);
+  expect(f.events).toEqual(["processes", "graph", "authority", "port"]);
+  // A state path that is not a regular private file still refuses.
+  await mkdir(join(f.lifecycle, "state.json"), { recursive: true });
+  await expectClosedRefusal(
+    verifyNativeFrontendRecovery(f.opts),
+    "cannot prove"
+  );
+  await rm(join(f.lifecycle, "state.json"), { recursive: true });
+  await symlink(
+    "/nonexistent-lifecycle-state",
+    join(f.lifecycle, "state.json")
+  );
+  await expectClosedRefusal(
+    verifyNativeFrontendRecovery(f.opts),
+    "cannot prove"
+  );
 });
 
 test("recovery cleans owned lifecycle only after graph, authority and port proof", async () => {

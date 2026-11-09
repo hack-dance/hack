@@ -18,6 +18,7 @@ import { NativeHttpsStartupError } from "../src/backends/native-https-startup-fa
 import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
 import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
+  admitNativeProjectFinalization,
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
   waitNativeProjectFinalization,
@@ -33,8 +34,11 @@ import {
 } from "../src/backends/native-project-restart-preflight.ts";
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import {
+  inspectNativeProjectRunMapping,
   loadNativeProjectRun,
   type NativeProjectRun,
+  type NativeProjectRunForeignHomeInspection,
+  releaseNativeProjectRunForeignHome,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
 import {
@@ -3250,6 +3254,89 @@ test("retained startup admits only the acknowledged original frontend before eff
     events.indexOf("runtime up")
   );
   expect(events).toContain("save");
+});
+
+/**
+ * HACK-1952: a retained startup in the owning home and a release of its mapping from
+ * another native home must not interleave. The startup is admitted under the owning
+ * home's finalization lock before its last mapping check and any runtime effect.
+ */
+async function retainedStartWithAnotherHome() {
+  const fixture = await retainedFinalizationFixture();
+  const { opts, saved } = fixture;
+  await saveNativeProjectRun({ ...opts.scope, run: saved });
+  await acknowledgeRetainedFrontend(opts.scope, saved);
+  opts.dependencies.load = loadNativeProjectRun;
+  const otherHome = await mkdtemp(join(tmpdir(), "native-start-home-b-"));
+  roots.push(otherHome);
+  const other = { ...opts.scope, nativeHome: otherHome };
+  const inspect = async () =>
+    (await inspectNativeProjectRunMapping({
+      scope: other,
+      runtime: { binary: join(otherHome, "absent-runtime"), home: otherHome },
+    })) as NativeProjectRunForeignHomeInspection;
+  const stopped = await inspect();
+  expect(stopped.owner).toBe("stopped");
+  const release = () =>
+    releaseNativeProjectRunForeignHome({
+      scope: other,
+      expectSelection: stopped.selectionSha256 ?? "",
+    });
+  const admissions = async () =>
+    (
+      await readdir(join(opts.scope.nativeHome, ".hack-local"), {
+        recursive: true,
+      })
+    ).filter((name) => name.endsWith("admission.json"));
+  return { ...fixture, inspect, release, admissions };
+}
+
+test("a release from another home refuses while the owning home admits a retained startup", async () => {
+  const { opts, events, saved, inspect, release, admissions } =
+    await retainedStartWithAnotherHome();
+  opts.dependencies.admitFinalization = async (selection) => {
+    const admitted = await admitNativeProjectFinalization(selection);
+    // Interleave: the other home tries to release right after admission.
+    expect((await inspect()).owner).toBe("live");
+    await expectClosedRefusal(release(), "is owned by live run");
+    events.push("release refused");
+    return admitted;
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      // Runtime effects begin only while the admission still excludes release.
+      expect(await admissions()).toHaveLength(1);
+      await expectClosedRefusal(release(), "is owned by live run");
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(events.indexOf("release refused")).toBeLessThan(
+    events.indexOf("runtime up")
+  );
+  // Readiness registered the new lifetime and retired the admission.
+  expect(await admissions()).toEqual([]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(saved);
+});
+
+test("a release that wins before admission makes the retained startup refuse before runtime effects", async () => {
+  const { opts, events, release, admissions } =
+    await retainedStartWithAnotherHome();
+  opts.dependencies.admitFinalization = async (selection) => {
+    // Interleave: the other home releases just before this startup is admitted.
+    expect((await release()).released).toBe(true);
+    events.push("released");
+    return await admitNativeProjectFinalization(selection);
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "Native retained run mapping changed before runtime start; no start was requested."
+  );
+  expect(events).toContain("released");
+  expect(events).not.toContain("runtime up");
+  // A startup that ends before any runtime effect leaves no admission behind.
+  expect(await admissions()).toEqual([]);
+  expect(await loadNativeProjectRun(opts.scope)).toBeNull();
 });
 
 test("retained acknowledgement cannot authorize a newer or concurrently changed mapping", async () => {

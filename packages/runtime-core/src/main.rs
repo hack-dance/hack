@@ -117,6 +117,7 @@ Usage:
   hack-local runtime up --profile development --internet --json
   hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
+  hack-local runtime repair-provider-tree [--json]
   hack-local runtime host-filesystem-recovery [--json]
   hack-local runtime recover-host-filesystem --expect-sha256 <sha256> --accept-legacy-device-rebind [--json]
   hack-local node serve|status|inspect
@@ -1117,6 +1118,11 @@ fn run() -> Result<(), CandidateError> {
             print_json(&hack_runtime_core::provider::host_filesystem::recover(
                 &discover_candidate(&requested)?,
                 hash,
+            )?)?;
+        }
+        ["runtime", "repair-provider-tree"] | ["runtime", "repair-provider-tree", "--json"] => {
+            print_json(&hack_runtime_core::provider::repair_provider_trees(
+                &discover_candidate(&requested)?,
             )?)?;
         }
         ["runtime", action] | ["runtime", action, "--json"] => {

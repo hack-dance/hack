@@ -110,6 +110,32 @@ impl Lock {
         Self::from_file(file)
     }
 
+    #[cfg(target_os = "macos")]
+    /// [`Self::acquire_existing`], waiting up to `wait` for another holder, such as the
+    /// short read-only inspection behind `hack ps`, to release the lock. Only acquisition
+    /// is retried: nothing is created or admitted while waiting, and on expiry the
+    /// ordinary `provider_busy` refusal is returned.
+    pub fn acquire_existing_waiting(
+        root: &Path,
+        wait: std::time::Duration,
+    ) -> Result<Self, CandidateError> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match Self::acquire_existing(root) {
+                Err(error)
+                    if error.code == "provider_busy" && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(
+                        deadline
+                            .saturating_duration_since(std::time::Instant::now())
+                            .min(std::time::Duration::from_millis(50)),
+                    );
+                }
+                result => return result,
+            }
+        }
+    }
+
     /// Adopt an exclusively created private lock file before publishing its
     /// pathname. The caller must fence the final pathname against this FD.
     pub(crate) fn from_file(file: File) -> Result<Self, CandidateError> {
@@ -794,6 +820,40 @@ mod tests {
         assert!(matches!(Lock::acquire(&root),Err(e) if e.code == "provider_busy"));
         drop(first);
         assert!(Lock::acquire(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn waiting_existing_acquisition_outlasts_a_brief_holder_and_refuses_a_lasting_one() {
+        let root = fixture();
+        drop(Lock::acquire(&root).unwrap());
+        // A brief holder, such as the inspection behind `hack ps`, is waited out.
+        let held = Lock::acquire_existing(&root).unwrap();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(held);
+        });
+        let started = std::time::Instant::now();
+        let lock =
+            Lock::acquire_existing_waiting(&root, std::time::Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+        // Still exclusive while held.
+        assert!(matches!(Lock::acquire_existing(&root), Err(e) if e.code == "provider_busy"));
+        drop(lock);
+        // A holder that outlasts the wait is refused as before.
+        let _held = Lock::acquire_existing(&root).unwrap();
+        assert!(matches!(
+            Lock::acquire_existing_waiting(&root, std::time::Duration::from_millis(100)),
+            Err(e) if e.code == "provider_busy"
+        ));
+        drop(_held);
+        // Waiting never creates an absent lock.
+        fs::remove_file(root.join("operation.lock")).unwrap();
+        assert!(
+            Lock::acquire_existing_waiting(&root, std::time::Duration::from_millis(100)).is_err()
+        );
+        assert!(!root.join("operation.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

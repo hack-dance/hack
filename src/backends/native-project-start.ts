@@ -76,6 +76,7 @@ import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   type NativeProjectInput,
+  nativeReviewedActiveServices,
   prepareNativeProjectInput,
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
@@ -124,6 +125,7 @@ import {
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
 import {
+  beginNativeProjectStartupObservation,
   describeNativeRunEnvironmentChange,
   loadNativeProjectRun,
   loadNativeRestartIntent,
@@ -1657,7 +1659,7 @@ function reportStopped(opts: {
   }
 }
 
-export async function startNativeProject(opts: {
+async function startNativeProjectAttempt(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
@@ -2193,17 +2195,9 @@ export async function startNativeProject(opts: {
             | undefined;
           // Redacted at receipt; the raw tail is never retained or persisted.
           let startupLogReport = "";
-          const reviewedServices =
-            isRecord(review.report.plan) &&
-            isRecord(review.report.plan.services)
-              ? review.report.plan.services
-              : {};
-          const services = Object.entries(reviewedServices)
-            .filter(
-              ([, service]) => isRecord(service) && service.active === true
-            )
-            .map(([name]) => name)
-            .sort();
+          const services = [
+            ...nativeReviewedActiveServices(review.report.plan),
+          ].sort();
           progress({ phase: "services", services });
           let stopWatching: (() => Promise<void>) | undefined;
           try {
@@ -2521,5 +2515,20 @@ export async function startNativeProject(opts: {
 function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   if (failure !== undefined && !failed) {
     throw failure;
+  }
+}
+
+/** Publish advisory startup evidence until this foreground invocation settles. */
+export async function startNativeProject(
+  opts: Parameters<typeof startNativeProjectAttempt>[0]
+): Promise<number> {
+  if (!opts.sharedSource || opts.signal?.aborted) {
+    return await startNativeProjectAttempt(opts);
+  }
+  const finish = await beginNativeProjectStartupObservation(opts.scope);
+  try {
+    return await startNativeProjectAttempt(opts);
+  } finally {
+    await finish();
   }
 }

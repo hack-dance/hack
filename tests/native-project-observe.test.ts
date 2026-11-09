@@ -7,7 +7,10 @@ import {
   nativeProjectLogs,
   nativeProjectPs,
 } from "../src/backends/native-project-observe.ts";
-import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
+import {
+  beginNativeProjectStartupObservation,
+  saveNativeProjectRun,
+} from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 
@@ -688,4 +691,23 @@ test("logs keep the runtime's interleaved whole lines and refuse malformed ones"
       "observation refused"
     );
   }
+});
+
+test("pending startup evidence is branch scoped and each invocation retires only its marker", async () => {
+  const opts = await fixture(false);
+  const first = await beginNativeProjectStartupObservation(opts.scope);
+  const second = await beginNativeProjectStartupObservation(opts.scope);
+  expect((await nativeProjectPs(opts)).status).toBe("pending");
+  expect(
+    (
+      await nativeProjectPs({
+        ...opts,
+        scope: { ...opts.scope, branch: "other" },
+      })
+    ).status
+  ).toBe("not_started");
+  await first();
+  expect((await nativeProjectPs(opts)).status).toBe("pending");
+  await second();
+  expect((await nativeProjectPs(opts)).status).toBe("not_started");
 });

@@ -9,6 +9,7 @@ import {
   loadNativeProjectRun,
   type NativeProjectRun,
   type NativeProjectRunScope,
+  nativeProjectStartupPending,
 } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
@@ -53,6 +54,7 @@ function runtimeNotRunning(): HackCliError {
  */
 export type NativeProjectPsStatus =
   | "not_started"
+  | "pending"
   | "runtime_not_running"
   | "runtime_busy"
   | "observed"
@@ -173,7 +175,9 @@ export async function nativeProjectPs(
   if (!run) {
     return {
       backend: "native",
-      status: "not_started",
+      status: (await nativeProjectStartupPending(opts.scope))
+        ? "pending"
+        : "not_started",
       run: null,
       phase: null,
       items: [],

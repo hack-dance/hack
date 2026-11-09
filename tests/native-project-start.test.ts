@@ -5502,3 +5502,21 @@ test("startup and ready progress list only reviewed active services", async () =
   });
   expect(lists).toEqual([["web"], ["web"]]);
 });
+
+test("ps reports pending during input preparation before any run mapping exists", async () => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const result = await nativeProjectPs({
+      ...opts,
+      invoke: async () => {
+        throw new Error("no runtime inspection before a mapping exists");
+      },
+    });
+    expect(result.status).toBe("pending");
+    expect(result.items).toEqual([]);
+    return await prepare(request);
+  };
+  await startNativeProject(opts);
+  expect((await nativeProjectPs(opts)).status).toBe("not_started");
+});

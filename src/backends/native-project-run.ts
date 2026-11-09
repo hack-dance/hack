@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
   realpath,
   rename,
   rmdir,
@@ -1691,6 +1692,41 @@ export async function prepareNativeProjectRunStorage(
   opts: NativeProjectRunScope
 ): Promise<void> {
   await paths(opts, true);
+}
+
+/** Advisory only: an unfinished frontend start is not evidence of runtime readiness.
+ * A crash retains the marker; readers report pending rather than infer live ownership.
+ * Each invocation owns a distinct leaf and may remove only that unchanged leaf.
+ */
+export async function beginNativeProjectStartupObservation(
+  opts: NativeProjectRunScope
+) {
+  const p = await paths(opts, true);
+  const file = `${p.file}.starting-${randomUUID()}`;
+  await write(file, "pending\n");
+  const original = await lstat(file);
+  return async () => {
+    const current = await lstat(file).catch(() => null);
+    if (current?.dev === original.dev && current.ino === original.ino) {
+      await unlink(file);
+    }
+  };
+}
+
+/** Missing storage means no observed intent. Other filesystem refusals stay closed. */
+export async function nativeProjectStartupPending(
+  opts: NativeProjectRunScope
+): Promise<boolean> {
+  try {
+    const p = await paths(opts, false);
+    const prefix = `${basename(p.file)}.starting-`;
+    return (await readdir(p.root)).some((name) => name.startsWith(prefix));
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
 }
 /** Read a mapping only; callers must still query native authority with every recorded identity. */
 export async function loadNativeProjectRun(

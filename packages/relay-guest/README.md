@@ -136,15 +136,18 @@ shutdown and absence of surviving workers or descriptors.
 The Linux-only gate modes do not read stdin or install signal handlers:
 
 ```text
-hack-relay-guest --await-release <32 lowercase hex generation> -- <absolute executable> [args...]
-hack-relay-guest --check-release <32 lowercase hex generation> -- <absolute executable> [args...]
+hack-relay-guest --await-release <32 lowercase hex generation> -- <executable> [args...]
+hack-relay-guest --check-release <32 lowercase hex generation> -- <executable> [args...]
 ```
 
 Await mode watches `/run/hack-startup` with inotify before checking for `release`,
 then waits on events with one anchored 120-second monotonic deadline. Check mode
 checks once and refuses immediately while the marker is absent. A valid release
-executes the supplied absolute executable in place, preserving arguments (including
-non-UTF-8 arguments), environment, uid/gid and standard descriptors. Observation
+executes the supplied executable in place, preserving arguments (including
+non-UTF-8 arguments), environment, uid/gid and standard descriptors. Like Docker,
+a name containing `/` runs as given and a bare name (such as
+`docker-entrypoint.sh`) is resolved through the container's own PATH; no shell
+runs and no host PATH is consulted. Observation
 FDs close before exec. Graph launch must use Docker `Init=true` so normal init
 signal forwarding applies while waiting and after replacement.
 

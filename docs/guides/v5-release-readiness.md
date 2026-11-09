@@ -39,12 +39,12 @@ into the stable default or switch active projects to create a readiness claim.
 | Qualify rollback and dogfood | Retained working software selection, explicit project/data compatibility, staged reversible project opt-in and measured acceptance | Software rollback is not data rollback. Refusal by an older candidate is not a successful rollback. |
 | Publish or promote | Exact version/channel/SHA/artifact plus remaining checks and explicit approval | No blanket waiver, active-project switch or DNS/deployment authority. |
 
-Track canonical acceptance under the [v5 program](https://linear.app/hackdance/issue/HACK-1112),
-[distribution](https://linear.app/hackdance/issue/HACK-1124),
-[agent integration](https://linear.app/hackdance/issue/HACK-1130),
-[plugin guidance](https://linear.app/hackdance/issue/HACK-1132),
-[MCP workflows](https://linear.app/hackdance/issue/HACK-1133) and
-[agent cost](https://linear.app/hackdance/issue/HACK-1141).
+Track canonical acceptance under the v5 program (HACK-1112),
+distribution (HACK-1124),
+agent integration (HACK-1130),
+plugin guidance (HACK-1132),
+MCP workflows (HACK-1133) and
+agent cost (HACK-1141).
 Linear is canonical; this document supplies the reproducible gate structure.
 
 ## Staged, reversible primary-driver plan

@@ -136,6 +136,76 @@ test("structured startup failure exposes its code without stderr values", async 
   expect(failure).not.toContain("synthetic-private-detail");
 });
 
+test("a startup failure passes failed services' bounded output only to its callback", async () => {
+  const reply = JSON.stringify({
+    code: "graph_startup_application_failed",
+    message: "synthetic-private-detail",
+    startup_logs: {
+      version: 1,
+      services: [
+        {
+          service: "web",
+          stdout: "",
+          stderr: "boot failed: synthetic-secret\u001b[31m",
+          truncated: false,
+        },
+      ],
+    },
+  });
+  const opts = await fixture(
+    `console.error(${JSON.stringify(reply)}); process.exit(2);`
+  );
+  const received: unknown[] = [];
+  let failure = "";
+  try {
+    await serveNativeProjectGraph({
+      ...opts,
+      onStartupLogs: (logs) => {
+        received.push(logs);
+      },
+      onReady: async () => {
+        throw new Error("must not become ready");
+      },
+    });
+  } catch (error) {
+    failure = String(error);
+  }
+  expect(received).toEqual([
+    [
+      {
+        service: "web",
+        stdout: "",
+        stderr: "boot failed: synthetic-secret\u001b[31m",
+        truncated: false,
+      },
+    ],
+  ]);
+  // The thrown message keeps its closed form; display is the caller's job.
+  expect(failure).toContain("graph_startup_application_failed");
+  expect(failure).not.toContain("synthetic");
+  expect(failure).not.toContain("boot failed");
+
+  const malformed = await fixture(
+    `console.error(${JSON.stringify(
+      JSON.stringify({
+        code: "graph_budget",
+        startup_logs: { version: 1, services: [{ service: "web" }] },
+      })
+    )}); process.exit(2);`
+  );
+  const ignored: unknown[] = [];
+  await expect(
+    serveNativeProjectGraph({
+      ...malformed,
+      onStartupLogs: (logs) => {
+        ignored.push(logs);
+      },
+      onReady: async () => {},
+    })
+  ).rejects.toThrow("graph_budget");
+  expect(ignored).toEqual([]);
+});
+
 test("cancellation preserves the owner's graceful cleanup beyond five seconds", async () => {
   const opts = await fixture(`
     process.on("SIGTERM", async () => {
@@ -520,3 +590,142 @@ test(
   },
   CASE_TIMEOUT_MS
 );
+
+test("a stop request after readiness runs beforeStop before the detached owner is asked to stop", async () => {
+  const opts = await fixture(`
+    process.on("SIGTERM", async () => {
+      const seen = await Bun.file(${JSON.stringify("BEFORE")}).exists();
+      await Bun.write(${JSON.stringify("MARKER")}, seen ? "before-seen" : "before-missing");
+      process.exit(0);
+    });
+    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    await Bun.sleep(30000);
+  `);
+  const before = join(opts.projectRoot, "before-ran");
+  const marker = join(opts.projectRoot, "owner-stopped");
+  const file = join(opts.projectRoot, "fake.ts");
+  await Bun.write(
+    file,
+    (await Bun.file(file).text())
+      .replace("BEFORE", before)
+      .replace("MARKER", marker)
+  );
+  const controller = new AbortController();
+  const force = new AbortController();
+  const code = await serveNativeProjectGraph({
+    ...opts,
+    signal: controller.signal,
+    forceSignal: force.signal,
+    requireGroupSettlement: false,
+    beforeStop: async () => {
+      await Bun.write(before, "ran");
+      return true;
+    },
+    onReady: async () => {
+      setTimeout(() => controller.abort(), 20);
+    },
+  });
+  expect(code).toBe(0);
+  expect(await Bun.file(marker).text()).toBe("before-seen");
+}, 15_000);
+
+test("a second stop request during beforeStop forces the owner to stop", async () => {
+  const opts = await fixture(`
+    process.on("SIGTERM", () => process.exit(0));
+    console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}));
+    await Bun.sleep(30000);
+  `);
+  const controller = new AbortController();
+  const force = new AbortController();
+  let canceled = false;
+  await expectClosedRefusal(
+    serveNativeProjectGraph({
+      ...opts,
+      signal: controller.signal,
+      forceSignal: force.signal,
+      requireGroupSettlement: false,
+      beforeStop: async () => {
+        setTimeout(() => force.abort(), 20);
+        await new Promise<void>((resolve) =>
+          force.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          })
+        );
+        canceled = true;
+        return true;
+      },
+      onReady: async () => {
+        setTimeout(() => controller.abort(), 20);
+      },
+    }),
+    "interrupted"
+  );
+  expect(canceled).toBe(true);
+}, 15_000);
+
+test("HACK-1939: a startup failure reports every named process refusal to the exit diagnostic", async () => {
+  const reply = JSON.stringify({
+    code: "environment_user",
+    message: "synthetic-private-detail",
+    process_refusals: {
+      version: 1,
+      refusals: [
+        { service: "db", field: "user" },
+        { service: "web", field: "healthcheck" },
+      ],
+    },
+  });
+  const opts = await fixture(
+    `console.error(${JSON.stringify(reply)}); process.exit(2);`
+  );
+  const diagnostics: unknown[] = [];
+  const failure = await serveNativeProjectGraph({
+    ...opts,
+    onExitDiagnostic: (diagnostic) => {
+      diagnostics.push(diagnostic);
+    },
+    onReady: async () => {
+      throw new Error("must not become ready");
+    },
+  }).catch((error: unknown) => String(error));
+  expect(failure).toContain("environment_user");
+  expect(failure).not.toContain("synthetic-private-detail");
+  expect(diagnostics).toEqual([
+    {
+      exitCode: 2,
+      nativeCode: "environment_user",
+      processRefusals: [
+        { service: "db", field: "user" },
+        { service: "web", field: "healthcheck" },
+      ],
+    },
+  ]);
+});
+
+test("a malformed process refusal list is dropped whole", async () => {
+  for (const process_refusals of [
+    { version: 2, refusals: [{ service: "db", field: "user" }] },
+    { version: 1, refusals: [{ service: "db", field: "argv" }] },
+    { version: 1, refusals: [{ service: "../db", field: "user" }] },
+    { version: 1, refusals: [] },
+    { version: 1, refusals: [{ service: "db", field: "user", value: "x" }] },
+  ]) {
+    const reply = JSON.stringify({
+      code: "environment_user",
+      process_refusals,
+    });
+    const opts = await fixture(
+      `console.error(${JSON.stringify(reply)}); process.exit(2);`
+    );
+    const diagnostics: Record<string, unknown>[] = [];
+    await serveNativeProjectGraph({
+      ...opts,
+      onExitDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+      },
+      onReady: async () => {},
+    }).catch(() => undefined);
+    expect(diagnostics[0]?.processRefusals).toBeUndefined();
+    expect(diagnostics[0]?.nativeCode).toBe("environment_user");
+  }
+});

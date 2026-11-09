@@ -234,7 +234,7 @@ test("workspace ensure resolves by controller project id when node project id di
       body: JSON.stringify({
         project: "bootstrap-target",
         controller_project_id: "controller-project-id",
-        controller_project_name: "event-agent",
+        controller_project_name: "example-app",
         bootstrap: {
           repo_url: sourceRepo,
           project_name: "bootstrap-target",
@@ -259,7 +259,7 @@ test("workspace ensure resolves by controller project id when node project id di
   const map = await readNodeWorkspaceMap({ homeDir: tempDir });
   expect(map.entries).toHaveLength(1);
   expect(map.entries[0]?.projectId).toBe("controller-project-id");
-  expect(map.entries[0]?.projectName).toBe("event-agent");
+  expect(map.entries[0]?.projectName).toBe("example-app");
 
   await rm(resolve(tempDir, ".hack", "projects.json"), { force: true });
 

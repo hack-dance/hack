@@ -305,6 +305,7 @@ fn options<'a>(
         shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
+        loopback_ports: false,
         project: PlanOptions {
             branch: None,
             project: fixture,
@@ -609,6 +610,7 @@ fn qualify_active_rebind(refreshable: bool, cancel_after_fence: bool) {
             },
             &mut runtime,
             &BTreeMap::new(),
+            &crate::provider::graph::ManagedFiles::new(),
             Instant::now() + Duration::from_secs(60),
         )
         .unwrap();
@@ -791,7 +793,10 @@ fn qualify_active_rebind(refreshable: bool, cancel_after_fence: bool) {
                     compose,
                     run: options(&fixture.0, &plan.plan_id, &run, &readiness, &public),
                 },
-                &BTreeMap::new(),
+                crate::provider::graph::ManagedInput {
+                    values: &BTreeMap::new(),
+                    files: &crate::provider::graph::ManagedFiles::new(),
+                },
                 Instant::now() + Duration::from_secs(60),
                 &mut fresh,
                 &restored_generation,

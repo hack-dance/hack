@@ -159,7 +159,7 @@ without launching a later child or inferring reaping from engine absence.
 The VM client preserves the selected `docker` command name for multiplexer clients
 while checking that its physical executable and selection remain unchanged.
 The VM path requires an explicit eligible local Unix Docker selection and already
-cached workload images plus `oven/bun:1.4.2-slim`. It neither pulls nor builds an
+cached workload images plus `oven/bun:1.4.4-slim`. It neither pulls nor builds an
 image. Images declaring volumes and workload pull policy `always` refuse. Hack
 pins each physical workload image and its original `Config.User`; it does not
 rewrite the app command or user. An omitted grant UID/GID defaults to `0:0` only
@@ -222,16 +222,18 @@ lifecycle/recovery qualification remain separate gates for this VM transport.
 ## Requirements
 
 The file material VM path and native Compose storage witness verification both
-run a fixed helper from the cataloged `oven/bun:1.4.2-slim` image. That exact
+run a fixed helper from the cataloged `oven/bun:1.4.4-slim` image. That exact
 image must already be in the selected daemon's local image store: the owner
 never pulls, builds, emulates or substitutes another tag or platform, and
 storage admission inspects and creates with `--pull never`. Before the first
 file-bearing or storage-bearing native command on a daemon, pull it once:
 
 ```sh
-docker pull oven/bun:1.4.2-slim
+docker pull oven/bun:1.4.4-slim
 ```
 
 The daemon's own architecture selects the cataloged linux/arm64 or linux/amd64
-artifact; other daemons refuse. A tag is not a pin: storage admission checks the
+artifact; other daemons refuse. A VM file generation prepared with the earlier
+`oven/bun:1.4.2-slim` helper keeps its own pinned helper image for restore and
+retirement; new preparation uses only the current tag. A tag is not a pin: storage admission checks the
 exact cataloged image identity and refuses a tag that resolves to other bytes.

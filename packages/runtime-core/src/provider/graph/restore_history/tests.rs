@@ -20,18 +20,21 @@ fn receipt(index: usize) -> Receipt {
         resources: BTreeMap::from([(
             "container:web".into(),
             Resource {
+                loopback_ports: Vec::new(),
                 routing: None,
                 networks: None,
                 outbound: false,
                 cache: None,
                 cache_provenance: None,
                 disposable_caches: Vec::new(),
+                restart_policy: None,
                 kind: Kind::Container,
                 key: "web".into(),
                 name: "owned-web".into(),
                 id: Some(format!("{index:064x}")),
                 image: None,
                 phase: "absent".into(),
+                amd64_emulation: None,
             },
         )]),
     }

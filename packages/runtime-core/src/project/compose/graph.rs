@@ -46,11 +46,26 @@ pub(super) fn validate(
                 ));
                 continue;
             };
-            if service.active && !target.active {
+            if service.active && !target.active && condition.required {
                 diagnostics.push(Diagnostic::error(
                     "inactive_dependency",
                     &field,
                     "An active service depends on a service disabled by the selected profiles.",
+                ));
+            } else if service.active && !target.active {
+                diagnostics.push(Diagnostic::warning(
+                    "optional_dependency_inactive",
+                    &field,
+                    "An optional dependency is disabled by the selected profiles; the edge is skipped, as with Compose.",
+                ));
+                // The execution graph drops this edge, so its target is never
+                // started or awaited: its condition requirements do not apply.
+                continue;
+            } else if service.active && !condition.required {
+                diagnostics.push(Diagnostic::warning(
+                    "optional_dependency_enforced",
+                    &field,
+                    "An active optional dependency is waited for like a required one; startup fails if its condition is never met, where Compose may only warn.",
                 ));
             }
             if condition.condition == "service_healthy"

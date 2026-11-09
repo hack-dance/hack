@@ -357,6 +357,7 @@ fn owned_named_volume_integrity_survives_container_restart() {
         shared_source: false,
         release_initializer_cache: BTreeSet::new(),
         routing_enrolled: false,
+        loopback_ports: false,
         project: options(&fixture.0),
         expected_plan: &plan.plan_id,
         source_revision: None,

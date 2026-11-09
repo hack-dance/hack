@@ -20,12 +20,28 @@ const TOKEN = /^[a-f0-9]{32}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const ENGINE = /^[a-zA-Z0-9][a-zA-Z0-9:-]{0,127}$/;
 
+/** Bun version of the currently cataloged helper image. */
+export const NATIVE_STORAGE_HELPER_BUN_VERSION = "1.4.4";
+/** Every helper Bun version a released CLI may have written into a saved receipt,
+ * intent, reference or carrier journal. Earlier versions stay parseable so saved
+ * stop, inspection and recovery keep working; only the current version is
+ * cataloged, so storage enrolled under an earlier artifact refuses verification
+ * as artifact drift instead of being relabeled or silently re-enrolled. */
+export type NativeComposeStorageHelperBunVersion =
+  | "1.4.2"
+  | typeof NATIVE_STORAGE_HELPER_BUN_VERSION;
+function helperBunVersion(
+  value: unknown
+): value is NativeComposeStorageHelperBunVersion {
+  return value === "1.4.2" || value === NATIVE_STORAGE_HELPER_BUN_VERSION;
+}
+
 /** Required private pins. A well-shaped pin is not an artifact/runtime qualification. */
 export type NativeComposeStorageXattrArtifact = {
   readonly version: 1;
   readonly imageId: string;
   readonly platform: "linux/arm64" | "linux/amd64";
-  readonly bunVersion: "1.4.2";
+  readonly bunVersion: NativeComposeStorageHelperBunVersion;
   readonly bunHash: string;
   readonly libcHash: string;
   readonly helperHash: string;
@@ -42,7 +58,7 @@ export function nativeComposeStorageXattrArtifactValid(
     ) &&
     value.version === 1 &&
     value.kernelAbi === 1 &&
-    value.bunVersion === "1.4.2" &&
+    helperBunVersion(value.bunVersion) &&
     (value.platform === "linux/arm64" || value.platform === "linux/amd64") &&
     typeof value.imageId === "string" &&
     IMAGE.test(value.imageId) &&
@@ -64,7 +80,7 @@ export function captureNativeComposeStorageXattrArtifact(
     version: 1,
     imageId: value.imageId,
     platform: value.platform,
-    bunVersion: "1.4.2",
+    bunVersion: value.bunVersion,
     bunHash: value.bunHash,
     libcHash: value.libcHash,
     helperHash: value.helperHash,

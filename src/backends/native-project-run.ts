@@ -10,12 +10,14 @@ import {
   rmdir,
   unlink,
 } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  inspectNativeProjectFinalizationLifetime,
   isNativeProjectFinalizationToken,
   type NativeProjectFinalizationToken,
+  withCompletedNativeProjectFinalization,
 } from "./native-project-finalization.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
@@ -27,6 +29,9 @@ const HEX32 = /^[a-f0-9]{32}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
 const LIMIT = 8192;
 const RECOVERY_SCHEMA = "hack.native-project-run-filesystem-recovery/v1";
+const FOREIGN_SCHEMA = "hack.native-project-run-foreign-home/v1";
+const SCOPE_KEYS =
+  "branch,dirIdentity,homeIdentity,nativeHome,projectDir,projectRoot,rootIdentity";
 // Equivalent to normalizeEnvConfigName(value) === value, with a bounded length.
 const ENV_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const AWS_PROFILE = /^[A-Za-z0-9_+=,.@-]{1,128}$/;
@@ -43,12 +48,184 @@ export type NativeProjectRun = {
   readonly profiles?: readonly string[];
   /** Public startup selector only; null means no AWS adaptation. Never credentials. */
   readonly aws?: { readonly profile: string; readonly region?: string } | null;
+  /** Public gcloud ADC adapter selector; absent means none. Never credential data. */
+  readonly gcloud?: { readonly mode: "file" };
   /**
    * Present when startup reviewed public runtime host metadata into this graph.
    * Retained restores must add it again; absent legacy graphs never gain it.
    */
   readonly runtimeMetadata?: true;
+  /**
+   * Present only when startup selected a named env while the project had no managed
+   * env file, so that env selected only the per-env native files. Absent mappings
+   * started with managed env files (or are legacy): a later missing file refuses.
+   */
+  readonly unmanagedEnvironment?: true;
+  /**
+   * Present only when startup selected a named env while the project had managed env
+   * files but not that env's overlay, so the base values applied. The overlay must
+   * still be absent; one that appears later is a changed selection.
+   */
+  readonly baseOnlyEnvironment?: true;
 };
+/** The startup environment markers a run mapping can carry; at most one is set. */
+export type NativeRunEnvironmentMarkers = Pick<
+  NativeProjectRun,
+  "unmanagedEnvironment" | "baseOnlyEnvironment"
+>;
+function isOverlay(envName: string, path: string): boolean {
+  return [
+    `hack.env.${envName}.yaml`,
+    `hack.env.${envName}.local.yaml`,
+  ].includes(basename(path));
+}
+function overlayPresent(
+  envName: string,
+  environmentFiles: readonly string[]
+): boolean {
+  return environmentFiles.some((path) => isOverlay(envName, path));
+}
+/**
+ * The marker a fresh startup records for its selection: none for a base selection or
+ * a named env whose overlay exists, `unmanagedEnvironment` without any managed env
+ * file, and `baseOnlyEnvironment` when managed env files exist but not the overlay.
+ */
+export function nativeRunEnvironmentMarkers(opts: {
+  readonly effectiveEnvName: string | null;
+  readonly environmentFiles: readonly string[];
+}): NativeRunEnvironmentMarkers {
+  const selected = opts.effectiveEnvName;
+  if (selected === null) {
+    return {};
+  }
+  if (opts.environmentFiles.length === 0) {
+    return { unmanagedEnvironment: true };
+  }
+  return overlayPresent(selected, opts.environmentFiles)
+    ? {}
+    : { baseOnlyEnvironment: true };
+}
+/** A managed env file that appeared or was removed since a run started. */
+export type NativeRunEnvironmentChange = {
+  readonly change: "appeared" | "removed";
+  /** Project-relative file name(s) only; never contents. */
+  readonly file: string;
+};
+type ChangedPath =
+  | { readonly change: "appeared"; readonly path: string }
+  | { readonly change: "removed"; readonly envName: string };
+/** The one comparison behind both exported checks; undefined means unchanged. */
+function changedEnvironmentFile(opts: {
+  readonly run: NativeRunEnvironmentMarkers & { readonly envName: string };
+  readonly environmentFiles: readonly string[];
+}): ChangedPath | undefined {
+  const { envName } = opts.run;
+  const overlay = opts.environmentFiles.find((path) =>
+    isOverlay(envName, path)
+  );
+  if (opts.run.unmanagedEnvironment === true) {
+    const appeared = overlay ?? opts.environmentFiles[0];
+    return appeared === undefined
+      ? undefined
+      : { change: "appeared", path: appeared };
+  }
+  if (opts.run.baseOnlyEnvironment === true) {
+    return overlay === undefined
+      ? undefined
+      : { change: "appeared", path: overlay };
+  }
+  return overlay === undefined ? { change: "removed", envName } : undefined;
+}
+/**
+ * Whether the managed env files a run's recorded selection needs are unchanged. A base
+ * selection needs none. A named selection needs its overlay (`hack.env.<env>.yaml` or
+ * `hack.env.<env>.local.yaml`), except a run recorded as started without any managed
+ * env file (there must still be none) or without the overlay (it must still be
+ * absent). A legacy mapping without a recorded selection never qualifies.
+ */
+export function nativeRunEnvironmentAvailable(opts: {
+  readonly run: Pick<
+    NativeProjectRun,
+    "effectiveEnvName" | "unmanagedEnvironment" | "baseOnlyEnvironment"
+  >;
+  readonly environmentFiles: readonly string[];
+}): boolean {
+  const selected = opts.run.effectiveEnvName;
+  if (selected === undefined) {
+    return false;
+  }
+  return (
+    selected === null ||
+    changedEnvironmentFile({
+      run: { ...opts.run, envName: selected },
+      environmentFiles: opts.environmentFiles,
+    }) === undefined
+  );
+}
+/**
+ * The managed env file whose appearance or removal changed a recorded named selection,
+ * named relative to the project root (a file outside it by its base name), or
+ * undefined when nothing changed or the selection is a base or legacy one.
+ */
+export function nativeRunEnvironmentChange(opts: {
+  readonly run: Pick<
+    NativeProjectRun,
+    "effectiveEnvName" | "unmanagedEnvironment" | "baseOnlyEnvironment"
+  >;
+  readonly environmentFiles: readonly string[];
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): NativeRunEnvironmentChange | undefined {
+  const selected = opts.run.effectiveEnvName;
+  if (selected === undefined || selected === null) {
+    return undefined;
+  }
+  const changed = changedEnvironmentFile({
+    run: { ...opts.run, envName: selected },
+    environmentFiles: opts.environmentFiles,
+  });
+  if (changed === undefined) {
+    return undefined;
+  }
+  const label = (path: string) => {
+    const name = relative(opts.projectRoot, path);
+    return name === "" || name.startsWith("..") || isAbsolute(name)
+      ? basename(path)
+      : name;
+  };
+  if (changed.change === "appeared") {
+    return { change: "appeared", file: label(changed.path) };
+  }
+  const overlay = label(
+    join(opts.projectDir, `hack.env.${changed.envName}.yaml`)
+  );
+  const local = label(
+    join(opts.projectDir, `hack.env.${changed.envName}.local.yaml`)
+  );
+  return { change: "removed", file: `${overlay} or ${local}` };
+}
+/**
+ * How to apply a changed env file set: start again with the files as they are now. A
+ * removed overlay can also be restored to keep the run; a project with down hooks needs
+ * it restored for `hack down`, which runs them with the values the run started with.
+ */
+export function nativeRunEnvironmentRemedy(opts: {
+  readonly change: NativeRunEnvironmentChange;
+  /** The command the caller refused, e.g. `hack restart`. */
+  readonly retry: string;
+}): string {
+  return opts.change.change === "appeared"
+    ? "Run hack down, then hack up, to start with it"
+    : `Restore it and run ${opts.retry} again, or run hack down (with it restored if the project has down hooks), then hack up, to start without it`;
+}
+/** "<file> appeared since this run started" or "<file> was removed since ..." */
+export function describeNativeRunEnvironmentChange(
+  change: NativeRunEnvironmentChange
+): string {
+  return change.change === "appeared"
+    ? `${change.file} appeared since this run started`
+    : `${change.file} was removed since this run started`;
+}
 export type NativeProjectRunScope = {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -59,6 +236,13 @@ export type NativeProjectRunScope = {
 function refused(): Error {
   return new ClosedCliError(
     "Native project run mapping is unsafe, changed, or owned by another run; inspect native state before recovery."
+  );
+}
+function validGcloud(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.keys(value).join() === "mode" &&
+    value.mode === "file"
   );
 }
 function validAws(value: unknown): boolean {
@@ -109,18 +293,46 @@ function validProfiles(value: unknown): boolean {
     return false;
   }
 }
+/** Mapping key sets written before the startup selectors were complete. */
+const LEGACY_KEY_SETS = [
+  "namespace,owner,planId,run",
+  "effectiveEnvName,namespace,owner,planId,run",
+  "aws,effectiveEnvName,namespace,owner,planId,run",
+];
+/** A complete mapping holds these keys plus any of {@link OPTIONAL_KEYS}. */
+const SELECTED_KEYS =
+  "aws,effectiveEnvName,namespace,owner,planId,profiles,run";
+const OPTIONAL_KEYS = new Set([
+  "baseOnlyEnvironment",
+  "gcloud",
+  "runtimeMetadata",
+  "unmanagedEnvironment",
+]);
+function validKeys(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value).sort();
+  return (
+    LEGACY_KEY_SETS.includes(keys.join()) ||
+    keys.filter((key) => !OPTIONAL_KEYS.has(key)).join() === SELECTED_KEYS
+  );
+}
+function validEnvironmentMarkers(value: Record<string, unknown>): boolean {
+  const unmanaged = Object.hasOwn(value, "unmanagedEnvironment");
+  const baseOnly = Object.hasOwn(value, "baseOnlyEnvironment");
+  return (
+    !(unmanaged && baseOnly) &&
+    (!unmanaged || value.unmanagedEnvironment === true) &&
+    (!baseOnly || value.baseOnlyEnvironment === true) &&
+    (!(unmanaged || baseOnly) || typeof value.effectiveEnvName === "string")
+  );
+}
 function valid(value: unknown): value is NativeProjectRun {
   return (
     isRecord(value) &&
-    [
-      "namespace,owner,planId,run",
-      "effectiveEnvName,namespace,owner,planId,run",
-      "aws,effectiveEnvName,namespace,owner,planId,run",
-      "aws,effectiveEnvName,namespace,owner,planId,profiles,run",
-      "aws,effectiveEnvName,namespace,owner,planId,profiles,run,runtimeMetadata",
-    ].includes(Object.keys(value).sort().join()) &&
+    validKeys(value) &&
+    (!Object.hasOwn(value, "gcloud") || validGcloud(value.gcloud)) &&
     (!Object.hasOwn(value, "runtimeMetadata") ||
       value.runtimeMetadata === true) &&
+    validEnvironmentMarkers(value) &&
     (!Object.hasOwn(value, "aws") || validAws(value.aws)) &&
     (!Object.hasOwn(value, "profiles") || validProfiles(value.profiles)) &&
     (!Object.hasOwn(value, "effectiveEnvName") ||
@@ -245,7 +457,7 @@ async function verifyIgnore(ignore: string) {
 async function paths(
   opts: NativeProjectRunScope,
   create: boolean,
-  kind: "run" | "restart" = "run"
+  kind: "run" | "restart" | "down-hooks" = "run"
 ) {
   const identity = await scope(opts);
   const internal = join(identity.projectDir, ".internal");
@@ -280,7 +492,7 @@ async function paths(
   const key = createHash("sha256")
     .update(JSON.stringify(identity.branch))
     .digest("hex");
-  const suffix = kind === "restart" ? ".restart" : "";
+  const suffix = kind === "run" ? "" : `.${kind}`;
   return {
     identity,
     root,
@@ -294,13 +506,22 @@ export type NativeRestartIntent = {
   readonly run: NativeProjectRun;
   readonly finalization: NativeProjectFinalizationToken;
 };
+/**
+ * The private directory and the operation lock path shared by restart,
+ * filesystem recovery and data removal. Creates the excluded directory.
+ */
+export async function nativeRestartOperationLock(
+  opts: NativeProjectRunScope
+): Promise<{ readonly root: string; readonly lock: string }> {
+  const p = await paths(opts, true, "restart");
+  return { root: p.root, lock: `${p.lock}.operation` };
+}
 /** Serialize cleanup and replacement hooks; uncertain abandoned ownership requires inspection. */
 export async function withNativeRestartLock<T>(
   opts: NativeProjectRunScope,
   action: (release: () => Promise<void>) => Promise<T>
 ): Promise<T> {
-  const p = await paths(opts, true, "restart");
-  const lock = `${p.lock}.operation`;
+  const { lock } = await nativeRestartOperationLock(opts);
   try {
     await mkdir(lock, { mode: 0o700 });
   } catch {
@@ -563,8 +784,7 @@ function oldMapping(
     value.version !== 1 ||
     !valid(value.run) ||
     !isRecord(value.scope) ||
-    Object.keys(value.scope).sort().join() !==
-      "branch,dirIdentity,homeIdentity,nativeHome,projectDir,projectRoot,rootIdentity"
+    Object.keys(value.scope).sort().join() !== SCOPE_KEYS
   ) {
     throw refused();
   }
@@ -858,6 +1078,111 @@ export async function inspectNativeProjectRunFilesystemRecovery(opts: {
   return (await recoverySelection(opts)).inspection;
 }
 
+export type NativeProjectRunCurrentInspection = {
+  readonly schema: typeof CURRENT_SCHEMA;
+  readonly state: "current";
+  readonly mappingSha256: string;
+  readonly run: NativeProjectRun;
+  /** Absent when the native graph cannot be read, for example while the pool is stopped. */
+  readonly graph: {
+    readonly phase: string;
+    readonly ownershipMatches: boolean;
+  } | null;
+  readonly repairRequired: false;
+};
+
+const CURRENT_SCHEMA = "hack.native-project-run-mapping-inspection/v1";
+const GRAPH_PHASE = /^[a-z][a-z-]{0,63}$/;
+
+async function currentGraph(opts: {
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly runtime: NativeRuntimeSelection;
+  readonly invoke?: typeof invokeNativeRuntime;
+}): Promise<NativeProjectRunCurrentInspection["graph"]> {
+  let observed: unknown;
+  try {
+    observed = await inspectNativeProjectGraph({
+      runtime: opts.runtime,
+      projectRoot: opts.projectRoot,
+      run: opts.run.run,
+      invoke: opts.invoke ?? invokeNativeRuntime,
+    });
+  } catch {
+    return null;
+  }
+  const receipt = isRecord(observed) ? observed.receipt : undefined;
+  if (
+    !(
+      isRecord(receipt) &&
+      typeof receipt.phase === "string" &&
+      GRAPH_PHASE.test(receipt.phase)
+    )
+  ) {
+    return null;
+  }
+  return {
+    phase: receipt.phase,
+    ownershipMatches:
+      isRecord(observed) &&
+      observed.journal_incomplete === false &&
+      receipt.run === opts.run.run &&
+      receipt.owner === opts.run.owner &&
+      receipt.namespace === opts.run.namespace &&
+      receipt.plan_id === opts.run.planId,
+  };
+}
+
+/**
+ * Read-only Doctor inspection of the saved run mapping. A mapping that still
+ * matches this checkout is reported with its native graph phase and whether the
+ * graph's ownership matches it; nothing needs repair. Only a mapping whose scope
+ * no longer matches falls through to the foreign-home inspection (only the native
+ * home differs) and then to the explicit legacy device-rebind inspection, which
+ * refuses every other difference.
+ */
+export async function inspectNativeProjectRunMapping(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly runtime: NativeRuntimeSelection;
+  readonly invoke?: typeof invokeNativeRuntime;
+  /** Test seam for the owning home's frontend PID check. */
+  readonly isAlive?: (pid: number) => boolean;
+}): Promise<
+  | NativeProjectRunCurrentInspection
+  | NativeProjectRunFilesystemInspection
+  | NativeProjectRunForeignHomeInspection
+> {
+  const p = await paths(opts.scope, false);
+  await recoveryDirectories(p);
+  const { bytes, value } = await readRecoveryFile(p.file);
+  let run: NativeProjectRun;
+  try {
+    run = record(value, p.identity);
+  } catch {
+    const foreign = await foreignHomeSelection({
+      scope: opts.scope,
+      isAlive: opts.isAlive,
+    }).catch(() => undefined);
+    return (
+      foreign?.inspection ??
+      (await inspectNativeProjectRunFilesystemRecovery(opts))
+    );
+  }
+  return {
+    schema: CURRENT_SCHEMA,
+    state: "current",
+    mappingSha256: createHash("sha256").update(bytes).digest("hex"),
+    run,
+    graph: await currentGraph({
+      projectRoot: p.identity.projectRoot,
+      run,
+      runtime: opts.runtime,
+      invoke: opts.invoke,
+    }),
+    repairRequired: false,
+  };
+}
+
 /** Explicitly rebind only three mapping device numbers; graph history is untouched. */
 export async function recoverNativeProjectRunFilesystem(opts: {
   readonly scope: NativeProjectRunScope;
@@ -949,6 +1274,418 @@ export async function recoverNativeProjectRunFilesystem(opts: {
     await releaseHeldDirectory(restartLock, restartHeld);
   }
 }
+/**
+ * A run mapping that another native home wrote for this exact checkout and
+ * instance. Each launcher version has its own native home, so an upgrade leaves the
+ * previous version's mapping behind. Its graph and retained data live only in that
+ * home; this home can neither restore nor stop it.
+ */
+export type NativeProjectRunForeignHomeInspection = {
+  readonly schema: typeof FOREIGN_SCHEMA;
+  readonly state: "foreign-home";
+  /** The owning native home, as recorded and still at that path and identity. */
+  readonly ownerHome: string;
+  /**
+   * The owning home's latest frontend lifetime for this run: `stopped` only when it
+   * acknowledged confirmed cleanup (`NativeProjectFinalizationLifetime`).
+   */
+  readonly owner: "stopped" | "live" | "interrupted" | "unproven";
+  /** The owning frontend's PID for a live or interrupted owner. */
+  readonly ownerPid: number | null;
+  readonly run: NativeProjectRun;
+  readonly mappingSha256: string;
+  /** Present only for a cleanly stopped owner; `release` requires it exactly. */
+  readonly selectionSha256: string | null;
+};
+
+export type NativeProjectRunForeignHomeRelease =
+  NativeProjectRunForeignHomeInspection & {
+    readonly released: true;
+    readonly auditPath: string;
+  };
+
+const HOME_LIMIT = 4096;
+
+function directoryIdentity(value: unknown): DirectoryIdentity | undefined {
+  return isRecord(value) &&
+    Object.keys(value).sort().join() === "dev,ino" &&
+    typeof value.dev === "number" &&
+    Number.isSafeInteger(value.dev) &&
+    typeof value.ino === "number" &&
+    Number.isSafeInteger(value.ino)
+    ? { dev: value.dev, ino: value.ino }
+    : undefined;
+}
+
+function sameDirectory(value: unknown, expected: DirectoryIdentity): boolean {
+  const identity = directoryIdentity(value);
+  return identity?.dev === expected.dev && identity.ino === expected.ino;
+}
+
+/**
+ * The mapping's owning home when the stored scope differs from this checkout in its
+ * native home only: the same canonical project root and directory, their exact
+ * identities, and the same instance. Any other difference is not a foreign home.
+ */
+function foreignHomeMapping(
+  value: unknown,
+  current: RunScopeIdentity
+):
+  | {
+      readonly ownerHome: string;
+      readonly ownerIdentity: DirectoryIdentity;
+      readonly run: NativeProjectRun;
+    }
+  | undefined {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).sort().join() !== "run,scope,version" ||
+    value.version !== 1 ||
+    !valid(value.run) ||
+    !isRecord(value.scope) ||
+    Object.keys(value.scope).sort().join() !== SCOPE_KEYS
+  ) {
+    return undefined;
+  }
+  const stored = value.scope;
+  const home = stored.nativeHome;
+  const ownerIdentity = directoryIdentity(stored.homeIdentity);
+  if (
+    typeof home !== "string" ||
+    !isAbsolute(home) ||
+    home.length > HOME_LIMIT ||
+    CONTROL.test(home) ||
+    home === current.nativeHome ||
+    ownerIdentity === undefined ||
+    stored.projectRoot !== current.projectRoot ||
+    stored.projectDir !== current.projectDir ||
+    stored.branch !== current.branch ||
+    !sameDirectory(stored.rootIdentity, current.rootIdentity) ||
+    !sameDirectory(stored.dirIdentity, current.dirIdentity)
+  ) {
+    return undefined;
+  }
+  return { ownerHome: home, ownerIdentity, run: value.run };
+}
+
+/** The recorded home is still that exact canonical directory. */
+async function ownerHomeMatches(
+  home: string,
+  identity: DirectoryIdentity
+): Promise<boolean> {
+  try {
+    const info = await lstat(home);
+    return (
+      info.isDirectory() &&
+      !info.isSymbolicLink() &&
+      info.dev === identity.dev &&
+      info.ino === identity.ino &&
+      (await realpath(home)) === home
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function foreignHomeSelection(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly isAlive?: (pid: number) => boolean;
+}): Promise<
+  | {
+      readonly inspection: NativeProjectRunForeignHomeInspection;
+      readonly p: RecoveryPaths;
+      readonly bytes: Buffer;
+      readonly fileIdentity: DirectoryIdentity;
+      readonly ownerScope: NativeProjectRunScope;
+      readonly attempt: string | null;
+    }
+  | undefined
+> {
+  const p = await paths(opts.scope, false);
+  await recoveryDirectories(p);
+  const { bytes, value, identity } = await readRecoveryFile(p.file);
+  const foreign = foreignHomeMapping(value, p.identity);
+  if (foreign === undefined) {
+    return undefined;
+  }
+  const ownerScope = { ...opts.scope, nativeHome: foreign.ownerHome };
+  const lifetime = (await ownerHomeMatches(
+    foreign.ownerHome,
+    foreign.ownerIdentity
+  ))
+    ? await inspectNativeProjectFinalizationLifetime({
+        scope: ownerScope,
+        run: foreign.run,
+        isAlive: opts.isAlive,
+      })
+    : ({ state: "unproven" } as const);
+  const mappingSha256 = createHash("sha256").update(bytes).digest("hex");
+  const attempt = lifetime.state === "completed" ? lifetime.attempt : null;
+  const selectionSha256 =
+    attempt === null
+      ? null
+      : createHash("sha256")
+          .update(
+            JSON.stringify({
+              schema: FOREIGN_SCHEMA,
+              mappingSha256,
+              fileIdentity: identity,
+              scope: p.identity,
+              ownerHome: foreign.ownerHome,
+              ownerIdentity: foreign.ownerIdentity,
+              run: foreign.run,
+              attempt,
+            })
+          )
+          .digest("hex");
+  return {
+    inspection: {
+      schema: FOREIGN_SCHEMA,
+      state: "foreign-home",
+      ownerHome: foreign.ownerHome,
+      owner: lifetime.state === "completed" ? "stopped" : lifetime.state,
+      ownerPid:
+        lifetime.state === "live" || lifetime.state === "interrupted"
+          ? lifetime.pid
+          : null,
+      run: foreign.run,
+      mappingSha256,
+      selectionSha256,
+    },
+    p,
+    bytes,
+    fileIdentity: identity,
+    ownerScope,
+    attempt,
+  };
+}
+
+/** The doctor command that releases a stopped foreign-home mapping from this home. */
+export function nativeForeignHomeReleaseCommand(opts: {
+  readonly selectionSha256: string;
+  readonly branch: string | null;
+}): string {
+  const branch = opts.branch === null ? "" : ` --branch ${opts.branch}`;
+  return `hack doctor --native-run-mapping release --expect-selection ${opts.selectionSha256}${branch}`;
+}
+
+/** The refusal sentence for a foreign-home mapping: names the owning home and the way out. */
+export function describeNativeForeignHomeMapping(opts: {
+  readonly inspection: NativeProjectRunForeignHomeInspection;
+  readonly branch: string | null;
+}): string {
+  const { inspection } = opts;
+  const where = `run ${inspection.run.run} in another native home (${inspection.ownerHome})`;
+  const stopThere = "run hack down with the Hack version that owns that home";
+  if (inspection.owner === "stopped" && inspection.selectionSha256 !== null) {
+    return (
+      `Native project run mapping belongs to ${where}, which stopped it cleanly; its retained data stays in that home. ` +
+      `To start this instance from this native home, release the mapping with ${nativeForeignHomeReleaseCommand(
+        {
+          selectionSha256: inspection.selectionSha256,
+          branch: opts.branch,
+        }
+      )}, or ${stopThere}.`
+    );
+  }
+  if (inspection.owner === "live") {
+    return (
+      `Native project run mapping is owned by live ${where}, frontend pid ${inspection.ownerPid}. ` +
+      `Stop it first: press Ctrl-C in that hack up, or ${stopThere}; then retry here.`
+    );
+  }
+  if (inspection.owner === "interrupted") {
+    return (
+      `Native project run mapping belongs to ${where}, whose frontend (pid ${inspection.ownerPid}) exited without confirming cleanup. ` +
+      "With the Hack version that owns that home, inspect it with hack doctor --native-cleanup inspect, then run hack down; then retry here."
+    );
+  }
+  return (
+    `Native project run mapping belongs to ${where}, and its clean stop cannot be proven from this home. ` +
+    `Before using this home, ${stopThere}.`
+  );
+}
+
+async function foreignHomeRefusal(
+  scope: NativeProjectRunScope
+): Promise<Error | undefined> {
+  try {
+    const selected = await foreignHomeSelection({ scope });
+    return selected
+      ? new ClosedCliError(
+          describeNativeForeignHomeMapping({
+            inspection: selected.inspection,
+            branch: scope.branch,
+          })
+        )
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The kind tag of the value-free down-hook journal beside the run mapping. */
+const DOWN_HOOK_KIND = "hack.native-project-down-hooks";
+
+function pendingDownHooks(): Error {
+  return new ClosedCliError(
+    "Native project run mapping from another native home has down hooks that are owed, unknown or not this run's; it was not released. Run hack down with the Hack version that owns that home first."
+  );
+}
+
+/**
+ * No down hook is owed for the selected run: its journal is absent, or it is a
+ * completed record of exactly this run (a successful stop keeps that terminal
+ * record rather than removing it). An owed, started (unknown), failed, unreadable or
+ * another run's record refuses. The journal's own writers hold its lock, which the
+ * caller checks separately.
+ */
+async function downHooksSettled(path: string, run: string): Promise<void> {
+  let value: unknown;
+  try {
+    value = (await readRecoveryFile(path)).value;
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return;
+    }
+    throw pendingDownHooks();
+  }
+  if (
+    !(
+      isRecord(value) &&
+      Object.keys(value).sort().join() ===
+        "generation,kind,run,state,version" &&
+      value.version === 1 &&
+      value.kind === DOWN_HOOK_KIND &&
+      value.run === run &&
+      typeof value.generation === "string" &&
+      HEX32.test(value.generation) &&
+      value.state === "complete"
+    )
+  ) {
+    throw pendingDownHooks();
+  }
+}
+
+/**
+ * Release a mapping that another native home left after a clean stop, so this home
+ * can start the instance afresh. Ownership is proved, never assumed: the stored scope
+ * differs only in its native home, that home is still the recorded directory, and
+ * its frontend records show the run's latest lifetime acknowledged confirmed cleanup.
+ * A down-hook journal must be absent or this run's completed record.
+ * The owning home's finalization lock is held throughout, so it cannot begin a new
+ * lifetime meanwhile. Pending restart or down-hook state refuses. The exact mapping
+ * bytes are kept in an audit file; the owning home's graph and data are untouched.
+ */
+export async function releaseNativeProjectRunForeignHome(opts: {
+  readonly scope: NativeProjectRunScope;
+  readonly expectSelection: string;
+}): Promise<NativeProjectRunForeignHomeRelease> {
+  if (!HEX64.test(opts.expectSelection)) {
+    throw refused();
+  }
+  const initial = await foreignHomeSelection({ scope: opts.scope });
+  if (initial === undefined) {
+    throw refused();
+  }
+  if (initial.attempt === null) {
+    throw new ClosedCliError(
+      describeNativeForeignHomeMapping({
+        inspection: initial.inspection,
+        branch: opts.scope.branch,
+      })
+    );
+  }
+  if (initial.inspection.selectionSha256 !== opts.expectSelection) {
+    throw refused();
+  }
+  const attempt = initial.attempt;
+  await recoveryLocksAbsent(initial.p);
+  const base = initial.p.file.slice(0, -5);
+  const restartLock = `${initial.p.lock.slice(0, -5)}.restart.lock.operation`;
+  await mkdir(restartLock, { mode: 0o700 });
+  const restartHeld = await heldDirectory(restartLock);
+  try {
+    await mkdir(initial.p.lock, { mode: 0o700 });
+    const mappingHeld = await heldDirectory(initial.p.lock);
+    try {
+      return await withCompletedNativeProjectFinalization({
+        scope: initial.ownerScope,
+        run: initial.inspection.run,
+        attempt,
+        action: async () => {
+          const selected = await foreignHomeSelection({ scope: opts.scope });
+          if (
+            selected === undefined ||
+            selected.inspection.selectionSha256 !== opts.expectSelection ||
+            selected.p.file !== initial.p.file ||
+            !selected.bytes.equals(initial.bytes) ||
+            selected.fileIdentity.dev !== initial.fileIdentity.dev ||
+            selected.fileIdentity.ino !== initial.fileIdentity.ino
+          ) {
+            throw refused();
+          }
+          await Promise.all([
+            absentPath(`${base}.restart.json`),
+            downHooksSettled(
+              `${base}.down-hooks.json`,
+              selected.inspection.run.run
+            ),
+            absentPath(`${base}.down-hooks.lock`),
+          ]);
+          const audit = `${base}.foreign-home-release-${selected.inspection.mappingSha256}.json`;
+          await preserveRecoveryAudit(
+            audit,
+            JSON.stringify({
+              version: 1,
+              schema: FOREIGN_SCHEMA,
+              selectionSha256: opts.expectSelection,
+              mappingSha256: selected.inspection.mappingSha256,
+              ownerHome: selected.inspection.ownerHome,
+              mapping: selected.bytes.toString("utf8"),
+            })
+          );
+          await sync(selected.p.root);
+          await Promise.all([restartHeld.verify(), mappingHeld.verify()]);
+          const closeMapping = await verifySelectedMappingPath(
+            selected.p.file,
+            selected.bytes,
+            selected.fileIdentity
+          );
+          try {
+            await unlink(selected.p.file);
+          } finally {
+            await closeMapping();
+          }
+          await sync(selected.p.root);
+          await absentPath(selected.p.file);
+          return { ...selected.inspection, released: true, auditPath: audit };
+        },
+      });
+    } finally {
+      await releaseHeldDirectory(initial.p.lock, mappingHeld);
+    }
+  } finally {
+    await releaseHeldDirectory(restartLock, restartHeld);
+  }
+}
+
+/**
+ * Private paths of the value-free down-hook journal beside the run mapping,
+ * under the same scope, directory and ignore-file checks. Missing storage
+ * surfaces as the raw ENOENT error; callers treat it as "no journal".
+ */
+export async function nativeProjectDownHookPaths(
+  opts: NativeProjectRunScope,
+  create: boolean
+): Promise<{
+  readonly root: string;
+  readonly file: string;
+  readonly lock: string;
+}> {
+  const p = await paths(opts, create, "down-hooks");
+  return { root: p.root, file: p.file, lock: p.lock };
+}
 /** Establish excluded metadata before source identity is reviewed. */
 export async function prepareNativeProjectRunStorage(
   opts: NativeProjectRunScope
@@ -964,14 +1701,21 @@ export async function loadNativeProjectRun(
   } catch {
     throw refused();
   }
+  let stored: { readonly value: unknown; readonly identity: RunScopeIdentity };
   try {
     const p = await paths(opts, false);
-    return record(await read(p.file), p.identity);
+    stored = { value: await read(p.file), identity: p.identity };
   } catch (error) {
     if (isRecord(error) && error.code === "ENOENT") {
       return null;
     }
     throw refused();
+  }
+  try {
+    return record(stored.value, stored.identity);
+  } catch {
+    // Only a mapping that differs in nothing but its native home gets a named refusal.
+    throw (await foreignHomeRefusal(opts)) ?? refused();
   }
 }
 /** Publish a new owner once, or replace its exact stopped mapping after restore. */

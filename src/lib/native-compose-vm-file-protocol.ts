@@ -3,7 +3,13 @@ import { refuseNativeComposeFile } from "./native-compose-file-bytes.ts";
 import { keys } from "./native-compose-private-state.ts";
 
 export const NATIVE_COMPOSE_VM_FILES_EXTENSION = "x-hack-native-vm-files";
-export const NATIVE_COMPOSE_VM_FILE_IMAGE = "oven/bun:1.4.2-slim";
+/** Helper image tag for new VM file preparation. The owner never pulls it. */
+export const NATIVE_COMPOSE_VM_FILE_IMAGE = "oven/bun:1.4.4-slim";
+/** Helper tags a released CLI may have recorded in a saved VM file manifest. A
+ * saved generation keeps its own pinned helper image ID for restore, readiness
+ * and retirement; only new preparation uses the current tag. */
+export const NATIVE_COMPOSE_VM_FILE_SAVED_IMAGES: readonly string[] =
+  Object.freeze(["oven/bun:1.4.2-slim", NATIVE_COMPOSE_VM_FILE_IMAGE]);
 export const NATIVE_COMPOSE_VM_FILE_LIMIT = 2 * 1024 * 1024;
 /** Docker omits optional empty image fields. Default absence only, retaining
  * every present value for the image decoder's type and policy checks. */

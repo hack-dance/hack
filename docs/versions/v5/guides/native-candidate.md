@@ -762,7 +762,7 @@ line and drops nothing. Existing
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;
 workspace installs that write elsewhere still require explicit volume mappings.
-An isolated Event Agent trial reached 14-service native readiness, completed Google
+An isolated trial of a real 14-service application reached native readiness, completed Google
 sign-in, and rendered authenticated search results and images over browser-trusted
 HTTPS. A normal `restart` kept its run and Redis data after a source edit. This does
 not establish every application workflow, crash recovery or comparative performance.
@@ -896,7 +896,7 @@ without blocking owned cleanup. Missing or malformed delivery refuses, as do
 values for another service; ordinary graph startup environment delivery retains
 its nonempty requirement.
 
-The running-project noninteractive path has a live Event Agent smoke check:
+The running-project noninteractive path has a live smoke check against a real multi-service application:
 `hack run www -- bun --version` completed after a same-run restart, and a command
 exiting 7 returned its stdout and exit status. Both left no job resource and
 preserved the healthy parent graph and its volume identities. An
@@ -1441,8 +1441,14 @@ and then `hack global dns activate --domain v5.hack.gy`. Without `--domain`,
 these commands use the global `default_domain` only when it is a custom suffix;
 changing that shared setting also changes the installed v4 CLI's default. With a
 built-in default such as `hack.local`, they stop with a usage message that names
-`hack doctor --fix` and the rollback command below. Preview is read-only;
-activation shows the exact scoped claim and requires interactive confirmation
+`hack doctor --fix` and the rollback command below. Preview is read-only. It
+names the running dnsmasq argument that loads the include directory, normally
+the Homebrew service's `-7 <prefix>/etc/dnsmasq.d,*.conf`. That argument, not a
+`conf-dir` line in `dnsmasq.conf`, is what Hack relies on, so a commented-out
+`conf-dir` line does not matter. When the running dnsmasq lacks the argument,
+preview refuses, says whether `dnsmasq.conf` has a matching `conf-dir` line, and
+names the next step: `sudo brew services restart dnsmasq`, then preview again.
+Activation shows the exact scoped claim and requires interactive confirmation
 and a native administrator prompt. Run it from a terminal; the bounded privileged
 steps preserve that terminal's sudo authorization and report the underlying
 command failure if a step fails. If you approve but the administrator prompt

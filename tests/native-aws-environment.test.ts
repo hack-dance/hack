@@ -64,7 +64,7 @@ test("explicit profile replaces only declared read-only AWS mount and scopes cre
   const before = JSON.stringify(original);
   const result = await adaptNativeAwsEnvironment({
     input: original,
-    profile: "livenation_qa",
+    profile: "example_qa",
     exportSource: source,
     now,
   });
@@ -96,7 +96,7 @@ test("explicit profile replaces only declared read-only AWS mount and scopes cre
   expect(result.input.originalSha256).toBe(original.originalSha256);
   expect(JSON.stringify(original)).toBe(before);
   expect(result.receipt).toEqual({
-    profile: "livenation_qa",
+    profile: "example_qa",
     expiry: exported.Expiration.replace("Z", ".000Z"),
     services: ["app"],
   });

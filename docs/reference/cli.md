@@ -191,7 +191,8 @@ hack down [options]
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
 | `--prune-caches` | After down, remove confirmed Compose-owned disposable cache volumes |
-| `--yes` | Confirm --prune-caches without prompting |
+| `--remove-data` | Native backend: delete a stopped project's owned data volumes so the next up starts fresh (asks first) |
+| `--yes` | Confirm --prune-caches or --remove-data without prompting |
 | `--json` | Output JSON (machine-readable) |
 | `--recover` | Explicitly reconcile an interrupted native Compose stop while retaining data |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -713,7 +714,7 @@ Explicitly adopt a stopped, verified existing Compose instance
 hack config adopt [options]
 ```
 
-Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher. Verified linked Git checkouts retain explicit existing identities. Local inheritance, generated overrides and container recreation remain unsupported.
+Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher and the Compose backend, also for --dry-run; on another backend, rerun with HACK_RUNTIME_BACKEND=compose. Verified linked Git checkouts retain explicit existing identities. Local inheritance, generated overrides and container recreation remain unsupported.
 
 ### Options
 
@@ -1423,13 +1424,14 @@ hack doctor [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--fix` | Attempt safe auto-remediations (network + CoreDNS + CA) |
 | `--migrate-env-config` | Migrate legacy hack.env.json/.env state to the new env config files |
+| `--accept-tracked-env-changes` | With --migrate-env-config and no prompt, allow deleting or editing git-tracked files (hack.env.json, the Compose file) |
 | `--domain-migration preview|apply|rollback` | Preview, apply, or roll back only this project's hack.local migration |
 | `--json` | Output JSON (machine-readable) |
 | `--browser-url https://app.hack` | HTTPS origin manually tested in the browser (no path or credentials) |
 | `--browser-result unknown|works|fails|permission-denied` | Your manual browser observation for --browser-url (default: unknown) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--native-cleanup inspect` | Inspect one mapped native graph's pending cleanup without recovery or stop replay |
-| `--native-run-mapping inspect|repair` | Inspect or explicitly repair a native run mapping after filesystem device renumbering |
+| `--native-run-mapping inspect|repair|release` | Inspect a native run mapping, explicitly repair it after filesystem device renumbering, or release one another native home left after a clean stop |
 | `--expect-selection <64-hex>` | Require the exact run-mapping recovery inspection selection |
 | `--accept-legacy-device-rebind` | Explicitly accept legacy migration without proof of original filesystem volume continuity |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

@@ -67,6 +67,21 @@ impl RefreshPolicy {
         })
     }
 
+    /// Require that the captured anchor is exactly the owner process the caller
+    /// selected (by PID and native start time). Used for owner-scoped selections
+    /// (a lifecycle pane or shared-helper process), so review cannot pin some other
+    /// ancestor at the same depth after the tree changed.
+    pub fn require_supervisor(&self, pid: i32, start_micros: u64) -> Result<(), CandidateError> {
+        if pid <= 1
+            || start_micros == 0
+            || self.supervisor.pid != pid
+            || self.supervisor.start_micros != start_micros
+        {
+            return Err(rejected());
+        }
+        Ok(())
+    }
+
     /// Binds native review to the selected anchor and intermediate executable
     /// chain as well as depth. Contains no process arguments or credentials.
     pub fn review_fingerprint(&self) -> Result<String, CandidateError> {
@@ -690,6 +705,8 @@ impl HostRelayRuntime {
                 })
                 .collect(),
         };
+        // From the first journal write on, a failure leaves effects unconfirmed.
+        self.rebind_unconfirmed = true;
         state::write(&root.join(JOURNAL), &journal)?;
         let mut fences: Vec<(u8, SlotFence)> = Vec::new();
         let result = (|| {
@@ -926,6 +943,7 @@ impl HostRelayRuntime {
             }
             return Err(original);
         }
+        self.rebind_unconfirmed = false;
         result
     }
 }

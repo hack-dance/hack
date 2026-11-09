@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{path::Path, time::Duration};
 
-fn error(message: &str) -> CandidateError {
+fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("graph_probe", message)
 }
 
@@ -410,7 +410,7 @@ trap - EXIT
     })();
     state::write(
         &evidence_dir.join(format!("{owner}.json")),
-        &json!({"passed":result.is_ok() && cleanup.is_ok(),"network":network,"volume":volume,"containers":names,"image":image,"phase":phase,"failure":result.as_ref().err().map(|e| &e.code),"cleanup_confirmed":cleanup.is_ok(),"scope":"Synthetic init/SQLite/web/check pipeline and VM restart; not Event Agent or host-loopback acceptance"}),
+        &json!({"passed":result.is_ok() && cleanup.is_ok(),"network":network,"volume":volume,"containers":names,"image":image,"phase":phase,"failure":result.as_ref().err().map(|e| &e.code),"cleanup_confirmed":cleanup.is_ok(),"scope":"Synthetic init/SQLite/web/check pipeline and VM restart; not real application or host-loopback acceptance"}),
     )?;
     cleanup?;
     result

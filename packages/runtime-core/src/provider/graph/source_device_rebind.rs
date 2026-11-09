@@ -283,6 +283,8 @@ pub(in crate::provider) fn https_devices(
         || witness.owner != owner.token
         || sha256(&owner_pin.bytes) != witness.current_owner_raw_sha256
         || owner.project_share.as_ref() != Some(&witness.current_share)
+        // Legacy device rebind is defined only for a single-root pool.
+        || !owner.additional_project_shares.is_empty()
         || owner.guest_boot_id.as_deref() != Some(witness.current_guest_boot.as_str())
         || lifecycle::host_filesystem::host_boot_micros()? != witness.host_boot_micros
         || witness.old_share.device == witness.current_share.device
@@ -498,6 +500,7 @@ fn validate_current(
         || lifecycle::host_filesystem::host_boot_micros()? != witness.host_boot_micros
         || engine.guest().boot_id() != witness.current_guest_boot
         || engine.guest().project_share() != Some(&witness.current_share)
+        || !engine.guest().single_project_share()
     {
         return Err(refused());
     }
@@ -590,6 +593,7 @@ fn selected_witness(
         || receipt.phase != "stopped-data-retained"
         || sha256(&state_bytes) != proof.completed_stopped_sha256
         || engine.guest().project_share() != Some(&current_share)
+        || !engine.guest().single_project_share()
         || lifecycle::host_filesystem::host_boot_micros()? != proof.host_boot_micros
         || engine.guest().boot_id() != proof.current_guest_boot
     {

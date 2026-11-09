@@ -8,17 +8,17 @@ import {
 import { classifyLifecycleSession } from "../src/lib/project-lifecycle-sessions.ts";
 
 const staleEntry: LifecycleStateEntry = {
-  composeProject: "event-agent",
-  projectName: "event-agent",
+  composeProject: "example-app",
+  projectName: "example-app",
   branch: "feature-cleanup",
-  sessionName: "event-agent--lifecycle-feature-cleanup",
+  sessionName: "example-app--lifecycle-feature-cleanup",
   backend: "tmux",
   updatedAt: "2026-04-01T14:00:00.000Z",
   processes: [
     {
       name: "proxy",
       windowName: "proxy",
-      logPath: "/tmp/event-agent.log",
+      logPath: "/tmp/example-app.log",
       panePid: 500,
       processGroupId: 500,
     },
@@ -81,7 +81,7 @@ test("classifyLifecycleSessionHygiene reports an owned session without a running
       backend: "tmux",
       name: ownedEntry.sessionName,
       attached: false,
-      path: "/tmp/event-agent",
+      path: "/tmp/example-app",
       windows: 2,
       createdAt: "2026-04-01T13:59:59.000Z",
     },
@@ -89,7 +89,7 @@ test("classifyLifecycleSessionHygiene reports an owned session without a running
     observedOwnershipToken: "owner-token",
     expectedBackend: "tmux",
     expectedSessionName: ownedEntry.sessionName,
-    expectedProjectRoot: "/tmp/event-agent",
+    expectedProjectRoot: "/tmp/example-app",
     expectedDefinitionHash: "definition-hash",
     liveWindowNames: new Set(["shell", "proxy"]),
   });
@@ -120,7 +120,7 @@ test("classifyLifecycleSessionHygiene preserves a recent owned session during st
       backend: "tmux",
       name: ownedEntry.sessionName,
       attached: false,
-      path: "/tmp/event-agent",
+      path: "/tmp/example-app",
       windows: 2,
       createdAt: "2026-04-01T13:59:59.000Z",
     },
@@ -128,7 +128,7 @@ test("classifyLifecycleSessionHygiene preserves a recent owned session during st
     observedOwnershipToken: "owner-token",
     expectedBackend: "tmux",
     expectedSessionName: ownedEntry.sessionName,
-    expectedProjectRoot: "/tmp/event-agent",
+    expectedProjectRoot: "/tmp/example-app",
     expectedDefinitionHash: "definition-hash",
     liveWindowNames: new Set(["shell", "proxy"]),
   });
@@ -147,7 +147,7 @@ test("classifyLifecycleSessionHygiene preserves a recent owned session during st
     {
       entry: ownedEntry,
       reason:
-        'Lifecycle session "event-agent--lifecycle-feature-cleanup" is recent enough to belong to an in-flight startup.',
+        'Lifecycle session "example-app--lifecycle-feature-cleanup" is recent enough to belong to an in-flight startup.',
     },
   ]);
 });
@@ -166,7 +166,7 @@ test("classifyLifecycleSessionHygiene preserves foreign collisions for manual re
     observedOwnershipToken: null,
     expectedBackend: "tmux",
     expectedSessionName: staleEntry.sessionName,
-    expectedProjectRoot: "/tmp/event-agent",
+    expectedProjectRoot: "/tmp/example-app",
     expectedDefinitionHash: "",
     liveWindowNames: new Set(["shell"]),
   });

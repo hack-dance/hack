@@ -1,5 +1,6 @@
 //! Explicit native foreground lifetime; dead ownership never authorizes adoption or replay.
 use super::*;
+use crate::provider::engine::LOG_STREAM_BUDGET;
 use crate::provider::graph::foreground::{signals, transport};
 use serde::{Deserialize, Serialize};
 use std::{cell::Cell, io::Write};
@@ -190,11 +191,11 @@ impl Reply {
                     || serde_json::to_vec(&logs.stdout)
                         .map_err(|_| refused())?
                         .len()
-                        > 16386
+                        > LOG_STREAM_BUDGET
                     || serde_json::to_vec(&logs.stderr)
                         .map_err(|_| refused())?
                         .len()
-                        > 16386
+                        > LOG_STREAM_BUDGET
                 {
                     return Err(refused());
                 }
@@ -397,7 +398,7 @@ pub fn serve_with_storage_tool(
         };
         let result = result.unwrap_or_else(|error| Outcome::Refused {
             code: error.code.into(),
-            stop_failures: error.stop_failures,
+            stop_failures: error.stop_failures.map(|detail| *detail),
         });
         let cleaned = matches!(result, Outcome::Cleaned { .. });
         let reply = Reply {
@@ -559,7 +560,7 @@ fn request_selected(
     } = reply.result
     {
         let mut error = refused().with_cause_code(code);
-        error.stop_failures = stop_failures;
+        error.stop_failures = stop_failures.map(Box::new);
         return Err(error);
     }
     serde_json::to_value(reply).map_err(|_| refused())

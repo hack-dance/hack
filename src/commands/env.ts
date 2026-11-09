@@ -80,6 +80,7 @@ import {
   discoverComposeServiceNames,
   ENV_KEY_INVALID_MESSAGE,
   findUnmigratedLegacyDotenv,
+  finishImplicitLegacyEnvMigration,
   hasUnmigratedLegacyDotenv,
   hydrateProjectEnvLocalLayer,
   materializeProjectEnv,
@@ -968,10 +969,13 @@ async function maybeMigrateLegacyProjectEnv(input: {
     serviceNames,
     materialize: false,
   });
-  if (migrated.legacyDetected && migrated.wroteFiles.length > 0) {
-    logger.info({
-      message: `Migrated legacy env config to ${migrated.wroteFiles.join(", ")}`,
-    });
+  const report = await finishImplicitLegacyEnvMigration({
+    projectRoot: input.project.projectRoot,
+    projectDir: input.project.projectDir,
+    migrated,
+  });
+  for (const line of report.lines) {
+    logger.info({ message: line });
   }
   return migrated.legacyDetected;
 }

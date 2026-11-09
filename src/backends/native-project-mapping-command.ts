@@ -7,9 +7,17 @@ import {
   resolveWorktreeAutoBranch,
   sanitizeBranchSlug,
 } from "../lib/project.ts";
+import type {
+  NativeProjectRunForeignHomeInspection,
+  NativeProjectRunForeignHomeRelease,
+  NativeProjectRunScope,
+} from "./native-project-run.ts";
 import {
-  inspectNativeProjectRunFilesystemRecovery,
+  describeNativeForeignHomeMapping,
+  inspectNativeProjectRunMapping,
+  nativeForeignHomeReleaseCommand,
   recoverNativeProjectRunFilesystem,
+  releaseNativeProjectRunForeignHome,
 } from "./native-project-run.ts";
 import type { NativeRuntimeSelection } from "./native-runtime-client.ts";
 
@@ -17,9 +25,13 @@ const SELECTION = /^[a-f0-9]{64}$/;
 
 type Selection =
   | { readonly action: "inspect" }
-  | { readonly action: "repair"; readonly expectSelection: string };
+  | { readonly action: "repair"; readonly expectSelection: string }
+  | { readonly action: "release"; readonly expectSelection: string };
 
-/** A device rebind is an explicit selected metadata migration, never an automatic Doctor fix. */
+/**
+ * A device rebind and a foreign-home release are explicit selected metadata changes,
+ * never automatic Doctor fixes; each requires the exact inspected selection.
+ */
 export function parseNativeRunMappingRecoveryOptions(opts: {
   readonly action?: string;
   readonly expectSelection?: string;
@@ -34,7 +46,7 @@ export function parseNativeRunMappingRecoveryOptions(opts: {
       opts.branch !== undefined
     ) {
       throw new CliUsageError(
-        "Run-mapping selection and branch options require --native-run-mapping inspect|repair."
+        "Run-mapping selection and branch options require --native-run-mapping inspect|repair|release."
       );
     }
     return null;
@@ -51,6 +63,18 @@ export function parseNativeRunMappingRecoveryOptions(opts: {
       );
     }
     return { action: "inspect" };
+  }
+  if (opts.action === "release") {
+    if (
+      opts.acceptLegacyDeviceRebind ||
+      !opts.expectSelection ||
+      !SELECTION.test(opts.expectSelection)
+    ) {
+      throw new CliUsageError(
+        "Run-mapping release requires --native-run-mapping release --expect-selection <64-hex> and no device-rebind acceptance."
+      );
+    }
+    return { action: "release", expectSelection: opts.expectSelection };
   }
   if (
     opts.action !== "repair" ||
@@ -106,26 +130,92 @@ export async function runNativeProjectMappingCommand(opts: {
     nativeHome: opts.runtime.home,
     branch: selected.branch,
   };
-  const data =
-    opts.selection.action === "inspect"
-      ? await inspectNativeProjectRunFilesystemRecovery({
-          scope,
-          runtime: opts.runtime,
-        })
-      : await recoverNativeProjectRunFilesystem({
-          scope,
-          runtime: opts.runtime,
-          expectSelection: opts.selection.expectSelection,
-          acceptLegacyDeviceRebind: true,
-        });
+  const data = await selectedMappingAction({
+    selection: opts.selection,
+    scope,
+    runtime: opts.runtime,
+  });
   if (opts.json) {
     emitCliResult({ result: okResult({ data }) });
   } else {
     process.stdout.write(
-      `Native run mapping ${opts.selection.action === "repair" ? "repaired" : "inspected"}: branch=${selected.branch ?? "base"}, run=${data.run.run}\n` +
-        `selection=${data.selectionSha256}\nqualification=${data.qualification}\n` +
-        "Graph recovery, retained-data readback and application readiness require separate verification.\n"
+      mappingText({
+        data,
+        action: opts.selection.action,
+        branch: selected.branch,
+      })
     );
   }
   return 0;
+}
+
+function selectedMappingAction(opts: {
+  readonly selection: Selection;
+  readonly scope: NativeProjectRunScope;
+  readonly runtime: NativeRuntimeSelection;
+}) {
+  if (opts.selection.action === "inspect") {
+    return inspectNativeProjectRunMapping({
+      scope: opts.scope,
+      runtime: opts.runtime,
+    });
+  }
+  if (opts.selection.action === "release") {
+    return releaseNativeProjectRunForeignHome({
+      scope: opts.scope,
+      expectSelection: opts.selection.expectSelection,
+    });
+  }
+  return recoverNativeProjectRunFilesystem({
+    scope: opts.scope,
+    runtime: opts.runtime,
+    expectSelection: opts.selection.expectSelection,
+    acceptLegacyDeviceRebind: true,
+  });
+}
+
+function mappingText(opts: {
+  readonly data: Awaited<ReturnType<typeof selectedMappingAction>>;
+  readonly action: Selection["action"];
+  readonly branch: string | null;
+}): string {
+  const { data } = opts;
+  if ("state" in data && data.state === "foreign-home") {
+    return foreignHomeText(data, opts.branch);
+  }
+  if ("state" in data) {
+    return (
+      `Native run mapping is current: branch=${opts.branch ?? "base"}, run=${data.run.run}\n` +
+      `graph=${data.graph ? `${data.graph.phase}, ownership ${data.graph.ownershipMatches ? "matches" : "differs"}` : "unavailable"}\n` +
+      "No repair is needed. Graph recovery, retained-data readback and application readiness require separate verification.\n"
+    );
+  }
+  return (
+    `Native run mapping ${opts.action === "repair" ? "repaired" : "inspected"}: branch=${opts.branch ?? "base"}, run=${data.run.run}\n` +
+    `selection=${data.selectionSha256}\nqualification=${data.qualification}\n` +
+    "Graph recovery, retained-data readback and application readiness require separate verification.\n"
+  );
+}
+
+function foreignHomeText(
+  data:
+    | NativeProjectRunForeignHomeInspection
+    | NativeProjectRunForeignHomeRelease,
+  branch: string | null
+): string {
+  const head = `branch=${branch ?? "base"}, run=${data.run.run}\nowner home=${data.ownerHome}, owner=${data.owner}${data.ownerPid === null ? "" : ` (frontend pid ${data.ownerPid})`}\n`;
+  if ("released" in data) {
+    return (
+      `Native run mapping released from another native home: ${head}` +
+      `audit=${data.auditPath}\n` +
+      "Its graph and retained data stay in that home. Run hack up to start this instance from this home.\n"
+    );
+  }
+  if (data.selectionSha256 !== null) {
+    return (
+      `Native run mapping belongs to another native home: ${head}selection=${data.selectionSha256}\n` +
+      `Release it from this home with ${nativeForeignHomeReleaseCommand({ selectionSha256: data.selectionSha256, branch })}\n`
+    );
+  }
+  return `Native run mapping belongs to another native home: ${head}${describeNativeForeignHomeMapping({ inspection: data, branch })}\n`;
 }

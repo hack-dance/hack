@@ -1,5 +1,6 @@
 //! WU03 Compose review and metadata-only enrollment. These plans cannot execute services.
 mod adapter;
+pub mod capabilities;
 pub use adapter::{NormalizedComposeOptions, plan_normalized};
 mod compose;
 mod enrollment;
@@ -23,7 +24,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub use enrollment::{EnrollmentReceipt, enroll, status, status_with_branch};
-#[cfg(feature = "native-config-plan")]
 pub(crate) use source::resolve as resolve_source;
 pub use source::{SourceEntry, SourceSelection};
 
@@ -60,7 +60,7 @@ impl Diagnostic {
         }
     }
 }
-fn problem(code: &'static str, message: &str) -> CandidateError {
+fn problem(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
 }
 
@@ -117,11 +117,36 @@ pub struct PortPlan {
     pub protocol: String,
     pub declared_host_ip: String,
     pub proposed_host_ip: String,
+    /// Variable name whose literal default supplied `published`; never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_reference: Option<String>,
+    /// Variable name whose literal default supplied the host IP; never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ip_reference: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyPlan {
     pub condition: String,
+    /// Compose `required: false`: an optional edge whose inactive target is
+    /// dropped before execution. An active target is still waited for and its
+    /// condition enforced (fail closed). Omitted when true so existing plan IDs hold.
+    #[serde(default = "required_dependency", skip_serializing_if = "is_required")]
+    pub required: bool,
+}
+fn required_dependency() -> bool {
+    true
+}
+fn is_required(required: &bool) -> bool {
+    *required
+}
+/// Compose `stdin_open`/`tty` intent. Native services never attach host input
+/// and never allocate a pseudo-terminal; only an open, unattached stdin is kept.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InteractivePlan {
+    pub stdin_open: bool,
+    pub tty: bool,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -236,6 +261,18 @@ pub struct RoutingPlan {
     pub port: u16,
 }
 
+/// A service's reviewed `x-hack-amd64-emulation` policy. The value is part of the plan, so
+/// the two modes are distinct reviewed plans and retained images can be bound to one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Amd64Emulation {
+    /// Linux arm64 when the image publishes it, otherwise `linux/amd64` under translation.
+    #[serde(rename = "prefer-native")]
+    PreferNative,
+    /// `linux/amd64` under translation, even when the image also publishes arm64.
+    #[serde(rename = "amd64")]
+    Amd64,
+}
+
 /// Most extra DNS names one service may own on one network, including the
 /// Compose container name when the project name is bound.
 pub const MAX_NETWORK_ALIASES: usize = 8;
@@ -273,14 +310,52 @@ pub struct ServicePlan {
     pub working_dir: Option<String>,
     pub user: Option<RedactedText>,
     pub platform: Option<String>,
+    /// Explicit `x-hack-amd64-emulation` opt-in and its reviewed platform policy: this
+    /// service may run a `linux/amd64` image under the pool's Rosetta 2 translation, and may
+    /// declare `platform: linux/amd64`. Without it only Linux arm64 is admitted. It never
+    /// applies to a declared arm64 platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amd64_emulation: Option<Amd64Emulation>,
     pub labels: BTreeMap<String, RedactedText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_cache: Option<DependencyCachePlan>,
+    /// The service declared Hack's exact `hack.service.one-shot: "true"` role
+    /// marker: it must finish successfully, so its readiness goal is completion.
+    /// Omitted when false, so plans without the marker keep their identity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub one_shot: bool,
+    /// Exactly `caddy` hostnames plus `caddy.tls: internal`, with no upstream:
+    /// a declaration that carries no traffic, so no route, hostname claim or relay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inert_route_labels: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<InteractivePlan>,
     pub logging: Option<LoggingPlan>,
     pub stop_grace_period_nanos: Option<u64>,
     pub stop_signal: Option<String>,
+    /// Reviewed `cap_add`/`cap_drop` adjustments to the engine default capability set.
+    /// Omitted when the service declares neither, so existing plan identities hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<CapabilityPlan>,
+}
+impl ServicePlan {
+    /// A declared restart policy that native starts without (engine policy `no`):
+    /// published port bridges and route relays are bound to one container
+    /// incarnation, so they cannot yet follow an engine restart (HACK-1935).
+    /// Review warns with `restart_policy_not_applied`; graph admission applies it.
+    pub fn restart_policy_not_applied(&self) -> bool {
+        self.restart != "no" && (self.routing.is_some() || !self.ports.is_empty())
+    }
+}
+/// Normalized Compose capability adjustments (`CAP_` names, or `ALL` in `drop`).
+/// Lowering applies Docker's precedence; see [`capabilities::effective`].
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityPlan {
+    pub add: Vec<String>,
+    pub drop: Vec<String>,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]

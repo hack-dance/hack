@@ -370,7 +370,7 @@ test(
               {
                 Containers: {
                   abc123: {
-                    Name: "omega-temporal-server-1",
+                    Name: "example-temporal-server-1",
                     IPv4Address: `${DEFAULT_CADDY_IP}/16`,
                   },
                 },
@@ -397,14 +397,14 @@ test(
       execCalls.some(
         (call) =>
           call.join(" ") ===
-          `docker network disconnect -f ${DEFAULT_INGRESS_NETWORK} omega-temporal-server-1`
+          `docker network disconnect -f ${DEFAULT_INGRESS_NETWORK} example-temporal-server-1`
       )
     ).toBe(true);
     expect(
       execCalls.some(
         (call) =>
           call.join(" ") ===
-          `docker network connect ${DEFAULT_INGRESS_NETWORK} omega-temporal-server-1`
+          `docker network connect ${DEFAULT_INGRESS_NETWORK} example-temporal-server-1`
       )
     ).toBe(true);
     expect(

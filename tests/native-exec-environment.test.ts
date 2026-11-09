@@ -99,6 +99,56 @@ test("fresh exec refuses missing selectors or deleted overlays before AWS export
   });
   expect(calls).toBe(0);
 });
+test("fresh exec delivers no values only for a run recorded without managed env files", async () => {
+  const opts = await fixture();
+  for (const name of ["default", "qa", "other"]) {
+    await rm(join(opts.scope.projectDir, `hack.env.${name}.yaml`));
+  }
+  // Started with hack.env.qa.yaml (or a legacy mapping): every file deleted since.
+  await expect(prepareNativeExecEnvironment(opts)).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message: expect.stringContaining("selection changed since startup"),
+  });
+  // Recorded as started without any managed env file: the env selected only files.
+  const unmanaged = { ...opts.run, unmanagedEnvironment: true as const };
+  expect(
+    await prepareNativeExecEnvironment({ ...opts, run: unmanaged })
+  ).toEqual({});
+  expect(
+    await prepareNativeExecEnvironment({
+      ...opts,
+      run: { ...opts.run, effectiveEnvName: null },
+    })
+  ).toEqual({});
+});
+test("fresh exec names the env file that appeared or was removed", async () => {
+  const opts = await fixture();
+  await rm(join(opts.scope.projectDir, "hack.env.qa.yaml"));
+  await expect(prepareNativeExecEnvironment(opts)).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native fresh exec selection changed since startup: .hack/hack.env.qa.yaml or .hack/hack.env.qa.local.yaml was removed since this run started. Restore it and run hack exec again, or run hack down (with it restored if the project has down hooks), then hack up, to start without it; no command was requested. Values omitted.",
+  });
+  await writeFile(
+    join(opts.scope.projectDir, "hack.env.qa.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "qa",
+      secretsprovider: "project_key",
+      values: { global: { VALUE: "late" } },
+    })
+  );
+  await expect(
+    prepareNativeExecEnvironment({
+      ...opts,
+      run: { ...opts.run, baseOnlyEnvironment: true },
+    })
+  ).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native fresh exec selection changed since startup: .hack/hack.env.qa.yaml appeared since this run started. Run hack down, then hack up, to start with it; no command was requested. Values omitted.",
+  });
+});
 test("fresh exec names a changed selection apart from an unresolvable environment", async () => {
   const opts = await fixture();
   // The service this exec selects is no longer in the configuration.
@@ -162,6 +212,42 @@ test("fresh exec uses only saved AWS selection and omits adapter failure details
       ...opts,
       run,
       adaptAws: async () => {
+        throw new Error("synthetic-private-detail");
+      },
+    })
+  ).rejects.toThrow("Values omitted");
+});
+test("fresh exec with a gcloud selection rechecks selectors only and delivers no files", async () => {
+  const opts = await fixture();
+  const run: NativeProjectRun = { ...opts.run, gcloud: { mode: "file" } };
+  let calls = 0;
+  const values = await prepareNativeExecEnvironment({
+    ...opts,
+    run,
+    adaptGcloud: async (request) => {
+      calls += 1;
+      expect(request.mode).toBe("file");
+      expect(request.deliver).toBe(false);
+      return {
+        input: request.input,
+        receipt: { mode: "file", types: [], services: ["web"] },
+      };
+    },
+  });
+  expect(calls).toBe(1);
+  expect(values).toEqual({ VALUE: "selected" });
+  // Without a saved selection the adapter is never consulted.
+  await prepareNativeExecEnvironment({
+    ...opts,
+    adaptGcloud: async () => {
+      throw new Error("must not run");
+    },
+  });
+  await expect(
+    prepareNativeExecEnvironment({
+      ...opts,
+      run,
+      adaptGcloud: async () => {
         throw new Error("synthetic-private-detail");
       },
     })

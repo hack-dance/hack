@@ -26,8 +26,9 @@ const STACK_FRAME = /^\s+at /m;
 const SPAWN_TIMEOUT_MS = 30_000;
 /** The target-inspect contract's own E_PROJECT_NOT_FOUND message. */
 const TARGET_MESSAGE = "No hack project found at the selected location.";
+/** The refusal names the next step: a native root, or import preview (HACK-1907). */
 const NATIVE_VALIDATION_MESSAGE =
-  "Project-aware native validation requires an exact native input family; values omitted.";
+  "Project-aware native validation requires an exact native input family: a project root with .hack/hack.project.json. For a Compose project (.hack/hack.config.json), preview its native conversion with `hack config import --dry-run --path <project root>`; values omitted.";
 
 /** `DIR` in an argv is replaced with the empty fixture directory. */
 type Argv = readonly string[];

@@ -1074,7 +1074,13 @@ pub(super) fn run_guarded(
         return Err(refused());
     }
     let expected = if config.data.is_empty() {
-        verify_images(&engine, &config.resources, &mut config.configs, &private)?
+        verify_images(
+            &engine,
+            &config.resources,
+            &mut config.configs,
+            &private,
+            &BTreeSet::new(),
+        )?
     } else {
         for service in config.data_mounts.keys() {
             storage_process_policy(&config.configs[service])?;
@@ -1082,7 +1088,8 @@ pub(super) fn run_guarded(
         verify_native_images(&engine, &config.resources, &mut config.configs, &private)?
     };
     for name in &private {
-        launcher::validate(&config.configs[name])?;
+        launcher::validate(&config.configs[name])
+            .map_err(super::super::process_refusals::Refused::into_error)?;
     }
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
@@ -1742,8 +1749,7 @@ fn verify_native_images(
         )?;
         let config = configs.get_mut(&resource.key).ok_or_else(refused)?;
         if image["Id"].as_str() != resource.image.as_deref()
-            || image["Os"] != "linux"
-            || image["Architecture"] != "arm64"
+            || !crate::provider::graph::admitted_architecture(engine, resource, &image)
         {
             return Err(refused());
         }
@@ -1787,7 +1793,8 @@ fn verify_native_images(
             }
         }
         if private.contains(&resource.key) {
-            image_process::apply_private(config, &image["Config"])?;
+            image_process::apply_private(config, &image["Config"])
+                .map_err(super::super::process_refusals::Refused::into_error)?;
         }
         expected.insert(
             resource.key.clone(),

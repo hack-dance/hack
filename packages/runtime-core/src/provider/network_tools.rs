@@ -28,7 +28,7 @@ const PACKAGES: [(&str, &str); 4] = [
         "f0accefde240ece6722479b46cb014d7d2f745af7d796e8eec3ced53571e1088",
     ),
 ];
-fn error(message: &str) -> CandidateError {
+fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new("network_tools", message)
 }
 fn read_archive(path: &Path, expected: &str) -> Result<Vec<u8>, CandidateError> {
@@ -112,7 +112,7 @@ fn prepare_packages(
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&staging)
-        .map_err(|e| error(&format!("Cannot create network-tools staging: {e}")))?;
+        .map_err(|e| error(format!("Cannot create network-tools staging: {e}")))?;
     for ((name, _), bytes) in packages.iter().zip(archives) {
         let mut file = OpenOptions::new()
             .write(true)
@@ -120,7 +120,7 @@ fn prepare_packages(
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(staging.join(name))
-            .map_err(|e| error(&format!("Cannot create staged archive: {e}")))?;
+            .map_err(|e| error(format!("Cannot create staged archive: {e}")))?;
         file.write_all(&bytes).map_err(state::io)?;
         file.sync_all().map_err(state::io)?;
     }
@@ -131,7 +131,7 @@ fn prepare_packages(
         .and_then(|directory| directory.sync_all())
         .map_err(state::io)?;
     fs::rename(&staging, &target)
-        .map_err(|e| error(&format!("Cannot publish network-tools directory: {e}")))?;
+        .map_err(|e| error(format!("Cannot publish network-tools directory: {e}")))?;
     File::open(&providers)
         .and_then(|directory| directory.sync_all())
         .map_err(state::io)?;

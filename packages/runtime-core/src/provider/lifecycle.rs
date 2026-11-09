@@ -8,6 +8,8 @@ mod prepared_boot;
 mod pressure_tests;
 #[cfg(any(target_os = "macos", test))]
 mod private_child;
+#[cfg(all(test, target_os = "macos"))]
+mod provider_repair_tests;
 mod relay_process;
 mod short_home;
 use super::{
@@ -344,8 +346,10 @@ impl<'a> ObservedGuest<'a> {
             || current.guest_boot_id != self.owner.guest_boot_id
             || current.network != self.owner.network
             || current.project_share != self.owner.project_share
+            || current.additional_project_shares != self.owner.additional_project_shares
             || current.application_bridge != self.owner.application_bridge
             || current.dependency_sockets != self.owner.dependency_sockets
+            || current.amd64_emulation != self.owner.amd64_emulation
             || current.process != self.owner.process
         {
             return Err(CandidateError::new(
@@ -359,6 +363,12 @@ impl<'a> ObservedGuest<'a> {
     pub(super) fn engine_socket(&self) -> Result<std::path::PathBuf, CandidateError> {
         self.verify()?;
         socket(self.candidate, &self.owner, "docker.sock")
+    }
+
+    /// The observed runtime incarnation; receipts name the incarnation that owns them.
+    #[cfg(target_os = "macos")]
+    pub(super) fn incarnation(&self) -> &str {
+        &self.owner.token
     }
 }
 
@@ -429,8 +439,29 @@ impl<'a> OwnedGuest<'a> {
         })
     }
 
+    /// The pool's primary share. Device-rebind recovery is defined only for single-root
+    /// pools and refuses when additional shares exist. That recovery is macOS-only.
+    #[cfg(target_os = "macos")]
     pub(super) fn project_share(&self) -> Option<&super::ProjectShareIntent> {
         self.owner.project_share.as_ref()
+    }
+    /// Whether the pool's additional shares are empty (a single-root pool).
+    #[cfg(target_os = "macos")]
+    pub(super) fn single_project_share(&self) -> bool {
+        self.owner.additional_project_shares.is_empty()
+    }
+    /// The exact share this pool approved for one project root. A graph binds only its
+    /// own root's share; another project's share is never selected for it.
+    pub(super) fn project_share_for(&self, project: &Path) -> Option<&super::ProjectShareIntent> {
+        self.owner.project_share_for(project)
+    }
+    /// Exact membership of one retained share in the pool's current share set.
+    pub(super) fn has_project_share(&self, share: &super::ProjectShareIntent) -> bool {
+        self.owner.project_shares().contains(&share)
+    }
+    /// Whether this audited boot runs with Rosetta 2 x86_64 translation.
+    pub(super) fn amd64_emulation(&self) -> bool {
+        self.owner.amd64_emulation
     }
     pub(super) fn before_effect(&self) -> Result<(), CandidateError> {
         if let Some(guard) = &self.guard {
@@ -634,6 +665,88 @@ impl<'a> OwnedGuest<'a> {
         Ok(result)
     }
 }
+/// The host's Rosetta 2 Linux runtime, which SmolVM shares into the guest for x86_64
+/// translation. Installed by `softwareupdate --install-rosetta` on Apple silicon.
+pub const HOST_ROSETTA_RUNTIME: &str = "/Library/Apple/usr/libexec/oah/RosettaLinux/rosetta";
+
+/// Whether this host can provide Rosetta 2 translation to the guest: Apple silicon macOS
+/// with the system-owned Rosetta Linux runtime installed. Read-only.
+pub fn host_translation_available() -> bool {
+    if !(cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")) {
+        return false;
+    }
+    fs::symlink_metadata(HOST_ROSETTA_RUNTIME).is_ok_and(|metadata| {
+        metadata.is_file()
+            && metadata.uid() == 0
+            && metadata.mode() & 0o022 == 0
+            && metadata.mode() & 0o111 != 0
+    })
+}
+
+fn require_host_translation() -> Result<(), CandidateError> {
+    if host_translation_available() {
+        return Ok(());
+    }
+    Err(CandidateError::new(
+        "amd64_emulation_unavailable",
+        "linux/amd64 services need Rosetta 2 on an Apple silicon Mac. Install it with `softwareupdate --install-rosetta`, or run the arm64 image variant. Nothing was started.",
+    ))
+}
+
+/// The refusal for an emulated platform in a pool booted without x86_64 translation.
+pub(super) fn amd64_emulation_not_enabled() -> CandidateError {
+    CandidateError::new(
+        "amd64_emulation_unavailable",
+        "This native VM pool was booted without x86_64 translation; a linux/amd64 image cannot run in it.",
+    )
+}
+
+/// A running pool cannot gain translation without a restart, and running workloads are never
+/// stopped implicitly to add it.
+fn check_amd64_emulation_request(owner: &Owner, requested: bool) -> Result<(), CandidateError> {
+    if requested && !owner.amd64_emulation && owner.phase == "running" {
+        return Err(CandidateError::new(
+            "amd64_emulation_restart_required",
+            "The running native VM pool was started without x86_64 translation. Stop every native project that uses it (`hack down`), then start again; nothing was stopped or started.",
+        ));
+    }
+    Ok(())
+}
+
+/// Record translation intent before its provider effect, then make the stopped machine match.
+/// A created machine whose provider record lacks translation is updated with `machine update
+/// --rosetta`; an interrupted update is repeated on the next start, and boot refuses any
+/// record, running config or guest registration that differs from the recorded intent.
+fn enable_amd64_emulation(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    requested: bool,
+    restart: &mut admission_pool::Restart<'_>,
+    lock: &state::Lock,
+) -> Result<(), CandidateError> {
+    let enabled = requested && !owner.amd64_emulation;
+    if enabled {
+        owner.amd64_emulation = true;
+        owner.save(candidate)?;
+    }
+    if owner.amd64_emulation {
+        require_host_translation()?;
+        if owner.created && !super::config_audit::recorded_amd64_emulation(candidate, owner)? {
+            invoke(
+                candidate,
+                owner,
+                &["machine", "update", "--name", &owner.machine, "--rosetta"],
+            )?;
+        }
+    }
+    if enabled {
+        // A reserve-qualified restart follows this authorized intent change, rechecked on
+        // the provider's updated configuration, instead of refusing it as a changed owner.
+        restart.requalify_amd64_emulation(candidate, lock)?;
+    }
+    Ok(())
+}
+
 fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     super::config_audit::verify(candidate, owner)?;
     super::dependency_socket::verify(candidate, owner)?;
@@ -654,7 +767,7 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
         )?;
     owner.network.verify_resources(&config["resources"])?;
     let mut mounts = json!([{"source":artifact::engine_root(candidate),"target":"/opt/hack-engine","read_only":true,"staged":false}]);
-    if let Some(share) = &owner.project_share {
+    for share in owner.project_shares() {
         share.validate_receipt()?;
         mounts
             .as_array_mut()
@@ -668,7 +781,7 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
         || config["resources"]["memory_mib"] != owner.profile.memory_mib()
         || config["resources"]["gpu"] != false
         || config["resources"]["cuda"] != false
-        || config["resources"]["rosetta"] != false
+        || config["resources"]["rosetta"] != owner.amd64_emulation
         || config["resources"]["storage_gib"] != owner.profile.storage_gib()
         || config["resources"]["overlay_gib"] != owner.profile.overlay_gib()
         || config["forkable"] != false
@@ -723,13 +836,14 @@ pub fn check_project_share(
     requested.validate()?;
     reject_aliased_state(&root(candidate))?;
     super::network_update::require_complete(candidate)?;
+    super::share_update::require_complete(candidate)?;
     let initialized = root(candidate)
         .join("owner.json")
         .try_exists()
         .map_err(io)?;
     if initialized {
         let owner = Owner::load(candidate)?;
-        super::project_share::check_request(owner.project_share.as_ref(), Some(requested))?;
+        super::project_share::check_request(&owner.project_shares(), Some(requested))?;
     } else {
         require_fresh_source_pool(candidate)?;
     }
@@ -823,6 +937,9 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
 
 pub fn up(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     reject_aliased_state(&root(candidate))?;
+    // The profile lookup below is a strict owner read; a squatted clean-stop alias must
+    // move to a fresh alias first, as in `start_pool`.
+    restore_released_short_home_before_use(candidate)?;
     let profile = if root(candidate)
         .join("owner.json")
         .try_exists()
@@ -1023,6 +1140,7 @@ fn up_selected(
         super::prepared_start::Start {
             retained,
             prepared: None,
+            amd64_emulation: false,
         },
     )
 }
@@ -1058,7 +1176,13 @@ fn start_pool(
     project_share: Option<super::ProjectShareIntent>,
     start: super::prepared_start::Start<'_>,
 ) -> Result<RuntimeStatus, CandidateError> {
+    // A clean stop whose alias path another entry holds is moved to a fresh alias before
+    // any strict owner read below refuses it.
+    restore_released_short_home_before_use(candidate)?;
     let retained = start.retained;
+    if start.amd64_emulation {
+        require_host_translation()?;
+    }
     #[cfg(target_os = "macos")]
     let retained_guard = retained
         .map(|(run, selection)| {
@@ -1075,6 +1199,7 @@ fn start_pool(
     let requested = bridge_request.initial();
     let dependencies = dependency_request.initial();
     super::network_update::require_complete(candidate)?;
+    super::share_update::require_complete(candidate)?;
     if let Some(share) = &project_share {
         share.validate()?;
     }
@@ -1089,30 +1214,34 @@ fn start_pool(
         super::BridgeIntent::new(intent.slots)?;
     }
     reject_aliased_state(&root(candidate))?;
-    let (existing, existing_network, existing_dependencies, existing_share) = if root(candidate)
-        .join("owner.json")
-        .try_exists()
-        .map_err(io)?
-    {
-        let owner = Owner::load(candidate)?;
-        super::project_share::check_request(owner.project_share.as_ref(), project_share.as_ref())?;
-        bridge_request.check(owner.application_bridge)?;
-        super::network_intent::check_request(&owner.network, network.as_ref())?;
-        dependency_request.check(owner.dependency_sockets)?;
-        (
-            owner.application_bridge,
-            owner.network.clone(),
-            owner.dependency_sockets,
-            owner.project_share.clone(),
-        )
-    } else {
-        (
-            requested,
-            network.unwrap_or_default(),
-            dependencies,
-            project_share.clone(),
-        )
-    };
+    let (existing, existing_network, existing_dependencies, existing_share, existing_additional) =
+        if root(candidate)
+            .join("owner.json")
+            .try_exists()
+            .map_err(io)?
+        {
+            let owner = Owner::load(candidate)?;
+            check_amd64_emulation_request(&owner, start.amd64_emulation)?;
+            super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
+            bridge_request.check(owner.application_bridge)?;
+            super::network_intent::check_request(&owner.network, network.as_ref())?;
+            dependency_request.check(owner.dependency_sockets)?;
+            (
+                owner.application_bridge,
+                owner.network.clone(),
+                owner.dependency_sockets,
+                owner.project_share.clone(),
+                owner.additional_project_shares.clone(),
+            )
+        } else {
+            (
+                requested,
+                network.unwrap_or_default(),
+                dependencies,
+                project_share.clone(),
+                Vec::new(),
+            )
+        };
     super::dependency_socket::check_capacity(existing, existing_dependencies)?;
     if existing.is_some() && !cfg!(feature = "native-stream-relay") {
         return Err(CandidateError::new(
@@ -1167,6 +1296,9 @@ fn start_pool(
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
     samples.extend(fresh_samples);
+    // Recheck a clean stop's alias under the lease before the release checks probe its
+    // sockets or the provider runs with it as HOME.
+    restore_released_short_home(candidate)?;
     // Under the lease: the selection is rechecked. A stopped pool keeps the reserve only if
     // a sample needs it, and then its provider release (VM lock, disk handles, listeners,
     // provider configuration) is proven; otherwise this start uses the fresh budget.
@@ -1176,6 +1308,7 @@ fn start_pool(
         guard.verify(candidate)?;
     }
     super::network_update::require_complete(candidate)?;
+    super::share_update::require_complete(candidate)?;
     let fresh_owner = match fs::symlink_metadata(root(candidate).join("owner.json")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Ok(_) => false,
@@ -1194,8 +1327,10 @@ fn start_pool(
         existing_dependencies,
         existing_share.clone(),
     )?;
-    super::project_share::check_request(owner.project_share.as_ref(), existing_share.as_ref())?;
-    if owner.project_share != existing_share {
+    super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
+    if owner.project_share != existing_share
+        || owner.additional_project_shares != existing_additional
+    {
         return Err(CandidateError::new(
             "project_share",
             "Project share changed before the operation lock.",
@@ -1222,6 +1357,7 @@ fn start_pool(
             "Capacity profile changed before the operation lock was acquired.",
         ));
     }
+    check_amd64_emulation_request(&owner, start.amd64_emulation)?;
     if fresh_owner {
         super::graph::initialize_owner_registry(candidate, &owner)?;
     } else {
@@ -1242,7 +1378,7 @@ fn start_pool(
         return status(candidate);
     }
     // Only a clean stopped selection continues, as a restart of its verified retained disks.
-    let restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
+    let mut restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
     if ![
         "initializing",
         "stopped",
@@ -1266,6 +1402,15 @@ fn start_pool(
         }
         verify_disks(candidate, &owner)?;
     }
+    // The provider mounts every share at boot: each must still be its exact approved root.
+    super::project_share::check_boot(&owner.project_shares())?;
+    enable_amd64_emulation(
+        candidate,
+        &mut owner,
+        start.amd64_emulation,
+        &mut restart,
+        &lock,
+    )?;
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
         // A reserve-qualified start never reaches `machine create`.
@@ -1299,7 +1444,10 @@ fn start_pool(
             "--volume".into(),
             mount,
         ];
-        if let Some(share) = &owner.project_share {
+        if owner.amd64_emulation {
+            arguments.push("--rosetta".into());
+        }
+        for share in owner.project_shares() {
             share.validate()?;
             arguments.extend(["--volume".into(), share.argument()]);
         }
@@ -1384,7 +1532,7 @@ fn start_pool(
         // Disk rejection must not keep an allocation alive. Process authority is
         // independent of disk adoption; this is an unclean stop, never reconciliation.
         let process = owner.process.as_ref().expect("process just recorded");
-        let cleanup = stop_failed_boot(process, &binary(candidate));
+        let cleanup = stop_verified_provider(process, &binary(candidate));
         state::write(
             &root(candidate).join("failed-boot.json"),
             &json!({
@@ -1429,7 +1577,8 @@ fn start_machine(
     .map(drop)
 }
 
-fn stop_failed_boot(
+/// SIGTERM a provider whose identity is verified at the signal, then wait for it to exit.
+fn stop_verified_provider(
     process: &identity::ProcessIdentity,
     binary: &Path,
 ) -> Result<(), CandidateError> {
@@ -1442,7 +1591,7 @@ fn stop_failed_boot(
         if Instant::now() >= deadline {
             return Err(CandidateError::new(
                 "stop_uncertain",
-                "Verified failed-boot provider did not stop after SIGTERM.",
+                "Verified provider did not stop after SIGTERM.",
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -1549,6 +1698,24 @@ fn finish_boot(
     }
     owner.guest_boot_id = Some(boot.to_owned());
     owner.save(candidate)?;
+    let translation = if owner.amd64_emulation {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let observed = guest(
+        candidate,
+        owner,
+        include_str!("guest-translation.sh"),
+        &[&owner.token, boot, translation],
+        false,
+    )?;
+    if observed != format!("amd64-translation-{translation}-v1\n") {
+        return Err(CandidateError::new(
+            "amd64_emulation",
+            "Guest x86_64 translation differs from the pool's audited intent; engine startup refused.",
+        ));
+    }
     if let Some(intent) = owner.dependency_sockets {
         let paths = intent.paths(&owner.short_home);
         let mut args = vec![owner.token.as_str(), boot];
@@ -1658,6 +1825,21 @@ exit 43"#,
     }
     owner.save(candidate)?;
     engine_ping(&socket(candidate, owner, "docker.sock")?)?;
+    if network_mode != "isolated" {
+        // Build-bridge isolation is not a startup requirement: graph containers never
+        // join the default bridge. A failure leaves no readiness marker, and native
+        // image builds refuse on that pool (see `image_build::verify_build_network`).
+        let _ = guest(
+            candidate,
+            owner,
+            include_str!("guest-build-network.sh"),
+            &[
+                network_mode,
+                owner.guest_boot_id.as_deref().expect("verified boot"),
+            ],
+            false,
+        );
+    }
     phase(candidate, owner, "running")?;
     status(candidate)
 }
@@ -1809,31 +1991,184 @@ fn engine_ping(path: &Path) -> Result<(), CandidateError> {
     Ok(())
 }
 
+/// Pool phases written only before a start or after proven provider absence.
+const STOPPED_PHASES: [&str; 4] = [
+    "stopped",
+    "stopped-before-engine",
+    "stopped-after-engine-failure",
+    "recovered-unclean",
+];
+
+/// A stopped phase with no live provider; no recorded provider (`None`) is as stopped
+/// as a dead one. Nothing runs from the prepared provider tree in this state.
+fn provider_stopped(phase: &str, process_alive: Option<bool>) -> bool {
+    STOPPED_PHASES.contains(&phase) && process_alive != Some(true)
+}
+
 pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     // Status is read-only and idempotent down on an uninitialized pool creates nothing.
     let initial = status(candidate)?;
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }
-    artifact::verify(candidate)?;
     let _lock = state::Lock::acquire(&root(candidate))?;
+    // Builds take their shared fence only under this lease, so none can start after this.
+    super::image_build::require_no_active_build(candidate)?;
     let mut owner = Owner::load(candidate)?;
+    let stopped = provider_stopped(&owner.phase, initial.process_alive);
+    // Only stopping a provider reaches the prepared tree. A stopped pool's down executes
+    // nothing from it, so a tree changed outside Hack cannot block quiescence; any later
+    // start still verifies the tree (see `repair_provider_trees`).
+    if !stopped {
+        artifact::verify(candidate)?;
+    }
     super::hostname_authority::managed::stop(candidate, &owner)?;
     super::publication::release(candidate, &owner.token, None)?;
-    if [
-        "stopped",
-        "stopped-before-engine",
-        "stopped-after-engine-failure",
-        "recovered-unclean",
-    ]
-    .contains(&owner.phase.as_str())
-        && initial.process_alive != Some(true)
-    {
-        // These phases are written only before a start or after proven absence; no recorded
-        // provider (`None`) is as stopped as a dead one.
+    if stopped {
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
+    match guest_stop(candidate, &mut owner) {
+        Ok(()) => status(candidate),
+        Err(error)
+            if error.code == "agent_protocol_uncertain" && agent_silent(candidate, &owner)? =>
+        {
+            stop_silent_guest(candidate, &mut owner)?;
+            status(candidate)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The outcome of `runtime repair-provider-tree`.
+#[derive(Serialize)]
+pub struct ProviderRepair {
+    /// Each prepared provider tree, repaired or found intact.
+    pub trees: Vec<artifact::TreeRepair>,
+    pub runtime: RuntimeStatus,
+}
+
+/// Re-prepare provider trees that something outside Hack changed (for example a cleanup
+/// tool that pruned empty directories), from the archives preparation retained.
+///
+/// Requires a stopped or uninitialized pool under the provider lock, so no provider runs
+/// from a tree while it is replaced and no start can begin meanwhile. Each tree is
+/// re-proved from its pinned archive digest and recorded tree digest; see
+/// `artifact::repair_tree`. Runtime state, disks and volumes are untouched. Until a
+/// repair succeeds, every start keeps refusing the changed tree.
+pub fn repair_provider_trees(candidate: &Candidate) -> Result<ProviderRepair, CandidateError> {
+    repair_trees(candidate, &[artifact::SMOLVM, artifact::ENGINE])
+}
+
+fn repair_trees(
+    candidate: &Candidate,
+    pins: &[artifact::TreePin],
+) -> Result<ProviderRepair, CandidateError> {
+    let providers = candidate.state_root.join("providers");
+    let mut any = false;
+    for pin in pins {
+        any |= providers.join(pin.record_name()).try_exists().map_err(io)?;
+    }
+    if !any {
+        // Nothing was prepared: create no state, like status and down.
+        return Ok(ProviderRepair {
+            trees: Vec::new(),
+            runtime: status(candidate)?,
+        });
+    }
+    let lock = state::Lock::acquire(&root(candidate))?;
+    super::image_build::require_no_active_build(candidate)?;
+    let current = status(candidate)?;
+    if current.phase != "uninitialized" && !provider_stopped(&current.phase, current.process_alive)
+    {
+        return Err(CandidateError::new(
+            "provider_repair_requires_stopped_runtime",
+            "Provider tree repair requires a stopped runtime; run runtime down first.",
+        ));
+    }
+    let mut trees = Vec::new();
+    for pin in pins {
+        lock.verify_path(&root(candidate))?;
+        trees.extend(artifact::repair_tree(candidate, pin, &lock)?);
+    }
+    Ok(ProviderRepair {
+        trees,
+        runtime: status(candidate)?,
+    })
+}
+
+/// How many pings, a few seconds apart, a guest agent must leave unanswered before
+/// `down` or `recover` treats it as stopped responding.
+const SILENT_PINGS: u32 = 3;
+#[cfg(not(test))]
+const SILENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(not(test))]
+const SILENT_PING_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const SILENT_PING_TIMEOUT: Duration = Duration::from_millis(200);
+#[cfg(test)]
+const SILENT_PING_INTERVAL: Duration = Duration::from_millis(50);
+
+/// `true` when the owned guest agent answered none of [`SILENT_PINGS`] pings.
+fn agent_silent(candidate: &Candidate, owner: &Owner) -> Result<bool, CandidateError> {
+    Ok(agent_silent_at(&socket(candidate, owner, "agent.sock")?))
+}
+
+/// Any reply, even an unexpected one, means the guest is alive and keeps the normal stop
+/// path.
+fn agent_silent_at(path: &Path) -> bool {
+    for attempt in 0..SILENT_PINGS {
+        if attempt > 0 {
+            std::thread::sleep(SILENT_PING_INTERVAL);
+        }
+        if agent::answers_ping(path, SILENT_PING_TIMEOUT) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Stop the verified provider of a guest whose agent stopped responding. Nothing in the
+/// guest is quiesced or flushed, so the pool is recorded `recovered-unclean`, as after a
+/// provider exit; the next start checks its retained disks as usual. The signal reaches
+/// only this home's recorded provider, rechecked by PID, start time, user and executable
+/// immediately before it is sent. A provider that already exited is only recorded.
+fn stop_silent_guest(candidate: &Candidate, owner: &mut Owner) -> Result<(), CandidateError> {
+    // Checked again at the effect: the caller holds the operation lease, but a running
+    // build holds only its shared fence while its client runs.
+    require_no_build_for_silent_stop(candidate)?;
+    let process = owner.process.clone().ok_or_else(|| {
+        CandidateError::new("process_identity_unavailable", "No recorded provider.")
+    })?;
+    if identity::alive(process.pid)? {
+        verify_live(candidate, owner)?;
+        stop_verified_provider(&process, &binary(candidate))?;
+    }
+    finish_stopped(candidate, owner, "recovered-unclean")
+}
+
+/// Refuse to stop a silent guest while a native image build is admitted. A build releases
+/// the operation lease while its client runs and keeps only the shared build fence
+/// (`run/image-builds/active.lock`), so the lease alone does not prove the engine is idle.
+/// The fence is a `flock`: it is released when the build's processes exit, including on
+/// SIGKILL, so a refusal lasts only while a build process is alive. Callers hold the
+/// operation lease, under which no new build can take the fence.
+fn require_no_build_for_silent_stop(candidate: &Candidate) -> Result<(), CandidateError> {
+    super::image_build::require_no_active_build(candidate).map_err(|error| {
+        if error.code == "provider_busy" {
+            CandidateError::new(
+                "provider_busy",
+                "A native image build is running against this guest. Finish or cancel it first (Ctrl-C the `hack up` that started it); the next attempt then stops the guest that stopped responding.",
+            )
+        } else {
+            error
+        }
+    })
+}
+
+/// `down`'s guest-facing part: quiesce the engine, ask the guest to flush and shut down,
+/// stop the provider and record the stop.
+fn guest_stop(candidate: &Candidate, owner: &mut Owner) -> Result<(), CandidateError> {
     let before_engine = engine_was_not_started(
         &owner.phase,
         owner.guest_boot_id.as_deref(),
@@ -1845,7 +2180,7 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     if failed_engine {
         guest(
             candidate,
-            &owner,
+            owner,
             r#"set -eu
 test "$(cat /storage/.hack-local-owner)" = "$1"
 test "$(cat /proc/sys/kernel/random/boot_id)" = "$2"
@@ -1878,10 +2213,10 @@ sync"#,
         } else {
             "initial"
         };
-        phase(candidate, &mut owner, "quiescing")?;
+        phase(candidate, owner, "quiescing")?;
         let quiescence = guest(
             candidate,
-            &owner,
+            owner,
             include_str!("guest-quiesce.sh"),
             &[
                 &owner.token,
@@ -1900,9 +2235,9 @@ sync"#,
             }),
         )?;
     }
-    phase(candidate, &mut owner, "stopping")?;
+    phase(candidate, owner, "stopping")?;
     let response = agent::request(
-        &socket(candidate, &owner, "agent.sock")?,
+        &socket(candidate, owner, "agent.sock")?,
         json!({"method":"shutdown"}),
         Duration::from_secs(15),
     )?;
@@ -1912,7 +2247,7 @@ sync"#,
             "Guest did not acknowledge flush/unmount.",
         ));
     }
-    verify_live(candidate, &owner)?;
+    verify_live(candidate, owner)?;
     let process = owner.process.as_ref().expect("live identity verified");
     // Revalidate immediately before signalling. macOS has no Linux pidfd equivalent;
     // this is cooperative same-user ownership, not hostile-process containment.
@@ -1928,13 +2263,100 @@ sync"#,
         ));
     }
     if before_engine {
-        finish_stopped(candidate, &mut owner, "stopped-before-engine")?;
+        finish_stopped(candidate, owner, "stopped-before-engine")?;
     } else if failed_engine {
-        finish_stopped(candidate, &mut owner, "stopped-after-engine-failure")?;
+        finish_stopped(candidate, owner, "stopped-after-engine-failure")?;
     } else {
-        finish_quiesced_stop(candidate, &mut owner)?;
+        finish_quiesced_stop(candidate, owner)?;
+        // The stopped receipt is written. The `/private/tmp` HOME alias stays reserved for
+        // this pool, so no other user can take its name; only the provider sockets the
+        // stop proved closed are removed.
+        remove_closed_sockets(candidate, owner)?;
     }
-    status(candidate)
+    Ok(())
+}
+
+/// Restore a clean stop's HOME alias under the caller's pool lock, when host cleanup removed
+/// it or another entry holds its path (see [`Owner::restore_released_short_home`]). Any
+/// other receipt, or one whose alias is present and owned, is left as [`Owner::load`]
+/// checks it.
+pub(super) fn restore_released_short_home(candidate: &Candidate) -> Result<(), CandidateError> {
+    if !root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        return Ok(());
+    }
+    let mut owner = Owner::load_for_alias_restore(candidate)?;
+    if owner.short_home_releasable() {
+        owner.restore_released_short_home(candidate)?;
+    }
+    Ok(())
+}
+
+/// Before a mutating operation's first strict owner read: a clean stop whose alias path
+/// another entry holds, which [`Owner::load`] refuses, moves to a fresh alias under the
+/// startup lease, which is then released. Every other state takes no lease here and is
+/// left to the operation's own checks; an absent alias is restored later under its lock.
+fn restore_released_short_home_before_use(candidate: &Candidate) -> Result<(), CandidateError> {
+    reject_aliased_state(&root(candidate))?;
+    if !root(candidate)
+        .join("owner.json")
+        .try_exists()
+        .map_err(io)?
+    {
+        return Ok(());
+    }
+    let Ok(owner) = Owner::load_for_alias_restore(candidate) else {
+        // Refusals are reported by the operation's strict read.
+        return Ok(());
+    };
+    if !owner.short_home_releasable() || Owner::load(candidate).is_ok() {
+        return Ok(());
+    }
+    let _lease = startup_lease(&root(candidate), STARTUP_LEASE_WAIT)?;
+    restore_released_short_home(candidate)
+}
+
+/// The provider sockets [`sockets_absent`] checks, by file name in the data directory.
+fn owned_socket_names(owner: &Owner) -> Vec<String> {
+    let mut sockets = vec!["agent.sock".to_owned(), "docker.sock".to_owned()];
+    if let Some(bridge) = owner.application_bridge {
+        sockets.extend(bridge.guest_paths().into_iter().map(|path| {
+            Path::new(&path)
+                .file_name()
+                .expect("fixed socket name")
+                .to_string_lossy()
+                .into_owned()
+        }));
+    }
+    sockets
+}
+
+/// After a clean stop proved that no owned provider socket accepts connections, remove the
+/// socket files left in the private data directory. The path is the real data directory,
+/// never the alias. Only sockets owned by this user are removed; any other entry is kept.
+fn remove_closed_sockets(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+    use std::os::unix::fs::FileTypeExt;
+    let data = owner.real_data_dir(candidate)?;
+    for name in owned_socket_names(owner) {
+        let path = data.join(name);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io(error)),
+        };
+        // SAFETY: geteuid has no preconditions.
+        if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(io(error)),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// `down`'s completion after the guest acknowledged flush and shutdown of a quiesced engine
@@ -2083,17 +2505,7 @@ fn finish_absent_locked(
 
 /// No owned provider socket accepts connections. Read-only: connecting never creates one.
 fn sockets_absent(owner: &Owner) -> Result<(), CandidateError> {
-    let mut sockets = vec!["agent.sock".to_owned(), "docker.sock".to_owned()];
-    if let Some(bridge) = owner.application_bridge {
-        sockets.extend(bridge.guest_paths().into_iter().map(|path| {
-            Path::new(&path)
-                .file_name()
-                .expect("fixed socket name")
-                .to_string_lossy()
-                .into_owned()
-        }));
-    }
-    for name in sockets {
+    for name in owned_socket_names(owner) {
         match UnixStream::connect(owner.data_dir().join(name)) {
             Ok(_) => {
                 return Err(CandidateError::new(
@@ -2116,6 +2528,7 @@ fn sockets_absent(owner: &Owner) -> Result<(), CandidateError> {
 }
 
 pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
+    restore_released_short_home_before_use(candidate)?;
     let initial = match status(candidate) {
         Ok(initial) => initial,
         Err(error) if error.code == "provider_home_missing" => {
@@ -2127,6 +2540,8 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return Ok(initial);
     }
     let lock = state::Lock::acquire(&root(candidate))?;
+    // Recovery rewrites the phase, which needs a clean stop's alias restored.
+    restore_released_short_home(candidate)?;
     let mut owner = Owner::load(candidate)?;
     let Some(process) = owner.process.as_ref() else {
         // A start interrupted before the provider identity was recorded; see `interrupted`.
@@ -2134,10 +2549,20 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         return status(candidate);
     };
     if identity::alive(process.pid)? {
-        return Err(CandidateError::new(
-            "recovery_required",
-            "Recovery only accepts a confirmed dead recorded process. Use down for a verified live guest.",
-        ));
+        // A live provider is stopped here only when its identity verifies and its guest
+        // agent stopped responding; a responsive guest is stopped cleanly by `down`.
+        // Refuse first, without probing, while a build is admitted.
+        require_no_build_for_silent_stop(candidate)?;
+        verify_live(candidate, &owner)?;
+        if !agent_silent(candidate, &owner)? {
+            return Err(CandidateError::new(
+                "recovery_required",
+                "Recovery only accepts a confirmed dead recorded process or a guest that stopped responding. Use down for a responsive guest.",
+            ));
+        }
+        // The operation lease taken above stays held through the stop and its receipt.
+        stop_silent_guest(candidate, &mut owner)?;
+        return status(candidate);
     }
     finish_stopped(candidate, &mut owner, "recovered-unclean")?;
     status(candidate)
@@ -2252,7 +2677,7 @@ mod tests {
             let other = super::super::ProjectShareIntent::approve(&second, true).unwrap();
             assert_eq!(
                 check_project_share(&candidate, &other).unwrap_err().code,
-                "project_share"
+                "project_share_extension_required"
             );
             assert_eq!(
                 fs::read(root(&candidate).join("owner.json")).unwrap(),
@@ -2264,6 +2689,92 @@ mod tests {
             );
             fs::remove_file(&owner.short_home).unwrap();
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn running_pool_reuse_ignores_a_removed_primary_root_but_boot_refuses() {
+        let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-share-reuse-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            crate::next_test_scratch()
+        ));
+        state::private_directory(&directory).unwrap();
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(directory.clone());
+        let approve = |name: &str| {
+            let project = directory.join(name);
+            state::private_directory(&project).unwrap();
+            fs::write(project.join("package.json"), "{}").unwrap();
+            super::super::ProjectShareIntent::approve(&project, true).unwrap()
+        };
+        let primary = approve("first-app");
+        let second = approve("second-app");
+        let pool = directory.join("pool");
+        state::private_directory(&pool).unwrap();
+        let candidate = Candidate::discover(&pool).unwrap();
+        let create = |candidate: &Candidate, share: &super::super::ProjectShareIntent| {
+            Owner::create_with_project_share(
+                candidate,
+                super::super::Profile::Development,
+                None,
+                super::super::NetworkIntent::Internet,
+                None,
+                Some(share.clone()),
+            )
+        };
+        let mut owner = create(&candidate, &primary).unwrap();
+        struct Unlink(std::path::PathBuf);
+        impl Drop for Unlink {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let _unlink = Unlink(owner.short_home.clone());
+        owner.additional_project_shares.push(second.clone());
+        owner.phase = "running".into();
+        owner.save(&candidate).unwrap();
+        let before = fs::read(root(&candidate).join("owner.json")).unwrap();
+
+        // The primary root disappears while the pool runs.
+        fs::remove_dir_all(&primary.project).unwrap();
+        let reused = create(&candidate, &primary).unwrap();
+        assert_eq!(reused.project_share.as_ref(), Some(&primary));
+        assert_eq!(reused.additional_project_shares, vec![second.clone()]);
+        assert_eq!(reused.phase, "running");
+        assert_eq!(
+            fs::read(root(&candidate).join("owner.json")).unwrap(),
+            before
+        );
+        // The second root is still admitted against the reused owner; its own project is
+        // not blocked by the stale neighbor.
+        assert!(
+            super::super::project_share::check_request(&reused.project_shares(), Some(&second))
+                .is_ok()
+        );
+        // Booting with the whole set still checks every root live.
+        assert_eq!(
+            super::super::project_share::check_boot(&reused.project_shares())
+                .unwrap_err()
+                .code,
+            "project_share_stale"
+        );
+
+        // A cold pool never records a share whose root is missing.
+        let cold_pool = directory.join("cold-pool");
+        state::private_directory(&cold_pool).unwrap();
+        let cold = Candidate::discover(&cold_pool).unwrap();
+        assert!(create(&cold, &primary).is_err());
+        assert!(!root(&cold).join("owner.json").exists());
     }
 
     #[test]
@@ -2379,6 +2890,41 @@ mod tests {
             &refused,
             Err(e) if e.code == "provider_busy" && e.message.contains("no operation was admitted")
         ));
+    }
+
+    #[test]
+    fn amd64_emulation_is_never_added_to_a_running_pool_and_is_never_dropped() {
+        let owner = |phase: &str, emulation: bool| -> Owner {
+            serde_json::from_value(json!({
+                "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
+                "short_home":"/fixture","created":true,"phase":phase,"process":null,
+                "storage":null,"overlay":null,"guest_boot_id":null,
+                "daemon_pid":null,"daemon_start":null,"rootfs_digest":null,
+                "amd64_emulation":emulation
+            }))
+            .unwrap()
+        };
+        let refused = check_amd64_emulation_request(&owner("running", false), true).unwrap_err();
+        assert_eq!(refused.code, "amd64_emulation_restart_required");
+        for (phase, emulation, requested) in [
+            ("running", false, false),
+            ("running", true, true),
+            ("running", true, false),
+            ("stopped", false, true),
+            ("initializing", false, true),
+        ] {
+            check_amd64_emulation_request(&owner(phase, emulation), requested).unwrap();
+        }
+        // A pool without translation keeps its original receipt shape.
+        let saved = serde_json::to_value(owner("stopped", false)).unwrap();
+        assert!(saved.get("amd64_emulation").is_none());
+        let saved = serde_json::to_value(owner("stopped", true)).unwrap();
+        assert_eq!(saved["amd64_emulation"], json!(true));
+        // Detection is read-only and only ever true on Apple silicon macOS.
+        if !(cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")) {
+            assert!(!host_translation_available());
+        }
+        let _ = host_translation_available();
     }
 
     #[test]
@@ -2667,7 +3213,7 @@ printf 'verified-cache\n'
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
-    #[ignore = "Manual owned M3 fixture only; requires explicit candidate root and host watchdog"]
+    #[ignore = "Manual owned macOS fixture only; requires explicit candidate root and host watchdog"]
     fn owned_provider_exit_recovery() {
         let path = std::env::var("HACK_LOCAL_CRASH_FIXTURE_ROOT").expect("explicit fixture root");
         let candidate = Candidate::discover(Path::new(&path)).unwrap();
@@ -2704,6 +3250,112 @@ printf 'verified-cache\n'
         );
     }
 
+    /// A short private directory for a fake agent socket (`sockaddr_un` is small).
+    struct ShortDirectory(std::path::PathBuf);
+    impl ShortDirectory {
+        fn new() -> Self {
+            let mut bytes = [0_u8; 6];
+            File::open("/dev/urandom")
+                .unwrap()
+                .read_exact(&mut bytes)
+                .unwrap();
+            let name: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let path = Path::new("/tmp").join(format!("hka-{name}"));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for ShortDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn only_a_guest_agent_that_never_starts_a_reply_counts_as_silent() {
+        use std::os::unix::net::UnixListener;
+        let directory = ShortDirectory::new();
+        let path = directory.0.join("agent.sock");
+        // No listener: refused connections are silence.
+        assert!(agent_silent_at(&path));
+        let listener = UnixListener::bind(&path).unwrap();
+        // Accepted but never answered, as when the guest's vsock path is saturated.
+        let held = std::thread::spawn(move || {
+            // Keep every connection open and unanswered until the probe is over.
+            let kept: Vec<_> = listener
+                .incoming()
+                .take(SILENT_PINGS as usize)
+                .map(Result::unwrap)
+                .collect();
+            kept.len()
+        });
+        let started = Instant::now();
+        assert!(agent_silent_at(&path));
+        // Each probe waits out its deadline (the last sees the fake end the connection).
+        assert!(started.elapsed() >= SILENT_PING_TIMEOUT * (SILENT_PINGS - 1));
+        assert_eq!(held.join().unwrap(), SILENT_PINGS as usize);
+        fs::remove_file(&path).unwrap();
+        // Any reply byte, even of an unexpected response, is an answer.
+        let listener = UnixListener::bind(&path).unwrap();
+        let answering = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"?").unwrap();
+        });
+        assert!(!agent_silent_at(&path));
+        answering.join().unwrap();
+        fs::remove_file(&path).unwrap();
+        // A connection the guest side ends before replying is silence.
+        let listener = UnixListener::bind(&path).unwrap();
+        let closing = std::thread::spawn(move || {
+            for stream in listener.incoming().take(SILENT_PINGS as usize) {
+                drop(stream.unwrap());
+            }
+        });
+        assert!(agent_silent_at(&path));
+        closing.join().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_silent_guest_is_not_stopped_under_an_admitted_build() {
+        let root = crate::test_root::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-silent-stop-build",
+        );
+        let checkout = root.join("checkout");
+        state::private_directory(&checkout).unwrap();
+        let candidate = Candidate::discover(&checkout).unwrap();
+        // A live process stands in for the recorded provider; it must not be signalled.
+        let mut provider = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut owner: Owner = serde_json::from_value(json!({
+            "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
+            "short_home":"/fixture","created":true,"phase":"running","process":null,
+            "storage":null,"overlay":null,"guest_boot_id":null,
+            "daemon_pid":null,"daemon_start":null,"rootfs_digest":null
+        }))
+        .unwrap();
+        owner.process = Some(identity::observe(provider.id() as i32).unwrap());
+        // An admitted build holds the shared fence, as `image_build::run` does.
+        let fence = super::super::image_build::hold_build_fence_for_test(&candidate);
+        let refused = stop_silent_guest(&candidate, &mut owner).unwrap_err();
+        assert_eq!(refused.code, "provider_busy");
+        assert!(refused.message.contains("Ctrl-C"));
+        assert!(
+            provider.try_wait().unwrap().is_none(),
+            "provider was signalled"
+        );
+        assert_eq!(owner.phase, "running");
+        drop(fence);
+        // Without a build, the check passes and the stop proceeds to identity checks.
+        assert!(require_no_build_for_silent_stop(&candidate).is_ok());
+        provider.kill().unwrap();
+        provider.wait().unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn failed_boot_cleanup_stops_only_the_verified_process() {
@@ -2717,7 +3369,7 @@ printf 'verified-cache\n'
             .unwrap();
         let observed = identity::observe(child.id() as i32).unwrap();
         let reaper = std::thread::spawn(move || child.wait().unwrap());
-        stop_failed_boot(&observed, &observed.executable).unwrap();
+        stop_verified_provider(&observed, &observed.executable).unwrap();
         reaper.join().unwrap();
         assert!(!identity::alive(observed.pid).unwrap());
         assert!(sentinel.try_wait().unwrap().is_none());
@@ -2756,6 +3408,7 @@ printf 'verified-cache\n'
             super::super::prepared_start::Start {
                 retained: None,
                 prepared: Some(&request),
+                amd64_emulation: false,
             },
         )
         .unwrap_err();

@@ -1,5 +1,7 @@
 //! Feature-gated static launcher; no resident wrapper or runtime credential provider.
+use super::process_refusals::Refused;
 use super::*;
+use crate::error::ProcessField;
 #[cfg(feature = "environment-launcher")]
 use base64::Engine as _;
 #[cfg(feature = "environment-launcher")]
@@ -99,25 +101,40 @@ pub(super) fn identity(config: &Value) -> Result<(u32, u32), CandidateError> {
     Ok((parse(uid)?, parse(gid)?))
 }
 
-pub(super) fn validate(config: &Value) -> Result<(), CandidateError> {
-    identity(config)?;
-    let entry = config["Entrypoint"]
+/// Wrapper admission for one materialized process (see
+/// `image_process::apply_private`). Executables may be absolute, relative to
+/// the working directory, or bare names: the wrapper resolves a bare name
+/// through the container's PATH at exec time, as Docker does. Each refusal
+/// names the field it concerns.
+pub(super) fn validate(config: &Value) -> Result<(), Refused> {
+    identity(config).map_err(|error| Refused {
+        field: ProcessField::User,
+        error,
+    })?;
+    let executable = config["Entrypoint"]
         .as_array()
-        .filter(|a| !a.is_empty())
-        .ok_or_else(|| {
-            error(
-                "environment_entrypoint",
-                "Environment delivery requires an explicit absolute entrypoint.",
-            )
-        })?;
-    if !entry[0].as_str().is_some_and(|s| s.starts_with('/'))
-        || config["StopSignal"]
-            .as_str()
-            .is_some_and(|s| !["SIGTERM", "SIGINT", "SIGQUIT", "SIGKILL"].contains(&s))
+        .and_then(|entry| entry.first())
+        .and_then(Value::as_str)
+        .is_some_and(super::image_process::executable);
+    if !executable
+        || !config["Entrypoint"]
+            .as_array()
+            .is_some_and(|entry| entry.iter().all(Value::is_string))
     {
-        return Err(error(
+        return Err(Refused::new(
+            ProcessField::Entrypoint,
             "environment_entrypoint",
-            "Environment delivery requires an absolute entrypoint ; unsupported stop signals remain gated.",
+            "Environment delivery requires an explicit entrypoint that names an executable.",
+        ));
+    }
+    if config["StopSignal"]
+        .as_str()
+        .is_some_and(|s| !["SIGTERM", "SIGINT", "SIGQUIT", "SIGKILL"].contains(&s))
+    {
+        return Err(Refused::new(
+            ProcessField::StopSignal,
+            "environment_entrypoint",
+            "Environment delivery supports only SIGTERM, SIGINT, SIGQUIT or SIGKILL stop signals.",
         ));
     }
     validate_health(config)?;
@@ -128,7 +145,8 @@ pub(super) fn validate(config: &Value) -> Result<(), CandidateError> {
     {
         let target = mount["Target"].as_str().unwrap_or("");
         if ["/run", "/"].contains(&target) || target.starts_with("/run/hack-environment") {
-            return Err(error(
+            return Err(Refused::new(
+                ProcessField::Mounts,
                 "environment_mount",
                 "A mount overlaps reserved environment paths.",
             ));
@@ -136,12 +154,13 @@ pub(super) fn validate(config: &Value) -> Result<(), CandidateError> {
     }
     Ok(())
 }
-fn validate_health(config: &Value) -> Result<(), CandidateError> {
+fn validate_health(config: &Value) -> Result<(), Refused> {
     let Some(health) = config.get("Healthcheck") else {
         return Ok(());
     };
     let test = health["Test"].as_array().ok_or_else(|| {
-        error(
+        Refused::new(
+            ProcessField::Healthcheck,
             "environment_health",
             "An explicit CMD health check is required.",
         )
@@ -151,18 +170,21 @@ fn validate_health(config: &Value) -> Result<(), CandidateError> {
     }
     if test.len() < 2
         || test[0] != "CMD"
-        || !test[1].as_str().is_some_and(|s| s.starts_with('/'))
+        || !test[1]
+            .as_str()
+            .is_some_and(super::image_process::executable)
         || !test.iter().all(Value::is_string)
     {
-        return Err(error(
+        return Err(Refused::new(
+            ProcessField::Healthcheck,
             "environment_health",
-            "Environment health delivery requires CMD with an absolute executable.",
+            "Environment health delivery requires an exec-form CMD test that names an executable.",
         ));
     }
     Ok(())
 }
 pub(super) fn attach(config: &mut Value, path: &str, launcher: &str) -> Result<(), CandidateError> {
-    validate(config)?;
+    validate(config).map_err(Refused::into_error)?;
     // Preserve Docker's numeric UID-only group lookup and supplemental groups.
     identity(config)?;
     if config["Healthcheck"]["Test"][0] == "CMD" {
@@ -204,6 +226,63 @@ pub(super) fn attach(config: &mut Value, path: &str, launcher: &str) -> Result<(
         (expiry.as_str(), "/run/hack-environment.expires"),
         (launcher, "/run/hack-environment-launcher"),
     ] {
+        mounts.push(json!({"Type":"bind","Source":source,"Target":target,"ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}}));
+    }
+    Ok(())
+}
+
+fn file_refused() -> CandidateError {
+    error(
+        "environment_file_mount",
+        "A private file target is reserved or overlaps another container mount; values omitted.",
+    )
+}
+/// Container paths already claimed by compiled mounts and tmpfs entries.
+fn claimed_targets(config: &Value) -> Vec<String> {
+    let mut targets: Vec<String> = config["HostConfig"]["Mounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|mount| mount["Target"].as_str().unwrap_or("").to_owned())
+        .collect();
+    if let Some(tmpfs) = config["HostConfig"]["Tmpfs"].as_object() {
+        targets.extend(tmpfs.keys().cloned());
+    }
+    targets
+}
+/// Private file targets must be reserved-free absolute paths that neither equal, contain
+/// nor sit under any compiled mount or tmpfs target. A target that cannot be parsed refuses.
+pub(super) fn validate_files(config: &Value, targets: &[&str]) -> Result<(), CandidateError> {
+    let claimed = claimed_targets(config);
+    for target in targets {
+        if !crate::provider::environment::file_target(target)
+            || claimed.iter().any(|other| {
+                other.is_empty()
+                    || other == target
+                    || crate::provider::environment::within(target, other)
+                    || crate::provider::environment::within(other, target)
+            })
+        {
+            return Err(file_refused());
+        }
+    }
+    Ok(())
+}
+/// Bind each verified allocation member read-only at its declared target. Called after
+/// `attach` for wrapped services, so reserved launcher binds are also checked.
+pub(super) fn attach_files(
+    config: &mut Value,
+    files: &[(String, String)],
+) -> Result<(), CandidateError> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let targets: Vec<&str> = files.iter().map(|(_, target)| target.as_str()).collect();
+    validate_files(config, &targets)?;
+    let mounts = config["HostConfig"]["Mounts"]
+        .as_array_mut()
+        .ok_or_else(file_refused)?;
+    for (source, target) in files {
         mounts.push(json!({"Type":"bind","Source":source,"Target":target,"ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}}));
     }
     Ok(())
@@ -282,14 +361,48 @@ mod tests {
         assert_eq!(value["Healthcheck"]["Interval"], 1000000000);
         assert_eq!(value["Healthcheck"]["Timeout"], 2000000000);
         assert_eq!(value["Healthcheck"]["Retries"], 3);
+        // apply_private turns CMD-SHELL into the exec form Docker runs first.
         for test in [
             json!(["CMD-SHELL", "echo ok"]),
             json!(["CMD"]),
             json!(["CMD", "/bin/check", 5]),
+            json!(["CMD", ""]),
         ] {
             value["Healthcheck"]["Test"] = test;
-            assert!(validate(&value).is_err());
+            let refused = validate(&value).unwrap_err();
+            assert_eq!(refused.field, ProcessField::Healthcheck);
+            assert_eq!(refused.error.code, "environment_health");
         }
+    }
+    #[test]
+    fn relative_entrypoint_and_health_names_are_kept_for_container_path_lookup() {
+        let mut value = config();
+        value["Entrypoint"] = json!(["docker-entrypoint.sh"]);
+        value["Cmd"] = json!(["mysqld"]);
+        value["Healthcheck"] = json!({"Test":["CMD","mysqladmin","ping"]});
+        attach(&mut value, "/run/slot/values.json", "/storage/launcher").unwrap();
+        assert_eq!(
+            value["Entrypoint"],
+            json!([
+                "/run/hack-environment-launcher",
+                "/run/hack-environment.json",
+                "/run/hack-environment.expires",
+                "docker-entrypoint.sh",
+                "mysqld"
+            ])
+        );
+        assert_eq!(
+            value["Healthcheck"]["Test"],
+            json!([
+                "CMD",
+                "/run/hack-environment-launcher",
+                "--health",
+                "/run/hack-environment.json",
+                "/run/hack-environment.expires",
+                "mysqladmin",
+                "ping"
+            ])
+        );
     }
     #[test]
     fn uid_only_keeps_engine_group_resolution_while_private_files_use_owner_uid() {
@@ -304,6 +417,63 @@ mod tests {
         }
     }
     #[test]
+    fn private_files_bind_read_only_after_launcher_mounts_and_refuse_overlap() {
+        let mut value = config();
+        value["HostConfig"]["Mounts"] = json!([{"Type":"volume","Target":"/data"}]);
+        attach(&mut value, "/run/slot/values.json", "/storage/launcher").unwrap();
+        let files = vec![(
+            "/run/slot/files/credential.json".to_owned(),
+            "/config/credential.json".to_owned(),
+        )];
+        attach_files(&mut value, &files).unwrap();
+        let mounts = value["HostConfig"]["Mounts"].as_array().unwrap();
+        assert_eq!(
+            mounts.last().unwrap(),
+            &json!({"Type":"bind","Source":"/run/slot/files/credential.json","Target":"/config/credential.json","ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}})
+        );
+        // Files-only services keep their process; only the bind is added.
+        let mut plain = config();
+        attach_files(&mut plain, &files).unwrap();
+        assert_eq!(plain["Entrypoint"], config()["Entrypoint"]);
+        assert_eq!(plain["HostConfig"]["Mounts"].as_array().unwrap().len(), 1);
+        for (claimed, target) in [
+            ("/config/credential.json", "/config/credential.json"),
+            ("/config", "/config/credential.json"),
+            ("/config/credential.json/inner", "/config/credential.json"),
+            ("/", "/config/credential.json"),
+            ("", "/config/credential.json"),
+        ] {
+            let mut value = config();
+            value["HostConfig"]["Mounts"] = json!([{"Type":"bind","Target":claimed}]);
+            assert_eq!(
+                validate_files(&value, &[target]).err().unwrap().code,
+                "environment_file_mount"
+            );
+        }
+        let mut value = config();
+        value["HostConfig"]["Tmpfs"] = json!({"/tmp":"rw"});
+        assert!(validate_files(&value, &["/tmp/credential.json"]).is_err());
+        assert!(validate_files(&value, &["/tmpfile"]).is_ok());
+        for target in [
+            "/",
+            "relative",
+            "/run/credential",
+            "/var/run/credential",
+            "/proc/credential",
+            "/sys",
+            "/dev/shm/key",
+            "/config/../etc/passwd",
+            "/config//key",
+            "/config/key/",
+            "/config/./key",
+        ] {
+            assert!(validate_files(&config(), &[target]).is_err(), "{target}");
+        }
+        let mut value = config();
+        value["HostConfig"]["Mounts"] = json!(null);
+        assert!(attach_files(&mut value, &files).is_err());
+    }
+    #[test]
     fn ambiguous_users_health_exec_and_mount_collisions_refuse_before_attachment() {
         for user in ["bun", "-1:2", "1:4294967295", "1:", "1:2:3"] {
             let mut value = config();
@@ -315,12 +485,34 @@ mod tests {
             value["HostConfig"]["Mounts"] = json!([{"Target":target}]);
             assert!(validate(&value).is_err());
         }
+        for (field, entry) in [
+            (ProcessField::Entrypoint, json!([])),
+            (ProcessField::Entrypoint, json!([""])),
+            (ProcessField::Entrypoint, json!(["/"])),
+            (ProcessField::Entrypoint, json!(["app", 5])),
+            (ProcessField::Entrypoint, json!(null)),
+        ] {
+            let mut value = config();
+            value["Entrypoint"] = entry;
+            assert_eq!(validate(&value).unwrap_err().field, field);
+        }
         let mut value = config();
-        value["Healthcheck"] = json!({"Test":["CMD","true"]});
-        assert!(validate(&value).is_err());
+        value["StopSignal"] = json!("SIGUSR1");
+        assert_eq!(
+            validate(&value).unwrap_err().field,
+            ProcessField::StopSignal
+        );
+        let mut value = config();
+        value["User"] = json!("bun");
+        assert_eq!(validate(&value).unwrap_err().field, ProcessField::User);
+        let mut value = config();
+        value["HostConfig"]["Mounts"] = json!([{"Target":"/run"}]);
+        assert_eq!(validate(&value).unwrap_err().field, ProcessField::Mounts);
+        // Relative names are accepted for container PATH lookup.
         let mut value = config();
         value["Entrypoint"] = json!(["app"]);
-        assert!(validate(&value).is_err());
+        value["Healthcheck"] = json!({"Test":["CMD","true"]});
+        assert!(validate(&value).is_ok());
     }
 }
 

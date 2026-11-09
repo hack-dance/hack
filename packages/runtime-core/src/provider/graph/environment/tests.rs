@@ -139,18 +139,21 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
         state::private_directory(&root).unwrap();
         let engine = Engine::connect(&candidate).unwrap();
         let resource = Resource {
+            loopback_ports: Vec::new(),
             routing: None,
             networks: None,
             outbound: false,
             cache: None,
             cache_provenance: None,
             disposable_caches: Vec::new(),
+            restart_policy: None,
             kind: Kind::Container,
             key: "job".into(),
             name: format!("hkg-{run}-container-0"),
             id: None,
             image: Some(image.clone()),
             phase: "reserved".into(),
+            amd64_emulation: None,
         };
         let mut receipt = Receipt {
             normalized_input: None,

@@ -121,6 +121,11 @@ import {
   type NativeSettingsReport,
 } from "../lib/doctor-native-settings.ts";
 import {
+  checkNativeSourceSize,
+  NATIVE_SOURCE_CHECK,
+  type NativeSourceReport,
+} from "../lib/doctor-native-source.ts";
+import {
   findCrossCheckoutInstances,
   inspectWorktreeSecretKeys,
 } from "../lib/doctor-worktree.ts";
@@ -283,6 +288,8 @@ interface CheckResult {
   readonly amd64Emulation?: Amd64EmulationReport;
   /** Native setting origins and closed warnings only; never setting values. */
   readonly nativeSettings?: NativeSettingsReport;
+  /** Selected source sizes and project-relative paths; never file contents. */
+  readonly nativeSource?: NativeSourceReport;
   /** Service names and closed process fields only. */
   readonly nativeProcess?: NativeProcessReport;
 }
@@ -1166,7 +1173,10 @@ async function handleNativeDoctor(opts: {
   }
   // The env key audit is runtime-independent; outside a project there is no
   // key to audit, so native Doctor adds no check there.
-  if (await findProjectContext(opts.startDir).catch(() => null)) {
+  const nativeProject = await findProjectContext(opts.startDir).catch(
+    () => null
+  );
+  if (nativeProject) {
     results.push(
       await runCheck(
         progress,
@@ -1204,6 +1214,18 @@ async function handleNativeDoctor(opts: {
     results.push(
       await runCheck(progress, NATIVE_PROCESS_CHECK, () =>
         checkNativeProcessWrappers({ startDir: opts.startDir })
+      )
+    );
+    results.push(
+      await runCheck(
+        progress,
+        NATIVE_SOURCE_CHECK,
+        () =>
+          checkNativeSourceSize({
+            runtime: opts.runtime,
+            projectRoot: nativeProject.projectRoot,
+          }),
+        { timeoutMs: 25_000 }
       )
     );
   }
@@ -1401,6 +1423,8 @@ export type DoctorJsonCheck = {
   readonly nativeSettings?: NativeSettingsReport;
   /** Present only on the native process-wrapper check: service names and closed fields. */
   readonly nativeProcess?: NativeProcessReport;
+  /** Present only on the native source size check: sizes and project-relative paths. */
+  readonly nativeSource?: NativeSourceReport;
 };
 
 export type DoctorJsonData = {
@@ -1447,6 +1471,7 @@ export function buildDoctorJsonData(opts: {
         ? { nativeSettings: result.nativeSettings }
         : {}),
       ...(result.nativeProcess ? { nativeProcess: result.nativeProcess } : {}),
+      ...(result.nativeSource ? { nativeSource: result.nativeSource } : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,

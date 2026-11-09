@@ -11,6 +11,7 @@ import { startNativeProject } from "../src/backends/native-project-start.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { runLifecycleCommandChild } from "../src/lib/lifecycle-command-child.ts";
 import { readLinesFromStream } from "../src/ui/lines.ts";
+import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 
 // Foreground Ctrl-C runs the project's down hooks around graph cleanup, as
 // `hack down` does on Compose. The fake graph owner below follows the serve
@@ -153,6 +154,9 @@ async function fixture(opts: {
           },
         }),
       invoke: async (request) => {
+        if (request.args[1] === "source-size") {
+          return nativeSourceSizeReceipt();
+        }
         if (request.args[1] === "check-project-share") {
           return { source_admitted: true, pool_initialized: false };
         }

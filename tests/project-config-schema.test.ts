@@ -183,3 +183,14 @@ test("project config schema declares lifecycle.sharedHelpers", () => {
     "upstreamEnv",
   ]);
 });
+
+test("project config schema documents the native source limit and its maximum", () => {
+  const schema = JSON.parse(renderProjectConfigSchemaJson()) as {
+    properties: Record<string, { properties?: Record<string, unknown> }>;
+  };
+  expect(schema.properties.native?.properties?.sourceLimitMiB).toMatchObject({
+    type: "integer",
+    minimum: 1,
+    maximum: 512,
+  });
+});

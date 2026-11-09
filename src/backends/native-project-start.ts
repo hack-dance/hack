@@ -144,6 +144,7 @@ import {
 } from "./native-project-run.ts";
 import { selectNativeEnvFile } from "./native-project-selection.ts";
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
+import { requireNativeSourceWithinLimit } from "./native-project-source-size.ts";
 import { reportNativeRestartPolicyNotices } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
@@ -343,6 +344,8 @@ type Dependencies = {
   recoverHttps: typeof recoverNativeHttpsLease;
   cleanupTemporary: (directory: string) => Promise<void>;
   invoke: typeof invokeNativeRuntime;
+  /** Refuses source over the native source limit before any runtime work. */
+  sourceSize: typeof requireNativeSourceWithinLimit;
   build: typeof invokeNativeBuild;
   load: typeof loadNativeProjectRun;
   loadRestart: typeof loadNativeRestartIntent;
@@ -375,6 +378,7 @@ const DEFAULTS: Dependencies = {
   cleanupTemporary: (directory) =>
     rm(directory, { recursive: true, force: true }),
   invoke: invokeNativeRuntime,
+  sourceSize: requireNativeSourceWithinLimit,
   build: invokeNativeBuild,
   load: loadNativeProjectRun,
   loadRestart: loadNativeRestartIntent,
@@ -1797,6 +1801,14 @@ async function startNativeProjectAttempt(
   await deps.admitDownHooks(opts.scope);
   const profiles = selection.profiles;
   progress({ phase: "input" });
+  // Measure the selected source first: an oversized project refuses here with its
+  // size and largest paths instead of after runtime start, image pulls and builds.
+  await deps.sourceSize({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    signal: opts.signal,
+    invoke: deps.invoke,
+  });
   await preflightNativeProjectSource({
     runtime: opts.runtime,
     projectRoot: opts.scope.projectRoot,

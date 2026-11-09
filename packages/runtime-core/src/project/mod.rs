@@ -14,6 +14,7 @@ pub mod native;
 pub mod registry;
 pub mod snapshot;
 mod source;
+pub mod source_budget;
 pub mod watcher;
 mod yaml;
 
@@ -415,6 +416,11 @@ pub struct PlanData {
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub original_environment_files: std::collections::BTreeSet<String>,
     pub source_selection: SourceSelection,
+    /// Configured content capture limit (`native.sourceLimitMiB` in the project's
+    /// `.hack/hack.config.json`). An admission threshold, not reviewed content: it is
+    /// excluded from plan identity, and absent means the 128 MiB default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_limit_bytes: Option<u64>,
     pub diagnostics: Vec<Diagnostic>,
     pub enrollment_compatible: bool,
     pub runtime_execution_supported: bool,
@@ -442,6 +448,8 @@ pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
     // bytes already bound below. It must not reidentify unchanged legacy graphs.
     let mut identity_plan = plan.clone();
     identity_plan.hostname_change_sha256 = None;
+    // Changing the capture limit must not reidentify an unchanged graph.
+    identity_plan.source_limit_bytes = None;
     let bytes = serde_json::to_vec(&identity_plan)
         .map_err(|_| problem("serialization_failed", "Cannot encode review plan."))?;
     if bytes.len() > 3 * 1024 * 1024 {
@@ -521,6 +529,7 @@ fn plan_input(
         environment_files.extend(data.original_environment_files.iter().cloned());
     }
     data.source_selection = source::inventory(source, &environment_files, &mut data.diagnostics)?;
+    data.source_limit_bytes = source_budget::configured_limit(source)?;
     let needs_registry = data
         .services
         .values()

@@ -62,6 +62,7 @@ import {
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
+import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -126,6 +127,9 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (opts.args[1] === "source-size") {
+        return nativeSourceSizeReceipt();
+      }
       if (opts.args[1] === "check-project-share") {
         return { source_admitted: true, pool_initialized: false };
       }
@@ -321,6 +325,39 @@ test("source pool mismatch refuses before hooks and storage preparation", async 
   await expect(startNativeProject(opts)).rejects.toThrow(
     "source pool mismatch"
   );
+  expect(events).toEqual([]);
+});
+
+test("oversized source refuses before share admission, storage, hooks and runtime work", async () => {
+  const { opts, events } = await fixture();
+  opts.dependencies.prepareStorage = async () => {
+    events.push("storage");
+  };
+  const requests: string[] = [];
+  const invoke = opts.dependencies.invoke;
+  opts.dependencies.invoke = async (request) => {
+    requests.push(request.args.slice(0, 2).join(" "));
+    if (request.args[1] === "source-size") {
+      expect(request.args).toEqual([
+        "project",
+        "source-size",
+        "--project",
+        opts.scope.projectRoot,
+        "--json",
+      ]);
+      return nativeSourceSizeReceipt({ totalBytes: 140 * 1024 * 1024 });
+    }
+    return await invoke?.(request);
+  };
+  const refusal = await startNativeProject(opts).catch(
+    (error: unknown) => error
+  );
+  expect(refusal).toBeInstanceOf(HackCliError);
+  expect((refusal as HackCliError).code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+  expect((refusal as HackCliError).message).toContain(
+    "Largest directories: assets"
+  );
+  expect(requests).toEqual(["project source-size"]);
   expect(events).toEqual([]);
 });
 
@@ -4326,7 +4363,7 @@ test("retained startup selects legacy labels only after runtime admission and be
       if (request.args[0] === "runtime" && request.args[1] === "up") {
         admitted = true;
       }
-      if (request.args[0] === "project") {
+      if (request.args[0] === "project" && request.args[1] === "plan") {
         expect(admitted).toBe(true);
         return {
           plan: {

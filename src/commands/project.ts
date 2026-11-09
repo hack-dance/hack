@@ -80,6 +80,7 @@ import {
   resolveNativeHostSettings,
 } from "../backends/native-project-settings.ts";
 import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
+import { requireNativeSourceWithinLimit } from "../backends/native-project-source-size.ts";
 import {
   type NativeStartupProgress,
   startNativeProject,
@@ -6194,6 +6195,10 @@ async function restartNativeImageProject({
         }
       : undefined,
     preflight: async (run, { cleanedRetry }) => {
+      await requireNativeSourceWithinLimit({
+        runtime: native,
+        projectRoot: startup.scope.projectRoot,
+      });
       await preflightNativeProjectSource({
         runtime: native,
         projectRoot: startup.scope.projectRoot,

@@ -27,6 +27,7 @@ import {
   saveNativeRestartIntent,
   withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
+import { NativeStartupCanceledError } from "../src/backends/native-project-start.ts";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
   expectClosedRefusal,
@@ -1949,3 +1950,351 @@ test("active restart preserves admitted images despite moved tags and refuses ch
     }
   }
 });
+
+function stopFixture(abortAt: "preflight" | "down" | "start" | "never") {
+  const events: string[] = [];
+  const controller = new AbortController();
+  let exit = 130;
+  let disposed = 0;
+  const signals = {
+    signal: controller.signal,
+    interruptedExit: () => exit,
+    dispose: () => {
+      disposed++;
+    },
+  };
+  const interrupt = (code = 130) => {
+    exit = code;
+    controller.abort();
+  };
+  let pending: NativeRestartIntent | null = null;
+  const options: Parameters<typeof restartNativeProject>[0] = {
+    scope,
+    preflight: async () => {
+      events.push("preflight");
+      if (abortAt === "preflight") {
+        interrupt();
+      }
+    },
+    down: async () => {
+      if (abortAt === "down") {
+        interrupt();
+      }
+      events.push("down");
+    },
+    progress: (event) =>
+      events.push(event.phase === "stopping" ? "stopping" : "stopped"),
+    start: async ({ signal, onStopSignals }) => {
+      events.push("start");
+      if (abortAt === "start") {
+        interrupt();
+      }
+      if (signal.aborted) {
+        throw new ClosedCliError("canceled before hand-off");
+      }
+      onStopSignals();
+      return 0;
+    },
+    dependencies: {
+      signals: () => signals,
+      load: async () => run,
+      pending: async () => pending,
+      save: async ({ intent }) => {
+        pending = intent;
+        events.push("intent");
+      },
+      cleaned: async ({ expected }) => {
+        pending = { ...expected, phase: "cleaned" };
+        return pending;
+      },
+      remove: async () => {
+        pending = null;
+        events.push("remove");
+      },
+      capture: async () => token,
+      wait: async () => {
+        events.push("finalized");
+      },
+      lock: async (_scope, action) => await action(async () => undefined),
+    },
+  };
+  return {
+    options,
+    events,
+    interrupt,
+    disposed: () => disposed,
+    pending: () => pending,
+  };
+}
+
+test("a stop request during preflight cancels the restart before anything is stopped", async () => {
+  const f = stopFixture("preflight");
+  expect(await restartNativeProject(f.options)).toBe(130);
+  expect(f.events).toEqual(["preflight", "stopped"]);
+  expect(f.pending()).toBeNull();
+  expect(f.disposed()).toBeGreaterThan(0);
+});
+
+test("a stop request during cleanup finishes the owned stop and does not start the new run", async () => {
+  const f = stopFixture("down");
+  expect(await restartNativeProject(f.options)).toBe(130);
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "stopping",
+    "down",
+    "finalized",
+    "remove",
+    "stopped",
+  ]);
+  // A plain `hack up` resumes the retained run; no restart stays pending.
+  expect(f.pending()).toBeNull();
+});
+
+test("a stop request before the start's own handlers ends as a stopped project", async () => {
+  const f = stopFixture("start");
+  expect(await restartNativeProject(f.options)).toBe(130);
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "down",
+    "finalized",
+    "start",
+    "stopping",
+    "remove",
+    "stopped",
+  ]);
+  expect(f.pending()).toBeNull();
+});
+
+test("after the hand-off the restart's handlers are gone and the start owns the stop", async () => {
+  const f = stopFixture("never");
+  let disposedAtHandOff = -1;
+  const start = f.options.start;
+  const options = {
+    ...f.options,
+    start: async (input: Parameters<typeof start>[0]) =>
+      await start({
+        ...input,
+        onStopSignals: () => {
+          input.onStopSignals();
+          disposedAtHandOff = f.disposed();
+          // A later request reaches only the start; the restart must not react.
+          f.interrupt();
+        },
+      }),
+  };
+  expect(await restartNativeProject(options)).toBe(0);
+  expect(disposedAtHandOff).toBeGreaterThan(0);
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "down",
+    "finalized",
+    "start",
+  ]);
+});
+
+test("a new start stopped by request before ready leaves no pending restart", async () => {
+  const f = stopFixture("never");
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals, onStopRequested }) => {
+        onStopSignals();
+        onStopRequested();
+        return 130;
+      },
+    })
+  ).toBe(130);
+  expect(f.pending()).toBeNull();
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "down",
+    "finalized",
+    "remove",
+  ]);
+});
+
+test("a start canceled after the hand-off before any service retires the intent so up resumes", async () => {
+  const f = stopFixture("never");
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals }) => {
+        onStopSignals();
+        // Ctrl-C while discovering host dependencies or waiting for runtime up.
+        throw new NativeStartupCanceledError(130, true);
+      },
+    })
+  ).toBe(130);
+  expect(f.pending()).toBeNull();
+  expect(f.events).toEqual([
+    "preflight",
+    "intent",
+    "down",
+    "finalized",
+    "remove",
+    "stopping",
+    "stopped",
+  ]);
+});
+
+test.each([
+  { name: "uncertain cleanup", error: new Error("lifecycle cleanup failed") },
+  {
+    name: "a cancellation without confirmed cleanup",
+    error: new NativeStartupCanceledError(130, false),
+  },
+])("a start that ends in $name after the hand-off keeps the pending restart", async ({
+  error,
+}) => {
+  const f = stopFixture("never");
+  await expect(
+    restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals }) => {
+        onStopSignals();
+        throw error;
+      },
+    })
+  ).rejects.toBe(error);
+  expect(f.pending()).toMatchObject({ phase: "cleaned" });
+});
+
+test("a new start that fails without a stop request keeps the pending restart", async () => {
+  const f = stopFixture("never");
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      start: async ({ onStopSignals }) => {
+        onStopSignals();
+        return 1;
+      },
+    })
+  ).toBe(1);
+  expect(f.pending()).toMatchObject({ phase: "cleaned" });
+});
+
+test("SIGTERM during cleanup exits 143 after the owned stop", async () => {
+  const f = stopFixture("never");
+  const down = f.options.down;
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      down: async () => {
+        f.interrupt(143);
+        await down();
+      },
+    })
+  ).toBe(143);
+  expect(f.events.at(-1)).toBe("stopped");
+});
+
+test.each([
+  {
+    hold: "preflight",
+    lines: [
+      "phase preflight",
+      "stopped: Native restart canceled before cleanup; nothing was stopped.",
+    ],
+    absent: ["phase down", "phase start"],
+  },
+  {
+    hold: "down",
+    lines: [
+      "phase down",
+      "stopping",
+      "old run stopped",
+      "old frontend finalized",
+      "intent removed",
+      "stopped: Native project stopped; owned cleanup confirmed.",
+    ],
+    absent: ["phase start"],
+  },
+  {
+    hold: "start",
+    lines: [
+      "phase start",
+      "stopping",
+      "intent removed",
+      "stopped: Native project stopped; owned cleanup confirmed.",
+    ],
+    absent: ["ready"],
+  },
+  {
+    hold: "starting",
+    lines: [
+      "phase starting",
+      "new run stopped by its own owner",
+      "intent removed",
+    ],
+    absent: ["ready", "stopping", "stopped:"],
+  },
+  {
+    hold: "serving",
+    lines: ["ready", "phase serving", "new run stopped by its own owner"],
+    absent: ["stopping", "stopped:"],
+  },
+])("the first real SIGINT stops a restart held in $hold, even when inherited as ignored", async ({
+  hold,
+  lines,
+  absent,
+}) => {
+  // A background job in a non-interactive shell starts with SIGINT ignored;
+  // the restart must still handle the first one. Its own process group keeps
+  // the signal from reaching this test runner.
+  const worker = join(
+    import.meta.dir,
+    "fixtures/native-restart-signal-worker.ts"
+  );
+  const child = Bun.spawn(
+    [
+      "/bin/sh",
+      "-c",
+      'trap "" INT; exec "$0" "$1" "$2"',
+      process.execPath,
+      worker,
+      hold,
+    ],
+    { stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true }
+  );
+  const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+  try {
+    let output = "";
+    const reader = child.stdout.getReader();
+    const decoder = new TextDecoder();
+    while (!output.includes(`phase ${hold}`)) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        break;
+      }
+      output += decoder.decode(chunk.value);
+    }
+    child.kill("SIGINT");
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        break;
+      }
+      output += decoder.decode(chunk.value);
+    }
+    const code = await child.exited;
+    expect({ code, stderr: await new Response(child.stderr).text() }).toEqual({
+      code: 130,
+      stderr: "",
+    });
+    for (const line of lines) {
+      expect(output).toContain(line);
+    }
+    for (const line of absent) {
+      expect(output).not.toContain(line);
+    }
+    // One "stopping" line at most, and no handler left behind by the restart.
+    expect(output.split("stopping").length).toBeLessThanOrEqual(2);
+    expect(output).toContain("exit 130 listeners=0");
+  } finally {
+    clearTimeout(timer);
+  }
+}, 20_000);

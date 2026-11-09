@@ -4,6 +4,12 @@ import { isAbsolute } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 
 const LIMIT = 65_536;
+/** Closed syntax reason; never includes parser excerpts or selected values. */
+export class NativeSelectionSyntaxError extends Error {
+  constructor() {
+    super("the selection file is not valid UTF-8 JSON");
+  }
+}
 function refused(): Error {
   return new HackCliError({
     code: "E_CONFIG_INVALID",
@@ -52,15 +58,22 @@ export async function readNativeSelection(
       ) {
         throw refused();
       }
-      return JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(
-          buffer.subarray(0, bytesRead)
-        )
-      );
+      try {
+        return JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(
+            buffer.subarray(0, bytesRead)
+          )
+        );
+      } catch {
+        throw new NativeSelectionSyntaxError();
+      }
     } finally {
       await file.close();
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof NativeSelectionSyntaxError) {
+      throw error;
+    }
     throw refused();
   }
 }

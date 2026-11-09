@@ -561,6 +561,22 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             "Dependency reservations require macOS.",
         ));
     }
+    if *action == "dependency-check" {
+        let (pid, port) = match *args {
+            ["--host-pid", pid, "--host-port", port]
+            | ["--host-pid", pid, "--host-port", port, "--json"] => (
+                pid.parse::<i32>().map_err(|_| invalid())?,
+                port.parse::<u16>().map_err(|_| invalid())?,
+            ),
+            _ => return Err(invalid()),
+        };
+        if pid <= 1 || port == 0 {
+            return Err(invalid());
+        }
+        // Observation only: no VM/provider or durable dependency authority.
+        hack_runtime_core::provider::host_endpoint::HostEndpoint::capture(pid, port)?;
+        return Ok(serde_json::json!({"listener_confirmed": true}));
+    }
     if *action == "dependency-plan" {
         let path = match *args {
             ["--dependencies", path] | ["--dependencies", path, "--json"] => Path::new(path),

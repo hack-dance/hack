@@ -1938,6 +1938,27 @@ async function startNativeProjectAttempt(opts: {
       path: selectedDependencyFile,
       services: Object.keys(specs),
       hostAliases,
+      checkPinned: async ({ hostPid, hostPort }) => {
+        const result = await deps.invoke({
+          runtime: opts.runtime,
+          cwd: opts.scope.projectRoot,
+          args: [
+            "graph",
+            "dependency-check",
+            "--host-pid",
+            String(hostPid),
+            "--host-port",
+            String(hostPort),
+            "--json",
+          ],
+          timeoutMs: 10_000,
+        });
+        if (!isRecord(result) || result.listener_confirmed !== true) {
+          throw new ClosedCliError(
+            "Native listener check was not confirmed; values omitted."
+          );
+        }
+      },
       discover: (selection) =>
         discoverNativeHostDependency({
           runtime: opts.runtime,

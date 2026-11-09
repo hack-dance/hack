@@ -133,6 +133,9 @@ async function fixture(withEnvironment = true) {
         return { reference: opts.args[3], kind: "docker_hub" };
       }
       events.push(opts.args.slice(0, 2).join(" "));
+      if (opts.args[1] === "dependency-check") {
+        return { listener_confirmed: true };
+      }
       if (opts.args[0] === "runtime" && opts.args[1] === "status") {
         return {
           phase: "running",
@@ -5577,4 +5580,42 @@ test("missing registry tags name the service and image field without echoing val
   );
   expect((error as Error).message).not.toContain("synthetic:missing");
   expect((error as Error).message).not.toContain("private registry detail");
+});
+
+test("wrong pinned host port names the binding before VM boot", async () => {
+  const { opts, events } = await fixture(false);
+  const path = join(opts.scope.projectRoot, "selection.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [
+        {
+          service: "web",
+          binding: "api",
+          guest_port: 443,
+          aliases: ["api.example.test"],
+          host_pid: 12_345,
+          host_port: 8443,
+        },
+      ],
+    })
+  );
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "dependency-check") {
+      throw new NativeRuntimeRequestError({
+        nativeCode: "host_endpoint_identity",
+        message: "private detail",
+      });
+    }
+    return await invoke(request);
+  };
+  await expect(
+    startNativeProject({ ...opts, dependencyFile: path })
+  ).rejects.toThrow(
+    "binding api, aliases api.example.test, guest port 443, host port 8443"
+  );
+  expect(events).not.toContain("runtime up");
+  expect(events).not.toContain("runtime ensure-image");
 });

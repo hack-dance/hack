@@ -1946,6 +1946,13 @@ before reporting success. A sibling graph's reservations and listeners remain ow
 by that sibling. Low-level callers without this flag keep exact slot semantics and
 must also respect existing reservations.
 
+Before starting the VM, foreground startup checks explicit `host_pid`/`host_port`
+selections with read-only `graph dependency-check --host-pid PID --host-port PORT`.
+A refusal names the service, binding, aliases and ports without exposing process
+values. This observation grants no durable authority; dependency planning and
+execution still capture and verify the exact listener again. Malformed dependency
+selection files report invalid UTF-8 JSON without including parser excerpts.
+
 `graph dependency-reservations --json` inspects the durable claims. A dead owner
 that never enrolled a graph can release a coherent claim with
 `graph recover-dependency-reservation --run-id RUN --expect-reservation SHA256`.

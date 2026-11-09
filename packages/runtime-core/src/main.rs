@@ -47,6 +47,7 @@ Usage:
   hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
   hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]
+  hack-local graph dependency-check --host-pid <pid> --host-port <port> [--json]
   hack-local graph dependency-reservations [--json]
   hack-local graph recover-dependency-reservation --run-id <32-hex> --expect-reservation <sha256> [--json]
   hack-local graph dependency-discover --host-port <port> --executable <absolute-path> [--json]

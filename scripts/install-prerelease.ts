@@ -2,7 +2,11 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Channel } from "./installer/channel.ts";
-import { requireThat, versionNumber } from "./installer/integrity.ts";
+import {
+  candidateVersion,
+  compareCandidateVersions,
+  requireThat,
+} from "./installer/integrity.ts";
 
 /** Compiled entry point. There is no interpreter lookup or automatic dependency install. */
 export async function main(inputArgv: string[]) {
@@ -16,7 +20,7 @@ export async function main(inputArgv: string[]) {
   }
   if (argv.length === 1 && ["--help", "-h"].includes(argv[0] ?? "")) {
     console.log(
-      "hack-next --manager install|upgrade --version 5.0.0-next.N [--archive /path --sha256 digest]\nhack-next --manager status|stable|rollback [--version VERSION]|upgrade-manager\nStandalone manager: [--root /canonical/path] <command>; hack-next runs the selected CLI."
+      "hack-next --manager install|upgrade --version 5.MINOR.PATCH-next.N [--archive /path --sha256 digest]\nhack-next --manager status|stable|rollback [--version VERSION]|upgrade-manager\nStandalone manager: [--root /canonical/path] <command>; hack-next runs the selected CLI."
     );
     return 0;
   }
@@ -63,7 +67,7 @@ export async function main(inputArgv: string[]) {
   }
   const version = options["--version"];
   if (command === "install" || command === "upgrade") {
-    versionNumber(version);
+    candidateVersion(version);
     requireThat(
       Boolean(options["--archive"]) === Boolean(options["--sha256"]),
       "--archive and --sha256 must be supplied together."
@@ -110,7 +114,7 @@ export async function main(inputArgv: string[]) {
         selected: channel.state.selected,
         previous: channel.state.previous,
         installed: Object.keys(channel.state.installed).sort((a, b) =>
-          versionNumber(a) < versionNumber(b) ? -1 : 1
+          compareCandidateVersions(a, b)
         ),
         launcher: join(root, "bin/hack-next"),
       })

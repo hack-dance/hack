@@ -59,6 +59,9 @@ describe("change scope classification", () => {
       ["packages/runtime-core/src/main.rs", "runtime-core"],
       ["packages/relay-guest/src/main.zig", "runtime-core"],
       ["scripts/build-hack-local.sh", "runtime-core"],
+      // The checkout launcher: local_contract.rs copies it, CI runs it.
+      ["hack-local", "runtime-core"],
+      [".hack-local/target/x", "typescript"],
       ["packages/config-compiler/src/lib.rs", "rust"],
       ["packages/runtime-core/Cargo.lock", "runtime-core"],
       ["Cargo.toml", "rust"],
@@ -88,6 +91,7 @@ describe("change scope classification", () => {
       [["packages/runtime-core/src/a.rs", "docs/a.md"], "runtime-core"],
       [["src/a.ts", "tests/a.test.ts", "docs/a.md"], "typescript"],
       [["src/a.ts", "packages/runtime-core/src/a.rs"], "code"],
+      [["src/a.ts", "hack-local"], "code"],
       [["packages/config-compiler/src/a.rs"], "code"],
       [["docs/a.md", ".github/workflows/ci.yml"], "code"],
     ] as const) {

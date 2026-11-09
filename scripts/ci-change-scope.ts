@@ -44,11 +44,16 @@ const DOCS_FILES = new Set([
   "LICENSE",
 ]);
 
-/** The runtime core and the guest it embeds; read only by its own job. */
+/**
+ * The runtime core, the guest it embeds and the checkout launcher its tests
+ * copy (packages/runtime-core/tests/local_contract.rs) and CI smoke-tests.
+ * Nothing else outside packages/runtime-core is read by its job.
+ */
 const RUNTIME_CORE_PATHS = [
   /^packages\/runtime-core\//,
   /^packages\/relay-guest\//,
   /^scripts\/build-hack-local\.sh$/,
+  /^hack-local$/,
 ] as const;
 
 /** Other Rust, toolchain pins and CI definitions: they can change any job. */

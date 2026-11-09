@@ -769,3 +769,5 @@ without a separate safety review and approval.
 
 Native recovery investigations can use the explicit, value-free
 [process census phase diagnostics](guides/native-census-diagnostics.md).
+
+<!-- HACK-1960 docs-scope CI probe; not for merge -->

@@ -2313,16 +2313,6 @@ export async function startNativeProject(opts: {
                     .catch(() => undefined);
                 }
                 await hooks?.ready?.();
-                await opts.onReady?.(readyServiceSummary(readinessArgs));
-                progress(
-                  readyProgress({
-                    services,
-                    run,
-                    plan: review.report.plan,
-                    routed: routes.services,
-                    httpsPort: servedHttpsPort(https, opts.https),
-                  })
-                );
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -2335,8 +2325,20 @@ export async function startNativeProject(opts: {
                     controller.abort();
                   },
                 });
-                // Last: only microtasks separate this from readiness.
+                // Commit owed down hooks before any observer can release a
+                // detached launcher. A journal failure is still startup failure.
                 await stop?.owe(() => controller.signal.aborted);
+                requireActiveStartup(controller.signal);
+                await opts.onReady?.(readyServiceSummary(readinessArgs));
+                progress(
+                  readyProgress({
+                    services,
+                    run,
+                    plan: review.report.plan,
+                    routed: routes.services,
+                    httpsPort: servedHttpsPort(https, opts.https),
+                  })
+                );
               },
             });
           } catch (error) {

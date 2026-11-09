@@ -5,14 +5,15 @@
 \* publishes the authenticated receipt's identity instead. Recording never stops,
 \* replays or retires anything.
 EXTENDS TLC
-CONSTANTS RecordFailedOwner, EnforceDetachedReady
-VARIABLES phase, resources, mapping, receipt, cleaned, readied, launcher, accepted
-launch == <<launcher, accepted>>
+CONSTANTS RecordFailedOwner, EnforceDetachedReady, EnforceBookkeeping
+VARIABLES phase, resources, mapping, receipt, cleaned, readied, launcher, accepted, bookkept
+launch == <<launcher, accepted, bookkept>>
 core == <<phase, resources, mapping, receipt, cleaned, readied>>
 vars == <<core, launch>>
 TypeOK ==
     /\ launcher \in {"waiting", "notified", "accepting", "handed", "returned", "lost"}
     /\ accepted \in BOOLEAN
+    /\ bookkept \in BOOLEAN
     /\ phase \in {"idle", "serving", "ready", "failed", "exited"}
     /\ resources \in {"none", "present", "absent"}
     /\ mapping \in {"none", "published"}
@@ -69,20 +70,25 @@ CoreNext == Serve \/ StartResources \/ Ready \/ Fail \/ OwnerCleanup \/ Inspect
         \/ Confirm \/ ExitConfirmed \/ ExitUnconfirmed
 \* The IPC launcher has no graph authority. A lost channel before acceptance
 \* requests ordinary stop; failure/cleanup retains the original mapping rules.
-Init == CoreInit /\ launcher = "waiting" /\ accepted = FALSE
+Init == CoreInit /\ launcher = "waiting" /\ accepted = FALSE /\ bookkept = FALSE
+\* Successful completion of up.after's durable down-hook obligation, including
+\* its cancellation fence. Delay/failure cannot issue a launcher notification.
+Bookkeep == /\ phase = "ready" /\ ~bookkept /\ bookkept' = TRUE
+            /\ UNCHANGED <<core, launcher, accepted>>
 Notify == /\ launcher = "waiting" /\ (EnforceDetachedReady => phase = "ready")
-          /\ launcher' = "notified" /\ UNCHANGED <<core, accepted>>
+          /\ (EnforceBookkeeping => bookkept)
+          /\ launcher' = "notified" /\ UNCHANGED <<core, accepted, bookkept>>
 Accept == /\ launcher = "notified" /\ launcher' = "accepting"
-          /\ UNCHANGED <<core, accepted>>
+          /\ UNCHANGED <<core, accepted, bookkept>>
 OwnerAccept == /\ launcher = "accepting" /\ launcher' = "handed"
-               /\ accepted' = TRUE /\ UNCHANGED core
+               /\ accepted' = TRUE /\ UNCHANGED <<core, bookkept>>
 Return == /\ launcher = "handed" /\ launcher' = "returned"
-          /\ UNCHANGED <<core, accepted>>
+          /\ UNCHANGED <<core, accepted, bookkept>>
 LauncherLoss == /\ launcher \in {"waiting", "notified", "accepting"}
-                /\ launcher' = "lost" /\ UNCHANGED <<core, accepted>>
-Next == CoreNext \/ Notify \/ Accept \/ OwnerAccept
+                /\ launcher' = "lost" /\ UNCHANGED <<core, accepted, bookkept>>
+Next == CoreNext \/ Bookkeep \/ Notify \/ Accept \/ OwnerAccept
         \/ Return \/ LauncherLoss
-NoPrematureReturn == launcher = "returned" => (readied /\ accepted)
+NoPrematureReturn == launcher = "returned" => (readied /\ bookkept /\ accepted)
 NoLostHandoff == launcher = "lost" => ~accepted
 Spec == Init /\ [][Next]_vars
 \* Resources that outlive the frontend under an authenticated receipt are owned.

@@ -5414,3 +5414,75 @@ test("restart preflight ignores inactive-profile services a wrapper cannot run",
   // The same preflight without the profile completes.
   await preflight([]);
 });
+
+test.each([
+  "commit",
+  "fail",
+  "cancel",
+] as const)("detached readiness waits for down-hook bookkeeping: %s", async (mode) => {
+  const { opts } = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const controller = new AbortController();
+  const progress: string[] = [];
+  let published = 0;
+  const before = opts.before;
+  const pending = startNativeProject({
+    ...opts,
+    signal: controller.signal,
+    before: async () => ({
+      ...(await before()),
+      stop: { before: async () => 0, after: async () => 0 },
+    }),
+    dependencies: {
+      ...opts.dependencies,
+      downHooks: () => ({
+        owe: async () => {
+          entered.resolve();
+          await release.promise;
+          if (mode === "fail") {
+            throw new Error("synthetic bookkeeping failure");
+          }
+          if (mode === "cancel") {
+            controller.abort();
+          }
+        },
+        before: async () => "skipped" as const,
+        after: async () => "skipped" as const,
+      }),
+    },
+    onReady: () => {
+      published += 1;
+    },
+    onProgress: (event) => {
+      progress.push(event.phase);
+    },
+  }).then(
+    (code) => ({ ok: true as const, code }),
+    () => ({ ok: false as const })
+  );
+  try {
+    await entered.promise;
+    // The actual startup owner is suspended at its durable journal boundary.
+    // Neither IPC observation nor human readiness can escape that boundary.
+    await Bun.sleep(20);
+    expect(published).toBe(0);
+    expect(progress).not.toContain("ready");
+    release.resolve();
+    const outcome = await pending;
+    if (mode === "commit") {
+      expect(outcome).toEqual({ ok: true, code: 0 });
+      expect(published).toBe(1);
+      expect(progress).toContain("ready");
+    } else {
+      expect(
+        mode === "fail" ? !outcome.ok : outcome.ok && outcome.code === 130
+      ).toBe(true);
+      expect(published).toBe(0);
+      expect(progress).not.toContain("ready");
+    }
+  } finally {
+    release.resolve();
+    await pending;
+  }
+});

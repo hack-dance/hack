@@ -707,7 +707,7 @@ Actual Rosetta execution in the guest needs host evidence.
 ## Stopped retained-pool startup
 
 `native-startup-owner/Owner.tla` checks project ownership after a foreground
-Compose startup fails (HACK-1917). The positive control explores 112 states.
+Compose startup fails (HACK-1917). The positive control explores 136 states.
 Readiness publishes the run mapping. A failure before readiness lets the graph
 owner's retaining cleanup either complete or be refused; the frontend then makes
 one read-only inspection that authenticates the exact receipt or is refused.
@@ -723,10 +723,15 @@ the later dead-owner recovery, which other models and runtime tests own.
 
 HACK-1940 extends this same owner model with launcher notification, acceptance,
 owner acknowledgement, return and channel loss. `NoPrematureReturn` requires
-readiness plus acceptance before detached success; `NoLostHandoff` prevents a
+readiness, committed down-hook bookkeeping and acceptance before detached success; `NoLostHandoff` prevents a
 lost pre-acceptance launcher from being handed off later. The
-`detached-before-ready` negative control removes the readiness guard and returns
-before Ready. Source: `native-detached-up.ts`, image onReady after hooks,
+`detached-before-ready` negative control bypasses both notification gates and returns
+before Ready.
+`Bookkeep` separates graph readiness from successful journal completion and its
+cancellation fence. The `detached-before-bookkeeping` control keeps Ready but
+removes the journal guard, allowing false success while `bookkept = FALSE`.
+The delayed, failed and canceled journal regressions in `native-project-start.test.ts`
+map that boundary to `stop.owe` before `onReady`. Source: `native-detached-up.ts`, image onReady after hooks,
 and authored `startupSelection.onReady` after durable publication. The synthetic
 `native-detached-up.test.ts` process fixtures cover post-launcher control,
 pre-acceptance launcher death, timeout and child failure. They do not execute

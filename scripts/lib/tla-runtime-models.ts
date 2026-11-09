@@ -1295,7 +1295,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-startup-owner",
     module: "Owner",
-    states: 112,
+    states: 136,
     invariant: "NoUnownedResources",
     action: "ExitUnconfirmed",
     fields: [
@@ -1305,6 +1305,18 @@ const contracts: readonly ModelContract[] = [
       'resources = "present"',
     ],
     additionalControls: [
+      {
+        name: "detached-before-bookkeeping",
+        negative: true,
+        invariant: "NoPrematureReturn",
+        action: "Return",
+        fields: [
+          'launcher = "returned"',
+          "accepted = TRUE",
+          "readied = TRUE",
+          "bookkept = FALSE",
+        ],
+      },
       {
         name: "detached-before-ready",
         negative: true,

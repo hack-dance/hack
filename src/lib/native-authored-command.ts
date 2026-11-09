@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { nativeAuthoredExecOptions } from "../backends/native-authored-exec-options.ts";
 import { nativeAuthoredProjectExec } from "../backends/native-authored-project-exec.ts";
 import {
@@ -46,6 +46,7 @@ import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import type { NativeComposeSelection } from "./native-compose-selection.ts";
+import { nativeDetachedUpReady } from "./native-detached-up.ts";
 import {
   createNativeEnvFingerprintEntry,
   createNativeEnvFingerprintSession,
@@ -620,8 +621,20 @@ function startupSelection(
         });
       }
     },
-    onReady: () => {
+    onReady: (selection) => {
       envFingerprints.commit();
+      const receipt = selection.record.receipt;
+      nativeDetachedUpReady({
+        project: basename(input.scope.projectRoot),
+        branch: input.scope.branch,
+        composeProject: basename(input.scope.projectRoot),
+        started: Object.keys(receipt.readiness).filter(
+          (name) => receipt.readiness[name] !== "completed"
+        ),
+        completed: Object.keys(receipt.readiness).filter(
+          (name) => receipt.readiness[name] === "completed"
+        ),
+      });
       logger.info({ message: "Project is ready. Press Ctrl-C to stop." });
       return undefined;
     },

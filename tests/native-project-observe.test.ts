@@ -417,7 +417,7 @@ test("unsupported native forms and missing restart consent refuse before Docker 
       expect(code).not.toBe(0);
       expect(stdout + stderr).toContain(
         operation === "up"
-          ? "E_USAGE: Native `hack up` runs in the foreground only, so --detach is not supported."
+          ? "E_STARTUP_INCOMPLETE: Native detached startup was not confirmed."
           : operation === "restart"
             ? "E_PERMISSION: Native restart requires HACK_NATIVE_SHARED_SOURCE=1"
             : operation === "exec"

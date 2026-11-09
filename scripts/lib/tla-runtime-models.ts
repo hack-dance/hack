@@ -283,7 +283,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-frontend-recovery",
     module: "Recovery",
-    states: 602,
+    states: 1752,
     invariant: "NoUnreservedPromotion",
     action: "PromoteCandidate",
     fields: [
@@ -293,6 +293,28 @@ const contracts: readonly ModelContract[] = [
       "pending = 0",
     ],
     additionalControls: [
+      {
+        name: "live-launcher-recovery",
+        negative: true,
+        invariant: "NoLiveLauncherRecovery",
+        action: "TryLauncherRecovery",
+        fields: [
+          'launcherRecovery = "unsafe"',
+          "launcherAlive = FALSE",
+          "alive = TRUE",
+        ],
+      },
+      {
+        name: "live-launcher-refusal-reachable",
+        negative: true,
+        invariant: "NeverLiveLauncherRefusal",
+        action: "TryLauncherRecovery",
+        fields: [
+          'launcherRecovery = "refused"',
+          "launcherAlive = FALSE",
+          "alive = TRUE",
+        ],
+      },
       {
         name: "uncommitted-release",
         negative: true,
@@ -1273,7 +1295,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-startup-owner",
     module: "Owner",
-    states: 32,
+    states: 112,
     invariant: "NoUnownedResources",
     action: "ExitUnconfirmed",
     fields: [
@@ -1283,6 +1305,13 @@ const contracts: readonly ModelContract[] = [
       'resources = "present"',
     ],
     additionalControls: [
+      {
+        name: "detached-before-ready",
+        negative: true,
+        invariant: "NoPrematureReturn",
+        action: "Return",
+        fields: ['launcher = "returned"', "accepted = TRUE", "readied = FALSE"],
+      },
       {
         name: "refused-inspection",
         negative: true,

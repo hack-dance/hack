@@ -1049,6 +1049,19 @@ function readyProgress(opts: {
     endpoints: nativeReadySummary(opts),
   };
 }
+
+/** Ready completion goals have succeeded; keep jobs separate in lifecycle JSON. */
+function readyServiceSummary(readinessArgs: readonly string[]): {
+  readonly started: readonly string[];
+  readonly completed: readonly string[];
+} {
+  const goals = readinessArgs.filter((arg) => arg !== "--ready");
+  const name = (goal: string) => goal.slice(0, goal.lastIndexOf("="));
+  return {
+    started: goals.filter((goal) => !goal.endsWith("=completed")).map(name),
+    completed: goals.filter((goal) => goal.endsWith("=completed")).map(name),
+  };
+}
 /** The HTTPS port routes are served on: only while the frontend lease runs. */
 function servedHttpsPort(
   lease: unknown,
@@ -1631,7 +1644,10 @@ export async function startNativeProject(opts: {
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
   readonly restore?: NativeProjectRun;
-  readonly onReady?: () => Promise<void>;
+  readonly onReady?: (services: {
+    readonly started: readonly string[];
+    readonly completed: readonly string[];
+  }) => void | Promise<void>;
   readonly dependencyFile?: string;
   /** Per-env dependency files; the entry for the run's effective env replaces `dependencyFile`. */
   readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
@@ -2150,6 +2166,12 @@ export async function startNativeProject(opts: {
           // Redacted at receipt; the raw tail is never retained or persisted.
           let startupLogReport = "";
           const services = Object.keys(specs).sort();
+          const readinessArgs = nativeReadinessArgs({
+            specs,
+            plan: review.report.plan,
+            initializers: cache.initializers,
+            routed: routes.services,
+          });
           progress({ phase: "services", services });
           let stopWatching: (() => Promise<void>) | undefined;
           try {
@@ -2165,12 +2187,7 @@ export async function startNativeProject(opts: {
                 review.planId,
                 ...nativeSharedSourceFlags(review.report.plan),
                 ...cache.flags,
-                ...nativeReadinessArgs({
-                  specs,
-                  plan: review.report.plan,
-                  initializers: cache.initializers,
-                  routed: routes.services,
-                }),
+                ...readinessArgs,
                 ...routes.flags,
                 "--dependencies",
                 dependencyFile,
@@ -2296,7 +2313,7 @@ export async function startNativeProject(opts: {
                     .catch(() => undefined);
                 }
                 await hooks?.ready?.();
-                await opts.onReady?.();
+                await opts.onReady?.(readyServiceSummary(readinessArgs));
                 progress(
                   readyProgress({
                     services,

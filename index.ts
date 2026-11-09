@@ -5,9 +5,25 @@ import {
   initializeNativeCpuDiagnostics,
 } from "./src/lib/native-cpu-diagnostics.ts";
 import {
+  NATIVE_DETACHED_OWNER_ARGUMENT,
+  runNativeDetachedOwner,
+} from "./src/lib/native-detached-up.ts";
+import {
   runTtySupervisor,
   TTY_SUPERVISOR_ARGUMENT,
 } from "./src/lib/tty-supervisor.ts";
+
+if (Bun.argv[2] === NATIVE_DETACHED_OWNER_ARGUMENT) {
+  process.exit(
+    await runNativeDetachedOwner({
+      args: Bun.argv.slice(3),
+      run: async (args) => {
+        const { runCli } = await import("./packages/cli/index.ts");
+        return await runCli(args);
+      },
+    })
+  );
+}
 
 if (Bun.argv[2] === TTY_SUPERVISOR_ARGUMENT && process.send) {
   process.exit(await runTtySupervisor());

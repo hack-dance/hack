@@ -8,9 +8,9 @@ import { HackCliError } from "./cli-result.ts";
  * project discovery, input acquisition or any runtime request.
  */
 /**
- * The one-line `E_USAGE` refusal of a detached native foreground start. Image
- * and authored projects share it, so `up --detach` and `restart --detach` give
- * the same code and message on either path.
+ * The one-line `E_USAGE` refusal for internal foreground entry points. Public
+ * `up --detach` launches a background frontend before reaching this helper;
+ * `restart --detach` still refuses on both image and authored paths.
  */
 export function nativeForegroundDetachRefusal(opts: {
   readonly restart: boolean;

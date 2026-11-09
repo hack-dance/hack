@@ -1,18 +1,20 @@
 ---------------------------- MODULE Recovery ----------------------------
 EXTENDS Naturals, TLC
-CONSTANTS EnforceReservation, EnforceRelease, EnforceAuthority, EnforceBinding
+CONSTANTS EnforceReservation, EnforceRelease, EnforceAuthority, EnforceBinding, EnforceOwnerDeath
 VARIABLES fresh, directory, owner, pending, savedOwner, savedNext, release,
           stage, active, alive, attempts, crashed, crashStage, progress, ready,
-          binding, unsafePromotion, unsafeAbsence, unsafeEffect
+          binding, unsafePromotion, unsafeAbsence, unsafeEffect, launcherAlive, launcherRecovery
+launch == <<launcherAlive, launcherRecovery>>
 publication == <<directory, owner, pending, savedOwner, savedNext, release>>
 process == <<stage, active, alive, attempts>>
 history == <<crashed, crashStage>>
 resources == <<progress, ready>>
 unsafe == <<unsafePromotion, unsafeAbsence, unsafeEffect>>
-vars == <<fresh, publication, process, history, resources, binding, unsafe>>
+core == <<fresh, publication, process, history, resources, binding, unsafe>>
+vars == <<core, launch>>
 Matches == binding = 1
 Issued == active /\ owner = savedOwner /\ savedNext = 0 /\ alive
-Init == /\ fresh \in BOOLEAN
+CoreInit == /\ fresh \in BOOLEAN
         /\ directory = TRUE /\ owner = 1 /\ pending = 0
         /\ savedOwner = 1 /\ savedNext = 0 /\ release = FALSE
         /\ stage = (IF fresh THEN "leased" ELSE "admitted")
@@ -28,12 +30,14 @@ ReserveCandidate ==
     /\ stage' = "pending" /\ alive' = TRUE /\ active' = FALSE
     /\ UNCHANGED <<fresh, directory, owner, savedOwner, savedNext, release,
                     history, resources, binding, unsafe>>
+    /\ UNCHANGED launch
 BindCandidate ==
     /\ stage = "pending" /\ alive /\ Matches /\ pending # 0
     /\ savedOwner' = owner /\ savedNext' = pending
     /\ release' = (owner = 0) /\ stage' = "reserved"
     /\ UNCHANGED <<fresh, directory, owner, pending, active, alive, attempts,
                     history, resources, binding, unsafe>>
+    /\ UNCHANGED launch
 PromoteCandidate ==
     /\ stage \in {"pending", "reserved"} /\ Matches /\ alive
     /\ pending # 0 /\ (EnforceReservation => savedNext = pending)
@@ -42,17 +46,20 @@ PromoteCandidate ==
     /\ UNCHANGED <<fresh, directory, savedOwner, savedNext, release,
                     active, alive, attempts, history, resources, binding,
                     unsafeAbsence, unsafeEffect>>
+    /\ UNCHANGED launch
 IssueLease ==
     /\ stage = "promoted" /\ Matches /\ alive /\ owner = savedNext
     /\ active' = TRUE /\ stage' = "issued"
     /\ UNCHANGED <<fresh, publication, alive, attempts, history, resources,
                     binding, unsafe>>
+    /\ UNCHANGED launch
 BindIssuedLease ==
     /\ stage = "issued" /\ active /\ Matches /\ alive
     /\ savedOwner' = owner /\ savedNext' = 0 /\ release' = FALSE
     /\ stage' = "leased"
     /\ UNCHANGED <<fresh, directory, owner, pending, active, alive, attempts,
                     history, resources, binding, unsafe>>
+    /\ UNCHANGED launch
 AdvanceResources ==
     /\ stage = "leased" /\ progress < 3
     /\ (EnforceAuthority => Issued) /\ (EnforceBinding => Matches)
@@ -61,11 +68,13 @@ AdvanceResources ==
     /\ unsafeEffect' = (unsafeEffect \/ ~Issued \/ ~Matches)
     /\ UNCHANGED <<fresh, publication, process, history, binding,
                     unsafePromotion, unsafeAbsence>>
+    /\ UNCHANGED launch
 ArmRelease ==
     /\ stage = "leased" /\ Issued /\ Matches
     /\ release' = TRUE /\ stage' = "releasing"
     /\ UNCHANGED <<fresh, directory, owner, pending, savedOwner, savedNext,
                     active, alive, attempts, history, resources, binding, unsafe>>
+    /\ UNCHANGED launch
 RemoveOwner ==
     /\ stage \in {"leased", "releasing"} /\ Issued /\ Matches
     /\ (EnforceRelease => release)
@@ -74,29 +83,35 @@ RemoveOwner ==
     /\ UNCHANGED <<fresh, directory, pending, savedOwner, savedNext, release,
                     alive, attempts, history, resources, binding,
                     unsafePromotion, unsafeEffect>>
+    /\ UNCHANGED launch
 RemoveDirectory ==
     /\ stage = "empty" /\ release /\ owner = 0 /\ pending = 0 /\ Matches
     /\ directory' = FALSE /\ stage' = "done" /\ alive' = FALSE
     /\ UNCHANGED <<fresh, owner, pending, savedOwner, savedNext, release,
                     active, attempts, history, resources, binding, unsafe>>
+    /\ UNCHANGED launch
 FailFreshRelease ==
     /\ fresh /\ stage = "leased" /\ progress = 3 /\ ~release
     /\ stage' = "release-failed" /\ active' = FALSE
     /\ UNCHANGED <<fresh, publication, alive, attempts, history, resources,
                     binding, unsafe>>
+    /\ UNCHANGED launch
 LoseAuthority ==
     /\ stage = "leased" /\ active /\ active' = FALSE
     /\ UNCHANGED <<fresh, publication, stage, alive, attempts, history,
                     resources, binding, unsafe>>
+    /\ UNCHANGED launch
 ReplaceBinding ==
     /\ binding = 1 /\ binding' = 2
     /\ UNCHANGED <<fresh, publication, process, history, resources, unsafe>>
+    /\ UNCHANGED launch
 Crash ==
     /\ stage \in {"pending", "reserved", "promoted", "issued", "leased",
                     "releasing", "empty", "release-failed"}
     /\ ~crashed /\ crashed' = TRUE /\ crashStage' = stage
     /\ stage' = "reopen" /\ active' = FALSE /\ alive' = FALSE
     /\ UNCHANGED <<fresh, publication, attempts, resources, binding, unsafe>>
+    /\ UNCHANGED launch
 RecoverSavedCandidate ==
     /\ stage = "reopen" /\ ~alive /\ Matches
     /\ directory /\ pending # 0 /\ pending = savedNext
@@ -104,6 +119,7 @@ RecoverSavedCandidate ==
     /\ owner' = pending /\ pending' = 0 /\ stage' = "admitted"
     /\ UNCHANGED <<fresh, directory, savedOwner, savedNext, release,
                     active, alive, attempts, history, resources, binding, unsafe>>
+    /\ UNCHANGED launch
 ReadmitOwner ==
     /\ stage = "reopen" /\ ~alive /\ Matches /\ pending = 0
     /\ (owner = savedOwner \/ (owner = savedNext /\ owner # 0)
@@ -111,22 +127,38 @@ ReadmitOwner ==
     /\ directory' = TRUE /\ stage' = "admitted"
     /\ UNCHANGED <<fresh, owner, pending, savedOwner, savedNext, release,
                     active, alive, attempts, history, resources, binding, unsafe>>
+    /\ UNCHANGED launch
 RefuseUnknown ==
     /\ stage = "reopen" /\ (pending # 0 /\ pending # savedNext)
     /\ stage' = "unknown-retained"
     /\ UNCHANGED <<fresh, publication, active, alive, attempts, history,
                     resources, binding, unsafe>>
+    /\ UNCHANGED launch
 RefuseChanged ==
     /\ stage = "reopen" /\ ~Matches /\ stage' = "changed-retained"
     /\ UNCHANGED <<fresh, publication, active, alive, attempts, history,
                     resources, binding, unsafe>>
-Next == ReserveCandidate \/ BindCandidate \/ PromoteCandidate \/ IssueLease
+    /\ UNCHANGED launch
+CoreNext == ReserveCandidate \/ BindCandidate \/ PromoteCandidate \/ IssueLease
         \/ BindIssuedLease \/ AdvanceResources \/ ArmRelease \/ RemoveOwner
         \/ RemoveDirectory \/ FailFreshRelease \/ LoseAuthority \/ ReplaceBinding
         \/ Crash \/ RecoverSavedCandidate \/ ReadmitOwner \/ RefuseUnknown
         \/ RefuseChanged
+\* Launcher disconnection is distinct from death of the retained frontend.
+\* It cannot substitute for the exact owner-incarnation checks in recovery.
+Init == CoreInit /\ launcherAlive = TRUE /\ launcherRecovery = "none"
+LauncherLoss == /\ launcherAlive /\ launcherAlive' = FALSE
+                /\ UNCHANGED <<core, launcherRecovery>>
+TryLauncherRecovery ==
+    /\ ~launcherAlive /\ alive /\ stage = "leased" /\ launcherRecovery = "none"
+    /\ launcherRecovery' = IF EnforceOwnerDeath THEN "refused" ELSE "unsafe"
+    /\ UNCHANGED <<core, launcherAlive>>
+Next == CoreNext \/ LauncherLoss \/ TryLauncherRecovery
+NoLiveLauncherRecovery == launcherRecovery # "unsafe"
+NeverLiveLauncherRefusal == launcherRecovery # "refused"
 Spec == Init /\ [][Next]_vars
-TypeOK == /\ fresh \in BOOLEAN /\ directory \in BOOLEAN
+TypeOK == /\ launcherAlive \in BOOLEAN
+          /\ launcherRecovery \in {"none", "refused", "unsafe"} /\ fresh \in BOOLEAN /\ directory \in BOOLEAN
           /\ owner \in 0..3 /\ pending \in 0..3 /\ savedOwner \in 0..3
           /\ savedNext \in 0..3 /\ release \in BOOLEAN
           /\ stage \in {"admitted", "pending", "reserved", "promoted", "issued",

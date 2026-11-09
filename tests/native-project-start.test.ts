@@ -1302,12 +1302,21 @@ test("managed values are delivered only to reviewed profile-active services", as
         }),
     });
   let delivered: unknown;
+  let reported: unknown;
   const serve = opts.dependencies.serve!;
   opts.dependencies.serve = async (request) => {
     delivered = JSON.parse(new TextDecoder().decode(request.privateInput));
     return await serve(request);
   };
-  expect(await startNativeProject(opts)).toBe(0);
+  expect(
+    await startNativeProject({
+      ...opts,
+      onReady: (services) => {
+        reported = services;
+      },
+    })
+  ).toBe(0);
+  expect(reported).toEqual({ started: ["web"], completed: [] });
   expect(delivered).toMatchObject({
     version: 1,
     services: { web: { GREETING: "synthetic-secret" } },
@@ -1467,6 +1476,7 @@ test("reviewed dependency caches bind published source and successful completion
           state: "guest-content-verified-no-job-started",
         }
       : await invoke?.(input);
+  let reported: unknown;
   opts.dependencies.serve = async (input) => {
     expect(input.args).toContain("--source-revision");
     expect(input.args).toContain("e".repeat(64));
@@ -1476,7 +1486,15 @@ test("reviewed dependency caches bind published source and successful completion
     }
     return await serve(input);
   };
-  expect(await startNativeProject(opts)).toBe(0);
+  expect(
+    await startNativeProject({
+      ...opts,
+      onReady: (services) => {
+        reported = services;
+      },
+    })
+  ).toBe(0);
+  expect(reported).toEqual({ started: [], completed: ["web"] });
 });
 
 test("approved outbound hosts are forwarded exactly and sorted before runtime admission", async () => {

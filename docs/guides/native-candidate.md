@@ -893,6 +893,9 @@ recorded container's ownership, runs no probes and grants no authority; foregrou
 report that contains an error diagnostic. With `--json` it exits 0 and the report is
 the result: `diagnostics` and `enrollment_compatible` carry the outcome, because Hack
 plans original input that its normalization adapts afterwards.
+JSON exit 0 means a report was produced, not that execution is admitted. Automation
+must check `plan.enrollment_compatible` and `plan.diagnostics` before proceeding;
+parse, input and transport failures still exit non-zero in JSON mode.
 Exec requires a running service and returns Base64 stdout/stderr to preserve arbitrary
 bytes, an exit code, and a truncation flag. The CLI also exits with the command's exit
 code. Retained exec output is limited to 1 MiB per stream.

@@ -5520,3 +5520,61 @@ test("ps reports pending during input preparation before any run mapping exists"
   await startNativeProject(opts);
   expect((await nativeProjectPs(opts)).status).toBe("not_started");
 });
+
+test("invalid HTTP retries name the service and field before hooks or runtime effects", async () => {
+  const { opts, events } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.web.healthcheck = {
+      "x-hack-http": {
+        port: 3000,
+        path: "/",
+        interval_ms: 100,
+        timeout_ms: 500,
+        retries: 120,
+        start_period_ms: 0,
+      },
+    };
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "service web field healthcheck.x-hack-http.retries"
+  );
+  expect(events).not.toContain("before");
+  expect(events).not.toContain("runtime up");
+  expect(events).not.toContain("runtime ensure-image");
+});
+
+test("missing registry tags name the service and image field without echoing values", async () => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    return {
+      ...input,
+      normalizedComposeJson: JSON.stringify({
+        services: { web: { image: "synthetic:missing" } },
+      }),
+    };
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      throw new NativeRuntimeRequestError({
+        nativeCode: "registry_image_not_found",
+        message: "private registry detail",
+      });
+    }
+    return await invoke(request);
+  };
+  const error = await startNativeProject(opts).catch(
+    (failure: unknown) => failure
+  );
+  expect((error as Error).message).toContain(
+    "service web field image (registry_image_not_found)"
+  );
+  expect((error as Error).message).not.toContain("synthetic:missing");
+  expect((error as Error).message).not.toContain("private registry detail");
+});

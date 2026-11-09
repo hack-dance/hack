@@ -20,6 +20,7 @@ import {
   adaptNativeGcloudEnvironment,
   type NativeGcloudSelection,
 } from "./native-gcloud-environment.ts";
+import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
 import {
   acquireNativeHttpsLease,
   NativeHttpsLeaseAcquisitionError,
@@ -541,6 +542,7 @@ export function prepareNativeProjectServices(
     ) {
       throw refused();
     }
+    admitNativeHttpProbe(name, value);
     result[name] = value;
   }
   return result;
@@ -548,6 +550,7 @@ export function prepareNativeProjectServices(
 /** Fixed text of the refusal when the project share was not granted. */
 export const NATIVE_SHARED_SOURCE_REFUSAL =
   "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
+const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -577,15 +580,30 @@ async function pinNativeProjectImages(opts: {
       continue;
     }
     const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
-    const ensured = await opts.invoke({
-      runtime: opts.runtime,
-      cwd: opts.projectRoot,
-      args: [
-        ...nativeEnsureImageArgs(image, policy),
-        ...nativeImagePolicyArgs(),
-      ],
-      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-    });
+    const ensured = await opts
+      .invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: [
+          ...nativeEnsureImageArgs(image, policy),
+          ...nativeImagePolicyArgs(),
+        ],
+        timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+      })
+      .catch((error: unknown) => {
+        if (
+          error instanceof NativeRuntimeRequestError &&
+          error.nativeCode === "registry_image_not_found"
+        ) {
+          const label = SERVICE_NAME.test(name)
+            ? `service ${name}`
+            : "a service";
+          throw new ClosedCliError(
+            `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
+          );
+        }
+        throw error;
+      });
     if (
       !isRecord(ensured) ||
       typeof ensured.image_id !== "string" ||

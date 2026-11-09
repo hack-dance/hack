@@ -960,6 +960,18 @@ declares stays owned and unmounted until `hack down --remove-data` (Compose also
 keeps project volumes). Retained data is only ever reattached to the run and
 namespace that created it.
 
+A removed service's stop record from the previous `down` or Ctrl-C is retired
+during that reconciliation, after its exact container is confirmed absent, so the
+next stop does not refuse it. Builds before this change kept that record, and the
+next stop failed with `graph_shutdown_uncertain`, leaving the graph in
+`cleanup-intent`. Stop and cleanup now drop such a stale record only when the
+engine no longer has that container. A graph left in that state can then finish
+through the existing explicit recovery in
+[Inspect a partial retaining shutdown](#inspect-a-partial-retaining-shutdown), as
+long as its relay-control publication still exists. A graph whose foreground owner
+exited cleanly after the failed stop has no such publication, and recovery still
+refuses it with `relay_owner_refused`.
+
 Graphs with `hack.dependencies.*` caches reconcile the same way. A cache's identity
 covers only its own inputs: the initializer's service definition and resolved
 command, entrypoint, environment and user, the cache declaration, its image, the

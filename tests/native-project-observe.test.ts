@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -710,4 +719,22 @@ test("pending startup evidence is branch scoped and each invocation retires only
   expect((await nativeProjectPs(opts)).status).toBe("pending");
   await second();
   expect((await nativeProjectPs(opts)).status).toBe("not_started");
+});
+
+test("startup completion preserves a substituted observation marker", async () => {
+  const opts = await fixture(false);
+  const finish = await beginNativeProjectStartupObservation(opts.scope);
+  const directory = join(opts.scope.projectDir, ".internal", "native-runs");
+  const marker = (await readdir(directory)).find((name) =>
+    name.includes(".starting-")
+  );
+  expect(marker).toBeDefined();
+  const path = join(directory, marker!);
+  await rename(path, `${path}.original`);
+  await writeFile(path, "replacement owned by another writer\n");
+  await finish();
+  await finish();
+  expect(await readFile(path, "utf8")).toBe(
+    "replacement owned by another writer\n"
+  );
 });

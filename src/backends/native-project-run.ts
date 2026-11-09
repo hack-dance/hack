@@ -1703,12 +1703,38 @@ export async function beginNativeProjectStartupObservation(
 ) {
   const p = await paths(opts, true);
   const file = `${p.file}.starting-${randomUUID()}`;
-  await write(file, "pending\n");
-  const original = await lstat(file);
+  const handle = await open(
+    file,
+    constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_WRONLY |
+      constants.O_NOFOLLOW,
+    0o600
+  );
+  const original = await handle.stat().catch(async (error: unknown) => {
+    await handle.close();
+    throw error;
+  });
+  try {
+    await handle.writeFile("pending\n");
+    await handle.sync();
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+  let settled = false;
   return async () => {
-    const current = await lstat(file).catch(() => null);
-    if (current?.dev === original.dev && current.ino === original.ino) {
-      await unlink(file);
+    if (settled) {
+      return;
+    }
+    settled = true;
+    try {
+      const current = await lstat(file).catch(() => null);
+      if (current?.dev === original.dev && current.ino === original.ino) {
+        await unlink(file);
+      }
+    } finally {
+      await handle.close();
     }
   };
 }

@@ -46,7 +46,8 @@ function runtimeNotRunning(): HackCliError {
   });
 }
 /**
- * Native ps result. `runtime_not_running` means the project has an owned run
+ * Native ps result. `pending` reports frontend startup intent before a run mapping
+ * exists; it grants no readiness or live-process authority. `runtime_not_running` means the project has an owned run
  * mapping but the candidate runtime is stopped: nothing was observed, so
  * `phase` is null and `items` is empty. `runtime_busy` means another operation
  * held the exclusive provider lease for the whole bounded read (a starting

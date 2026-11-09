@@ -118,6 +118,9 @@ packages/config-compiler/target/
 /tests/models/tla/**/MC.out
 /tests/models/tla/**/MC.err
 /tests/models/tla/**/.apalache/
+/tests/models/tla/**/*_TTrace_*.bin
+/tests/models/tla/**/SpecTE.tla
+/tests/models/tla/**/SpecTE.cfg
 
 # Python harness bytecode
 __pycache__/

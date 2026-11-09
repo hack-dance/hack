@@ -115,7 +115,7 @@ test.skipIf(!tmux)(
     const bashRc = join(root, "bashrc");
     // tmux's default shell may be noninteractive Bash, which clears inherited PS1.
     // Set it in the interactive shell itself, without loading the user's startup files.
-    await writeFile(bashRc, 'PS1="HACK_TEST_READY> "\n');
+    await writeFile(bashRc, 'PS1="HACK_TEST_READY> "\nunset HISTFILE\n');
     // Bash's readonly UID/EUID must not intercept the command's selected environment.
     const bashSession = await privateExec([
       tmux ?? "tmux",

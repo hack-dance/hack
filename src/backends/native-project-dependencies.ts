@@ -33,6 +33,7 @@ const FIELDS = new Set([
   "host_ancestor_start_micros",
   "host_lifecycle",
   "host_shared_helper",
+  "host_wait_seconds",
 ]);
 /** Resolved authority; a selection file names an owner instead of these. */
 const RESOLVED_OWNER_FIELDS = [
@@ -48,6 +49,15 @@ const OWNER_AUTHORITY_FIELDS = [
 
 /** Most bindings one selection may grant, counted after version 2 expansion. */
 const LIMIT = 128;
+
+/**
+ * Seconds `up` waits, measured from the end of the `up.before` hooks, for a
+ * discovered listener (`host_executable`, `host_lifecycle` or
+ * `host_shared_helper`) when its entry sets no `host_wait_seconds`.
+ */
+export const NATIVE_HOST_DEPENDENCY_DEFAULT_WAIT_SECONDS = 60;
+/** Largest accepted `host_wait_seconds`; a longer wait refuses as a selection error. */
+export const NATIVE_HOST_DEPENDENCY_MAX_WAIT_SECONDS = 900;
 
 export type NativeHostDependency = {
   readonly service: string;
@@ -116,6 +126,9 @@ function discoveryReason(error: unknown): string | undefined {
     return DISCOVERY_REASONS.get(error);
   }
   if (error instanceof NativeRuntimeRequestError) {
+    if (error.nativeCode === "host_endpoint_unsupervised") {
+      return UNSUPERVISED_LISTENER_REASON;
+    }
     return error.nativeCode && SAFE_NATIVE_CODE.test(error.nativeCode)
       ? `listener discovery failed (${error.nativeCode})`
       : "listener discovery request failed";
@@ -126,6 +139,18 @@ const FILE_REASON =
   "HACK_NATIVE_DEPENDENCIES must name an absolute path to a bounded, unchanged regular JSON file";
 const MISSING_LISTENER_REASON =
   "no listener owned by host_executable answered on host_port before the discovery deadline";
+const MISSING_OWNED_LISTENER_REASON =
+  "no listener beneath the selected owner answered on host_port before the discovery deadline";
+/**
+ * Native review requires a live same-user parent for an executable-selected
+ * listener; one reparented to PID 1 (`nohup … &`, `ssh -f`, a daemonizing fork)
+ * would pass discovery and refuse only after runtime work.
+ */
+const UNSUPERVISED_LISTENER_REASON =
+  "the listener on host_port has no supervising parent process (its parent is PID 1, as after nohup … &, ssh -f or a daemonizing fork); keep it under a parent that stays running, such as a persistent up.before hook that waits for it";
+const WAIT_SECONDS_REASON = `host_wait_seconds must be an integer 1..${NATIVE_HOST_DEPENDENCY_MAX_WAIT_SECONDS}`;
+const WAIT_WITHOUT_DISCOVERY_REASON =
+  "host_wait_seconds requires host_executable, host_lifecycle or host_shared_helper; a fixed host_pid is never waited for";
 const SHAPE_REASON =
   "the selection must be {version: 1, dependencies: [1..128 entries]} with no other fields";
 const INVALID_DISCOVERY_REASON = "listener discovery returned an invalid reply";
@@ -235,6 +260,9 @@ function entryProblem(
   if (host !== undefined) {
     return host;
   }
+  if (!validWaitSeconds(entry.host_wait_seconds)) {
+    return WAIT_SECONDS_REASON;
+  }
   if (
     !(
       Array.isArray(entry.aliases) &&
@@ -261,6 +289,16 @@ function hostname(value: unknown): value is string {
     value !== "localhost.localdomain" &&
     !NUMERIC_HOST.test(value) &&
     value.split(".").every((part) => LABEL.test(part))
+  );
+}
+
+function validWaitSeconds(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "number" &&
+      Number.isInteger(value) &&
+      value >= 1 &&
+      value <= NATIVE_HOST_DEPENDENCY_MAX_WAIT_SECONDS)
   );
 }
 
@@ -366,6 +404,13 @@ export function provisionalNativeHostDependencies(opts: {
     if (RESOLVED_OWNER_FIELDS.some((field) => entry[field] !== undefined)) {
       throw refused(RESOLVED_OWNER_REASON, describeEntry(entry, index));
     }
+    if (
+      entry.host_wait_seconds !== undefined &&
+      owner === undefined &&
+      entry.host_executable === undefined
+    ) {
+      throw refused(WAIT_WITHOUT_DISCOVERY_REASON, describeEntry(entry, index));
+    }
     const selected = JSON.stringify(owner ?? null);
     const prior = owners.get(entry.host_port);
     if (prior !== undefined && prior !== selected) {
@@ -422,6 +467,7 @@ const DECLARATIVE_FIELDS = new Set([
   "host_port",
   "host_executable",
   "host_supervisor_depth",
+  "host_wait_seconds",
 ]);
 
 /**
@@ -746,27 +792,73 @@ function ownedAuthority(opts: {
   };
 }
 
+/**
+ * The public, validated parts of one discovery request. `waitSeconds` is the
+ * largest `host_wait_seconds` (or the default) of every entry sharing this
+ * listener; startup measures it from the end of the `up.before` hooks.
+ * `service` and `binding` name the first such entry, for progress output.
+ */
+export type NativeDependencyDiscoveryTarget = {
+  readonly hostPort: number;
+  readonly waitSeconds: number;
+  readonly service: string;
+  readonly binding: string;
+};
+
 type NativeDependencyDiscovery = {
-  readonly discover?: (selection: {
-    readonly hostPort: number;
-    readonly executable: string;
-  }) => Promise<{
+  readonly discover?: (
+    selection: NativeDependencyDiscoveryTarget & { readonly executable: string }
+  ) => Promise<{
     readonly host_pid: number;
     readonly endpoint_fingerprint: string;
   }>;
   /** Resolves `host_lifecycle` / `host_shared_helper` owners; absent refuses them. */
   readonly owners?: NativeDependencyOwnerResolver;
-  readonly discoverOwned?: (selection: {
-    readonly hostPort: number;
-    readonly ancestorPid: number;
-  }) => Promise<NativeOwnedDiscovery>;
+  readonly discoverOwned?: (
+    selection: NativeDependencyDiscoveryTarget & {
+      readonly ancestorPid: number;
+    }
+  ) => Promise<NativeOwnedDiscovery>;
+  /**
+   * Names of the persistent `up.before` hooks and lifecycle processes that ran
+   * before discovery. A discovery-deadline refusal lists them (project config
+   * names only, never commands or listener values).
+   */
+  readonly listenerHooks?: readonly string[];
 };
+
+const MAX_LISTED_HOOKS = 8;
+
+/** Value-free deadline detail: the wait, the hooks that ran, and how to raise it. */
+function missingListenerReason(opts: {
+  readonly reason: string;
+  readonly waitSeconds: number;
+  readonly hooks: readonly string[] | undefined;
+}): string {
+  const names = (opts.hooks ?? []).filter((name) => OWNER_NAME.test(name));
+  const listed = names.slice(0, MAX_LISTED_HOOKS).join(", ");
+  const more =
+    names.length > MAX_LISTED_HOOKS
+      ? ` and ${names.length - MAX_LISTED_HOOKS} more`
+      : "";
+  const hooks =
+    names.length > 0
+      ? `; persistent hooks and processes: ${listed}${more}`
+      : "; no persistent up.before hook or lifecycle process ran";
+  return `${opts.reason} (waited ${opts.waitSeconds} s after the up.before hooks${hooks}); if the listener starts more slowly, set host_wait_seconds on this binding (default ${NATIVE_HOST_DEPENDENCY_DEFAULT_WAIT_SECONDS}, at most ${NATIVE_HOST_DEPENDENCY_MAX_WAIT_SECONDS})`;
+}
 
 /**
  * Owned discovery failure: a listener outside the owner's tree keeps the
  * closed owner-mismatch text; anything else names a value-free reason.
  */
-function ownedDiscoveryRefusal(error: unknown, context: string): Error {
+function ownedDiscoveryRefusal(opts: {
+  readonly error: unknown;
+  readonly context: string;
+  readonly waitSeconds: number;
+  readonly hooks: readonly string[] | undefined;
+}): Error {
+  const error = opts.error;
   if (
     error instanceof NativeRuntimeRequestError &&
     error.nativeCode === "host_endpoint_owner"
@@ -776,16 +868,73 @@ function ownedDiscoveryRefusal(error: unknown, context: string): Error {
   const reason = discoveryReason(error);
   return refused(
     reason === MISSING_LISTENER_REASON
-      ? "no listener beneath the selected owner answered on host_port before the discovery deadline"
+      ? missingListenerReason({
+          reason: MISSING_OWNED_LISTENER_REASON,
+          waitSeconds: opts.waitSeconds,
+          hooks: opts.hooks,
+        })
       : (reason ?? "listener discovery failed"),
-    context
+    opts.context
   );
 }
 
+/** One discovery per owner (or executable) and host port; undefined for fixed PIDs. */
+function resolutionKey(entry: Record<string, unknown>): string | undefined {
+  const owner = ownerSelector(entry);
+  if (owner) {
+    return `${owner.kind}\0${owner.name}\0${Number(entry.host_port)}`;
+  }
+  return entry.host_executable === undefined
+    ? undefined
+    : `${String(entry.host_executable)}\0${Number(entry.host_port)}`;
+}
+
+/**
+ * The wait of each shared discovery: the largest `host_wait_seconds` of the
+ * entries that select it, so declaring a longer wait on any one of them is
+ * enough. Entries were validated by {@link provisionalNativeHostDependencies}.
+ */
+function discoveryWaits(entries: readonly unknown[]): Map<string, number> {
+  const waits = new Map<string, number>();
+  for (const entry of entries) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const key = resolutionKey(entry);
+    if (key === undefined) {
+      continue;
+    }
+    const wait =
+      typeof entry.host_wait_seconds === "number"
+        ? entry.host_wait_seconds
+        : NATIVE_HOST_DEPENDENCY_DEFAULT_WAIT_SECONDS;
+    waits.set(key, Math.max(waits.get(key) ?? 0, wait));
+  }
+  return waits;
+}
+
+function discoveryTarget(
+  entry: Record<string, unknown>,
+  waits: ReadonlyMap<string, number>
+): NativeDependencyDiscoveryTarget {
+  const key = resolutionKey(entry);
+  return {
+    hostPort: Number(entry.host_port),
+    waitSeconds:
+      (key === undefined ? undefined : waits.get(key)) ??
+      NATIVE_HOST_DEPENDENCY_DEFAULT_WAIT_SECONDS,
+    service: String(entry.service),
+    binding: String(entry.binding),
+  };
+}
+
 /** One live discovery per owner (or executable) and host port, in entry order. */
-function createDependencyResolution(opts: NativeDependencyDiscovery) {
+function createDependencyResolution(
+  opts: NativeDependencyDiscovery & { readonly entries: readonly unknown[] }
+) {
   const resolved = new Map<string, number>();
   const owned = new Map<string, Record<string, unknown>>();
+  const waits = discoveryWaits(opts.entries);
   const ownedEntry = async (
     entry: Record<string, unknown>,
     owner: NativeDependencyOwner,
@@ -797,8 +946,8 @@ function createDependencyResolution(opts: NativeDependencyDiscovery) {
         context
       );
     }
-    const hostPort = Number(entry.host_port);
-    const key = `${owner.kind}\0${owner.name}\0${hostPort}`;
+    const target = discoveryTarget(entry, waits);
+    const key = `${owner.kind}\0${owner.name}\0${target.hostPort}`;
     let authority = owned.get(key);
     if (authority === undefined) {
       // Owner refusals keep their own closed text.
@@ -806,11 +955,16 @@ function createDependencyResolution(opts: NativeDependencyDiscovery) {
       let found: NativeOwnedDiscovery;
       try {
         found = await opts.discoverOwned({
-          hostPort,
+          ...target,
           ancestorPid: proof.pid,
         });
       } catch (error) {
-        throw ownedDiscoveryRefusal(error, context);
+        throw ownedDiscoveryRefusal({
+          error,
+          context,
+          waitSeconds: target.waitSeconds,
+          hooks: opts.listenerHooks,
+        });
       }
       authority = ownedAuthority({ found, ownerPid: proof.pid, context });
       // The owner must still be the same live process after discovery.
@@ -820,6 +974,7 @@ function createDependencyResolution(opts: NativeDependencyDiscovery) {
     const {
       host_lifecycle: _lifecycle,
       host_shared_helper: _helper,
+      host_wait_seconds: _wait,
       ...rest
     } = entry;
     return { ...rest, ...authority };
@@ -835,16 +990,23 @@ function createDependencyResolution(opts: NativeDependencyDiscovery) {
       );
     }
     const executable = String(entry.host_executable);
-    const hostPort = Number(entry.host_port);
-    const key = `${executable}\0${hostPort}`;
+    const target = discoveryTarget(entry, waits);
+    const key = `${executable}\0${target.hostPort}`;
     let hostPid = resolved.get(key);
     if (hostPid === undefined) {
       let discovered: Awaited<ReturnType<NonNullable<typeof opts.discover>>>;
       try {
-        discovered = await opts.discover({ executable, hostPort });
+        discovered = await opts.discover({ ...target, executable });
       } catch (error) {
+        const reason = discoveryReason(error);
         throw refused(
-          discoveryReason(error) ?? "listener discovery failed",
+          reason === MISSING_LISTENER_REASON
+            ? missingListenerReason({
+                reason,
+                waitSeconds: target.waitSeconds,
+                hooks: opts.listenerHooks,
+              })
+            : (reason ?? "listener discovery failed"),
           context
         );
       }
@@ -859,7 +1021,8 @@ function createDependencyResolution(opts: NativeDependencyDiscovery) {
       hostPid = discovered.host_pid;
       resolved.set(key, hostPid);
     }
-    return { ...entry, host_pid: hostPid };
+    const { host_wait_seconds: _wait, ...rest } = entry;
+    return { ...rest, host_pid: hostPid };
   };
   return async (entry: unknown, index: number): Promise<unknown> => {
     if (!isRecord(entry)) {
@@ -928,7 +1091,10 @@ async function readSelectedHostDependencies(
   // Validate the complete intent before resolving owners or invoking native
   // process discovery.
   provisionalNativeHostDependencies({ value, services: opts.services });
-  const resolve = createDependencyResolution(opts);
+  const resolve = createDependencyResolution({
+    ...opts,
+    entries: value.dependencies,
+  });
   const dependencies: unknown[] = [];
   for (const [index, entry] of value.dependencies.entries()) {
     dependencies.push(await resolve(entry, index));
@@ -942,7 +1108,63 @@ async function readSelectedHostDependencies(
 type NativeDependencyWait = {
   readonly deadlineMs: number;
   readonly signal: AbortSignal;
+  /** Called before each retry delay while the listener is still missing. */
+  readonly onRetry?: () => void;
 };
+
+/** Value-free progress while startup waits for one discovered listener. */
+export type NativeDependencyWaitProgress = {
+  readonly service: string;
+  readonly binding: string;
+  readonly hostPort: number;
+  readonly waitedSeconds: number;
+  readonly limitSeconds: number;
+};
+
+const WAIT_PROGRESS_INTERVAL_MS = 10_000;
+
+/**
+ * The startup wait for one discovery: its deadline is `startedAtMs` plus the
+ * binding's `waitSeconds`, so every binding is measured from the end of the
+ * same `up.before` hooks rather than from when an earlier binding resolved.
+ * `report` runs on the first retry and then at most every ten seconds; it is
+ * observation only and its failure never changes discovery.
+ */
+export function nativeDependencyStartupWait(opts: {
+  readonly target: NativeDependencyDiscoveryTarget;
+  readonly startedAtMs: number;
+  readonly signal: AbortSignal;
+  readonly report?: (progress: NativeDependencyWaitProgress) => void;
+  readonly now?: () => number;
+}): NativeDependencyWait {
+  const now = opts.now ?? (() => performance.now());
+  let reportedAt = Number.NEGATIVE_INFINITY;
+  return {
+    deadlineMs: opts.startedAtMs + opts.target.waitSeconds * 1000,
+    signal: opts.signal,
+    onRetry: () => {
+      const current = now();
+      if (current - reportedAt < WAIT_PROGRESS_INTERVAL_MS) {
+        return;
+      }
+      reportedAt = current;
+      try {
+        opts.report?.({
+          service: opts.target.service,
+          binding: opts.target.binding,
+          hostPort: opts.target.hostPort,
+          waitedSeconds: Math.max(
+            0,
+            Math.floor((current - opts.startedAtMs) / 1000)
+          ),
+          limitSeconds: opts.target.waitSeconds,
+        });
+      } catch {
+        // Progress is advisory terminal output.
+      }
+    },
+  };
+}
 
 function remainingDiscoveryTime(
   wait?: NativeDependencyWait
@@ -973,6 +1195,7 @@ async function waitForNextDiscovery(opts: {
     return false;
   }
   const remaining = remainingDiscoveryTime(opts.wait);
+  opts.wait.onRetry?.();
   try {
     await delay(Math.min(500, remaining ?? 0), undefined, {
       signal: opts.wait.signal,
@@ -985,8 +1208,9 @@ async function waitForNextDiscovery(opts: {
 
 /**
  * Discover a pinned listener, optionally waiting for a persistent startup hook.
- * Only read-only endpoint identity refusals retry; all bindings share the caller's
- * deadline. A successful discovery still needs dependency-plan/admission review.
+ * Only read-only endpoint identity refusals retry; the caller sets each
+ * binding's deadline. A successful discovery still needs dependency-plan/admission
+ * review.
  */
 export async function discoverNativeHostDependency(opts: {
   readonly runtime: NativeRuntimeSelection;

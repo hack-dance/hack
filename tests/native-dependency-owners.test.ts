@@ -626,3 +626,42 @@ test("the owned-helper reader accepts only a ready owned claim with a live birth
   await chmod(claimPath, 0o644);
   expect(await read()).toBeNull();
 });
+
+test("an owner listener missing past its wait names the wait and the hooks", async () => {
+  const path = await selection([
+    { ...ownedEntry("web"), host_wait_seconds: 5 },
+  ]);
+  const { owners } = recordingOwners();
+  const waits: number[] = [];
+  const failure = await readNativeHostDependencies({
+    path,
+    services: ["web"],
+    owners,
+    discoverOwned: async (request) => {
+      waits.push(request.waitSeconds);
+      return await discoverNativeOwnedHostDependency({
+        runtime: { binary: "/synthetic/native", home: "/synthetic/home" },
+        projectRoot: "/synthetic/project",
+        hostPort: request.hostPort,
+        ancestorPid: request.ancestorPid,
+        invoke: async () => {
+          throw new NativeRuntimeRequestError({
+            message: "Native runtime request failed (host_endpoint_identity)",
+            nativeCode: "host_endpoint_identity",
+          });
+        },
+        // The binding's wait already elapsed after the hooks.
+        wait: {
+          deadlineMs: performance.now() - 1,
+          signal: new AbortController().signal,
+        },
+      });
+    },
+    listenerHooks: ["tunnel"],
+  }).catch((error: unknown) => error);
+  expect(waits).toEqual([5]);
+  expect(failure).toHaveProperty("code", "E_CONFIG_INVALID");
+  expect((failure as Error).message).toContain(
+    "host port 8443): no listener beneath the selected owner answered on host_port before the discovery deadline (waited 5 s after the up.before hooks; persistent hooks and processes: tunnel); if the listener starts more slowly, set host_wait_seconds on this binding (default 60, at most 900); listener values omitted."
+  );
+});

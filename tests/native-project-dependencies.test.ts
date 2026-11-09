@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   compileNativeHostDependencySelection,
   discoverNativeHostDependency,
+  nativeDependencyStartupWait,
   parseNativeHostDependencies,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
@@ -375,6 +376,8 @@ test("executable-pinned selection refreshes one current PID per shared listener 
       ...intent,
       host_executable: executable,
       host_supervisor_depth: 2,
+      // A longer wait on any entry sharing the listener applies to it.
+      ...(entry.service === "worker" ? { host_wait_seconds: 240 } : {}),
     };
   });
   await writeFile(path, JSON.stringify({ version: 1, dependencies: selected }));
@@ -391,7 +394,18 @@ test("executable-pinned selection refreshes one current PID per shared listener 
     services: ["web", "worker"],
     discover,
   });
-  expect(calls).toEqual([{ hostPort: 8443, executable }]);
+  expect(calls).toEqual([
+    {
+      hostPort: 8443,
+      executable,
+      waitSeconds: 240,
+      service: "web",
+      binding: "search",
+    },
+  ]);
+  for (const entry of result) {
+    expect(entry).not.toHaveProperty("host_wait_seconds");
+  }
   expect(result.map((entry) => [entry.host_pid, entry.slot])).toEqual([
     [456, 0],
     [456, 0],
@@ -586,12 +600,34 @@ test("a listener missing past the discovery deadline names its binding and port"
           throw unavailableListener();
         },
       }),
+    listenerHooks: ["tunnels", "hook-2"],
   }).catch((error: unknown) => error);
   expect(failure).toHaveProperty("code", "E_CONFIG_INVALID");
   expect((failure as Error).message).toBe(
-    "Native host dependencies refused for dependency #1 (service web, binding search, aliases search.example.com, guest port 443, host port 8443): no listener owned by host_executable answered on host_port before the discovery deadline; listener values omitted."
+    "Native host dependencies refused for dependency #1 (service web, binding search, aliases search.example.com, guest port 443, host port 8443): no listener owned by host_executable answered on host_port before the discovery deadline (waited 60 s after the up.before hooks; persistent hooks and processes: tunnels, hook-2); if the listener starts more slowly, set host_wait_seconds on this binding (default 60, at most 900); listener values omitted."
   );
   expect((failure as Error).message).not.toContain("private-tunnel");
+
+  const unhooked = await readNativeHostDependencies({
+    path,
+    services: ["web"],
+    discover: async ({ executable, hostPort }) =>
+      await discoverNativeHostDependency({
+        ...discovery,
+        executable,
+        hostPort,
+        wait: {
+          deadlineMs: performance.now() + 20,
+          signal: new AbortController().signal,
+        },
+        invoke: async () => {
+          throw unavailableListener();
+        },
+      }),
+  }).catch((error: unknown) => error);
+  expect((unhooked as Error).message).toContain(
+    "(waited 60 s after the up.before hooks; no persistent up.before hook or lifecycle process ran)"
+  );
 
   const coded = await readNativeHostDependencies({
     path,
@@ -786,7 +822,13 @@ test("limits apply after declarative expansion and one discovery serves every ex
     },
   });
   expect(discovered).toEqual([
-    { executable: "/usr/local/bin/synthetic-tunnel", hostPort: 8443 },
+    {
+      executable: "/usr/local/bin/synthetic-tunnel",
+      hostPort: 8443,
+      waitSeconds: 60,
+      service: "web",
+      binding: "api",
+    },
   ]);
   expect(
     selected.map(({ service, slot, host_pid, aliases }) => ({
@@ -980,9 +1022,236 @@ test("a version 2 file discovers one PID per shared executable listener", async 
       return { host_pid: 456, endpoint_fingerprint: "a".repeat(64) };
     },
   });
-  expect(calls).toEqual([{ hostPort: 8443, executable }]);
+  expect(calls).toEqual([
+    {
+      hostPort: 8443,
+      executable,
+      waitSeconds: 60,
+      service: "web",
+      binding: "search",
+    },
+  ]);
   expect(result.map((entry) => [entry.service, entry.host_pid])).toEqual([
     ["web", 456],
     ["worker", 456],
   ]);
+});
+
+async function selectionFile(value: unknown): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "native-dependencies-wait-"));
+  roots.push(root);
+  const path = join(root, "selection.json");
+  await writeFile(path, JSON.stringify(value));
+  return path;
+}
+function executableBinding(extra: Record<string, unknown> = {}) {
+  const { host_pid: _pid, ...intent } = binding();
+  return {
+    ...intent,
+    host_executable: "/synthetic/private-tunnel",
+    ...extra,
+  };
+}
+
+test("host_wait_seconds is bounded and needs a discovered listener", async () => {
+  for (const value of [0, 901, 1.5, "120", null]) {
+    await expectCodedRefusal(
+      readNativeHostDependencies({
+        path: await selectionFile({
+          version: 1,
+          dependencies: [executableBinding({ host_wait_seconds: value })],
+        }),
+        services: ["web"],
+        discover: async () => {
+          throw new Error("discovery must not run for an invalid selection");
+        },
+      }),
+      "E_CONFIG_INVALID",
+      "host port 8443): host_wait_seconds must be an integer 1..900; listener values omitted."
+    );
+  }
+  await expectCodedRefusal(
+    readNativeHostDependencies({
+      path: await selectionFile({
+        version: 1,
+        dependencies: [{ ...binding(), host_wait_seconds: 120 }],
+      }),
+      services: ["web"],
+    }),
+    "E_CONFIG_INVALID",
+    "host_wait_seconds requires host_executable, host_lifecycle or host_shared_helper; a fixed host_pid is never waited for"
+  );
+  // Version 2 entries accept the same field for every expanded binding.
+  const calls: unknown[] = [];
+  await readNativeHostDependencies({
+    path: await selectionFile({
+      version: 2,
+      dependencies: [
+        {
+          binding: "search",
+          guest_port: 443,
+          aliases: ["search.example.com"],
+          host_port: 8443,
+          host_executable: "/synthetic/private-tunnel",
+          host_wait_seconds: 900,
+        },
+      ],
+    }),
+    services: ["web", "worker"],
+    hostAliases: {
+      web: ["search.example.com"],
+      worker: ["search.example.com"],
+    },
+    discover: async (request) => {
+      calls.push(request.waitSeconds);
+      return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+    },
+  });
+  expect(calls).toEqual([900]);
+});
+
+test("each binding waits its own host_wait_seconds from the end of the hooks", () => {
+  const signal = new AbortController().signal;
+  const target = {
+    hostPort: 8443,
+    service: "web",
+    binding: "search",
+  };
+  expect(
+    nativeDependencyStartupWait({
+      target: { ...target, waitSeconds: 60 },
+      startedAtMs: 1000,
+      signal,
+    }).deadlineMs
+  ).toBe(61_000);
+  // A later binding is not cut short by the time an earlier one took.
+  expect(
+    nativeDependencyStartupWait({
+      target: { ...target, waitSeconds: 300 },
+      startedAtMs: 1000,
+      signal,
+    }).deadlineMs
+  ).toBe(301_000);
+});
+
+test("startup wait reports progress on the first retry and then every ten seconds", () => {
+  let now = 5000;
+  const reports: unknown[] = [];
+  const wait = nativeDependencyStartupWait({
+    target: {
+      hostPort: 8443,
+      waitSeconds: 180,
+      service: "web",
+      binding: "search",
+    },
+    startedAtMs: 1000,
+    signal: new AbortController().signal,
+    now: () => now,
+    report: (progress) => {
+      reports.push(progress);
+      throw new Error("an observer failure never changes discovery");
+    },
+  });
+  for (const at of [5000, 5500, 14_999, 15_000, 20_000, 25_000]) {
+    now = at;
+    wait.onRetry?.();
+  }
+  const progress = (waitedSeconds: number) => ({
+    service: "web",
+    binding: "search",
+    hostPort: 8443,
+    waitedSeconds,
+    limitSeconds: 180,
+  });
+  expect(reports).toEqual([progress(4), progress(14), progress(24)]);
+});
+
+test("a listener that appears 61 s after the hooks needs a longer host_wait_seconds", async () => {
+  // The hooks ended 61 s ago; the listener answers on the second query.
+  const startedAtMs = performance.now() - 61_000;
+  const read = async (extra: Record<string, unknown>) => {
+    let calls = 0;
+    const reports: unknown[] = [];
+    const result = await readNativeHostDependencies({
+      path: await selectionFile({
+        version: 1,
+        dependencies: [executableBinding(extra)],
+      }),
+      services: ["web"],
+      discover: async (selection) =>
+        await discoverNativeHostDependency({
+          ...discovery,
+          executable: selection.executable,
+          hostPort: selection.hostPort,
+          wait: nativeDependencyStartupWait({
+            target: selection,
+            startedAtMs,
+            signal: new AbortController().signal,
+            report: (progress) => reports.push(progress),
+          }),
+          invoke: async () => {
+            if (++calls === 1) {
+              throw unavailableListener();
+            }
+            return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+          },
+        }),
+      listenerHooks: ["tunnels"],
+    }).catch((error: unknown) => error);
+    return { result, calls, reports };
+  };
+  const fixed = await read({});
+  expect((fixed.result as Error).message).toContain(
+    "(waited 60 s after the up.before hooks; persistent hooks and processes: tunnels); if the listener starts more slowly, set host_wait_seconds"
+  );
+  expect(fixed.calls).toBe(0);
+
+  const longer = await read({ host_wait_seconds: 120 });
+  expect(longer.calls).toBe(2);
+  expect(longer.result).toEqual([
+    expect.objectContaining({ binding: "search", host_pid: 456 }),
+  ]);
+  expect(longer.reports).toEqual([
+    {
+      service: "web",
+      binding: "search",
+      hostPort: 8443,
+      waitedSeconds: 61,
+      limitSeconds: 120,
+    },
+  ]);
+});
+
+test("a listener reparented to PID 1 refuses at discovery with its binding and reason", async () => {
+  let calls = 0;
+  const failure = await readNativeHostDependencies({
+    path: await selectionFile({
+      version: 1,
+      dependencies: [executableBinding()],
+    }),
+    services: ["web"],
+    discover: async (selection) =>
+      await discoverNativeHostDependency({
+        ...discovery,
+        executable: selection.executable,
+        hostPort: selection.hostPort,
+        wait: {
+          deadlineMs: performance.now() + 2000,
+          signal: new AbortController().signal,
+        },
+        invoke: async () => {
+          calls++;
+          throw new NativeRuntimeRequestError({
+            message: "synthetic-do-not-print",
+            nativeCode: "host_endpoint_unsupervised",
+          });
+        },
+      }),
+  }).catch((error: unknown) => error);
+  // Not retried: the parent cannot come back, and no runtime work follows.
+  expect(calls).toBe(1);
+  expect(failure).toHaveProperty("code", "E_CONFIG_INVALID");
+  expect((failure as Error).message).toBe(
+    "Native host dependencies refused for dependency #1 (service web, binding search, aliases search.example.com, guest port 443, host port 8443): the listener on host_port has no supervising parent process (its parent is PID 1, as after nohup … &, ssh -f or a daemonizing fork); keep it under a parent that stays running, such as a persistent up.before hook that waits for it; listener values omitted."
+  );
 });

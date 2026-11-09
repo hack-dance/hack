@@ -52,6 +52,8 @@ import {
 import {
   discoverNativeHostDependency,
   discoverNativeOwnedHostDependency,
+  type NativeDependencyWaitProgress,
+  nativeDependencyStartupWait,
   prepareNativeDependencyServices,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
@@ -324,6 +326,11 @@ type Hooks = {
    * the signal cancels a running phase (a second interrupt).
    */
   readonly stop?: NativeForegroundStopCommands;
+  /**
+   * Names of the persistent `up.before` hooks and lifecycle processes that
+   * may start host dependency listeners; a discovery-deadline refusal lists them.
+   */
+  readonly listenerHooks?: readonly string[];
 };
 type Dependencies = {
   prepare: typeof prepareNativeProjectInput;
@@ -1587,6 +1594,7 @@ export type NativeStartupProgress =
       readonly phase: "services";
       readonly services: readonly string[];
     }
+  | ({ readonly phase: "dependency-wait" } & NativeDependencyWaitProgress)
   | {
       readonly phase: "ready";
       readonly services: readonly string[];
@@ -1908,7 +1916,18 @@ export async function startNativeProject(opts: {
         buildServices
       );
     }
-    const dependencyDiscoveryDeadline = performance.now() + 60_000;
+    // Every binding's wait (`host_wait_seconds`, default 60 s) is measured
+    // from here, the end of the up.before hooks.
+    const dependencyDiscoveryStart = performance.now();
+    const dependencyWait = (
+      target: Parameters<typeof nativeDependencyStartupWait>[0]["target"]
+    ) =>
+      nativeDependencyStartupWait({
+        target,
+        startedAtMs: dependencyDiscoveryStart,
+        signal: controller.signal,
+        report: (waiting) => progress({ phase: "dependency-wait", ...waiting }),
+      });
     const hostAliases = nativeServiceHostAliases({
       services: specs,
       profiles,
@@ -1925,10 +1944,7 @@ export async function startNativeProject(opts: {
           hostPort: selection.hostPort,
           executable: selection.executable,
           invoke: deps.invoke,
-          wait: {
-            deadlineMs: dependencyDiscoveryDeadline,
-            signal: controller.signal,
-          },
+          wait: dependencyWait(selection),
         }),
       owners: opts.dependencyOwners,
       discoverOwned: (selection) =>
@@ -1938,11 +1954,9 @@ export async function startNativeProject(opts: {
           hostPort: selection.hostPort,
           ancestorPid: selection.ancestorPid,
           invoke: deps.invoke,
-          wait: {
-            deadlineMs: dependencyDiscoveryDeadline,
-            signal: controller.signal,
-          },
+          wait: dependencyWait(selection),
         }),
+      listenerHooks: hooks.listenerHooks,
     });
     requireActiveStartup(controller.signal);
     requireNativeHostAliasBindings({

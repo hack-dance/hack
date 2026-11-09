@@ -7,6 +7,7 @@ import {
   resolveLifecycleCommandServiceName,
   resolveLifecycleCwd,
   resolveLifecycleSessionName,
+  resolvePersistentLifecycleNames,
   resolveProjectLifecycleDefinitionHash,
   SHARED_HELPER_MUX_UNSUPPORTED_MESSAGE,
   stopLifecycleProcessController,
@@ -5860,6 +5861,11 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
         message: `Starting services: ${event.services.join(", ")}…`,
       });
       return;
+    case "dependency-wait":
+      logger.step({
+        message: `Waiting for host listener ${event.binding} (service ${event.service}, host port ${event.hostPort}): ${event.waitedSeconds} s of ${event.limitSeconds} s…`,
+      });
+      return;
     case "ready":
       logger.success({
         message: [
@@ -6054,6 +6060,7 @@ async function handleNativeUp({
         });
       return {
         cleanup,
+        listenerHooks: resolvePersistentLifecycleNames(cfg.lifecycle),
         ...(down?.before?.length || down?.after?.length
           ? { stop: { before: stopPhase("before"), after: stopPhase("after") } }
           : {}),

@@ -323,6 +323,14 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Create isolated Hack network
         run: docker network create --subnet 172.30.0.0/16 hack-dev
+      # Keep real Linux coverage while the unit-test pools in HACK-1960 land.
+      - name: Verify private tmux input on Linux
+        if: matrix.shard == 4
+        shell: bash
+        run: |
+          command -v tmux
+          SHELL=/bin/bash bun test tests/tmux-private-input.test.ts 2>&1 | tee "$RUNNER_TEMP/tmux-private-input.log"
+          grep -Eq '^ *1 pass$' "$RUNNER_TEMP/tmux-private-input.log"
       - name: Prepare offline cache fixture images
         run: |
           docker pull alpine:3.20

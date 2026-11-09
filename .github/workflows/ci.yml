@@ -16,23 +16,52 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    # Pull-request change scope (scripts/ci-change-scope.ts, HACK-1960). Pushes
+    # to next/main and an unavailable diff are always `full`: the whole matrix,
+    # every bun test shard on macOS. Pull requests run the config compiler on
+    # Linux only, split the bun shards into macOS and Linux pools, and skip the
+    # jobs that cannot see their change (docs-only, TypeScript-only and
+    # runtime-core-only scopes). The `test` and `docker-e2e` fan-ins still
+    # report on every run.
+    name: Change scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+      compiler_hosts: ${{ steps.scope.outputs.compiler_hosts }}
+      compiler_rust: ${{ steps.scope.outputs.compiler_rust }}
+      runtime_core: ${{ steps.scope.outputs.runtime_core }}
+      suite: ${{ steps.scope.outputs.suite }}
+      test_layout: ${{ steps.scope.outputs.test_layout }}
+      test_focus: ${{ steps.scope.outputs.test_focus }}
+    steps:
+      # A pull-request checkout is GitHub's merge commit; its first parent is
+      # the base tip, so HEAD^1..HEAD is exactly the pull request's change.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - name: Classify changed paths
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: bun scripts/ci-change-scope.ts --event="$EVENT_NAME"
+
   config-compiler:
     name: Config compiler (${{ matrix.os }})
+    needs: changes
+    # Pull requests build and check on Linux x64 only; pushes and release
+    # builds (release.yml, prerelease.yml) cover every compiler release host.
+    if: ${{ needs.changes.outputs.compiler_hosts != '[]' }}
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-            arch: x64
-          - os: macos-latest
-            platform: darwin
-            arch: arm64
-          - os: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-          - os: macos-15-intel
-            platform: darwin
-            arch: x64
+        include: ${{ fromJSON(needs.changes.outputs.compiler_hosts) }}
     runs-on: ${{ matrix.os }}
     # Intel needs time for full compiler, schema and bundle verification.
     timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 30 || 15 }}
@@ -55,7 +84,11 @@ jobs:
           EXPECTED_PLATFORM: ${{ matrix.platform }}
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: bun -e 'if (process.platform !== process.env.EXPECTED_PLATFORM || process.arch !== process.env.EXPECTED_ARCH) throw new Error("Unexpected compiler release host");'
-      - run: bun run check:config-compiler && bun run test:config-compiler
+      # TypeScript-only pull requests cannot change the compiler crate, which
+      # reads nothing outside packages/config-compiler.
+      - name: Check and test the compiler crate
+        if: ${{ needs.changes.outputs.compiler_rust == 'true' }}
+        run: bun run check:config-compiler && bun run test:config-compiler
       - run: bun run build:config-compiler
       # Intentionally permanent: the owner test emits closed stage tokens only, never values.
       - name: Test private file sources and owner with the matching compiler
@@ -166,6 +199,10 @@ jobs:
 
   runtime-core:
     name: Candidate core (${{ matrix.os }})
+    needs: changes
+    # Skipped only for pull requests that change no Rust, toolchain or
+    # workflow file: the crate reads nothing outside packages/runtime-core.
+    if: ${{ needs.changes.outputs.runtime_core == 'true' }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -259,6 +296,8 @@ jobs:
             --report-path "$RUNNER_TEMP/gitleaks.sarif"
 
   runtime-images:
+    needs: changes
+    if: ${{ needs.changes.outputs.suite == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -299,6 +338,8 @@ jobs:
   docker-e2e-shard:
     # One deterministic slice of the default e2e set per runner (tests/e2e/shard.ts).
     name: docker-e2e shard ${{ matrix.shard }}/4
+    needs: changes
+    if: ${{ needs.changes.outputs.suite == 'true' }}
     strategy:
       # Let every shard finish so one failure still reports the other scenarios.
       fail-fast: false
@@ -397,9 +438,10 @@ jobs:
 
   docker-e2e:
     # The single docker-e2e signal for the prerelease exact-head gate and branch checks.
-    # It always runs: cancelled-only shard results are non-failures, while failures
-    # and skipped shards still fail. Prerelease gates separately require every shard.
-    needs: docker-e2e-shard
+    # It always runs: cancelled-only results are non-failures, and shards skipped
+    # because the change scope excludes the suite pass; failures, a failed scope
+    # and any other skip still fail. Prerelease gates separately require every shard.
+    needs: [changes, docker-e2e-shard]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -407,8 +449,23 @@ jobs:
     steps:
       - name: Reject failed or skipped docker-e2e shards
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SCOPE: ${{ needs.changes.outputs.scope }}
+          SUITE: ${{ needs.changes.outputs.suite }}
           SHARD_RESULT: ${{ needs.docker-e2e-shard.result }}
         run: |
+          if [ "$CHANGES_RESULT" = "cancelled" ]; then
+            echo "change scope was cancelled without failure; aggregate is non-failing"
+            exit 0
+          fi
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "change scope did not succeed (result: $CHANGES_RESULT)"
+            exit 1
+          fi
+          if [ "$SUITE" = "false" ] && [ "$SHARD_RESULT" = "skipped" ]; then
+            echo "docker-e2e is out of scope for this pull request (scope: $SCOPE)"
+            exit 0
+          fi
           if [ "$SHARD_RESULT" = "cancelled" ]; then
             echo "shards were cancelled without failure; aggregate is non-failing"
             exit 0
@@ -424,12 +481,18 @@ jobs:
     # reached the 60 min limit on slow runners; each file now runs in its own
     # `bun test` process with a start/result line, so a hang names its file.
     name: test shard ${{ matrix.shard }}/8
+    needs: changes
+    if: ${{ needs.changes.outputs.suite == 'true' }}
     strategy:
       # Let every shard finish so one failure still reports the other files.
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    runs-on: macos-15
+    # `full` (pushes): every shard on macOS. `pooled` (pull requests): shards
+    # 1-3 run the platform-sensitive files on macOS and shards 4-8 the rest on
+    # Linux (POOLED_MACOS_SHARDS in scripts/test-shard-plan.ts; the runner
+    # refuses a shard on the wrong host).
+    runs-on: ${{ (needs.changes.outputs.test_layout == 'pooled' && matrix.shard > 3) && 'ubuntu-latest' || 'macos-15' }}
     # Eight shards keep the slower GitHub-hosted macOS jobs below the existing
     # 30 min file-runner deadline; the 40 min job limit bounds a hung runner.
     timeout-minutes: 40
@@ -442,25 +505,27 @@ jobs:
           bun-version: "1.4.4"
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      # The one-off checks and builds run once, on shard 1.
+      # The one-off checks and builds run once, on shard 8 (Linux when pooled).
       - name: Typecheck (Turbo)
-        if: matrix.shard == 1
+        if: matrix.shard == 8
         run: bun run turbo:typecheck
       - name: Privacy check
-        if: matrix.shard == 1
+        if: matrix.shard == 8
         run: bun run privacy:check
       - name: Quality checks (Turbo)
-        if: matrix.shard == 1
+        if: matrix.shard == 8
         run: bun run turbo:check
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Prepare matching compiler for private file owner tests
         run: bun run build:config-compiler
       # Runs check:bun-version and test:preflight as `bun run test` does, then
-      # verifies that all eight shards cover the full test file set exactly once.
+      # verifies that the shards (and, when pooled, the two pools) cover the
+      # full test file set exactly once.
       - name: Tests (shard)
         env:
           HACK_TEST_SHARD: ${{ matrix.shard }}/8
-        run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
+          HACK_TEST_LAYOUT: ${{ needs.changes.outputs.test_layout }}
+        run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
       - name: Preserve measured file durations
         # Per-file seconds only; refresh scripts/test-shard-durations.json with
         # `bun scripts/test-shard.ts update-durations`.
@@ -472,17 +537,62 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Build CLI
-        if: matrix.shard == 1
+        if: matrix.shard == 8
         run: bun run build
       - name: Build release smoke (no tests)
-        if: matrix.shard == 1
+        if: matrix.shard == 8
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
+
+  test-focus:
+    # Docs-only and runtime-core-only pull requests run, instead of the bun
+    # shards, every test file that names those sources (scripts/test-shard-plan.ts
+    # FOCUS_SOURCE). It always runs and passes as a no-op otherwise, because the
+    # prerelease gate requires every job of a push run to succeed without skips.
+    name: test focus
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Report scope
+        env:
+          SCOPE: ${{ needs.changes.outputs.scope }}
+          TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
+        run: |
+          echo "scope ${SCOPE}; focused tests: ${TEST_FOCUS:-none, the bun shards run}"
+      - name: Checkout
+        if: ${{ needs.changes.outputs.test_focus != '' }}
+        uses: actions/checkout@v4
+      - name: Setup Bun
+        if: ${{ needs.changes.outputs.test_focus != '' }}
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - name: Install dependencies
+        if: ${{ needs.changes.outputs.test_focus != '' }}
+        run: bun install --frozen-lockfile
+      - name: Privacy check
+        if: ${{ needs.changes.outputs.test_focus != '' }}
+        run: bun run privacy:check
+      - if: ${{ needs.changes.outputs.test_focus != '' }}
+        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Prepare matching compiler for private file owner tests
+        if: ${{ needs.changes.outputs.test_focus != '' }}
+        run: bun run build:config-compiler
+      - name: Focused tests
+        if: ${{ needs.changes.outputs.test_focus != '' }}
+        env:
+          TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
+        run: bun scripts/test-shard.ts run --focus="$TEST_FOCUS"
 
   test:
     # The required `test` check (repository ruleset) for `next` and `main`. It
-    # always runs: cancelled-only shard results are non-failures, while failures
-    # and skipped shards still fail rather than surfacing as a skipped check.
-    needs: test-shard
+    # always runs. When the change scope runs the suite, every bun shard must
+    # succeed; when it runs a focus instead, the focused job must. A cancelled
+    # result is a non-failure, while a failure, a failed scope or any skip of
+    # the job in scope still fails rather than surfacing as a skipped check.
+    needs: [changes, test-shard, test-focus]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -490,8 +600,33 @@ jobs:
     steps:
       - name: Reject failed or skipped test shards
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SCOPE: ${{ needs.changes.outputs.scope }}
+          SUITE: ${{ needs.changes.outputs.suite }}
+          TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
           SHARD_RESULT: ${{ needs.test-shard.result }}
+          FOCUS_RESULT: ${{ needs.test-focus.result }}
         run: |
+          if [ "$CHANGES_RESULT" = "cancelled" ]; then
+            echo "change scope was cancelled without failure; aggregate is non-failing"
+            exit 0
+          fi
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "change scope did not succeed (result: $CHANGES_RESULT)"
+            exit 1
+          fi
+          if [ "$FOCUS_RESULT" != "success" ] && [ "$FOCUS_RESULT" != "cancelled" ]; then
+            echo "test focus did not succeed (result: $FOCUS_RESULT)"
+            exit 1
+          fi
+          if [ "$SUITE" != "true" ]; then
+            if [ -z "$TEST_FOCUS" ]; then
+              echo "scope $SCOPE runs neither the bun shards nor a focus"
+              exit 1
+            fi
+            SHARD_RESULT="$FOCUS_RESULT"
+            echo "bun shards are out of scope ($SCOPE); gating on the focused tests ($TEST_FOCUS)"
+          fi
           if [ "$SHARD_RESULT" = "cancelled" ]; then
             echo "shards were cancelled without failure; aggregate is non-failing"
             exit 0
@@ -502,6 +637,8 @@ jobs:
           fi
 
   linux-process-lifetime:
+    needs: changes
+    if: ${{ needs.changes.outputs.suite == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

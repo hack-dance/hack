@@ -819,9 +819,11 @@ test("doctor contract migration keeps base and untracked overlays with undeliver
   for (const [name, text] of Object.entries(files)) {
     await writeFile(resolve(projectDir, name), text);
   }
+  // Compose lists only the base: a listed overlay that a default launch doesn't
+  // select refuses instead (HACK-1682, the next test).
   await writeFile(
     resolve(projectDir, "docker-compose.yml"),
-    "services:\n  api:\n    image: alpine:3.19\n    env_file: [./.env, ./.env.bak]\n"
+    "services:\n  api:\n    image: alpine:3.19\n    env_file: [./.env]\n"
   );
   const { runCli } = await import("../src/cli/run.ts");
   expect(
@@ -870,6 +872,55 @@ test("doctor contract migration keeps base and untracked overlays with undeliver
   expect(
     await readFile(resolve(projectDir, "hack.env.example.local.yaml"), "utf8")
   ).toContain("synthetic-example");
+});
+
+test("doctor contract migration refuses a Compose-listed overlay a default launch wouldn't select (HACK-1682)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "A", source: "plain_env" }],
+    })
+  );
+  const files = {
+    ".env": "A=synthetic-delivered\n",
+    // Only an undeclared key differs: the Compose repair would still drop it.
+    ".env.bak": "A=synthetic-delivered\nBACKUP_ONLY=synthetic-backup-only\n",
+  };
+  for (const [name, text] of Object.entries(files)) {
+    await writeFile(resolve(projectDir, name), text);
+  }
+  const compose =
+    "services:\n  api:\n    image: alpine:3.19\n    env_file: [./.env, ./.env.bak]\n";
+  await writeFile(resolve(projectDir, "docker-compose.yml"), compose);
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli([
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      projectRoot,
+    ])
+  ).toBe(1);
+  for (const [name, text] of Object.entries(files)) {
+    expect(await readFile(resolve(projectDir, name), "utf8")).toBe(text);
+  }
+  expect(
+    await readFile(resolve(projectDir, "docker-compose.yml"), "utf8")
+  ).toBe(compose);
+  for (const layer of [
+    "hack.env.default.yaml",
+    "hack.env.local.yaml",
+    "hack.env.bak.local.yaml",
+  ]) {
+    expect(
+      await lstat(resolve(projectDir, layer)).catch(() => null)
+    ).toBeNull();
+  }
+  expect(noteCalls.join("\n")).not.toContain("synthetic-backup-only");
 });
 
 test("doctor migration refusal leaves a missing .hack/.gitignore unwritten (HACK-1695)", async () => {
@@ -987,3 +1038,83 @@ for (const filename of [".env", ".env.bak"]) {
     }
   );
 }
+
+test("doctor keeps an encrypted store with an undeclared entry and its key file, naming only keys (HACK-1715)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  const saved = {
+    fileKey: process.env.HACK_SECRETS_FILE_KEY,
+    fallback: process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK,
+  };
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  // No keychain is read or written: the key comes from the project key file.
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  try {
+    await writeFile(
+      resolve(projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "store-retention",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: { path: "secrets.enc.json", keyPath: "store.key" },
+          },
+        },
+      })
+    );
+    await writeFile(
+      resolve(projectDir, "hack.env.json"),
+      JSON.stringify({
+        version: 1,
+        vars: [{ key: "SEC", source: "keychain" }],
+      })
+    );
+    const storePath = resolve(projectRoot, "secrets.enc.json");
+    const keyPath = resolve(projectRoot, "store.key");
+    const keyText = `${["synthetic", "store", "key", "51ab"].join("-")}\n`;
+    await writeFile(keyPath, keyText);
+    const declared = ["synthetic", "declared", "51ab"].join("-");
+    const undeclared = ["synthetic", "undeclared", "51ab"].join("-");
+    const { resolveSecretStore } = await import("../src/lib/secret-store.ts");
+    const store = await resolveSecretStore({
+      projectName: "store-retention",
+      projectDir,
+    });
+    await store.set({ key: "SEC", value: declared });
+    await store.set({ key: "UNDECL", value: undeclared });
+    const storeText = await readFile(storePath, "utf8");
+
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(
+      await runCli([
+        "doctor",
+        "--migrate-env-config",
+        "--no-interactive",
+        "--accept-tracked-env-changes",
+        "--path",
+        projectRoot,
+      ])
+    ).toBe(0);
+
+    expect(await readFile(storePath, "utf8")).toBe(storeText);
+    expect(await readFile(keyPath, "utf8")).toBe(keyText);
+    const notes = noteCalls.join("\n");
+    expect(notes).toContain(
+      `Kept ${storePath}: keys not preserved in env layers: UNDECL (values omitted).`
+    );
+    expect(notes).toContain(`Kept ${keyPath}: the kept encrypted secret store`);
+    for (const value of [declared, undeclared, keyText.trim()]) {
+      expect(notes).not.toContain(value);
+    }
+    // The declared value now lives in the tracked layer, encrypted.
+    const layer = await readFile(
+      resolve(projectDir, "hack.env.default.yaml"),
+      "utf8"
+    );
+    expect(layer).toContain("SEC");
+    expect(layer).not.toContain(declared);
+  } finally {
+    restoreEnv("HACK_SECRETS_FILE_KEY", saved.fileKey);
+    restoreEnv("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK", saved.fallback);
+  }
+}, 30_000);

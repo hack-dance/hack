@@ -4202,6 +4202,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     serviceNames,
     materialize: false,
     migrateUndeclaredDotenv: true,
+    composeRepairFollows: true,
   });
   if (migrated.wroteFiles.length === 0) {
     note("Legacy env migration found nothing to write.", "doctor");

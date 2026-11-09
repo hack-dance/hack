@@ -69,8 +69,10 @@ import {
 import { getRecord, getString, isRecord } from "./guards.ts";
 import {
   findProcessOnlyContractValues,
+  type HackEnvContract,
   type ProcessOnlyContractValue,
   readHackEnvContract,
+  readHackEnvRuntimeConfig,
   resolveEnvFilePath,
   resolveHackEnv,
 } from "./hack-env.ts";
@@ -112,6 +114,10 @@ import {
   ProjectsRegistryLockTimeoutError,
   withProjectsRegistryLock,
 } from "./projects-registry-lock.ts";
+import {
+  type FileSecretStoreListing,
+  listFileSecretStoreEntries,
+} from "./secret-store.ts";
 import {
   hasPrimaryLocalInputs,
   isNativeManagedLocalTracked,
@@ -5171,11 +5177,27 @@ export type LegacyProjectEnvMigration = {
  * - `compose_interpolation`: Compose interpolates these keys, which the env
  *   layers now set only for a service. Compose reads `.hack/.env` on its own,
  *   and Hack passes it only global values, so removing the file would drop them.
+ * - `secret_store_unlisted`: an encrypted secret store the migration couldn't
+ *   list (its key isn't available, it can't be read, or the keychain backend is
+ *   selected), so it may hold entries no env layer delivers. `keys` is empty.
+ * - `secret_store_shared`: an encrypted secret store that also holds entries for
+ *   another project or scope, which this migration doesn't carry over.
+ * - `secret_store_key`: the key file of an encrypted secret store that is kept
+ *   (`storePath`), because removing it would leave that store unreadable.
+ *
+ * An encrypted store whose own entries the layers don't all deliver is kept with
+ * `undelivered`, its keys named as stored (`TOKEN`, `env.staging.TOKEN`).
  */
 export type RetainedLegacyEnvFile = {
   readonly path: string;
   readonly keys: readonly string[];
-  readonly reason: "undelivered" | "compose_interpolation";
+  readonly reason:
+    | "undelivered"
+    | "compose_interpolation"
+    | "secret_store_unlisted"
+    | "secret_store_shared"
+    | "secret_store_key";
+  readonly storePath?: string;
 };
 
 /** Value-free line saying why a legacy env file was kept. */
@@ -5184,6 +5206,15 @@ export function describeRetainedLegacyEnvFile(opts: {
   readonly retained: RetainedLegacyEnvFile;
 }): string {
   const keys = opts.retained.keys.join(", ");
+  if (opts.retained.reason === "secret_store_unlisted") {
+    return `Kept ${opts.shownPath}: the migration couldn't list this encrypted secret store's entries, so it may hold values no env layer delivers (values omitted). Check its entries, with its key, before removing it.`;
+  }
+  if (opts.retained.reason === "secret_store_shared") {
+    return `Kept ${opts.shownPath}: this encrypted secret store also holds entries for another project, which this migration doesn't carry over (values omitted).`;
+  }
+  if (opts.retained.reason === "secret_store_key") {
+    return `Kept ${opts.shownPath}: the kept encrypted secret store ${opts.retained.storePath ?? ""} can't be read without this key (values omitted).`;
+  }
   if (opts.retained.reason === "compose_interpolation") {
     return `Kept ${opts.shownPath}: Compose interpolates ${keys}, which the env layers now set only for a service, and service values don't reach interpolation (values omitted). To remove the file, set ${opts.retained.keys.length === 1 ? "that key" : "those keys"} without --service or export ${opts.retained.keys.length === 1 ? "it" : "them"} in your shell.`;
   }
@@ -5216,6 +5247,14 @@ export async function migrateLegacyProjectEnv(opts: {
    * the implicit migrations run by other commands keep requiring a contract.
    */
   readonly migrateUndeclaredDotenv?: boolean;
+  /**
+   * The caller may remove the `.hack/.env*` `env_file` entries from the Compose
+   * file after migrating (`hack doctor --migrate-env-config`), so every value
+   * such a file gives a service, not only the contract's, must survive in the
+   * layers a launch without `--env` selects. Implicit migrations keep the
+   * Compose file, so only contract keys are compared for them.
+   */
+  readonly composeRepairFollows?: boolean;
 }): Promise<LegacyProjectEnvMigration> {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
@@ -5265,18 +5304,13 @@ export async function migrateLegacyProjectEnv(opts: {
     };
   }
 
-  // Discovered overlays are regular files only, and a link that remains (the
-  // base file, or a configured default overlay) refuses wherever it points: a
-  // repository's symlink must not pull another file's values into this project's
-  // env layers, even one in .hack such as a machine-local .env.local.
-  const overlayNames = await discoverLegacyOverlayNames({
-    projectDir: opts.projectDir,
-    includeSymlinks: false,
-  });
-  await assertNoLegacyDotenvLinks({
-    projectDir: opts.projectDir,
-    overlayNames,
-  });
+  const { overlayNames, secretStoreListing } =
+    await selectContractMigrationOverlays({
+      projectDir: opts.projectDir,
+      projectName: opts.projectName,
+      contract: contract.contract,
+      composeRepairFollows: opts.composeRepairFollows,
+    });
 
   // Before resolveHackEnv, which can provision secret-store key material.
   assertNoShellValuesInContractMigration({
@@ -5488,12 +5522,24 @@ export async function migrateLegacyProjectEnv(opts: {
     composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
     projectDir: opts.projectDir,
   });
+  const secretStoreRetention = await retainLegacySecretStoreFiles({
+    candidates: configCleanup.cleanupCandidates,
+    listing: secretStoreListing,
+    deliveredByEnv: new Map<string | null, ReadonlyMap<string, string | null>>(
+      [{ name: null, values: baseResolved.values }, ...overlaysResolved].map(
+        (resolved) => [
+          resolved.name,
+          new Map(resolved.values.map((entry) => [entry.key, entry.value])),
+        ]
+      )
+    ),
+  });
   const cleanupCandidates = await collectLegacyProjectEnvCleanupCandidates({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
     overlayNames,
     materialize: opts.materialize,
-    configCleanupCandidates: configCleanup.cleanupCandidates,
+    configCleanupCandidates: secretStoreRetention.candidates,
     deliveredValues,
     composeEnvFileReferences,
     composeInterpolatedKeys: new Map([
@@ -5515,7 +5561,10 @@ export async function migrateLegacyProjectEnv(opts: {
     updatedProjectConfig: configCleanup.changed,
     cleanupCandidates: cleanupCandidates.allowed,
     blockedCleanupCandidates: cleanupCandidates.blocked,
-    retainedEnvFiles: cleanupCandidates.retainedEnvFiles,
+    retainedEnvFiles: [
+      ...cleanupCandidates.retainedEnvFiles,
+      ...secretStoreRetention.retained,
+    ],
     composeEnvFileReferences,
   };
 }
@@ -8717,6 +8766,298 @@ function collectLegacyEncryptedBackendCleanupCandidates(opts: {
   }
 
   return [...candidates].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * The legacy overlays a contract migration converts, checked before anything is
+ * written or any key material can be provisioned:
+ * - Discovered overlays are regular files only, plus the configured default
+ *   overlay and overlays the secret store alone holds. A link that remains (the
+ *   base file, or a configured default overlay) refuses wherever it points: a
+ *   repository's symlink must not pull another file's values into this
+ *   project's env layers, even one in .hack such as a machine-local .env.local.
+ * - A legacy file that exists but can't be read refuses (`E_PERMISSION`): the
+ *   contract read takes it for an empty one, which would migrate it without its
+ *   values and then offer it for cleanup. A missing file still reads as empty.
+ * - Compose must keep the values it loads from those files.
+ * The secret-store listing is read-only and is also what later decides whether
+ * the store may be offered for cleanup.
+ */
+async function selectContractMigrationOverlays(opts: {
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly contract: HackEnvContract;
+  readonly composeRepairFollows: boolean | undefined;
+}): Promise<{
+  readonly overlayNames: readonly string[];
+  readonly secretStoreListing: FileSecretStoreListing;
+}> {
+  const secretStoreListing = await listFileSecretStoreEntries({
+    projectName: opts.projectName,
+    projectDir: opts.projectDir,
+  });
+  const overlayNames = withStoreOnlyLegacyOverlays({
+    discovered: await discoverLegacyOverlayNames({
+      projectDir: opts.projectDir,
+      includeSymlinks: false,
+    }),
+    contract: opts.contract,
+    storePlaintextInBackend: (
+      await readHackEnvRuntimeConfig({ projectDir: opts.projectDir })
+    ).storePlaintextInBackend,
+    listing: secretStoreListing,
+  });
+  await assertNoLegacyDotenvLinks({
+    projectDir: opts.projectDir,
+    overlayNames,
+  });
+  for (const envName of [null, ...overlayNames]) {
+    await readLegacyDotenvText({
+      path: resolveEnvFilePath({ projectDir: opts.projectDir, envName }),
+    });
+  }
+  await assertContractComposeOverlaysKeepValues({
+    projectDir: opts.projectDir,
+    overlayNames,
+    contractKeys: new Set(opts.contract.vars.map((entry) => entry.key)),
+    composeRepairFollows: opts.composeRepairFollows === true,
+  });
+  return { overlayNames, secretStoreListing };
+}
+
+/**
+ * Splits a secret-store key named by `resolveEnvSecretKey` for an overlay
+ * (`env.<overlay>.<KEY>`). Contract keys have no dots, so the last dot ends the
+ * overlay name. Null for a base key.
+ */
+function parseStoreOverlayKey(
+  storeKey: string
+): { readonly envName: string; readonly key: string } | null {
+  const prefix = "env.";
+  const last = storeKey.lastIndexOf(".");
+  if (!storeKey.startsWith(prefix) || last <= prefix.length) {
+    return null;
+  }
+  return {
+    envName: storeKey.slice(prefix.length, last),
+    key: storeKey.slice(last + 1),
+  };
+}
+
+/**
+ * Adds the overlays a contract migration knows only from the encrypted secret
+ * store: `hack env set KEY --secret --env <name>` wrote `env.<name>.KEY` there
+ * without creating `.hack/.env.<name>`, so a list built from files alone would
+ * leave that value in no layer. Only keys the contract reads from the store
+ * count. A name that can't be an env layer name refuses before any write,
+ * counting the names instead of quoting them.
+ */
+function withStoreOnlyLegacyOverlays(opts: {
+  readonly discovered: readonly string[];
+  readonly contract: HackEnvContract;
+  readonly storePlaintextInBackend: boolean;
+  readonly listing: FileSecretStoreListing;
+}): readonly string[] {
+  if (opts.listing.kind !== "listed") {
+    return opts.discovered;
+  }
+  const storeKeys = new Set(
+    opts.contract.vars
+      .filter(
+        (entry) => entry.source === "keychain" || opts.storePlaintextInBackend
+      )
+      .map((entry) => entry.key)
+  );
+  const names = new Set(opts.discovered);
+  const unusable = new Set<string>();
+  for (const storeKey of opts.listing.ownEntries.keys()) {
+    const parsed = parseStoreOverlayKey(storeKey);
+    if (
+      parsed === null ||
+      !storeKeys.has(parsed.key) ||
+      names.has(parsed.envName)
+    ) {
+      continue;
+    }
+    if (
+      NATIVE_ENV_OVERLAY_PATTERN.test(parsed.envName) &&
+      !isReservedLegacyOverlayName(parsed.envName)
+    ) {
+      names.add(parsed.envName);
+    } else {
+      unusable.add(parsed.envName);
+    }
+  }
+  if (unusable.size > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the encrypted secret store holds contract values for ${countLabel({ count: unusable.size, noun: "overlay" })} whose name can't be an env layer name (lowercase letters, digits and single dashes, not default or local), so those values would reach no layer. Set them again under a valid overlay name with \`hack env set KEY --secret --env <name>\` and remove the old entries, then retry.`,
+    });
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Refuses a contract migration that would change what a Compose service
+ * receives from a legacy overlay it lists in `env_file`. After the migration
+ * Hack delivers the layers a launch without `--env` selects, which outrank
+ * `env_file`, so an overlay that isn't `env.defaultOverlay` would lose the
+ * values it sets differently from `.hack/.env`; and the layers let the default
+ * overlay win over `.hack/.env` whatever the `env_file` order. Only contract
+ * keys move to layers, so only they are compared, unless the Compose repair
+ * that removes the `env_file` entries follows, which drops every key. Names
+ * files, services and keys, never values.
+ */
+async function assertContractComposeOverlaysKeepValues(opts: {
+  readonly projectDir: string;
+  readonly overlayNames: readonly string[];
+  readonly contractKeys: ReadonlySet<string>;
+  readonly composeRepairFollows: boolean;
+}): Promise<void> {
+  const legacyValues = new Map<string | null, Record<string, string>>();
+  for (const envName of [null, ...opts.overlayNames]) {
+    const entries = await readLegacyDotenvFile({
+      path: resolveEnvFilePath({ projectDir: opts.projectDir, envName }),
+    });
+    legacyValues.set(
+      envName,
+      opts.composeRepairFollows
+        ? entries
+        : Object.fromEntries(
+            Object.entries(entries).filter(([key]) =>
+              opts.contractKeys.has(key)
+            )
+          )
+    );
+  }
+  await assertComposeOverlaysStaySelected({
+    projectDir: opts.projectDir,
+    overlayNames: opts.overlayNames,
+    legacyValues,
+  });
+  const parsed = await readComposeFile({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+  });
+  if (parsed === null) {
+    return;
+  }
+  const orderConflicts = composeLegacyEnvFileOrderConflicts({
+    projectDir: opts.projectDir,
+    services: getRecord(parsed, "services") ?? {},
+    legacyValues,
+    defaultOverlay: await readProjectDefaultEnvConfig({
+      projectDir: opts.projectDir,
+    }),
+  });
+  if (orderConflicts.length > 0) {
+    throw new LegacyDotenvMigrationRefusalError({
+      code: "E_CONFIG_INVALID",
+      reason: `the order of Compose env_file gives ${orderConflicts.join(", ")} a different value from the migrated layers, where the default overlay wins over .hack/.env. List .env before the overlay, or make the files agree, then retry.`,
+    });
+  }
+}
+
+/**
+ * Keeps a configured encrypted secret store, and its key file, out of cleanup
+ * unless env layers now deliver every entry it holds. The store is removable
+ * only when it was listed, every entry of this project matches what the
+ * layers deliver for its env, and no other project has entries in it. The key
+ * file is removable only when no store that needs it stays behind. Kept files
+ * are reported with key names, never values.
+ */
+async function retainLegacySecretStoreFiles(opts: {
+  readonly candidates: readonly string[];
+  readonly listing: FileSecretStoreListing;
+  readonly deliveredByEnv: ReadonlyMap<
+    string | null,
+    ReadonlyMap<string, string | null>
+  >;
+}): Promise<{
+  readonly candidates: readonly string[];
+  readonly retained: readonly RetainedLegacyEnvFile[];
+}> {
+  const { storePath, keyPath } = opts.listing;
+  const storeIsCandidate = opts.candidates.includes(storePath);
+  const keyIsCandidate =
+    keyPath !== storePath && opts.candidates.includes(keyPath);
+  if (!(storeIsCandidate || keyIsCandidate)) {
+    return { candidates: opts.candidates, retained: [] };
+  }
+  const retained: RetainedLegacyEnvFile[] = [];
+  const keptStore = storeIsCandidate
+    ? await secretStoreRetention({
+        listing: opts.listing,
+        deliveredByEnv: opts.deliveredByEnv,
+      })
+    : null;
+  if (keptStore !== null) {
+    retained.push(keptStore);
+  }
+  const storeStays =
+    (keptStore !== null || !storeIsCandidate) && (await pathExists(storePath));
+  const keepKey = keyIsCandidate && storeStays;
+  if (keepKey && (await pathExists(keyPath))) {
+    retained.push({
+      path: keyPath,
+      keys: [],
+      reason: "secret_store_key",
+      storePath,
+    });
+  }
+  return {
+    candidates: opts.candidates.filter(
+      (path) =>
+        !(
+          (path === storePath && keptStore !== null) ||
+          (path === keyPath && keepKey)
+        )
+    ),
+    retained,
+  };
+}
+
+/** Why a configured encrypted store must be kept, or null when nothing in it would be lost. */
+async function secretStoreRetention(opts: {
+  readonly listing: FileSecretStoreListing;
+  readonly deliveredByEnv: ReadonlyMap<
+    string | null,
+    ReadonlyMap<string, string | null>
+  >;
+}): Promise<RetainedLegacyEnvFile | null> {
+  const path = opts.listing.storePath;
+  if (opts.listing.kind === "inactive") {
+    // The keychain backend doesn't read this store, and it isn't opened here.
+    const read = await readOptionalTextFile(path);
+    return read.kind === "absent" ||
+      (read.kind === "text" && read.text.length === 0)
+      ? null
+      : { path, keys: [], reason: "secret_store_unlisted" };
+  }
+  if (opts.listing.kind === "unreadable") {
+    return { path, keys: [], reason: "secret_store_unlisted" };
+  }
+  const undelivered: string[] = [];
+  for (const [storeKey, value] of opts.listing.ownEntries) {
+    const parsed = parseStoreOverlayKey(storeKey);
+    const delivered =
+      parsed !== null && opts.deliveredByEnv.has(parsed.envName)
+        ? opts.deliveredByEnv.get(parsed.envName)?.get(parsed.key)
+        : opts.deliveredByEnv.get(null)?.get(storeKey);
+    if (delivered !== value) {
+      undelivered.push(storeKey);
+    }
+  }
+  if (undelivered.length > 0) {
+    return {
+      path,
+      keys: undelivered.sort((left, right) => left.localeCompare(right)),
+      reason: "undelivered",
+    };
+  }
+  if (opts.listing.foreignEntryCount > 0) {
+    return { path, keys: [], reason: "secret_store_shared" };
+  }
+  return null;
 }
 
 function resolveConfiguredProjectPath(opts: {

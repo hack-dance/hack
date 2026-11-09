@@ -1361,9 +1361,36 @@ All tracked and effective local destinations are checked for collisions before a
 writes, including compatibility paths. For example, `.env.staging` together with
 `.env.staging.local` is refused because both would write `hack.env.staging.local.yaml`.
 Collision checks include case-only aliases for checkouts with case-insensitive filenames.
-If a legacy dotenv file cannot be read, migration refuses cleanup and leaves
-legacy artifacts in place. Env layers may already have been written; check read
+With `hack.env.json`, the migration refuses (`E_PERMISSION`) before it writes any env layer
+when `.hack/.env`, a legacy overlay or the configured default overlay exists but can't be
+read, for example mode 000, because reading it as empty would migrate it without its values.
+A missing file still counts as empty. If a legacy dotenv file becomes unreadable after the
+layers were written, cleanup still refuses and leaves legacy artifacts in place; check read
 access and preserve the remaining entries before cleaning up manually.
+
+With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing no env layer,
+when Compose `env_file` loads a legacy overlay that isn't `env.defaultOverlay` and that sets a
+contract key differently from `.hack/.env`, or when the `env_file` order gives a contract key a
+different value from the layers, where the default overlay wins over `.hack/.env`. After the
+migration Hack delivers the layers a launch without `--env` selects, and they outrank
+`env_file`, so the service would switch values. `hack doctor --migrate-env-config` compares
+every key in those files, not only the contract's, because its Compose repair then removes the
+`env_file` entries. Set `env.defaultOverlay` to that overlay, list `.env` first, or make the
+files agree, then retry. The error names files, services and keys, never values.
+
+With `hack.env.json` and an `encrypted_file` (or `cloud` shim) secret backend, the migration
+lists the store's entries read-only before it writes anything, without creating key material.
+An overlay that exists only in the store, such as a value from
+`hack env set KEY --secret --env staging` with no `.hack/.env.staging`, is migrated like an
+overlay file. A stored overlay whose name can't be an env layer name refuses
+(`E_CONFIG_INVALID`). Doctor offers a configured store inside the project for cleanup only
+when the env layers now deliver every entry it holds for this project and it holds none for
+another; otherwise it keeps the store and names the entries that would be lost, never their
+values. A store it can't list (its key isn't available, it can't be read, or the backend is
+the keychain) is kept too. A store key file inside the project is offered only when no store
+that needs it stays behind. The keychain backend can't list its entries, so with it an overlay
+that has no legacy file and isn't the default overlay isn't found; its keychain items are left
+as they are, so set those values again with `hack env set --secret --env <name>`.
 
 `hack doctor` also warns when a repo still depends on the old format. Its `env mode`
 check reports an error, not the legacy format, when a `.hack/hack.env.*.yaml` entry is a

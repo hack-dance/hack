@@ -1523,6 +1523,20 @@ test("migrateLegacyProjectEnv converts legacy base and overlay values into new c
 
 test("migrateLegacyProjectEnv blocks cleanup for compose-referenced legacy env files and can repair compose", async () => {
   const repo = await createRepo();
+  // Compose loads .env.production on every launch, so it must stay selected
+  // without --env once the env_file entries go (HACK-1682).
+  await writeFile(
+    repo.configFile,
+    `${JSON.stringify(
+      {
+        name: "project-env-test",
+        dev_host: "project-env.hack",
+        env: { defaultOverlay: "production" },
+      },
+      null,
+      2
+    )}\n`
+  );
   await writeFile(
     repo.composeFile,
     [

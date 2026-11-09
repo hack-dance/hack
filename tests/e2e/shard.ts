@@ -31,9 +31,13 @@ export const DEFAULT_DURATION_HINT_SECONDS = 60;
  * next CI run 38181288374). Hints only balance shards; they never bound or
  * skip a scenario, so a stale value costs wall time, not coverage. Refresh
  * them from a docker-e2e summary when a scenario's runtime changes materially.
+ * The three `native-config-networks-*` parts replace one 3409 s scenario; each
+ * repeats its three-checkout startup and cleanup, so together they exceed it.
  */
 export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
-  "native-config-networks": 3409,
+  "native-config-networks-policy": 1300,
+  "native-config-networks-ingress": 1200,
+  "native-config-networks-lifecycle": 1150,
   "native-config-compose": 973,
   "native-config-routing": 571,
   "native-config-build": 209,

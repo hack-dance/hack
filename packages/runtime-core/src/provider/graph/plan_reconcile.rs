@@ -704,7 +704,8 @@ mod tests {
             .unwrap();
             super::super::restore_history::retain(&fixture.0, &current).unwrap();
             // The production restore calls this after absence/history and before apply.
-            super::super::shutdown::rebase_stopped(&fixture.0, &current).unwrap();
+            super::super::shutdown::rebase_stopped_with(&fixture.0, &current, |_, _| Ok(true))
+                .unwrap();
             let (report, identity, mut prepared) = project.prepared(compose(services, &["data"]));
             let proof = prepare(&report.plan, &current, &identity).unwrap();
             let projection = proof.project(&mut prepared, &current).unwrap();
@@ -713,6 +714,11 @@ mod tests {
                 .unwrap();
             let evidence: Value = state::read(&fixture.0.join("shutdown.json")).unwrap();
             assert!(evidence["containers"].as_object().unwrap().is_empty());
+            super::super::shutdown::validate_current(
+                &serde_json::from_value(evidence).unwrap(),
+                &current,
+            )
+            .unwrap();
             assert_eq!(current.run, RUN);
             assert_eq!(current.resources["volume:data"].phase, "created");
             // Closest portable boundary: new compute is reserved, never old stop evidence.

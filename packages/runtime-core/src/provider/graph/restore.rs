@@ -618,7 +618,7 @@ fn restore_inputs(
     }
     // All prior compute was inspected absent above and its receipt is retained.
     // Reset stop observations before projection drops keys or recreates instances.
-    shutdown::rebase_stopped(&root, &receipt)?;
+    shutdown::rebase_stopped(&engine, &root, &receipt)?;
     // The complete previous attempt is retained above; current failure evidence
     // belongs only to this newly admitted generation.
     if let Some(change) = &hostname_change {

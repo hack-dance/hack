@@ -32,7 +32,7 @@ pub(super) struct Terminal {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Evidence {
+pub(super) struct Evidence {
     version: u8,
     run: String,
     owner: String,
@@ -126,7 +126,10 @@ fn validate(evidence: &Evidence, receipt: &Receipt) -> Result<(), CandidateError
     Ok(())
 }
 
-fn validate_current(evidence: &Evidence, receipt: &Receipt) -> Result<(), CandidateError> {
+pub(super) fn validate_current(
+    evidence: &Evidence,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
     validate(evidence, receipt)?;
     if evidence.containers.keys().any(|key| {
         !receipt
@@ -180,7 +183,21 @@ fn replace(
 /// Called under the provider lease only after restore confirms all prior compute
 /// absent and retains its stopped receipt. No previous stop claim crosses into
 /// the freshly admitted generation, including when logical service keys survive.
-pub(super) fn rebase_stopped(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
+pub(super) fn rebase_stopped(
+    engine: &Engine<'_>,
+    root: &Path,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    rebase_stopped_with(root, receipt, |old, resource| {
+        Ok(inspect_resource(engine, old, resource)?.is_none())
+    })
+}
+
+pub(super) fn rebase_stopped_with(
+    root: &Path,
+    receipt: &Receipt,
+    absent: impl Fn(&Receipt, &Resource) -> Result<bool, CandidateError>,
+) -> Result<(), CandidateError> {
     if receipt.phase != "stopped-data-retained"
         || receipt
             .resources
@@ -201,7 +218,13 @@ pub(super) fn rebase_stopped(root: &Path, receipt: &Receipt) -> Result<(), Candi
                 && resource.phase == "absent"
                 && resource.id.as_deref() == Some(&terminal.id)
         }) {
-            return Err(refused());
+            let old =
+                super::restore_history::shutdown_generation(root, receipt, key, &terminal.id)?
+                    .ok_or_else(refused)?;
+            let resource = old.resources.get(key).ok_or_else(refused)?;
+            if !absent(&old, resource)? {
+                return Err(refused());
+            }
         }
     }
     let next = Evidence {
@@ -235,8 +258,6 @@ fn rebase_selection_with(
     if receipt.phase != "cleanup-intent"
         || root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
-        || root.join("shutdown.pending").exists()
-        || root.join("shutdown.pending").is_symlink()
     {
         return Err(refused());
     }
@@ -291,6 +312,16 @@ pub(super) fn repaired(root: &Path, receipt: &Receipt) -> Result<bool, Candidate
     Ok(repaired_selection(root, receipt)?.is_some())
 }
 fn repaired_selection(root: &Path, receipt: &Receipt) -> Result<Option<String>, CandidateError> {
+    repaired_selection_with(root, receipt, false)
+}
+
+// Inspection may select committed evidence despite an interrupted replacement;
+// only the explicit repair may retain those pending bytes after selection matches.
+fn repaired_selection_with(
+    root: &Path,
+    receipt: &Receipt,
+    allow_pending: bool,
+) -> Result<Option<String>, CandidateError> {
     let path = root.join("shutdown-rebase.json");
     if !path.exists() && !path.is_symlink() {
         return Ok(None);
@@ -298,9 +329,12 @@ fn repaired_selection(root: &Path, receipt: &Receipt) -> Result<Option<String>, 
     for name in [
         "state.pending",
         "shutdown.pending",
+        "shutdown-history.pending",
         "shutdown-rebase.pending",
     ] {
-        if root.join(name).exists() || root.join(name).is_symlink() {
+        if (name == "state.pending" || !allow_pending)
+            && (root.join(name).exists() || root.join(name).is_symlink())
+        {
             return Err(refused());
         }
     }
@@ -324,14 +358,42 @@ fn repaired_selection(root: &Path, receipt: &Receipt) -> Result<Option<String>, 
     Ok(Some(proof.selection))
 }
 
+fn retain_rebase_pending(root: &Path) -> Result<(), CandidateError> {
+    for (name, limit) in [
+        ("shutdown.pending", 64 * 1024),
+        ("shutdown-history.pending", 1024 * 1024),
+        ("shutdown-rebase.pending", 64 * 1024),
+    ] {
+        super::journal::retain_file(root, name, "shutdown-recovery", limit)?;
+    }
+    Ok(())
+}
+fn pending_rebase(root: &Path) -> bool {
+    [
+        "shutdown.pending",
+        "shutdown-history.pending",
+        "shutdown-rebase.pending",
+    ]
+    .iter()
+    .any(|name| root.join(name).exists() || root.join(name).is_symlink())
+}
+
 /// Inspect the stale evidence repair selection without modifying any files.
 pub fn inspect_rebase(candidate: &super::Candidate, run: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = super::load(candidate, &engine, run)?;
+    if let Some(selection) = repaired_selection_with(&root, &receipt, true)? {
+        return Ok(
+            serde_json::json!({"run":run,"selection":selection,"repaired":true,
+            "pending_evidence":pending_rebase(&root),"cleanup_required":true}),
+        );
+    }
     let (selection, previous, next) = rebase_selection(&engine, &root, &receipt)?;
-    Ok(serde_json::json!({"run":run,"selection":selection,
+    Ok(
+        serde_json::json!({"run":run,"selection":selection,"pending_evidence":pending_rebase(&root),
         "retired_entries":previous.containers.len() - next.containers.len(),
-        "current_entries":next.containers.len(),"repaired":false}))
+        "current_entries":next.containers.len(),"repaired":false}),
+    )
 }
 
 /// Explicitly replace only selected historical entries proven absent under the
@@ -343,8 +405,12 @@ pub fn recover_rebase(
 ) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = super::load(candidate, &engine, run)?;
-    if let Some(selection) = repaired_selection(&root, &receipt)? {
+    if let Some(selection) = repaired_selection_with(&root, &receipt, true)? {
         if !hex(expected, 64) || selection != expected {
+            return Err(refused());
+        }
+        retain_rebase_pending(&root)?;
+        if repaired_selection(&root, &receipt)?.as_deref() != Some(selection.as_str()) {
             return Err(refused());
         }
         return Ok(
@@ -355,6 +421,7 @@ pub fn recover_rebase(
     if !hex(expected, 64) || selection != expected {
         return Err(refused());
     }
+    retain_rebase_pending(&root)?;
     // Bind a narrowly admitted foreground recovery to this exact original receipt
     // and its empty replacement. Publish the proof first so a crash can retry.
     if !next.containers.is_empty() {

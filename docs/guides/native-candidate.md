@@ -3401,7 +3401,7 @@ Copy `selection` from the inspection. Repair rechecks the receipt and shutdown
 selection under the provider lease. Each removed observation must match an exact
 immutable container ID in retained stopped restore history, and that ID must be
 freshly absent from the engine. An old container still present (even exited), an
-unknown ID, missing/truncated-away history, foreign identity, pending journal or
+unknown ID, missing/truncated-away history, foreign identity, pending graph-state journal or
 failed inspection refuses repair. For an enrolled foreground run on the same pool boot, use the existing explicit
 interrupted-cleanup engine after repair (the command name also covers this narrow
 repaired-shutdown case):
@@ -3424,6 +3424,15 @@ use ordinary retaining `graph cleanup --run-id RUN --json` instead. Do not stop
 or restart a shared pool to perform this recovery: the foreground repair path
 requires the original boot. Previous-boot owner/coordinator failures retain their
 existing dedicated recovery gates and may still require operator investigation.
+
+Inspection reports `pending_evidence` when an interrupted shutdown/history/proof
+replacement exists. Explicit repair retains those bounded private bytes unchanged
+before retrying publication; it never decodes them as authority. A pending
+`state.json` replacement still refuses because graph ownership is uncertain.
+Stopped upgrade receipts can also contain older stop IDs under a surviving
+service key. Restore requires stopped history for that exact old ID and a fresh
+engine absence observation before resetting it, even when the current service
+was never created or had a different container ID.
 
 Repair itself never stops containers, deletes volumes, clears owner or relay
 acknowledgements, or turns an uncertain stop into success. It archives the old

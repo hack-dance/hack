@@ -4,7 +4,14 @@ use std::{fs, path::Path, process::Command};
 
 #[test]
 fn shutdown_rebase_rejects_missing_duplicate_and_destructive_flags_before_admission() {
-    let root = std::env::temp_dir().join(format!("shutdown-rebase-cli-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "shutdown-rebase-cli-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     fs::create_dir(&root).unwrap();
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

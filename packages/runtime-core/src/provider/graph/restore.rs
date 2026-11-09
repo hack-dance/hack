@@ -631,6 +631,9 @@ fn restore_inputs(
                 .as_ref()
                 .map(|inputs| inputs.binding.clone()),
         )?;
+        // Removed services' containers were confirmed absent above; their stop
+        // records from the previous generation must not outlive the receipt entry.
+        shutdown::retire_unowned(&engine, &receipt, &root)?;
     }
     receipt.startup_failure = None;
     receipt.probes = probes::fresh(&engine, &prepared.configs, prepared.probes)?;

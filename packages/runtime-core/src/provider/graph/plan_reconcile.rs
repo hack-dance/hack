@@ -707,6 +707,68 @@ mod tests {
         assert_eq!(mounts(&original, "db"), vec![data]);
     }
 
+    /// HACK-1963: add service, stop, remove service, reconcile, stop. The first
+    /// stop recorded both containers; the reconciled receipt must leave no stop
+    /// record that a later stop would compare against a missing receipt entry.
+    #[test]
+    fn removed_service_stop_record_is_retired_with_the_reconciled_receipt() {
+        let project = Project::new();
+        let (mut receipt, _) = base(&project);
+        let ids = [("db", '1'), ("web", '2')];
+        for (service, tag) in ids {
+            receipt
+                .resources
+                .get_mut(&format!("container:{service}"))
+                .unwrap()
+                .id = Some(tag.to_string().repeat(64));
+        }
+        let graph_root = super::super::tests::Fixture::new();
+        let containers = ids
+            .iter()
+            .map(|(service, tag)| {
+                (
+                    format!("container:{service}"),
+                    json!({"id": tag.to_string().repeat(64), "exit_code": 0,
+                        "oom_killed": false, "stop_requested": true}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        state::write(
+            &graph_root.0.join("shutdown.json"),
+            &json!({"version": 1, "run": RUN, "owner": receipt.owner,
+                "plan": receipt.plan_id, "containers": containers}),
+        )
+        .unwrap();
+        let (report, identity, mut prepared) = project.prepared(compose(
+            json!({"db": service("serve", 'a', &["data"])}),
+            &["data"],
+        ));
+        let proof = prepare(&report.plan, &receipt, &identity).unwrap();
+        let projection = proof.project(&mut prepared, &receipt).unwrap();
+        let mut reconciled = receipt.clone();
+        proof
+            .apply(&mut reconciled, projection, &BTreeMap::new(), None)
+            .unwrap();
+        assert!(!reconciled.resources.contains_key("container:web"));
+        let mut checked = Vec::new();
+        shutdown::retire_unowned_with(&graph_root.0, &reconciled, |id| {
+            checked.push(id.to_owned());
+            Ok(false)
+        })
+        .unwrap();
+        assert_eq!(checked, vec!["2".repeat(64)]);
+        let evidence: Value = state::read(&graph_root.0.join("shutdown.json")).unwrap();
+        assert_eq!(
+            evidence["containers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["container:db"]
+        );
+        assert_eq!(evidence["plan"], json!(reconciled.plan_id));
+    }
+
     #[test]
     fn added_and_removed_services_recreate_compute_and_keep_data() {
         let project = Project::new();

@@ -8,6 +8,7 @@ use crate::{
     error::{StopFailureDiagnostic, StopFailuresDiagnostic},
     provider::engine::StopBatchFailure,
 };
+use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
@@ -52,32 +53,10 @@ pub(super) fn stop_owned(
 ) -> Result<(), CandidateError> {
     super::journal::retain_file(root, "shutdown.pending", "shutdown-recovery", 64 * 1024)?;
     let path = root.join("shutdown.json");
-    let mut evidence: Evidence = if path.exists() || path.is_symlink() {
-        state::read(&path)?
-    } else {
-        Evidence {
-            version: 1,
-            run: receipt.run.clone(),
-            owner: receipt.owner.clone(),
-            plan: receipt.plan_id.clone(),
-            containers: BTreeMap::new(),
-        }
-    };
-    if evidence.version != 1
-        || evidence.run != receipt.run
-        || evidence.owner != receipt.owner
-        || evidence.plan != receipt.plan_id
-        || evidence.containers.len() > super::MAX_SERVICES
-        || evidence.containers.iter().any(|(key, value)| {
-            !hex(&value.id, 64)
-                || !receipt
-                    .resources
-                    .get(key)
-                    .is_some_and(|r| r.kind == Kind::Container)
-        })
-    {
-        return Err(refused());
-    }
+    // A record of a container this receipt no longer owns is retired only after
+    // its immutable ID is confirmed absent. This also lets a graph wedged by an
+    // earlier reconciliation (HACK-1963) finish its pending cleanup.
+    let mut evidence = load(root, receipt, |id| container_present(engine, id))?;
     // Stop wins against engine restarts: disarm every admitted policy and
     // confirm it with a fresh observation before the first stop request. A
     // restart already pending in the engine is cancelled by the stop itself.
@@ -122,6 +101,112 @@ pub(super) fn stop_owned(
         );
     }
     state::write(&path, &evidence)
+}
+
+/// Retire stop records of containers that `receipt` no longer owns.
+///
+/// Reconciliation drops a removed service's container from the receipt only after
+/// restore confirmed its absence, but `shutdown.json` from the previous stop still
+/// describes it. Stop and interrupted-start selection compare the evidence keys
+/// with the receipt, so that stale record would refuse every later cleanup
+/// (HACK-1963). The caller holds the engine mutation lease and calls this with the
+/// projected receipt before committing it. A stale record is dropped only when its
+/// immutable container ID is absent from the engine. A present container, an
+/// engine failure or malformed evidence refuses and leaves the file unchanged. A
+/// crash before the new receipt commits leaves the old receipt with fewer records,
+/// which never strengthens a stop or cleanup claim.
+pub(super) fn retire_unowned(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    root: &Path,
+) -> Result<(), CandidateError> {
+    retire_unowned_with(root, receipt, |id| container_present(engine, id))
+}
+
+/// `retire_unowned` with the absence observation supplied by the caller.
+pub(super) fn retire_unowned_with(
+    root: &Path,
+    receipt: &Receipt,
+    present: impl FnMut(&str) -> Result<bool, CandidateError>,
+) -> Result<(), CandidateError> {
+    let path = root.join("shutdown.json");
+    if !path.exists() && !path.is_symlink() {
+        return Ok(());
+    }
+    super::journal::retain_file(root, "shutdown.pending", "shutdown-recovery", 64 * 1024)?;
+    let recorded = state::read::<Evidence>(&path)?.containers.len();
+    let evidence = load(root, receipt, present)?;
+    if evidence.containers.len() != recorded {
+        state::write(&path, &evidence)?;
+    }
+    Ok(())
+}
+
+/// Read the retained stop evidence for `receipt`, or start empty evidence.
+///
+/// The header must name this exact run, owner and ownership plan, and every
+/// record must carry an immutable container ID. A record whose key the receipt
+/// does not own as a container describes a container that an earlier
+/// reconciliation retired. It is dropped from the returned evidence only when
+/// `present` confirms that exact container ID is gone. A container that is still
+/// present keeps the refusal: the receipt would then be missing an owned container.
+fn load(
+    root: &Path,
+    receipt: &Receipt,
+    mut present: impl FnMut(&str) -> Result<bool, CandidateError>,
+) -> Result<Evidence, CandidateError> {
+    let path = root.join("shutdown.json");
+    let mut evidence: Evidence = if path.exists() || path.is_symlink() {
+        state::read(&path)?
+    } else {
+        Evidence {
+            version: 1,
+            run: receipt.run.clone(),
+            owner: receipt.owner.clone(),
+            plan: receipt.plan_id.clone(),
+            containers: BTreeMap::new(),
+        }
+    };
+    if evidence.version != 1
+        || evidence.run != receipt.run
+        || evidence.owner != receipt.owner
+        || evidence.plan != receipt.plan_id
+        || evidence.containers.len() > super::MAX_SERVICES
+        || evidence
+            .containers
+            .values()
+            .any(|value| !hex(&value.id, 64))
+    {
+        return Err(refused());
+    }
+    let retired = evidence
+        .containers
+        .iter()
+        .filter(|(key, _)| {
+            !receipt
+                .resources
+                .get(*key)
+                .is_some_and(|r| r.kind == Kind::Container)
+        })
+        .map(|(key, value)| (key.clone(), value.id.clone()))
+        .collect::<Vec<_>>();
+    for (key, id) in retired {
+        if present(&id)? {
+            return Err(refused());
+        }
+        evidence.containers.remove(&key);
+    }
+    Ok(evidence)
+}
+
+/// Whether the engine still has a container with this exact immutable ID. Only
+/// `engine_not_found` proves absence; every other failure propagates.
+fn container_present(engine: &Engine<'_>, id: &str) -> Result<bool, CandidateError> {
+    match engine.request(Method::GET, &format!("/v1.53/containers/{id}/json"), None) {
+        Ok(_) => Ok(true),
+        Err(e) if e.code == "engine_not_found" => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Disarm the engine restart policy of every owned container that still has one.
@@ -361,6 +446,7 @@ mod tests {
     use super::*;
     use crate::{error::StopFailureStage, provider::engine::StopFailure};
     use serde_json::json;
+    use std::{fs, os::unix::fs::MetadataExt};
 
     #[test]
     fn stop_detail_uses_only_admitted_service_names_and_omits_foreign_ids() {
@@ -450,6 +536,185 @@ mod tests {
         record(&mut recovered, "container:service".into(), fresh);
         assert!(!recovered.containers["container:service"].stop_requested);
         assert_eq!(recovered.containers.len(), 1);
+    }
+
+    const API: &str = "container:api";
+    const APP: &str = "container:app";
+
+    /// A stopped two-service receipt (`app` with a named volume, plus `api`), as
+    /// the first foreground stop leaves it before the Compose edit.
+    fn two_service_receipt() -> Receipt {
+        serde_json::from_value(json!({
+            "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
+            "namespace":"c".repeat(64),"plan_id":"d".repeat(64),
+            "phase":"stopped-data-retained","readiness":{"app":"started","api":"started"},
+            "resources":{
+                "container:app":{"kind":"container","key":"app","name":"owned-app","id":"e".repeat(64),"phase":"absent"},
+                "container:api":{"kind":"container","key":"api","name":"owned-api","id":"f".repeat(64),"phase":"absent"},
+                "volume:appdata":{"kind":"volume","key":"appdata","name":"owned-appdata","phase":"created"}
+            }
+        }))
+        .unwrap()
+    }
+
+    /// The same run after a reconciliation that removed `api`: the receipt drops
+    /// its container and recreates `app` under a new immutable ID.
+    fn reconciled_receipt() -> Receipt {
+        let mut receipt = two_service_receipt();
+        receipt.resources.remove(API);
+        let app = receipt.resources.get_mut(APP).unwrap();
+        app.id = Some("1".repeat(64));
+        app.phase = "started".into();
+        receipt.readiness.remove("api");
+        receipt.phase = "ready-observed".into();
+        receipt
+    }
+
+    /// Commit stop evidence exactly as `stop_owned` records it for every container.
+    fn stopped_evidence(root: &Path, receipt: &Receipt) {
+        let mut evidence = load(root, receipt, |_| unreachable!("no stale record")).unwrap();
+        for resource in receipt.resources.values() {
+            if resource.kind == Kind::Container {
+                record(
+                    &mut evidence,
+                    format!("container:{}", resource.key),
+                    Terminal {
+                        id: resource.id.clone().unwrap(),
+                        exit_code: 137,
+                        oom_killed: false,
+                        stop_requested: true,
+                    },
+                );
+            }
+        }
+        state::write(&root.join("shutdown.json"), &evidence).unwrap();
+    }
+
+    fn recorded(root: &Path) -> Vec<String> {
+        let evidence: Evidence = state::read(&root.join("shutdown.json")).unwrap();
+        evidence.containers.into_keys().collect()
+    }
+
+    #[test]
+    fn removed_service_reconcile_retires_its_stop_record_so_the_next_stop_proceeds() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let first = two_service_receipt();
+        stopped_evidence(root, &first);
+        assert_eq!(recorded(root), vec![API, APP]);
+        let reconciled = reconciled_receipt();
+        // HACK-1963: without retirement the stale `api` record refuses every
+        // later stop while its container could still exist.
+        assert_eq!(
+            load(root, &reconciled, |_| Ok(true)).err().unwrap().code,
+            "graph_shutdown_uncertain"
+        );
+        let mut observed = Vec::new();
+        retire_unowned_with(root, &reconciled, |id| {
+            observed.push(id.to_owned());
+            Ok(false)
+        })
+        .unwrap();
+        assert_eq!(
+            observed,
+            vec!["f".repeat(64)],
+            "only the stale ID is checked"
+        );
+        assert_eq!(recorded(root), vec![APP]);
+        // The next stop reads the evidence without any further absence check, and
+        // the old `app` generation is replaced by the fresh observation.
+        let mut evidence = load(root, &reconciled, |_| unreachable!("retired")).unwrap();
+        assert_eq!(evidence.containers[APP].id, "e".repeat(64));
+        record(
+            &mut evidence,
+            APP.into(),
+            Terminal {
+                id: "1".repeat(64),
+                exit_code: 0,
+                oom_killed: false,
+                stop_requested: true,
+            },
+        );
+        state::write(&root.join("shutdown.json"), &evidence).unwrap();
+        assert_eq!(recorded(root), vec![APP]);
+        // Retirement is idempotent and does not rewrite unchanged evidence (a
+        // write replaces the file, so its inode would change).
+        let inode = || fs::metadata(root.join("shutdown.json")).unwrap().ino();
+        let before = inode();
+        retire_unowned_with(root, &reconciled, |_| unreachable!("nothing stale")).unwrap();
+        assert_eq!(inode(), before);
+    }
+
+    #[test]
+    fn wedged_cleanup_retires_a_stale_record_only_after_confirmed_absence() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        stopped_evidence(root, &two_service_receipt());
+        // A graph already wedged in cleanup-intent by HACK-1963: the receipt lost
+        // `api` but `shutdown.json` still lists it.
+        let mut wedged = reconciled_receipt();
+        wedged.phase = "cleanup-intent".into();
+        let bytes = fs::read(root.join("shutdown.json")).unwrap();
+        // A still-present container or an engine failure keeps the refusal and
+        // leaves the evidence untouched.
+        assert_eq!(
+            load(root, &wedged, |_| Ok(true)).err().unwrap().code,
+            "graph_shutdown_uncertain"
+        );
+        assert_eq!(
+            load(root, &wedged, |_| Err(CandidateError::new(
+                "engine_unavailable",
+                "Synthetic engine failure."
+            )))
+            .err()
+            .unwrap()
+            .code,
+            "engine_unavailable"
+        );
+        assert_eq!(
+            retire_unowned_with(root, &wedged, |_| Ok(true))
+                .unwrap_err()
+                .code,
+            "graph_shutdown_uncertain"
+        );
+        assert_eq!(fs::read(root.join("shutdown.json")).unwrap(), bytes);
+        // Confirmed absence of the exact recorded ID lets cleanup proceed.
+        let evidence = load(root, &wedged, |id| {
+            assert_eq!(id, "f".repeat(64));
+            Ok(false)
+        })
+        .unwrap();
+        assert_eq!(evidence.containers.keys().collect::<Vec<_>>(), vec![APP]);
+    }
+
+    #[test]
+    fn retirement_never_relaxes_header_identity_or_malformed_records() {
+        let fixture = super::super::tests::Fixture::new();
+        let root = &fixture.0;
+        let reconciled = reconciled_receipt();
+        // No evidence yet: nothing to retire and nothing is created.
+        retire_unowned_with(root, &reconciled, |_| unreachable!("no file")).unwrap();
+        assert!(!root.join("shutdown.json").exists());
+        stopped_evidence(root, &two_service_receipt());
+        for change in ["run", "owner", "plan_id"] {
+            let mut other = reconciled.clone();
+            match change {
+                "run" => other.run = "9".repeat(32),
+                "owner" => other.owner = "9".repeat(32),
+                _ => other.plan_id = "9".repeat(64),
+            }
+            assert!(load(root, &other, |_| Ok(false)).is_err(), "{change}");
+            assert!(
+                retire_unowned_with(root, &other, |_| Ok(false)).is_err(),
+                "{change}"
+            );
+        }
+        // A stale record without an immutable ID is never checked or dropped.
+        let mut evidence: Evidence = state::read(&root.join("shutdown.json")).unwrap();
+        evidence.containers.get_mut(API).unwrap().id = "not-an-id".into();
+        state::write(&root.join("shutdown.json"), &evidence).unwrap();
+        assert!(load(root, &reconciled, |_| unreachable!("malformed")).is_err());
+        assert_eq!(recorded(root), vec![API, APP]);
     }
 
     fn fixture() -> (Resource, Value) {

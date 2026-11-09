@@ -17,9 +17,20 @@ export const MCP_TOOL_RESULT_LIMIT_BYTES = 9.5 * MIB;
 /** Most bytes the `content` text may occupy once a result has been cut. */
 export const MCP_TOOL_RESULT_TEXT_LIMIT_BYTES = 256 * 1024;
 
-/** Fixed, value-free line appended to `stderr` in any payload that was cut. */
+/**
+ * Fixed, value-free line appended to `stderr` in a non-log payload that was cut
+ * and in a result without a typed payload.
+ */
 export const MCP_TOOL_RESULT_CUT_NOTE =
   "MCP tool result exceeded its size limit; use the CLI for full output.";
+
+/**
+ * The log tools' cut line. It names the inputs both log tools accept that
+ * shrink the next call, because a log caller can usually narrow the request
+ * instead of leaving MCP. Like the generic line, it is fixed and value-free.
+ */
+export const MCP_LOG_RESULT_CUT_NOTE =
+  "MCP tool result exceeded its size limit; narrow the request with tail, since, until or service, or use the CLI for full output.";
 
 /** Stderr kept even when the primary output could fill the whole budget. */
 const STDERR_FLOOR_BYTES = 16 * 1024;
@@ -143,7 +154,7 @@ function cutPayload(opts: {
     ...rest,
     command,
     stdout: parts.stdout,
-    stderr: appendCutNote(parts.stderr),
+    stderr: appendCutNote({ stderr: parts.stderr, log: logData !== null }),
     outputTruncated: true,
     ...(logData
       ? {
@@ -197,9 +208,17 @@ function cutPayload(opts: {
   return assemble({ stdout, stderr, events });
 }
 
-function appendCutNote(stderr: string): string {
+function cutNote(opts: { readonly log: boolean }): string {
+  return opts.log ? MCP_LOG_RESULT_CUT_NOTE : MCP_TOOL_RESULT_CUT_NOTE;
+}
+
+function appendCutNote(opts: {
+  readonly stderr: string;
+  readonly log: boolean;
+}): string {
+  const { stderr } = opts;
   const separator = stderr === "" || stderr.endsWith("\n") ? "" : "\n";
-  return `${stderr}${separator}${MCP_TOOL_RESULT_CUT_NOTE}\n`;
+  return `${stderr}${separator}${cutNote(opts)}\n`;
 }
 
 /** The longest run of whole events from the start that fits. */
@@ -300,7 +319,7 @@ function buildLastResortResult(opts: {
     command: "",
     exitCode: opts.payload.exitCode,
     stdout: "",
-    stderr: `${MCP_TOOL_RESULT_CUT_NOTE}\n`,
+    stderr: `${cutNote({ log: toLogData(opts.payload.data) !== null })}\n`,
     outputTruncated: true,
   };
   return {

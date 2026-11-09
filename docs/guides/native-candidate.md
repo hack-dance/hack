@@ -3080,6 +3080,24 @@ separately after restart.
 
 ### Explicit cleanup after a dead foreground owner
 
+`hack up` and `hack restart` refuse a run whose foreground publication is still
+present and name the next step: a running owner must be stopped with Ctrl-C or
+`hack down`; an owner that exited while its services were running is stopped by
+`hack down --recover`. That command selects the run's exact receipt with the
+read-only `graph foreground-owner --run-id RUN --json` and then uses the
+same-boot `graph recover-live-owner` described below, retaining data and
+retiring the stale publication. If the frontend that owned the run also exited
+before confirming its cleanup, `hack down --recover` prints the exact
+`hack restart --recover-frontend --expect-finalization-attempt ATTEMPT` step.
+An owner that exited before its restore was admitted is reported, with data
+retained, but no command retires that attempt yet.
+
+Read-only `hack ps` and `hack logs` hold the provider lease only briefly. Native
+startup, retained-start eligibility, restore admission, inspections inside
+mutating commands and owned foreground cleanup wait out such a holder within a
+bound instead of failing, so polling status during `up` or `restart` does not
+make them fail or strand a foreground publication.
+
 For a fully ready graph whose foreground owner died while its pool remains on the
 same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects
 only that graph. It requires matching dead foreground and relay-owner identities,

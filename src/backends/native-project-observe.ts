@@ -3,6 +3,7 @@ import { isRecord } from "../lib/guards.ts";
 import {
   inspectNativeProjectGraph,
   isNativeProviderBusy,
+  OBSERVER_BUSY_WAIT_MS,
 } from "./native-project-inspect.ts";
 import {
   loadNativeProjectRun,
@@ -143,6 +144,7 @@ async function inspect(opts: Options, run: NativeProjectRun) {
       projectRoot: opts.scope.projectRoot,
       run: run.run,
       invoke: opts.invoke,
+      busyWaitMs: OBSERVER_BUSY_WAIT_MS,
     }),
     run
   );

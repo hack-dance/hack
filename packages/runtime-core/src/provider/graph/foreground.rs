@@ -285,7 +285,10 @@ fn serve_input<'a>(
             // containers. It travels only in this reply and is never persisted.
             let error = error.with_startup_logs(super::startup_logs::capture(candidate, &run_id));
             if fresh_generation.is_some() && !runtime.admission_started() {
-                let engine = Engine::connect_cleanup(candidate)?;
+                // Wait out a concurrent read-only holder of the lease: refusing here
+                // would exit with this attempt's publication still bound, which
+                // blocks every later start of the retained run.
+                let engine = Engine::connect_cleanup_wait(candidate)?;
                 let (retained, root) = super::load(candidate, &engine, &run_id)?;
                 if retained.phase == "stopped-data-retained"
                     && std::fs::symlink_metadata(root.join("state.pending"))

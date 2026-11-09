@@ -251,6 +251,23 @@ fn restore_inputs(
     if options.timeout.is_zero() || options.timeout > Duration::from_secs(600) {
         return Err(error("graph_budget", "Invalid restore timeout."));
     }
+    // Nothing above has effects, and acquisition admits nothing: wait out a concurrent
+    // read-only holder of the lease (the inspection behind `hack ps`) within the restore
+    // budget instead of failing the restore, as graph startup does. Cancellation stops
+    // the wait before admission.
+    #[cfg(target_os = "macos")]
+    let engine = {
+        let budget = std::time::Instant::now() + options.timeout;
+        let deadline = fresh
+            .as_ref()
+            .map_or(budget, |fresh| fresh.deadline.min(budget));
+        Engine::connect_until(candidate, deadline, || {
+            startup
+                .as_ref()
+                .is_some_and(|driver| driver.check_cancelled().is_err())
+        })?
+    };
+    #[cfg(not(target_os = "macos"))]
     let engine = Engine::connect(candidate)?;
     if engine.guest().profile() != super::super::Profile::Development {
         return Err(error(

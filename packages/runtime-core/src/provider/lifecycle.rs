@@ -284,6 +284,13 @@ fn operation_lease<T>(
     Ok((lock, current))
 }
 
+/// How long owned cleanup and recovery wait for a provider lease that another operation
+/// holds, such as the `graph inspect` behind a polling `hack ps`. Acquisition admits nothing,
+/// and a foreground owner that gives up its cleanup exits with its publication and services
+/// still bound, so this waits longer than startup does.
+#[cfg(target_os = "macos")]
+pub(super) const OWNED_CLEANUP_LEASE_WAIT: Duration = Duration::from_secs(30);
+
 /// How long ordinary startup waits for a provider lease that another operation holds, such as
 /// the `graph inspect` behind `hack ps`.
 pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
@@ -483,7 +490,7 @@ impl<'a> OwnedGuest<'a> {
         Self::connect_mode(
             candidate,
             false,
-            Some(Instant::now() + Duration::from_secs(5)),
+            Some(Instant::now() + OWNED_CLEANUP_LEASE_WAIT),
         )
     }
 

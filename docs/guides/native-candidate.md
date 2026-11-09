@@ -3089,8 +3089,20 @@ same-boot `graph recover-live-owner` described below, retaining data and
 retiring the stale publication. If the frontend that owned the run also exited
 before confirming its cleanup, `hack down --recover` prints the exact
 `hack restart --recover-frontend --expect-finalization-attempt ATTEMPT` step.
-An owner that exited before its restore was admitted is reported, with data
-retained, but no command retires that attempt yet.
+
+An owner of a retained run that exited before the runtime admitted its restore
+is also retired by `hack down --recover`. The admission's first durable write
+replaces the acknowledged `stopped-data-retained` receipt, so an unchanged
+receipt proves the attempt never reached the guest. That command calls
+`graph retire-unadmitted-owner --run-id RUN --expect-receipt SHA --json` with
+the receipt it selected. The runtime holds the publication gate, the provider
+lease and the dead owner's publication lock, requires the full retained-start
+eligibility of that exact receipt, and releases only the relay publication and
+dependency reservation that name the same dead process before it retires the
+foreground publication. Nothing in the guest is stopped, created or removed,
+and data is retained. Then `hack up` restores the run. An owner that exited
+after its restore was admitted is still reported without a supported
+retirement.
 
 Read-only `hack ps` and `hack logs` hold the provider lease only briefly. Native
 startup, retained-start eligibility, restore admission, inspections inside

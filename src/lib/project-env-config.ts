@@ -5169,7 +5169,43 @@ export type LegacyProjectEnvMigration = {
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
   readonly retainedEnvFiles: readonly RetainedLegacyEnvFile[];
+  /**
+   * The project config still points at an encrypted secret store the
+   * migration keeps (not offered for cleanup), so its entries stay readable.
+   * Absent or null when no pointer was kept for that reason.
+   */
+  readonly keptSecretStorePointer?: KeptSecretStorePointer | null;
 };
+
+/**
+ * An encrypted secret store pointer (`controlPlane.secrets.encryptedFile` and
+ * `backend: encrypted_file`) the migration left in `configPath` because it
+ * keeps `storePath`. `keys` names this project's entries still in the store,
+ * as stored (`TOKEN`, `env.staging.TOKEN`); empty when it couldn't be listed.
+ */
+export type KeptSecretStorePointer = {
+  readonly configPath: string;
+  readonly storePath: string;
+  readonly listed: boolean;
+  readonly keys: readonly string[];
+};
+
+/** Value-free line saying the store pointer was kept, naming keys only. */
+export function describeKeptSecretStorePointer(opts: {
+  readonly shownConfigPath: string;
+  readonly shownStorePath: string;
+  readonly pointer: KeptSecretStorePointer;
+}): string {
+  let holds: string;
+  if (!opts.pointer.listed) {
+    holds = "its entries couldn't be listed";
+  } else if (opts.pointer.keys.length > 0) {
+    holds = `it still holds ${opts.pointer.keys.join(", ")}`;
+  } else {
+    holds = "it holds no entries for this project";
+  }
+  return `Kept the encrypted secret store pointer (controlPlane.secrets) in ${opts.shownConfigPath} for ${opts.shownStorePath}, which stays: ${holds} (values omitted).`;
+}
 
 /**
  * A legacy dotenv file the migration keeps, and why:
@@ -5514,16 +5550,12 @@ export async function migrateLegacyProjectEnv(opts: {
     });
   }
 
-  const configCleanup = await migrateLegacyProjectConfig({
+  const plannedConfig = await planLegacyProjectConfigChanges({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
   });
-  const composeEnvFileReferences = await inspectLegacyComposeEnvFileReferences({
-    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
-    projectDir: opts.projectDir,
-  });
   const secretStoreRetention = await retainLegacySecretStoreFiles({
-    candidates: configCleanup.cleanupCandidates,
+    candidates: plannedConfig.cleanupCandidates,
     listing: secretStoreListing,
     deliveredByEnv: new Map<string | null, ReadonlyMap<string, string | null>>(
       [{ name: null, values: baseResolved.values }, ...overlaysResolved].map(
@@ -5533,6 +5565,18 @@ export async function migrateLegacyProjectEnv(opts: {
         ]
       )
     ),
+  });
+  // A store that still exists keeps its pointer on every route; doctor drops
+  // the pointer only after its cleanup removed the store.
+  const keepStorePointer = await pathExists(secretStoreListing.storePath);
+  const configCleanup = await migrateLegacyProjectConfig({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    keepStorePointer,
+  });
+  const composeEnvFileReferences = await inspectLegacyComposeEnvFileReferences({
+    composeFile: resolve(opts.projectDir, PROJECT_COMPOSE_FILENAME),
+    projectDir: opts.projectDir,
   });
   const cleanupCandidates = await collectLegacyProjectEnvCleanupCandidates({
     projectRoot: opts.projectRoot,
@@ -5566,6 +5610,23 @@ export async function migrateLegacyProjectEnv(opts: {
       ...secretStoreRetention.retained,
     ],
     composeEnvFileReferences,
+    keptSecretStorePointer:
+      keepStorePointer &&
+      plannedConfig.secretStorePointer &&
+      !cleanupCandidates.allowed.includes(secretStoreListing.storePath) &&
+      !cleanupCandidates.blocked.includes(secretStoreListing.storePath)
+        ? {
+            configPath: plannedConfig.path,
+            storePath: secretStoreListing.storePath,
+            listed: secretStoreListing.kind === "listed",
+            keys:
+              secretStoreListing.kind === "listed"
+                ? [...secretStoreListing.ownEntries.keys()].sort(
+                    (left, right) => left.localeCompare(right)
+                  )
+                : [],
+          }
+        : null,
   };
 }
 
@@ -5743,6 +5804,8 @@ async function planLegacyProjectConfigChanges(opts: {
   readonly path: string;
   readonly changed: boolean;
   readonly cleanupCandidates: readonly string[];
+  /** The project config names an encrypted store a migration could drop. */
+  readonly secretStorePointer: boolean;
 }> {
   const path = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
   const text = await readTextFile(path).catch(() => null);
@@ -5753,16 +5816,34 @@ async function planLegacyProjectConfigChanges(opts: {
     parsed = null;
   }
   if (!isRecord(parsed)) {
-    return { path, changed: false, cleanupCandidates: [] };
+    return {
+      path,
+      changed: false,
+      cleanupCandidates: [],
+      secretStorePointer: false,
+    };
   }
+  // The most the migration and doctor's cleanup can change: a kept store's
+  // pointer is dropped once the cleanup removes the store, so consent for that
+  // edit is asked up front.
   const planned = normalizeLegacyProjectTopLevelConfig({
     parsed,
     projectRoot: opts.projectRoot,
+    keepStorePointer: false,
   });
+  const secretsRaw = getRecord(
+    getRecord(parsed, "controlPlane") ?? {},
+    "secrets"
+  );
+  const backend = secretsRaw ? getString(secretsRaw, "backend") : undefined;
   return {
     path,
     changed: planned.changed,
     cleanupCandidates: planned.cleanupCandidates,
+    secretStorePointer:
+      secretsRaw !== undefined &&
+      backend !== "cloud" &&
+      (isRecord(secretsRaw.encryptedFile) || backend === "encrypted_file"),
   };
 }
 
@@ -5820,6 +5901,15 @@ export async function finishImplicitLegacyEnvMigration(opts: {
   if (removed.length > 0) {
     lines.push(
       `Removed ${removed.map(shown).join(", ")}: env layers now hold every value ${removed.length === 1 ? "it" : "they"} set.`
+    );
+  }
+  if (migrated.keptSecretStorePointer) {
+    lines.push(
+      describeKeptSecretStorePointer({
+        shownConfigPath: shown(migrated.keptSecretStorePointer.configPath),
+        shownStorePath: shown(migrated.keptSecretStorePointer.storePath),
+        pointer: migrated.keptSecretStorePointer,
+      })
     );
   }
   for (const retained of migrated.retainedEnvFiles) {
@@ -8234,6 +8324,44 @@ export async function removeLegacyProjectEnvArtifacts(opts: {
   return removed;
 }
 
+/**
+ * Drops the encrypted secret store pointer from `hack.config.json` once
+ * doctor's cleanup has removed the store it names (`removed`). The migration
+ * keeps the pointer while the store exists, so a declined or failed removal
+ * leaves it in place; a `cloud` backend, which reads the pointer, keeps it.
+ * Returns whether the config changed.
+ */
+export async function dropRemovedLegacySecretStorePointer(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly removed: readonly string[];
+}): Promise<boolean> {
+  if (opts.removed.length === 0) {
+    return false;
+  }
+  const plan = await planLegacyProjectConfigChanges({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+  });
+  if (!plan.secretStorePointer) {
+    return false;
+  }
+  const { storePath } = await listFileSecretStoreEntries({
+    projectName: opts.projectName,
+    projectDir: opts.projectDir,
+  });
+  if (!opts.removed.includes(storePath) || (await pathExists(storePath))) {
+    return false;
+  }
+  const migrated = await migrateLegacyProjectConfig({
+    projectRoot: opts.projectRoot,
+    projectDir: opts.projectDir,
+    keepStorePointer: false,
+  });
+  return migrated.changed;
+}
+
 async function discoverLegacyOverlayNames(opts: {
   readonly projectDir: string;
   readonly includeSymlinks: boolean;
@@ -8523,6 +8651,8 @@ export async function collectLegacyProjectEnvCleanupCandidates(opts: {
 async function migrateLegacyProjectConfig(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
+  /** See {@link normalizeLegacyProjectSecretsConfig}. */
+  readonly keepStorePointer: boolean;
 }): Promise<{
   readonly changed: boolean;
   readonly cleanupCandidates: readonly string[];
@@ -8548,6 +8678,7 @@ async function migrateLegacyProjectConfig(opts: {
   const topLevel = normalizeLegacyProjectTopLevelConfig({
     parsed,
     projectRoot: opts.projectRoot,
+    keepStorePointer: opts.keepStorePointer,
   });
 
   if (!topLevel.changed) {
@@ -8569,6 +8700,7 @@ async function migrateLegacyProjectConfig(opts: {
 function normalizeLegacyProjectTopLevelConfig(opts: {
   readonly parsed: Record<string, unknown>;
   readonly projectRoot: string;
+  readonly keepStorePointer: boolean;
 }): {
   readonly config: Record<string, unknown>;
   readonly changed: boolean;
@@ -8603,6 +8735,7 @@ function normalizeLegacyProjectTopLevelConfig(opts: {
   const controlPlane = normalizeLegacyProjectControlPlaneConfig({
     controlPlaneRaw,
     projectRoot: opts.projectRoot,
+    keepStorePointer: opts.keepStorePointer,
   });
   if (controlPlane.value !== undefined) {
     config.controlPlane = controlPlane.value;
@@ -8632,6 +8765,7 @@ function normalizeLegacyProjectEnvOverlay(opts: {
 function normalizeLegacyProjectControlPlaneConfig(opts: {
   readonly controlPlaneRaw: unknown;
   readonly projectRoot: string;
+  readonly keepStorePointer: boolean;
 }): {
   readonly value: Record<string, unknown> | undefined;
   readonly changed: boolean;
@@ -8649,6 +8783,7 @@ function normalizeLegacyProjectControlPlaneConfig(opts: {
   const secrets = normalizeLegacyProjectSecretsConfig({
     secretsRaw,
     projectRoot: opts.projectRoot,
+    keepStorePointer: opts.keepStorePointer,
   });
 
   const value: Record<string, unknown> = { ...rest };
@@ -8663,9 +8798,21 @@ function normalizeLegacyProjectControlPlaneConfig(opts: {
   };
 }
 
+/**
+ * Rewrites a project's legacy `controlPlane.secrets` for env layers. Legacy
+ * keys are dropped, except the encrypted store pointer (`encryptedFile`, and
+ * `backend: encrypted_file`) while `keepStorePointer` is set: the migration
+ * keeps a store that still exists, so its entries stay readable through the
+ * secret store without hand edits, and drops the pointer only once doctor's
+ * cleanup has removed the store ({@link dropRemovedLegacySecretStorePointer}).
+ * The `cloud` shim reads `encryptedFile` too, so with `backend: cloud` the
+ * pointer always stays and its store and key file are never cleanup
+ * candidates.
+ */
 function normalizeLegacyProjectSecretsConfig(opts: {
   readonly secretsRaw: unknown;
   readonly projectRoot: string;
+  readonly keepStorePointer: boolean;
 }): {
   readonly value: Record<string, unknown> | undefined;
   readonly changed: boolean;
@@ -8679,12 +8826,16 @@ function normalizeLegacyProjectSecretsConfig(opts: {
     };
   }
 
-  const cleanupCandidates = collectLegacyEncryptedBackendCleanupCandidates({
-    secretsRaw: opts.secretsRaw,
-    projectRoot: opts.projectRoot,
-  });
-
   const backend = getString(opts.secretsRaw, "backend");
+  const cleanupCandidates =
+    backend === "cloud"
+      ? []
+      : collectLegacyEncryptedBackendCleanupCandidates({
+          secretsRaw: opts.secretsRaw,
+          projectRoot: opts.projectRoot,
+        });
+  const keepPointer = opts.keepStorePointer || backend === "cloud";
+  const encryptedFileRaw = opts.secretsRaw.encryptedFile;
   const allowEnvAuthRefs = opts.secretsRaw.allowEnvAuthRefs;
   const cloud = normalizeLegacyProjectSecretsCloudConfig({
     cloudRaw: opts.secretsRaw.cloud,
@@ -8694,8 +8845,11 @@ function normalizeLegacyProjectSecretsConfig(opts: {
   if (allowEnvAuthRefs === false) {
     value.allowEnvAuthRefs = false;
   }
-  if (backend === "cloud") {
+  if (backend === "cloud" || (keepPointer && backend === "encrypted_file")) {
     value.backend = backend;
+  }
+  if (keepPointer && isRecord(encryptedFileRaw)) {
+    value.encryptedFile = { ...encryptedFileRaw };
   }
   if (cloud !== undefined) {
     value.cloud = cloud;
@@ -8703,8 +8857,9 @@ function normalizeLegacyProjectSecretsConfig(opts: {
 
   const changed =
     "storePlaintextInBackend" in opts.secretsRaw ||
-    "encryptedFile" in opts.secretsRaw ||
-    backend === "encrypted_file" ||
+    ("encryptedFile" in opts.secretsRaw &&
+      !(keepPointer && isRecord(encryptedFileRaw))) ||
+    (backend === "encrypted_file" && !keepPointer) ||
     allowEnvAuthRefs === true ||
     (isRecord(opts.secretsRaw.cloud) && cloud === undefined);
 

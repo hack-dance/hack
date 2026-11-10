@@ -28,6 +28,7 @@ import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
 import {
   assertValidProjectEnvScopeName,
+  dropRemovedLegacySecretStorePointer,
   ENV_SCOPE_UNKNOWN_MESSAGE,
   ensureHackDirGitignore,
   ensureProjectEnvSecretKey,
@@ -1518,7 +1519,33 @@ test("migrateLegacyProjectEnv converts legacy base and overlay values into new c
   expect(config.env).toEqual({
     defaultOverlay: "qa",
   });
-  expect(config.controlPlane).toBeUndefined();
+  // The store is only offered, not removed yet, so its pointer stays and the
+  // store stays readable; the other legacy secrets keys are gone (HACK-1715).
+  const storePath = resolve(repo.projectRoot, "legacy-secrets.enc.json");
+  expect(config.controlPlane).toEqual({
+    secrets: { backend: "encrypted_file", encryptedFile: { path: storePath } },
+  });
+  expect(migrated.keptSecretStorePointer).toBeNull();
+
+  // Once the cleanup removed the store, the pointer goes too.
+  const removed = await removeLegacyProjectEnvArtifacts({
+    projectRoot: repo.projectRoot,
+    paths: [storePath],
+  });
+  expect(
+    await dropRemovedLegacySecretStorePointer({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      projectName: "project-env-test",
+      removed,
+    })
+  ).toBe(true);
+  const dropped = JSON.parse(await readFile(repo.configFile, "utf8")) as Record<
+    string,
+    unknown
+  >;
+  expect(dropped.controlPlane).toBeUndefined();
+  expect(dropped.env).toEqual({ defaultOverlay: "qa" });
 });
 
 test("migrateLegacyProjectEnv blocks cleanup for compose-referenced legacy env files and can repair compose", async () => {

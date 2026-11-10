@@ -18,16 +18,19 @@ import {
   PROJECT_ENV_CONTRACT_FILENAME,
 } from "../src/constants.ts";
 import {
+  dropRemovedLegacySecretStorePointer,
   migrateLegacyProjectEnv,
   resolveProjectEnvConfig,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
  * Env and secret migration safety for v4 to v5 upgrades. Every fixture lives
  * in a temp HOME with synthetic values; the keychain fallback is off, so no
  * test reads or writes a real keychain item, and no Docker or git is used.
+ * The one CLI run uses a private environment in the same temp HOME.
  */
 
 const PROJECT = "env-migration-safety";
@@ -295,6 +298,187 @@ test("a store shared with another project is kept (HACK-1715)", async () => {
     keys: [],
     reason: "secret_store_shared",
   });
+});
+
+// HACK-1715 option C: a kept store keeps its config pointer, on every route.
+
+const ENTRYPOINT = resolve(import.meta.dir, "..", "index.ts");
+
+async function readConfig(repo: Repo): Promise<Record<string, unknown>> {
+  return JSON.parse(
+    await readFile(resolve(repo.projectDir, PROJECT_CONFIG_FILENAME), "utf8")
+  ) as Record<string, unknown>;
+}
+
+async function runHack(opts: {
+  readonly repo: Repo;
+  readonly args: readonly string[];
+  readonly stdin: string;
+}): Promise<{ readonly exitCode: number; readonly output: string }> {
+  if (!(root && process.env.HOME)) {
+    throw new Error("root not set");
+  }
+  const proc = Bun.spawn([process.execPath, ENTRYPOINT, ...opts.args], {
+    cwd: opts.repo.projectRoot,
+    env: privateCliEnv({
+      root,
+      home: process.env.HOME,
+      env: {
+        HACK_GLOBAL_CONFIG_PATH: join(root, "hack-config.json"),
+        HACK_HOME: join(root, "hack-home"),
+        HACK_NO_INTERACTIVE: "1",
+        HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
+        HACK_SECRETS_FILE_KEY: process.env.HACK_SECRETS_FILE_KEY,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      },
+    }),
+    stdin: new Blob([opts.stdin]),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { exitCode, output: `${stdout}${stderr}` };
+}
+
+test("an implicit env add keeps the pointer of a store with an undeclared entry, which stays readable (HACK-1715)", async () => {
+  const repo = await createRepo({
+    vars: [{ key: "SEC", source: "keychain" }],
+    config: encryptedFileConfig({ path: "secrets.enc.json" }),
+  });
+  const storePath = resolve(repo.projectRoot, "secrets.enc.json");
+  const declared = ["synthetic", "declared", "a7c1"].join("-");
+  const undeclared = ["synthetic", "undeclared", "a7c1"].join("-");
+  await setStoreEntries(repo, { SEC: declared, UNDECL: undeclared });
+  const storeText = await readFile(storePath, "utf8");
+  const configBefore = await readConfig(repo);
+  const added = ["synthetic", "added", "a7c1"].join("-");
+
+  const run = await runHack({
+    repo,
+    args: [
+      "env",
+      "add",
+      "NEW_SETTING",
+      "--local",
+      "--value-stdin",
+      "--path",
+      repo.projectRoot,
+    ],
+    stdin: `${added}\n`,
+  });
+
+  expect(run.exitCode).toBe(0);
+  expect(await exists(resolve(repo.projectDir, "hack.env.default.yaml"))).toBe(
+    true
+  );
+  expect(await readConfig(repo)).toEqual(configBefore);
+  expect(await readFile(storePath, "utf8")).toBe(storeText);
+  const store = await resolveSecretStore({
+    projectName: PROJECT,
+    projectDir: repo.projectDir,
+  });
+  expect(await store.get({ key: "UNDECL" })).toBe(undeclared);
+  expect(run.output).toContain(
+    "Kept the encrypted secret store pointer (controlPlane.secrets) in .hack/hack.config.json for secrets.enc.json, which stays: it still holds SEC, UNDECL (values omitted)"
+  );
+  for (const value of [declared, undeclared, added]) {
+    expect(run.output).not.toContain(value);
+  }
+}, 60_000);
+
+test("a store outside the project keeps its pointer, and a second migration changes nothing (HACK-1715)", async () => {
+  if (!root) {
+    throw new Error("root not set");
+  }
+  const outsideStore = resolve(root, "outside", "secrets.enc.json");
+  const repo = await createRepo({
+    vars: [{ key: "SEC", source: "keychain" }],
+    config: encryptedFileConfig({ path: outsideStore }),
+  });
+  const declared = ["synthetic", "declared", "d3e4"].join("-");
+  await setStoreEntries(repo, { SEC: declared });
+  const configPath = resolve(repo.projectDir, PROJECT_CONFIG_FILENAME);
+  const configText = await readFile(configPath, "utf8");
+
+  const first = await migrate(repo);
+
+  expect(first.updatedProjectConfig).toBe(false);
+  expect(await readFile(configPath, "utf8")).toBe(configText);
+  expect(first.keptSecretStorePointer).toEqual({
+    configPath,
+    storePath: outsideStore,
+    listed: true,
+    keys: ["SEC"],
+  });
+  const layers = await readFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    "utf8"
+  );
+  const storeText = await readFile(outsideStore, "utf8");
+
+  const second = await migrate(repo);
+
+  expect(second.legacyDetected).toBe(false);
+  expect(second.wroteFiles).toEqual([]);
+  expect(await readFile(configPath, "utf8")).toBe(configText);
+  expect(await readFile(outsideStore, "utf8")).toBe(storeText);
+  expect(
+    await readFile(resolve(repo.projectDir, "hack.env.default.yaml"), "utf8")
+  ).toBe(layers);
+});
+
+test("a cloud backend keeps the in-project store pointer it reads, and its store is never offered (HACK-1715)", async () => {
+  if (!root) {
+    throw new Error("root not set");
+  }
+  // Absolute, because the cloud shim resolves a relative path against HOME.
+  const storePath = resolve(root, "repo", "cloud-shim.enc.json");
+  const keyPath = resolve(root, "repo", "cloud.key");
+  const repo = await createRepo({
+    vars: [{ key: "SEC", source: "keychain" }],
+    config: {
+      controlPlane: {
+        secrets: {
+          backend: "cloud",
+          cloud: { provider: "vault", project: "synthetic" },
+          encryptedFile: { path: storePath, keyPath },
+        },
+      },
+    },
+  });
+  const declared = ["synthetic", "cloud", "b8f9"].join("-");
+  await setStoreEntries(repo, { SEC: declared });
+  expect(await exists(storePath)).toBe(true);
+  const storeText = await readFile(storePath, "utf8");
+
+  const migrated = await migrate(repo);
+
+  const secrets = (
+    (await readConfig(repo)).controlPlane as Record<string, unknown>
+  ).secrets as Record<string, unknown>;
+  expect(secrets.backend).toBe("cloud");
+  expect(secrets.encryptedFile).toEqual({ path: storePath, keyPath });
+  expect(migrated.cleanupCandidates).not.toContain(storePath);
+  expect(migrated.cleanupCandidates).not.toContain(keyPath);
+  expect(
+    await dropRemovedLegacySecretStorePointer({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      projectName: PROJECT,
+      removed: [storePath],
+    })
+  ).toBe(false);
+  expect(await readFile(storePath, "utf8")).toBe(storeText);
+  const store = await resolveSecretStore({
+    projectName: PROJECT,
+    projectDir: repo.projectDir,
+  });
+  expect(await store.get({ key: "SEC" })).toBe(declared);
 });
 
 // HACK-1714: an overlay secret that only the store holds must reach a layer.

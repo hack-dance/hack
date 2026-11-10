@@ -1388,7 +1388,14 @@ when the env layers now deliver every entry it holds for this project and it hol
 another; otherwise it keeps the store and names the entries that would be lost, never their
 values. A store it can't list (its key isn't available, it can't be read, or the backend is
 the keychain) is kept too. A store key file inside the project is offered only when no store
-that needs it stays behind. The keychain backend can't list its entries, so with it an overlay
+that needs it stays behind. While a store exists, the migration keeps its pointer in
+`hack.config.json` (`controlPlane.secrets.encryptedFile` and `backend: encrypted_file`) on
+every route, including implicit ones such as `hack env add`, so entries it still holds stay
+readable through the secret store without hand edits; Hack reports the kept pointer with the
+key names still in the store, never values. The pointer is dropped only after doctor's
+cleanup has removed the store, so a declined or failed removal leaves it in place. A `cloud`
+backend reads the same pointer, so it always keeps it, and its store and key file are never
+offered for cleanup. The keychain backend can't list its entries, so with it an overlay
 that has no legacy file and isn't the default overlay isn't found; its keychain items are left
 as they are, so set those values again with `hack env set --secret --env <name>`.
 

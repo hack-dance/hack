@@ -837,23 +837,75 @@ type NativeDependencyDiscovery = {
 
 const MAX_LISTED_HOOKS = 8;
 
+/** Value-free list of the persistent hooks and processes that ran before discovery. */
+function hooksDetail(hooks: readonly string[] | undefined): string {
+  const names = (hooks ?? []).filter((name) => OWNER_NAME.test(name));
+  const listed = names.slice(0, MAX_LISTED_HOOKS).join(", ");
+  const more =
+    names.length > MAX_LISTED_HOOKS
+      ? ` and ${names.length - MAX_LISTED_HOOKS} more`
+      : "";
+  return names.length > 0
+    ? `; persistent hooks and processes: ${listed}${more}`
+    : "; no persistent up.before hook or lifecycle process ran";
+}
+
+const WAIT_HINT = `(default ${NATIVE_HOST_DEPENDENCY_DEFAULT_WAIT_SECONDS}, at most ${NATIVE_HOST_DEPENDENCY_MAX_WAIT_SECONDS})`;
+
 /** Value-free deadline detail: the wait, the hooks that ran, and how to raise it. */
 function missingListenerReason(opts: {
   readonly reason: string;
   readonly waitSeconds: number;
   readonly hooks: readonly string[] | undefined;
 }): string {
-  const names = (opts.hooks ?? []).filter((name) => OWNER_NAME.test(name));
-  const listed = names.slice(0, MAX_LISTED_HOOKS).join(", ");
-  const more =
-    names.length > MAX_LISTED_HOOKS
-      ? ` and ${names.length - MAX_LISTED_HOOKS} more`
-      : "";
-  const hooks =
-    names.length > 0
-      ? `; persistent hooks and processes: ${listed}${more}`
-      : "; no persistent up.before hook or lifecycle process ran";
-  return `${opts.reason} (waited ${opts.waitSeconds} s after the up.before hooks${hooks}); if the listener starts more slowly, set host_wait_seconds on this binding (default ${NATIVE_HOST_DEPENDENCY_DEFAULT_WAIT_SECONDS}, at most ${NATIVE_HOST_DEPENDENCY_MAX_WAIT_SECONDS})`;
+  return `${opts.reason} (waited ${opts.waitSeconds} s after the up.before hooks${hooksDetail(opts.hooks)}); if the listener starts more slowly, set host_wait_seconds on this binding ${WAIT_HINT}`;
+}
+
+/**
+ * Deadline refusals of one startup, keyed by error, so the caller can keep
+ * resolving the other bindings and name every one still missing.
+ */
+const MISSING_LISTENERS = new WeakMap<
+  Error,
+  {
+    readonly context: string;
+    readonly waitSeconds: number;
+    readonly hooks: readonly string[] | undefined;
+  }
+>();
+
+function missingListenerRefusal(opts: {
+  readonly reason: string;
+  readonly context: string;
+  readonly waitSeconds: number;
+  readonly hooks: readonly string[] | undefined;
+}): Error {
+  const error = refused(missingListenerReason(opts), opts.context);
+  MISSING_LISTENERS.set(error, opts);
+  return error;
+}
+
+/**
+ * One refusal for every binding whose listener did not answer within its own
+ * wait. A single missing binding keeps its own message. A binding reached only
+ * after its wait had already elapsed (while earlier bindings resolved) is not
+ * queried again; it is listed with the others.
+ */
+function missingListenersRefusal(missing: readonly Error[]): Error {
+  const [first] = missing;
+  if (missing.length === 1 && first !== undefined) {
+    return first;
+  }
+  const details = missing.flatMap((error) => {
+    const detail = MISSING_LISTENERS.get(error);
+    return detail ? [detail] : [];
+  });
+  const items = details.map(
+    (detail) => `${detail.context} after ${detail.waitSeconds} s`
+  );
+  return refused(
+    `no listener answered on host_port before the discovery deadline for ${items.length} bindings: ${items.join("; ")} (each wait measured from the end of the up.before hooks${hooksDetail(details[0]?.hooks)}); if a listener starts more slowly, set host_wait_seconds on its binding ${WAIT_HINT}`
+  );
 }
 
 /**
@@ -874,16 +926,14 @@ function ownedDiscoveryRefusal(opts: {
     return nativeDependencyOwnerMismatch();
   }
   const reason = discoveryReason(error);
-  return refused(
-    reason === MISSING_LISTENER_REASON
-      ? missingListenerReason({
-          reason: MISSING_OWNED_LISTENER_REASON,
-          waitSeconds: opts.waitSeconds,
-          hooks: opts.hooks,
-        })
-      : (reason ?? "listener discovery failed"),
-    opts.context
-  );
+  return reason === MISSING_LISTENER_REASON
+    ? missingListenerRefusal({
+        reason: MISSING_OWNED_LISTENER_REASON,
+        context: opts.context,
+        waitSeconds: opts.waitSeconds,
+        hooks: opts.hooks,
+      })
+    : refused(reason ?? "listener discovery failed", opts.context);
 }
 
 /** One discovery per owner (or executable) and host port; undefined for fixed PIDs. */
@@ -1007,16 +1057,14 @@ function createDependencyResolution(
         discovered = await opts.discover({ ...target, executable });
       } catch (error) {
         const reason = discoveryReason(error);
-        throw refused(
-          reason === MISSING_LISTENER_REASON
-            ? missingListenerReason({
-                reason,
-                waitSeconds: target.waitSeconds,
-                hooks: opts.listenerHooks,
-              })
-            : (reason ?? "listener discovery failed"),
-          context
-        );
+        throw reason === MISSING_LISTENER_REASON
+          ? missingListenerRefusal({
+              reason,
+              context,
+              waitSeconds: target.waitSeconds,
+              hooks: opts.listenerHooks,
+            })
+          : refused(reason ?? "listener discovery failed", context);
       }
       if (
         !(
@@ -1121,8 +1169,22 @@ async function readSelectedHostDependencies(
     entries: value.dependencies,
   });
   const dependencies: unknown[] = [];
+  // A listener missing after its wait does not stop the others: each binding
+  // keeps its own deadline from the end of the hooks, and the refusal names
+  // every binding still missing. Any other refusal stops at once.
+  const missing: Error[] = [];
   for (const [index, entry] of value.dependencies.entries()) {
-    dependencies.push(await resolve(entry, index));
+    try {
+      dependencies.push(await resolve(entry, index));
+    } catch (error) {
+      if (!(error instanceof Error && MISSING_LISTENERS.has(error))) {
+        throw error;
+      }
+      missing.push(error);
+    }
+  }
+  if (missing.length > 0) {
+    throw missingListenersRefusal(missing);
   }
   return parseNativeHostDependencies({
     value: { ...value, dependencies },

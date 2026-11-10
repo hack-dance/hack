@@ -1293,3 +1293,56 @@ test("a pinned listener refusal names binding aliases and port without private p
   expect((failure as Error).message).not.toContain("12345");
   expect((failure as Error).message).not.toContain("private process detail");
 });
+
+test("a deadline refusal names every binding still missing, not only the first", async () => {
+  // The hooks ended 61 s ago. search (60 s) is already past its wait, docs
+  // (62 s) never answers within its last second, and events (120 s) answers.
+  const startedAtMs = performance.now() - 61_000;
+  const queried: number[] = [];
+  const entry = (name: string, hostPort: number, wait?: number) => ({
+    ...executableBinding(),
+    binding: name,
+    aliases: [`${name}.example.com`],
+    host_port: hostPort,
+    ...(wait === undefined ? {} : { host_wait_seconds: wait }),
+  });
+  const failure = await readNativeHostDependencies({
+    path: await selectionFile({
+      version: 1,
+      dependencies: [
+        entry("search", 8443),
+        entry("docs", 8444, 62),
+        entry("events", 8445, 120),
+      ],
+    }),
+    services: ["web"],
+    listenerHooks: ["tunnels"],
+    discover: async (selection) =>
+      await discoverNativeHostDependency({
+        ...discovery,
+        executable: selection.executable,
+        hostPort: selection.hostPort,
+        wait: nativeDependencyStartupWait({
+          target: selection,
+          startedAtMs,
+          signal: new AbortController().signal,
+        }),
+        invoke: async () => {
+          queried.push(selection.hostPort);
+          if (selection.hostPort === 8445) {
+            return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
+          }
+          throw unavailableListener();
+        },
+      }),
+  }).catch((error: unknown) => error);
+  expect(failure).toHaveProperty("code", "E_CONFIG_INVALID");
+  expect((failure as Error).message).toBe(
+    "Native host dependencies refused: no listener answered on host_port before the discovery deadline for 2 bindings: dependency #1 (service web, binding search, aliases search.example.com, guest port 443, host port 8443) after 60 s; dependency #2 (service web, binding docs, aliases docs.example.com, guest port 443, host port 8444) after 62 s (each wait measured from the end of the up.before hooks; persistent hooks and processes: tunnels); if a listener starts more slowly, set host_wait_seconds on its binding (default 60, at most 900); listener values omitted."
+  );
+  // search was past its wait before any query; docs was queried until its
+  // deadline; the later events binding was still discovered.
+  expect(queried).not.toContain(8443);
+  expect(queried).toContain(8444);
+  expect(queried.at(-1)).toBe(8445);
+});

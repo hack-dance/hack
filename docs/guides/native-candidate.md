@@ -2103,8 +2103,12 @@ host port, each shown only after it validates. For example, a listener that neve
 appears on the selected port reports `no listener owned by host_executable answered
 on host_port before the discovery deadline`, followed by how long it waited, the
 names of the persistent `up.before` hooks and lifecycle processes that ran, and the
-`host_wait_seconds` default and maximum. Host PIDs, executable paths, hook commands
-and the contents of unrecognized fields are never printed.
+`host_wait_seconds` default and maximum. A missing listener does not stop the
+other bindings: startup keeps resolving them, each against its own wait, and when
+more than one is still missing the single refusal lists every one of them with its
+wait. A binding reached only after its wait had already elapsed is listed without
+another query. Host PIDs, executable paths, hook commands and the contents of
+unrecognized fields are never printed.
 
 A `host_executable` listener needs a running parent process: native review pins
 at least one supervisor link and refuses a parent at PID 1. A listener started
@@ -2640,6 +2644,14 @@ the machine settings path with your home shown as `~`. With `--json`, the check'
 | `compose_profiles_ignored` | `COMPOSE_PROFILES` is set in the environment, but native selects profiles only from `--profile`. Managed `COMPOSE_PROFILES` values are not inspected. |
 | `aws_region_without_profile` | `HACK_NATIVE_AWS_REGION` is set without `HACK_NATIVE_AWS_PROFILE` and is ignored. |
 | `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |
+
+When a host dependency selection is configured (`HACK_NATIVE_DEPENDENCIES` or the
+machine `dependencies` or `dependenciesByEnv` setting) and the project has persistent `up.before` hooks or
+`lifecycle.processes`, the check also notes the listener wait: native `up` waits
+for each discovered binding up to its `host_wait_seconds` (default 60 s, at most
+900 s) after the hooks. `nativeSettings.dependencyWait` holds `persistentHooks`,
+`defaultSeconds` and `maxSeconds`. The note does not change the check's status, and
+the selection file is not read.
 
 An invalid settings file makes the check an error with the same closed line native
 `up` prints. Each adaptation file (the base and every `adaptation.<env>.json`) is

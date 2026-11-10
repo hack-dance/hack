@@ -514,16 +514,14 @@ fn same_resource_bindings(
 /// Receipt-load bound for loopback publication intent: containers only, unique
 /// non-zero host ports graph-wide, and the admission budget.
 /// Restart authority exists only on containers, never alongside an
-/// incarnation-bound route, loopback publication, cache or probe, or a completion
+/// incarnation-bound cache or non-routed probe, or a completion
 /// goal that cannot retry. A resource without a policy is always valid here.
 fn restart_policy_valid(resource: &Resource, probed: bool, readiness: Option<&Condition>) -> bool {
     resource.restart_policy.as_ref().is_none_or(|policy| {
         resource.kind == Kind::Container
             && policy.valid()
-            && resource.routing.is_none()
-            && resource.loopback_ports.is_empty()
             && resource.cache.is_none()
-            && !probed
+            && (!probed || resource.routing.is_some())
             && (readiness != Some(&Condition::Completed)
                 || matches!(policy, restart_policy::RestartPolicy::OnFailure { .. }))
     })

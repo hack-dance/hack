@@ -5,6 +5,11 @@ import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import {
+  nativePlanServiceSourceUse,
+  nativeServiceInitializesCache,
+  nativeServiceSharesSource,
+} from "./native-source-capture.ts";
 
 const CACHE_LABELS = new Set([
   "hack.dependencies.cache-volume",
@@ -14,7 +19,10 @@ const CACHE_LABELS = new Set([
 ]);
 const SHA = /^[a-f0-9]{64}$/;
 
-/** Source sharing is meaningful only for active bind mounts, not image-only services. */
+/**
+ * Source sharing is meaningful only for active bind mounts, not image-only services.
+ * Decided by {@link nativeServiceSharesSource}, as the source limit check is.
+ */
 export function nativeSharedSourceFlags(plan: unknown): readonly string[] {
   if (!(isRecord(plan) && isRecord(plan.services))) {
     throw new ClosedCliError("Native source review is invalid.");
@@ -22,9 +30,7 @@ export function nativeSharedSourceFlags(plan: unknown): readonly string[] {
   const shared = Object.values(plan.services).some(
     (service) =>
       isRecord(service) &&
-      service.active === true &&
-      Array.isArray(service.mounts) &&
-      service.mounts.some((mount) => isRecord(mount) && mount.kind === "bind")
+      nativeServiceSharesSource(nativePlanServiceSourceUse(service))
   );
   return shared ? ["--shared-source"] : [];
 }
@@ -90,6 +96,7 @@ export async function publishNativeCacheSource(opts: {
   return { flags: ["--source-revision", publication.revision], initializers };
 }
 
+/** Active dependency-cache services, by {@link nativeServiceInitializesCache}. */
 export function nativeCacheInitializers(plan: unknown): ReadonlySet<string> {
   if (!(isRecord(plan) && isRecord(plan.services))) {
     throw new ClosedCliError("Native cache review is invalid.");
@@ -99,7 +106,7 @@ export function nativeCacheInitializers(plan: unknown): ReadonlySet<string> {
     if (!isRecord(service)) {
       throw new ClosedCliError("Native service review is invalid.");
     }
-    if (service.active === true && isRecord(service.dependency_cache)) {
+    if (nativeServiceInitializesCache(nativePlanServiceSourceUse(service))) {
       initializers.add(name);
     }
   }

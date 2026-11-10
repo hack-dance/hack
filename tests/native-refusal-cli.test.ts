@@ -305,9 +305,20 @@ test(
 );
 
 test(
-  "native-project-source-size: oversized source is one coded line before any runtime work",
+  "native-project-source-size: oversized captured source is one coded line before any runtime work",
   async () => {
-    const f = await fixture();
+    // A bind mount captures source; image-only graphs (the other fixtures) are
+    // never measured, so their calls below carry no `project source-size`.
+    const f = await fixture(
+      JSON.stringify({
+        services: {
+          web: {
+            image: `sha256:${"e".repeat(64)}`,
+            volumes: ["./src:/app:ro"],
+          },
+        },
+      })
+    );
     await scriptUpThroughReview(f);
     await f.reply(
       "project source-size",
@@ -318,7 +329,10 @@ test(
       result,
       "E_NATIVE_PROJECT_UNSUPPORTED: Selected (non-ignored) source is 140 MiB in 3 files; the native source limit is 128 MiB (default). Native up refuses source over the limit; no runtime, image or build work was started. Largest directories: assets (140 MiB), assets/video (140 MiB). Largest files: assets/video/intro.bin (140 MiB). Exclude paths the containers do not need in the project's .gitignore or .ignore file (for example a line such as `assets/video/`) or raise native.sourceLimitMiB in .hack/hack.config.json (maximum 512)."
     );
-    expect(await f.calls()).toEqual(["project source-size"]);
+    expect(await f.calls()).toEqual([
+      "runtime check-project-share",
+      "project source-size",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -339,10 +353,7 @@ test(
       result,
       "E_CONFIG_INVALID: Native host dependencies refused: the selection must be {version: 1, dependencies: [1..128 entries]} with no other fields; listener values omitted."
     );
-    expect(await f.calls()).toEqual([
-      "project source-size",
-      "runtime check-project-share",
-    ]);
+    expect(await f.calls()).toEqual(["runtime check-project-share"]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -359,7 +370,6 @@ test(
       "Native project input changed before review; prepare it again."
     );
     expect(await f.calls()).toEqual([
-      "project source-size",
       "runtime check-project-share",
       "runtime up",
       "project plan",
@@ -467,7 +477,6 @@ test(
       "Native active image selection changed; the current graph was not stopped."
     );
     expect(await f.calls()).toEqual([
-      "project source-size",
       "runtime check-project-share",
       "runtime status",
       "runtime probe",
@@ -595,10 +604,7 @@ test(
       result,
       "E_CONFIG_INVALID: Native workspace cache layout conflicts with declared mounts or is invalid; values omitted."
     );
-    expect(await f.calls()).toEqual([
-      "project source-size",
-      "runtime check-project-share",
-    ]);
+    expect(await f.calls()).toEqual(["runtime check-project-share"]);
   },
   SPAWN_TIMEOUT_MS
 );

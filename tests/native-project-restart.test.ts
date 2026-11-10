@@ -28,11 +28,12 @@ import {
   withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
 import { NativeStartupCanceledError } from "../src/backends/native-project-start.ts";
-import { ClosedCliError } from "../src/lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   expectClosedRefusal,
   expectCodedRefusal,
 } from "./helpers/closed-refusal.ts";
+import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 
 const run = {
   run: "a".repeat(32),
@@ -400,6 +401,80 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
     }),
     "compatibility changed"
   );
+});
+
+test("restart preflight limits captured source before review and stopping, never image-only source", async () => {
+  const image = `sha256:${"9".repeat(64)}`;
+  const preflight = (app: Record<string, unknown>) => {
+    const calls: string[] = [];
+    const result = preflightNativeRestart({
+      runtime: { binary: "/unused", home: "/candidate" },
+      scope,
+      composeFile: "/fixture/.hack/docker-compose.yml",
+      run,
+      dependencies: {
+        activeImages: async () => activeImageFixture(),
+        prepare: async () => ({
+          originalSha256: "1".repeat(64),
+          environmentFiles: [],
+          serviceNames: ["app"],
+          normalizedComposeJson: JSON.stringify({
+            services: { app: { image, ...app } },
+          }),
+          managedEnvironment: {},
+          lifecycleHostEnvironment: {},
+          effectiveEnvName: "qa",
+        }),
+        adapt: async ({ input: prepared }) => prepared,
+        dependencies: async () => [],
+        invoke: async ({ args }) => {
+          calls.push(args.slice(0, 2).join(" "));
+          if (args[1] === "source-size") {
+            return nativeSourceSizeReceipt({ totalBytes: 140 * 1024 * 1024 });
+          }
+          if (args[1] === "probe") {
+            return { admitted: true };
+          }
+          return { network: "internet" };
+        },
+        review: async () => {
+          calls.push("review");
+          throw new Error("reviewed");
+        },
+      },
+    });
+    return { calls, result };
+  };
+  // Image-only: no source is captured, so the oversized checkout is not measured.
+  const imageOnly = preflight({});
+  await expect(imageOnly.result).rejects.toThrow("reviewed");
+  expect(imageOnly.calls).not.toContain("project source-size");
+  expect(imageOnly.calls).toContain("review");
+  // An active bind mount or dependency cache captures source: refuse before review.
+  for (const app of [
+    { volumes: ["./src:/app:ro"] },
+    {
+      volumes: ["modules:/app/node_modules"],
+      labels: { "hack.dependencies.cache-volume": "modules" },
+    },
+  ]) {
+    const captured = preflight(app);
+    const refusal = await captured.result.catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(HackCliError);
+    expect((refusal as HackCliError).code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+    expect((refusal as HackCliError).message).toContain(
+      "Native up refuses source over the limit"
+    );
+    expect(captured.calls).toContain("project source-size");
+    expect(captured.calls).not.toContain("review");
+  }
+  // A bind mount only in a profile the retained run does not select captures nothing.
+  const inactive = preflight({
+    profiles: ["tools"],
+    volumes: ["./src:/app:ro"],
+  });
+  await expect(inactive.result).rejects.toThrow("reviewed");
+  expect(inactive.calls).not.toContain("project source-size");
 });
 
 test("preflight selects the per-env adaptation and dependency files by the retained env", async () => {

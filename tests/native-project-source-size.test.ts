@@ -1,10 +1,21 @@
 import { expect, test } from "bun:test";
 import {
+  nativeCacheInitializers,
+  nativeSharedSourceFlags,
+} from "../src/backends/native-project-cache.ts";
+import {
   formatNativeSourceBytes,
   parseNativeSourceSize,
+  requireCapturedNativeSourceWithinLimit,
   requireNativeSourceWithinLimit,
 } from "../src/backends/native-project-source-size.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import {
+  nativeComposeServiceSourceUse,
+  nativeComposeSourceCaptured,
+  nativePlanServiceSourceUse,
+  nativeSourceCaptured,
+} from "../src/backends/native-source-capture.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {
   checkNativeSourceSize,
@@ -163,4 +174,109 @@ test("doctor warns when the runtime cannot measure the source", async () => {
   expect(failed.message).toContain("could not be measured");
   expect(failed.message).toContain("source_limit_config");
   expect(failed.nativeSource).toBeUndefined();
+});
+
+test("only a graph that captures source is measured and limited", async () => {
+  const image = `sha256:${"e".repeat(64)}`;
+  const measured: string[] = [];
+  const check = (services: Record<string, Record<string, unknown>>) =>
+    requireCapturedNativeSourceWithinLimit({
+      runtime,
+      projectRoot: "/work/app",
+      services,
+      profiles: ["app"],
+      invoke: async (request) => {
+        measured.push(request.args[1] ?? "");
+        return nativeSourceSizeReceipt({ totalBytes: 140 * MIB });
+      },
+    });
+  // Image-only, named volumes, a lone bootstrap label and inactive profiles: no capture.
+  expect(
+    await check({
+      web: { image, volumes: ["data:/var/lib/data"] },
+      db: {
+        image,
+        volumes: [{ type: "volume", source: "db", target: "/db" }],
+        labels: { "hack.dependencies.bootstrap": "true" },
+      },
+      tools: { image, profiles: ["tools"], volumes: ["./src:/src"] },
+    })
+  ).toBeUndefined();
+  expect(measured).toEqual([]);
+  // A bind mount (short or long syntax) or a dependency cache: refused over the limit.
+  for (const web of [
+    { image, volumes: ["./src:/app:ro"] },
+    { image, volumes: [{ type: "bind", source: ".", target: "/app" }] },
+    { image, labels: ["hack.dependencies.cache-volume=modules"] },
+    { image, profiles: ["app"], volumes: ["/abs/src:/app"] },
+  ]) {
+    await expect(check({ web })).rejects.toBeInstanceOf(HackCliError);
+  }
+  expect(measured).toEqual([
+    "source-size",
+    "source-size",
+    "source-size",
+    "source-size",
+  ]);
+});
+
+test("unclassifiable Compose declarations keep the source limit", () => {
+  for (const service of [
+    { volumes: "./src:/app" },
+    { volumes: [42] },
+    { volumes: ["$HOME/src:/app"] },
+    { volumes: [{ type: "tmpfs", target: "/tmp" }] },
+    { labels: "hack.dependencies.cache-volume=modules" },
+  ]) {
+    expect(
+      nativeComposeSourceCaptured({ services: { web: service }, profiles: [] })
+    ).toBe(true);
+  }
+});
+
+test("the startup source flags and the source limit share one capture predicate", () => {
+  const plan = {
+    services: {
+      web: { active: true, mounts: [{ kind: "volume" }] },
+      off: { active: false, mounts: [{ kind: "bind" }] },
+      cacheOff: { active: false, dependency_cache: { volume: "m" } },
+    },
+  };
+  const uses = Object.values(plan.services).map(nativePlanServiceSourceUse);
+  expect(nativeSharedSourceFlags(plan)).toEqual([]);
+  expect(nativeCacheInitializers(plan).size).toBe(0);
+  expect(nativeSourceCaptured(uses)).toBe(false);
+  for (const service of [
+    { active: true, mounts: [{ kind: "bind" }] },
+    { active: true, dependency_cache: { volume: "m" } },
+  ]) {
+    const selected = { services: { ...plan.services, app: service } };
+    const flagged =
+      nativeSharedSourceFlags(selected).length > 0 ||
+      nativeCacheInitializers(selected).size > 0;
+    expect(flagged).toBe(true);
+    expect(
+      nativeSourceCaptured(
+        Object.values(selected.services).map(nativePlanServiceSourceUse)
+      )
+    ).toBe(true);
+  }
+  // The Compose reading before review agrees with the plan reading for these forms.
+  expect(
+    nativeComposeServiceSourceUse({ volumes: ["./src:/app"] }, [])
+  ).toEqual(
+    nativePlanServiceSourceUse({ active: true, mounts: [{ kind: "bind" }] })
+  );
+  expect(
+    nativeComposeServiceSourceUse(
+      { labels: { "hack.dependencies.cache-volume": "m" } },
+      []
+    )
+  ).toEqual(
+    nativePlanServiceSourceUse({
+      active: true,
+      mounts: [],
+      dependency_cache: { volume: "m" },
+    })
+  );
 });

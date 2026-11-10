@@ -4,6 +4,7 @@ import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import { nativeComposeSourceCaptured } from "./native-source-capture.ts";
 
 /**
  * Native source content limit (HACK-1965).
@@ -203,4 +204,41 @@ export async function requireNativeSourceWithinLimit(opts: {
     });
   }
   return size;
+}
+
+/**
+ * Apply {@link requireNativeSourceWithinLimit} only to a startup that captures source:
+ * one whose selected Compose services bind-mount project source or declare a
+ * dependency cache ({@link nativeComposeSourceCaptured}, the predicate the startup
+ * source flags use). An image-only graph never reads source content, so its checkout
+ * size is not limited and nothing is measured; the result is then `undefined`.
+ * `up` and the restart preflight both decide here, so a restart never stops a graph
+ * that its replacement startup would refuse for size.
+ */
+export async function requireCapturedNativeSourceWithinLimit(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  /** The selected Compose services, keyed by name, before review. */
+  readonly services: Readonly<
+    Record<string, Readonly<Record<string, unknown>>>
+  >;
+  readonly profiles: readonly string[] | undefined;
+  readonly signal?: AbortSignal;
+  readonly invoke?: typeof invokeNativeRuntime;
+  readonly check?: typeof requireNativeSourceWithinLimit;
+}): Promise<NativeSourceSize | undefined> {
+  if (
+    !nativeComposeSourceCaptured({
+      services: opts.services,
+      profiles: opts.profiles,
+    })
+  ) {
+    return undefined;
+  }
+  return await (opts.check ?? requireNativeSourceWithinLimit)({
+    runtime: opts.runtime,
+    projectRoot: opts.projectRoot,
+    signal: opts.signal,
+    invoke: opts.invoke,
+  });
 }

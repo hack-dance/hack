@@ -328,37 +328,74 @@ test("source pool mismatch refuses before hooks and storage preparation", async 
   expect(events).toEqual([]);
 });
 
-test("oversized source refuses before share admission, storage, hooks and runtime work", async () => {
+const OVERSIZED = 140 * 1024 * 1024;
+
+test("oversized captured source refuses before hooks, image and runtime work", async () => {
+  // A bind mount (shared source) and a dependency cache (published revision) are
+  // the two ways startup captures source; both keep the limit.
+  for (const web of [
+    { image: `sha256:${"e".repeat(64)}`, volumes: ["./src:/app:ro"] },
+    {
+      image: `sha256:${"e".repeat(64)}`,
+      volumes: ["modules:/app/node_modules"],
+      labels: { "hack.dependencies.cache-volume": "modules" },
+    },
+  ]) {
+    const { opts, events } = await fixture();
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({ services: { web } }),
+    });
+    const requests: string[] = [];
+    const invoke = opts.dependencies.invoke;
+    opts.dependencies.invoke = async (request) => {
+      requests.push(request.args.slice(0, 2).join(" "));
+      if (request.args[1] === "source-size") {
+        expect(request.args).toEqual([
+          "project",
+          "source-size",
+          "--project",
+          opts.scope.projectRoot,
+          "--json",
+        ]);
+        return nativeSourceSizeReceipt({ totalBytes: OVERSIZED });
+      }
+      return await invoke?.(request);
+    };
+    const refusal = await startNativeProject(opts).catch(
+      (error: unknown) => error
+    );
+    expect(refusal).toBeInstanceOf(HackCliError);
+    expect((refusal as HackCliError).code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+    expect((refusal as HackCliError).message).toContain(
+      "Native up refuses source over the limit; no runtime, image or build work was started. Largest directories: assets"
+    );
+    expect(requests).toEqual([
+      "runtime check-project-share",
+      "project source-size",
+    ]);
+    expect(events).toEqual([]);
+  }
+});
+
+test("an image-only graph starts above the source limit without measuring source", async () => {
+  // No bind mount and no dependency cache: the runtime never reads source content,
+  // so unrelated checkout files over the limit do not block startup.
   const { opts, events } = await fixture();
-  opts.dependencies.prepareStorage = async () => {
-    events.push("storage");
-  };
   const requests: string[] = [];
   const invoke = opts.dependencies.invoke;
   opts.dependencies.invoke = async (request) => {
     requests.push(request.args.slice(0, 2).join(" "));
     if (request.args[1] === "source-size") {
-      expect(request.args).toEqual([
-        "project",
-        "source-size",
-        "--project",
-        opts.scope.projectRoot,
-        "--json",
-      ]);
-      return nativeSourceSizeReceipt({ totalBytes: 140 * 1024 * 1024 });
+      return nativeSourceSizeReceipt({ totalBytes: OVERSIZED });
     }
     return await invoke?.(request);
   };
-  const refusal = await startNativeProject(opts).catch(
-    (error: unknown) => error
-  );
-  expect(refusal).toBeInstanceOf(HackCliError);
-  expect((refusal as HackCliError).code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
-  expect((refusal as HackCliError).message).toContain(
-    "Largest directories: assets"
-  );
-  expect(requests).toEqual(["project source-size"]);
-  expect(events).toEqual([]);
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(requests).not.toContain("project source-size");
+  expect(events).toContain("before");
+  expect(events).toContain("save");
 });
 
 test("foreground saves after readiness and retains mapping after confirmed stop", async () => {

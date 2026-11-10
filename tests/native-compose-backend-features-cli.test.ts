@@ -14,7 +14,6 @@ import { nativeBuildsDisabledRefusal } from "../src/backends/native-project-buil
 import { NATIVE_CONFIGURATION_REFUSAL } from "../src/backends/native-project-start.ts";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
-import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -83,10 +82,6 @@ exit 1
   await writeFile(
     join(stub, "runtime-check-project-share.out"),
     JSON.stringify({ source_admitted: true, pool_initialized: true })
-  );
-  await writeFile(
-    join(stub, "project-source-size.out"),
-    JSON.stringify(nativeSourceSizeReceipt())
   );
   const calls = async () =>
     (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
@@ -346,10 +341,7 @@ test(
       expectOneClosedLine(result, `E_NATIVE_PROJECT_UNSUPPORTED: ${refusal}`);
       expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
       // The check passed: native up went on to its own source preflight.
-      expect(await f.calls()).toEqual([
-        "project source-size",
-        "runtime check-project-share",
-      ]);
+      expect(await f.calls()).toEqual(["runtime check-project-share"]);
     }
   },
   SPAWN_TIMEOUT_MS
@@ -376,11 +368,7 @@ test(
     expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
     const calls = await f.calls();
     expect(calls).toEqual(
-      [
-        "project source-size",
-        "runtime check-project-share",
-        "runtime up",
-      ].slice(0, calls.length)
+      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
     );
     expect(calls.length).toBeGreaterThan(0);
   },
@@ -417,10 +405,7 @@ test(
     expect(result.output).not.toContain(secret);
     // The Compose backend would record the value in the image history too.
     expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
-    expect(await f.calls()).toEqual([
-      "project source-size",
-      "runtime check-project-share",
-    ]);
+    expect(await f.calls()).toEqual(["runtime check-project-share"]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -458,10 +443,7 @@ test(
     });
     const result = await cli(f, ["up"]);
     expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
-    expect(await f.calls()).toEqual([
-      "project source-size",
-      "runtime check-project-share",
-    ]);
+    expect(await f.calls()).toEqual(["runtime check-project-share"]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -505,11 +487,7 @@ test(
     expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
     const calls = await f.calls();
     expect(calls).toEqual(
-      [
-        "project source-size",
-        "runtime check-project-share",
-        "runtime up",
-      ].slice(0, calls.length)
+      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
     );
   },
   SPAWN_TIMEOUT_MS
@@ -708,11 +686,7 @@ test(
     expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
     const calls = await f.calls();
     expect(calls).toEqual(
-      [
-        "project source-size",
-        "runtime check-project-share",
-        "runtime up",
-      ].slice(0, calls.length)
+      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
     );
   },
   SPAWN_TIMEOUT_MS
@@ -748,11 +722,7 @@ test(
       expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
       const calls = await f.calls();
       expect(calls).toEqual(
-        [
-          "project source-size",
-          "runtime check-project-share",
-          "runtime up",
-        ].slice(0, calls.length)
+        ["runtime check-project-share", "runtime up"].slice(0, calls.length)
       );
     }
   },

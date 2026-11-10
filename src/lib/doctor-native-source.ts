@@ -23,6 +23,8 @@ export type NativeSourceReport = NativeSourceSize;
  * Predict the native up source limit refusal (HACK-1965). Over the limit is a
  * warning that names the largest directories and files and both remedies; a failed
  * measurement is a warning too, because native up runs the same measurement first.
+ * Doctor does not review the Compose graph, so it reports the size for every native
+ * project; up and restart apply the limit only to graphs that capture source.
  */
 export async function checkNativeSourceSize(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -47,7 +49,7 @@ export async function checkNativeSourceSize(opts: {
     return {
       name: NATIVE_SOURCE_CHECK,
       status: "warn",
-      message: `Native source size could not be measured, so native up refuses before startup. ${detail}`,
+      message: `Native source size could not be measured, so native up refuses before startup when a service bind-mounts project source or declares a dependency cache. ${detail}`,
     };
   }
   if (size.withinLimit) {
@@ -61,7 +63,7 @@ export async function checkNativeSourceSize(opts: {
   return {
     name: NATIVE_SOURCE_CHECK,
     status: "warn",
-    message: `${describeNativeSourceSize(size)} Native up and restart refuse source over the limit.${nativeSourceSizeRemedy(size)}`,
+    message: `${describeNativeSourceSize(size)} Native up and restart refuse source over the limit when a service bind-mounts project source or declares a dependency cache; image-only projects are not limited.${nativeSourceSizeRemedy(size)}`,
     nativeSource: size,
   };
 }

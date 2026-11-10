@@ -17,6 +17,7 @@ import {
   type NativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -69,6 +70,10 @@ async function fixture(compose = COMPOSE) {
   await mkdir(runtimeDir);
   await mkdir(stub);
   await writeFile(join(projectDir, "docker-compose.yml"), compose);
+  await writeFile(
+    join(stub, "project-source-size.out"),
+    JSON.stringify(nativeSourceSizeReceipt())
+  );
   await writeFile(
     join(projectDir, "hack.config.json"),
     JSON.stringify({
@@ -295,6 +300,39 @@ test(
       "Native runtime returned an invalid control response."
     );
     expect(await f.calls()).toEqual(["graph inspect"]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "native-project-source-size: oversized captured source is one coded line before any runtime work",
+  async () => {
+    // A bind mount captures source; image-only graphs (the other fixtures) are
+    // never measured, so their calls below carry no `project source-size`.
+    const f = await fixture(
+      JSON.stringify({
+        services: {
+          web: {
+            image: `sha256:${"e".repeat(64)}`,
+            volumes: ["./src:/app:ro"],
+          },
+        },
+      })
+    );
+    await scriptUpThroughReview(f);
+    await f.reply(
+      "project source-size",
+      nativeSourceSizeReceipt({ totalBytes: 140 * 1024 * 1024 })
+    );
+    const result = await cli({ fixture: f, args: ["up"], env: SHARED });
+    expectOneClosedLine(
+      result,
+      "E_NATIVE_PROJECT_UNSUPPORTED: Selected (non-ignored) source is 140 MiB in 3 files; the native source limit is 128 MiB (default). Native up refuses source over the limit; no runtime, image or build work was started. Largest directories: assets (140 MiB), assets/video (140 MiB). Largest files: assets/video/intro.bin (140 MiB). Exclude paths the containers do not need in the project's .gitignore or .ignore file (for example a line such as `assets/video/`) or raise native.sourceLimitMiB in .hack/hack.config.json (maximum 512)."
+    );
+    expect(await f.calls()).toEqual([
+      "runtime check-project-share",
+      "project source-size",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );

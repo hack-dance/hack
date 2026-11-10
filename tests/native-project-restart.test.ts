@@ -28,11 +28,12 @@ import {
   withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
 import { NativeStartupCanceledError } from "../src/backends/native-project-start.ts";
-import { ClosedCliError } from "../src/lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   expectClosedRefusal,
   expectCodedRefusal,
 } from "./helpers/closed-refusal.ts";
+import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 
 const run = {
   run: "a".repeat(32),
@@ -221,6 +222,60 @@ test("a cleaned intent selects retained-state review with or without a matching 
     expect(f.events.includes("down")).toBe(current !== null);
   }
 });
+test("HACK-1953: a prepared intent left by an interrupted stop resumes through the exact old selection", async () => {
+  // The old owner stopped its graph itself after the interrupted restart
+  // exited; the mapping still names the same run, owner, namespace and plan.
+  const prepared: NativeRestartIntent = {
+    run,
+    finalization: token,
+    phase: "prepared",
+  };
+  const f = fixture(prepared);
+  const seen: unknown[] = [];
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      preflight: async (selected, options) => {
+        expect(selected).toEqual(run);
+        seen.push(options);
+        f.events.push("preflight");
+      },
+      dependencies: { ...f.options.dependencies, load: async () => run },
+    })
+  ).toBe(0);
+  // Preflight may confirm a stopped graph; the down then only confirms the
+  // stop (it requests none for a stopped graph) and the exact old frontend
+  // finalization is still awaited before the replacement starts.
+  expect(seen).toEqual([{ cleanedRetry: false, preparedRetry: true }]);
+  expect(f.events).toEqual([
+    "preflight",
+    "down",
+    "finalized",
+    "start",
+    "remove",
+    "unlock",
+    "serving",
+  ]);
+  expect(f.state.pending).toBeNull();
+});
+test("HACK-1953: a prepared intent never resumes against a changed mapping", async () => {
+  const f = fixture({ run, finalization: token, phase: "prepared" });
+  for (const changed of [
+    { ...run, owner: "9".repeat(32) },
+    { ...run, planId: "8".repeat(64) },
+    { ...run, namespace: "7".repeat(64) },
+  ]) {
+    await expectClosedRefusal(
+      restartNativeProject({
+        ...f.options,
+        dependencies: { ...f.options.dependencies, load: async () => changed },
+      }),
+      "Native restart mapping changed; no cleanup requested."
+    );
+  }
+  expect(f.events).toEqual([]);
+  expect(f.state.pending).toMatchObject({ phase: "prepared" });
+});
 test("explicit dead-owner recovery runs after preflight and retained cleanup, before replacement", async () => {
   const f = fixture({ run, finalization: token, phase: "cleaned" });
   await restartNativeProject({
@@ -400,6 +455,80 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
     }),
     "compatibility changed"
   );
+});
+
+test("restart preflight limits captured source before review and stopping, never image-only source", async () => {
+  const image = `sha256:${"9".repeat(64)}`;
+  const preflight = (app: Record<string, unknown>) => {
+    const calls: string[] = [];
+    const result = preflightNativeRestart({
+      runtime: { binary: "/unused", home: "/candidate" },
+      scope,
+      composeFile: "/fixture/.hack/docker-compose.yml",
+      run,
+      dependencies: {
+        activeImages: async () => activeImageFixture(),
+        prepare: async () => ({
+          originalSha256: "1".repeat(64),
+          environmentFiles: [],
+          serviceNames: ["app"],
+          normalizedComposeJson: JSON.stringify({
+            services: { app: { image, ...app } },
+          }),
+          managedEnvironment: {},
+          lifecycleHostEnvironment: {},
+          effectiveEnvName: "qa",
+        }),
+        adapt: async ({ input: prepared }) => prepared,
+        dependencies: async () => [],
+        invoke: async ({ args }) => {
+          calls.push(args.slice(0, 2).join(" "));
+          if (args[1] === "source-size") {
+            return nativeSourceSizeReceipt({ totalBytes: 140 * 1024 * 1024 });
+          }
+          if (args[1] === "probe") {
+            return { admitted: true };
+          }
+          return { network: "internet" };
+        },
+        review: async () => {
+          calls.push("review");
+          throw new Error("reviewed");
+        },
+      },
+    });
+    return { calls, result };
+  };
+  // Image-only: no source is captured, so the oversized checkout is not measured.
+  const imageOnly = preflight({});
+  await expect(imageOnly.result).rejects.toThrow("reviewed");
+  expect(imageOnly.calls).not.toContain("project source-size");
+  expect(imageOnly.calls).toContain("review");
+  // An active bind mount or dependency cache captures source: refuse before review.
+  for (const app of [
+    { volumes: ["./src:/app:ro"] },
+    {
+      volumes: ["modules:/app/node_modules"],
+      labels: { "hack.dependencies.cache-volume": "modules" },
+    },
+  ]) {
+    const captured = preflight(app);
+    const refusal = await captured.result.catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(HackCliError);
+    expect((refusal as HackCliError).code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+    expect((refusal as HackCliError).message).toContain(
+      "Native up refuses source over the limit"
+    );
+    expect(captured.calls).toContain("project source-size");
+    expect(captured.calls).not.toContain("review");
+  }
+  // A bind mount only in a profile the retained run does not select captures nothing.
+  const inactive = preflight({
+    profiles: ["tools"],
+    volumes: ["./src:/app:ro"],
+  });
+  await expect(inactive.result).rejects.toThrow("reviewed");
+  expect(inactive.calls).not.toContain("project source-size");
 });
 
 test("preflight selects the per-env adaptation and dependency files by the retained env", async () => {
@@ -1049,6 +1178,92 @@ test("explicit stopped recovery rechecks compute and retained data after review"
       expect(f.events).toEqual([]);
       expect(f.state.pending).toBeNull();
     }
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("HACK-1953: a prepared retry reviews a graph its old owner stopped as retained and rechecks it after review", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const prepared: NativeRestartIntent = {
+      run,
+      finalization: token,
+      phase: "prepared",
+    };
+    const f = fixture(prepared);
+    expect(
+      await restartNativeProject({
+        ...f.options,
+        preflight: async (selected, options) =>
+          await preflightNativeRestart({
+            ...listener.options,
+            run: selected,
+            ...options,
+          }),
+        dependencies: { ...f.options.dependencies, load: async () => run },
+      })
+    ).toBe(0);
+    // No active image selection or live listener discovery: the stopped graph
+    // is confirmed before review and again after it.
+    expect(listener.calls).toEqual([
+      "graph inspect",
+      "runtime status",
+      "runtime probe",
+      "review",
+      "graph inspect",
+    ]);
+    expect(f.events).toEqual([
+      "down",
+      "finalized",
+      "start",
+      "remove",
+      "unlock",
+      "serving",
+    ]);
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
+test("HACK-1953: a prepared retry refuses an unconfirmed stopped graph and keeps active checks for a live one", async () => {
+  const listener = await listenerIntentFixture();
+  try {
+    const unconfirmed = { ...stoppedRetainedGraph(), journal_incomplete: true };
+    await expectClosedRefusal(
+      preflightNativeRestart({
+        ...listener.options,
+        preparedRetry: true,
+        dependencies: {
+          ...listener.options.dependencies,
+          invoke: async () => unconfirmed,
+        },
+      }),
+      "cannot confirm the stopped retained graph"
+    );
+    // The old owner never received the stop: the live graph is stopped by the
+    // resumed restart only after the normal active checks.
+    await expectCodedRefusal(
+      preflightNativeRestart({
+        ...listener.options,
+        preparedRetry: true,
+        dependencies: {
+          ...listener.options.dependencies,
+          invoke: async (options) =>
+            options.args[1] === "inspect"
+              ? {
+                  ...stoppedRetainedGraph(),
+                  receipt: {
+                    ...stoppedRetainedGraph().receipt,
+                    phase: "ready-observed",
+                  },
+                }
+              : await listener.options.dependencies!.invoke!(options),
+        },
+      }),
+      "E_CONFIG_INVALID",
+      "Native host dependencies refused for dependency #1"
+    );
   } finally {
     await rm(listener.directory, { recursive: true, force: true });
   }
@@ -2177,6 +2392,81 @@ test("a new start that fails without a stop request keeps the pending restart", 
   expect(f.pending()).toMatchObject({ phase: "cleaned" });
 });
 
+test("HACK-1953: a stop lost to the interrupt keeps the prepared intent and names hack restart, not hack up", async () => {
+  const f = stopFixture("never");
+  const error = await expectClosedRefusal(
+    restartNativeProject({
+      ...f.options,
+      down: async () => {
+        f.interrupt();
+        // The terminal's Ctrl-C ended the runtime request mid-stop.
+        throw new Error("Native runtime request failed");
+      },
+    }),
+    "Run hack restart to finish it"
+  );
+  expect(error.message).not.toContain("Run hack up");
+  expect(f.pending()).toMatchObject({ phase: "prepared" });
+  expect(f.events).toEqual(["preflight", "intent", "stopping"]);
+});
+
+test("HACK-1953: a stop that fails without an interrupt keeps its own error and the intent", async () => {
+  const f = stopFixture("never");
+  const failure = new Error("down hook failed");
+  await expect(
+    restartNativeProject({
+      ...f.options,
+      down: async () => {
+        throw failure;
+      },
+    })
+  ).rejects.toBe(failure);
+  expect(f.pending()).toMatchObject({ phase: "prepared" });
+});
+
+test("HACK-1953: a preflight request lost to the interrupt ends as canceled before cleanup", async () => {
+  const f = stopFixture("never");
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      preflight: async () => {
+        f.events.push("preflight");
+        f.interrupt();
+        throw new Error("Native runtime request failed");
+      },
+    })
+  ).toBe(130);
+  expect(f.events).toEqual(["preflight", "stopped"]);
+  expect(f.pending()).toBeNull();
+});
+
+test("HACK-1953: canceling a resumed prepared restart before cleanup says it is still pending", async () => {
+  const f = stopFixture("preflight");
+  const summaries: string[] = [];
+  const prepared: NativeRestartIntent = {
+    run,
+    finalization: token,
+    phase: "prepared",
+  };
+  expect(
+    await restartNativeProject({
+      ...f.options,
+      progress: (event) => {
+        if (event.phase === "stopped") {
+          summaries.push(event.summary);
+        }
+      },
+      dependencies: {
+        ...f.options.dependencies,
+        pending: async () => prepared,
+      },
+    })
+  ).toBe(130);
+  expect(summaries).toEqual([
+    expect.stringContaining("run hack restart to finish it"),
+  ]);
+});
+
 test("SIGTERM during cleanup exits 143 after the owned stop", async () => {
   const f = stopFixture("never");
   const down = f.options.down;
@@ -2296,5 +2586,97 @@ test.each([
     expect(output).toContain("exit 130 listeners=0");
   } finally {
     clearTimeout(timer);
+  }
+}, 20_000);
+
+test.each([
+  {
+    group: "own",
+    code: 130,
+    lines: [
+      "phase down",
+      "stopping",
+      "old run stopped",
+      "old frontend finalized",
+      "intent removed",
+      "stopped: Native project stopped; owned cleanup confirmed.",
+      "pending none",
+    ],
+    absent: ["error ", "phase start"],
+  },
+  {
+    // The pre-HACK-1953 shape: the runtime request shares the terminal's
+    // process group, so Ctrl-C ends it mid-stop. The restart keeps its exact
+    // prepared intent and names hack restart, never hack up.
+    group: "inherit",
+    code: 1,
+    lines: [
+      "phase down",
+      "stopping",
+      "error Native restart was interrupted before it could confirm the old run's stop",
+      "Run hack restart to finish it",
+      "pending prepared",
+    ],
+    absent: ["old run stopped", "Run hack up", "phase start"],
+  },
+])("HACK-1953: a terminal Ctrl-C to the whole process group during the old run's stop ($group runtime group)", async ({
+  group,
+  code,
+  lines,
+  absent,
+}) => {
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), "hack-restart-group-sigint-"))
+  );
+  const runtime = join(directory, "hack-native");
+  const started = join(directory, "started");
+  // Stands in for `graph cleanup`: a request that takes a while to finish.
+  await writeFile(
+    runtime,
+    '#!/bin/sh\n: > "$TMPDIR/started"\nsleep 2\nprintf \'{"ok":true}\\n\'\n',
+    { mode: 0o700 }
+  );
+  const worker = join(
+    import.meta.dir,
+    "fixtures/native-restart-signal-worker.ts"
+  );
+  // Its own process group stands in for the terminal's foreground group and
+  // keeps the signal from reaching this test runner.
+  const child = Bun.spawn(
+    [process.execPath, worker, "runtime", runtime, group],
+    {
+      env: { ...process.env, TMPDIR: directory },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    }
+  );
+  const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+  try {
+    const deadline = Date.now() + 10_000;
+    while (!(await Bun.file(started).exists())) {
+      if (Date.now() > deadline) {
+        throw new Error("the runtime request never started");
+      }
+      await Bun.sleep(20);
+    }
+    // As a terminal's Ctrl-C does: every process in the foreground group.
+    process.kill(-child.pid, "SIGINT");
+    const output = await new Response(child.stdout).text();
+    expect({
+      code: await child.exited,
+      stderr: await new Response(child.stderr).text(),
+    }).toEqual({ code, stderr: "" });
+    for (const line of lines) {
+      expect(output).toContain(line);
+    }
+    for (const line of absent) {
+      expect(output).not.toContain(line);
+    }
+    expect(output).toContain(`exit ${code} listeners=0`);
+  } finally {
+    clearTimeout(timer);
+    await rm(directory, { recursive: true, force: true });
   }
 }, 20_000);

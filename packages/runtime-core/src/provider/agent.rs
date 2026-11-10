@@ -342,8 +342,21 @@ pub(super) fn connect_until(path: &Path, deadline: Instant) -> Result<UnixStream
     Ok(stream)
 }
 
+/// Exit status reserved across every guest script for one meaning: the guest's owner
+/// token, boot ID or engine identity does not match the receipt. No script may use it for
+/// any other failure. It decodes to `guest_identity_mismatch`, never `guest_command_failed`,
+/// so a refusal to act on an unidentified guest is never mistaken for a command that ran and
+/// failed (see `lifecycle::quiesce_stalled`).
+pub(super) const GUEST_IDENTITY_REFUSED: i64 = 86;
+
 /// Error details are guest-controlled and may echo input values. Retain only a numeric exit code.
 fn decode_execution(response: Value) -> Result<String, CandidateError> {
+    if response["status"] == "completed" && response["exit_code"] == GUEST_IDENTITY_REFUSED {
+        return Err(CandidateError::new(
+            "guest_identity_mismatch",
+            "Guest owner, boot or engine identity does not match the receipt; phase retained. Guest output omitted.",
+        ));
+    }
     if response["status"] != "completed" || response["exit_code"] != 0 {
         let exit = response["exit_code"]
             .as_i64()
@@ -363,6 +376,12 @@ fn decode_execution(response: Value) -> Result<String, CandidateError> {
         .decode(encoded)
         .map_err(|_| failure("Invalid base64 guest output."))?;
     String::from_utf8(decoded).map_err(|_| failure("Guest receipt is not UTF-8."))
+}
+
+/// Decode a guest reply as `exec` does, for tests that run a guest script locally.
+#[cfg(test)]
+pub(super) fn decode_execution_for_test(response: Value) -> Result<String, CandidateError> {
+    decode_execution(response)
 }
 
 #[cfg(test)]
@@ -386,6 +405,27 @@ mod tests {
         let failure = decode_execution(json!({"status":"completed", "exit_code":23})).unwrap_err();
         assert_eq!(failure.code, "guest_command_failed");
         assert!(failure.message.contains("exit 23"));
+    }
+
+    /// HACK-1968: only a completed command's reserved status is an identity refusal; an
+    /// engine timeout (42) and a command the agent did not complete stay ordinary failures.
+    #[test]
+    fn only_the_reserved_exit_status_is_an_identity_refusal() {
+        let sentinel = "synthetic-private-input";
+        let refused = decode_execution(json!({"status":"completed", "exit_code":GUEST_IDENTITY_REFUSED, "stderr":STANDARD.encode(sentinel)})).unwrap_err();
+        assert_eq!(refused.code, "guest_identity_mismatch");
+        assert!(refused.message_fixed);
+        assert!(!serde_json::to_string(&refused).unwrap().contains(sentinel));
+        for response in [
+            json!({"status":"completed", "exit_code":42}),
+            json!({"status":"timeout", "exit_code":GUEST_IDENTITY_REFUSED}),
+            json!({"status":"completed", "exit_code":"86"}),
+        ] {
+            assert_eq!(
+                decode_execution(response).unwrap_err().code,
+                "guest_command_failed"
+            );
+        }
     }
 
     #[test]

@@ -121,6 +121,11 @@ import {
   type NativeSettingsReport,
 } from "../lib/doctor-native-settings.ts";
 import {
+  checkNativeSourceSize,
+  NATIVE_SOURCE_CHECK,
+  type NativeSourceReport,
+} from "../lib/doctor-native-source.ts";
+import {
   findCrossCheckoutInstances,
   inspectWorktreeSecretKeys,
 } from "../lib/doctor-worktree.ts";
@@ -204,8 +209,10 @@ import {
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   canMigrateCheckoutLegacyDotenv,
+  describeKeptSecretStorePointer,
   describeRetainedLegacyEnvFile,
   discoverComposeServiceNames,
+  dropRemovedLegacySecretStorePointer,
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   HACK_DIR_GITIGNORE_REFUSAL,
@@ -283,6 +290,8 @@ interface CheckResult {
   readonly amd64Emulation?: Amd64EmulationReport;
   /** Native setting origins and closed warnings only; never setting values. */
   readonly nativeSettings?: NativeSettingsReport;
+  /** Selected source sizes and project-relative paths; never file contents. */
+  readonly nativeSource?: NativeSourceReport;
   /** Service names and closed process fields only. */
   readonly nativeProcess?: NativeProcessReport;
 }
@@ -1166,7 +1175,10 @@ async function handleNativeDoctor(opts: {
   }
   // The env key audit is runtime-independent; outside a project there is no
   // key to audit, so native Doctor adds no check there.
-  if (await findProjectContext(opts.startDir).catch(() => null)) {
+  const nativeProject = await findProjectContext(opts.startDir).catch(
+    () => null
+  );
+  if (nativeProject) {
     results.push(
       await runCheck(
         progress,
@@ -1204,6 +1216,18 @@ async function handleNativeDoctor(opts: {
     results.push(
       await runCheck(progress, NATIVE_PROCESS_CHECK, () =>
         checkNativeProcessWrappers({ startDir: opts.startDir })
+      )
+    );
+    results.push(
+      await runCheck(
+        progress,
+        NATIVE_SOURCE_CHECK,
+        () =>
+          checkNativeSourceSize({
+            runtime: opts.runtime,
+            projectRoot: nativeProject.projectRoot,
+          }),
+        { timeoutMs: 25_000 }
       )
     );
   }
@@ -1401,6 +1425,8 @@ export type DoctorJsonCheck = {
   readonly nativeSettings?: NativeSettingsReport;
   /** Present only on the native process-wrapper check: service names and closed fields. */
   readonly nativeProcess?: NativeProcessReport;
+  /** Present only on the native source size check: sizes and project-relative paths. */
+  readonly nativeSource?: NativeSourceReport;
 };
 
 export type DoctorJsonData = {
@@ -1447,6 +1473,7 @@ export function buildDoctorJsonData(opts: {
         ? { nativeSettings: result.nativeSettings }
         : {}),
       ...(result.nativeProcess ? { nativeProcess: result.nativeProcess } : {}),
+      ...(result.nativeSource ? { nativeSource: result.nativeSource } : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -4202,6 +4229,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     serviceNames,
     materialize: false,
     migrateUndeclaredDotenv: true,
+    composeRepairFollows: true,
   });
   if (migrated.wroteFiles.length === 0) {
     note("Legacy env migration found nothing to write.", "doctor");
@@ -4219,6 +4247,16 @@ async function maybeMigrateProjectEnvConfig(opts: {
   for (const retained of migrated.retainedEnvFiles) {
     note(
       describeRetainedLegacyEnvFile({ shownPath: retained.path, retained }),
+      "env cleanup"
+    );
+  }
+  if (migrated.keptSecretStorePointer) {
+    note(
+      describeKeptSecretStorePointer({
+        shownConfigPath: migrated.keptSecretStorePointer.configPath,
+        shownStorePath: migrated.keptSecretStorePointer.storePath,
+        pointer: migrated.keptSecretStorePointer,
+      }),
       "env cleanup"
     );
   }
@@ -4273,6 +4311,8 @@ async function maybeMigrateProjectEnvConfig(opts: {
   });
   await offerDoctorEnvCleanup({
     projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    projectName,
     paths: cleanupCandidates,
     acceptTrackedChanges: opts.acceptTrackedChanges,
   });
@@ -4285,6 +4325,8 @@ async function maybeMigrateProjectEnvConfig(opts: {
  */
 async function offerDoctorEnvCleanup(opts: {
   readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
   readonly paths: readonly string[];
   readonly acceptTrackedChanges: boolean;
 }): Promise<void> {
@@ -4317,6 +4359,8 @@ async function offerDoctorEnvCleanup(opts: {
     ) {
       await removeDoctorEnvCleanup({
         projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
         paths: untracked,
       });
     }
@@ -4338,6 +4382,8 @@ async function offerDoctorEnvCleanup(opts: {
     ) {
       await removeDoctorEnvCleanup({
         projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
         paths: tracked,
       });
     } else {
@@ -4349,8 +4395,15 @@ async function offerDoctorEnvCleanup(opts: {
   }
 }
 
+/**
+ * Removes confirmed legacy env files. Once the encrypted secret store itself is
+ * gone, its pointer leaves `hack.config.json` too; the migration kept it so a
+ * declined or failed removal leaves the store readable.
+ */
 async function removeDoctorEnvCleanup(opts: {
   readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
   readonly paths: readonly string[];
 }): Promise<void> {
   const removed = await removeLegacyProjectEnvArtifacts({
@@ -4359,6 +4412,19 @@ async function removeDoctorEnvCleanup(opts: {
   });
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
+  }
+  if (
+    await dropRemovedLegacySecretStorePointer({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      projectName: opts.projectName,
+      removed,
+    })
+  ) {
+    note(
+      "Removed the encrypted secret store pointer from hack.config.json: the store it named is gone.",
+      "env cleanup"
+    );
   }
 }
 

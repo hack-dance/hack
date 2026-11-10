@@ -204,8 +204,10 @@ import {
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   canMigrateCheckoutLegacyDotenv,
+  describeKeptSecretStorePointer,
   describeRetainedLegacyEnvFile,
   discoverComposeServiceNames,
+  dropRemovedLegacySecretStorePointer,
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   HACK_DIR_GITIGNORE_REFUSAL,
@@ -4202,6 +4204,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     serviceNames,
     materialize: false,
     migrateUndeclaredDotenv: true,
+    composeRepairFollows: true,
   });
   if (migrated.wroteFiles.length === 0) {
     note("Legacy env migration found nothing to write.", "doctor");
@@ -4219,6 +4222,16 @@ async function maybeMigrateProjectEnvConfig(opts: {
   for (const retained of migrated.retainedEnvFiles) {
     note(
       describeRetainedLegacyEnvFile({ shownPath: retained.path, retained }),
+      "env cleanup"
+    );
+  }
+  if (migrated.keptSecretStorePointer) {
+    note(
+      describeKeptSecretStorePointer({
+        shownConfigPath: migrated.keptSecretStorePointer.configPath,
+        shownStorePath: migrated.keptSecretStorePointer.storePath,
+        pointer: migrated.keptSecretStorePointer,
+      }),
       "env cleanup"
     );
   }
@@ -4273,6 +4286,8 @@ async function maybeMigrateProjectEnvConfig(opts: {
   });
   await offerDoctorEnvCleanup({
     projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    projectName,
     paths: cleanupCandidates,
     acceptTrackedChanges: opts.acceptTrackedChanges,
   });
@@ -4285,6 +4300,8 @@ async function maybeMigrateProjectEnvConfig(opts: {
  */
 async function offerDoctorEnvCleanup(opts: {
   readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
   readonly paths: readonly string[];
   readonly acceptTrackedChanges: boolean;
 }): Promise<void> {
@@ -4317,6 +4334,8 @@ async function offerDoctorEnvCleanup(opts: {
     ) {
       await removeDoctorEnvCleanup({
         projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
         paths: untracked,
       });
     }
@@ -4338,6 +4357,8 @@ async function offerDoctorEnvCleanup(opts: {
     ) {
       await removeDoctorEnvCleanup({
         projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
         paths: tracked,
       });
     } else {
@@ -4349,8 +4370,15 @@ async function offerDoctorEnvCleanup(opts: {
   }
 }
 
+/**
+ * Removes confirmed legacy env files. Once the encrypted secret store itself is
+ * gone, its pointer leaves `hack.config.json` too; the migration kept it so a
+ * declined or failed removal leaves the store readable.
+ */
 async function removeDoctorEnvCleanup(opts: {
   readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly projectName: string;
   readonly paths: readonly string[];
 }): Promise<void> {
   const removed = await removeLegacyProjectEnvArtifacts({
@@ -4359,6 +4387,19 @@ async function removeDoctorEnvCleanup(opts: {
   });
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
+  }
+  if (
+    await dropRemovedLegacySecretStorePointer({
+      projectRoot: opts.projectRoot,
+      projectDir: opts.projectDir,
+      projectName: opts.projectName,
+      removed,
+    })
+  ) {
+    note(
+      "Removed the encrypted secret store pointer from hack.config.json: the store it named is gone.",
+      "env cleanup"
+    );
   }
 }
 

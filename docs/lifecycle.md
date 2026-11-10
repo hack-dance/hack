@@ -4,6 +4,12 @@ Many projects need host-side setup around `hack up` (auth, local proxies, tunnel
 
 Lifecycle is configured in `.hack/hack.config.json` under `lifecycle`.
 
+With the Compose backend, the first Ctrl-C during foreground `hack up` asks
+Compose to stop the project containers. Hack waits for Compose to finish stopping
+them and drains its logs before exiting with code 130. A second Ctrl-C is forwarded
+to Compose so it can force shutdown. Lifecycle process cleanup runs after Compose
+settles. Detached `hack up -d` is unchanged; use `hack down` to stop that instance.
+
 You can also use a shorthand `startup` array for common `hack up` startup flows.
 
 For project-wide `up` and `restart`, Hack resolves hook environment and checks registry

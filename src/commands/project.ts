@@ -6642,7 +6642,14 @@ async function runUpCommand({
       assertCurrent: assertHelpersCurrent,
       up: (beforeStart) =>
         composeRuntimeBackend.up({
-          ...(beforeStart ? { beforeStart } : {}),
+          beforeStart: async () => {
+            await beforeStart?.();
+            if (!detach) {
+              // Compose owns foreground shutdown. Lifecycle cleanup runs after
+              // it settles; re-raising here would turn one Ctrl-C into two.
+              signalCleanup.dispose();
+            }
+          },
           dependencyProgress: resolveDependencyCacheProgress({
             cache: dependencyCache,
             project: composeProjectName,

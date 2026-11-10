@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { NATIVE_SHARED_SOURCE_REFUSAL } from "../src/backends/native-project-start.ts";
+import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv, privateCliHome } from "./helpers/private-cli-env.ts";
 
 /**
@@ -84,6 +85,10 @@ exit 1
     join(stub, "runtime-check-project-share.out"),
     JSON.stringify({ source_admitted: true, pool_initialized: true })
   );
+  await writeFile(
+    join(stub, "project-source-size.out"),
+    JSON.stringify(nativeSourceSizeReceipt())
+  );
   const calls = async () =>
     (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
       .split("\n")
@@ -128,7 +133,7 @@ exit 1
     await writeFile(file, JSON.stringify(bound), { mode });
     await chmod(file, mode);
   };
-  return { root, project, calls, env, committed, machine };
+  return { root, project, stub, calls, env, committed, machine };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -316,6 +321,69 @@ test(
       "ERROR: E_CONFIG_INVALID: Native machine settings file must be a bounded owner-only (mode 0600) regular JSON file; values omitted.",
     ]);
     expect(await f.calls()).toEqual([]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "native doctor reports the selected source size and warns over the source limit",
+  async () => {
+    const f = await fixture({ services: { web: { image: IMAGE } } });
+    const within = await cli(f, ["doctor", "--json"]);
+    expect(
+      JSON.parse(within.output.slice(within.output.indexOf("{")))
+    ).toMatchObject({
+      data: {
+        checks: expect.arrayContaining([
+          expect.objectContaining({
+            id: "native source size",
+            status: "ok",
+            nativeSource: expect.objectContaining({
+              totalBytes: 4096,
+              limitBytes: 128 * 1024 * 1024,
+              withinLimit: true,
+            }),
+          }),
+        ]),
+      },
+    });
+    await writeFile(
+      join(f.stub, "project-source-size.out"),
+      JSON.stringify(
+        nativeSourceSizeReceipt({
+          totalBytes: 300 * 1024 * 1024,
+          limitMiB: 256,
+          limitOrigin: "project",
+        })
+      )
+    );
+    const over = await cli(f, ["doctor", "--json"]);
+    const envelope: unknown = JSON.parse(
+      over.output.slice(over.output.indexOf("{"))
+    );
+    expect(envelope).toMatchObject({
+      data: {
+        checks: expect.arrayContaining([
+          expect.objectContaining({
+            id: "native source size",
+            status: "warn",
+            detail: expect.stringContaining(
+              "the native source limit is 256 MiB (native.sourceLimitMiB in .hack/hack.config.json)"
+            ),
+            nativeSource: expect.objectContaining({
+              withinLimit: false,
+              largestDirectories: [
+                { path: "assets", bytes: 300 * 1024 * 1024 - 1024 },
+                { path: "assets/video", bytes: 300 * 1024 * 1024 - 2048 },
+              ],
+            }),
+          }),
+        ]),
+      },
+    });
+    expect(
+      (await f.calls()).filter((call) => call === "project source-size")
+    ).toHaveLength(2);
   },
   SPAWN_TIMEOUT_MS
 );

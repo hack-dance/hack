@@ -16,6 +16,7 @@ Usage:
   hack-local project plan --project <directory> --file <compose.yaml> [--profile <name>] [--json]
   hack-local project enroll --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
   hack-local project status --project <directory> [--json]
+  hack-local project source-size --project <directory> --json
   hack-local project sync-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--watch] [--reconcile] [--duration-seconds <seconds>] [--json]
   hack-local project sync-status --project <directory> --file <compose.yaml> [--json]
   hack-local project capture --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
@@ -1153,6 +1154,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         "plan",
         "enroll",
         "status",
+        "source-size",
         "capture",
         "publish-source",
         "verify-source",
@@ -1228,6 +1230,15 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
     let source = Path::new(
         source.ok_or_else(|| CandidateError::new("invalid_arguments", "--project is required."))?,
     );
+    if *action == "source-size" {
+        if !json || branch.is_some() || file.is_some() || expected.is_some() || !profiles.is_empty()
+        {
+            return Err(CandidateError::new("invalid_arguments", HELP));
+        }
+        // Metadata only: no content is read and no state is written.
+        let preview = candidate.plan(source)?;
+        return print_json(&project::source_budget::report(&preview.source)?);
+    }
     if *action == "status" {
         if file.is_some() || expected.is_some() || !profiles.is_empty() {
             return Err(CandidateError::new("invalid_arguments", HELP));

@@ -71,6 +71,10 @@ import {
   selectNativeEnvFile,
 } from "./native-project-selection.ts";
 import {
+  requireCapturedNativeSourceWithinLimit,
+  requireNativeSourceWithinLimit,
+} from "./native-project-source-size.ts";
+import {
   nativeRuntimeMetadataSelected,
   prepareNativeProjectServices,
 } from "./native-project-start.ts";
@@ -95,6 +99,7 @@ const DEFAULTS = {
   selectReview: selectNativeProjectReviewIdentity,
   retainedImages: selectNativeRetainedImages,
   activeImages: selectNativeActiveImages,
+  sourceSize: requireNativeSourceWithinLimit,
 };
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -527,6 +532,16 @@ export async function preflightNativeRestart(opts: {
       }).keys()
     )
   );
+  // The replacement startup measures captured source before its hooks; refuse an
+  // oversized one before the current graph is stopped. Image-only graphs skip it.
+  await requireCapturedNativeSourceWithinLimit({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    services: specs,
+    profiles: selected.profiles,
+    invoke: deps.invoke,
+    check: deps.sourceSize,
+  });
   const hostAliases = nativeServiceHostAliases({
     services: specs,
     profiles: selected.profiles,

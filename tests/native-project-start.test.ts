@@ -62,6 +62,7 @@ import {
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
+import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -126,6 +127,9 @@ async function fixture(withEnvironment = true) {
         },
       }),
     invoke: async (opts) => {
+      if (opts.args[1] === "source-size") {
+        return nativeSourceSizeReceipt();
+      }
       if (opts.args[1] === "check-project-share") {
         return { source_admitted: true, pool_initialized: false };
       }
@@ -322,6 +326,76 @@ test("source pool mismatch refuses before hooks and storage preparation", async 
     "source pool mismatch"
   );
   expect(events).toEqual([]);
+});
+
+const OVERSIZED = 140 * 1024 * 1024;
+
+test("oversized captured source refuses before hooks, image and runtime work", async () => {
+  // A bind mount (shared source) and a dependency cache (published revision) are
+  // the two ways startup captures source; both keep the limit.
+  for (const web of [
+    { image: `sha256:${"e".repeat(64)}`, volumes: ["./src:/app:ro"] },
+    {
+      image: `sha256:${"e".repeat(64)}`,
+      volumes: ["modules:/app/node_modules"],
+      labels: { "hack.dependencies.cache-volume": "modules" },
+    },
+  ]) {
+    const { opts, events } = await fixture();
+    const prepare = opts.dependencies.prepare!;
+    opts.dependencies.prepare = async (request) => ({
+      ...(await prepare(request)),
+      normalizedComposeJson: JSON.stringify({ services: { web } }),
+    });
+    const requests: string[] = [];
+    const invoke = opts.dependencies.invoke;
+    opts.dependencies.invoke = async (request) => {
+      requests.push(request.args.slice(0, 2).join(" "));
+      if (request.args[1] === "source-size") {
+        expect(request.args).toEqual([
+          "project",
+          "source-size",
+          "--project",
+          opts.scope.projectRoot,
+          "--json",
+        ]);
+        return nativeSourceSizeReceipt({ totalBytes: OVERSIZED });
+      }
+      return await invoke?.(request);
+    };
+    const refusal = await startNativeProject(opts).catch(
+      (error: unknown) => error
+    );
+    expect(refusal).toBeInstanceOf(HackCliError);
+    expect((refusal as HackCliError).code).toBe("E_NATIVE_PROJECT_UNSUPPORTED");
+    expect((refusal as HackCliError).message).toContain(
+      "Native up refuses source over the limit; no runtime, image or build work was started. Largest directories: assets"
+    );
+    expect(requests).toEqual([
+      "runtime check-project-share",
+      "project source-size",
+    ]);
+    expect(events).toEqual([]);
+  }
+});
+
+test("an image-only graph starts above the source limit without measuring source", async () => {
+  // No bind mount and no dependency cache: the runtime never reads source content,
+  // so unrelated checkout files over the limit do not block startup.
+  const { opts, events } = await fixture();
+  const requests: string[] = [];
+  const invoke = opts.dependencies.invoke;
+  opts.dependencies.invoke = async (request) => {
+    requests.push(request.args.slice(0, 2).join(" "));
+    if (request.args[1] === "source-size") {
+      return nativeSourceSizeReceipt({ totalBytes: OVERSIZED });
+    }
+    return await invoke?.(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(requests).not.toContain("project source-size");
+  expect(events).toContain("before");
+  expect(events).toContain("save");
 });
 
 test("foreground saves after readiness and retains mapping after confirmed stop", async () => {
@@ -4344,7 +4418,7 @@ test("retained startup selects legacy labels only after runtime admission and be
       if (request.args[0] === "runtime" && request.args[1] === "up") {
         admitted = true;
       }
-      if (request.args[0] === "project") {
+      if (request.args[0] === "project" && request.args[1] === "plan") {
         expect(admitted).toBe(true);
         return {
           plan: {

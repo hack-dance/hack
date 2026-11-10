@@ -2,7 +2,7 @@
 mod generated;
 mod mountpoints;
 mod registry;
-use super::{Diagnostic, SourceSelection, problem, source};
+use super::{Diagnostic, SourceSelection, problem, source, source_budget};
 use crate::CandidateError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,7 +14,12 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path};
 
-const MAX_BYTES: u64 = 128 * 1024 * 1024;
+/// Retained manifests are validated against the largest configurable limit, so a
+/// revision captured under a raised project limit stays readable.
+const MAX_BYTES: u64 = source_budget::MAXIMUM_LIMIT_BYTES;
+
+/// Fixed (value-free) refusal; `hack doctor` reports the measured size and paths.
+const OVER_LIMIT: &str = "Selected source content exceeds the native source limit (default 128 MiB). Run hack doctor to list the largest paths, then exclude them in the project .gitignore or .ignore file or raise native.sourceLimitMiB in .hack/hack.config.json (maximum 512).";
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -397,10 +402,12 @@ pub fn capture_plan(plan: &super::PlanData) -> Result<Snapshot, CandidateError> 
         .flat_map(|service| service.environment_files.iter().cloned())
         .chain(plan.original_environment_files.iter().cloned())
         .collect();
-    capture(
+    capture_after_inventory(
         &plan.source,
         &environment_files,
         &plan.source_selection.metadata_sha256,
+        source_budget::effective_limit(plan.source_limit_bytes),
+        || {},
     )?
     .with_mountpoints(plan)?
     .with_registry(plan)?
@@ -415,18 +422,35 @@ pub fn capture(
     environment_files: &BTreeSet<String>,
     expected_selection: &str,
 ) -> Result<Snapshot, CandidateError> {
-    capture_after_inventory(project, environment_files, expected_selection, || {})
+    capture_after_inventory(
+        project,
+        environment_files,
+        expected_selection,
+        source_budget::DEFAULT_LIMIT_BYTES,
+        || {},
+    )
 }
 
 fn capture_after_inventory(
     project: &Path,
     environment_files: &BTreeSet<String>,
     expected_selection: &str,
+    limit: u64,
     after_inventory: impl FnOnce(),
 ) -> Result<Snapshot, CandidateError> {
+    let limit = limit.min(MAX_BYTES);
     let selected = selection(project, environment_files)?;
     if selected.metadata_sha256 != expected_selection {
         return Err(changed());
+    }
+    // Refuse from inventory metadata before reading any content.
+    let selected_bytes = selected
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == "file")
+        .try_fold(0_u64, |total, entry| total.checked_add(entry.bytes));
+    if selected_bytes.is_none_or(|bytes| bytes > limit) {
+        return Err(problem("source_budget", OVER_LIMIT));
     }
     after_inventory();
     let root = OpenOptions::new()
@@ -461,11 +485,11 @@ fn capture_after_inventory(
             if !before.is_file() || before.nlink() != 1 || before.len() != entry.bytes {
                 return Err(changed());
             }
-            let remaining = MAX_BYTES
+            let remaining = limit
                 .checked_sub(total)
-                .ok_or_else(|| problem("source_budget", "Source content exceeds 128 MiB."))?;
+                .ok_or_else(|| problem("source_budget", OVER_LIMIT))?;
             if before.len() > remaining {
-                return Err(problem("source_budget", "Source content exceeds 128 MiB."));
+                return Err(problem("source_budget", OVER_LIMIT));
             }
             Read::by_ref(&mut file)
                 .take(remaining + 1)
@@ -540,12 +564,42 @@ mod tests {
         let environments = BTreeSet::new();
         let reviewed = selection(&project, &environments).unwrap().metadata_sha256;
 
-        let result = capture_after_inventory(&project, &environments, &reviewed, || {
-            fs::rename(root.0.join("replacement.js"), project.join("app.js")).unwrap();
-        });
+        let result = capture_after_inventory(
+            &project,
+            &environments,
+            &reviewed,
+            source_budget::DEFAULT_LIMIT_BYTES,
+            || {
+                fs::rename(root.0.join("replacement.js"), project.join("app.js")).unwrap();
+            },
+        );
         assert_eq!(
             result.err().expect("capture must refuse").code,
             "source_changed"
         );
+    }
+
+    #[test]
+    fn capture_refuses_content_over_its_limit_before_reading() {
+        let root = Fixture(std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-snapshot-limit-{}-{}",
+            std::process::id(),
+            crate::next_test_scratch()
+        )));
+        fs::create_dir(&root.0).unwrap();
+        fs::write(root.0.join("blob.bin"), vec![0_u8; 2048]).unwrap();
+        let environments = BTreeSet::new();
+        let reviewed = selection(&root.0, &environments).unwrap().metadata_sha256;
+        let mut read = false;
+        let refused =
+            capture_after_inventory(&root.0, &environments, &reviewed, 2047, || read = true);
+        let error = refused.err().expect("capture must refuse");
+        assert_eq!(error.code, "source_budget");
+        assert!(error.message.contains("native.sourceLimitMiB"));
+        assert!(!read, "the limit is checked from inventory metadata first");
+        let accepted =
+            capture_after_inventory(&root.0, &environments, &reviewed, 2048, || {}).unwrap();
+        assert_eq!(accepted.receipt().total_bytes, 2048);
+        accepted.receipt().validate().unwrap();
     }
 }

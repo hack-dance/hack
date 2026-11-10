@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
 import {
   mkdir,
   mkdtemp,
@@ -14,6 +14,11 @@ import {
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
+
+// Each case spawns the source CLI (bounded at 10 s below) one or more times; a cold
+// start alone takes several seconds on a loaded host, close to Bun's 5 s default.
+setDefaultTimeout(30_000);
 
 const roots: string[] = [];
 const entrypoint = resolve("index.ts");
@@ -59,6 +64,11 @@ async function fixture(approveSource = false) {
 if [ "$4" = "check-project-share" ]; then
   touch "$HOME/preflight-ran"
   ${approveSource ? `printf '%s\\n' '{"source_admitted":true,"pool_initialized":false}'\n  exit 0` : "exit 71"}
+fi
+# The source size check reads metadata only; it is not a runtime effect either.
+if [ "$4" = "source-size" ]; then
+  printf '%s\\n' '${JSON.stringify(nativeSourceSizeReceipt())}'
+  exit 0
 fi
 # Image admission is a pure runtime check that runs before hooks; it is not a
 # runtime effect, so it answers without touching the native-ran tripwire.

@@ -144,6 +144,10 @@ import {
 } from "./native-project-run.ts";
 import { selectNativeEnvFile } from "./native-project-selection.ts";
 import { preflightNativeProjectSource } from "./native-project-source-preflight.ts";
+import {
+  requireCapturedNativeSourceWithinLimit,
+  requireNativeSourceWithinLimit,
+} from "./native-project-source-size.ts";
 import { reportNativeRestartPolicyNotices } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
@@ -343,6 +347,8 @@ type Dependencies = {
   recoverHttps: typeof recoverNativeHttpsLease;
   cleanupTemporary: (directory: string) => Promise<void>;
   invoke: typeof invokeNativeRuntime;
+  /** Refuses captured source over the native source limit before any runtime work. */
+  sourceSize: typeof requireNativeSourceWithinLimit;
   build: typeof invokeNativeBuild;
   load: typeof loadNativeProjectRun;
   loadRestart: typeof loadNativeRestartIntent;
@@ -375,6 +381,7 @@ const DEFAULTS: Dependencies = {
   cleanupTemporary: (directory) =>
     rm(directory, { recursive: true, force: true }),
   invoke: invokeNativeRuntime,
+  sourceSize: requireNativeSourceWithinLimit,
   build: invokeNativeBuild,
   load: loadNativeProjectRun,
   loadRestart: loadNativeRestartIntent,
@@ -1885,6 +1892,18 @@ async function startNativeProjectAttempt(
     selectedDependencyFile !== undefined,
     buildServices
   );
+  // A graph that captures source (bind mounts or a dependency cache) measures it
+  // before hooks, image work or runtime start, so an oversized project refuses with
+  // its size and largest paths. An image-only graph never reads source content.
+  await requireCapturedNativeSourceWithinLimit({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    services: specs,
+    profiles,
+    signal: opts.signal,
+    invoke: deps.invoke,
+    check: deps.sourceSize,
+  });
   // Refuse malformed or unacquirable references before hooks, VM or provider start.
   await admitNativeProjectImages({
     runtime: opts.runtime,

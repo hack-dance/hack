@@ -32,11 +32,16 @@ export const DEFAULT_DURATION_HINT_SECONDS = 60;
  * each scenario, rounded, minimum 1). Hints only balance shards; they never
  * bound or skip a scenario, so a stale value costs wall time, not coverage.
  * Refresh them from the shard logs when a scenario's runtime changes
- * materially. `native-config-networks` alone is longer than any other shard's
- * whole load, so it always runs by itself and sets the docker-e2e wall time.
+ * materially. The custom-network qualification runs as three
+ * `native-config-networks-*` parts (PR CI run 42690450094); the single
+ * scenario (3090 s here) was longer than any other shard's whole load. Each
+ * part repeats its three-checkout startup and cleanup, so together they
+ * exceed it, but each gets a shard of its own.
  */
 export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
-  "native-config-networks": 3090,
+  "native-config-networks-ingress": 1345,
+  "native-config-networks-policy": 1249,
+  "native-config-networks-lifecycle": 1236,
   "native-config-compose": 736,
   "native-config-routing": 558,
   "native-compose-adoption-job-worktrees": 177,

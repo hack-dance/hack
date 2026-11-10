@@ -501,13 +501,7 @@ export const PLATFORM_SENSITIVE_SOURCE =
  * Files the pattern misses that still need macOS, with the reason. An entry
  * here keeps the file in the macOS pool of the pooled layout.
  */
-export const MACOS_POOL_FILES: Readonly<Record<string, string>> = {
-  // GitHub's macOS runners have no tmux, so this file has only ever skipped in
-  // CI; on Ubuntu (tmux installed) its Bash prompt never appears. Keep the
-  // existing coverage until the Linux behavior is fixed.
-  "tests/tmux-private-input.test.ts":
-    "skips on macOS runners without tmux; fails on Ubuntu with tmux",
-};
+export const MACOS_POOL_FILES: Readonly<Record<string, string>> = {};
 
 /** Parse a layout name, refused closed. */
 export function parseTestLayout(value: string | undefined): TestLayout {

@@ -68,6 +68,7 @@ liveness/reachability controls have their own documented assumptions.
 
 | Model | Positive distinct states | Configurations |
 | --- | ---: | ---: |
+| [shutdown-rebase](../../tests/models/tla/shutdown-rebase/ShutdownRebase.tla) | 43 | 3 |
 | [native-plan-reconcile](../../tests/models/tla/native-plan-reconcile/Reconcile.tla) | 747,656 | 4 |
 | [native-cache-reconcile](../../tests/models/tla/native-cache-reconcile/CacheReconcile.tla) | 2,208 | 5 |
 | [pre-ready-retirement](../../tests/models/tla/pre-ready-retirement/Retirement.tla) | 10,965 | 8 |
@@ -127,3 +128,26 @@ pending publication, uncertain reader/child/group/host exit, hard cancellation,
 crash/reopen and incompatible software rollback. Preserve a named counterexample
 and an executable regression for every claimed implementation fix. Missing
 executable or model coverage stays a release gate; a diagram alone cannot close it.
+
+### Retained shutdown evidence (HACK-1963)
+
+`shutdown-rebase` checks `StopAdmitted`, `RetainedBeforeReset` and
+`NoUnprovenPrune` for one graph, two logical services, one retired generation,
+three old-container observations (absent/present/unknown), and presence/absence of
+exact stopped history. `Archive`, `Rebase`, `Start` map to restore's confirmed
+compute absence, `restore_history::retain`, `shutdown::rebase_stopped`, and receipt
+projection/publication. History and reset are distinct crash boundaries; `Crash`
+permits retry before new compute admission. `Repair` maps to explicit receipt-bound
+selection and fresh immutable-ID absence in `shutdown::recover_rebase`.
+
+The missing-reset control fails `StopAdmitted` at `Start`; the missing-absence
+control fails `NoUnprovenPrune` at `Repair`. Rust shutdown rebase tests cover exact
+IDs, refusal, bounded evidence history, retry and read-only selection; the plan
+reconcile regression covers add/stop/remove/projection. The interrupted-cleanup
+engine retains its independent owner, coordinator, inventory and per-stop journal
+checks; the model does not prove those native effects. Assumptions: provider lease
+serializes managed writers and engine absence observations are authoritative for
+the inspected immutable ID. Uncovered: real VM/foreground signals, external Docker
+writers, fsync failures, native publication retirement, boot rollover recovery,
+application flush behavior and live container absence. Linux portable checks do
+not qualify those macOS behaviors.

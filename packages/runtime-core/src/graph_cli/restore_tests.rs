@@ -486,3 +486,44 @@ fn automatic_dependency_slots_are_explicit_and_foreground_only() {
     }
     assert!(!candidate.state_root.exists());
 }
+
+#[test]
+fn pinned_dependency_check_rejects_invalid_selectors_before_observation() {
+    let fixture = Fixture::new();
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    for args in [
+        vec!["dependency-check", "--host-pid", "1", "--host-port", "8443"],
+        vec!["dependency-check", "--host-pid", "123", "--host-port", "0"],
+        vec!["dependency-check", "--host-pid", "123"],
+        vec![
+            "dependency-check",
+            "--host-pid",
+            "123",
+            "--host-port",
+            "65536",
+        ],
+    ] {
+        assert_eq!(
+            command(&candidate, &args).unwrap_err().code,
+            "graph_arguments"
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(
+        command(
+            &candidate,
+            &[
+                "dependency-check",
+                "--host-pid",
+                "123",
+                "--host-port",
+                "8443",
+                "--json"
+            ]
+        )
+        .unwrap_err()
+        .code,
+        "unsupported_host"
+    );
+    assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 0);
+}

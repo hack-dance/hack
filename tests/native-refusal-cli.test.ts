@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { beginNativeProjectFinalization } from "../src/backends/native-project-finalization.ts";
 import {
+  beginNativeProjectStartupObservation,
   type NativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
@@ -652,4 +653,30 @@ test(
     expect(await f.calls()).toEqual([]);
   },
   SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "ps renders pending startup without a misleading not-started line or empty service table",
+  async () => {
+    const f = await fixture();
+    const finish = await beginNativeProjectStartupObservation(f.scope);
+    try {
+      const text = await cli({ fixture: f, args: ["ps"] });
+      expect(text.code).toBe(0);
+      expect(text.output).toContain("Native project startup is pending");
+      expect(text.output).not.toContain("has not been started");
+      expect(text.output).not.toContain("NATIVE SERVICE");
+      const json = await cli({ fixture: f, args: ["ps", "--json"] });
+      expect(json.code).toBe(0);
+      expect(JSON.parse(json.stdout).data).toMatchObject({
+        status: "pending",
+        run: null,
+        items: [],
+      });
+      expect(await f.calls()).toEqual([]);
+    } finally {
+      await finish();
+    }
+  },
+  SPAWN_TIMEOUT_MS
 );

@@ -142,6 +142,23 @@ const restartPolicyStaleUses = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "shutdown-rebase",
+    module: "ShutdownRebase",
+    states: 43,
+    invariant: "StopAdmitted",
+    action: "Start",
+    fields: ['phase = "running"', "archived = TRUE"],
+    additionalControls: [
+      {
+        name: "absence",
+        negative: true,
+        invariant: "NoUnprovenPrune",
+        action: "Repair",
+        fields: ["unsafePrune = TRUE", 'phase = "repaired"'],
+      },
+    ],
+  },
+  {
     name: "native-plan-reconcile",
     module: "Reconcile",
     states: 747_656,
@@ -1885,6 +1902,14 @@ const contracts: readonly ModelContract[] = [
     invariant: "NoReclaimReferenced",
     action: "Reclaim",
     fields: ["refs = {1}", "removed = 1", "fence = FALSE"],
+    // Two-worker TLC can first reclaim image 2; require the same exact
+    // referenced-image violation rather than accepting an arbitrary failure.
+    alternativeWitnesses: [
+      {
+        action: "Reclaim",
+        fields: ["refs = {2}", "removed = 2", "fence = FALSE"],
+      },
+    ],
     additionalControls: [
       {
         name: "foreign-adoption",

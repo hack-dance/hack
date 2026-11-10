@@ -4,11 +4,19 @@ import { isAbsolute } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 
 const LIMIT = 65_536;
+const FILE_REFUSAL =
+  "Native selection requires a bounded, unchanged regular JSON file; values omitted.";
+/** Closed syntax reason; never includes parser excerpts or selected values. */
+export class NativeSelectionSyntaxError extends HackCliError {
+  readonly reason = "the selection file is not valid UTF-8 JSON";
+  constructor() {
+    super({ code: "E_CONFIG_INVALID", message: FILE_REFUSAL });
+  }
+}
 function refused(): Error {
   return new HackCliError({
     code: "E_CONFIG_INVALID",
-    message:
-      "Native selection requires a bounded, unchanged regular JSON file; values omitted.",
+    message: FILE_REFUSAL,
   });
 }
 /**
@@ -52,15 +60,22 @@ export async function readNativeSelection(
       ) {
         throw refused();
       }
-      return JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(
-          buffer.subarray(0, bytesRead)
-        )
-      );
+      try {
+        return JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(
+            buffer.subarray(0, bytesRead)
+          )
+        );
+      } catch {
+        throw new NativeSelectionSyntaxError();
+      }
     } finally {
       await file.close();
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof NativeSelectionSyntaxError) {
+      throw error;
+    }
     throw refused();
   }
 }

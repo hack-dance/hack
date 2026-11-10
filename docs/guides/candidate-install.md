@@ -1,7 +1,9 @@
 # Install a native prerelease alongside stable Hack
 
 Native prereleases are opt-in Apple Silicon macOS bundles identified by
-`5.0.0-next.N`, with a positive number and no leading zero. Install a specific
+`5.0.0-next.N`, with a positive number and no leading zero. After a stable v5
+release, candidates move to the next line, such as `5.1.0-next.N`; see
+[versions and artifacts](prereleases.md#versions-and-artifacts). Install a specific
 published GitHub prerelease. Download the installer from that same explicit tag
 over HTTPS, review the saved file, then run it locally:
 

@@ -3422,7 +3422,12 @@ printf 'verified-cache\n'
     }
 
     /// A fixture guest filesystem for `guest-quiesce.sh`: owner `owner`, boot `boot`, and a
-    /// recorded engine at a PID no host process can hold, started at `777`.
+    /// recorded engine at a PID no host process can hold, started at `777`. The script runs
+    /// with `PATH` holding only the fixture's `bin`, so no host tool, and in particular no
+    /// host `pidof` that sees a real engine, can decide a case. `bin` holds a fake `pidof`
+    /// (see [`QuiesceFixture::guest_processes`]), a no-op `sync`, and the plain host
+    /// `cat`, `awk` and `readlink` the script reads fixture files with. `seq` and `sleep`
+    /// are absent: only the bounded wait after `kill` uses them, and no case reaches it.
     struct QuiesceFixture(std::path::PathBuf);
 
     const FIXTURE_ENGINE_PID: &str = "2147483646";
@@ -3439,9 +3444,35 @@ printf 'verified-cache\n'
                 root.join("proc/sys/kernel/random"),
                 root.join("run/hack-local"),
                 root.join("opt/hack-engine"),
+                root.join("bin"),
+                root.join("pidof"),
                 engine.clone(),
             ] {
                 fs::create_dir_all(directory).unwrap();
+            }
+            let executable = |name: &str, body: String| {
+                use std::os::unix::fs::PermissionsExt;
+                let path = root.join("bin").join(name);
+                fs::write(&path, body).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            };
+            // Prints the fixture's PIDs for a name, like `pidof`, using shell builtins only.
+            let pidof = root.join("pidof");
+            executable(
+                "pidof",
+                format!(
+                    "#!/bin/sh\nfile='{}'/\"$1\"\ntest -f \"$file\" || exit 1\nwhile IFS= read -r line || test -n \"$line\"; do printf '%s\\n' \"$line\"; done < \"$file\"\n",
+                    pidof.display()
+                ),
+            );
+            executable("sync", "#!/bin/sh\nexit 0\n".into());
+            for tool in ["cat", "awk", "readlink"] {
+                let host = ["/bin", "/usr/bin"]
+                    .iter()
+                    .map(|directory| Path::new(directory).join(tool))
+                    .find(|path| path.is_file())
+                    .unwrap_or_else(|| panic!("host {tool}"));
+                std::os::unix::fs::symlink(host, root.join("bin").join(tool)).unwrap();
             }
             fs::write(root.join("storage/.hack-local-owner"), "owner").unwrap();
             fs::write(root.join("proc/sys/kernel/random/boot_id"), "boot").unwrap();
@@ -3462,6 +3493,11 @@ printf 'verified-cache\n'
                 stat,
             )
             .unwrap();
+        }
+
+        /// Make the fake `pidof NAME` print `pids` and succeed, as for a running process.
+        fn guest_processes(&self, name: &str, pids: &str) {
+            fs::write(self.0.join("pidof").join(name), pids).unwrap();
         }
 
         fn engine_exe(&self, relative: &str) {
@@ -3485,6 +3521,8 @@ printf 'verified-cache\n'
                 script = script.replace(path, &format!("{root}{path}"));
             }
             let output = std::process::Command::new("/bin/sh")
+                .env_clear()
+                .env("PATH", self.0.join("bin"))
                 .args(["-c", &script, "hack-local", owner, boot])
                 .args([FIXTURE_ENGINE_PID, "777", mode])
                 .output()
@@ -3561,6 +3599,49 @@ printf 'verified-cache\n'
             fixture.quiesce("owner", "boot", "resume").unwrap(),
             "quiesced\n"
         );
+    }
+
+    /// HACK-1993: once the recorded engine is gone, a resumed stop reports `quiesced` only
+    /// when no pidfile, dockerd or containerd remains. `set -e` ignores a failing
+    /// `! pidof`, so the script used to print `quiesced` while an engine still ran. Each
+    /// remaining engine now exits 42, the engine-did-not-exit status, which a resumed
+    /// stop treats as a stall.
+    #[test]
+    fn a_resumed_stop_never_reports_quiesced_while_an_engine_remains() {
+        type Remaining = fn(&QuiesceFixture);
+        let remaining: [(&str, Remaining); 3] = [
+            ("dockerd", |fixture| {
+                fixture.guest_processes("dockerd", "1322")
+            }),
+            ("containerd", |fixture| {
+                fixture.guest_processes("containerd", "1089")
+            }),
+            ("pidfile", |fixture| {
+                fs::write(fixture.0.join("run/hack-local/docker.pid"), "1322").unwrap();
+            }),
+        ];
+        for (case, remain) in remaining {
+            let fixture = QuiesceFixture::new();
+            fs::remove_file(fixture.0.join("proc").join(FIXTURE_ENGINE_PID).join("stat")).unwrap();
+            fs::remove_file(fixture.0.join("run/hack-local/docker.pid")).unwrap();
+            assert_eq!(
+                fixture.quiesce("owner", "boot", "resume").unwrap(),
+                "quiesced\n",
+                "{case}"
+            );
+            remain(&fixture);
+            let error = fixture.quiesce("owner", "boot", "resume").unwrap_err();
+            assert_eq!(error.code, "guest_command_failed", "{case}");
+            assert!(error.message.contains("exit 42"), "{case}");
+            assert!(!authorizes_unclean_stop(&quiesce_failure(
+                fixture.quiesce("owner", "boot", "resume").unwrap_err(),
+                false
+            )));
+            assert!(
+                authorizes_unclean_stop(&quiesce_failure(error, true)),
+                "{case}"
+            );
+        }
     }
 
     /// The first stop's identity refusal leaves the pool `quiescing`; the next `down` and

@@ -2841,19 +2841,32 @@ fn text_plan_exits_non_zero_on_error_diagnostics_and_json_keeps_the_report() {
             .unwrap()
     };
     let clean = Fixture::new(BASIC);
-    assert!(plan(&clean, false).status.success());
+    let clean_report = plan(&clean, false);
+    assert!(
+        clean_report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clean_report.stderr)
+    );
     let failing = Fixture::new(&format!("{BASIC}    privileged: true\n"));
     let text = plan(&failing, false);
-    assert!(!text.status.success());
+    assert_eq!(text.status.code(), Some(2));
     let stdout = String::from_utf8(text.stdout).unwrap();
     assert!(stdout.contains("error [privileged_service]"), "{stdout}");
     let refusal: serde_json::Value = serde_json::from_slice(&text.stderr).unwrap();
     assert_eq!(refusal["code"], "plan_diagnostics");
     assert_eq!(refusal["message_fixed"], true);
     let json = plan(&failing, true);
-    assert!(json.status.success());
+    assert_eq!(json.status.code(), Some(0));
     let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(report["plan"]["enrollment_compatible"], false);
+    assert!(
+        report["plan"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["severity"] == "error"
+                && diagnostic["code"] == "privileged_service")
+    );
 }
 
 fn diagnostic_codes(report: &PlanReport) -> Vec<&str> {

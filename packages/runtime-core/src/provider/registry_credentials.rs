@@ -17,8 +17,8 @@ use std::{
     fs::File,
     io::{Read, Write},
     os::unix::{fs::PermissionsExt, process::CommandExt},
-    path::PathBuf,
-    process::{Command, Stdio},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -231,6 +231,37 @@ fn drain(
     }
 }
 
+/// Starts a helper, retrying briefly while its executable is busy.
+///
+/// On Linux, `execve` fails with `ETXTBSY` while any process holds the file open for
+/// writing. A helper that was just installed or updated can hit this when another
+/// thread of this process forks while it still has the write handle: the forked child
+/// keeps a copy of that handle until it execs. The busy window is short, so the retry
+/// is bounded by the caller's deadline; any other spawn error fails at once.
+fn spawn_helper(executable: &Path, deadline: Instant) -> Result<Child, CandidateError> {
+    let mut backoff = Duration::from_millis(5);
+    loop {
+        match Command::new(executable)
+            .arg("get")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(err)
+                if err.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() + backoff < deadline =>
+            {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(100));
+            }
+            Err(_) => return Err(error("Cannot start the Docker credential helper.")),
+        }
+    }
+}
+
 /// Run `docker-credential-<name> get` for one server address. Helper output is bounded and
 /// its stderr discarded.
 ///
@@ -248,14 +279,7 @@ fn run_helper(
 ) -> Result<Option<Credential>, CandidateError> {
     let executable = helper_executable(policy, helper_name(name)?)?;
     let deadline = Instant::now() + timeout;
-    let mut child = Command::new(executable)
-        .arg("get")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|_| error("Cannot start the Docker credential helper."))?;
+    let mut child = spawn_helper(&executable, deadline)?;
     let written = child
         .stdin
         .take()
@@ -547,6 +571,47 @@ pub(super) mod tests {
             lookup(&policy, "bad.test").err().unwrap().code,
             "registry_credentials"
         );
+    }
+
+    #[test]
+    fn a_helper_still_open_for_writing_starts_once_released() {
+        let f = DockerFixture::new(&serde_json::json!({}));
+        let path = f.root.join("docker-credential-busy");
+        // Hold a write handle, as a concurrently forked child would after an install.
+        let mut writer = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o700)
+            .open(&path)
+            .unwrap();
+        writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        writer.flush().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(writer);
+        });
+        let mut child = spawn_helper(&path, Instant::now() + Duration::from_secs(5)).unwrap();
+        release.join().unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn a_busy_helper_fails_at_the_deadline() {
+        let f = DockerFixture::new(&serde_json::json!({}));
+        let path = f.root.join("docker-credential-held");
+        let _writer = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o700)
+            .open(&path)
+            .unwrap();
+        // macOS has no ETXTBSY; there an empty file starts and exits, which is also fine.
+        if cfg!(target_os = "linux") {
+            let started = Instant::now();
+            let err = spawn_helper(&path, Instant::now() + Duration::from_millis(50)).unwrap_err();
+            assert_eq!(err.code, "registry_credentials");
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
     }
 
     /// The pid a fixture helper recorded for its background descendant.

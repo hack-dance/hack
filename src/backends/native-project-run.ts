@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
   realpath,
   rename,
   rmdir,
@@ -1691,6 +1692,96 @@ export async function prepareNativeProjectRunStorage(
   opts: NativeProjectRunScope
 ): Promise<void> {
   await paths(opts, true);
+}
+
+/** Advisory only: an unfinished frontend start is not evidence of runtime readiness.
+ * A crash retains the marker; readers ignore an owner proven absent. PID reuse or
+ * inaccessible owners remain uncertain, never readiness or effect authority.
+ * Each invocation owns a distinct leaf and may remove only that unchanged leaf.
+ */
+export async function beginNativeProjectStartupObservation(
+  opts: NativeProjectRunScope
+) {
+  const p = await paths(opts, true);
+  const file = `${p.file}.starting-${randomUUID()}`;
+  const handle = await open(
+    file,
+    constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_WRONLY |
+      constants.O_NOFOLLOW,
+    0o600
+  );
+  const original = await handle.stat().catch(async (error: unknown) => {
+    await handle.close();
+    throw error;
+  });
+  try {
+    await handle.writeFile(JSON.stringify({ version: 1, pid: process.pid }));
+    await handle.sync();
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+  let settled = false;
+  return async () => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    try {
+      const current = await lstat(file).catch(() => null);
+      if (current?.dev === original.dev && current.ino === original.ino) {
+        await unlink(file);
+      }
+    } finally {
+      await handle.close();
+    }
+  };
+}
+
+/** Missing storage means no observed intent. Other filesystem refusals stay closed. */
+export async function nativeProjectStartupPending(
+  opts: NativeProjectRunScope
+): Promise<boolean> {
+  try {
+    const p = await paths(opts, false);
+    const prefix = `${basename(p.file)}.starting-`;
+    for (const name of await readdir(p.root)) {
+      if (
+        name.startsWith(prefix) &&
+        (await startupOwnerMayExist(join(p.root, name)))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+/** ESRCH alone proves this PID is absent. Reuse/access failures are advisory uncertainty. */
+async function startupOwnerMayExist(path: string): Promise<boolean> {
+  const value = await read(path).catch(() => null);
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    !Number.isSafeInteger(value.pid) ||
+    typeof value.pid !== "number" ||
+    value.pid <= 1 ||
+    value.pid > 2_147_483_647
+  ) {
+    return true;
+  }
+  try {
+    process.kill(value.pid, 0);
+    return true;
+  } catch (error) {
+    return !(isRecord(error) && error.code === "ESRCH");
+  }
 }
 /** Read a mapping only; callers must still query native authority with every recorded identity. */
 export async function loadNativeProjectRun(

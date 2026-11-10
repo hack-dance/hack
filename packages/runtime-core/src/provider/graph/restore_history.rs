@@ -238,7 +238,6 @@ pub(super) fn latest_for_bridge_recovery(
     )
 }
 
-#[cfg(any(target_os = "macos", test))]
 fn verified_for_recovery(
     root: &Path,
     current: &Receipt,
@@ -263,6 +262,25 @@ fn verified_for_recovery(
     }
     Ok(Some(history))
 }
+/// Match an exact retired immutable ID; history never supplies current cleanup
+/// authority. The repair caller must freshly confirm this ID absent in the engine.
+pub(super) fn shutdown_generation(
+    root: &Path,
+    current: &Receipt,
+    key: &str,
+    id: &str,
+) -> Result<Option<Receipt>, CandidateError> {
+    Ok(verified_for_recovery(root, current)?.and_then(|history| {
+        history.entries.into_iter().rev().find(|entry| {
+            entry.resources.get(key).is_some_and(|resource| {
+                resource.kind == Kind::Container
+                    && resource.phase == "absent"
+                    && resource.id.as_deref() == Some(id)
+            })
+        })
+    }))
+}
+
 fn next(root: &Path, current: &Receipt) -> Result<History, CandidateError> {
     let mut history = load(root, current)?;
     let same =

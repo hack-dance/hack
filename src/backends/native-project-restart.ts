@@ -63,6 +63,10 @@ const STOPPED =
   "Native project stopped; owned cleanup confirmed. Named volumes and the stopped run mapping are kept for the next hack up.";
 const CANCELED_BEFORE_CLEANUP =
   "Native restart canceled before cleanup; nothing was stopped.";
+const INTERRUPTED_STOP =
+  "Native restart was interrupted before it could confirm the old run's stop; data is retained and the restart is still pending. Run hack restart to finish it; hack up refuses until then.";
+const CANCELED_PENDING =
+  "Native restart canceled before cleanup; nothing more was stopped. The interrupted restart is still pending: run hack restart to finish it with the retained data.";
 
 const DEFAULTS = {
   signals: nativeRestartStopSignals,
@@ -84,7 +88,16 @@ export async function restartNativeProject(opts: {
   readonly profiles?: readonly string[];
   readonly preflight: (
     run: NativeProjectRun,
-    options: { readonly cleanedRetry: boolean }
+    options: {
+      readonly cleanedRetry: boolean;
+      /**
+       * A saved `prepared` intent is being resumed: its stop of the old run
+       * was interrupted (HACK-1953), so the old run may still be active, or
+       * already stopped by its own owner. Preflight must accept either and
+       * confirm a stopped graph from fresh observations.
+       */
+      readonly preparedRetry: boolean;
+    }
   ) => Promise<void>;
   readonly down: () => Promise<unknown>;
   readonly start: (options: {
@@ -143,7 +156,9 @@ type RestartContext = RestartOptions & {
  * cleanup nothing is stopped; once cleanup has begun it runs to completion and
  * the new run is not started; after the start takes over, the start stops its
  * own run as an interrupted `up` does. Every path ends with the graph stopped
- * and data retained, and exits 130 (143 for SIGTERM).
+ * and data retained, and exits 130 (143 for SIGTERM). If the stop itself was
+ * lost to the interrupt, its `prepared` intent stays and the next restart
+ * resumes it from whatever state the old owner reached (HACK-1953).
  */
 async function restartUnderLock(
   opts: RestartOptions & {
@@ -179,12 +194,29 @@ async function restartUnderLock(
   };
   return await opts.deps.lock(opts.scope, async (release) => {
     const { run, intent, current } = await selectRestart(context);
-    await opts.preflight(run, {
-      cleanedRetry: intent?.phase === "cleaned",
-    });
-    if (opts.stop.signal.aborted && intent?.phase !== "cleaned") {
-      opts.progress?.({ phase: "stopped", summary: CANCELED_BEFORE_CLEANUP });
+    const canceledBeforeCleanup = () => {
+      opts.progress?.({
+        phase: "stopped",
+        summary: intent ? CANCELED_PENDING : CANCELED_BEFORE_CLEANUP,
+      });
       return opts.stop.interruptedExit();
+    };
+    try {
+      await opts.preflight(run, {
+        cleanedRetry: intent?.phase === "cleaned",
+        preparedRetry: intent?.phase === "prepared",
+      });
+    } catch (error) {
+      // Preflight stops nothing; a request it lost to this interrupt (for
+      // example a runtime child that shared the terminal's process group)
+      // ends the restart as canceled, not as a failure.
+      if (opts.stop.signal.aborted && intent?.phase !== "cleaned") {
+        return canceledBeforeCleanup();
+      }
+      throw error;
+    }
+    if (opts.stop.signal.aborted && intent?.phase !== "cleaned") {
+      return canceledBeforeCleanup();
     }
     cleanupStarted = true;
     if (opts.stop.signal.aborted) {
@@ -256,7 +288,17 @@ async function cleanOldRun(opts: {
     await deps.save({ ...context.scope, intent });
   }
   if (current) {
-    await context.down();
+    try {
+      await context.down();
+    } catch (error) {
+      // The stop's outcome is uncertain, so the prepared intent stays. It is
+      // the exact selection the next `hack restart` resumes (whether the old
+      // owner is still running or has stopped itself), never a fresh start.
+      if (context.stop.signal.aborted) {
+        throw new ClosedCliError(INTERRUPTED_STOP);
+      }
+      throw error;
+    }
     intent = await deps.cleaned({ ...context.scope, expected: intent });
   } else if (intent.phase !== "cleaned") {
     throw interruptedCleanup();

@@ -746,6 +746,29 @@ refusal is reachable. Original publication, crash, binding and lease transitions
 remain unchanged. The model bounds two recovery candidates and does not model
 OS IPC delivery, process incarnation probing or real resource cleanup.
 
+## Interrupted native restart intent
+
+`native-restart-intent/RestartIntent.tla` checks that an interrupted
+`hack restart` never leaves a pending restart that `hack up` and `hack restart`
+both refuse (HACK-1953). The positive control explores 40 states with one
+Ctrl-C, one frontend crash and two restart attempts. A restart saves a
+`prepared` intent for the exact old run, asks the old foreground owner to stop,
+and marks the intent `cleaned` only after the stop is confirmed. The old owner
+can stop on that request or on its own Ctrl-C. `up` refuses while an intent is
+pending. `NoRecoveryLoop` requires `up` or `restart` to accept every quiet state
+in which the old owner has stopped. `InterruptLeavesNoIntent` requires the first
+Ctrl-C to end with no pending restart. `NoFreshFallback` and
+`NoReplacementOverLiveOwner` keep the exact selection and the stop ordering.
+
+Three negative controls remove one mechanism each. In `negative`, the stop
+request shares the terminal's process group, so the Ctrl-C ends it and leaves the
+intent (`Interrupt`). In `no-resume`, a prepared intent requires an active graph,
+so a crashed frontend after the old owner stopped itself leaves a loop (`Crash`
+or `OwnerStops`). `shared-group-loop` has neither mechanism and reproduces the
+v5.0.0-next.12 loop. Preflight review, hooks, finalization records and the
+restart lock are abstracted. The model does not cover a stale restart lock left
+by a crashed frontend, which still refuses until it is inspected.
+
 `stopped-pool-startup/Resume.tla` checks one explicit startup from shape-valid
 stopped owner/retained receipt evidence. The positive control explores 71 states.
 Offline preflight records owner and receipt generations without granting graph

@@ -239,6 +239,15 @@ export async function invokeNativeRuntime(opts: {
    * it at {@link NATIVE_EXIT_DRAIN_BOUND_MS}; EOF ends the drain earlier.
    */
   readonly exitDrainBoundMs?: number;
+  /**
+   * `"own"` starts the request in its own process group, so a terminal's
+   * Ctrl-C, which reaches the whole foreground group, reaches only the caller.
+   * The caller then decides what the interrupt means. A restart stopping its
+   * old run uses this (HACK-1953): its frontend handles SIGINT and lets the
+   * committed stop finish. The caller's `signal`, timeout and cleanup still
+   * end the child.
+   */
+  readonly processGroup?: "inherit" | "own";
 }): Promise<unknown> {
   if (opts.signal?.aborted) {
     throw new NativeRuntimeRequestError({
@@ -291,6 +300,7 @@ export async function invokeNativeRuntime(opts: {
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      detached: opts.processGroup === "own",
     }
   );
   // A descendant may inherit a pipe after the owned child exits. The child's

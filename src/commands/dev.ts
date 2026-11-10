@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
 import { isRecord, isStringArray } from "../lib/guards.ts";
@@ -23,7 +23,7 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
   if (
     isAbsolute(configRelative) ||
     configRelative === ".." ||
-    configRelative.startsWith("../")
+    configRelative.startsWith(`..${sep}`)
   ) {
     throw new CliUsageError(
       "The dev declaration must stay inside this repository."

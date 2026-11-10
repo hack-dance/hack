@@ -23,6 +23,8 @@ import { Channel, launcherBytes } from "../scripts/installer/channel.ts";
 import { download, secureUrl } from "../scripts/installer/download.ts";
 import {
   archiveEntries,
+  candidateVersion,
+  compareCandidateVersions,
   digest,
   hash,
   jsonBytes,
@@ -30,7 +32,6 @@ import {
   metadata,
   parseJson,
   SHA256,
-  versionNumber,
 } from "../scripts/installer/integrity.ts";
 import {
   isFreshInitializerStage,
@@ -147,6 +148,64 @@ describe("standalone manager ownership and atomic state", () => {
         launcherBytes()
       );
       expect(readdirSync(join(channel.root, "versions"))).toHaveLength(2);
+    }
+  );
+  test("candidate versions follow semver precedence across lines", () => {
+    expect(candidateVersion("5.0.0-next.12")).toEqual([0n, 0n, 12n]);
+    expect(candidateVersion("5.1.0-next.1")).toEqual([1n, 0n, 1n]);
+    const ordered = [
+      "5.0.0-next.2",
+      "5.0.0-next.10",
+      "5.0.0-next.13",
+      "5.0.1-next.1",
+      "5.1.0-next.1",
+      "5.1.0-next.2",
+      "5.10.0-next.1",
+    ];
+    expect(
+      [...ordered].reverse().sort((a, b) => compareCandidateVersions(a, b))
+    ).toEqual(ordered);
+    expect(compareCandidateVersions("5.1.0-next.1", "5.1.0-next.1")).toBe(0);
+    for (const value of [
+      "5.0.0",
+      "5.01.0-next.1",
+      "5.0.00-next.1",
+      "5.0.0-next.0",
+      "6.0.0-next.1",
+      "4.2.1-next.1",
+      "v5.1.0-next.1",
+      "5.1.0-next.1\n",
+      `5.0.0-next.${"9".repeat(80)}`,
+      12,
+    ]) {
+      expect(() => candidateVersion(value)).toThrow("5.MINOR.PATCH-next.N");
+    }
+  });
+  fixtureTest(
+    "upgrades from a 5.0.0 candidate to the next line and refuses moving back",
+    async () => {
+      const { root, channel } = fixture();
+      const current = fixtureArchive(root, "5.0.0-next.13");
+      const nextLine = fixtureArchive(root, "5.1.0-next.1");
+      const older = fixtureArchive(root, "5.0.0-next.14");
+      await channel.install("5.0.0-next.13", current.archive, current.checksum);
+      await channel.install(
+        "5.1.0-next.1",
+        nextLine.archive,
+        nextLine.checksum,
+        true
+      );
+      expect(channel.state.selected).toBe("5.1.0-next.1");
+      await expect(
+        channel.install("5.0.0-next.14", older.archive, older.checksum, true)
+      ).rejects.toThrow("must increase");
+      channel.validate();
+      expect(Object.keys(channel.state.installed).sort()).toEqual([
+        "5.0.0-next.13",
+        "5.1.0-next.1",
+      ]);
+      channel.select("5.0.0-next.13");
+      expect(channel.state.previous).toBe("5.1.0-next.1");
     }
   );
   fixtureTest(
@@ -404,7 +463,7 @@ describe("bounded input boundaries", () => {
   fixtureTest(
     "duplicate escaped JSON fields, malformed identity and foreign downloads refuse",
     async () => {
-      expect(() => versionNumber("5.0.0-next.1\n")).toThrow();
+      expect(() => candidateVersion("5.0.0-next.1\n")).toThrow();
       expect(SHA256.test(`${"a".repeat(64)}\n`)).toBe(false);
       expect(() => parseJson('{"a":1,"\\u0061":2}')).toThrow("Duplicate");
       expect(() => parseJson('{"x":{"a":1,"a":2}}')).toThrow("Duplicate");

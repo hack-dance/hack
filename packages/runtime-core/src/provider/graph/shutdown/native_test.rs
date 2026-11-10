@@ -197,6 +197,47 @@ fn owned_graph_shutdown_signals_and_escalation() {
             "set -eu; test -d \"$1\"; test ! -L \"$1\"; test ! -L \"$1/term-stopped\"; test ! -L \"$1/custom-stopped\"; test \"$(cat \"$1/term-stopped\")\" = term; test \"$(cat \"$1/custom-stopped\")\" = custom; test \"$(cat \"$1/ignore-ready\")\" = ready; printf retained",
             &[&data]).unwrap(), "retained");
     }
+    // Every restore recreates compute, even with unchanged logical service keys.
+    // No stop_requested observation may be inherited by those fresh instances.
+    let restored = restore(
+        &candidate,
+        RunOptions {
+            live_source: false,
+            shared_source: false,
+            release_initializer_cache: BTreeSet::new(),
+            routing_enrolled: false,
+            loopback_ports: false,
+            project: options(&fixture.0),
+            expected_plan: &report.plan_id,
+            source_revision: None,
+            non_secret_values: &BTreeMap::new(),
+            readiness: &readiness,
+            run_id: &run_id,
+            timeout: Duration::from_secs(25),
+        },
+    )
+    .unwrap();
+    for (key, resource) in &restored.resources {
+        if resource.kind == Kind::Container {
+            assert_ne!(resource.id, receipt.resources[key].id);
+        }
+    }
+    let stopped_again = cleanup(&candidate, &run_id, false).unwrap();
+    assert_eq!(stopped_again.phase, "stopped-data-retained");
+    {
+        let engine = Engine::connect_cleanup(&candidate).unwrap();
+        for resource in restored
+            .resources
+            .values()
+            .filter(|r| r.kind == Kind::Container)
+        {
+            assert!(
+                inspect_resource(&engine, &restored, resource)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
     let removed = cleanup(&candidate, &run_id, true).unwrap();
     assert_eq!(removed.phase, "removed");
     {

@@ -673,6 +673,68 @@ mod tests {
     }
 
     #[test]
+    fn stop_add_service_stop_remove_service_restore_has_fresh_shutdown_evidence() {
+        let project = Project::new();
+        let (mut current, _) = base(&project);
+        let fixture = super::super::tests::Fixture::new();
+        for services in [
+            json!({"db": service("serve", 'a', &["data"]), "api": service("serve", 'a', &[])}),
+            json!({"db": service("serve --recreated", 'a', &["data"])}),
+        ] {
+            // Model the completed real stop's immutable IDs and retained observations.
+            let mut terminals = serde_json::Map::new();
+            for (key, resource) in &mut current.resources {
+                if resource.kind == Kind::Container {
+                    resource.id = Some("e".repeat(64));
+                    resource.phase = "absent".into();
+                    terminals.insert(
+                        key.clone(),
+                        json!({"id":resource.id,
+                        "exit_code":0,"oom_killed":false,"stop_requested":true}),
+                    );
+                }
+            }
+            state::write(
+                &fixture.0.join("shutdown.json"),
+                &json!({
+                    "version":1,"run":current.run,"owner":current.owner,
+                    "plan":current.plan_id,"containers":terminals,
+                }),
+            )
+            .unwrap();
+            super::super::restore_history::retain(&fixture.0, &current).unwrap();
+            // The production restore calls this after absence/history and before apply.
+            super::super::shutdown::rebase_stopped_with(&fixture.0, &current, |_, _| Ok(true))
+                .unwrap();
+            let (report, identity, mut prepared) = project.prepared(compose(services, &["data"]));
+            let proof = prepare(&report.plan, &current, &identity).unwrap();
+            let projection = proof.project(&mut prepared, &current).unwrap();
+            proof
+                .apply(&mut current, projection, &BTreeMap::new(), None)
+                .unwrap();
+            let evidence: Value = state::read(&fixture.0.join("shutdown.json")).unwrap();
+            assert!(evidence["containers"].as_object().unwrap().is_empty());
+            super::super::shutdown::validate_current(
+                &serde_json::from_value(evidence).unwrap(),
+                &current,
+            )
+            .unwrap();
+            assert_eq!(current.run, RUN);
+            assert_eq!(current.resources["volume:data"].phase, "created");
+            // Closest portable boundary: new compute is reserved, never old stop evidence.
+            for resource in current
+                .resources
+                .values()
+                .filter(|r| r.kind == Kind::Container)
+            {
+                assert_eq!(resource.phase, "reserved");
+                assert!(resource.id.is_none());
+            }
+        }
+        assert!(!current.resources.contains_key("container:api"));
+    }
+
+    #[test]
     fn changed_command_image_and_environment_reattach_the_same_volume() {
         let project = Project::new();
         let (receipt, original) = base(&project);

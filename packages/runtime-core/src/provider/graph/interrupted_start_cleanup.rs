@@ -74,6 +74,8 @@ struct Selection {
     bridge_sha256: String,
     environment_sha256: String,
     reservation_sha256: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    shutdown_rebased: bool,
     failed_key: String,
     failed_id: String,
     /// The foreground owner had already stopped every started container of this failed
@@ -180,7 +182,9 @@ impl Proof<'_> {
             .resources
             .get(&self.selected.failed_key)
             .ok_or_else(refused)?;
-        if let Some(value) = inspect_resource(&self.engine, &current, failed)? {
+        if let Some(value) = inspect_resource(&self.engine, &current, failed)?
+            && !self.selected.shutdown_rebased
+        {
             if self.selected.owner_stopped {
                 stopped_terminal(failed, &value)?;
             } else {
@@ -566,12 +570,36 @@ fn select_ignoring<'a>(
     {
         return Err(refused());
     }
+    let shutdown_rebased = prior.as_ref().map_or_else(
+        || shutdown::repaired(&root, &original),
+        |journal| Ok(journal.selection.shutdown_rebased),
+    )?;
     let (failed_key, failed_id, owner_stopped) = if let Some(j) = &prior {
         (
             j.selection.failed_key.clone(),
             j.selection.failed_id.clone(),
             j.selection.owner_stopped,
         )
+    } else if shutdown_rebased {
+        // Every recorded current container is fully started and ownership checked;
+        // no current stop observation was discarded by the explicit repair.
+        let mut selected = None;
+        for (key, resource) in &original.resources {
+            if resource.kind != Kind::Container {
+                continue;
+            }
+            if resource.phase != "started" {
+                return Err(refused());
+            }
+            let observed = inspect_resource(&engine, &original, resource)?.ok_or_else(refused)?;
+            let prepared = shutdown::prepare(resource, &observed)?;
+            if resource.id.as_deref() != Some(prepared.id.as_str()) {
+                return Err(refused());
+            }
+            selected = Some((key.clone(), prepared.id));
+        }
+        let (key, id) = selected.ok_or_else(refused)?;
+        (key, id, false)
     } else if let Some((key, id)) = stopped_failed_start(&original, &engine, &root)? {
         (key, id, true)
     } else {
@@ -592,6 +620,7 @@ fn select_ignoring<'a>(
         bridge_sha256,
         environment_sha256,
         reservation_sha256,
+        shutdown_rebased,
         failed_key,
         failed_id,
         owner_stopped,

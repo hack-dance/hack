@@ -57,6 +57,7 @@ fn selected(original: &Receipt) -> Selection {
         bridge_sha256: "4".repeat(64),
         environment_sha256: "5".repeat(64),
         reservation_sha256: "6".repeat(64),
+        shutdown_rebased: false,
         failed_key: "container:failed".into(),
         failed_id: "d".repeat(64),
         owner_stopped: false,
@@ -495,4 +496,73 @@ fn only_a_finished_journal_of_replaced_generations_is_superseded() {
         }
         assert!(!superseded(&journal, &other), "{change}");
     }
+}
+
+#[test]
+fn repaired_shutdown_journal_requires_started_exact_original_and_retains_stop_fence() {
+    let mut original = original();
+    let mut selection = selected(&original);
+    selection.shutdown_rebased = true;
+    let mut record = Journal {
+        version: 1,
+        selection_sha256: selection.digest().unwrap(),
+        selection,
+        original: original.clone(),
+        steps: steps(&original, &[]).unwrap(),
+        cursor: 0,
+        pending: false,
+        graph_complete: false,
+        publisher_retired: false,
+        reservation_released: false,
+    };
+    assert!(
+        record
+            .validate_basic(&original.run, &record.selection_sha256)
+            .is_err()
+    );
+    original
+        .resources
+        .get_mut("container:failed")
+        .unwrap()
+        .phase = "started".into();
+    record.original = original.clone();
+    record.selection.receipt_sha256 = digest(&serde_json::to_vec_pretty(&original).unwrap());
+    record.selection_sha256 = record.selection.digest().unwrap();
+    record
+        .validate_basic(&original.run, &record.selection_sha256)
+        .unwrap();
+    let resource = &original.resources["container:failed"];
+    let running = json!({"Id":resource.id,"Config":{"StopTimeout":1,"StopSignal":null},
+        "State":{"Paused":false,"Restarting":false,"Dead":false,"OOMKilled":false,
+            "ExitCode":0,"Running":true,"Pid":42,"Status":"running"}});
+    assert_eq!(
+        stop_decision(resource, &running, false).unwrap(),
+        StopDecision::IssueOneStop
+    );
+    assert!(
+        stop_decision(resource, &running, true).is_err(),
+        "a pending stop cannot be sent again"
+    );
+    record
+        .original
+        .resources
+        .get_mut("container:failed")
+        .unwrap()
+        .id = Some("f".repeat(64));
+    assert!(
+        record
+            .validate_basic(&original.run, &record.selection_sha256)
+            .is_err()
+    );
+}
+
+#[test]
+fn legacy_cleanup_selection_serialization_keeps_its_original_shape() {
+    let original = original();
+    let selection = selected(&original);
+    let encoded = serde_json::to_value(&selection).unwrap();
+    assert!(encoded.get("shutdown_rebased").is_none());
+    let decoded: Selection = serde_json::from_value(encoded).unwrap();
+    assert!(!decoded.shutdown_rebased);
+    assert_eq!(decoded.digest().unwrap(), selection.digest().unwrap());
 }

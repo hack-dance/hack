@@ -156,8 +156,13 @@ impl Journal {
                 .get(&self.selection.failed_key)
                 .is_some_and(|resource| {
                     resource.kind == Kind::Container
-                        && (resource.phase == "uncertain"
-                            || (self.selection.owner_stopped && resource.phase == "started"))
+                        && if self.selection.shutdown_rebased {
+                            // The two selection kinds are exclusive.
+                            !self.selection.owner_stopped && resource.phase == "started"
+                        } else {
+                            resource.phase == "uncertain"
+                                || (self.selection.owner_stopped && resource.phase == "started")
+                        }
                         && resource.id.as_deref() == Some(self.selection.failed_id.as_str())
                 })
             || digest(&serde_json::to_vec_pretty(&self.original).map_err(|_| refused())?)
@@ -268,7 +273,10 @@ fn advance_stop(
         journal.cursor += 1;
         return journal.write(&proof.root);
     };
-    if key == proof.selected.failed_key && !proof.selected.owner_stopped {
+    if key == proof.selected.failed_key
+        && !proof.selected.owner_stopped
+        && !proof.selected.shutdown_rebased
+    {
         failed_created(resource, &value)?;
     }
     if proof.selected.owner_stopped && !journal.pending {

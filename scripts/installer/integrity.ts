@@ -17,7 +17,14 @@ import { gunzipSync } from "node:zlib";
 
 export const MAX_ARCHIVE = 512 * 1024 * 1024;
 export const SHA256 = /^[0-9a-f]{64}$(?![\s\S])/;
-export const VERSION = /^5\.0\.0-next\.([1-9][0-9]*)$(?![\s\S])/;
+/**
+ * Candidate grammar `5.MINOR.PATCH-next.N`. The channel is not tied to one base:
+ * candidates move to the next unreleased v5 line (for example `5.1.0-next.N`)
+ * after a stable release, so they sort above it. Release planning pins the
+ * line it publishes; the manager accepts any v5 line and orders by semver.
+ */
+export const VERSION =
+  /^5\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-next\.([1-9][0-9]*)$(?![\s\S])/;
 const CORE = [
   "hack-native",
   "hack-relay-guest",
@@ -303,12 +310,43 @@ export function writeFile(path: string, bytes: Uint8Array, mode = 0o600) {
     closeSync(fd);
   }
 }
-export function versionNumber(value: unknown): bigint {
+/** Precedence components of a validated candidate version. */
+export type CandidateVersion = readonly [
+  minor: bigint,
+  patch: bigint,
+  number: bigint,
+];
+/** Validate a candidate version and return its precedence components. */
+export function candidateVersion(value: unknown): CandidateVersion {
+  const match =
+    typeof value === "string" && value.length <= 80
+      ? VERSION.exec(value)
+      : null;
   requireThat(
-    typeof value === "string" && VERSION.test(value) && value.length <= 80,
-    "Version must be 5.0.0-next.N (positive N, no leading zero)."
+    match,
+    "Version must be 5.MINOR.PATCH-next.N (positive N, no leading zeros)."
   );
-  return BigInt(value.slice("5.0.0-next.".length));
+  return [
+    BigInt(match[1] ?? ""),
+    BigInt(match[2] ?? ""),
+    BigInt(match[3] ?? ""),
+  ];
+}
+/**
+ * Semver precedence for candidates: line first, then candidate number, so
+ * `5.1.0-next.1` follows `5.0.0-next.99`. Both inputs are validated.
+ */
+export function compareCandidateVersions(a: unknown, b: unknown): -1 | 0 | 1 {
+  const left = candidateVersion(a);
+  const right = candidateVersion(b);
+  for (let index = 0; index < left.length; index++) {
+    const l = left[index] ?? 0n;
+    const r = right[index] ?? 0n;
+    if (l !== r) {
+      return l < r ? -1 : 1;
+    }
+  }
+  return 0;
 }
 export function metadata(raw: Uint8Array, version: string) {
   const value = parseJson(raw);

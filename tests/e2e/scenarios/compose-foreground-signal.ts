@@ -1,4 +1,8 @@
+import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { readLifecycleState } from "../../../src/lib/lifecycle-runtime.ts";
+import { quoteShellWord } from "../../../src/lib/logs.ts";
+import { readProjectRuntimeState } from "../../../src/lib/project-runtime-state.ts";
 import { createMonorepoFixture } from "../fixture.ts";
 import {
   buildCliEnv,
@@ -51,11 +55,49 @@ export const composeForegroundSignalScenario: Scenario = {
       const errorLog = Bun.file(
         join(ctx.tempRoot, `${fixture.name}.stderr.log`)
       );
+      const cleanupEntered = join(
+        ctx.tempRoot,
+        `${fixture.name}.cleanup-entered`
+      );
+      const cleanupReleased = join(
+        ctx.tempRoot,
+        `${fixture.name}.cleanup-released`
+      );
+      const shimDir = join(ctx.tempRoot, `${fixture.name}.bin`);
+      if (persistentUpBefore) {
+        const tmux = Bun.which("tmux");
+        expect({
+          that: tmux !== null,
+          message: "lifecycle shutdown regression requires tmux",
+        });
+        await mkdir(shimDir);
+        const shim = join(shimDir, "tmux");
+        await Bun.write(
+          shim,
+          `#!/bin/sh
+if [ "$1" = kill-session ]; then
+  printf ready > ${quoteShellWord(cleanupEntered)}
+  attempts=0
+  while [ ! -f ${quoteShellWord(cleanupReleased)} ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+fi
+exec ${quoteShellWord(tmux ?? "tmux")} "$@"
+`
+        );
+        await chmod(shim, 0o700);
+      }
       const child = Bun.spawn(resolveCliSpawnArgs(["up"]), {
         cwd: fixture.root,
         env: buildCliEnv({
           hackHome: ctx.hackHome,
-          extra: { HACK_RUNTIME_BACKEND: "compose" },
+          extra: {
+            HACK_RUNTIME_BACKEND: "compose",
+            ...(persistentUpBefore
+              ? { PATH: `${shimDir}:${process.env.PATH}` }
+              : {}),
+          },
         }),
         detached: true,
         stdin: "ignore",
@@ -76,19 +118,10 @@ export const composeForegroundSignalScenario: Scenario = {
           timeoutMs: 15_000,
         });
       try {
-        const deadline = Date.now() + 90_000;
-        let ready = false;
-        while (Date.now() < deadline && child.exitCode === null) {
-          const output = await Bun.file(logPath).text();
-          if ((output.match(/foreground-ready/g) ?? []).length >= 2) {
-            ready = true;
-            break;
-          }
-          await Bun.sleep(100);
-        }
-        expect({
-          that: ready,
-          message: `both services must emit logs before Ctrl-C: ${await Bun.file(logPath).text()}\n${await errorLog.text()}`,
+        await expectServicesReady({
+          child,
+          stdout: logPath,
+          stderr: errorLog.name,
         });
         const before = await containers();
         expectExit({
@@ -100,7 +133,26 @@ export const composeForegroundSignalScenario: Scenario = {
           that: before.stdout.trim().split("\n").length === 2,
           message: "two project containers must be running before Ctrl-C",
         });
+        const lifecycleBefore = await readLifecycleState({
+          projectDir: fixture.hackDir,
+        });
+        const processGroup = lifecycleBefore.find(
+          (entry) => entry.composeProject === fixture.name
+        )?.processes[0]?.processGroupId;
+        if (persistentUpBefore) {
+          expect({
+            that: processGroup !== undefined && processGroup > 1,
+            message:
+              "persistent lifecycle must publish its process group before Ctrl-C",
+          });
+        }
         process.kill(-child.pid, "SIGINT");
+        await interruptDuringCleanup({
+          enabled: persistentUpBefore,
+          child,
+          entered: cleanupEntered,
+          released: cleanupReleased,
+        });
         const code = await child.exited;
         const after = await containers();
         ctx.log(
@@ -121,7 +173,32 @@ export const composeForegroundSignalScenario: Scenario = {
             "first Ctrl-C must leave no project container running at CLI exit",
           result: after,
         });
+        expect({
+          that: !(await Bun.file(logPath).text()).includes(
+            "docker compose up failed"
+          ),
+          message: "an intentional interrupt is not a Compose startup failure",
+        });
+        expect({
+          that:
+            (await readProjectRuntimeState({ projectDir: fixture.hackDir }))
+              .length === 0,
+          message: "foreground shutdown must retire runtime state",
+        });
+        expect({
+          that:
+            (await readLifecycleState({ projectDir: fixture.hackDir }))
+              .length === 0,
+          message: "foreground shutdown must retire lifecycle state",
+        });
+        await expectLifecycleProcessGone({
+          enabled: persistentUpBefore,
+          processGroup,
+          name: fixture.name,
+          cwd: fixture.root,
+        });
       } finally {
+        await Bun.write(cleanupReleased, "release");
         clearTimeout(timeout);
         if (child.exitCode === null) {
           child.kill("SIGKILL");
@@ -132,3 +209,91 @@ export const composeForegroundSignalScenario: Scenario = {
     }
   },
 };
+
+async function expectLifecycleProcessGone(opts: {
+  readonly enabled: boolean;
+  readonly processGroup: number | undefined;
+  readonly name: string;
+  readonly cwd: string;
+}): Promise<void> {
+  if (opts.enabled && opts.processGroup !== undefined) {
+    const session = await runCommand({
+      argv: ["tmux", "has-session", "-t", `=${opts.name}--lifecycle`],
+      cwd: opts.cwd,
+    });
+    expect({
+      that: session.exitCode !== 0,
+      message: "persistent lifecycle session must be gone before CLI exit",
+      result: session,
+    });
+    let groupAbsent = false;
+    try {
+      process.kill(-opts.processGroup, 0);
+    } catch (error: unknown) {
+      groupAbsent =
+        error instanceof Error && "code" in error && error.code === "ESRCH";
+    }
+    expect({
+      that: groupAbsent,
+      message:
+        "persistent lifecycle command process group must be gone before CLI exit",
+    });
+  }
+}
+
+async function interruptDuringCleanup(opts: {
+  readonly enabled: boolean;
+  readonly child: Bun.Subprocess;
+  readonly entered: string;
+  readonly released: string;
+}): Promise<void> {
+  if (opts.enabled) {
+    const deadline = Date.now() + 15_000;
+    while (
+      !(await Bun.file(opts.entered).exists()) &&
+      opts.child.exitCode === null &&
+      Date.now() < deadline
+    ) {
+      await Bun.sleep(20);
+    }
+    expect({
+      that: await Bun.file(opts.entered).exists(),
+      message: "must reach lifecycle teardown after Compose exits",
+    });
+    // Two more group interrupts arrive while the real tmux teardown is
+    // paused. Neither may terminate Hack or abandon its owned cleanup.
+    process.kill(-opts.child.pid, "SIGINT");
+    await Bun.sleep(50);
+    process.kill(-opts.child.pid, "SIGINT");
+    await Bun.sleep(50);
+    expect({
+      that: opts.child.exitCode === null,
+      message: "repeated Ctrl-C must not abort lifecycle cleanup",
+    });
+    await Bun.write(opts.released, "release");
+  }
+}
+
+async function expectServicesReady(opts: {
+  readonly child: Bun.Subprocess;
+  readonly stdout: string;
+  readonly stderr: string | undefined;
+}): Promise<void> {
+  const deadline = Date.now() + 90_000;
+  let ready = false;
+  let output = "";
+  while (Date.now() < deadline && opts.child.exitCode === null) {
+    output =
+      (await Bun.file(opts.stdout).text()) +
+      (opts.stderr ? await Bun.file(opts.stderr).text() : "");
+    if ((output.match(/foreground-ready/g) ?? []).length >= 2) {
+      ready = true;
+      break;
+    }
+    await Bun.sleep(100);
+  }
+  expect({
+    that: ready,
+    message: `both services must emit logs before Ctrl-C: ${output}`,
+  });
+}

@@ -219,6 +219,7 @@ import {
   isSlimExecutionMode,
   renderSlimModeUnavailableMessage,
 } from "../lib/execution-mode.ts";
+import { installForegroundTerminationGuard } from "../lib/foreground-termination-guard.ts";
 import {
   ensureDir,
   pathExists,
@@ -6552,8 +6553,10 @@ async function runUpCommand({
   // keeps the shared helpers: a start still in flight can start services
   // after any snapshot, so no probe could prove them absent.
   let containerStartBegun = false;
-  const signalCleanup =
-    lifecycleSignalCleanup ??
+  const foregroundTermination: {
+    guard: ReturnType<typeof installForegroundTerminationGuard> | null;
+  } = { guard: null };
+  const installOperationSignalCleanup = () =>
     installLifecycleSignalCleanup({
       cleanup: signalCleanupKeepingStartedHelpers({
         cleanup: lifecycleCleanup,
@@ -6561,6 +6564,7 @@ async function runUpCommand({
         keepSharedHelpers: () => keepSharedHelpers,
       }),
     });
+  let signalCleanup = lifecycleSignalCleanup ?? installOperationSignalCleanup();
   try {
     // Hooks may register or remove runtime aliases; render overrides only after
     // successful preparation, while lifecycle cleanup remains installed.
@@ -6647,6 +6651,8 @@ async function runUpCommand({
             if (!detach) {
               // Compose owns foreground shutdown. Lifecycle cleanup runs after
               // it settles; re-raising here would turn one Ctrl-C into two.
+              // Keep an owner until the caller's cleanup has also settled.
+              foregroundTermination.guard = installForegroundTerminationGuard();
               signalCleanup.dispose();
             }
           },
@@ -6689,7 +6695,13 @@ async function runUpCommand({
       logger.error({ message: error.message });
       return 1;
     }
-    const upCode = guarded.code;
+    const upCode = foregroundTermination.guard?.exitCode() ?? guarded.code;
+    if (foregroundTermination.guard?.exitCode() === null) {
+      // Normal completion hands later signals back to lifecycle handling.
+      signalCleanup = installOperationSignalCleanup();
+      foregroundTermination.guard.dispose();
+      foregroundTermination.guard = null;
+    }
     if (upCode !== 0) {
       // Compose may have started some services before it failed or timed
       // out: their helpers stay unless no container may run.
@@ -6699,6 +6711,17 @@ async function runUpCommand({
         projectDir: project.projectDir,
         composeProject: lifecycleComposeProject,
       });
+      if (foregroundTermination.guard?.exitCode() != null) {
+        const message = "Project startup interrupted.";
+        if (json) {
+          return emitLifecycleResult({
+            result: errorResult({ code: "E_CANCELLED", message }),
+            exitCode: upCode,
+          });
+        }
+        logger.info({ message });
+        return upCode;
+      }
       const failure = composeStartupFailure({
         code: upCode,
         action: "docker compose up",
@@ -6826,6 +6849,7 @@ async function runUpCommand({
     });
     throw error;
   } finally {
+    foregroundTermination.guard?.dispose();
     signalCleanup.dispose();
   }
 }

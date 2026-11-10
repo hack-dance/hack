@@ -1864,6 +1864,19 @@ const contracts: readonly ModelContract[] = [
     ],
     additionalControls: [
       {
+        name: "rebind-reachable",
+        negative: true,
+        invariant: "NeverRebound",
+        action: "Rebind",
+        fields: ['phase = "serving"', 'engine = "running"', "bound = 2"],
+        alternativeWitnesses: [
+          {
+            action: "Rebind",
+            fields: ['phase = "serving"', 'engine = "running"', "bound = 3"],
+          },
+        ],
+      },
+      {
         name: "unproved-terminal",
         negative: true,
         invariant: "TerminalProof",

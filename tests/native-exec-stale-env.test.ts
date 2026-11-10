@@ -930,7 +930,12 @@ describe("authored native command wiring", () => {
             fingerprint({ web: { [KEY]: SECRET_BEFORE } })
           );
           request.onReady?.(
-            {} as Parameters<NonNullable<typeof request.onReady>>[0]
+            // Only readiness is observed by this notification seam; it grants
+            // no receipt authority and does not exercise receipt admission.
+            {
+              record: { receipt: { readiness: { web: "started" } } },
+            } as unknown as Parameters<NonNullable<typeof request.onReady>>[0],
+            { projectName: "fixture" }
           );
           // The ready record is written off the synchronous observer.
           for (let attempt = 0; attempt < 50 && !observed.entry; attempt++) {

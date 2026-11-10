@@ -604,8 +604,8 @@ if test "$action" = rearm; then
  test "$(findmnt -n -o FSTYPE --mountpoint "$root/state")" = tmpfs
  state="$root/state"; previous="$7"
  # PROBE_REARM_SAMPLES
- exit 0
-fi
+ # Fall through to the common confirmation outside this redirected subshell.
+else
 if findmnt -n --mountpoint "$root/state" >/dev/null; then
  test "$(findmnt -n -o FSTYPE --mountpoint "$root/state")" = tmpfs
  test "$action" != create
@@ -621,6 +621,7 @@ else
  test "$(stat -c %u:%g:%a:%h "$binary")" = 0:0:555:1
  test "$(sha256sum "$binary" | cut -d' ' -f1)" = "${binary##*/}"
  mount -t tmpfs -o "size=65536,mode=0700,uid=$uid,gid=$gid,nosuid,nodev,noexec" tmpfs "$root/state"
+fi
 fi
 ) >/dev/null 2>&1
 printf 'probe-storage-ready
@@ -840,6 +841,91 @@ pub(super) fn rearm_after_inactive(
 mod storage_tests {
     use super::STORAGE;
     use std::{fs, process::Command};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_rearm_storage_script_confirms_success_once_and_never_confirms_refusal() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let fixture = super::super::tests::Fixture::new();
+        let parent = fixture.0.join("http-probes");
+        let root = parent.join("allocation");
+        let state = root.join("state");
+        let tools = fixture.0.join("tools");
+        for path in [&parent, &root, &state, &tools] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(root.join("owner"), "synthetic-probe-owner").unwrap();
+        fs::set_permissions(root.join("owner"), fs::Permissions::from_mode(0o400)).unwrap();
+        fs::write(state.join("lock"), "").unwrap();
+        fs::set_permissions(state.join("lock"), fs::Permissions::from_mode(0o600)).unwrap();
+        let findmnt = r#"#!/bin/sh
+set -eu
+test "$#" = 5
+test "$1" = -n; test "$2" = -o; test "$3" = FSTYPE
+test "$4" = --mountpoint; test "$5" = "$HACK_TEST_PROBE_STATE"
+printf 'tmpfs\n'
+"#;
+        for (name, program) in [
+            ("findmnt", findmnt),
+            ("mount", "#!/bin/sh\nexit 99\n"),
+            ("umount", "#!/bin/sh\nexit 99\n"),
+        ] {
+            let path = tools.join(name);
+            fs::write(&path, program).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let metadata = fs::metadata(&root).unwrap();
+        let uid = metadata.uid();
+        let gid = metadata.gid();
+        // Run the complete production template and fragment, including its
+        // subshell/redirection/footer. Only guest root UID and mount observation
+        // are adapted; this test performs no mount and claims no VM proof.
+        let script = STORAGE
+            .replace("# PROBE_REARM_SAMPLES", super::REARM_SAMPLES)
+            .replace("parent=/run/hack-local/http-probes", "parent=\"$8\"")
+            .replace("= 0:0:700", &format!("= {uid}:{gid}:700"))
+            .replace("= 0:0:400:1", &format!("= {uid}:{gid}:400:1"));
+        let previous = "a".repeat(32);
+        let invoke = || {
+            Command::new("/bin/sh")
+                .args(["-eu", "-c", &script, "probe-storage-contract", "rearm"])
+                .arg(&root)
+                .arg("synthetic-probe-owner")
+                .arg(uid.to_string())
+                .arg(gid.to_string())
+                .arg("/nonexistent/probe")
+                .arg(&previous)
+                .arg(&parent)
+                .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
+                .env("HACK_TEST_PROBE_STATE", &state)
+                .output()
+                .unwrap()
+        };
+        let inode = fs::metadata(&state).unwrap().ino();
+        for pending in ["", "v1 partial sample"] {
+            for (name, value) in [
+                ("status", format!("v1 {previous} 1 1 0 1000 1\n")),
+                ("first-sample", format!("v1 {previous} 1 1 0 1000 1\n")),
+                ("status.pending", pending.into()),
+            ] {
+                let path = state.join(name);
+                fs::write(&path, value).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let result = invoke();
+            assert!(result.status.success(), "{result:?}");
+            assert_eq!(result.stdout, b"probe-storage-ready\n");
+            assert!(result.stderr.is_empty());
+            assert_eq!(fs::metadata(&state).unwrap().ino(), inode);
+            for name in ["status", "first-sample", "status.pending"] {
+                assert!(!state.join(name).exists());
+            }
+            let refused = invoke();
+            assert!(!refused.status.success());
+            assert!(refused.stdout.is_empty());
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

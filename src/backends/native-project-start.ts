@@ -20,6 +20,7 @@ import {
   adaptNativeGcloudEnvironment,
   type NativeGcloudSelection,
 } from "./native-gcloud-environment.ts";
+import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
 import {
   acquireNativeHttpsLease,
   NativeHttpsLeaseAcquisitionError,
@@ -76,6 +77,7 @@ import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   type NativeProjectInput,
+  nativeReviewedActiveServices,
   prepareNativeProjectInput,
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
@@ -124,6 +126,7 @@ import {
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
 import {
+  beginNativeProjectStartupObservation,
   describeNativeRunEnvironmentChange,
   loadNativeProjectRun,
   loadNativeRestartIntent,
@@ -416,10 +419,44 @@ function httpsVerificationFailed(code: string): Error {
 }
 
 /** Cancellation is not a configuration refusal: it carries no refusal code. */
+/**
+ * A foreground start ended by a stop request. `beforeServices` is set only when
+ * the request arrived after the start's own stop handling was installed and
+ * before any service of the run was requested, and the start's cleanup (hooks,
+ * finalization) then completed: nothing of the new run was admitted.
+ */
+export class NativeStartupCanceledError extends ClosedCliError {
+  readonly interruptedExit: number;
+  readonly beforeServices: boolean;
+  constructor(interruptedExit = 130, beforeServices = false) {
+    super("Native foreground up was canceled; values omitted.");
+    this.interruptedExit = interruptedExit;
+    this.beforeServices = beforeServices;
+  }
+}
+/**
+ * The error a failed foreground start reports. A stop request before any service
+ * was requested is a confirmed cancellation: the run was never admitted. The
+ * caller's cleanup must still complete, or its own failure replaces this outcome.
+ */
+function foregroundStartFailure(opts: {
+  readonly error: unknown;
+  readonly stopRequested: boolean;
+  readonly servicesRequested: boolean;
+  readonly httpsAcquisitionFailure: unknown;
+  readonly interruptedExit: number;
+}): unknown {
+  if (
+    opts.stopRequested &&
+    !opts.servicesRequested &&
+    opts.httpsAcquisitionFailure === undefined
+  ) {
+    return new NativeStartupCanceledError(opts.interruptedExit, true);
+  }
+  return httpsCleanupFailure(opts.httpsAcquisitionFailure, opts.error);
+}
 function canceled(): Error {
-  return new ClosedCliError(
-    "Native foreground up was canceled; values omitted."
-  );
+  return new NativeStartupCanceledError();
 }
 
 function requireActiveStartup(signal: AbortSignal | undefined): void {
@@ -505,6 +542,7 @@ export function prepareNativeProjectServices(
     ) {
       throw refused();
     }
+    admitNativeHttpProbe(name, value);
     result[name] = value;
   }
   return result;
@@ -512,6 +550,7 @@ export function prepareNativeProjectServices(
 /** Fixed text of the refusal when the project share was not granted. */
 export const NATIVE_SHARED_SOURCE_REFUSAL =
   "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
+const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -541,15 +580,30 @@ async function pinNativeProjectImages(opts: {
       continue;
     }
     const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
-    const ensured = await opts.invoke({
-      runtime: opts.runtime,
-      cwd: opts.projectRoot,
-      args: [
-        ...nativeEnsureImageArgs(image, policy),
-        ...nativeImagePolicyArgs(),
-      ],
-      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-    });
+    const ensured = await opts
+      .invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: [
+          ...nativeEnsureImageArgs(image, policy),
+          ...nativeImagePolicyArgs(),
+        ],
+        timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+      })
+      .catch((error: unknown) => {
+        if (
+          error instanceof NativeRuntimeRequestError &&
+          error.nativeCode === "registry_image_not_found"
+        ) {
+          const label = SERVICE_NAME.test(name)
+            ? `service ${name}`
+            : "a service";
+          throw new ClosedCliError(
+            `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
+          );
+        }
+        throw error;
+      });
     if (
       !isRecord(ensured) ||
       typeof ensured.image_id !== "string" ||
@@ -1047,6 +1101,19 @@ function readyProgress(opts: {
     services: opts.services,
     run: RUN.test(opts.run) ? opts.run : "unknown",
     endpoints: nativeReadySummary(opts),
+  };
+}
+
+/** Ready completion goals have succeeded; keep jobs separate in lifecycle JSON. */
+function readyServiceSummary(readinessArgs: readonly string[]): {
+  readonly started: readonly string[];
+  readonly completed: readonly string[];
+} {
+  const goals = readinessArgs.filter((arg) => arg !== "--ready");
+  const name = (goal: string) => goal.slice(0, goal.lastIndexOf("="));
+  return {
+    started: goals.filter((goal) => !goal.endsWith("=completed")).map(name),
+    completed: goals.filter((goal) => goal.endsWith("=completed")).map(name),
   };
 }
 /** The HTTPS port routes are served on: only while the frontend lease runs. */
@@ -1623,7 +1690,7 @@ function reportStopped(opts: {
   }
 }
 
-export async function startNativeProject(opts: {
+type NativeProjectStartOptions = {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
@@ -1631,7 +1698,10 @@ export async function startNativeProject(opts: {
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
   readonly restore?: NativeProjectRun;
-  readonly onReady?: () => Promise<void>;
+  readonly onReady?: (services: {
+    readonly started: readonly string[];
+    readonly completed: readonly string[];
+  }) => void | Promise<void>;
   readonly dependencyFile?: string;
   /** Per-env dependency files; the entry for the run's effective env replaces `dependencyFile`. */
   readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
@@ -1676,10 +1746,22 @@ export async function startNativeProject(opts: {
   readonly signal?: AbortSignal;
   /** A second stop request: cancels a running down hook and forces cleanup. */
   readonly forceSignal?: AbortSignal;
+  /**
+   * Called once this start's own SIGINT/SIGTERM handling is installed, before any
+   * hook, runtime start or service. A caller that handled stop requests until
+   * now (such as `hack restart`) removes its handlers here; `signal` still
+   * carries a request that arrived earlier.
+   */
+  readonly onStopSignals?: () => void;
   /** Foreground progress and the ready line; see {@link NativeStartupProgress}. */
   readonly onProgress?: (event: NativeStartupProgress) => void;
   readonly dependencies?: Partial<Dependencies>;
-}): Promise<number> {
+};
+
+async function startNativeProjectAttempt(
+  opts: NativeProjectStartOptions,
+  observeStartup: () => Promise<void>
+): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
   requireActiveStartup(opts.signal);
@@ -1738,6 +1820,7 @@ export async function startNativeProject(opts: {
     invoke: deps.invoke,
   });
   await deps.prepareStorage(opts.scope);
+  await observeStartup();
   let input = await deps.prepare({
     ...opts.scope,
     composeFile: opts.composeFile,
@@ -1830,6 +1913,7 @@ export async function startNativeProject(opts: {
     .update(new Uint8Array(await artifactFile.arrayBuffer()))
     .digest("hex");
   const stopSignals = nativeForegroundStopSignals(opts);
+  opts.onStopSignals?.();
   const controller = stopSignals.controller;
   controller.signal.addEventListener(
     "abort",
@@ -1839,6 +1923,8 @@ export async function startNativeProject(opts: {
   let hooks: Hooks | undefined;
   let foregroundStop: NativeForegroundStop | undefined;
   let failed = false;
+  // Set before the first service of this run is requested from the runtime.
+  let servicesRequested = false;
   let finalization:
     | Awaited<ReturnType<typeof beginNativeProjectFinalization>>
     | undefined;
@@ -1874,6 +1960,27 @@ export async function startNativeProject(opts: {
       path: selectedDependencyFile,
       services: Object.keys(specs),
       hostAliases,
+      checkPinned: async ({ hostPid, hostPort }) => {
+        const result = await deps.invoke({
+          runtime: opts.runtime,
+          cwd: opts.scope.projectRoot,
+          args: [
+            "graph",
+            "dependency-check",
+            "--host-pid",
+            String(hostPid),
+            "--host-port",
+            String(hostPort),
+            "--json",
+          ],
+          timeoutMs: 10_000,
+        });
+        if (!isRecord(result) || result.listener_confirmed !== true) {
+          throw new ClosedCliError(
+            "Native listener check was not confirmed; values omitted."
+          );
+        }
+      },
       discover: (selection) =>
         discoverNativeHostDependency({
           runtime: opts.runtime,
@@ -2149,10 +2256,19 @@ export async function startNativeProject(opts: {
             | undefined;
           // Redacted at receipt; the raw tail is never retained or persisted.
           let startupLogReport = "";
-          const services = Object.keys(specs).sort();
+          const services = [
+            ...nativeReviewedActiveServices(review.report.plan),
+          ].sort();
+          const readinessArgs = nativeReadinessArgs({
+            specs,
+            plan: review.report.plan,
+            initializers: cache.initializers,
+            routed: routes.services,
+          });
           progress({ phase: "services", services });
           let stopWatching: (() => Promise<void>) | undefined;
           try {
+            servicesRequested = true;
             code = await deps.serve({
               runtime: opts.runtime,
               projectRoot: opts.scope.projectRoot,
@@ -2165,12 +2281,7 @@ export async function startNativeProject(opts: {
                 review.planId,
                 ...nativeSharedSourceFlags(review.report.plan),
                 ...cache.flags,
-                ...nativeReadinessArgs({
-                  specs,
-                  plan: review.report.plan,
-                  initializers: cache.initializers,
-                  routed: routes.services,
-                }),
+                ...readinessArgs,
                 ...routes.flags,
                 "--dependencies",
                 dependencyFile,
@@ -2296,16 +2407,6 @@ export async function startNativeProject(opts: {
                     .catch(() => undefined);
                 }
                 await hooks?.ready?.();
-                await opts.onReady?.();
-                progress(
-                  readyProgress({
-                    services,
-                    run,
-                    plan: review.report.plan,
-                    routed: routes.services,
-                    httpsPort: servedHttpsPort(https, opts.https),
-                  })
-                );
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -2318,8 +2419,20 @@ export async function startNativeProject(opts: {
                     controller.abort();
                   },
                 });
-                // Last: only microtasks separate this from readiness.
+                // Commit owed down hooks before any observer can release a
+                // detached launcher. A journal failure is still startup failure.
                 await stop?.owe(() => controller.signal.aborted);
+                requireActiveStartup(controller.signal);
+                await opts.onReady?.(readyServiceSummary(readinessArgs));
+                progress(
+                  readyProgress({
+                    services,
+                    run,
+                    plan: review.report.plan,
+                    routed: routes.services,
+                    httpsPort: servedHttpsPort(https, opts.https),
+                  })
+                );
               },
             });
           } catch (error) {
@@ -2429,7 +2542,13 @@ export async function startNativeProject(opts: {
     });
   } catch (error) {
     failed = true;
-    throw httpsCleanupFailure(httpsAcquisitionFailure, error);
+    throw foregroundStartFailure({
+      error,
+      stopRequested: controller.signal.aborted,
+      servicesRequested,
+      httpsAcquisitionFailure,
+      interruptedExit: stopSignals.interruptedExit(),
+    });
   } finally {
     cancelAwsExpiry?.();
     // The stop listeners stay installed until down.after and the finalization
@@ -2460,5 +2579,19 @@ export async function startNativeProject(opts: {
 function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   if (failure !== undefined && !failed) {
     throw failure;
+  }
+}
+
+/** Publish advisory startup evidence until this foreground invocation settles. */
+export async function startNativeProject(
+  opts: NativeProjectStartOptions
+): Promise<number> {
+  let finish: (() => Promise<void>) | undefined;
+  try {
+    return await startNativeProjectAttempt(opts, async () => {
+      finish = await beginNativeProjectStartupObservation(opts.scope);
+    });
+  } finally {
+    await finish?.();
   }
 }

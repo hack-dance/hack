@@ -107,7 +107,6 @@ async function invoke(opts: {
 }
 
 test.each([
-  { args: ["up", "--json"] },
   { args: ["restart", "--json"] },
   { args: ["restart", "web"] },
   { args: ["run", "web"] },
@@ -220,28 +219,41 @@ test("source CLI native exec with a named --env reaches authored dispatch", asyn
   expect(value.stderr).not.toContain(NATIVE_EXEC_SELECTION_REFUSAL);
 });
 
-test("source CLI native up --detach refuses with one line before compiler or runtime work", async () => {
+test.each([
+  { flags: ["--detach"] },
+  { flags: ["-d"] },
+  { flags: ["--detach", "--json"] },
+  { flags: ["--json"] },
+])("source CLI native up %j reports unconfirmed background startup", async ({
+  flags,
+}) => {
   const selected = await fixture();
   const value = await invoke({
     selected,
-    args: ["up", "--detach"],
+    args: ["up", ...flags],
     backend: "native",
   });
   expect(value.code).toBe(1);
-  // macOS supports authored foreground up, so a detached start gets the image
-  // project's E_USAGE refusal; elsewhere authored execution is unsupported.
-  expect(value.stdout + value.stderr).toContain(
-    process.platform === "darwin"
-      ? "E_USAGE: Native `hack up` runs in the foreground only, so --detach is not supported."
-      : "E_NATIVE_PROJECT_UNSUPPORTED"
-  );
+  expect(value.stdout + value.stderr).toContain("E_STARTUP_INCOMPLETE");
+  expect(value.stdout + value.stderr).not.toContain(PRIVATE);
   expect(value.stdout + value.stderr).not.toMatch(/^\s+at /m);
-  expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
+  expect(await Bun.file(join(selected.root, "runtime-called")).exists()).toBe(
     false
   );
-  expect(await readdir(join(selected.root, ".hack"))).toEqual([
-    "hack.project.json",
-  ]);
+  // Admitted macOS startup acquires the existing private admission store before
+  // parsing input. Failure releases its locks without publishing intent or run.
+  expect((await readdir(join(selected.root, ".hack"))).sort()).toEqual(
+    process.platform === "darwin"
+      ? [".internal", "hack.project.json"]
+      : ["hack.project.json"]
+  );
+  if (process.platform === "darwin") {
+    const internal = join(selected.root, ".hack/.internal");
+    expect(await readdir(internal)).toEqual(["native-authored-runs"]);
+    const store = join(internal, "native-authored-runs");
+    expect(await readdir(store)).toEqual([".gitignore"]);
+    expect(await Bun.file(join(store, ".gitignore")).text()).toBe("*\n");
+  }
 });
 
 test("source CLI omitted backend retains the existing Compose foreground refusal", async () => {

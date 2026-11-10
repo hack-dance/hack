@@ -229,12 +229,12 @@ const serveNativeAuthoredProject = (
   const runId = input.run;
   return serveStart({
     ...input,
-    onReady: (selection) => {
+    onReady: (selection, identity) => {
       observeOwners(owner, input);
       if (input.holdOwner !== true) {
         releaseOwner(input.root, runId);
       }
-      return input.onReady?.(selection);
+      return input.onReady?.(selection, identity);
     },
   });
 };
@@ -988,14 +988,16 @@ macTest(
 macTest(
   "native frontend holds admission through exact ready publication and Removed retirement",
   async () => {
-    const selected = await fixture();
+    const selected = await fixture({ branch: "feature" });
     let ready = 0;
     const code = await serveNativeAuthoredProject({
       ...selected,
       run,
       startupTimeoutMs: STARTUP_TIMEOUT_MS,
-      onReady: (mapping) => {
+      onReady: (mapping, identity) => {
         ready += 1;
+        expect(identity).toEqual({ projectName: "fixture" });
+        expect(selected.scope.projectRoot.endsWith("/project")).toBe(true);
         expect(Object.isFrozen(mapping.record.receipt.resources)).toBe(true);
         expect(mapping.record.receipt.review.provenance.run).toBe(run);
         return undefined;

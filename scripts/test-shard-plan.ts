@@ -22,7 +22,7 @@
  * two shards.
  */
 import { statSync } from "node:fs";
-import { relative, resolve, sep } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
 import { isRecord } from "../src/lib/guards.ts";
 
@@ -471,9 +471,216 @@ export async function assertSuiteInputs(opts: {
   }
 }
 
+/**
+ * How the hosted shards split the suite (HACK-1960).
+ *
+ * - `full`: every shard runs on macOS and the `n` shards partition the whole
+ *   set. Pushes to `next`/`main` use it, so the prerelease exact-head gate
+ *   still sees the whole suite pass on macOS.
+ * - `pooled`: pull requests run the platform-sensitive files (the `macos`
+ *   pool) on the first {@link POOLED_MACOS_SHARDS} shards, on macOS, and every
+ *   other file (the `linux` pool) on the remaining shards, on Linux.
+ */
+export type TestLayout = "full" | "pooled";
+
+export type TestPool = "macos" | "linux";
+
+/** In the pooled layout, shards `1..POOLED_MACOS_SHARDS` are the macOS pool. */
+export const POOLED_MACOS_SHARDS = 3;
+
+/**
+ * A test file whose source, or a `tests/` module it imports, matches this may
+ * behave differently off macOS, so the pooled layout keeps it on macOS. The
+ * match is deliberately broad: a false positive costs macOS minutes, a false
+ * negative moves macOS coverage of that file to the `full` push run.
+ */
+export const PLATFORM_SENSITIVE_SOURCE =
+  /process\.platform|\bplatform\(\)|\bdarwin\b|\bmacOS\b|launchctl|osascript|sandbox-exec|keychain|\/private\/(?:tmp|var)|\blsof\b|\bpgrep\b|\bsysctl\b|kqueue|fsevents/i;
+
+/**
+ * Files the pattern misses that still need macOS, with the reason. An entry
+ * here keeps the file in the macOS pool of the pooled layout.
+ */
+export const MACOS_POOL_FILES: Readonly<Record<string, string>> = {};
+
+/** Parse a layout name, refused closed. */
+export function parseTestLayout(value: string | undefined): TestLayout {
+  if (value === undefined || value === "full") {
+    return "full";
+  }
+  if (value === "pooled") {
+    return "pooled";
+  }
+  throw new ClosedCliError("test shard: --layout must be full or pooled.");
+}
+
+/**
+ * The pool and the pool-local selection of global shard `selection` in the
+ * pooled layout: shards `1..POOLED_MACOS_SHARDS` split the macOS pool, the
+ * rest split the Linux pool.
+ */
+export function pooledSelection(selection: ShardSelection): {
+  readonly pool: TestPool;
+  readonly selection: ShardSelection;
+} {
+  if (selection.count <= POOLED_MACOS_SHARDS) {
+    throw new ClosedCliError(
+      `test shard: the pooled layout needs more than ${POOLED_MACOS_SHARDS} shards.`
+    );
+  }
+  if (selection.index <= POOLED_MACOS_SHARDS) {
+    return {
+      pool: "macos",
+      selection: { index: selection.index, count: POOLED_MACOS_SHARDS },
+    };
+  }
+  return {
+    pool: "linux",
+    selection: {
+      index: selection.index - POOLED_MACOS_SHARDS,
+      count: selection.count - POOLED_MACOS_SHARDS,
+    },
+  };
+}
+
+/** The `process.platform` a pool must run on. */
+export function poolPlatform(pool: TestPool): NodeJS.Platform {
+  return pool === "macos" ? "darwin" : "linux";
+}
+
+const RELATIVE_IMPORT =
+  /(?:\bfrom\s+|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)["'](\.{1,2}\/[^"']+)["']/gm;
+
+/** Repository-relative modules that `file` imports through relative paths. */
+function localImports(opts: {
+  readonly repoRoot: string;
+  readonly file: string;
+  readonly source: string;
+}): string[] {
+  const found: string[] = [];
+  const base = dirname(resolve(opts.repoRoot, opts.file));
+  for (const match of opts.source.matchAll(RELATIVE_IMPORT)) {
+    const target = resolve(base, match[1] as string);
+    for (const candidate of [target, `${target}.ts`]) {
+      const path = relative(opts.repoRoot, candidate).split(sep).join("/");
+      if (!path.startsWith("../") && isFile(candidate)) {
+        found.push(path);
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+/** Whether `path` is a module under one of the test suite roots. */
+function inTestSuite(path: string): boolean {
+  return TEST_SUITES.some((suite) => within({ root: suite.root, path }));
+}
+
+/**
+ * Whether `file`'s source, or a module it imports (transitively) that
+ * `follow` admits, matches `pattern`. By default only test-suite modules are
+ * followed, not product code: the test is what decides which host behavior
+ * it observes.
+ */
+export async function testSourceMatches(opts: {
+  readonly repoRoot: string;
+  readonly file: string;
+  readonly pattern: RegExp;
+  readonly cache?: Map<string, string>;
+  /** Which imported modules to read too; test-suite modules by default. */
+  readonly follow?: (path: string) => boolean;
+}): Promise<boolean> {
+  const cache = opts.cache ?? new Map<string, string>();
+  const seen = new Set<string>();
+  const queue = [opts.file];
+  while (queue.length > 0) {
+    const file = queue.pop() as string;
+    if (seen.has(file)) {
+      continue;
+    }
+    seen.add(file);
+    let source = cache.get(file);
+    if (source === undefined) {
+      source = await Bun.file(resolve(opts.repoRoot, file)).text();
+      cache.set(file, source);
+    }
+    if (opts.pattern.test(source)) {
+      return true;
+    }
+    queue.push(
+      ...localImports({ repoRoot: opts.repoRoot, file, source }).filter(
+        opts.follow ?? inTestSuite
+      )
+    );
+  }
+  return false;
+}
+
+/** Split `files` into the pooled layout's macOS and Linux pools. */
+export async function classifyTestPools(opts: {
+  readonly repoRoot: string;
+  readonly files: readonly string[];
+  readonly macosFiles?: Readonly<Record<string, string>>;
+}): Promise<{
+  readonly macos: readonly string[];
+  readonly linux: readonly string[];
+}> {
+  const macosFiles = opts.macosFiles ?? MACOS_POOL_FILES;
+  const cache = new Map<string, string>();
+  const macos: string[] = [];
+  const linux: string[] = [];
+  for (const file of opts.files) {
+    const sensitive =
+      Object.hasOwn(macosFiles, file) ||
+      (await testSourceMatches({
+        repoRoot: opts.repoRoot,
+        file,
+        pattern: PLATFORM_SENSITIVE_SOURCE,
+        cache,
+      }));
+    (sensitive ? macos : linux).push(file);
+  }
+  return { macos, linux };
+}
+
+/**
+ * Focused runs for pull requests that change only documentation or only the
+ * runtime core (HACK-1960): instead of the whole suite, Linux jobs run every
+ * test file that names those sources, directly or through a shared
+ * `tests/helpers/` module or a `scripts/` module it imports (the documentation
+ * generators and checks live there). The patterns are broad, so a doubtful file runs.
+ * Scenario fixtures are not followed: they write their own README and docs
+ * files into temporary projects, which would pull in the whole suite.
+ */
+export type TestFocus = "docs" | "runtime-core";
+
+export const FOCUS_SOURCE: Readonly<Record<TestFocus, RegExp>> = {
+  docs: /docs\/|["'`]docs["'`]|README|CHANGELOG|SECURITY\.md|PACKAGING\.md|LICENSE|site\/|["'`]site["'`]/,
+  "runtime-core":
+    /runtime-core|relay-guest|hack-runtime-candidate|provider-pins|hack-local|build-hack-local/,
+};
+
+/** Parse a comma-separated focus list, refused closed. */
+export function parseTestFocus(value: string): readonly TestFocus[] {
+  const names = value.split(",");
+  const focus: TestFocus[] = [];
+  for (const name of names) {
+    if (!(name === "docs" || name === "runtime-core") || focus.includes(name)) {
+      throw new ClosedCliError(
+        "test shard: --focus must list docs and/or runtime-core, comma-separated, once each."
+      );
+    }
+    focus.push(name);
+  }
+  return focus.sort();
+}
+
 export type ShardPlan = {
   /** The full test-file set, from disk; equal to the Git enumeration. */
   readonly files: readonly string[];
+  /** The files the shards split: the full set, one pool, or a focus. */
+  readonly scope: readonly string[];
   readonly shards: readonly (readonly string[])[];
   readonly durations: Readonly<Record<string, number>>;
 };
@@ -490,6 +697,12 @@ export async function buildVerifiedPlan(opts: {
   readonly durationTablePath?: string;
   /** Test seam: replaces the partition, to prove the coverage check fails. */
   readonly partition?: typeof partitionTestFiles;
+  /** Plan only this pool of the pooled layout; `count` shards split it. */
+  readonly pool?: TestPool;
+  /** Test seam: extra macOS pool files (defaults to {@link MACOS_POOL_FILES}). */
+  readonly macosFiles?: Readonly<Record<string, string>>;
+  /** Plan only the files that read these sources; `count` shards split them. */
+  readonly focus?: readonly TestFocus[];
 }): Promise<ShardPlan> {
   const suites = opts.suites ?? TEST_SUITES;
   if (!opts.suites) {
@@ -512,11 +725,55 @@ export async function buildVerifiedPlan(opts: {
       ].join("\n")
     );
   }
+  if (opts.pool && opts.focus) {
+    throw new ClosedCliError("test shard: a pool and a focus cannot combine.");
+  }
+  let scope: readonly string[] = tracked;
+  if (opts.pool) {
+    const pools = await classifyTestPools({
+      repoRoot: opts.repoRoot,
+      files: tracked,
+      macosFiles: opts.macosFiles,
+    });
+    // The two pools must partition the full set, so the pooled layout as a
+    // whole still runs every file exactly once.
+    assertShardCoverage({
+      expected: tracked,
+      shards: [pools.macos, pools.linux],
+    });
+    scope = pools[opts.pool];
+  } else if (opts.focus) {
+    if (opts.focus.length === 0) {
+      throw new ClosedCliError(
+        "test shard: a focus needs at least one source set."
+      );
+    }
+    const pattern = new RegExp(
+      opts.focus.map((name) => FOCUS_SOURCE[name].source).join("|")
+    );
+    const cache = new Map<string, string>();
+    const focused: string[] = [];
+    for (const file of tracked) {
+      if (
+        await testSourceMatches({
+          repoRoot: opts.repoRoot,
+          file,
+          pattern,
+          cache,
+          follow: (path) =>
+            path.startsWith("tests/helpers/") || path.startsWith("scripts/"),
+        })
+      ) {
+        focused.push(file);
+      }
+    }
+    scope = focused;
+  }
   const shards = (opts.partition ?? partitionTestFiles)({
-    files,
+    files: scope,
     count: opts.count,
     durations,
   });
-  assertShardCoverage({ expected: tracked, shards });
-  return { files, shards, durations };
+  assertShardCoverage({ expected: scope, shards });
+  return { files, scope, shards, durations };
 }

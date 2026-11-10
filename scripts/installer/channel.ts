@@ -23,7 +23,9 @@ import {
 } from "./bundle.ts";
 import { officialArchive } from "./download.ts";
 import {
+  candidateVersion,
   canonical,
+  compareCandidateVersions,
   digest,
   exact,
   hash,
@@ -34,7 +36,6 @@ import {
   requireThat,
   SHA256,
   syncDirectory,
-  versionNumber,
   writeFile,
 } from "./integrity.ts";
 import {
@@ -401,7 +402,7 @@ export class Channel {
     );
     const validated: Record<string, string> = Object.create(null);
     for (const [version, checksum] of Object.entries(installed)) {
-      versionNumber(version);
+      candidateVersion(version);
       requireThat(
         typeof checksum === "string" && SHA256.test(checksum),
         "Malformed receipt hash."
@@ -425,7 +426,7 @@ export class Channel {
       if (Object.hasOwn(validated, version)) {
         continue;
       }
-      versionNumber(version);
+      candidateVersion(version);
       // An interrupted rename remains unselected, retained and independently validated.
       const receipt = this.path(`versions/${version}/.receipt.json`);
       privateJson(receipt);
@@ -604,7 +605,7 @@ export class Channel {
     checksum?: string,
     upgrade = false
   ) {
-    versionNumber(version);
+    candidateVersion(version);
     requireThat(
       Boolean(archive) === Boolean(checksum),
       "--archive and --sha256 must be supplied together."
@@ -639,7 +640,7 @@ export class Channel {
       "A candidate is selected; use upgrade with a newer version."
     );
     requireThat(
-      current === null || versionNumber(version) > versionNumber(current),
+      current === null || compareCandidateVersions(version, current) > 0,
       "Upgrade must increase the prerelease version; use rollback."
     );
     requireThat(

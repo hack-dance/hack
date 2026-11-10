@@ -450,3 +450,22 @@ test("failed dependency refresh refuses before exec inspection or private prepar
     expect(calls).toEqual(["refresh-dependencies"]);
   }
 });
+
+test("exec names an inactive service before sending any command", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  await expect(
+    nativeProjectExec({
+      ...opts,
+      service: "extra",
+      argv: ["true"],
+      invoke: async (request) => {
+        calls.push(request.args[1]!);
+        return request.args[1] === "inspect" ? snapshot() : refreshed();
+      },
+    })
+  ).rejects.toThrow(
+    "Native service extra is not active in this run; nothing was executed."
+  );
+  expect(calls).not.toContain("exec");
+});

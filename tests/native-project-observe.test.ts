@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,7 +16,10 @@ import {
   nativeProjectLogs,
   nativeProjectPs,
 } from "../src/backends/native-project-observe.ts";
-import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
+import {
+  beginNativeProjectStartupObservation,
+  saveNativeProjectRun,
+} from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 
@@ -417,7 +429,7 @@ test("unsupported native forms and missing restart consent refuse before Docker 
       expect(code).not.toBe(0);
       expect(stdout + stderr).toContain(
         operation === "up"
-          ? "E_USAGE: Native `hack up` runs in the foreground only, so --detach is not supported."
+          ? "E_STARTUP_INCOMPLETE: Native detached startup was not confirmed."
           : operation === "restart"
             ? "E_PERMISSION: Native restart requires HACK_NATIVE_SHARED_SOURCE=1"
             : operation === "exec"
@@ -688,4 +700,41 @@ test("logs keep the runtime's interleaved whole lines and refuse malformed ones"
       "observation refused"
     );
   }
+});
+
+test("pending startup evidence is branch scoped and each invocation retires only its marker", async () => {
+  const opts = await fixture(false);
+  const first = await beginNativeProjectStartupObservation(opts.scope);
+  const second = await beginNativeProjectStartupObservation(opts.scope);
+  expect((await nativeProjectPs(opts)).status).toBe("pending");
+  expect(
+    (
+      await nativeProjectPs({
+        ...opts,
+        scope: { ...opts.scope, branch: "other" },
+      })
+    ).status
+  ).toBe("not_started");
+  await first();
+  expect((await nativeProjectPs(opts)).status).toBe("pending");
+  await second();
+  expect((await nativeProjectPs(opts)).status).toBe("not_started");
+});
+
+test("startup completion preserves a substituted observation marker", async () => {
+  const opts = await fixture(false);
+  const finish = await beginNativeProjectStartupObservation(opts.scope);
+  const directory = join(opts.scope.projectDir, ".internal", "native-runs");
+  const marker = (await readdir(directory)).find((name) =>
+    name.includes(".starting-")
+  );
+  expect(marker).toBeDefined();
+  const path = join(directory, marker!);
+  await rename(path, `${path}.original`);
+  await writeFile(path, "replacement owned by another writer\n");
+  await finish();
+  await finish();
+  expect(await readFile(path, "utf8")).toBe(
+    "replacement owned by another writer\n"
+  );
 });

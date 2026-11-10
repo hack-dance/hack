@@ -261,6 +261,10 @@ import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backen
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
 import {
+  nativeDetachedUpReady,
+  startNativeDetachedUp,
+} from "../lib/native-detached-up.ts";
+import {
   createNativeEnvFingerprintEntry,
   createNativeEnvFingerprintSession,
 } from "../lib/native-env-fingerprint-state.ts";
@@ -4441,8 +4445,8 @@ export function resolveInitComposeBackend(
 
 /**
  * Follow-up commands `hack init` prints, limited to ones the selected backend
- * accepts. Native `up` runs in the foreground only, needs the explicit
- * project-share grant, and refuses `--detach`; `hack global install` refuses
+ * accepts. Native `up` needs the explicit project-share grant; this follow-up
+ * keeps its foreground form. `hack global install` refuses
  * on native, where routes use the optional native HTTPS frontend instead.
  */
 export function initNextSteps(opts: {
@@ -6010,6 +6014,14 @@ async function handleNativeUp({
       await envFingerprints.record(
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
+    onReady: (services) => {
+      nativeDetachedUpReady({
+        project: projectName,
+        branch,
+        composeProject,
+        ...services,
+      });
+    },
     onProgress: reportNativeStartupProgress,
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
@@ -6147,6 +6159,17 @@ async function restartNativeImageProject({
   };
   readonly dropEnvFingerprint: () => void;
 }): Promise<number> {
+  // One "Stopping…" line, whether the restart or its new start sees the request.
+  let stoppingReported = false;
+  const progress = (event: NativeStartupProgress): void => {
+    if (event.phase === "stopping") {
+      if (stoppingReported) {
+        return;
+      }
+      stoppingReported = true;
+    }
+    reportNativeStartupProgress(event);
+  };
   return await restartNativeProject({
     scope: startup.scope,
     envName: startup.envName,
@@ -6237,12 +6260,21 @@ async function restartNativeImageProject({
         });
       }
     },
-    start: ({ run, onReady }) =>
+    progress,
+    start: ({ run, onReady, signal, onStopSignals, onStopRequested }) =>
       startNativeProject({
         ...startup,
         ...nativeRestartSelection({ run }),
         restore: run,
         onReady,
+        signal,
+        onStopSignals,
+        onProgress: (event) => {
+          if (event.phase === "stopping") {
+            onStopRequested();
+          }
+          progress(event);
+        },
       }),
   });
 }
@@ -6256,6 +6288,33 @@ async function handleUp({
 }): Promise<number> {
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
+  if (
+    (args.options.detach || args.options.json) &&
+    resolveNativeRuntimeSelection()
+  ) {
+    refuseUnsupportedNativeUpOptions({
+      restart: false,
+      target: args.options.target,
+      services: args.positionals.services,
+    });
+    const childArgs = ["up"];
+    for (const [name, value] of Object.entries({
+      path: args.options.path,
+      project: args.options.project,
+      branch: args.options.branch,
+      env: args.options.env,
+      profile: args.options.profile,
+    })) {
+      if (value !== undefined) {
+        childArgs.push(`--${name}=${value}`);
+      }
+    }
+    return await startNativeDetachedUp({
+      cwd: ctx.cwd,
+      args: childArgs,
+      json: args.options.json === true,
+    });
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -8694,6 +8753,13 @@ async function displayNativePs(
 ): Promise<void> {
   if (json) {
     emitCliResult({ result: okResult({ data: result }) });
+    return;
+  }
+  if (result.status === "pending") {
+    logger.info({
+      message:
+        "Native project startup is pending: a foreground up is starting, or an interrupted start retained its intent. No current service status is confirmed.",
+    });
     return;
   }
   if (result.status === "not_started") {

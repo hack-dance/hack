@@ -44,6 +44,7 @@ import {
 import {
   NATIVE_CONFIGURATION_REFUSAL,
   NATIVE_SHARED_SOURCE_REFUSAL,
+  NativeStartupCanceledError,
   type NativeStartupProgress,
   nativeReadinessArgs,
   nativeReadySummary,
@@ -132,6 +133,9 @@ async function fixture(withEnvironment = true) {
         return { reference: opts.args[3], kind: "docker_hub" };
       }
       events.push(opts.args.slice(0, 2).join(" "));
+      if (opts.args[1] === "dependency-check") {
+        return { listener_confirmed: true };
+      }
       if (opts.args[0] === "runtime" && opts.args[1] === "status") {
         return {
           phase: "running",
@@ -1167,6 +1171,72 @@ test("cancellation while runtime up waits on a held lease issues no later runtim
   expect(events).not.toContain("save");
 });
 
+function heldRuntimeUp(
+  invoke: NonNullable<
+    Parameters<typeof startNativeProject>[0]["dependencies"]
+  >["invoke"],
+  controller: AbortController
+) {
+  return async (call: Parameters<NonNullable<typeof invoke>>[0]) => {
+    if (call.args[0] === "runtime" && call.args[1] === "up") {
+      queueMicrotask(() => controller.abort());
+      await new Promise((_, reject) =>
+        call.signal?.addEventListener(
+          "abort",
+          () => reject(new Error("runtime killed while waiting")),
+          { once: true }
+        )
+      );
+    }
+    return await invoke!(call);
+  };
+}
+
+test("a stop request before any service is a confirmed cancellation once cleanup completes", async () => {
+  const { opts, events } = await fixture(false);
+  const controller = new AbortController();
+  opts.dependencies.invoke = heldRuntimeUp(
+    opts.dependencies.invoke,
+    controller
+  );
+  const error = await startNativeProject({
+    ...opts,
+    signal: controller.signal,
+  }).then(
+    () => undefined,
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(NativeStartupCanceledError);
+  expect(error).toMatchObject({ beforeServices: true, interruptedExit: 130 });
+  expect(events.at(-1)).toBe("cleanup");
+});
+
+test("a stop request whose cleanup fails is not reported as a confirmed cancellation", async () => {
+  const { opts } = await fixture(false);
+  const controller = new AbortController();
+  opts.dependencies.invoke = heldRuntimeUp(
+    opts.dependencies.invoke,
+    controller
+  );
+  const error = await startNativeProject({
+    ...opts,
+    signal: controller.signal,
+    before: async () => ({
+      cleanup: async () => {
+        throw new Error("lifecycle cleanup failed");
+      },
+      ready: async () => undefined,
+    }),
+  }).then(
+    () => undefined,
+    (caught: unknown) => caught
+  );
+  expect(error).toBeDefined();
+  expect(
+    error instanceof NativeStartupCanceledError && error.beforeServices
+  ).toBe(false);
+});
+
 test("cancellation after readiness retains mapping when data is preserved", async () => {
   const { opts, events } = await fixture();
   const controller = new AbortController();
@@ -1302,12 +1372,21 @@ test("managed values are delivered only to reviewed profile-active services", as
         }),
     });
   let delivered: unknown;
+  let reported: unknown;
   const serve = opts.dependencies.serve!;
   opts.dependencies.serve = async (request) => {
     delivered = JSON.parse(new TextDecoder().decode(request.privateInput));
     return await serve(request);
   };
-  expect(await startNativeProject(opts)).toBe(0);
+  expect(
+    await startNativeProject({
+      ...opts,
+      onReady: (services) => {
+        reported = services;
+      },
+    })
+  ).toBe(0);
+  expect(reported).toEqual({ started: ["web"], completed: [] });
   expect(delivered).toMatchObject({
     version: 1,
     services: { web: { GREETING: "synthetic-secret" } },
@@ -1467,6 +1546,7 @@ test("reviewed dependency caches bind published source and successful completion
           state: "guest-content-verified-no-job-started",
         }
       : await invoke?.(input);
+  let reported: unknown;
   opts.dependencies.serve = async (input) => {
     expect(input.args).toContain("--source-revision");
     expect(input.args).toContain("e".repeat(64));
@@ -1476,7 +1556,15 @@ test("reviewed dependency caches bind published source and successful completion
     }
     return await serve(input);
   };
-  expect(await startNativeProject(opts)).toBe(0);
+  expect(
+    await startNativeProject({
+      ...opts,
+      onReady: (services) => {
+        reported = services;
+      },
+    })
+  ).toBe(0);
+  expect(reported).toEqual({ started: [], completed: ["web"] });
 });
 
 test("approved outbound hosts are forwarded exactly and sorted before runtime admission", async () => {
@@ -5395,4 +5483,266 @@ test("restart preflight ignores inactive-profile services a wrapper cannot run",
   );
   // The same preflight without the profile completes.
   await preflight([]);
+});
+
+test.each([
+  "commit",
+  "fail",
+  "cancel",
+] as const)("detached readiness waits for down-hook bookkeeping: %s", async (mode) => {
+  const { opts } = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const controller = new AbortController();
+  const progress: string[] = [];
+  let published = 0;
+  const before = opts.before;
+  const pending = startNativeProject({
+    ...opts,
+    signal: controller.signal,
+    before: async () => ({
+      ...(await before()),
+      stop: { before: async () => 0, after: async () => 0 },
+    }),
+    dependencies: {
+      ...opts.dependencies,
+      downHooks: () => ({
+        owe: async () => {
+          entered.resolve();
+          await release.promise;
+          if (mode === "fail") {
+            throw new Error("synthetic bookkeeping failure");
+          }
+          if (mode === "cancel") {
+            controller.abort();
+          }
+        },
+        before: async () => "skipped" as const,
+        after: async () => "skipped" as const,
+      }),
+    },
+    onReady: () => {
+      published += 1;
+    },
+    onProgress: (event) => {
+      progress.push(event.phase);
+    },
+  }).then(
+    (code) => ({ ok: true as const, code }),
+    () => ({ ok: false as const })
+  );
+  try {
+    await entered.promise;
+    // The actual startup owner is suspended at its durable journal boundary.
+    // Neither IPC observation nor human readiness can escape that boundary.
+    await Bun.sleep(20);
+    expect(published).toBe(0);
+    expect(progress).not.toContain("ready");
+    release.resolve();
+    const outcome = await pending;
+    if (mode === "commit") {
+      expect(outcome).toEqual({ ok: true, code: 0 });
+      expect(published).toBe(1);
+      expect(progress).toContain("ready");
+    } else {
+      expect(
+        mode === "fail" ? !outcome.ok : outcome.ok && outcome.code === 130
+      ).toBe(true);
+      expect(published).toBe(0);
+      expect(progress).not.toContain("ready");
+    }
+  } finally {
+    release.resolve();
+    await pending;
+  }
+});
+
+test("startup and ready progress list only reviewed active services", async () => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.extra = { ...compose.services.web, profiles: ["extra"] };
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) =>
+    review({
+      ...request,
+      run: (result) =>
+        request.run({
+          ...result,
+          report: {
+            plan: {
+              enrollment_compatible: true,
+              services: {
+                web: { active: true },
+                extra: { active: false },
+              },
+            },
+          },
+        }),
+    });
+  const lists: (readonly string[])[] = [];
+  await startNativeProject({
+    ...opts,
+    onProgress: (event) => {
+      if (event.phase === "services" || event.phase === "ready") {
+        lists.push(event.services);
+      }
+    },
+  });
+  expect(lists).toEqual([["web"], ["web"]]);
+});
+
+test("ps reports pending during input preparation before any run mapping exists", async () => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const result = await nativeProjectPs({
+      ...opts,
+      invoke: async () => {
+        throw new Error("no runtime inspection before a mapping exists");
+      },
+    });
+    expect(result.status).toBe("pending");
+    expect(result.items).toEqual([]);
+    return await prepare(request);
+  };
+  await startNativeProject(opts);
+  expect((await nativeProjectPs(opts)).status).toBe("not_started");
+});
+
+test("invalid HTTP retries name the service and field before hooks or runtime effects", async () => {
+  const { opts, events } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    const compose = JSON.parse(input.normalizedComposeJson);
+    compose.services.web.healthcheck = {
+      "x-hack-http": {
+        port: 3000,
+        path: "/",
+        interval_ms: 100,
+        timeout_ms: 500,
+        retries: 120,
+        start_period_ms: 0,
+      },
+    };
+    return { ...input, normalizedComposeJson: JSON.stringify(compose) };
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "service web field healthcheck.x-hack-http.retries"
+  );
+  expect(events).not.toContain("before");
+  expect(events).not.toContain("runtime up");
+  expect(events).not.toContain("runtime ensure-image");
+});
+
+test("missing registry tags name the service and image field without echoing values", async () => {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    return {
+      ...input,
+      normalizedComposeJson: JSON.stringify({
+        services: { web: { image: "synthetic:missing" } },
+      }),
+    };
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "ensure-image") {
+      throw new NativeRuntimeRequestError({
+        nativeCode: "registry_image_not_found",
+        message: "private registry detail",
+      });
+    }
+    return await invoke(request);
+  };
+  const error = await startNativeProject(opts).catch(
+    (failure: unknown) => failure
+  );
+  expect((error as Error).message).toContain(
+    "service web field image (registry_image_not_found)"
+  );
+  expect((error as Error).message).not.toContain("synthetic:missing");
+  expect((error as Error).message).not.toContain("private registry detail");
+});
+
+test("wrong pinned host port names the binding before VM boot", async () => {
+  const { opts, events } = await fixture(false);
+  const path = join(opts.scope.projectRoot, "selection.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [
+        {
+          service: "web",
+          binding: "api",
+          guest_port: 443,
+          aliases: ["api.example.test"],
+          host_pid: 12_345,
+          host_port: 8443,
+        },
+      ],
+    })
+  );
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "dependency-check") {
+      throw new NativeRuntimeRequestError({
+        nativeCode: "host_endpoint_identity",
+        message: "private detail",
+      });
+    }
+    return await invoke(request);
+  };
+  await expect(
+    startNativeProject({ ...opts, dependencyFile: path })
+  ).rejects.toThrow(
+    "binding api, aliases api.example.test, guest port 443, host port 8443"
+  );
+  expect(events).not.toContain("runtime up");
+  expect(events).not.toContain("runtime ensure-image");
+});
+
+test("an exited frontend marker does not survive a later completed start as pending", async () => {
+  const { opts } = await fixture(false);
+  const modulePath = new URL(
+    "../src/backends/native-project-run.ts",
+    import.meta.url
+  ).pathname;
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `
+    const { beginNativeProjectStartupObservation } = await import(${JSON.stringify(modulePath)});
+    await beginNativeProjectStartupObservation(JSON.parse(process.env.HACK_TEST_SCOPE));
+    // Exit without the returned finalizer, as a terminated frontend would.
+  `,
+    ],
+    {
+      env: { HACK_TEST_SCOPE: JSON.stringify(opts.scope) },
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 10_000,
+    }
+  );
+  expect(await child.exited).toBe(0);
+  expect((await nativeProjectPs(opts)).status).toBe("not_started");
+  await startNativeProject(opts);
+  expect((await nativeProjectPs(opts)).status).toBe("not_started");
+});
+
+test("invalid startup arguments refuse before creating advisory storage", async () => {
+  const { opts } = await fixture(false);
+  await expect(
+    startNativeProject({ ...opts, allowedHosts: ["bad host"] })
+  ).rejects.toThrow();
+  expect(await readdir(opts.scope.projectDir)).toEqual([]);
 });

@@ -18,6 +18,7 @@ import {
   CONFIG_COMPILER_PAYLOAD,
   createPrereleasePlan,
   PAYLOAD_MODES,
+  PRERELEASE_BASE,
   PRERELEASE_PAYLOAD,
   PRERELEASE_PLATFORM,
   PRERELEASE_SUPPORT_ANCHOR,
@@ -28,6 +29,7 @@ import {
   requireExactHeadCi,
   requireHumanApproval,
   requireReviewerProtection,
+  requireUnreleasedCandidateLine,
   stableReleaseVersion,
   verifyPublishGate,
   verifyReleaseAssets,
@@ -162,6 +164,9 @@ function gateApi(overrides: Record<string, unknown> = {}) {
     [`commits/${sha}/statuses?per_page=100&page=1`]: [],
     [`git/ref/tags/${plan.tag}`]: null,
     [`releases/tags/${plan.tag}`]: null,
+    [`git/ref/tags/v${plan.base}`]: null,
+    [`releases/tags/v${plan.base}`]: null,
+    "releases/latest": { tag_name: "v4.2.7" },
     "actions/runs/99/approvals": approval,
     ...overrides,
   };
@@ -195,6 +200,52 @@ describe("prerelease decision boundary", () => {
     ).toBe(true);
   });
 
+  test("current dispatch path plans the next 5.0.0 candidates", () => {
+    expect(PRERELEASE_BASE).toBe("5.0.0");
+    for (const version of ["5.0.0-next.12", "5.0.0-next.13"]) {
+      const next = createPrereleasePlan({ ...input, version, publish: "true" });
+      expect(next.tag).toBe(`v${version}`);
+      expect(next.base).toBe("5.0.0");
+      expect(
+        Object.keys(prereleaseMetadata({ version, sourceRevision: sha }))
+      ).toEqual(["schema", "version", "tag", "source_revision", "platform"]);
+    }
+  });
+
+  test("candidate line moves to the next unreleased stable line", () => {
+    const moved = createPrereleasePlan({
+      ...input,
+      version: "5.1.0-next.1",
+      base: "5.1.0",
+    });
+    expect(moved.tag).toBe("v5.1.0-next.1");
+    expect(moved.archive).toBe("hack-5.1.0-next.1-darwin-arm64-native.tar.gz");
+    expect(
+      prereleaseMetadata({
+        version: "5.1.0-next.1",
+        sourceRevision: sha,
+        base: "5.1.0",
+      }).tag
+    ).toBe("v5.1.0-next.1");
+    for (const version of ["5.0.0-next.13", "5.10.0-next.1", "5.1.0-next.0"]) {
+      expect(() =>
+        createPrereleasePlan({ ...input, version, base: "5.1.0" })
+      ).toThrow("Version must be 5.1.0-next.N");
+    }
+    for (const base of [
+      "5.1",
+      "v5.1.0",
+      "5.01.0",
+      "4.3.0",
+      "6.0.0",
+      "5.1.0-next.1",
+    ]) {
+      expect(() =>
+        createPrereleasePlan({ ...input, version: `${base}-next.1`, base })
+      ).toThrow("Candidate base");
+    }
+  });
+
   test("refuses invalid versions, revisions, event, channel and publish input", () => {
     for (const version of [
       "5.0.0",
@@ -206,6 +257,10 @@ describe("prerelease decision boundary", () => {
       "5.0.0-next.1;touch /tmp/injected",
       "5.0.0-rc.1",
       "4.2.1-next.1",
+      " 5.0.0-next.1",
+      // Another line than the planned base.
+      "5.1.0-next.1",
+      "5.0.1-next.1",
     ]) {
       expect(() => createPrereleasePlan({ ...input, version })).toThrow();
     }
@@ -397,6 +452,8 @@ describe("prerelease decision boundary", () => {
       },
       { [`git/ref/tags/${plan.tag}`]: { ref: `refs/tags/${plan.tag}` } },
       { [`releases/tags/${plan.tag}`]: { id: 1 } },
+      { [`git/ref/tags/v${plan.base}`]: { ref: `refs/tags/v${plan.base}` } },
+      { "releases/latest": { tag_name: `v${plan.base}` } },
       { "actions/runs/99/approvals": [] },
     ]) {
       await expect(
@@ -416,6 +473,58 @@ describe("prerelease decision boundary", () => {
         approved: true,
       })
     ).rejects.toThrow("API unavailable");
+  });
+
+  test("refuses a candidate line that a stable release already reached", async () => {
+    const api = (data: Record<string, unknown>) => (path: string) => {
+      if (!(path in data)) {
+        throw new Error(`Unexpected API request ${path}`);
+      }
+      return Promise.resolve(data[path]);
+    };
+    const unreleased = (latest: unknown, base = "5.0.0") => ({
+      [`git/ref/tags/v${base}`]: null,
+      [`releases/tags/v${base}`]: null,
+      "releases/latest": latest,
+    });
+    // No stable release yet, or only earlier lines: the line still sorts above stable.
+    for (const latest of [
+      null,
+      { tag_name: "v4.2.7" },
+      { tag_name: "v4.99.0" },
+    ]) {
+      await requireUnreleasedCandidateLine({
+        api: api(unreleased(latest)),
+        base: "5.0.0",
+      });
+    }
+    await requireUnreleasedCandidateLine({
+      api: api(unreleased({ tag_name: "v5.0.3" }, "5.1.0")),
+      base: "5.1.0",
+    });
+    // Released line (tag, release or latest stable at/after it) and malformed latest.
+    for (const [data, message] of [
+      [
+        {
+          ...unreleased(null),
+          "git/ref/tags/v5.0.0": { ref: "refs/tags/v5.0.0" },
+        },
+        "Stable v5.0.0 already exists",
+      ],
+      [
+        { ...unreleased(null), "releases/tags/v5.0.0": { id: 1 } },
+        "Stable v5.0.0 already exists",
+      ],
+      [unreleased({ tag_name: "v5.0.0" }), "does not sort above"],
+      [unreleased({ tag_name: "v5.0.1" }), "does not sort above"],
+      [unreleased({ tag_name: "v5.10.0" }), "does not sort above"],
+      [unreleased({ tag_name: "v5.0.0-next.12" }), "vX.Y.Z tag"],
+      [unreleased({}), "vX.Y.Z tag"],
+    ] as const) {
+      await expect(
+        requireUnreleasedCandidateLine({ api: api(data), base: "5.0.0" })
+      ).rejects.toThrow(message);
+    }
   });
 
   test("uses content-readable classic policy alongside rulesets without an administration endpoint", async () => {

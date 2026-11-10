@@ -43,7 +43,9 @@ impl HttpProbe {
         }
         Ok(())
     }
-    /// State directory must be a fresh private tmpfs directory for this process generation.
+    /// Samples must be absent in the private tmpfs directory for this generation.
+    /// Owner rearm may retain the mount after proving the prior exec inactive
+    /// and clearing its exact samples under the existing probe lock.
     pub fn arguments(
         &self,
         directory: &str,
@@ -226,6 +228,7 @@ mod tests {
             server: Option<thread::JoinHandle<()>>,
             config: HttpProbe,
             accepted: Arc<AtomicUsize>,
+            generation: String,
         }
         impl Fixture {
             fn new(mode: usize, grace: u64) -> Self {
@@ -299,6 +302,7 @@ mod tests {
                     server: Some(server),
                     config,
                     accepted,
+                    generation: GENERATION.into(),
                 };
                 fixture.process = Some(fixture.command().spawn().unwrap());
                 fixture
@@ -307,7 +311,7 @@ mod tests {
                 let mut c = Command::new(concat!(env!("OUT_DIR"), "/http-probe-host"));
                 c.args(
                     self.config
-                        .arguments(self.root.to_str().unwrap(), GENERATION)
+                        .arguments(self.root.to_str().unwrap(), &self.generation)
                         .unwrap(),
                 )
                 .stdin(Stdio::null())
@@ -321,7 +325,10 @@ mod tests {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as u64;
-                let health = self.config.health(&raw, GENERATION, true, now).unwrap();
+                let health = self
+                    .config
+                    .health(&raw, &self.generation, true, now)
+                    .unwrap();
                 Some((health, raw.split(' ').nth(2).unwrap().parse().unwrap()))
             }
             fn wait(&mut self, health: Health, after: u64) -> u64 {
@@ -354,6 +361,92 @@ mod tests {
                 self.server.take().unwrap().join().unwrap();
                 fs::remove_dir_all(&self.root).unwrap();
             }
+        }
+
+        #[cfg(target_os = "linux")]
+        fn prepare_rearm(fixture: &Fixture, previous: &str) -> std::process::Output {
+            use std::os::unix::fs::MetadataExt;
+            let owner = fs::metadata(&fixture.root).unwrap();
+            let script = format!(
+                "state=$1; uid=$2; gid=$3; previous=$4\n{}",
+                include_str!("graph/probe-rearm-samples.sh")
+            );
+            Command::new("/bin/sh")
+                .args(["-eu", "-c", &script, "probe-rearm-test"])
+                .arg(&fixture.root)
+                .arg(owner.uid().to_string())
+                .arg(owner.gid().to_string())
+                .arg(previous)
+                .output()
+                .unwrap()
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn retained_probe_rearm_clears_old_and_interrupted_samples_without_remounting() {
+            use std::os::unix::fs::MetadataExt;
+            for pending in [b"".as_slice(), b"v1 interrupted sample".as_slice()] {
+                let mut f = Fixture::new(1, 0);
+                f.wait(Health::Healthy, 0);
+                let before = fs::read(f.root.join("status")).unwrap();
+                // A live writer's lock refuses before any sample is removed.
+                assert!(!prepare_rearm(&f, GENERATION).status.success());
+                assert!(f.root.join("first-sample").exists());
+                let mut old = f.process.take().unwrap();
+                old.kill().unwrap();
+                old.wait().unwrap();
+                fs::write(f.root.join("status.pending"), pending).unwrap();
+                fs::set_permissions(
+                    f.root.join("status.pending"),
+                    fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+                let directory = fs::metadata(&f.root).unwrap().ino();
+                let lock = fs::metadata(f.root.join("lock")).unwrap().ino();
+                assert!(prepare_rearm(&f, GENERATION).status.success());
+                assert!(!prepare_rearm(&f, GENERATION).status.success());
+                for name in ["status", "first-sample", "status.pending"] {
+                    assert!(!f.root.join(name).exists());
+                }
+                assert_eq!(fs::metadata(&f.root).unwrap().ino(), directory);
+                assert_eq!(fs::metadata(f.root.join("lock")).unwrap().ino(), lock);
+                f.generation = "f".repeat(32);
+                assert!(
+                    f.config
+                        .health(
+                            std::str::from_utf8(&before).unwrap(),
+                            &f.generation,
+                            true,
+                            0
+                        )
+                        .is_err()
+                );
+                f.process = Some(f.command().spawn().unwrap());
+                f.wait(Health::Healthy, 0);
+                let first = fs::read_to_string(f.root.join("first-sample")).unwrap();
+                assert!(first.starts_with(&format!("v1 {} 1 ", f.generation)));
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn retained_probe_rearm_refuses_foreign_generation_and_aliased_samples() {
+            use std::os::unix::fs::symlink;
+            let mut f = Fixture::new(1, 0);
+            f.wait(Health::Healthy, 0);
+            let mut old = f.process.take().unwrap();
+            old.kill().unwrap();
+            old.wait().unwrap();
+            let before = fs::read(f.root.join("status")).unwrap();
+            assert!(!prepare_rearm(&f, &"f".repeat(32)).status.success());
+            assert_eq!(fs::read(f.root.join("status")).unwrap(), before);
+            symlink("status", f.root.join("status.pending")).unwrap();
+            assert!(!prepare_rearm(&f, GENERATION).status.success());
+            assert_eq!(fs::read(f.root.join("status")).unwrap(), before);
+            fs::remove_file(f.root.join("status.pending")).unwrap();
+            fs::hard_link(f.root.join("status"), f.root.join("status.pending")).unwrap();
+            assert!(!prepare_rearm(&f, GENERATION).status.success());
+            assert_eq!(fs::read(f.root.join("status")).unwrap(), before);
         }
         #[test]
         fn resident_probe_counts_retries_recovers_and_refuses_duplicate_or_replay() {

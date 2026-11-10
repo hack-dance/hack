@@ -18,7 +18,7 @@ import {
   type Scenario,
   selectScenarios,
 } from "./harness.ts";
-import { nativeConfigNetworksScenario } from "./native-config-networks-acceptance.ts";
+import { nativeConfigNetworksScenarios } from "./native-config-networks-acceptance.ts";
 import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
 import { agentSurfaceFreezeScenario } from "./scenarios/agent-surface-freeze.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
@@ -136,7 +136,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   nativeConfigVmFilesScenario,
   nativeConfigProcessPolicyScenario,
   nativeConfigRoutingScenario,
-  nativeConfigNetworksScenario,
+  ...nativeConfigNetworksScenarios,
   nativeComposeAdoptionWorktreesScenario,
   nativeComposeAdoptionBranchWorktreesScenario,
   nativeComposeAdoptionStringWorktreesScenario,

@@ -31,6 +31,21 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     if *action == "native" {
         return native::command(candidate, args);
     }
+    if *action == "inspect-shutdown-rebase" {
+        let run = match *args {
+            ["--run-id", run] | ["--run-id", run, "--json"] => run,
+            _ => return Err(invalid()),
+        };
+        return graph::inspect_shutdown_rebase(candidate, run);
+    }
+    if *action == "recover-shutdown-rebase" {
+        let (run, expected) = match *args {
+            ["--run-id", run, "--expect-selection", expected]
+            | ["--run-id", run, "--expect-selection", expected, "--json"] => (run, expected),
+            _ => return Err(invalid()),
+        };
+        return graph::recover_shutdown_rebase(candidate, run, expected);
+    }
     if *action == "inspect-interrupted-start-cleanup" {
         let run = match *args {
             ["--run-id", run] | ["--run-id", run, "--json"] => run,
@@ -579,6 +594,22 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             "unsupported_host",
             "Dependency reservations require macOS.",
         ));
+    }
+    if *action == "dependency-check" {
+        let (pid, port) = match *args {
+            ["--host-pid", pid, "--host-port", port]
+            | ["--host-pid", pid, "--host-port", port, "--json"] => (
+                pid.parse::<i32>().map_err(|_| invalid())?,
+                port.parse::<u16>().map_err(|_| invalid())?,
+            ),
+            _ => return Err(invalid()),
+        };
+        if pid <= 1 || port == 0 {
+            return Err(invalid());
+        }
+        // Observation only: no VM/provider or durable dependency authority.
+        hack_runtime_core::provider::host_endpoint::HostEndpoint::capture(pid, port)?;
+        return Ok(serde_json::json!({"listener_confirmed": true}));
     }
     if *action == "dependency-plan" {
         let path = match *args {

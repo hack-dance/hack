@@ -17,8 +17,13 @@ const runner = resolve(import.meta.dir, "e2e/run.ts");
 const defaultNames = selectScenarios({ scenarios: ALL_SCENARIOS }).map(
   (scenario) => scenario.name
 );
+const NETWORK_PARTS = [
+  "native-config-networks-lifecycle",
+  "native-config-networks-policy",
+  "native-config-networks-ingress",
+];
 const LONG_SCENARIOS = [
-  "native-config-networks",
+  ...NETWORK_PARTS,
   "native-config-compose",
   "native-config-routing",
 ];
@@ -113,18 +118,23 @@ describe("e2e shard selection", () => {
     }
   });
 
-  test("the known long scenarios land on separate CI shards", () => {
+  test("the network parts spread over CI shards and run without other long scenarios", () => {
+    for (const name of LONG_SCENARIOS) {
+      expect(defaultNames).toContain(name);
+    }
     const shards = partitionScenarios({ names: defaultNames, count: 4 });
-    const homes = LONG_SCENARIOS.map((name) =>
-      shards.findIndex((shard) => shard.includes(name))
-    );
-    expect(homes.every((home) => home >= 0)).toBe(true);
-    expect(new Set(homes).size).toBe(LONG_SCENARIOS.length);
-    // The longest scenario runs alone so nothing queues behind it.
-    const networks = shards.find((shard) =>
-      shard.includes("native-config-networks")
-    );
-    expect(networks).toEqual(["native-config-networks"]);
+    const home = (name: string) =>
+      shards.findIndex((shard) => shard.includes(name));
+    const networkHomes = NETWORK_PARTS.map(home);
+    // The parts used to be one scenario that set the docker-e2e wall time.
+    expect(new Set(networkHomes).size).toBe(NETWORK_PARTS.length);
+    for (const index of networkHomes) {
+      expect(
+        shards[index]?.filter((name) => LONG_SCENARIOS.includes(name))
+      ).toHaveLength(1);
+    }
+    expect(networkHomes).not.toContain(home("native-config-compose"));
+    expect(networkHomes).not.toContain(home("native-config-routing"));
   });
 
   test("unhinted scenarios still run and duplicates are refused", () => {
@@ -212,36 +222,62 @@ describe("docker-e2e CI fan-in", () => {
     }
   });
 
-  test("docker-e2e accepts success or cancellation and never skips failures", async () => {
+  test("docker-e2e accepts success, cancellation or an out-of-scope skip and never hides failures", async () => {
     const workflow = await ciWorkflow();
     const fanIn = workflow.jobs["docker-e2e"];
     expect(fanIn?.name ?? "docker-e2e").toBe("docker-e2e");
-    expect(fanIn?.needs).toBe("docker-e2e-shard");
+    expect(fanIn?.needs).toEqual(["changes", "docker-e2e-shard"]);
     expect(fanIn?.if).toBe("${{ always() }}");
+    const shardJob = workflow.jobs["docker-e2e-shard"];
+    expect(shardJob?.needs).toBe("changes");
+    expect(shardJob?.if).toBe("${{ needs.changes.outputs.suite == 'true' }}");
     const gate = fanIn?.steps.find(
       (step) => step.name === "Reject failed or skipped docker-e2e shards"
     );
-    expect(gate?.env?.SHARD_RESULT).toBe(
-      "${{ needs.docker-e2e-shard.result }}"
-    );
+    expect(gate?.env).toEqual({
+      CHANGES_RESULT: "${{ needs.changes.result }}",
+      SCOPE: "${{ needs.changes.outputs.scope }}",
+      SUITE: "${{ needs.changes.outputs.suite }}",
+      SHARD_RESULT: "${{ needs.docker-e2e-shard.result }}",
+    });
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
     expect(gate?.run).toContain("exit 1");
     if (!gate?.run) {
       throw new Error("Missing aggregate shell gate");
     }
-    for (const [result, exitCode] of [
-      ["success", 0],
-      ["cancelled", 0],
-      ["failure", 1],
-      ["skipped", 1],
-      ["", 1],
-      ["unexpected", 1],
+    // [scope result, suite in scope, shard result, exit code]
+    for (const [changes, suite, result, exitCode] of [
+      ["success", "true", "success", 0],
+      ["success", "true", "cancelled", 0],
+      ["success", "true", "failure", 1],
+      ["success", "true", "skipped", 1],
+      ["success", "true", "", 1],
+      ["success", "true", "unexpected", 1],
+      // Out of scope: skipped shards pass, anything that ran must still pass.
+      ["success", "false", "skipped", 0],
+      ["success", "false", "failure", 1],
+      ["success", "", "skipped", 1],
+      // A failed or skipped scope fails closed; a cancelled run does not.
+      ["failure", "false", "skipped", 1],
+      ["skipped", "false", "skipped", 1],
+      ["", "false", "skipped", 1],
+      ["cancelled", "", "skipped", 0],
     ] as const) {
       const run = Bun.spawnSync(["bash", "-e", "-c", gate.run], {
-        env: { ...process.env, SHARD_RESULT: result },
+        env: {
+          ...process.env,
+          CHANGES_RESULT: changes,
+          SCOPE: "fixture",
+          SUITE: suite,
+          SHARD_RESULT: result,
+        },
+        stdout: "ignore",
         timeout: 5000,
       });
-      expect(run.exitCode).toBe(exitCode);
+      expect(
+        run.exitCode,
+        `changes=${changes} suite=${suite} shards=${result}`
+      ).toBe(exitCode);
     }
     // No other job may claim the docker-e2e name.
     const named = Object.entries(workflow.jobs).filter(

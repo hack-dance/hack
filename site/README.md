@@ -1,67 +1,75 @@
 # hack.foo documentation site
 
-Local, reviewable site for the Hack public docs. Nothing here configures DNS,
-credentials, analytics, deployment or a hosting account. `https://hack.foo` is the
-intended canonical URL; a successful local build does not mean the site is deployed.
+The public docs site for Hack, built with Next.js and Fumadocs. `https://hack.foo`
+is the canonical URL. The site publishes two versioned corpora, v4 (stable) and
+v5 (prerelease), from pinned snapshots of the repository's `docs/` tree plus
+short editorial pages under `docs/versions/<version>/`.
 
 ## Develop and verify
 
-For a Hack-routed preview, run from the repository root:
-
-```bash
-hack up docs --profile docs --branch docs-preview --detach
-hack open docs --branch docs-preview
-```
-
-This opt-in service runs the pinned Bun and Node tools in a container, installs
-the frozen site lockfile, builds with webpack, and serves the production build.
-Dependencies and Next build output
-live in branch-owned volumes. Hack supplies local HTTPS routing; no host port or
-public deployment is created. Inspect startup with
-`hack logs docs --profile docs --branch docs-preview --compose --no-follow`.
-Stop this preview with `hack down --profile docs --branch docs-preview`.
-The service is capped at two CPUs and 6 GB memory, with a 3 GB Node heap.
-Restart the service after source changes to rebuild the preview. This avoids
-development-server compilation and HMR overhead while reviewing the whole corpus.
-
-Use the repository's pinned Bun 1.4.4. Site dependencies and `site/bun.lock` are
-independent of the CLI workspace; do not change the root Bun pin for Next.js.
-Next.js also requires a supported Node.js installation (20.9 or newer).
+Use the repository's pinned Bun. Site dependencies and `site/bun.lock` are
+independent of the CLI workspace; Next.js also needs Node.js 20.9 or newer.
 
 From the repository root:
 
 ```bash
 bun install --cwd site --frozen-lockfile
-bun run docs:prepare
-bun run docs:check
+bun run docs:prepare      # stage the versioned corpus into site/content and site/public
+bun run docs:check        # corpus, link-boundary and framing checks
 bun run docs:typecheck
 bun run docs:build
-bun run docs:dev
+bun run docs:dev          # http://127.0.0.1:3000
 ```
 
-The dev server binds to `127.0.0.1:3000`; choose a different port with the Next CLI
-when needed. `bun run --cwd site start` serves an existing production build locally.
-With the preview running, validate all routes and exports in a second terminal:
+With a production build served by `bun run --cwd site start`, run the HTTP smoke
+in a second terminal:
 
 ```bash
 bun run docs:smoke http://127.0.0.1:3000
 ```
 
-There is no publish or deploy command. Production builds explicitly use Next's
-supported webpack builder. Upstream Fumadocs cache-analysis and CSS `::highlight`
-optimizer warnings can appear; a passing build does not establish their resolution.
+It checks every versioned route, canonical URLs, search isolation, the LLM
+exports, legacy redirects and unknown-version handling.
 
-## Sources, versions and curation
+For a Hack-routed preview, `hack up docs --profile docs --branch docs-preview
+--detach` builds and serves the site in a container at a local HTTPS URL; stop it
+with `hack down --profile docs --branch docs-preview`.
 
-Read [versioned-content.md](versioned-content.md) for source refs, original snapshot
-hashes, editorial adaptations, navigation and verification boundaries.
-`scripts/docs/versions.json` is the version-specific publication allowlist.
-Only its entries feed Fumadocs/search/LLM exports; no recursive archive discovery
-is used. `docs:prepare` owns ignored generated content and exports. Edit the
-explicit editorial source for the desired version, preserve original snapshots,
-and run corpus, type, build and live smoke checks.
+## Content model
 
-The homepage design remains independent of version selection. `/docs` defaults to
-v5; the docs navigation selects v4 or v5. Versioned source snapshots describe their
-pinned revision, not every current development change. No successful site build
-establishes runtime acceptance or public deployment.
+- `scripts/docs/versions.json` pins each version to a Git revision and lists the
+  `docs/` files it publishes. Only listed files are published; there is no
+  recursive discovery.
+- `docs/versions/<version>/originals/<dir>/` holds byte-exact snapshots of those
+  files at the pinned revision, verified by SHA-256 at build time.
+- `docs/versions/<version>/*.md` are editorial pages written for the site. An
+  editorial page with the same slug as a snapshot replaces it.
+- `bun run docs:prepare` rewrites relative links to site routes or pinned GitHub
+  URLs, curates the generated CLI reference to the supported surface, and writes
+  `/<version>/llms.txt` and `/<version>/llms-full.txt`.
+
+To move v5 to a newer prerelease:
+
+```bash
+bun run docs:pin -- --version v5 --ref v5.0.0-next.13 --label "v5 (next.13)" --dir next13
+```
+
+Then update the release tag in `docs/versions/v5/install.md`, re-read the
+editorial pages against the new release, and run the checks above. The pin script
+replaces the previous originals directory.
+
+See [content-decisions.md](content-decisions.md) for the editorial rules and
+[reference-coverage.md](reference-coverage.md) for what the field references cover.
+
+## Deploy
+
+The site deploys through Vercel's Git integration from this repository. The Vercel
+project uses root directory `site/`, the Next.js preset and the settings in
+[`vercel.json`](vercel.json): a frozen Bun install and a build that stages the
+corpus from the repository root before `next build`. "Include source files outside
+of the Root Directory" must stay enabled so the build can read `docs/` and
+`scripts/docs/`.
+
+Pull requests get preview deployments. The production branch is `next` while v5
+docs live there; it moves to `main` after 5.0.0. No custom domain is attached yet.
+A successful local build does not mean the site is deployed.

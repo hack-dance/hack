@@ -1,55 +1,62 @@
 # Use Hack with an agent
 
-[Agent setup in next.6](guides/agent-setup-v5-branch.md) describes the opt-in model shipped by merged PR531 in this release.
+With shell access, an agent can use the CLI directly. Complete [Install](install.md),
+make the intended `hack` executable available on the agent's PATH, and give it this
+version's [documentation index](/v5/llms.txt) or [full corpus](/v5/llms-full.txt).
+Plugins and MCP are optional additions. They do not install Hack or prepare its
+runtime.
 
-With shell access, an agent can use the CLI directly. Complete [Install](install.md), select the intended executable and give the agent this version's [documentation index](/v5/llms.txt) or [full corpus](/v5/llms-full.txt).
+v5 retired automatic instruction injection. Hack no longer writes `AGENTS.md` or
+`CLAUDE.md` sections, Cursor rules, session hooks or global skill copies, and the
+old `hack setup sync` and `hack agent prime` paths refuse with a retirement notice.
+Existing customized files are left alone. Guidance now arrives through the
+plugin below, which the client's own plugin manager installs and updates.
 
-For a local review, replace the public host below with the actual preview host **before** copying the task. Keep the /v5/ path so the agent reads the selected version. After publication, use the public host shown.
+## The `hack` plugin
 
-A copyable task introduction:
-
-~~~text
-Read https://hack.foo/v5/llms.txt.
-Confirm the Hack executable, version, host and project before changing anything.
-Use the CLI for the requested task and verify the application's behavior.
-Preserve existing repository policy. Do not install agent instructions, hooks
-or rules, run guidance sync, or update skills as a setup side effect.
-~~~
-
-Plugins and MCP are optional. They do not install Hack or prepare its runtime.
-
-## Optional Codex skills
-
-Use a reviewed checkout of the selected source revision. Its [native marketplace](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/.agents/plugins/marketplace.json) lists `./plugins/hack` and `./plugins/hack-mcp` relative to the repository marketplace root. The [Codex manifest](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/plugins/hack/.codex-plugin/plugin.json) selects `./skills/`.
-
-Register that local source:
-
-~~~sh
-codex plugin marketplace add /absolute/path/to/reviewed-checkout
-~~~
-
-Registration does not install or load the plugin. Follow the current [OpenAI plugin documentation](https://developers.openai.com/plugins/build/plugins) to select, install and test it through the client Plugins Directory. A repository marketplace is not a public directory listing.
-
-The `hack` bundle ships these seven skills; select only the guidance you want:
+The `hack` plugin ships eight skills and nothing else: no hooks, no rules, no MCP
+server.
 
 | Skill | Purpose |
 | --- | --- |
-| hack-cli | CLI workflows, services, URLs, logs and workspaces |
+| hack-cli | Everyday workflows: services, URLs, logs, exec and workspaces |
 | hack-branches | Parallel branch instances and aliases |
-| hack-env | Env layers and value-safe configuration workflows |
-| hack-diagnose | Read-first diagnosis and error-code reference |
-| hack-init | Explicit project onboarding through the CLI prompt |
-| hack-install | Installation and executable/channel selection |
-| hack-remote | Prepare a project on another host or in a cloud environment; it does not enable unsupported node/gateway commands |
+| hack-env | Env layers and value-safe configuration changes |
+| hack-diagnose | Read-first diagnosis and the error-code reference |
+| hack-init | Project onboarding through the CLI's onboarding prompt |
+| hack-install | Installation and executable or channel selection |
+| hack-remote | Prepare a project on another host or in a cloud environment |
+| hack-feedback | Report a Hack problem with redacted evidence |
 
-**Shipped in next.6:** the [skill bodies](https://github.com/hack-dance/hack/tree/44aaf5156426dfcbb1c8a189b8e20531e5b95613/plugins/hack/skills) no longer require automatic guidance maintenance. Codex, Claude and Cursor manifests select skills only, with no SessionStart/PreCompact primer hooks or injected rules. Existing customized client files are preserved. See the [historical compatibility boundary](reference/agent-compatibility.md) for next.5 behavior and the shipped retirement.
+Install it from this repository's marketplace:
 
-Clients supporting individual opt-in skills can use a separately reviewed skill and its references. That choice does not require policy-file exports, global settings or automatic skill updates. For project setup, see [Give an agent an explicit task](guides/agent-first-setup.md).
+```sh
+# Codex
+codex plugin marketplace add hack-dance/hack
+codex plugin add hack@hack-dance
 
-## Optional, separate MCP
+# Claude Code
+claude plugin marketplace add hack-dance/hack --sparse .claude-plugin plugins/hack plugins/hack-mcp
+claude plugin install hack@hack-dance
+```
 
-The `hack` plugin has no MCP server. The separate [hack-mcp bundle](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/plugins/hack-mcp/README.md) supplies one stdio server, `hack mcp serve`, with no skills, hooks or rules. Its [server definition](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/plugins/hack-mcp/mcp.json) finds `hack` on the client's PATH; it does not select `hack-next` or a native home. Choose one Hack MCP registration per client.
+In Cursor, install Hack from Customize. The plugin finds `hack` on the client's
+PATH; during the prerelease that is whichever executable you put there. The
+[plugin README](https://github.com/hack-dance/hack/blob/4e51bc3f8119e154f49e040e606b6ed7f727d6d3/plugins/hack/README.md)
+has per-client notes. A plugin registered in a client is not proof that it loaded;
+check the client's plugin list.
 
-For an explicitly selected candidate integration, next.6's `mcp print` supports `--bundle`, `--cli` and `--runtime-directory`. These select a verified MCP adapter bundle, its intended Hack executable and a private socket directory; an adapter bundle is separate from the native CLI installation. Printing previews configuration without installing it. See the [pinned command declarations](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/src/commands/mcp.ts) and [bundle launch contract](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/src/mcp/bundle-launch.ts) for requirements.
+## The separate `hack-mcp` plugin
 
-Read [MCP tools](../reference/mcp-tools.md), [fields/results](reference/mcp-fields.md) and [log limits](../reference/mcp-logs.md) when choosing this interface. Plugin registration is not proof of client loading or runtime compatibility, and local plugins do not automatically appear in cloud tasks.
+Clients without shell access can add `hack-mcp`. It declares one stdio server,
+`hack mcp serve`, and no skills. Use one Hack MCP registration per client, either
+this plugin or a single `hack mcp install` entry, never both. The
+[MCP tools](../reference/mcp-tools.md) and [MCP logs](../reference/mcp-logs.md)
+references describe the tool surface and its finite log cutoffs.
+
+## Project onboarding
+
+`hack agent onboard` prints an onboarding prompt for an existing project, and
+`hack init --with claude|codex` hands a new project's setup to an agent. Both
+describe the work to do; neither installs skills or edits client configuration.
+See [Explicit agent setup](guides/agent-first-setup.md).

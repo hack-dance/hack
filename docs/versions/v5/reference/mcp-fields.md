@@ -1,6 +1,6 @@
 # MCP fields and results
 
-Historical next.5 field audit. For released next.6 changes and current command sources, see [next.6 release contracts](next6-contracts.md). These field inventories have not been requalified against next.6; they do not override its current generated command reference.
+This field inventory was audited against the `5.0.0-next.5` source and has not been requalified against later prereleases. The [generated command reference](../../reference/cli.md) and the pinned runtime guides take precedence where they differ.
 
 Exact tool inputs for v5 (next.5). Start with [Agent integrations](../../integrations.md) for setup. These are MCP JSON input names, not CLI flag spellings.
 

@@ -2101,7 +2101,11 @@ merely because their error happens to be `provider_busy`.
 
 Routes retain native HTTP healthy readiness. The owner rearms a dead probe exec
 with a fresh sample generation after an ownership-verified incarnation change,
-using a normally admitted allocation-capable engine lease. Cleanup-only
+using an allocation-capable engine lease only after cleanup-only observation
+detects a change and releases its lease. Allocation acquisition contention or
+resource pressure defers rearm; ownership and generation are revalidated after
+acquisition, and subsequent errors remain failures. Idle ticks require no allocation
+admission. Cleanup-only
 connections continue to reject exec create/start requests.
 It keeps the mounted state directory and prepares only the prior generation’s
 private samples under the existing probe lock; the stopped-container reset path would

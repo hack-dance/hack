@@ -31,19 +31,44 @@ fn with_available_lease<L, T>(
     operation(lease).map(Some)
 }
 
-/// Route rearm creates/starts an exec, so its lease must admit allocation.
-/// Initial enrollment cannot defer; subsequent ticks defer acquisition only.
-fn with_probe_lease<L, T>(
+/// Idle observation never asks for allocation admission. Drop that lease before
+/// admitting a changed generation; pressure/busy refusals there preserve the graph.
+/// The mutation callback must revalidate and return false for pre-effect drift.
+fn probe_tick<L>(
     initialize: bool,
-    acquire: impl FnOnce(ConnectionMode) -> Result<L, CandidateError>,
-    operation: impl FnOnce(L) -> Result<T, CandidateError>,
-) -> Result<Option<T>, CandidateError> {
-    let acquire = || acquire(ConnectionMode::Allocation);
-    if initialize {
-        acquire().and_then(operation).map(Some)
+    generations: &mut BTreeMap<String, String>,
+    mut acquire: impl FnMut(ConnectionMode) -> Result<L, CandidateError>,
+    observe: impl FnOnce(&L) -> Result<BTreeMap<String, String>, CandidateError>,
+    mut rearm: impl FnMut(&L, &str, &str) -> Result<bool, CandidateError>,
+) -> Result<(), CandidateError> {
+    let observed = if initialize {
+        acquire(ConnectionMode::Cleanup)
+            .and_then(|lease| observe(&lease))
+            .map(Some)
     } else {
-        with_available_lease(acquire, operation)
+        with_available_lease(|| acquire(ConnectionMode::Cleanup), |lease| observe(&lease))
+    }?;
+    let Some(observed) = observed else {
+        return Ok(());
+    };
+    if initialize {
+        *generations = observed;
+        return Ok(());
     }
+    for (name, expected) in observed {
+        if generations.get(&name).ok_or_else(refused)? == &expected {
+            continue;
+        }
+        let lease = match acquire(ConnectionMode::Allocation) {
+            Err(error) if matches!(error.code, "provider_busy" | "runtime_pressure") => continue,
+            result => result?,
+        };
+        // No operation error is deferred: preparation or a POST may have begun.
+        if rearm(&lease, &name, &expected)? {
+            generations.insert(name, expected);
+        }
+    }
+    Ok(())
 }
 
 /// A generation change is permission to retire only when the receipt admitted
@@ -255,46 +280,53 @@ pub(in crate::provider::graph) fn supervise_probes(
     check: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     check()?;
-    let acquire = |mode| Engine::connect_in_mode(candidate, mode);
-    let operation = |engine: Engine<'_>| {
-        let (mut receipt, root) = load(candidate, &engine, run)?;
-        let names = receipt
-            .resources
-            .values()
-            .filter(|r| r.routing.is_some() && r.restart_policy.is_some())
-            .map(|r| r.key.clone())
-            .collect::<Vec<_>>();
-        for name in names {
+    probe_tick(
+        initialize,
+        generations,
+        |mode| {
             check()?;
-            let Some(endpoint) = route_endpoint(&engine, &receipt, &name)? else {
-                continue;
+            Engine::connect_in_mode(candidate, mode)
+        },
+        |engine| {
+            let (receipt, _) = load(candidate, engine, run)?;
+            let mut observed = BTreeMap::new();
+            for resource in receipt
+                .resources
+                .values()
+                .filter(|r| r.routing.is_some() && r.restart_policy.is_some())
+            {
+                check()?;
+                if let Some(endpoint) = route_endpoint(engine, &receipt, &resource.key)? {
+                    observed.insert(resource.key.clone(), endpoint.generation);
+                }
+            }
+            Ok(observed)
+        },
+        |engine, name, expected| {
+            // Observation's lease has been released. Reload the receipt and full
+            // endpoint under this independently admitted mutation lease.
+            let (mut receipt, root) = load(candidate, engine, run)?;
+            check()?;
+            let Some(endpoint) = route_endpoint(engine, &receipt, name)? else {
+                return Ok(false);
             };
-            if initialize {
-                generations.insert(name, endpoint.generation);
-                continue;
+            if endpoint.generation != expected {
+                return Ok(false);
             }
-            let previous = generations.get(&name).ok_or_else(refused)?;
-            if *previous == endpoint.generation {
-                continue;
-            }
-            // Resolve again across each await using the retained original receipt.
             let pinned = receipt.clone();
             let fence = || {
                 check()?;
-                if route_endpoint(&engine, &pinned, &name)?
-                    .is_some_and(|e| e.generation == endpoint.generation)
+                if route_endpoint(engine, &pinned, name)?.is_some_and(|e| e.generation == expected)
                 {
                     check()
                 } else {
                     Err(refused())
                 }
             };
-            probes::rearm_route(&engine, &mut receipt, &root, &name, &fence)?;
-            generations.insert(name, endpoint.generation);
-        }
-        Ok(())
-    };
-    with_probe_lease(initialize, acquire, operation).map(|_| ())
+            probes::rearm_route(engine, &mut receipt, &root, name, &fence)?;
+            Ok(true)
+        },
+    )
 }
 
 #[cfg(test)]
@@ -321,13 +353,18 @@ mod tests {
         use std::cell::RefCell;
         let (_fixture, mut receipt, root) = rearm_fixture();
         let posts = RefCell::new(Vec::new());
-        let result = with_probe_lease(
+        let mut generations = BTreeMap::from([("web".into(), "old".into())]);
+        probe_tick(
             false,
+            &mut generations,
+            Ok,
             |mode| {
-                assert_eq!(mode, ConnectionMode::Allocation);
-                Ok(mode)
+                assert_eq!(*mode, ConnectionMode::Cleanup);
+                Ok(BTreeMap::from([("web".into(), "changed".into())]))
             },
-            |mode| {
+            |mode, name, expected| {
+                assert_eq!(*mode, ConnectionMode::Allocation);
+                assert_eq!((name, expected), ("web", "changed"));
                 probes::rearm_after_inactive(
                     &mut receipt,
                     &root,
@@ -353,10 +390,11 @@ mod tests {
                         })
                     },
                 )
+                .map(|()| true)
             },
         )
         .unwrap();
-        assert!(result.is_some());
+        assert_eq!(generations["web"], "changed");
         assert_eq!(
             *posts.borrow(),
             vec![
@@ -374,35 +412,93 @@ mod tests {
 
     #[test]
     fn probe_acquisition_contention_precedes_intent_preparation_and_dispatch() {
-        let (_fixture, mut receipt, root) = rearm_fixture();
+        let (_fixture, receipt, root) = rearm_fixture();
         let before = serde_json::to_vec(&receipt).unwrap();
-        let result = with_probe_lease(
-            false,
-            |mode| {
-                assert_eq!(mode, ConnectionMode::Allocation);
-                Err::<(), _>(error("provider_busy", "Busy lease."))
-            },
-            |_| {
-                probes::rearm_after_inactive(
-                    &mut receipt,
-                    &root,
-                    "web",
-                    &|| Ok(()),
-                    |_, _| panic!("busy acquisition must not prepare samples"),
-                    |_, _, _| panic!("busy acquisition must not dispatch"),
-                )
-            },
-        )
-        .unwrap();
-        assert!(result.is_none());
-        assert_eq!(serde_json::to_vec(&receipt).unwrap(), before);
-        assert!(!root.join("state.json").exists());
-        let initial: Result<Option<()>, _> = with_probe_lease(
+        for code in ["provider_busy", "runtime_pressure"] {
+            let mut generations = BTreeMap::from([("web".into(), "old".into())]);
+            probe_tick(
+                false,
+                &mut generations,
+                |mode| {
+                    if mode == ConnectionMode::Cleanup {
+                        Ok(mode)
+                    } else {
+                        Err(error(code, "Admission deferred."))
+                    }
+                },
+                |_| Ok(BTreeMap::from([("web".into(), "changed".into())])),
+                |_, _, _| panic!("failed acquisition must not prepare or dispatch"),
+            )
+            .unwrap();
+            assert_eq!(generations["web"], "old");
+            assert_eq!(serde_json::to_vec(&receipt).unwrap(), before);
+            assert!(!root.join("state.json").exists());
+        }
+        let initial = probe_tick(
             true,
-            |_| Err::<(), _>(error("provider_busy", "Busy lease.")),
+            &mut BTreeMap::new(),
+            |_| Err::<ConnectionMode, _>(error("provider_busy", "Busy lease.")),
             |_| panic!("initial enrollment must not silently defer"),
+            |_, _, _| panic!("initial enrollment never rearms"),
         );
         assert_eq!(initial.unwrap_err().code, "provider_busy");
+    }
+
+    #[test]
+    fn idle_probe_ticks_never_request_allocation() {
+        for observed in [
+            BTreeMap::new(),
+            BTreeMap::from([("web".into(), "old".into())]),
+        ] {
+            let mut generations = BTreeMap::from([("web".into(), "old".into())]);
+            probe_tick(
+                false,
+                &mut generations,
+                |mode| {
+                    assert_eq!(mode, ConnectionMode::Cleanup);
+                    Ok(())
+                },
+                |_| Ok(observed),
+                |_, _, _| panic!("idle tick must not rearm"),
+            )
+            .unwrap();
+            assert_eq!(generations["web"], "old");
+        }
+    }
+
+    #[test]
+    fn probe_observation_releases_lock_before_mutation_and_revalidates() {
+        let fixture = super::super::super::tests::Fixture::new();
+        let root = fixture.0.join("provider");
+        drop(state::Lock::acquire(&root).unwrap());
+        let mut generations = BTreeMap::from([("web".into(), "old".into())]);
+        for valid in [false, true] {
+            probe_tick(
+                false,
+                &mut generations,
+                |_| state::Lock::acquire_existing(&root),
+                |_| Ok(BTreeMap::from([("web".into(), "changed".into())])),
+                |_, _, _| Ok(valid),
+            )
+            .unwrap();
+            assert_eq!(generations["web"], if valid { "changed" } else { "old" });
+        }
+    }
+
+    #[test]
+    fn admitted_probe_errors_are_not_deferred() {
+        for code in ["provider_busy", "runtime_pressure"] {
+            let mut generations = BTreeMap::from([("web".into(), "old".into())]);
+            let result = probe_tick(
+                false,
+                &mut generations,
+                |_| Ok(()),
+                |_| Ok(BTreeMap::from([("web".into(), "changed".into())])),
+                |_, _, _| Err(error(code, "Admitted effect failed.")),
+            );
+            assert_eq!(result.unwrap_err().code, code);
+            assert_eq!(generations["web"], "old");
+        }
     }
 
     #[test]

@@ -56,12 +56,29 @@ These limits still apply to a packaged candidate:
 
 ## Versions and artifacts
 
-Candidate versions have the form `5.0.0-next.N`, where `N` is a positive integer
-without leading zeros. The matching Git tag is `v5.0.0-next.N`. Each version is
-immutable: a failed or superseded release gets a new number rather than replacing
-its tag or assets.
+Candidate versions have the form `BASE-next.N`, where `BASE` is the next
+unreleased stable v5 line and `N` is a positive integer without leading zeros.
+The current line is `5.0.0`, so candidates are `5.0.0-next.N` with the Git tag
+`v5.0.0-next.N`. Each version is immutable: a failed or superseded release gets a
+new number rather than replacing its tag or assets.
 
-The native archive is named `hack-5.0.0-next.N-darwin-arm64-native.tar.gz`. It
+Semantic versioning orders `5.0.0-next.N` below `5.0.0`. After a stable release
+ships, the line moves to the next unreleased version, for example `5.1.0-next.1`,
+so candidates keep sorting above stable. `PRERELEASE_BASE` in
+`scripts/prerelease-plan.ts` names the line, and a reviewed change on `next` moves
+it. Planning refuses a version on any other line. Publication also refuses when
+the line's stable tag or release exists, or when the latest stable release is at
+or above the line.
+
+The installer accepts any `5.MINOR.PATCH-next.N` version and orders versions by
+line, then by number, so an upgrade from `5.0.0-next.N` to `5.1.0-next.1` is an
+increase. Older managers, including those in every release through
+`5.0.0-next.11`, accept only `5.0.0-next.N`. A channel created by one of them
+cannot install a later line through its retained manager; use a fresh `--root`
+with a newer installer.
+
+The native archive is named `hack-BASE-next.N-darwin-arm64-native.tar.gz`, for
+example `hack-5.0.0-next.12-darwin-arm64-native.tar.gz`. It
 contains the complete frontend, executor, guest relay, storage root witness and its
 byte manifest, config compiler and schemas, shared MCP bundle, launcher, provider
 pins, guide, checksums and `prerelease.json` provenance. The compiled frontend

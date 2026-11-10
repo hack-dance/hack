@@ -108,6 +108,32 @@ test("a pending engine restart counts as running compute that cleanup must stop"
   });
 });
 
+test("a failed start whose removal left a container dead is inspected and points at down", async () => {
+  // HACK-1968: the startup message names this run for hack ps, hack down and this
+  // inspection; the engine reports the container whose removal failed as dead.
+  const opts = await fixture();
+  const failed = snapshot();
+  Object.assign(failed.observations, {
+    "container:web": { state: "dead" },
+    "container:ws": { state: "absent" },
+  });
+  failed.pending_cleanup = {
+    version: 1,
+    kind: "interrupted_startup_candidate",
+  };
+  const result = await inspectNativeProjectCleanup({
+    ...opts,
+    invoke: async () => failed,
+  });
+  expect(result).toMatchObject({
+    state: "interrupted_startup_candidate",
+    pending: true,
+    counts: { running: 0, exited: 0, created: 0, dead: 1, absent: 1 },
+  });
+  expect(result.guidance).toContain("Run hack down");
+  expect(JSON.stringify(result)).not.toContain("synthetic-private-canary");
+});
+
 test("legacy hints and missing volumes report observations without inventing recovery authority", async () => {
   const opts = await fixture();
   const legacy = snapshot();

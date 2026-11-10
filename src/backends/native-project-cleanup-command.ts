@@ -32,6 +32,8 @@ const KINDS = new Set([
 ]);
 const GUIDANCE =
   "No uncertain stop was replayed. Preserve receipts and run mappings. Pending cleanup requires explicit owned recovery; review every graph sharing the pool before stopping it, and do not roll over its boot repeatedly.";
+const FAILED_START_GUIDANCE =
+  "No uncertain stop was replayed. This failed start's owner exited before its cleanup finished. Run hack down for this branch: it proves the selection again, removes the stopped containers, retains volumes and releases the run. Do not stop or restart the pool first; the recovery requires the same guest boot.";
 
 function refused(): Error {
   return new ClosedCliError(
@@ -73,12 +75,16 @@ function verifiedSnapshot(value: unknown, run: NativeProjectRun) {
 
 function containerState(
   value: unknown
-): "running" | "exited" | "created" | "absent" {
+): "running" | "exited" | "created" | "dead" | "absent" {
   switch (value) {
     case "running":
     case "exited":
     case "created":
     case "absent":
+      return value;
+    // The engine leaves a container dead when its removal failed (HACK-1968): it has
+    // no process; only a further removal applies to it.
+    case "dead":
       return value;
     // A pending engine restart is live compute that cleanup must still stop.
     case "restarting":
@@ -96,6 +102,7 @@ function observedCounts(
     running: 0,
     exited: 0,
     created: 0,
+    dead: 0,
     absent: 0,
     volumesPresent: 0,
     volumesAbsent: 0,
@@ -121,7 +128,14 @@ function observedCounts(
       }
     }
   }
-  if (counts.running + counts.exited + counts.created + counts.absent > 32) {
+  if (
+    counts.running +
+      counts.exited +
+      counts.created +
+      counts.dead +
+      counts.absent >
+    32
+  ) {
     throw refused();
   }
   return counts;
@@ -172,15 +186,22 @@ export async function inspectNativeProjectCleanup(opts: {
     phase === "cleanup-intent" &&
     isRecord(receipt.relay_cleanup) &&
     receipt.relay_cleanup.phase === "pending";
+  const state = cleanupKind(pending, hint);
+  let guidance =
+    "No pending retaining cleanup was observed. This does not establish application readiness.";
+  if (pending) {
+    guidance =
+      state === "interrupted_startup_candidate"
+        ? FAILED_START_GUIDANCE
+        : GUIDANCE;
+  }
   return {
-    state: cleanupKind(pending, hint),
+    state,
     pending,
     run: run.run,
     phase,
     counts: observedCounts(resources, observations),
-    guidance: pending
-      ? GUIDANCE
-      : "No pending retaining cleanup was observed. This does not establish application readiness.",
+    guidance,
   } as const;
 }
 

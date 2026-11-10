@@ -78,6 +78,11 @@ struct Selection {
     shutdown_rebased: bool,
     failed_key: String,
     failed_id: String,
+    /// The foreground owner had already stopped every started container of this failed
+    /// start, durably (`shutdown.json`), before its cleanup stopped; see [`stopped_failed_start`].
+    /// Absent in selections made before this kind existed, which are never of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    owner_stopped: bool,
 }
 impl Selection {
     fn digest(&self) -> Result<String, CandidateError> {
@@ -180,7 +185,11 @@ impl Proof<'_> {
         if let Some(value) = inspect_resource(&self.engine, &current, failed)?
             && !self.selected.shutdown_rebased
         {
-            failed_created(failed, &value)?;
+            if self.selected.owner_stopped {
+                stopped_terminal(failed, &value)?;
+            } else {
+                failed_created(failed, &value)?;
+            }
         }
         Ok(())
     }
@@ -316,6 +325,107 @@ fn failed_start(
     failed.ok_or_else(refused)
 }
 
+/// A present container of an owner-stopped failed start: the recorded generation, with
+/// no process (exited, created or dead). Nothing here is ever started again.
+fn stopped_terminal(resource: &Resource, value: &Value) -> Result<(), CandidateError> {
+    let prepared = shutdown::prepare(resource, value)?;
+    if resource.kind != Kind::Container
+        || resource.id.as_deref() != Some(prepared.id.as_str())
+        || prepared.running
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// The durable stop evidence the foreground owner commits before its first removal.
+fn owner_stop_records(
+    root: &Path,
+    receipt: &Receipt,
+) -> Result<Option<BTreeMap<String, String>>, CandidateError> {
+    let path = root.join("shutdown.json");
+    if !path.exists() && !path.is_symlink() {
+        return Ok(None);
+    }
+    let value: Value = state::read_bounded(&path, 64 * 1024)?;
+    if value["version"] != 1
+        || value["run"] != receipt.run
+        || value["owner"] != receipt.owner
+        || value["plan"] != receipt.plan_id
+    {
+        return Err(refused());
+    }
+    let records = value["containers"].as_object().ok_or_else(refused)?;
+    if records.len() > MAX_SERVICES {
+        return Err(refused());
+    }
+    let mut ids = BTreeMap::new();
+    for (key, terminal) in records {
+        let id = terminal["id"]
+            .as_str()
+            .filter(|id| hex(id, 64))
+            .ok_or_else(refused)?;
+        if !receipt
+            .resources
+            .get(key)
+            .is_some_and(|r| r.kind == Kind::Container)
+        {
+            return Err(refused());
+        }
+        ids.insert(key.clone(), id.to_owned());
+    }
+    Ok(Some(ids))
+}
+
+/// Select a failed fresh start whose foreground owner recorded the startup failure,
+/// stopped every container it had created and committed that stop (`shutdown.json`)
+/// for the current generations, then exited before its removals finished (HACK-1968:
+/// the engine could not remove one container and left it `dead`).
+///
+/// Every container that has an engine ID must have a terminal stop record for exactly
+/// that ID, and is now either absent (the owner already removed it) or present with no
+/// process. Containers without an ID must be `reserved` and absent. The selected failed
+/// container is the one named by the receipt's `startup_failure`. Nothing is ever
+/// started, and the retained volumes stay as they are.
+fn stopped_failed_start(
+    receipt: &Receipt,
+    engine: &Engine<'_>,
+    root: &Path,
+) -> Result<Option<(String, String)>, CandidateError> {
+    let Some(records) = owner_stop_records(root, receipt)? else {
+        return Ok(None);
+    };
+    let Some(failure) = &receipt.startup_failure else {
+        return Ok(None);
+    };
+    let failed_key = format!("container:{}", failure.service);
+    if !failure.valid(receipt)
+        || receipt.resources[&failed_key].id.as_deref() != Some(failure.container.as_str())
+        || records.get(&failed_key) != Some(&failure.container)
+    {
+        return Err(refused());
+    }
+    for (key, resource) in &receipt.resources {
+        if resource.kind != Kind::Container {
+            continue;
+        }
+        let observed = inspect_resource(engine, receipt, resource)?;
+        let Some(id) = resource.id.as_deref() else {
+            if observed.is_some() || resource.phase != "reserved" || records.contains_key(key) {
+                return Err(refused());
+            }
+            continue;
+        };
+        if records.get(key).map(String::as_str) != Some(id) {
+            return Err(refused());
+        }
+        if let Some(value) = observed {
+            stopped_terminal(resource, &value)?;
+        }
+    }
+    Ok(Some((failed_key, failure.container.clone())))
+}
+
 fn no_current_shutdown(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
     let path = root.join("shutdown.json");
     if !path.exists() && !path.is_symlink() {
@@ -346,8 +456,25 @@ fn no_current_shutdown(root: &Path, receipt: &Receipt) -> Result<(), CandidateEr
 }
 
 fn select<'a>(candidate: &'a Candidate, run: &str) -> Result<Proof<'a>, CandidateError> {
+    select_ignoring(candidate, run, false)
+}
+
+/// `ignore_journal` is only for read-only inspection of a run whose finished journal
+/// the caller proved [`superseded`]; recovery retires that journal before selecting.
+fn select_ignoring<'a>(
+    candidate: &'a Candidate,
+    run: &str,
+    ignore_journal: bool,
+) -> Result<Proof<'a>, CandidateError> {
+    let read_journal = |root: &Path| {
+        if ignore_journal {
+            Ok(None)
+        } else {
+            journal(root)
+        }
+    };
     let prior_root = directory(candidate, run)?;
-    let existing = journal(&prior_root)?;
+    let existing = read_journal(&prior_root)?;
     let reservation_sha256 = if let Some(prior) = &existing {
         prior.selection.reservation_sha256.clone()
     } else {
@@ -371,7 +498,7 @@ fn select<'a>(candidate: &'a Candidate, run: &str) -> Result<Proof<'a>, Candidat
     let engine = Engine::connect_cleanup_wait(candidate)?;
     let (current, root) = load(candidate, &engine, run)?;
     no_pending(&root)?;
-    let prior = journal(&root)?;
+    let prior = read_journal(&root)?;
     if serde_json::to_value(&prior).map_err(|_| refused())?
         != serde_json::to_value(&existing).map_err(|_| refused())?
     {
@@ -447,10 +574,11 @@ fn select<'a>(candidate: &'a Candidate, run: &str) -> Result<Proof<'a>, Candidat
         || shutdown::repaired(&root, &original),
         |journal| Ok(journal.selection.shutdown_rebased),
     )?;
-    let (failed_key, failed_id) = if let Some(j) = &prior {
+    let (failed_key, failed_id, owner_stopped) = if let Some(j) = &prior {
         (
             j.selection.failed_key.clone(),
             j.selection.failed_id.clone(),
+            j.selection.owner_stopped,
         )
     } else if shutdown_rebased {
         // Every recorded current container is fully started and ownership checked;
@@ -470,10 +598,14 @@ fn select<'a>(candidate: &'a Candidate, run: &str) -> Result<Proof<'a>, Candidat
             }
             selected = Some((key.clone(), prepared.id));
         }
-        selected.ok_or_else(refused)?
+        let (key, id) = selected.ok_or_else(refused)?;
+        (key, id, false)
+    } else if let Some((key, id)) = stopped_failed_start(&original, &engine, &root)? {
+        (key, id, true)
     } else {
         no_current_shutdown(&root, &original)?;
-        failed_start(&original, &engine)?
+        let (key, id) = failed_start(&original, &engine)?;
+        (key, id, false)
     };
     let selected = Selection {
         version: 1,
@@ -491,6 +623,7 @@ fn select<'a>(candidate: &'a Candidate, run: &str) -> Result<Proof<'a>, Candidat
         shutdown_rebased,
         failed_key,
         failed_id,
+        owner_stopped,
     };
     if prior.as_ref().is_some_and(|j| {
         j.selection != selected || j.selection.digest().ok() != Some(j.selection_sha256.clone())
@@ -515,13 +648,170 @@ fn select<'a>(candidate: &'a Candidate, run: &str) -> Result<Proof<'a>, Candidat
     Ok(proof)
 }
 
+const RETIRED_PREFIX: &str = "interrupted-start-cleanup-retired-";
+const RETIRED_LIMIT: usize = 8;
+
+/// Whether a fully finished recovery journal describes an earlier container generation
+/// of a run that was restored and failed again, now with its own pending cleanup.
+///
+/// The old journal finished every step (graph, publisher and reservation), so it holds
+/// no pending effect; it is history, never authority. The current receipt keeps the
+/// run identity and plan but records different engine IDs for every container the old
+/// recovery removed, so the old evidence cannot describe it.
+fn superseded(record: &recovery::Journal, current: &Receipt) -> bool {
+    let original = &record.original;
+    record.graph_complete
+        && record.publisher_retired
+        && record.reservation_released
+        && current.phase == "cleanup-intent"
+        && current.run == original.run
+        && current.owner == original.owner
+        && current.namespace == original.namespace
+        && current.plan_id == original.plan_id
+        && original
+            .resources
+            .iter()
+            .filter(|(_, resource)| resource.kind == Kind::Container)
+            .all(|(key, resource)| {
+                resource.id.as_deref().is_none_or(|old| {
+                    current.resources.get(key).and_then(|now| now.id.as_deref()) != Some(old)
+                })
+            })
+        && original
+            .resources
+            .values()
+            .any(|resource| resource.kind == Kind::Container && resource.id.is_some())
+}
+
+/// Move a superseded finished journal (see [`superseded`]) aside as bounded history, so
+/// the new failed start can be selected on its own evidence. An atomic rename keeps the
+/// old record intact; a bounded count and an existing target refuse.
+///
+/// Concurrent recoveries of one run must not both retire: the second could move the new
+/// journal the first published (with its pending-effect fence) over the archive. So the
+/// retirement takes the run's operation lock and the provider lease, in the order and
+/// under the same locks recovery holds while it writes a journal, re-reads every fact
+/// under them, and renames only the exact journal file it validated (see
+/// [`rename_unchanged`]). A run with no superseded journal takes no lock here.
+fn retire_superseded(candidate: &Candidate, root: &Path, run: &str) -> Result<(), CandidateError> {
+    if retirable(root, run)?.is_none() {
+        return Ok(());
+    }
+    let _owner = foreground::transport::DeadOwner::acquire(candidate, run)?;
+    let _engine = Engine::connect_cleanup_wait(candidate)?;
+    let Some((record, identity)) = retirable(root, run)? else {
+        return Ok(());
+    };
+    let mut retired = 0;
+    for entry in fs::read_dir(root).map_err(state::io)? {
+        let name = entry.map_err(state::io)?.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(RETIRED_PREFIX))
+        {
+            retired += 1;
+            if retired >= RETIRED_LIMIT {
+                return Err(refused());
+            }
+        }
+    }
+    let target = root.join(format!("{RETIRED_PREFIX}{}.json", record.selection_sha256));
+    rename_unchanged(root, &target, &identity)
+}
+
+/// The superseded journal at `root` and the identity of the file it was read from, or
+/// `None` when there is no journal or it is not superseded. A file that changed during
+/// the read refuses.
+fn retirable(
+    root: &Path,
+    run: &str,
+) -> Result<Option<(recovery::Journal, JournalIdentity)>, CandidateError> {
+    let Some(before) = journal_identity(root)? else {
+        return Ok(None);
+    };
+    let Some(record) = journal(root)? else {
+        return Err(refused());
+    };
+    if journal_identity(root)?.as_ref() != Some(&before) {
+        return Err(refused());
+    }
+    record.validate_basic(run, &record.selection_sha256)?;
+    no_pending(root)?;
+    let current: Receipt = state::read_bounded(&root.join("state.json"), LIMIT)?;
+    Ok(superseded(&record, &current).then_some((record, before)))
+}
+
+/// A journal file's device, inode and content digest. Every journal write replaces the
+/// file by rename, so a rewrite, even with the same bytes, changes the inode.
+#[derive(Debug, PartialEq, Eq)]
+struct JournalIdentity {
+    device: u64,
+    inode: u64,
+    sha256: String,
+}
+
+fn journal_identity(root: &Path) -> Result<Option<JournalIdentity>, CandidateError> {
+    use std::os::unix::fs::MetadataExt;
+    let path = root.join(JOURNAL);
+    let metadata = match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(state::io(e)),
+        Ok(metadata) => metadata,
+    };
+    let bytes = host_pin_recovery::read_raw(&path, LIMIT)?;
+    let after = fs::symlink_metadata(&path).map_err(state::io)?;
+    if (metadata.dev(), metadata.ino()) != (after.dev(), after.ino()) {
+        return Err(refused());
+    }
+    Ok(Some(JournalIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        sha256: digest(&bytes),
+    }))
+}
+
+/// Rename the journal to `target` only if it is still the exact file `expected`
+/// describes and `target` is absent; otherwise refuse and change nothing.
+fn rename_unchanged(
+    root: &Path,
+    target: &Path,
+    expected: &JournalIdentity,
+) -> Result<(), CandidateError> {
+    if journal_identity(root)?.as_ref() != Some(expected) {
+        return Err(refused());
+    }
+    match fs::symlink_metadata(target) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(refused()),
+    }
+    fs::rename(root.join(JOURNAL), target).map_err(state::io)?;
+    fs::File::open(root)
+        .and_then(|file| file.sync_all())
+        .map_err(state::io)
+}
+
 /// Read-only, value-free selection for exactly one interrupted failed start.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let root = directory(candidate, run)?;
     if let Some(record) = journal(&root)? {
         record.validate_basic(run, &record.selection_sha256)?;
         if record.graph_complete {
-            return recovery::inspect_completed(candidate, run, &record);
+            match recovery::inspect_completed(candidate, run, &record) {
+                Err(error) if error.code == recovery::STALE => {
+                    // Inspection stays read-only: report the new selection only after
+                    // an explicit recovery retires the superseded history.
+                    let current: Receipt = state::read_bounded(&root.join("state.json"), LIMIT)?;
+                    if !superseded(&record, &current) {
+                        return Err(error);
+                    }
+                    let proof = select_ignoring(candidate, run, true)?;
+                    return Ok(
+                        json!({"run":run,"phase":proof.current.phase,"eligible":true,
+                        "selection_sha256":proof.selected.digest()?,"data_retained":true,"same_boot":true}),
+                    );
+                }
+                other => return other,
+            }
         }
     }
     let proof = select(candidate, run)?;
@@ -549,5 +839,7 @@ pub fn recover(candidate: &Candidate, run: &str, expected: &str) -> Result<Value
     if !hex(expected, 64) {
         return Err(refused());
     }
+    // A restored run that failed again: its earlier, finished recovery is history.
+    retire_superseded(candidate, &directory(candidate, run)?, run)?;
     recovery::recover(candidate, run, expected)
 }

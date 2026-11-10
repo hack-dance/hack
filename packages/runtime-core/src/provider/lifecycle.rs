@@ -2043,8 +2043,56 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             stop_silent_guest(candidate, &mut owner)?;
             status(candidate)
         }
+        Err(error) if authorizes_unclean_stop(&error) => {
+            stop_silent_guest(candidate, &mut owner)?;
+            status(candidate)
+        }
         Err(error) => Err(error),
     }
+}
+
+/// The code `guest_stop` returns when the engine quiesce failed again on a resumed stop.
+const QUIESCE_STALLED: &str = "engine_quiesce_stalled";
+
+/// Whether a `guest_stop` failure lets `down` or `recover` stop a responsive guest's
+/// provider without flushing it. Only a resumed quiesce stall does; see [`quiesce_stalled`].
+fn authorizes_unclean_stop(error: &CandidateError) -> bool {
+    error.code == QUIESCE_STALLED
+}
+
+/// Classify a failed engine quiesce. A resumed stall becomes [`QUIESCE_STALLED`]. A guest
+/// identity refusal keeps its own code with the next step, on every attempt, so it never
+/// authorizes an unclean stop. Anything else is returned as is.
+fn quiesce_failure(error: CandidateError, resumed: bool) -> CandidateError {
+    if error.code == "guest_identity_mismatch" {
+        CandidateError::new(
+            "guest_identity_mismatch",
+            "The guest's owner, boot or engine identity does not match the runtime receipt, so its engine was not quiesced and the provider was not stopped. Inspect runtime status; once the recorded provider has exited or its guest stops answering, runtime recover records the stop.",
+        )
+    } else if quiesce_stalled(&error, resumed) {
+        CandidateError::new(
+            QUIESCE_STALLED,
+            "The guest engine did not finish quiescing after a resumed stop.",
+        )
+    } else {
+        error
+    }
+}
+
+/// Whether a failed engine quiesce means the engine cannot be quiesced from the guest.
+///
+/// A first attempt that times out or exits nonzero leaves the pool `quiescing` and is
+/// reported as is: the engine may still be finishing its own shutdown. A resumed attempt
+/// (the pool was already `quiescing` before this stop began) that fails the same way has
+/// now sent TERM to the same engine identity twice without it exiting, or found the guest
+/// unable to finish the bounded quiesce command at all. The guest agent may still answer
+/// pings, so the silent-guest rule cannot apply; waiting longer gives no further evidence,
+/// and the only remaining way out is a provider stop. Identity refusals are never treated
+/// as a stall: the quiesce script reports them with the reserved
+/// [`agent::GUEST_IDENTITY_REFUSED`] status, which decodes to `guest_identity_mismatch`,
+/// and host-side refusals carry their own codes.
+fn quiesce_stalled(error: &CandidateError, resumed: bool) -> bool {
+    resumed && ["agent_protocol_uncertain", "guest_command_failed"].contains(&error.code)
 }
 
 /// The outcome of `runtime repair-provider-tree`.
@@ -2135,7 +2183,8 @@ fn agent_silent_at(path: &Path) -> bool {
     true
 }
 
-/// Stop the verified provider of a guest whose agent stopped responding. Nothing in the
+/// Stop the verified provider of a guest whose agent stopped responding, or whose engine did
+/// not quiesce on a resumed stop (see [`quiesce_stalled`]). Nothing in the
 /// guest is quiesced or flushed, so the pool is recorded `recovered-unclean`, as after a
 /// provider exit; the next start checks its retained disks as usual. The signal reaches
 /// only this home's recorded provider, rechecked by PID, start time, user and executable
@@ -2215,11 +2264,8 @@ sync"#,
                 CandidateError::new("recovery_required", "Engine start time unavailable.")
             })?
             .to_string();
-        let quiesce_mode = if owner.phase == "quiescing" {
-            "resume"
-        } else {
-            "initial"
-        };
+        let resumed = owner.phase == "quiescing";
+        let quiesce_mode = if resumed { "resume" } else { "initial" };
         phase(candidate, owner, "quiescing")?;
         let quiescence = guest(
             candidate,
@@ -2233,7 +2279,8 @@ sync"#,
                 quiesce_mode,
             ],
             false,
-        )?;
+        )
+        .map_err(|error| quiesce_failure(error, resumed))?;
         state::write(
             &root(candidate).join("quiescence.json"),
             &json!({
@@ -2561,7 +2608,20 @@ pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         // Refuse first, without probing, while a build is admitted.
         require_no_build_for_silent_stop(candidate)?;
         verify_live(candidate, &owner)?;
-        if !agent_silent(candidate, &owner)? {
+        let silent = agent_silent(candidate, &owner)?;
+        if !silent && owner.phase == "quiescing" {
+            // A stop already began quiescing the engine and did not finish. Resume it once;
+            // an engine that still does not quiesce is stopped with the provider, unclean.
+            return match guest_stop(candidate, &mut owner) {
+                Ok(()) => status(candidate),
+                Err(error) if authorizes_unclean_stop(&error) => {
+                    stop_silent_guest(candidate, &mut owner)?;
+                    status(candidate)
+                }
+                Err(error) => Err(error),
+            };
+        }
+        if !silent {
             return Err(CandidateError::new(
                 "recovery_required",
                 "Recovery only accepts a confirmed dead recorded process or a guest that stopped responding. Use down for a responsive guest.",
@@ -3334,6 +3394,275 @@ printf 'verified-cache\n'
         });
         assert!(agent_silent_at(&path));
         closing.join().unwrap();
+    }
+
+    /// HACK-1968: a guest whose agent still answers pings, but whose engine never finishes
+    /// quiescing, is stopped only after a resumed quiesce failed the same way; a first
+    /// failure, and any identity or protocol refusal, keep the ordinary report.
+    #[test]
+    fn only_a_resumed_quiesce_failure_is_a_stall() {
+        for code in ["agent_protocol_uncertain", "guest_command_failed"] {
+            let error = CandidateError::new(code, "Fixed.");
+            assert!(quiesce_stalled(&error, true), "{code}");
+            assert!(!quiesce_stalled(&error, false), "{code}");
+        }
+        for code in [
+            "process_identity_mismatch",
+            "foreign_state",
+            "recovery_required",
+            "stop_uncertain",
+            "guest_identity_mismatch",
+            QUIESCE_STALLED,
+        ] {
+            assert!(
+                !quiesce_stalled(&CandidateError::new(code, "Fixed."), true),
+                "{code}"
+            );
+        }
+    }
+
+    /// A fixture guest filesystem for `guest-quiesce.sh`: owner `owner`, boot `boot`, and a
+    /// recorded engine at a PID no host process can hold, started at `777`. The script runs
+    /// with `PATH` holding only the fixture's `bin`, so no host tool, and in particular no
+    /// host `pidof` that sees a real engine, can decide a case. `bin` holds a fake `pidof`
+    /// (see [`QuiesceFixture::guest_processes`]), a no-op `sync`, and the plain host
+    /// `cat`, `awk` and `readlink` the script reads fixture files with. `seq` and `sleep`
+    /// are absent: only the bounded wait after `kill` uses them, and no case reaches it.
+    struct QuiesceFixture(std::path::PathBuf);
+
+    const FIXTURE_ENGINE_PID: &str = "2147483646";
+
+    impl QuiesceFixture {
+        fn new() -> Self {
+            let root = crate::test_root::private_test_root(
+                &std::env::temp_dir().canonicalize().unwrap(),
+                "hack-quiesce-identity",
+            );
+            let engine = root.join("proc").join(FIXTURE_ENGINE_PID);
+            for directory in [
+                root.join("storage"),
+                root.join("proc/sys/kernel/random"),
+                root.join("run/hack-local"),
+                root.join("opt/hack-engine"),
+                root.join("bin"),
+                root.join("pidof"),
+                engine.clone(),
+            ] {
+                fs::create_dir_all(directory).unwrap();
+            }
+            let executable = |name: &str, body: String| {
+                use std::os::unix::fs::PermissionsExt;
+                let path = root.join("bin").join(name);
+                fs::write(&path, body).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            };
+            // Prints the fixture's PIDs for a name, like `pidof`, using shell builtins only.
+            let pidof = root.join("pidof");
+            executable(
+                "pidof",
+                format!(
+                    "#!/bin/sh\nfile='{}'/\"$1\"\ntest -f \"$file\" || exit 1\nwhile IFS= read -r line || test -n \"$line\"; do printf '%s\\n' \"$line\"; done < \"$file\"\n",
+                    pidof.display()
+                ),
+            );
+            executable("sync", "#!/bin/sh\nexit 0\n".into());
+            for tool in ["cat", "awk", "readlink"] {
+                let host = ["/bin", "/usr/bin"]
+                    .iter()
+                    .map(|directory| Path::new(directory).join(tool))
+                    .find(|path| path.is_file())
+                    .unwrap_or_else(|| panic!("host {tool}"));
+                std::os::unix::fs::symlink(host, root.join("bin").join(tool)).unwrap();
+            }
+            fs::write(root.join("storage/.hack-local-owner"), "owner").unwrap();
+            fs::write(root.join("proc/sys/kernel/random/boot_id"), "boot").unwrap();
+            fs::write(root.join("run/hack-local/docker.pid"), FIXTURE_ENGINE_PID).unwrap();
+            let fixture = Self(root);
+            fixture.engine_started_at("777");
+            fixture.engine_exe("opt/hack-engine/dockerd");
+            fixture
+        }
+
+        fn engine_started_at(&self, start: &str) {
+            let stat = format!(
+                "{FIXTURE_ENGINE_PID} (dockerd) S {}{start}",
+                "0 ".repeat(18)
+            );
+            fs::write(
+                self.0.join("proc").join(FIXTURE_ENGINE_PID).join("stat"),
+                stat,
+            )
+            .unwrap();
+        }
+
+        /// Make the fake `pidof NAME` print `pids` and succeed, as for a running process.
+        fn guest_processes(&self, name: &str, pids: &str) {
+            fs::write(self.0.join("pidof").join(name), pids).unwrap();
+        }
+
+        fn engine_exe(&self, relative: &str) {
+            let link = self.0.join("proc").join(FIXTURE_ENGINE_PID).join("exe");
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(self.0.join(relative), link).unwrap();
+        }
+
+        /// Run the shipped script with its absolute guest paths moved under the fixture and
+        /// decode its exit status the way the agent's reply is decoded. Every case below
+        /// refuses or finishes before `kill`, which could reach no host process anyway.
+        fn quiesce(&self, owner: &str, boot: &str, mode: &str) -> Result<String, CandidateError> {
+            let root = self.0.to_str().unwrap();
+            let mut script = include_str!("guest-quiesce.sh").to_owned();
+            for path in [
+                "/storage/",
+                "/proc/",
+                "/run/hack-local/",
+                "/opt/hack-engine/",
+            ] {
+                script = script.replace(path, &format!("{root}{path}"));
+            }
+            let output = std::process::Command::new("/bin/sh")
+                .env_clear()
+                .env("PATH", self.0.join("bin"))
+                .args(["-c", &script, "hack-local", owner, boot])
+                .args([FIXTURE_ENGINE_PID, "777", mode])
+                .output()
+                .unwrap();
+            agent::decode_execution_for_test(json!({
+                "status":"completed", "exit_code":output.status.code(),
+                "stdout":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &output.stdout)
+            }))
+        }
+    }
+
+    impl Drop for QuiesceFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// HACK-1968 review: every owner, boot or engine identity refusal in the quiesce script
+    /// decodes to `guest_identity_mismatch`, which never authorizes an unclean stop, on a
+    /// first or a resumed attempt.
+    #[test]
+    fn a_guest_identity_refusal_never_authorizes_an_unclean_stop() {
+        type Change = fn(&QuiesceFixture);
+        let refusals: [(&str, &str, &str, Change); 5] = [
+            ("other-owner", "boot", "initial", |_| {}),
+            ("owner", "other-boot", "resume", |_| {}),
+            ("owner", "boot", "initial", |fixture| {
+                fs::write(fixture.0.join("run/hack-local/docker.pid"), "4243").unwrap();
+            }),
+            ("owner", "boot", "resume", |fixture| {
+                fixture.engine_exe("opt/other/dockerd");
+            }),
+            ("owner", "boot", "initial", |fixture| {
+                fixture.engine_started_at("778")
+            }),
+        ];
+        for (index, (owner, boot, mode, change)) in refusals.into_iter().enumerate() {
+            let fixture = QuiesceFixture::new();
+            change(&fixture);
+            for resumed in [false, true] {
+                let error = fixture.quiesce(owner, boot, mode).unwrap_err();
+                assert_eq!(error.code, "guest_identity_mismatch", "case {index}");
+                let classified = quiesce_failure(error, resumed);
+                assert_eq!(classified.code, "guest_identity_mismatch", "case {index}");
+                assert!(!authorizes_unclean_stop(&classified), "case {index}");
+                assert!(
+                    classified
+                        .message
+                        .contains("does not match the runtime receipt")
+                );
+                assert!(classified.message.contains("runtime recover"));
+                assert!(classified.message_fixed);
+            }
+        }
+    }
+
+    /// A real stall, the script's bounded wait ending (exit 42), still authorizes the
+    /// unclean stop on a resumed attempt only. A resumed stop whose recorded PID now names a
+    /// later process sees the engine exited and quiesces cleanly instead of refusing.
+    #[test]
+    fn a_resumed_quiesce_timeout_still_authorizes_an_unclean_stop() {
+        let timeout = || {
+            agent::decode_execution_for_test(json!({"status":"completed", "exit_code":42}))
+                .unwrap_err()
+        };
+        assert!(!authorizes_unclean_stop(&quiesce_failure(timeout(), false)));
+        let stalled = quiesce_failure(timeout(), true);
+        assert_eq!(stalled.code, QUIESCE_STALLED);
+        assert!(authorizes_unclean_stop(&stalled));
+        let fixture = QuiesceFixture::new();
+        fixture.engine_started_at("778");
+        fs::remove_file(fixture.0.join("run/hack-local/docker.pid")).unwrap();
+        assert_eq!(
+            fixture.quiesce("owner", "boot", "resume").unwrap(),
+            "quiesced\n"
+        );
+    }
+
+    /// HACK-1993: once the recorded engine is gone, a resumed stop reports `quiesced` only
+    /// when no pidfile, dockerd or containerd remains. `set -e` ignores a failing
+    /// `! pidof`, so the script used to print `quiesced` while an engine still ran. Each
+    /// remaining engine now exits 42, the engine-did-not-exit status, which a resumed
+    /// stop treats as a stall.
+    #[test]
+    fn a_resumed_stop_never_reports_quiesced_while_an_engine_remains() {
+        type Remaining = fn(&QuiesceFixture);
+        let remaining: [(&str, Remaining); 3] = [
+            ("dockerd", |fixture| {
+                fixture.guest_processes("dockerd", "1322")
+            }),
+            ("containerd", |fixture| {
+                fixture.guest_processes("containerd", "1089")
+            }),
+            ("pidfile", |fixture| {
+                fs::write(fixture.0.join("run/hack-local/docker.pid"), "1322").unwrap();
+            }),
+        ];
+        for (case, remain) in remaining {
+            let fixture = QuiesceFixture::new();
+            fs::remove_file(fixture.0.join("proc").join(FIXTURE_ENGINE_PID).join("stat")).unwrap();
+            fs::remove_file(fixture.0.join("run/hack-local/docker.pid")).unwrap();
+            assert_eq!(
+                fixture.quiesce("owner", "boot", "resume").unwrap(),
+                "quiesced\n",
+                "{case}"
+            );
+            remain(&fixture);
+            let error = fixture.quiesce("owner", "boot", "resume").unwrap_err();
+            assert_eq!(error.code, "guest_command_failed", "{case}");
+            assert!(error.message.contains("exit 42"), "{case}");
+            assert!(!authorizes_unclean_stop(&quiesce_failure(
+                fixture.quiesce("owner", "boot", "resume").unwrap_err(),
+                false
+            )));
+            assert!(
+                authorizes_unclean_stop(&quiesce_failure(error, true)),
+                "{case}"
+            );
+        }
+    }
+
+    /// The first stop's identity refusal leaves the pool `quiescing`; the next `down` and
+    /// `recover` resume it (`resumed` is true) and, refused again, still do not stop the
+    /// provider. Both share `authorizes_unclean_stop`.
+    #[test]
+    fn a_second_down_or_recover_after_an_identity_refusal_still_refuses() {
+        let fixture = QuiesceFixture::new();
+        let first = fixture
+            .quiesce("other-owner", "boot", "initial")
+            .unwrap_err();
+        assert!(!authorizes_unclean_stop(&quiesce_failure(first, false)));
+        for _second_down_then_recover in 0..2 {
+            let again = fixture
+                .quiesce("other-owner", "boot", "resume")
+                .unwrap_err();
+            let classified = quiesce_failure(again, true);
+            assert_eq!(classified.code, "guest_identity_mismatch");
+            assert_ne!(classified.code, QUIESCE_STALLED);
+            assert!(!authorizes_unclean_stop(&classified));
+        }
     }
 
     #[cfg(target_os = "macos")]

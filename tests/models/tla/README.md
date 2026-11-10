@@ -1339,3 +1339,9 @@ fails `DownNotUnderBuild` at `Down`. The model does not cover a build client tha
 outlives a killed `hack-native` process (the implementation keeps the fence and key
 lock held by the inherited descriptors until that client exits), real BuildKit or
 engine behavior, receipt durability, or more than one key and namespace.
+
+`shutdown-rebase/ShutdownRebase.tla` covers retained stop evidence across removed
+and recreated services. Its 43-state positive bound separates stopped history,
+evidence reset, receipt publication and crash/retry. The two negative controls
+remove reset and fresh old-ID absence respectively. Source mapping, regression
+coverage and native proof limits are in `docs/reference/v5-model-coverage.md`.

@@ -540,3 +540,25 @@ test("restart-policy controls accept every reachable first violation only", () =
     ).toBe(false);
   }
 });
+
+test("build retention accepts the observed image-2 reclaim violation only with a matching reference", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "native-build-retention"
+  );
+  expect(model).toBeDefined();
+  const output = tlaWitness({
+    invariant: "NoReclaimReferenced",
+    action: "Reclaim",
+    fields: ["refs = {2}", "removed = 2", "fence = FALSE"],
+  });
+  expect(model?.verify({ negative: true, exitCode: 12, output })).toBe(true);
+  for (const invalid of [
+    output.replace("refs = {2}", "refs = {1}"),
+    output.replace("removed = 2", "removed = 1"),
+    output.replace("fence = FALSE", "fence = TRUE"),
+  ]) {
+    expect(
+      model?.verify({ negative: true, exitCode: 12, output: invalid })
+    ).toBe(false);
+  }
+});

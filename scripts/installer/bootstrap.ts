@@ -1,4 +1,4 @@
-import { requireThat, SHA256, versionNumber } from "./integrity.ts";
+import { candidateVersion, requireThat, SHA256 } from "./integrity.ts";
 import {
   TRANSFER_INACTIVITY_MS,
   TRANSFER_TOTAL_MS,
@@ -34,7 +34,7 @@ export const BOOTSTRAP_ASSET = "hack-next-install.sh";
 export const INSTALLER_SUMS = "INSTALLER-SHA256SUMS";
 /** Render only from verified package bytes; the script never discovers a mutable latest candidate. */
 export function renderBootstrap(version: string, checksum: string) {
-  versionNumber(version);
+  candidateVersion(version);
   requireThat(SHA256.test(checksum), "Invalid standalone manager checksum.");
   const url = `https://github.com/hack-dance/hack/releases/download/v${version}/${MANAGER_ASSET}`;
   return `#!/bin/sh

@@ -17,8 +17,13 @@ const runner = resolve(import.meta.dir, "e2e/run.ts");
 const defaultNames = selectScenarios({ scenarios: ALL_SCENARIOS }).map(
   (scenario) => scenario.name
 );
+const NETWORK_PARTS = [
+  "native-config-networks-lifecycle",
+  "native-config-networks-policy",
+  "native-config-networks-ingress",
+];
 const LONG_SCENARIOS = [
-  "native-config-networks",
+  ...NETWORK_PARTS,
   "native-config-compose",
   "native-config-routing",
 ];
@@ -113,18 +118,23 @@ describe("e2e shard selection", () => {
     }
   });
 
-  test("the known long scenarios land on separate CI shards", () => {
+  test("the network parts spread over CI shards and run without other long scenarios", () => {
+    for (const name of LONG_SCENARIOS) {
+      expect(defaultNames).toContain(name);
+    }
     const shards = partitionScenarios({ names: defaultNames, count: 4 });
-    const homes = LONG_SCENARIOS.map((name) =>
-      shards.findIndex((shard) => shard.includes(name))
-    );
-    expect(homes.every((home) => home >= 0)).toBe(true);
-    expect(new Set(homes).size).toBe(LONG_SCENARIOS.length);
-    // The longest scenario runs alone so nothing queues behind it.
-    const networks = shards.find((shard) =>
-      shard.includes("native-config-networks")
-    );
-    expect(networks).toEqual(["native-config-networks"]);
+    const home = (name: string) =>
+      shards.findIndex((shard) => shard.includes(name));
+    const networkHomes = NETWORK_PARTS.map(home);
+    // The parts used to be one scenario that set the docker-e2e wall time.
+    expect(new Set(networkHomes).size).toBe(NETWORK_PARTS.length);
+    for (const index of networkHomes) {
+      expect(
+        shards[index]?.filter((name) => LONG_SCENARIOS.includes(name))
+      ).toHaveLength(1);
+    }
+    expect(networkHomes).not.toContain(home("native-config-compose"));
+    expect(networkHomes).not.toContain(home("native-config-routing"));
   });
 
   test("unhinted scenarios still run and duplicates are refused", () => {

@@ -140,6 +140,18 @@ export async function nativeProjectExec(opts: {
   }
   const service = before.items.find((item) => item.service === opts.service);
   if (
+    before.status === "observed" &&
+    before.phase === "ready-observed" &&
+    before.run === refreshed.mapping.run &&
+    JSON.stringify(await loadNativeProjectRun(opts.scope)) ===
+      JSON.stringify(refreshed.mapping) &&
+    !service
+  ) {
+    throw new ClosedCliError(
+      `Native service ${opts.service} is not active in this run; nothing was executed.`
+    );
+  }
+  if (
     before.run !== refreshed.mapping.run ||
     JSON.stringify(await loadNativeProjectRun(opts.scope)) !==
       JSON.stringify(refreshed.mapping) ||

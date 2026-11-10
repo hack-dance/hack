@@ -16,7 +16,7 @@ import {
   MANAGER_ASSET,
   renderBootstrap,
 } from "./installer/bootstrap.ts";
-import { digest } from "./installer/integrity.ts";
+import { digest, VERSION } from "./installer/integrity.ts";
 
 export const PRERELEASE_ENVIRONMENT = "v5-prerelease";
 /**
@@ -55,20 +55,33 @@ export const PAYLOAD_MODES: Readonly<Record<string, number>> = {
 export const PRERELEASE_PLATFORM = "darwin-arm64";
 /** GitHub heading anchor of the consolidated support list in the prerelease guide. */
 export const PRERELEASE_SUPPORT_ANCHOR = "supported-platforms-and-capabilities";
-const VERSION = /^5\.0\.0-next\.[1-9][0-9]*$/;
+/**
+ * The unreleased stable line that published candidates precede: candidates are
+ * `${PRERELEASE_BASE}-next.N`. Semver orders `X.Y.Z-next.N` below `X.Y.Z`, so
+ * once `vX.Y.Z` ships stable, raise this to the next unreleased v5 line (for
+ * example `5.1.0`) in a reviewed change; numbering restarts at `next.1`. The
+ * publish gate refuses a line that a stable release already reached.
+ */
+export const PRERELEASE_BASE = "5.0.0";
+const BASE = /^5\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const STABLE_TAG = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
 
 export function prereleaseMetadata({
   version,
   sourceRevision,
+  base = PRERELEASE_BASE,
 }: {
   readonly version: string;
   readonly sourceRevision: string;
+  readonly base?: string;
 }) {
-  if (!VERSION.test(version) || version.trim() !== version) {
+  if (!BASE.test(base)) {
+    throw new Error("Candidate base must be a stable 5.MINOR.PATCH version");
+  }
+  if (!(version.startsWith(`${base}-next.`) && VERSION.test(version))) {
     throw new Error(
-      "Version must be 5.0.0-next.N with a positive integer and no leading zeros"
+      `Version must be ${base}-next.N with a positive integer and no leading zeros`
     );
   }
   if (!REVISION.test(sourceRevision) || sourceRevision.length !== 40) {
@@ -92,6 +105,7 @@ export function createPrereleasePlan({
   eventName,
   channel,
   publish = "false",
+  base = PRERELEASE_BASE,
 }: {
   readonly version: string;
   readonly sourceRevision: string;
@@ -99,8 +113,9 @@ export function createPrereleasePlan({
   readonly eventName: string;
   readonly channel: string;
   readonly publish?: string;
+  readonly base?: string;
 }) {
-  const metadata = prereleaseMetadata({ version, sourceRevision });
+  const metadata = prereleaseMetadata({ version, sourceRevision, base });
   if (
     channel !== "prerelease" ||
     ref !== "refs/heads/next" ||
@@ -115,6 +130,7 @@ export function createPrereleasePlan({
   }
   return {
     ...metadata,
+    base,
     archive: `hack-${version}-${PRERELEASE_PLATFORM}-native.tar.gz`,
     publish: publish === "true",
     environment: PRERELEASE_ENVIRONMENT,
@@ -355,6 +371,7 @@ export async function verifyPublishGate({
   ) {
     throw new Error("Refusing to replace an existing tag or release");
   }
+  await requireUnreleasedCandidateLine({ api, base: plan.base });
   if (approved) {
     if (!/^[1-9][0-9]*$/.test(runId)) {
       throw new Error("Publishing needs the current workflow run id");
@@ -364,6 +381,57 @@ export async function verifyPublishGate({
       environmentId,
     });
   }
+}
+
+/**
+ * `BASE-next.N` sorts below stable `vBASE` and every later stable release, so
+ * an installed stable would look newer than the candidate. Refuse publication
+ * once a stable release reached the candidate line; the fix is to raise
+ * `PRERELEASE_BASE`, never to reuse the line. A missing latest release (404)
+ * means no stable release exists; a malformed one refuses.
+ */
+export async function requireUnreleasedCandidateLine({
+  api,
+  base,
+}: {
+  readonly api: Api;
+  readonly base: string;
+}) {
+  if (
+    (await api(`git/ref/tags/v${base}`, true)) !== null ||
+    (await api(`releases/tags/v${base}`, true)) !== null
+  ) {
+    throw new Error(
+      `Stable v${base} already exists; raise PRERELEASE_BASE to the next unreleased line`
+    );
+  }
+  const latest = await api("releases/latest", true);
+  if (latest === null) {
+    return;
+  }
+  const tag = object(latest).tag_name;
+  if (typeof tag !== "string" || !STABLE_TAG.test(tag)) {
+    throw new Error("Latest stable release must have a vX.Y.Z tag");
+  }
+  if (compareStableVersions(tag.slice(1), base) >= 0) {
+    throw new Error(
+      `Candidate line ${base} does not sort above the latest stable release ${tag}; raise PRERELEASE_BASE`
+    );
+  }
+}
+
+/** Compare validated `X.Y.Z` stable versions numerically. */
+function compareStableVersions(a: string, b: string): number {
+  const left = a.split(".").map(BigInt);
+  const right = b.split(".").map(BigInt);
+  for (let index = 0; index < 3; index++) {
+    const l = left[index] ?? 0n;
+    const r = right[index] ?? 0n;
+    if (l !== r) {
+      return l < r ? -1 : 1;
+    }
+  }
+  return 0;
 }
 
 async function requireBranchChecks({
@@ -518,6 +586,7 @@ export async function packagePrerelease({
   const metadata = prereleaseMetadata({
     version: plan.version,
     sourceRevision: plan.source_revision,
+    base: plan.base,
   });
   await verifyStorageToolPayload({
     bundle,
@@ -678,6 +747,7 @@ export async function verifyReleaseAssets({
   const expected = prereleaseMetadata({
     version: plan.version,
     sourceRevision: plan.source_revision,
+    base: plan.base,
   });
   const metadata: unknown = await Bun.file(
     join(output, "prerelease.json")

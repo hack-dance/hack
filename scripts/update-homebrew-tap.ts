@@ -248,6 +248,20 @@ function parseAssets({
   return out;
 }
 
+/**
+ * The CLI resolves its config compiler beside its own executable and never
+ * searches PATH (`resolveNativeConfigCompilerBinary`). `bin/hack` is an env
+ * script that execs `libexec/hack`, so the compiler is installed in `libexec`.
+ */
+export const FORMULA_CONFIG_COMPILER = "hack-config-compiler";
+/** Synthetic project the formula test validates through the installed CLI. */
+export const FORMULA_TEST_PROJECT = "formula-test";
+
+/**
+ * Render the stable formula. Stable release archives ship the compiler beside
+ * `hack` (`scripts/build-release.ts`); an archive without it fails the Homebrew
+ * install instead of producing a CLI that cannot run `hack config`.
+ */
 export function renderFormula({
   repo,
   tag,
@@ -287,6 +301,7 @@ export function renderFormula({
     "",
     "  def install",
     '    libexec.install "hack"',
+    `    libexec.install "${FORMULA_CONFIG_COMPILER}"`,
     '    (libexec/"assets").install Dir["assets/*"] if (buildpath/"assets").directory?',
     '    (libexec/"assets/binaries").install Dir["binaries/*"] if (buildpath/"binaries").directory?',
     '    (bin/"hack").write_env_script libexec/"hack", HACK_ASSETS_DIR: libexec/"assets"',
@@ -294,6 +309,14 @@ export function renderFormula({
     "",
     "  test do",
     '    assert_match "hack", shell_output("#{bin}/hack --help")',
+    `    assert_match "transport_version", shell_output("#{libexec}/${FORMULA_CONFIG_COMPILER} --protocol")`,
+    '    (testpath/".hack").mkpath',
+    '    (testpath/".hack/hack.project.json").write <<~JSON',
+    `      {"schema_version":1,"name":"${FORMULA_TEST_PROJECT}","services":{"web":{"image":"example/web:1"}}}`,
+    "    JSON",
+    '    validation = JSON.parse(shell_output("#{bin}/hack config validate --json"))',
+    '    assert_equal true, validation["ok"]',
+    `    assert_equal "${FORMULA_TEST_PROJECT}", validation["plan"]["name"]`,
     "  end",
     "end",
     "",

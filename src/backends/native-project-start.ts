@@ -20,6 +20,7 @@ import {
   adaptNativeGcloudEnvironment,
   type NativeGcloudSelection,
 } from "./native-gcloud-environment.ts";
+import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
 import {
   acquireNativeHttpsLease,
   NativeHttpsLeaseAcquisitionError,
@@ -76,6 +77,7 @@ import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   type NativeProjectInput,
+  nativeReviewedActiveServices,
   prepareNativeProjectInput,
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
@@ -124,6 +126,7 @@ import {
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
 import {
+  beginNativeProjectStartupObservation,
   describeNativeRunEnvironmentChange,
   loadNativeProjectRun,
   loadNativeRestartIntent,
@@ -539,6 +542,7 @@ export function prepareNativeProjectServices(
     ) {
       throw refused();
     }
+    admitNativeHttpProbe(name, value);
     result[name] = value;
   }
   return result;
@@ -546,6 +550,7 @@ export function prepareNativeProjectServices(
 /** Fixed text of the refusal when the project share was not granted. */
 export const NATIVE_SHARED_SOURCE_REFUSAL =
   "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 or sharedSource in the native machine settings to share this exact project, including ignored files. Grant that share and run the command again.";
+const SERVICE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -575,15 +580,30 @@ async function pinNativeProjectImages(opts: {
       continue;
     }
     const policy = nativeEmulationPolicy(opts.amd64Emulation, name);
-    const ensured = await opts.invoke({
-      runtime: opts.runtime,
-      cwd: opts.projectRoot,
-      args: [
-        ...nativeEnsureImageArgs(image, policy),
-        ...nativeImagePolicyArgs(),
-      ],
-      timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
-    });
+    const ensured = await opts
+      .invoke({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: [
+          ...nativeEnsureImageArgs(image, policy),
+          ...nativeImagePolicyArgs(),
+        ],
+        timeoutMs: NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
+      })
+      .catch((error: unknown) => {
+        if (
+          error instanceof NativeRuntimeRequestError &&
+          error.nativeCode === "registry_image_not_found"
+        ) {
+          const label = SERVICE_NAME.test(name)
+            ? `service ${name}`
+            : "a service";
+          throw new ClosedCliError(
+            `Native image acquisition failed for ${label} field image (registry_image_not_found); the selected registry image or tag was not found. Values omitted.`
+          );
+        }
+        throw error;
+      });
     if (
       !isRecord(ensured) ||
       typeof ensured.image_id !== "string" ||
@@ -1670,7 +1690,7 @@ function reportStopped(opts: {
   }
 }
 
-export async function startNativeProject(opts: {
+type NativeProjectStartOptions = {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
@@ -1736,7 +1756,12 @@ export async function startNativeProject(opts: {
   /** Foreground progress and the ready line; see {@link NativeStartupProgress}. */
   readonly onProgress?: (event: NativeStartupProgress) => void;
   readonly dependencies?: Partial<Dependencies>;
-}): Promise<number> {
+};
+
+async function startNativeProjectAttempt(
+  opts: NativeProjectStartOptions,
+  observeStartup: () => Promise<void>
+): Promise<number> {
   const progress = progressReporter(opts.onProgress);
   const requestedProfiles = normalizeNativeProfiles(opts.profiles);
   requireActiveStartup(opts.signal);
@@ -1795,6 +1820,7 @@ export async function startNativeProject(opts: {
     invoke: deps.invoke,
   });
   await deps.prepareStorage(opts.scope);
+  await observeStartup();
   let input = await deps.prepare({
     ...opts.scope,
     composeFile: opts.composeFile,
@@ -1934,6 +1960,27 @@ export async function startNativeProject(opts: {
       path: selectedDependencyFile,
       services: Object.keys(specs),
       hostAliases,
+      checkPinned: async ({ hostPid, hostPort }) => {
+        const result = await deps.invoke({
+          runtime: opts.runtime,
+          cwd: opts.scope.projectRoot,
+          args: [
+            "graph",
+            "dependency-check",
+            "--host-pid",
+            String(hostPid),
+            "--host-port",
+            String(hostPort),
+            "--json",
+          ],
+          timeoutMs: 10_000,
+        });
+        if (!isRecord(result) || result.listener_confirmed !== true) {
+          throw new ClosedCliError(
+            "Native listener check was not confirmed; values omitted."
+          );
+        }
+      },
       discover: (selection) =>
         discoverNativeHostDependency({
           runtime: opts.runtime,
@@ -2209,7 +2256,9 @@ export async function startNativeProject(opts: {
             | undefined;
           // Redacted at receipt; the raw tail is never retained or persisted.
           let startupLogReport = "";
-          const services = Object.keys(specs).sort();
+          const services = [
+            ...nativeReviewedActiveServices(review.report.plan),
+          ].sort();
           const readinessArgs = nativeReadinessArgs({
             specs,
             plan: review.report.plan,
@@ -2530,5 +2579,19 @@ export async function startNativeProject(opts: {
 function reportForegroundStopFailure(failure: unknown, failed: boolean): void {
   if (failure !== undefined && !failed) {
     throw failure;
+  }
+}
+
+/** Publish advisory startup evidence until this foreground invocation settles. */
+export async function startNativeProject(
+  opts: NativeProjectStartOptions
+): Promise<number> {
+  let finish: (() => Promise<void>) | undefined;
+  try {
+    return await startNativeProjectAttempt(opts, async () => {
+      finish = await beginNativeProjectStartupObservation(opts.scope);
+    });
+  } finally {
+    await finish?.();
   }
 }

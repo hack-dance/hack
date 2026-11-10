@@ -609,7 +609,7 @@ test("a listener missing past the discovery deadline names its binding and port"
   expect((coded as Error).message).not.toContain("synthetic-do-not-print");
 });
 
-test("an unreadable selection file is named without echoing its contents", async () => {
+test("a malformed selection file reports JSON syntax without echoing its contents", async () => {
   const root = await mkdtemp(join(tmpdir(), "native-dependencies-"));
   roots.push(root);
   const path = join(root, "selection.json");
@@ -619,7 +619,7 @@ test("an unreadable selection file is named without echoing its contents", async
     services: ["web"],
   }).catch((error: unknown) => error);
   expect((failure as Error).message).toBe(
-    "Native host dependencies refused: HACK_NATIVE_DEPENDENCIES must name an absolute path to a bounded, unchanged regular JSON file; listener values omitted."
+    "Native host dependencies refused: the selection file is not valid UTF-8 JSON; listener values omitted."
   );
 });
 
@@ -985,4 +985,42 @@ test("a version 2 file discovers one PID per shared executable listener", async 
     ["web", 456],
     ["worker", 456],
   ]);
+});
+
+test("a pinned listener refusal names binding aliases and port without private process values", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-dependencies-"));
+  roots.push(root);
+  const path = join(root, "selection.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      dependencies: [
+        {
+          service: "web",
+          binding: "api",
+          guest_port: 443,
+          aliases: ["api.example.test"],
+          host_pid: 12_345,
+          host_port: 8443,
+        },
+      ],
+    })
+  );
+  const failure = await readNativeHostDependencies({
+    path,
+    services: ["web"],
+    checkPinned: async () => {
+      throw new NativeRuntimeRequestError({
+        nativeCode: "host_endpoint_identity",
+        message: "private process detail",
+      });
+    },
+  }).catch((error: unknown) => error);
+  expect((failure as Error).message).toContain(
+    "service web, binding api, aliases api.example.test, guest port 443, host port 8443"
+  );
+  expect((failure as Error).message).toContain("host_endpoint_identity");
+  expect((failure as Error).message).not.toContain("12345");
+  expect((failure as Error).message).not.toContain("private process detail");
 });

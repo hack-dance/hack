@@ -240,9 +240,20 @@ test.each([
   expect(await Bun.file(join(selected.root, "runtime-called")).exists()).toBe(
     false
   );
-  expect(await readdir(join(selected.root, ".hack"))).toEqual([
-    "hack.project.json",
-  ]);
+  // Admitted macOS startup acquires the existing private admission store before
+  // parsing input. Failure releases its locks without publishing intent or run.
+  expect((await readdir(join(selected.root, ".hack"))).sort()).toEqual(
+    process.platform === "darwin"
+      ? [".internal", "hack.project.json"]
+      : ["hack.project.json"]
+  );
+  if (process.platform === "darwin") {
+    const internal = join(selected.root, ".hack/.internal");
+    expect(await readdir(internal)).toEqual(["native-authored-runs"]);
+    const store = join(internal, "native-authored-runs");
+    expect(await readdir(store)).toEqual([".gitignore"]);
+    expect(await Bun.file(join(store, ".gitignore")).text()).toBe("*\n");
+  }
 });
 
 test("source CLI omitted backend retains the existing Compose foreground refusal", async () => {

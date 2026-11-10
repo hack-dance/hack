@@ -129,6 +129,16 @@ fn execute(
     name: &str,
     action: &str,
 ) -> Result<(), CandidateError> {
+    execute_with_generation(engine, receipt, name, action, "")
+}
+
+fn execute_with_generation(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    name: &str,
+    action: &str,
+    previous: &str,
+) -> Result<(), CandidateError> {
     let p = &receipt.probes[name];
     let path = path(p);
     let marker = marker(receipt, name, p);
@@ -141,11 +151,13 @@ fn execute(
         uid.as_str(),
         gid.as_str(),
         p.binary.as_str(),
+        previous,
     ];
+    let script = STORAGE.replace("# PROBE_REARM_SAMPLES", REARM_SAMPLES);
     let output = if action == "remove" {
-        engine.guest().execute_cleanup(STORAGE, &args)?
+        engine.guest().execute_cleanup(&script, &args)?
     } else {
-        engine.guest().execute(STORAGE, &args, None)?
+        engine.guest().execute(&script, &args, None)?
     };
     if output != "probe-storage-ready\n" {
         return Err(error(
@@ -588,6 +600,12 @@ test ! -L "$root/owner"
 test "$(stat -c %u:%g:%a:%h "$root/owner")" = 0:0:400:1
 test "$(cat "$root/owner")" = "$marker"
 test ! -L "$root/state"
+if test "$action" = rearm; then
+ test "$(findmnt -n -o FSTYPE --mountpoint "$root/state")" = tmpfs
+ state="$root/state"; previous="$7"
+ # PROBE_REARM_SAMPLES
+ # Fall through to the common confirmation outside this redirected subshell.
+else
 if findmnt -n --mountpoint "$root/state" >/dev/null; then
  test "$(findmnt -n -o FSTYPE --mountpoint "$root/state")" = tmpfs
  test "$action" != create
@@ -604,10 +622,12 @@ else
  test "$(sha256sum "$binary" | cut -d' ' -f1)" = "${binary##*/}"
  mount -t tmpfs -o "size=65536,mode=0700,uid=$uid,gid=$gid,nosuid,nodev,noexec" tmpfs "$root/state"
 fi
+fi
 ) >/dev/null 2>&1
 printf 'probe-storage-ready
 '
 "#;
+const REARM_SAMPLES: &str = include_str!("probe-rearm-samples.sh");
 #[cfg(feature = "native-http-probe")]
 pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
     let bytes = super::super::http_probe::guest_binary();
@@ -693,10 +713,219 @@ pub(super) fn unchanged(
     Ok(())
 }
 
+/// Rearm an admitted route probe after an independently observed container
+/// incarnation change. Keep the existing mounted state: reset would unmount it
+/// while the running container still holds the old mount. A new random probe
+/// generation rejects every old sample. An uncertain exec intent is never replayed.
+#[cfg(target_os = "macos")]
+pub(super) fn rearm_route(
+    engine: &Engine<'_>,
+    receipt: &mut Receipt,
+    root: &std::path::Path,
+    name: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    fence()?;
+    let resource = receipt
+        .resources
+        .get(&format!("container:{name}"))
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route container."))?;
+    let probe = receipt
+        .probes
+        .get(name)
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route probe."))?;
+    if resource.restart_policy.is_none()
+        || resource.routing.is_none()
+        || probe.phase != "running"
+        || !inactive_exec(exec(engine, receipt, name)?.as_ref())
+    {
+        return Err(error(
+            "graph_probe_replay",
+            "Prior route probe is live or uncertain; no rearm was attempted.",
+        ));
+    }
+    rearm_after_inactive(
+        receipt,
+        root,
+        name,
+        fence,
+        |receipt, previous| execute_with_generation(engine, receipt, name, "rearm", previous),
+        |method, path, body| engine.request(method, path, body),
+    )
+}
+
+/// One non-replayable preparation/create/start protocol after inactive-exec proof.
+/// Request dispatch is injected so the actual connection-mode guard is tested.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn rearm_after_inactive(
+    receipt: &mut Receipt,
+    root: &std::path::Path,
+    name: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+    prepare: impl FnOnce(&Receipt, &str) -> Result<(), CandidateError>,
+    mut request: impl FnMut(Method, &str, Option<&Value>) -> Result<Value, CandidateError>,
+) -> Result<(), CandidateError> {
+    let id = receipt
+        .resources
+        .get(&format!("container:{name}"))
+        .and_then(|r| r.id.clone())
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route container."))?;
+    if receipt
+        .probes
+        .get(name)
+        .is_none_or(|p| p.phase != "running")
+    {
+        return Err(error(
+            "graph_probe_replay",
+            "Probe rearm cannot replay an uncertain intent.",
+        ));
+    }
+    fence()?;
+    let probe = receipt
+        .probes
+        .get_mut(name)
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route probe."))?;
+    let previous = probe.generation.clone();
+    probe.generation = token()?;
+    probe.exec_id = None;
+    probe.started_ms = 0;
+    probe.phase = "exec-intent".into();
+    state::write(&root.join("state.json"), receipt)?;
+    fence()?;
+    prepare(receipt, &previous)?;
+    fence()?;
+    let probe = &receipt.probes[name];
+    let mut args = vec!["/run/hack-http-probe".to_owned()];
+    args.extend(
+        probe
+            .config
+            .arguments("/run/hack-http-probe-state", &probe.generation)?,
+    );
+    let value = request(
+        Method::POST,
+        &format!("/v1.53/containers/{id}/exec"),
+        Some(
+            &json!({"AttachStdout":false,"AttachStderr":false,"User":format!("{}:{}",probe.uid,probe.gid),"Cmd":args}),
+        ),
+    )?;
+    let exec_id = value["Id"]
+        .as_str()
+        .filter(|id| hex(id, 64))
+        .ok_or_else(|| error("graph_probe_identity", "Missing created probe identity."))?
+        .to_owned();
+    fence()?;
+    let probe = receipt
+        .probes
+        .get_mut(name)
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route probe."))?;
+    probe.exec_id = Some(exec_id.clone());
+    probe.started_ms = now()?;
+    probe.phase = "starting".into();
+    state::write(&root.join("state.json"), receipt)?;
+    fence()?;
+    request(
+        Method::POST,
+        &format!("/v1.53/exec/{exec_id}/start"),
+        Some(&json!({"Detach":true,"Tty":false})),
+    )?;
+    fence()?;
+    receipt
+        .probes
+        .get_mut(name)
+        .ok_or_else(|| error("graph_probe_identity", "Missing owned route probe."))?
+        .phase = "running".into();
+    state::write(&root.join("state.json"), receipt)
+}
+
 #[cfg(test)]
 mod storage_tests {
     use super::STORAGE;
     use std::{fs, process::Command};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn complete_rearm_storage_script_confirms_success_once_and_never_confirms_refusal() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let fixture = super::super::tests::Fixture::new();
+        let parent = fixture.0.join("http-probes");
+        let root = parent.join("allocation");
+        let state = root.join("state");
+        let tools = fixture.0.join("tools");
+        for path in [&parent, &root, &state, &tools] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(root.join("owner"), "synthetic-probe-owner").unwrap();
+        fs::set_permissions(root.join("owner"), fs::Permissions::from_mode(0o400)).unwrap();
+        fs::write(state.join("lock"), "").unwrap();
+        fs::set_permissions(state.join("lock"), fs::Permissions::from_mode(0o600)).unwrap();
+        let findmnt = r#"#!/bin/sh
+set -eu
+test "$#" = 5
+test "$1" = -n; test "$2" = -o; test "$3" = FSTYPE
+test "$4" = --mountpoint; test "$5" = "$HACK_TEST_PROBE_STATE"
+printf 'tmpfs\n'
+"#;
+        for (name, program) in [
+            ("findmnt", findmnt),
+            ("mount", "#!/bin/sh\nexit 99\n"),
+            ("umount", "#!/bin/sh\nexit 99\n"),
+        ] {
+            let path = tools.join(name);
+            fs::write(&path, program).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let metadata = fs::metadata(&root).unwrap();
+        let uid = metadata.uid();
+        let gid = metadata.gid();
+        // Run the complete production template and fragment, including its
+        // subshell/redirection/footer. Only guest root UID and mount observation
+        // are adapted; this test performs no mount and claims no VM proof.
+        let script = STORAGE
+            .replace("# PROBE_REARM_SAMPLES", super::REARM_SAMPLES)
+            .replace("parent=/run/hack-local/http-probes", "parent=\"$8\"")
+            .replace("= 0:0:700", &format!("= {uid}:{gid}:700"))
+            .replace("= 0:0:400:1", &format!("= {uid}:{gid}:400:1"));
+        let previous = "a".repeat(32);
+        let invoke = || {
+            Command::new("/bin/sh")
+                .args(["-eu", "-c", &script, "probe-storage-contract", "rearm"])
+                .arg(&root)
+                .arg("synthetic-probe-owner")
+                .arg(uid.to_string())
+                .arg(gid.to_string())
+                .arg("/nonexistent/probe")
+                .arg(&previous)
+                .arg(&parent)
+                .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
+                .env("HACK_TEST_PROBE_STATE", &state)
+                .output()
+                .unwrap()
+        };
+        let inode = fs::metadata(&state).unwrap().ino();
+        for pending in ["", "v1 partial sample"] {
+            for (name, value) in [
+                ("status", format!("v1 {previous} 1 1 0 1000 1\n")),
+                ("first-sample", format!("v1 {previous} 1 1 0 1000 1\n")),
+                ("status.pending", pending.into()),
+            ] {
+                let path = state.join(name);
+                fs::write(&path, value).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let result = invoke();
+            assert!(result.status.success(), "{result:?}");
+            assert_eq!(result.stdout, b"probe-storage-ready\n");
+            assert!(result.stderr.is_empty());
+            assert_eq!(fs::metadata(&state).unwrap().ino(), inode);
+            for name in ["status", "first-sample", "status.pending"] {
+                assert!(!state.join(name).exists());
+            }
+            let refused = invoke();
+            assert!(!refused.status.success());
+            assert!(refused.stdout.is_empty());
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

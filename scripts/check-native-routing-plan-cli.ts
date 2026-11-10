@@ -378,19 +378,14 @@ try {
     "local route injection refused"
   );
   await rm(join(checkout, ".hack/hack.local.json"));
-  const runtime = await invoke(["up", "--detach", "--json"], checkout, {
+  const runtime = await invoke(["up", "web", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
+    HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
+    HACK_NATIVE_HOME: join(home, "native"),
   });
   assert(
-    runtime.exit !== 0 &&
-      (runtime.stdout + runtime.stderr).includes(
-        // On macOS authored foreground up is supported, so --detach gets the
-        // shared one-line E_USAGE refusal; elsewhere it is unsupported.
-        process.platform === "darwin"
-          ? "E_USAGE"
-          : "E_NATIVE_PROJECT_UNSUPPORTED"
-      ),
-    "native detached up refuses before input or runtime work"
+    runtime.exit !== 0 && (runtime.stdout + runtime.stderr).includes("E_USAGE"),
+    "native detached service selection refuses before input or runtime work"
   );
   assert(
     !(

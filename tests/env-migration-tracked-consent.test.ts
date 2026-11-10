@@ -184,7 +184,9 @@ for (const backend of ["compose", "native"] as const) {
         "git-tracked files (edit .hack/docker-compose.yml; delete .hack/hack.env.json)"
       );
       expect(run.output).toContain("--accept-tracked-env-changes");
-      expect(run.output).not.toContain("v4");
+      expect(run.output).not.toContain(
+        `Moved ${KEY} to .hack/hack.env.local.yaml (values omitted).`
+      );
       expect(await status(project)).toEqual(["?? .hack/.env"]);
       expect(
         await readFile(join(project.projectDir, "hack.env.json"), "utf8")

@@ -281,7 +281,7 @@ async function runHackCli(opts: {
     },
   });
   const proc = Bun.spawn(
-    ["bun", resolve(import.meta.dir, "../index.ts"), ...opts.args],
+    [process.execPath, resolve(import.meta.dir, "../index.ts"), ...opts.args],
     {
       cwd: opts.sandbox,
       env,

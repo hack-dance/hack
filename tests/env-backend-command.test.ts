@@ -1519,7 +1519,7 @@ async function runHack(input: {
     throw new Error("Missing temp directory state");
   }
   const proc = Bun.spawn(
-    ["bun", resolve(import.meta.dir, "../index.ts"), ...input.args],
+    [process.execPath, resolve(import.meta.dir, "../index.ts"), ...input.args],
     {
       cwd: input.cwd ?? resolve(import.meta.dir, ".."),
       env: privateCliEnv({

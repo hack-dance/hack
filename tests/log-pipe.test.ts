@@ -23,7 +23,7 @@ async function runLogPipe(opts: {
   try {
     const proc = Bun.spawn(
       [
-        "bun",
+        process.execPath,
         "index.ts",
         "log-pipe",
         "--format",

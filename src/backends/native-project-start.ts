@@ -1980,13 +1980,16 @@ async function startNativeProjectAttempt(
     // Every binding's wait (`host_wait_seconds`, default 60 s) is measured
     // from here, the end of the up.before hooks.
     const dependencyDiscoveryStart = performance.now();
+    // A discovery stops on cancellation or once another binding's refusal
+    // already ends this startup.
     const dependencyWait = (
-      target: Parameters<typeof nativeDependencyStartupWait>[0]["target"]
+      target: Parameters<typeof nativeDependencyStartupWait>[0]["target"],
+      stopped: AbortSignal
     ) =>
       nativeDependencyStartupWait({
         target,
         startedAtMs: dependencyDiscoveryStart,
-        signal: controller.signal,
+        signal: AbortSignal.any([controller.signal, stopped]),
         report: (waiting) => progress({ phase: "dependency-wait", ...waiting }),
       });
     const hostAliases = nativeServiceHostAliases({
@@ -2026,7 +2029,7 @@ async function startNativeProjectAttempt(
           hostPort: selection.hostPort,
           executable: selection.executable,
           invoke: deps.invoke,
-          wait: dependencyWait(selection),
+          wait: dependencyWait(selection, selection.signal),
         }),
       owners: opts.dependencyOwners,
       discoverOwned: (selection) =>
@@ -2036,7 +2039,7 @@ async function startNativeProjectAttempt(
           hostPort: selection.hostPort,
           ancestorPid: selection.ancestorPid,
           invoke: deps.invoke,
-          wait: dependencyWait(selection),
+          wait: dependencyWait(selection, selection.signal),
         }),
       listenerHooks: hooks.listenerHooks,
     });

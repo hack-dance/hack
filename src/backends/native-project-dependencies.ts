@@ -815,7 +815,11 @@ type NativeDependencyDiscovery = {
     readonly hostPort: number;
   }) => Promise<void>;
   readonly discover?: (
-    selection: NativeDependencyDiscoveryTarget & { readonly executable: string }
+    selection: NativeDependencyDiscoveryTarget & {
+      readonly executable: string;
+      /** Aborted when another binding's refusal already ends this startup. */
+      readonly signal: AbortSignal;
+    }
   ) => Promise<{
     readonly host_pid: number;
     readonly endpoint_fingerprint: string;
@@ -825,6 +829,8 @@ type NativeDependencyDiscovery = {
   readonly discoverOwned?: (
     selection: NativeDependencyDiscoveryTarget & {
       readonly ancestorPid: number;
+      /** Aborted when another binding's refusal already ends this startup. */
+      readonly signal: AbortSignal;
     }
   ) => Promise<NativeOwnedDiscovery>;
   /**
@@ -887,9 +893,8 @@ function missingListenerRefusal(opts: {
 
 /**
  * One refusal for every binding whose listener did not answer within its own
- * wait. A single missing binding keeps its own message. A binding reached only
- * after its wait had already elapsed (while earlier bindings resolved) is not
- * queried again; it is listed with the others.
+ * wait. A single missing binding keeps its own message; several are listed in
+ * selection order.
  */
 function missingListenersRefusal(missing: readonly Error[]): Error {
   const [first] = missing;
@@ -986,13 +991,62 @@ function discoveryTarget(
   };
 }
 
-/** One live discovery per owner (or executable) and host port, in entry order. */
+/** A failure of the shared owned discovery itself, mapped per entry. */
+class OwnedDiscoveryFailure {
+  readonly error: unknown;
+  constructor(error: unknown) {
+    this.error = error;
+  }
+}
+
+/**
+ * One live discovery per owner (or executable) and host port. Bindings resolve
+ * concurrently, so entries that share a listener share one in-flight discovery
+ * (and its longest wait) while independent listeners are each observed within
+ * their own wait. Each entry maps a shared failure to its own context.
+ */
 function createDependencyResolution(
-  opts: NativeDependencyDiscovery & { readonly entries: readonly unknown[] }
+  opts: NativeDependencyDiscovery & {
+    readonly entries: readonly unknown[];
+    readonly signal: AbortSignal;
+  }
 ) {
-  const resolved = new Map<string, number>();
-  const owned = new Map<string, Record<string, unknown>>();
+  const resolved = new Map<
+    string,
+    Promise<Awaited<ReturnType<NonNullable<typeof opts.discover>>>>
+  >();
+  const owned = new Map<string, Promise<Record<string, unknown>>>();
   const waits = discoveryWaits(opts.entries);
+  const ownedAuthorityFor = async (request: {
+    readonly owner: NativeDependencyOwner;
+    readonly target: NativeDependencyDiscoveryTarget;
+    readonly context: string;
+    readonly resolveOwner: NativeDependencyOwnerResolver;
+    readonly discoverOwned: NonNullable<
+      NativeDependencyDiscovery["discoverOwned"]
+    >;
+  }) => {
+    // Owner refusals keep their own closed text.
+    const proof = await request.resolveOwner(request.owner);
+    let found: NativeOwnedDiscovery;
+    try {
+      found = await request.discoverOwned({
+        ...request.target,
+        ancestorPid: proof.pid,
+        signal: opts.signal,
+      });
+    } catch (error) {
+      throw new OwnedDiscoveryFailure(error);
+    }
+    const authority = ownedAuthority({
+      found,
+      ownerPid: proof.pid,
+      context: request.context,
+    });
+    // The owner must still be the same live process after discovery.
+    await proof.confirm();
+    return authority;
+  };
   const ownedEntry = async (
     entry: Record<string, unknown>,
     owner: NativeDependencyOwner,
@@ -1006,28 +1060,30 @@ function createDependencyResolution(
     }
     const target = discoveryTarget(entry, waits);
     const key = `${owner.kind}\0${owner.name}\0${target.hostPort}`;
-    let authority = owned.get(key);
-    if (authority === undefined) {
-      // Owner refusals keep their own closed text.
-      const proof = await opts.owners(owner);
-      let found: NativeOwnedDiscovery;
-      try {
-        found = await opts.discoverOwned({
-          ...target,
-          ancestorPid: proof.pid,
-        });
-      } catch (error) {
-        throw ownedDiscoveryRefusal({
-          error,
-          context,
-          waitSeconds: target.waitSeconds,
-          hooks: opts.listenerHooks,
-        });
+    let pending = owned.get(key);
+    if (pending === undefined) {
+      pending = ownedAuthorityFor({
+        owner,
+        target,
+        context,
+        resolveOwner: opts.owners,
+        discoverOwned: opts.discoverOwned,
+      });
+      owned.set(key, pending);
+    }
+    let authority: Record<string, unknown>;
+    try {
+      authority = await pending;
+    } catch (error) {
+      if (!(error instanceof OwnedDiscoveryFailure)) {
+        throw error;
       }
-      authority = ownedAuthority({ found, ownerPid: proof.pid, context });
-      // The owner must still be the same live process after discovery.
-      await proof.confirm();
-      owned.set(key, authority);
+      throw ownedDiscoveryRefusal({
+        error: error.error,
+        context,
+        waitSeconds: target.waitSeconds,
+        hooks: opts.listenerHooks,
+      });
     }
     const {
       host_lifecycle: _lifecycle,
@@ -1050,35 +1106,35 @@ function createDependencyResolution(
     const executable = String(entry.host_executable);
     const target = discoveryTarget(entry, waits);
     const key = `${executable}\0${target.hostPort}`;
-    let hostPid = resolved.get(key);
-    if (hostPid === undefined) {
-      let discovered: Awaited<ReturnType<NonNullable<typeof opts.discover>>>;
-      try {
-        discovered = await opts.discover({ ...target, executable });
-      } catch (error) {
-        const reason = discoveryReason(error);
-        throw reason === MISSING_LISTENER_REASON
-          ? missingListenerRefusal({
-              reason,
-              context,
-              waitSeconds: target.waitSeconds,
-              hooks: opts.listenerHooks,
-            })
-          : refused(reason ?? "listener discovery failed", context);
-      }
-      if (
-        !(
-          validPid(discovered.host_pid) &&
-          FINGERPRINT.test(discovered.endpoint_fingerprint)
-        )
-      ) {
-        throw refused(INVALID_DISCOVERY_REASON, context);
-      }
-      hostPid = discovered.host_pid;
-      resolved.set(key, hostPid);
+    let pending = resolved.get(key);
+    if (pending === undefined) {
+      pending = opts.discover({ ...target, executable, signal: opts.signal });
+      resolved.set(key, pending);
+    }
+    let discovered: Awaited<typeof pending>;
+    try {
+      discovered = await pending;
+    } catch (error) {
+      const reason = discoveryReason(error);
+      throw reason === MISSING_LISTENER_REASON
+        ? missingListenerRefusal({
+            reason,
+            context,
+            waitSeconds: target.waitSeconds,
+            hooks: opts.listenerHooks,
+          })
+        : refused(reason ?? "listener discovery failed", context);
+    }
+    if (
+      !(
+        validPid(discovered.host_pid) &&
+        FINGERPRINT.test(discovered.endpoint_fingerprint)
+      )
+    ) {
+      throw refused(INVALID_DISCOVERY_REASON, context);
     }
     const { host_wait_seconds: _wait, ...rest } = entry;
-    return { ...rest, host_pid: hostPid };
+    return { ...rest, host_pid: discovered.host_pid };
   };
   return async (entry: unknown, index: number): Promise<unknown> => {
     if (!isRecord(entry)) {
@@ -1164,23 +1220,47 @@ async function readSelectedHostDependencies(
   // Validate the complete intent before resolving owners or invoking native
   // process discovery.
   provisionalNativeHostDependencies({ value, services: opts.services });
+  const stop = new AbortController();
   const resolve = createDependencyResolution({
     ...opts,
     entries: value.dependencies,
+    signal: stop.signal,
   });
-  const dependencies: unknown[] = [];
-  // A listener missing after its wait does not stop the others: each binding
-  // keeps its own deadline from the end of the hooks, and the refusal names
-  // every binding still missing. Any other refusal stops at once.
-  const missing: Error[] = [];
-  for (const [index, entry] of value.dependencies.entries()) {
-    try {
-      dependencies.push(await resolve(entry, index));
-    } catch (error) {
-      if (!(error instanceof Error && MISSING_LISTENERS.has(error))) {
+  // Bindings resolve concurrently, so selection order never decides whether a
+  // binding meets its own deadline from the end of the hooks. A listener
+  // missing after its wait does not stop the others, and the refusal names
+  // every binding still missing. The first other refusal stops the remaining
+  // discoveries and is reported once they settle.
+  const fatal: { failed: boolean; error?: unknown } = { failed: false };
+  const settled = await Promise.allSettled(
+    value.dependencies.map(async (entry, index) => {
+      try {
+        return await resolve(entry, index);
+      } catch (error) {
+        if (
+          !(
+            fatal.failed ||
+            (error instanceof Error && MISSING_LISTENERS.has(error))
+          )
+        ) {
+          fatal.failed = true;
+          fatal.error = error;
+          stop.abort();
+        }
         throw error;
       }
-      missing.push(error);
+    })
+  );
+  if (fatal.failed) {
+    throw fatal.error;
+  }
+  const dependencies: unknown[] = [];
+  const missing: Error[] = [];
+  for (const outcome of settled) {
+    if (outcome.status === "fulfilled") {
+      dependencies.push(outcome.value);
+    } else {
+      missing.push(outcome.reason as Error);
     }
   }
   if (missing.length > 0) {

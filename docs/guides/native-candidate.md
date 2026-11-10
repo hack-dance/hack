@@ -2109,9 +2109,10 @@ Startup waits for persistent hooks to create each discovered listener
 (`host_executable`, `host_lifecycle` or `host_shared_helper`), with cancellable
 waits and bounded read-only discovery requests. Each binding may wait up to its
 `host_wait_seconds`, an integer from 1 through 900 that defaults to 60. Every
-binding's wait is measured from the moment the `up.before` hooks return, so a slow
-earlier binding does not shorten a later one. When several entries share one
-listener, the longest wait among them applies. A fixed `host_pid` entry is never
+binding's wait is measured from the moment the `up.before` hooks return, and
+independent listeners are discovered at the same time, so a slow binding never
+shortens another one, whatever their order in the selection. When several entries
+share one listener, it is discovered once and the longest wait among them applies. A fixed `host_pid` entry is never
 waited for and refuses `host_wait_seconds`. For example, a hook that opens
 tunnels taking about three minutes needs:
 
@@ -2134,7 +2135,7 @@ listener BINDING (service SERVICE, host port PORT): N s of LIMIT s…` on the fi
 retry and then every ten seconds.
 
 Discovery retries only native endpoint-identity refusals; malformed selections and
-other failures stop immediately. A refusal is one `E_CONFIG_INVALID` line that names the
+other failures stop immediately, and stop the discoveries still waiting. A refusal is one `E_CONFIG_INVALID` line that names the
 reason and the affected entry by position, service, binding, aliases, guest port and
 host port, each shown only after it validates. For example, a listener that never
 appears on the selected port reports `no listener owned by host_executable answered
@@ -2143,8 +2144,7 @@ names of the persistent `up.before` hooks and lifecycle processes that ran, and 
 `host_wait_seconds` default and maximum. A missing listener does not stop the
 other bindings: startup keeps resolving them, each against its own wait, and when
 more than one is still missing the single refusal lists every one of them with its
-wait. A binding reached only after its wait had already elapsed is listed without
-another query. Host PIDs, executable paths, hook commands and the contents of
+wait, in selection order. Host PIDs, executable paths, hook commands and the contents of
 unrecognized fields are never printed.
 
 A `host_executable` listener needs a running parent process: native review pins

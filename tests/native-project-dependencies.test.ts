@@ -39,6 +39,15 @@ function parse(dependencies: unknown[]) {
   });
 }
 
+/** A recorded discovery request without its stop signal, which every request carries. */
+function withoutSignal<T extends { readonly signal: AbortSignal }>(
+  request: T
+): Omit<T, "signal"> {
+  expect(request.signal).toBeInstanceOf(AbortSignal);
+  const { signal: _signal, ...rest } = request;
+  return rest;
+}
+
 const discovery = {
   runtime: { binary: "/synthetic/native", home: "/synthetic/home" },
   projectRoot: "/synthetic/project",
@@ -385,8 +394,9 @@ test("executable-pinned selection refreshes one current PID per shared listener 
   const discover = async (request: {
     readonly hostPort: number;
     readonly executable: string;
+    readonly signal: AbortSignal;
   }) => {
-    calls.push(request);
+    calls.push(withoutSignal(request));
     return { host_pid: 456, endpoint_fingerprint: "a".repeat(64) };
   };
   const result = await readNativeHostDependencies({
@@ -817,7 +827,7 @@ test("limits apply after declarative expansion and one discovery serves every ex
     services: ["web", "worker", "db"],
     hostAliases: declaredAliases,
     discover: async (selection) => {
-      discovered.push(selection);
+      discovered.push(withoutSignal(selection));
       return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
     },
   });
@@ -1018,7 +1028,7 @@ test("a version 2 file discovers one PID per shared executable listener", async 
     services: ["web", "worker"],
     hostAliases: compactAliases,
     discover: async (request) => {
-      calls.push(request);
+      calls.push(withoutSignal(request));
       return { host_pid: 456, endpoint_fingerprint: "a".repeat(64) };
     },
   });
@@ -1341,8 +1351,111 @@ test("a deadline refusal names every binding still missing, not only the first",
     "Native host dependencies refused: no listener answered on host_port before the discovery deadline for 2 bindings: dependency #1 (service web, binding search, aliases search.example.com, guest port 443, host port 8443) after 60 s; dependency #2 (service web, binding docs, aliases docs.example.com, guest port 443, host port 8444) after 62 s (each wait measured from the end of the up.before hooks; persistent hooks and processes: tunnels); if a listener starts more slowly, set host_wait_seconds on its binding (default 60, at most 900); listener values omitted."
   );
   // search was past its wait before any query; docs was queried until its
-  // deadline; the later events binding was still discovered.
+  // deadline; events was still discovered alongside them.
   expect(queried).not.toContain(8443);
   expect(queried).toContain(8444);
-  expect(queried.at(-1)).toBe(8445);
+  expect(queried).toContain(8445);
+});
+
+test("binding order does not decide whether a shorter wait is met", async () => {
+  // A (10 s) answers only after 2 s; B (1 s) answers at once. Each binding is
+  // observed within its own wait from the end of the hooks, so B, listed
+  // second, must not be starved while A is still being waited on.
+  let clock = 1_000_000;
+  const now = spyOn(performance, "now").mockImplementation(() => clock);
+  try {
+    const startedAtMs = clock;
+    const invoked: number[] = [];
+    let aStarted: () => void = () => undefined;
+    const aRunning = new Promise<void>((resolve) => {
+      aStarted = resolve;
+    });
+    let releaseA: () => void = () => undefined;
+    const aGate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const entry = (name: string, hostPort: number, wait: number) => ({
+      ...executableBinding(),
+      binding: name,
+      aliases: [`${name}.example.com`],
+      host_port: hostPort,
+      host_wait_seconds: wait,
+    });
+    const pending = readNativeHostDependencies({
+      path: await selectionFile({
+        version: 1,
+        dependencies: [entry("alpha", 8443, 10), entry("beta", 8444, 1)],
+      }),
+      services: ["web"],
+      discover: async (selection) =>
+        await discoverNativeHostDependency({
+          ...discovery,
+          executable: selection.executable,
+          hostPort: selection.hostPort,
+          wait: nativeDependencyStartupWait({
+            target: selection,
+            startedAtMs,
+            signal: selection.signal,
+            now: () => clock,
+          }),
+          invoke: async () => {
+            invoked.push(selection.hostPort);
+            if (selection.hostPort === 8443) {
+              aStarted();
+              await aGate;
+            }
+            return {
+              host_pid: selection.hostPort === 8443 ? 456 : 789,
+              endpoint_fingerprint: "f".repeat(64),
+            };
+          },
+        }),
+    });
+    await aRunning;
+    for (let turn = 0; turn < 5; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    // A's query takes 2 s of the shared clock; B's 1 s wait is over by then.
+    clock += 2000;
+    releaseA();
+    const result = await pending;
+    expect(result.map((dependency) => dependency.host_pid)).toEqual([456, 789]);
+    expect(invoked.toSorted()).toEqual([8443, 8444]);
+  } finally {
+    now.mockRestore();
+  }
+});
+
+test("the first other refusal stops the discoveries still waiting", async () => {
+  const entry = (name: string, hostPort: number) => ({
+    ...executableBinding(),
+    binding: name,
+    aliases: [`${name}.example.com`],
+    host_port: hostPort,
+  });
+  let waitingStopped = false;
+  const failure = await readNativeHostDependencies({
+    path: await selectionFile({
+      version: 1,
+      dependencies: [entry("waiting", 8443), entry("broken", 8444)],
+    }),
+    services: ["web"],
+    discover: async (selection) => {
+      if (selection.hostPort === 8444) {
+        return { host_pid: 789, endpoint_fingerprint: "invalid" };
+      }
+      // Still waiting for its listener until the startup is stopped.
+      await new Promise<void>((resolve) => {
+        selection.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        });
+      });
+      waitingStopped = true;
+      throw new Error("listener discovery was cancelled");
+    },
+  }).catch((error: unknown) => error);
+  expect(waitingStopped).toBe(true);
+  expect(failure).toHaveProperty("code", "E_CONFIG_INVALID");
+  expect((failure as Error).message).toContain("binding broken");
+  expect((failure as Error).message).not.toContain("binding waiting");
 });

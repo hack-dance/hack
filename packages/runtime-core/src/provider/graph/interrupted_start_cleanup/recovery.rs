@@ -151,7 +151,12 @@ impl Journal {
                 .get(&self.selection.failed_key)
                 .is_some_and(|resource| {
                     resource.kind == Kind::Container
-                        && resource.phase == "uncertain"
+                        && resource.phase
+                            == if self.selection.shutdown_rebased {
+                                "started"
+                            } else {
+                                "uncertain"
+                            }
                         && resource.id.as_deref() == Some(self.selection.failed_id.as_str())
                 })
             || digest(&serde_json::to_vec_pretty(&self.original).map_err(|_| refused())?)
@@ -237,7 +242,7 @@ fn advance_stop(
 ) -> Result<(), CandidateError> {
     let resource = proof.original.resources.get(key).ok_or_else(refused)?;
     let value = inspect_resource(&proof.engine, &proof.current, resource)?.ok_or_else(refused)?;
-    if key == proof.selected.failed_key {
+    if key == proof.selected.failed_key && !proof.selected.shutdown_rebased {
         failed_created(resource, &value)?;
     }
     if !journal.pending {

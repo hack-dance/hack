@@ -1753,13 +1753,38 @@ async function qualifyArtifacts(
   };
 }
 
+/**
+ * The custom bridge qualification runs as independent parts so the docker-e2e
+ * sharder can place them on separate runners (one serial pass took 37-58 min).
+ * Every part qualifies the same artifacts, starts all three checkouts, proves
+ * sibling continuity after each primary operation and runs the same exact
+ * cleanup; the parts differ only in which primary operations they drive.
+ */
+export const NATIVE_NETWORK_FIXTURE_PARTS = [
+  "lifecycle",
+  "policy",
+  "ingress",
+] as const;
+export type NativeNetworkFixturePart =
+  (typeof NATIVE_NETWORK_FIXTURE_PARTS)[number];
+
+const NATIVE_NETWORK_FIXTURE_SUMMARIES: Readonly<
+  Record<NativeNetworkFixturePart, string>
+> = {
+  lifecycle:
+    "custom bridge DNS/isolation, three worktrees, created recovery, warm reuse, restart and retained data",
+  policy:
+    "custom bridge disconnected-endpoint and topology refusals and outbound policy changes across three worktrees",
+  ingress:
+    "custom bridge foreign-endpoint and wrong-policy refusals and mixed routed ingress across three worktrees",
+};
+
 /** Actual native-only custom bridge qualification. Requires the root's exclusive Docker slot and exact artifact manifest. */
-export const nativeConfigNetworksScenario: Scenario = {
-  name: "native-config-networks",
-  tier: "docker",
-  summary:
-    "custom bridge policy/DNS, three worktrees, created recovery, ownership, retained data and routed ingress",
-  run: async (ctx) => {
+const nativeNetworkFixture = {
+  run: async (
+    ctx: ScenarioContext,
+    part: NativeNetworkFixturePart
+  ): Promise<void> => {
     const started = Date.now();
     const captures = join(ctx.tempRoot, "network-captures");
     const privateHome = join(ctx.tempRoot, "network-home");
@@ -1993,7 +2018,7 @@ export const nativeConfigNetworksScenario: Scenario = {
     const qualificationPath = join(ctx.tempRoot, "network-qualification.json");
     await Bun.write(
       qualificationPath,
-      `${JSON.stringify({ ...manifest, composePlugin: { ...composePlugin, version: composeVersion }, images: { bun: image, caddy: caddyImage }, limits: { milliseconds: SCENARIO_TIMEOUT, cleanupMilliseconds: CLEANUP_TIMEOUT, commandMilliseconds: COMMAND_TIMEOUT, outputBytes: OUTPUT_LIMIT, peakContainers: 13, ownedBridges: 6, ownedVolumes: 3 }, inputs: checkouts.map((checkout) => ({ root: checkout.root, authoredHash: digest(checkout.text) })) })}\n`
+      `${JSON.stringify({ ...manifest, part, composePlugin: { ...composePlugin, version: composeVersion }, images: { bun: image, caddy: caddyImage }, limits: { milliseconds: SCENARIO_TIMEOUT, cleanupMilliseconds: CLEANUP_TIMEOUT, commandMilliseconds: COMMAND_TIMEOUT, outputBytes: OUTPUT_LIMIT, peakContainers: 13, ownedBridges: 6, ownedVolumes: 3 }, inputs: checkouts.map((checkout) => ({ root: checkout.root, authoredHash: digest(checkout.text) })) })}\n`
     );
     await chmod(qualificationPath, 0o600);
     const volumePins = new Map<string, NativeNetworkFixtureVolume>();
@@ -2448,7 +2473,7 @@ export const nativeConfigNetworksScenario: Scenario = {
         ctx.log("Network failure census unavailable");
       }
     };
-    const runPhases = async (): Promise<void> => {
+    const createdRecovery = async (): Promise<void> => {
       const store = await openNativeComposeGenerationStore({
         projectRoot: primary.root,
         instance: null,
@@ -2503,6 +2528,9 @@ export const nativeConfigNetworksScenario: Scenario = {
       ctx.log(
         "Actual created-before-start empty network identity recovered through owned saved down"
       );
+    };
+    // Every part starts all three checkouts: sibling continuity is the isolation proof.
+    const startCheckouts = async (): Promise<void> => {
       for (const checkout of checkouts) {
         startedRoots.add(checkout.root);
         await cli(checkout, ["up", "--detach", "--json"]);
@@ -2539,6 +2567,8 @@ export const nativeConfigNetworksScenario: Scenario = {
           JSON.stringify(await observe(checkout))
         );
       }
+    };
+    const lifecycle = async (): Promise<void> => {
       const beforeWarm = await observe(primary);
       await cli(primary, ["up", "--detach", "--json"]);
       const afterWarm = await observe(primary);
@@ -2565,7 +2595,11 @@ export const nativeConfigNetworksScenario: Scenario = {
       await observe(primary);
       await markers(primary);
       await continuity();
-
+      ctx.log(
+        "Warm reuse, unrouted one-off refusal, restart and down/up preserved retained data and sibling continuity"
+      );
+    };
+    const policy = async (): Promise<void> => {
       const disconnected = authored({ name, image, marker: primary.marker });
       requireValue(
         disconnected.services?.web,
@@ -2620,7 +2654,11 @@ export const nativeConfigNetworksScenario: Scenario = {
       await observe(primary);
       await markers(primary);
       await continuity();
-
+      ctx.log(
+        "Disconnected endpoint, topology mutation and outbound policy changes refused or applied with sibling continuity"
+      );
+    };
+    const foreignState = async (): Promise<void> => {
       const original = await saved(primary.root);
       const originalSnapshot = await observe(primary);
       const outbound = originalSnapshot.networks.find(
@@ -2745,9 +2783,10 @@ export const nativeConfigNetworksScenario: Scenario = {
       await markers(primary);
       await continuity();
       ctx.log(
-        "Custom aliases, isolation, policy/refusal and retained-data lifecycle passed; checking mixed routed ingress"
+        "Foreign endpoint and wrong-policy bridge refusals preserved owned state; checking mixed routed ingress"
       );
-
+    };
+    const ingress = async (): Promise<void> => {
       // Reuse the established no-host-publication proxy contract, preserving any stopped real selector.
       const selectors = [
         "--filter",
@@ -2950,6 +2989,28 @@ export const nativeConfigNetworksScenario: Scenario = {
       );
       await tls(canaryHost, canaryMarker);
     };
+    const runPhases = async (): Promise<void> => {
+      switch (part) {
+        case "lifecycle":
+          await createdRecovery();
+          await startCheckouts();
+          await lifecycle();
+          return;
+        case "policy":
+          await startCheckouts();
+          await policy();
+          return;
+        case "ingress":
+          await startCheckouts();
+          await foreignState();
+          await ingress();
+          return;
+        default:
+          throw new Error(
+            `Unknown network fixture part: ${String(part satisfies never)}`
+          );
+      }
+    };
     try {
       await runPhases();
     } catch (error: unknown) {
@@ -3079,7 +3140,16 @@ export const nativeConfigNetworksScenario: Scenario = {
       throw failure;
     }
     ctx.log(
-      `Custom-network actual acceptance complete in ${Date.now() - started}ms; configuration/isolation proof, no performance claim`
+      `Custom-network actual acceptance (${part}) complete in ${Date.now() - started}ms; configuration/isolation proof, no performance claim`
     );
   },
 };
+
+/** One docker scenario per part; each is a complete, independently cleaned run. */
+export const nativeConfigNetworksScenarios: readonly Scenario[] =
+  NATIVE_NETWORK_FIXTURE_PARTS.map((part) => ({
+    name: `native-config-networks-${part}`,
+    tier: "docker",
+    summary: NATIVE_NETWORK_FIXTURE_SUMMARIES[part],
+    run: (ctx) => nativeNetworkFixture.run(ctx, part),
+  }));

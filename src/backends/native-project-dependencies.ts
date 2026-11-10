@@ -8,7 +8,10 @@ import {
   type NativeDependencyOwnerResolver,
   nativeDependencyOwnerMismatch,
 } from "./native-dependency-owners.ts";
-import { readNativeSelection } from "./native-project-selection.ts";
+import {
+  NativeSelectionSyntaxError,
+  readNativeSelection,
+} from "./native-project-selection.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
@@ -806,6 +809,11 @@ export type NativeDependencyDiscoveryTarget = {
 };
 
 type NativeDependencyDiscovery = {
+  /** Read-only exact-PID observation before VM boot; execution pins it again. */
+  readonly checkPinned?: (selection: {
+    readonly hostPid: number;
+    readonly hostPort: number;
+  }) => Promise<void>;
   readonly discover?: (
     selection: NativeDependencyDiscoveryTarget & { readonly executable: string }
   ) => Promise<{
@@ -1032,9 +1040,24 @@ function createDependencyResolution(
     if (owner) {
       return await ownedEntry(entry, owner, describeEntry(entry, index));
     }
-    return entry.host_executable === undefined
-      ? entry
-      : await executableEntry(entry, describeEntry(entry, index));
+    if (entry.host_executable !== undefined) {
+      return await executableEntry(entry, describeEntry(entry, index));
+    }
+    if (opts.checkPinned) {
+      try {
+        await opts.checkPinned({
+          hostPid: Number(entry.host_pid),
+          hostPort: Number(entry.host_port),
+        });
+      } catch (error) {
+        throw refused(
+          discoveryReason(error) ??
+            "the selected host_pid does not own an exclusive loopback listener on host_port",
+          describeEntry(entry, index)
+        );
+      }
+    }
+    return entry;
   };
 }
 
@@ -1078,8 +1101,10 @@ async function readSelectedHostDependencies(
   let selection: unknown;
   try {
     selection = await readNativeSelection(opts.path);
-  } catch {
-    throw refused(FILE_REASON);
+  } catch (error) {
+    throw refused(
+      error instanceof NativeSelectionSyntaxError ? error.reason : FILE_REASON
+    );
   }
   const value = compileNativeHostDependencySelection({
     value: selection,

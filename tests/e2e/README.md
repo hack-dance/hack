@@ -38,9 +38,11 @@ Docker CI" below therefore means the optional `docker-e2e` job. Every job has a
 `tests/e2e/shard.ts` splits the default scenario set deterministically: it puts
 each scenario in the lightest shard, longest first, using the checked-in
 duration hints. Every scenario runs in exactly one shard, and
-`tests/e2e-shard.test.ts` proves that for the current list. The long native
-scenarios (`native-config-networks`, `-compose`, `-routing`) each get their own
-shard, so the slowest single scenario sets the wall time. `docker-e2e` always
+`tests/e2e-shard.test.ts` proves that for the current list. The custom-network
+qualification runs as three parts (`native-config-networks-lifecycle`,
+`-policy`, `-ingress`), each with its own three-checkout startup and cleanup, so
+the parts land on separate shards; `native-config-compose` and `-routing` share
+the fourth. The slowest shard sets the wall time. `docker-e2e` always
 runs and passes only when every shard succeeded. The prerelease exact-head gate
 also requires each shard job by name. To reproduce one CI shard locally, run
 `bun tests/e2e/run.ts --list --shard=i/4`, then rerun its names with `--only`.

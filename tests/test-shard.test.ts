@@ -587,6 +587,8 @@ describe("pooled layout and focused runs (HACK-1960)", () => {
       count: linux.selection.count,
       pool: "linux",
     });
+    expect(linuxPlan.scope).toContain("tests/tmux-private-input.test.ts");
+    expect(macosPlan.scope).not.toContain("tests/tmux-private-input.test.ts");
     expectExactPartition({
       shards: [...macosPlan.shards, ...linuxPlan.shards],
       files: tracked,

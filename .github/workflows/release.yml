@@ -12,7 +12,7 @@ on:
         options: [stable, prerelease]
         default: stable
       prerelease_version:
-        description: 'Explicit v5 candidate version (5.0.0-next.N)'
+        description: 'Explicit v5 candidate version (PRERELEASE_BASE-next.N, currently 5.0.0-next.N)'
         type: string
         required: false
       source_revision:

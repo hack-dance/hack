@@ -4,7 +4,7 @@ set -eu
 umask 077
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-  echo "Usage: scripts/build-native-candidate.sh /absolute/new/bundle-directory [--version=5.0.0-next.N]" >&2
+  echo "Usage: scripts/build-native-candidate.sh /absolute/new/bundle-directory [--version=5.MINOR.PATCH-next.N]" >&2
   exit 64
 fi
 version=

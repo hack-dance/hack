@@ -266,23 +266,32 @@ fn inspect(
         observations.insert(name.into(), state);
     }
     if state.failed() {
-        return Err(error(
-            "graph_service_failed",
-            match state {
-                Observation::Exited { code } => format!(
-                    "Owned graph service {name} exited with code {code}; no further services will start."
-                ),
-                Observation::Dead => format!(
-                    "Owned graph service {name} is dead or OOM-killed; no further services will start."
-                ),
-                _ => format!(
-                    "Owned graph service {name} is unhealthy; no further services will start."
-                ),
-            },
-        )
-        .with_service(name));
+        return Err(failed_service_error("graph_service_failed", name, state));
     }
     Ok(state)
+}
+/// The value-free failure for an owned service observed as failed: it names the
+/// service and its exit code, death or health, never its output or configuration.
+/// Graph startup with host dependency bindings reports an application failure
+/// with this text under its own stage code.
+pub(crate) fn failed_service_error(
+    code: &'static str,
+    name: &str,
+    state: Observation,
+) -> CandidateError {
+    error(
+        code,
+        match state {
+            Observation::Exited { code } => format!(
+                "Owned graph service {name} exited with code {code}; no further services will start."
+            ),
+            Observation::Dead => format!(
+                "Owned graph service {name} is dead or OOM-killed; no further services will start."
+            ),
+            _ => format!("Owned graph service {name} is unhealthy; no further services will start."),
+        },
+    )
+    .with_service(name)
 }
 fn before_deadline(deadline: Instant) -> Result<(), CandidateError> {
     if Instant::now() >= deadline {

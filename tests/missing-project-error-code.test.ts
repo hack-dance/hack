@@ -71,6 +71,15 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
     stderr:
       "ERROR: TUI requires a TTY. Run this from an interactive terminal.\n",
   },
+  // hack dev reads the repository's .hack/dev.json rather than a project
+  // config, so a path without one refuses with its own fixed message.
+  dev: {
+    kind: "exception",
+    argv: ["dev", "-p", "DIR"],
+    stdout: "",
+    stderr:
+      "ERROR: No .hack/dev.json found in this repository. Declare a side-by-side dev command first.\nSee `hack dev --help` for usage.\n",
+  },
   "branch add": { kind: "line", argv: ["branch", "add", "x", "-p", "DIR"] },
   "branch list": { kind: "line", argv: ["branch", "list", "-p", "DIR"] },
   "branch remove": {

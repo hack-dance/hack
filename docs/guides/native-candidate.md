@@ -1647,7 +1647,17 @@ cleanup. Retry still reviews the public dependency intent and all source, plan,
 environment, network and admission checks. It captures
 listener identities after the startup hooks recreate them, rather than requiring
 already stopped listeners before those hooks run. An interrupted operation lock
-requires ownership inspection rather than automatic removal. Restart does not
+requires ownership inspection rather than automatic removal.
+Ctrl-C while restart stops the previous run lets that stop finish: the stop's
+runtime requests run in their own process group, so the terminal's interrupt
+reaches only the restart. It then exits 130 as a stopped project with data
+retained, and a plain `up` resumes it. If the stop cannot be confirmed (for
+example the restart itself was killed, or a down hook failed), the saved intent
+stays and `up` refuses with `use hack restart`. Run `hack restart` then: it
+resumes the exact saved run, owner and plan, stopping the previous run if it is
+still active or confirming from fresh native observations that its own owner
+already stopped it, and it waits for that owner's frontend to finish before
+starting the replacement. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
 When an interrupted frontend cannot write that final acknowledgement, an explicit
 `restart --recover-frontend --expect-finalization-attempt <32-hex>` can resume

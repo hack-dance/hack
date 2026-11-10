@@ -1314,6 +1314,71 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    // HACK-1953. The negative control runs the stop request in the terminal's
+    // process group: one Ctrl-C leaves a pending restart.
+    name: "native-restart-intent",
+    module: "RestartIntent",
+    states: 40,
+    invariant: "InterruptLeavesNoIntent",
+    action: "Interrupt",
+    fields: [
+      "crashed = FALSE",
+      "interrupted = TRUE",
+      'intent = "prepared"',
+      'restart = "failed"',
+    ],
+    additionalControls: [
+      {
+        // A crashed restart frontend after (or before) the old owner stopped
+        // itself, when a prepared intent requires an active graph.
+        name: "no-resume",
+        negative: true,
+        invariant: "NoRecoveryLoop",
+        action: "Crash",
+        fields: [
+          "crashed = TRUE",
+          'graph = "stopped"',
+          'intent = "prepared"',
+          'restart = "failed"',
+        ],
+        alternativeWitnesses: [
+          {
+            action: "OwnerStops",
+            fields: [
+              "crashed = TRUE",
+              'graph = "stopped"',
+              'intent = "prepared"',
+              'restart = "failed"',
+            ],
+          },
+        ],
+      },
+      {
+        // The v5.0.0-next.12 behavior: neither mechanism, so up and restart
+        // refuse each other.
+        name: "shared-group-loop",
+        negative: true,
+        invariant: "NoRecoveryLoop",
+        action: "Interrupt",
+        fields: [
+          'graph = "stopped"',
+          'intent = "prepared"',
+          'owner = "retired"',
+          'restart = "failed"',
+        ],
+        alternativeWitnesses: ["Crash", "OwnerStops"].map((action) => ({
+          action,
+          fields: [
+            'graph = "stopped"',
+            'intent = "prepared"',
+            'owner = "retired"',
+            'restart = "failed"',
+          ],
+        })),
+      },
+    ],
+  },
+  {
     name: "stopped-pool-startup",
     module: "Resume",
     states: 71,

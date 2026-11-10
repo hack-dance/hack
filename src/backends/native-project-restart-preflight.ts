@@ -370,6 +370,14 @@ export async function preflightNativeRestart(opts: {
   readonly cleanedRetry?: boolean;
   /** Explicit frontend recovery may encounter a graph stopped before an intent was saved. */
   readonly recoverStopped?: boolean;
+  /**
+   * A resumed `prepared` intent (HACK-1953): the interrupted restart's stop
+   * may have reached the old owner, which then stopped the graph itself. Like
+   * `recoverStopped`, a graph confirmed stopped from fresh observations is
+   * reviewed as retained and rechecked after review; an active graph keeps the
+   * active checks; a stopped but unconfirmed graph refuses.
+   */
+  readonly preparedRetry?: boolean;
   readonly adaptationFile?: string;
   /** Per-env adaptations; the retained run's effective env selects as start does. */
   readonly adaptationFileByEnv?: Readonly<Record<string, string>>;
@@ -396,8 +404,11 @@ export async function preflightNativeRestart(opts: {
     selection: opts.runtimeMetadata,
     restore: opts.run,
   });
+  const recoverStopped =
+    opts.recoverStopped === true || opts.preparedRetry === true;
   const stoppedRetry = await stoppedRestartMode({
     ...opts,
+    recoverStopped,
     invoke: deps.invoke,
   });
   requireNativeRestartNetwork(
@@ -649,7 +660,7 @@ export async function preflightNativeRestart(opts: {
         proof: reviewIdentity?.activeProof,
         invoke: deps.invoke,
       });
-      if (stoppedRetry && opts.recoverStopped && !opts.cleanedRetry) {
+      if (stoppedRetry && recoverStopped && !opts.cleanedRetry) {
         const observed = await inspectRestartGraph({
           ...opts,
           invoke: deps.invoke,

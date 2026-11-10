@@ -96,6 +96,10 @@ pub use dead_owner_cleanup::recover_cleanup;
 pub use dead_owner_cleanup::retire_recovered_publisher;
 #[cfg(target_os = "macos")]
 pub use live_owner_cleanup::recover_live_owner;
+#[cfg(target_os = "macos")]
+mod unadmitted_owner;
+#[cfg(target_os = "macos")]
+pub use unadmitted_owner::retire_unadmitted_owner;
 
 mod config;
 mod dependency_cache;

@@ -4,6 +4,7 @@ import { branchCommand } from "../commands/branch.ts";
 import { configCommand } from "../commands/config.ts";
 import { crashCaptureCommand } from "../commands/crash-capture.ts";
 import { daemonCommand } from "../commands/daemon.ts";
+import { devCommand } from "../commands/dev.ts";
 import { dispatchCommand } from "../commands/dispatch.ts";
 import { doctorCommand } from "../commands/doctor.ts";
 import { envCommand, hostCommand } from "../commands/env.ts";
@@ -70,6 +71,7 @@ export const CLI_SPEC = defineCli({
     projectsCommand,
     projectCommand,
     initCommand,
+    devCommand,
     upCommand,
     downCommand,
     restartCommand,

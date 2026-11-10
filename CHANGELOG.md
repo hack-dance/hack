@@ -1,3 +1,9 @@
+## [4.3.0](https://github.com/hack-dance/hack/compare/v4.2.7...v4.3.0) (2026-11-10)
+
+### Features
+
+* add hack dev for declared side-by-side builds ([#664](https://github.com/hack-dance/hack/issues/664)) ([9b958c4](https://github.com/hack-dance/hack/commit/9b958c4c6b5465a34dc078b60a668bcf533fcdde))
+
 ## [4.2.7](https://github.com/hack-dance/hack/compare/v4.2.6...v4.2.7) (2026-10-31)
 
 ### Bug Fixes

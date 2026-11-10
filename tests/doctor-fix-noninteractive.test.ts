@@ -190,12 +190,12 @@ afterEach(async () => {
   if (originalNoInteractive === undefined) {
     Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
   } else {
-    process.env.HACK_NO_INTERACTIVE = originalNoInteractive;
+    restoreEnv("HACK_NO_INTERACTIVE", originalNoInteractive);
   }
   if (originalMutagenPath === undefined) {
     Reflect.deleteProperty(process.env, "HACK_MUTAGEN_PATH");
   } else {
-    process.env.HACK_MUTAGEN_PATH = originalMutagenPath;
+    restoreEnv("HACK_MUTAGEN_PATH", originalMutagenPath);
   }
   restoreEnv("HACK_LOGGER", originalLogger);
 });

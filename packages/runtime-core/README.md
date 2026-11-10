@@ -2082,3 +2082,41 @@ start before their guest consumers, and unsupported cycles must refuse before ef
 Routed HTTPS authority and a typed TCP projection remain separate gates. Portable
 captured-inspection tests qualify none of those live behaviors, installed execution,
 old-receipt recovery or full NC05 corpus acceptance.
+
+### Restart-policy publication supervision
+
+The Compose graph foreground owner checks published and routed services every
+second when their receipt admits an engine restart policy. A changed endpoint
+generation requires the same container ID, owned labels, original boot and full
+network attachment. The owner fences complete retirement of only that bridge,
+retires its host publication and reaps its publisher before reserving and launching
+a fresh bridge. Each reservation has one launch. A host port taken in the gap
+refuses without endpoint values and leaves that publication retired; the owner
+does not retry it automatically.
+
+Provider lease contention before observation or retirement defers that work to
+another tick, retaining the original publisher and reservation. Once a lease is
+acquired, failures remain errors; admitted or uncertain effects are never retried
+merely because their error happens to be `provider_busy`.
+
+Routes retain native HTTP healthy readiness. The owner rearms a dead probe exec
+with a fresh sample generation after an ownership-verified incarnation change,
+using an allocation-capable engine lease only after cleanup-only observation
+detects a change and releases its lease. Allocation acquisition contention or
+resource pressure defers rearm; ownership and generation are revalidated after
+acquisition, and subsequent errors remain failures. Idle ticks require no allocation
+admission. Cleanup-only
+connections continue to reject exec create/start requests.
+It keeps the mounted state directory and prepares only the prior generation’s
+private samples under the existing probe lock; the stopped-container reset path would
+unmount state still held by a running replacement. Uncertain exec intent is not
+replayed. Other native HTTP probes, host dependencies, managed environment
+delivery and dependency caches still refuse restart policies.
+
+Portable tests and finite models do not qualify engine restart behavior. Native
+host acceptance must crash a policy-managed published service and routed service,
+observe unchanged container IDs with new StartedAt/endpoint generations, then
+prove fresh requests succeed on the original port and hostname. Also replace an
+owned container with a foreign/copied-label container and occupy a host port
+after retirement: no forwarding may reach the replacement, and the busy bridge
+must remain retired. Stop must disarm policies and leave no publisher or relay.

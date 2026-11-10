@@ -1103,6 +1103,19 @@ function readyProgress(opts: {
     endpoints: nativeReadySummary(opts),
   };
 }
+
+/** Ready completion goals have succeeded; keep jobs separate in lifecycle JSON. */
+function readyServiceSummary(readinessArgs: readonly string[]): {
+  readonly started: readonly string[];
+  readonly completed: readonly string[];
+} {
+  const goals = readinessArgs.filter((arg) => arg !== "--ready");
+  const name = (goal: string) => goal.slice(0, goal.lastIndexOf("="));
+  return {
+    started: goals.filter((goal) => !goal.endsWith("=completed")).map(name),
+    completed: goals.filter((goal) => goal.endsWith("=completed")).map(name),
+  };
+}
 /** The HTTPS port routes are served on: only while the frontend lease runs. */
 function servedHttpsPort(
   lease: unknown,
@@ -1685,7 +1698,10 @@ type NativeProjectStartOptions = {
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
   readonly restore?: NativeProjectRun;
-  readonly onReady?: () => Promise<void>;
+  readonly onReady?: (services: {
+    readonly started: readonly string[];
+    readonly completed: readonly string[];
+  }) => void | Promise<void>;
   readonly dependencyFile?: string;
   /** Per-env dependency files; the entry for the run's effective env replaces `dependencyFile`. */
   readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
@@ -2243,6 +2259,12 @@ async function startNativeProjectAttempt(
           const services = [
             ...nativeReviewedActiveServices(review.report.plan),
           ].sort();
+          const readinessArgs = nativeReadinessArgs({
+            specs,
+            plan: review.report.plan,
+            initializers: cache.initializers,
+            routed: routes.services,
+          });
           progress({ phase: "services", services });
           let stopWatching: (() => Promise<void>) | undefined;
           try {
@@ -2259,12 +2281,7 @@ async function startNativeProjectAttempt(
                 review.planId,
                 ...nativeSharedSourceFlags(review.report.plan),
                 ...cache.flags,
-                ...nativeReadinessArgs({
-                  specs,
-                  plan: review.report.plan,
-                  initializers: cache.initializers,
-                  routed: routes.services,
-                }),
+                ...readinessArgs,
                 ...routes.flags,
                 "--dependencies",
                 dependencyFile,
@@ -2390,16 +2407,6 @@ async function startNativeProjectAttempt(
                     .catch(() => undefined);
                 }
                 await hooks?.ready?.();
-                await opts.onReady?.();
-                progress(
-                  readyProgress({
-                    services,
-                    run,
-                    plan: review.report.plan,
-                    routed: routes.services,
-                    httpsPort: servedHttpsPort(https, opts.https),
-                  })
-                );
                 stopWatching = watchServiceExits({
                   runtime: opts.runtime,
                   projectRoot: opts.scope.projectRoot,
@@ -2412,8 +2419,20 @@ async function startNativeProjectAttempt(
                     controller.abort();
                   },
                 });
-                // Last: only microtasks separate this from readiness.
+                // Commit owed down hooks before any observer can release a
+                // detached launcher. A journal failure is still startup failure.
                 await stop?.owe(() => controller.signal.aborted);
+                requireActiveStartup(controller.signal);
+                await opts.onReady?.(readyServiceSummary(readinessArgs));
+                progress(
+                  readyProgress({
+                    services,
+                    run,
+                    plan: review.report.plan,
+                    routed: routes.services,
+                    httpsPort: servedHttpsPort(https, opts.https),
+                  })
+                );
               },
             });
           } catch (error) {

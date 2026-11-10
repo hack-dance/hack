@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { nativeAuthoredExecOptions } from "../backends/native-authored-exec-options.ts";
+import type { NativeAuthoredReceipt } from "../backends/native-authored-graph-protocol.ts";
 import { nativeAuthoredProjectExec } from "../backends/native-authored-project-exec.ts";
 import {
   nativeAuthoredLogsOptions,
@@ -46,12 +47,14 @@ import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import type { NativeComposeSelection } from "./native-compose-selection.ts";
+import { nativeDetachedUpReady } from "./native-detached-up.ts";
 import {
   createNativeEnvFingerprintEntry,
   createNativeEnvFingerprintSession,
   type NativeEnvFingerprintSession,
 } from "./native-env-fingerprint-state.ts";
 import { nativeForegroundDetachRefusal } from "./native-up-refusals.ts";
+import { runtimeHostMetadataComposeProject } from "./runtime-host-metadata.ts";
 
 function unsupported(): never {
   throw new HackCliError({
@@ -574,6 +577,25 @@ function envFingerprintSession(
   });
 }
 
+/** Value-free detached identity uses the admitted name, as runtime metadata does. */
+export function nativeAuthoredUpReadyData(opts: {
+  readonly projectName: string;
+  readonly branch: string | null;
+  readonly readiness: NativeAuthoredReceipt["readiness"];
+}) {
+  return {
+    project: opts.projectName,
+    branch: opts.branch,
+    composeProject: runtimeHostMetadataComposeProject(opts),
+    started: Object.keys(opts.readiness).filter(
+      (name) => opts.readiness[name] !== "completed"
+    ),
+    completed: Object.keys(opts.readiness).filter(
+      (name) => opts.readiness[name] === "completed"
+    ),
+  };
+}
+
 /**
  * Fresh foreground selection shared by up and the start half of restart. The
  * delivered env selection is captured as value-free digests and recorded once
@@ -620,8 +642,16 @@ function startupSelection(
         });
       }
     },
-    onReady: () => {
+    onReady: (selection, identity) => {
       envFingerprints.commit();
+      const receipt = selection.record.receipt;
+      nativeDetachedUpReady(
+        nativeAuthoredUpReadyData({
+          projectName: identity.projectName,
+          branch: input.scope.branch,
+          readiness: receipt.readiness,
+        })
+      );
       logger.info({ message: "Project is ready. Press Ctrl-C to stop." });
       return undefined;
     },

@@ -1441,6 +1441,69 @@ impl DeadOwner {
     pub(in crate::provider::graph) fn fingerprint(&self) -> String {
         format!("{:x}", Sha256::digest(&self.pin.bytes))
     }
+    /// Retire this exact dead publication under the lock this guard holds. The
+    /// immutable journal written first makes an interrupted rename resumable
+    /// through [`resume_recovered_publisher`]. `verify_cleanup` is the caller's
+    /// own proof, rechecked before each publication effect.
+    pub(in crate::provider::graph) fn retire(
+        &self,
+        candidate: &Candidate,
+        run: &str,
+        expected_receipt: &str,
+        verify_cleanup: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        self.verify_retirement_ready()?;
+        retire_recovered_publisher_locked_fenced(
+            candidate,
+            run,
+            &self.fingerprint(),
+            expected_receipt,
+            None,
+            &self._lock,
+            verify_cleanup,
+        )
+    }
+}
+
+/// Finish a publisher retirement that was interrupted between its two renames:
+/// the control socket was already moved and the owner record is still in place.
+/// Only the immutable journal of that exact record, for the exact expected
+/// receipt, selects it; any other partial publication is refused unchanged.
+pub(in crate::provider::graph) fn resume_recovered_publisher(
+    candidate: &Candidate,
+    run: &str,
+    expected_receipt: &str,
+    verify_cleanup: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    if !super::super::hex(expected_receipt, 64) {
+        return Err(retirement_refused());
+    }
+    let root = root(candidate, run)?;
+    super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
+    state::check_private_directory(&root).map_err(|_| retirement_refused())?;
+    let lock = state::Lock::acquire_existing(&root).map_err(|_| retirement_refused())?;
+    super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
+    if metadata(&root.join("control.sock"))?.is_some() {
+        return Err(retirement_refused());
+    }
+    let record = metadata(&root.join("owner.json"))?.ok_or_else(retirement_refused)?;
+    if !record.is_file() || !private(&record) || record.nlink() != 1 || record.len() > 8192 {
+        return Err(retirement_refused());
+    }
+    let bytes = fs::read(root.join("owner.json")).map_err(|_| retirement_refused())?;
+    let owner = format!("{:x}", Sha256::digest(&bytes));
+    if metadata(&retirement_path(&root, &owner))?.is_none() {
+        return Err(retirement_refused());
+    }
+    retire_recovered_publisher_locked_fenced(
+        candidate,
+        run,
+        &owner,
+        expected_receipt,
+        None,
+        &lock,
+        verify_cleanup,
+    )
 }
 
 /// The framed client shuts down only its write side. A read-side EOF therefore

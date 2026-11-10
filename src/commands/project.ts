@@ -219,6 +219,7 @@ import {
   isSlimExecutionMode,
   renderSlimModeUnavailableMessage,
 } from "../lib/execution-mode.ts";
+import { installForegroundTerminationGuard } from "../lib/foreground-termination-guard.ts";
 import {
   ensureDir,
   pathExists,
@@ -260,6 +261,10 @@ import { MissingProjectContextError } from "../lib/missing-project-error.ts";
 import { refuseNativeComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
+import {
+  nativeDetachedUpReady,
+  startNativeDetachedUp,
+} from "../lib/native-detached-up.ts";
 import {
   createNativeEnvFingerprintEntry,
   createNativeEnvFingerprintSession,
@@ -4441,8 +4446,8 @@ export function resolveInitComposeBackend(
 
 /**
  * Follow-up commands `hack init` prints, limited to ones the selected backend
- * accepts. Native `up` runs in the foreground only, needs the explicit
- * project-share grant, and refuses `--detach`; `hack global install` refuses
+ * accepts. Native `up` needs the explicit project-share grant; this follow-up
+ * keeps its foreground form. `hack global install` refuses
  * on native, where routes use the optional native HTTPS frontend instead.
  */
 export function initNextSteps(opts: {
@@ -6010,6 +6015,14 @@ async function handleNativeUp({
       await envFingerprints.record(
         createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
       ),
+    onReady: (services) => {
+      nativeDetachedUpReady({
+        project: projectName,
+        branch,
+        composeProject,
+        ...services,
+      });
+    },
     onProgress: reportNativeStartupProgress,
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
@@ -6276,6 +6289,33 @@ async function handleUp({
 }): Promise<number> {
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
+  if (
+    (args.options.detach || args.options.json) &&
+    resolveNativeRuntimeSelection()
+  ) {
+    refuseUnsupportedNativeUpOptions({
+      restart: false,
+      target: args.options.target,
+      services: args.positionals.services,
+    });
+    const childArgs = ["up"];
+    for (const [name, value] of Object.entries({
+      path: args.options.path,
+      project: args.options.project,
+      branch: args.options.branch,
+      env: args.options.env,
+      profile: args.options.profile,
+    })) {
+      if (value !== undefined) {
+        childArgs.push(`--${name}=${value}`);
+      }
+    }
+    return await startNativeDetachedUp({
+      cwd: ctx.cwd,
+      args: childArgs,
+      json: args.options.json === true,
+    });
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -6552,8 +6592,10 @@ async function runUpCommand({
   // keeps the shared helpers: a start still in flight can start services
   // after any snapshot, so no probe could prove them absent.
   let containerStartBegun = false;
-  const signalCleanup =
-    lifecycleSignalCleanup ??
+  const foregroundTermination: {
+    guard: ReturnType<typeof installForegroundTerminationGuard> | null;
+  } = { guard: null };
+  const installOperationSignalCleanup = () =>
     installLifecycleSignalCleanup({
       cleanup: signalCleanupKeepingStartedHelpers({
         cleanup: lifecycleCleanup,
@@ -6561,6 +6603,7 @@ async function runUpCommand({
         keepSharedHelpers: () => keepSharedHelpers,
       }),
     });
+  let signalCleanup = lifecycleSignalCleanup ?? installOperationSignalCleanup();
   try {
     // Hooks may register or remove runtime aliases; render overrides only after
     // successful preparation, while lifecycle cleanup remains installed.
@@ -6642,7 +6685,16 @@ async function runUpCommand({
       assertCurrent: assertHelpersCurrent,
       up: (beforeStart) =>
         composeRuntimeBackend.up({
-          ...(beforeStart ? { beforeStart } : {}),
+          beforeStart: async () => {
+            await beforeStart?.();
+            if (!detach) {
+              // Compose owns foreground shutdown. Lifecycle cleanup runs after
+              // it settles; re-raising here would turn one Ctrl-C into two.
+              // Keep an owner until the caller's cleanup has also settled.
+              foregroundTermination.guard = installForegroundTerminationGuard();
+              signalCleanup.dispose();
+            }
+          },
           dependencyProgress: resolveDependencyCacheProgress({
             cache: dependencyCache,
             project: composeProjectName,
@@ -6682,7 +6734,13 @@ async function runUpCommand({
       logger.error({ message: error.message });
       return 1;
     }
-    const upCode = guarded.code;
+    const upCode = foregroundTermination.guard?.exitCode() ?? guarded.code;
+    if (foregroundTermination.guard?.exitCode() === null) {
+      // Normal completion hands later signals back to lifecycle handling.
+      signalCleanup = installOperationSignalCleanup();
+      foregroundTermination.guard.dispose();
+      foregroundTermination.guard = null;
+    }
     if (upCode !== 0) {
       // Compose may have started some services before it failed or timed
       // out: their helpers stay unless no container may run.
@@ -6692,6 +6750,17 @@ async function runUpCommand({
         projectDir: project.projectDir,
         composeProject: lifecycleComposeProject,
       });
+      if (foregroundTermination.guard?.exitCode() != null) {
+        const message = "Project startup interrupted.";
+        if (json) {
+          return emitLifecycleResult({
+            result: errorResult({ code: "E_CANCELLED", message }),
+            exitCode: upCode,
+          });
+        }
+        logger.info({ message });
+        return upCode;
+      }
       const failure = composeStartupFailure({
         code: upCode,
         action: "docker compose up",
@@ -6819,6 +6888,7 @@ async function runUpCommand({
     });
     throw error;
   } finally {
+    foregroundTermination.guard?.dispose();
     signalCleanup.dispose();
   }
 }

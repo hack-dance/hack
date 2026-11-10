@@ -739,6 +739,9 @@ fn payload() -> Result<&'static [u8], CandidateError> {
 }
 /// The caller must retain its operation lock until exec closes inherited descriptors.
 pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), CandidateError> {
+    if let Some(port) = options.port {
+        require_loopback_port_free(port)?;
+    }
     let bytes = payload()?;
     let hostnames = names(options.hostnames)?;
     if !hex(options.owner, 32)
@@ -872,6 +875,17 @@ mod port_probe_tests {
             "published_port_in_use"
         );
         assert!(require_loopback_port_free(0).is_err());
+    }
+
+    #[test]
+    fn busy_port_refusal_contains_no_endpoint_value() {
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let refusal = require_loopback_port_free(port).unwrap_err();
+        assert_eq!(refusal.code, "published_port_in_use");
+        assert_eq!(refusal.message, port_in_use().message);
+        assert!(!refusal.message.contains(&port.to_string()));
+        assert!(!refusal.message.contains("127.0.0.1"));
     }
 }
 

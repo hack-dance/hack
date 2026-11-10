@@ -136,7 +136,8 @@ int main(int argc, char **argv) {
     if (directory < 0 || fstat(directory, &st) || st.st_uid != geteuid() || (st.st_mode & 0777) != 0700) return 125;
     int lock = openat(directory, "lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (lock < 0 || !private_regular(lock) || flock(lock, LOCK_EX | LOCK_NB)) return 125;
-    // A generation can start once only; restart must supply a fresh tmpfs directory.
+    // Samples must be fresh. Only the owner may prepare a retained tmpfs under
+    // this same lock after proving the prior exec inactive and journaling rearm.
     if (fstatat(directory, "status", &st, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) return 125;
     if (fstatat(directory, "first-sample", &st, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) return 125;
     uint64_t start = millis(CLOCK_MONOTONIC), sequence = 0, failures = 0;

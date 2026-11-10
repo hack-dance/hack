@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CliUsageError } from "../src/cli/command.ts";
 import { loadDevCommand } from "../src/commands/dev.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const fixtures: string[] = [];
 afterEach(async () => {
@@ -32,12 +34,26 @@ async function fixture(value: unknown) {
 }
 async function initRepo(root: string) {
   const child = Bun.spawn(["git", "init", "--quiet", "--template=", root], {
+    env: fixtureGitEnv(),
     stdout: "ignore",
     stderr: "ignore",
   });
   if ((await child.exited) !== 0) {
     throw new Error("Git is required for checkout boundary tests");
   }
+}
+/**
+ * Runs `hack dev --path <root>` from the source checkout with a private env:
+ * HOME is `<root>/user-home` and no runner variable outside the allow-list
+ * reaches the CLI or the declared command.
+ */
+function spawnDev(root: string) {
+  return Bun.spawn([process.execPath, "index.ts", "dev", "--path", root], {
+    cwd: join(import.meta.dir, ".."),
+    env: privateCliEnv({ root }),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 }
 test("native declaration resolves from a subdirectory without Compose", async () => {
   const root = await fixture({
@@ -69,10 +85,7 @@ test("CLI preserves argv, cwd and child failure status", async () => {
       "literal $(echo unsafe)",
     ],
   });
-  const child = Bun.spawn(
-    [process.execPath, "index.ts", "dev", "--path", root],
-    { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" }
-  );
+  const child = spawnDev(root);
   expect(await child.exited).toBe(7);
   expect(await new Response(child.stdout).text()).toContain(
     "literal $(echo unsafe)"
@@ -98,14 +111,7 @@ test.each([
     setInterval(() => {}, 1000);
   `
   );
-  const child = Bun.spawn(
-    [process.execPath, "index.ts", "dev", "--path", root],
-    {
-      cwd: join(import.meta.dir, ".."),
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
+  const child = spawnDev(root);
   try {
     const reader = child.stdout.getReader();
     const ready = await reader.read();
@@ -125,10 +131,7 @@ test("malformed JSON and missing executables return actionable errors", async ()
     version: 1,
     command: ["hack-dev-nonexistent-executable"],
   });
-  const child = Bun.spawn(
-    [process.execPath, "index.ts", "dev", "--path", root],
-    { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" }
-  );
+  const child = spawnDev(root);
   expect(await child.exited).not.toBe(0);
   const output =
     (await new Response(child.stderr).text()) +
@@ -184,10 +187,7 @@ test("empty non-executable argv values remain literal", async () => {
       "",
     ],
   });
-  const child = Bun.spawn(
-    [process.execPath, "index.ts", "dev", "--path", root],
-    { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" }
-  );
+  const child = spawnDev(root);
   expect(await child.exited).toBe(0);
   expect((await new Response(child.stdout).text()).trim()).toBe('[""]');
 });

@@ -1,9 +1,9 @@
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
 import { isRecord, isStringArray } from "../lib/guards.ts";
-import { findUpFile } from "../lib/path.ts";
+import { exec } from "../lib/shell.ts";
 
 /** Native projects can declare a dev runner without a Compose stack. No shell expansion. */
 export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
@@ -15,7 +15,7 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
       "Cannot find the selected dev directory. Check --path."
     );
   }
-  const boundary = (await findUpFile(start, ".git")) ?? start;
+  const boundary = await trustedGitBoundary(start);
   let root = start;
   while (!(await Bun.file(resolve(root, ".hack/dev.json")).exists())) {
     if (root === boundary) {
@@ -26,6 +26,12 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
     root = dirname(root);
   }
   const configPath = await realpath(resolve(root, ".hack/dev.json"));
+  const uid = process.getuid?.();
+  if (uid !== undefined && (await stat(configPath)).uid !== uid) {
+    throw new CliUsageError(
+      "The dev declaration must be owned by the current user."
+    );
+  }
   const configRelative = relative(boundary, configPath);
   if (
     isAbsolute(configRelative) ||
@@ -47,13 +53,48 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
     declaration.version !== 1 ||
     !isStringArray(declaration.command) ||
     declaration.command.length === 0 ||
-    declaration.command.some((arg) => arg.length === 0 || arg.includes("\0"))
+    !declaration.command[0] ||
+    declaration.command.some((arg) => arg.includes("\0"))
   ) {
     throw new CliUsageError(
       "Invalid .hack/dev.json: expected version 1 and a nonempty command array."
     );
   }
   return { root, command: declaration.command };
+}
+
+/** A marker alone is insufficient in shared ancestors; ask Git and check ownership. */
+async function trustedGitBoundary(start: string): Promise<string> {
+  try {
+    const result = await exec(
+      [
+        "git",
+        "-C",
+        start,
+        "-c",
+        "core.fsmonitor=false",
+        "rev-parse",
+        "--show-toplevel",
+      ],
+      { timeoutMs: 3000, stdin: "ignore" }
+    );
+    if (result.exitCode !== 0) {
+      return start;
+    }
+    const root = await realpath(result.stdout.trim());
+    const fromRoot = relative(root, start);
+    if (
+      isAbsolute(fromRoot) ||
+      fromRoot === ".." ||
+      fromRoot.startsWith(`..${sep}`)
+    ) {
+      return start;
+    }
+    const uid = process.getuid?.();
+    return uid === undefined || (await stat(root)).uid === uid ? root : start;
+  } catch {
+    return start;
+  }
 }
 
 export const devCommand = withHandler(

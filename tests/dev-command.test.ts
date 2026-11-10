@@ -13,11 +13,20 @@ afterEach(async () => {
 async function fixture(value: unknown) {
   const root = await mkdtemp(join(tmpdir(), "hack-dev-test-"));
   fixtures.push(root);
-  await mkdir(join(root, ".git"));
+  await initRepo(root);
   await mkdir(join(root, ".hack"));
   await mkdir(join(root, "nested"));
   await Bun.write(join(root, ".hack/dev.json"), JSON.stringify(value));
   return root;
+}
+async function initRepo(root: string) {
+  const child = Bun.spawn(["git", "init", "--quiet", "--template=", root], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  if ((await child.exited) !== 0) {
+    throw new Error("Git is required for checkout boundary tests");
+  }
 }
 test("native declaration resolves from a subdirectory without Compose", async () => {
   const root = await fixture({
@@ -123,7 +132,8 @@ test("malformed JSON and missing executables return actionable errors", async ()
 test("does not execute declarations outside the selected checkout", async () => {
   const outer = await fixture({ version: 1, command: ["attacker-command"] });
   const inner = join(outer, "victim");
-  await mkdir(join(inner, ".git"), { recursive: true });
+  await mkdir(inner);
+  await initRepo(inner);
   await mkdir(join(inner, "nested"));
   await expect(loadDevCommand({ cwd: join(inner, "nested") })).rejects.toThrow(
     "No .hack/dev.json found in this repository"
@@ -140,4 +150,33 @@ test("missing --path returns an actionable usage error", async () => {
   await expect(loadDevCommand({ cwd: join(root, "missing") })).rejects.toThrow(
     "Check --path"
   );
+});
+
+test("a false Git marker above a non-Git project grants no discovery boundary", async () => {
+  const outer = await fixture({ version: 1, command: ["attacker-command"] });
+  await rm(join(outer, ".git"), { recursive: true });
+  await mkdir(join(outer, ".git"));
+  const victim = join(outer, "victim");
+  await mkdir(victim);
+  await expect(loadDevCommand({ cwd: victim })).rejects.toThrow(
+    "No .hack/dev.json found in this repository"
+  );
+});
+
+test("empty non-executable argv values remain literal", async () => {
+  const root = await fixture({
+    version: 1,
+    command: [
+      process.execPath,
+      "-e",
+      "console.log(JSON.stringify(process.argv.slice(1)))",
+      "",
+    ],
+  });
+  const child = Bun.spawn(
+    [process.execPath, "index.ts", "dev", "--path", root],
+    { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" }
+  );
+  expect(await child.exited).toBe(0);
+  expect((await new Response(child.stdout).text()).trim()).toBe('[""]');
 });

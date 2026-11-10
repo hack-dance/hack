@@ -295,3 +295,121 @@ fn a_retirement_interrupted_between_its_renames_resumes_by_its_journal() {
     assert!(!publication(&fixture).join("owner.json").exists());
     retained_startup::preflight(&fixture.candidate, &fixture.run).unwrap();
 }
+
+/// Fail the relay fence on its `at`th check. `dead::retire_checked` checks it on
+/// entry, before the socket unlink, before the record unlink and on exit.
+fn interrupt_relay_at(at: usize) -> impl Fn() -> Result<(), CandidateError> {
+    let calls = std::cell::Cell::new(0);
+    move || {
+        calls.set(calls.get() + 1);
+        if calls.get() == at {
+            return Err(refused());
+        }
+        Ok(())
+    }
+}
+fn relay_retirement(fixture: &Fixture) -> PathBuf {
+    relay_control(fixture).join(RELAY_RETIREMENT)
+}
+/// A dead owner whose relay retirement was interrupted at fence check `at`.
+fn interrupted_relay(fixture: &Fixture, at: usize) -> String {
+    let (child, _) = spawn_owner(fixture);
+    kill_and_reap(child);
+    let selected = receipt_sha(fixture);
+    assert_eq!(
+        retire(
+            &fixture.candidate,
+            &fixture.run,
+            &selected,
+            &interrupt_relay_at(at)
+        )
+        .unwrap_err()
+        .code,
+        "graph_unadmitted_owner_recovery"
+    );
+    // The foreground publication is retired last, so it still blocks a start.
+    assert!(publication(fixture).join("owner.json").exists());
+    assert!(retained_startup::preflight(&fixture.candidate, &fixture.run).is_err());
+    assert!(relay_retirement(fixture).exists());
+    selected
+}
+fn assert_retired(fixture: &Fixture) {
+    let relay = relay_control(fixture).join("relay-control");
+    assert!(!relay.join("owner.json").exists());
+    assert!(!relay.join("control.sock").exists());
+    assert!(!relay_retirement(fixture).exists());
+    assert!(!publication(fixture).join("owner.json").exists());
+    retained_startup::preflight(&fixture.candidate, &fixture.run).unwrap();
+}
+
+#[test]
+fn a_relay_retirement_interrupted_between_its_unlinks_resumes_from_its_selection() {
+    let fixture = Fixture::new();
+    let _scratch = scratch(&fixture);
+    // Interrupted after the socket unlink and its directory sync, before the
+    // record unlink: the relay publication is now partial.
+    let selected = interrupted_relay(&fixture, 3);
+    let relay = relay_control(&fixture).join("relay-control");
+    assert!(!relay.join("control.sock").exists());
+    assert!(relay.join("owner.json").exists());
+    let value = retire_unadmitted_owner(&fixture.candidate, &fixture.run, &selected).unwrap();
+    assert_eq!(value["relay_retired"], true);
+    assert_retired(&fixture);
+}
+
+#[test]
+fn a_relay_retirement_interrupted_after_its_unlinks_releases_its_selection() {
+    let fixture = Fixture::new();
+    let _scratch = scratch(&fixture);
+    let selected = interrupted_relay(&fixture, 4);
+    let relay = relay_control(&fixture).join("relay-control");
+    assert!(!relay.join("control.sock").exists());
+    assert!(!relay.join("owner.json").exists());
+    let value = retire_unadmitted_owner(&fixture.candidate, &fixture.run, &selected).unwrap();
+    assert_eq!(value["relay_retired"], true);
+    assert_retired(&fixture);
+}
+
+#[test]
+fn a_persisted_relay_selection_of_another_identity_is_refused_without_effects() {
+    let fixture = Fixture::new();
+    let _scratch = scratch(&fixture);
+    let selected = interrupted_relay(&fixture, 3);
+    let relay = relay_control(&fixture).join("relay-control");
+    let record = fs::read(relay.join("owner.json")).unwrap();
+    let original: Value = state::read(&relay_retirement(&fixture)).unwrap();
+    let mut mismatches = vec![
+        ("/process/start_micros", json!(1)),
+        ("/lock/1", json!(1)),
+        ("/run", json!("0".repeat(32))),
+        ("/boot", json!("other-boot")),
+        ("/version", json!(2)),
+    ];
+    // A selection of another relay record is refused against the current one.
+    let record_id = original["selected"]["record_id"][1].as_u64().unwrap();
+    mismatches.push(("/selected/record_id/1", json!(record_id + 1)));
+    for (pointer, value) in mismatches {
+        let mut changed = original.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        state::write(&relay_retirement(&fixture), &changed).unwrap();
+        assert_eq!(
+            refused_code(&fixture, &selected),
+            "graph_unadmitted_owner_recovery",
+            "{pointer}"
+        );
+        // Nothing was unlinked or released: the partial relay publication, the
+        // foreground publication and the selection stay exactly as they were.
+        assert_eq!(fs::read(relay.join("owner.json")).unwrap(), record);
+        assert!(!relay.join("control.sock").exists());
+        assert!(publication(&fixture).join("owner.json").exists());
+        assert_eq!(
+            state::read::<Value>(&relay_retirement(&fixture)).unwrap(),
+            changed
+        );
+    }
+
+    // The exact selection still resumes.
+    state::write(&relay_retirement(&fixture), &original).unwrap();
+    retire_unadmitted_owner(&fixture.candidate, &fixture.run, &selected).unwrap();
+    assert_retired(&fixture);
+}

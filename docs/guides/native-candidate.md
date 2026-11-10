@@ -3099,7 +3099,10 @@ the receipt it selected. The runtime holds the publication gate, the provider
 lease and the dead owner's publication lock, requires the full retained-start
 eligibility of that exact receipt, and releases only the relay publication and
 dependency reservation that name the same dead process before it retires the
-foreground publication. Nothing in the guest is stopped, created or removed,
+foreground publication. It records the selected relay publication durably
+before it unlinks either relay path, so a retry after an interrupted relay
+retirement resumes from that exact selection and refuses any other. Nothing in
+the guest is stopped, created or removed,
 and data is retained. Then `hack up` restores the run. An owner that exited
 after its restore was admitted is still reported without a supported
 retirement.

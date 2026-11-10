@@ -3,11 +3,19 @@
  * Hosted test shard runner (HACK-1381). See scripts/test-shard-plan.ts for the
  * partition and its coverage check.
  *
- *   bun scripts/test-shard.ts verify --count=4
- *   bun scripts/test-shard.ts plan --shard=2/4
- *   bun scripts/test-shard.ts run --shard=2/4 [--durations-out=FILE]
- *       [--file-timeout-seconds=720] [--deadline-seconds=1800]
+ *   bun scripts/test-shard.ts verify --count=4 [--layout=full|pooled]
+ *   bun scripts/test-shard.ts plan --shard=2/4 [--layout=full|pooled]
+ *   bun scripts/test-shard.ts plan --focus=docs[,runtime-core]
+ *   bun scripts/test-shard.ts run --shard=2/4 [--layout=full|pooled]
+ *       [--durations-out=FILE] [--file-timeout-seconds=720]
+ *       [--deadline-seconds=1800]
+ *   bun scripts/test-shard.ts run --focus=docs[,runtime-core] [...]
  *   bun scripts/test-shard.ts update-durations --source=TEXT FILE...
+ *
+ * `--layout=pooled` (pull requests, HACK-1960) runs the platform-sensitive
+ * files on the first shards, which must be macOS hosts, and the rest on Linux
+ * hosts; `--focus` runs only the files that read documentation or runtime-core
+ * sources, in one process set. See scripts/test-shard-plan.ts.
  *
  * `run` first checks the Bun pin and the compiler preflight exactly as
  * `bun run test` does, verifies the plan, then runs each of its files in its
@@ -31,7 +39,12 @@ import {
   discoverTestFiles,
   parseDurationTable,
   parseShardSelection,
+  parseTestFocus,
+  parseTestLayout,
   plannedSeconds,
+  pooledSelection,
+  poolPlatform,
+  type ShardPlan,
   type ShardSelection,
   suiteForFile,
   TEST_SUITES,
@@ -491,42 +504,135 @@ function requireSelection(args: readonly string[]): ShardSelection {
   return selection;
 }
 
-async function commandVerify(args: readonly string[]): Promise<number> {
-  const count = Number(optionValue(args, "count") ?? "");
-  const plan = await buildVerifiedPlan({ repoRoot: REPO_ROOT, count });
-  console.log(
-    `test shard plan: ${plan.files.length} files in ${count} shards cover the full test set exactly once.`
-  );
-  for (const [index, shard] of plan.shards.entries()) {
+/** One shard's slice of a verified plan, and how to name it. */
+type ShardTarget = {
+  readonly label: string;
+  readonly plan: ShardPlan;
+  readonly files: readonly string[];
+};
+
+/**
+ * Resolve `--shard`, `--layout` and `--focus` to the files this invocation
+ * runs. In the pooled layout the host must match the pool, so a workflow that
+ * puts a shard on the wrong runner fails instead of silently skipping the
+ * platform-gated tests of that pool.
+ */
+async function resolveTarget(opts: {
+  readonly args: readonly string[];
+  readonly requireHost: boolean;
+}): Promise<ShardTarget> {
+  const focusValue = optionValue(opts.args, "focus");
+  if (focusValue !== undefined) {
+    if (
+      optionValue(opts.args, "shard") !== undefined ||
+      optionValue(opts.args, "layout") !== undefined
+    ) {
+      throw new ClosedCliError(
+        "test shard: --focus runs on its own; it cannot combine with --shard or --layout."
+      );
+    }
+    const focus = parseTestFocus(focusValue);
+    const plan = await buildVerifiedPlan({
+      repoRoot: REPO_ROOT,
+      count: 1,
+      focus,
+    });
+    return {
+      label: `[test focus ${focus.join(",")}]`,
+      plan,
+      files: plan.shards[0] ?? [],
+    };
+  }
+  const selection = requireSelection(opts.args);
+  const layout = parseTestLayout(optionValue(opts.args, "layout"));
+  if (layout === "full") {
+    const plan = await buildVerifiedPlan({
+      repoRoot: REPO_ROOT,
+      count: selection.count,
+    });
+    return {
+      label: `[test shard ${selection.index}/${selection.count}]`,
+      plan,
+      files: plan.shards[selection.index - 1] ?? [],
+    };
+  }
+  const pooled = pooledSelection(selection);
+  if (opts.requireHost && process.platform !== poolPlatform(pooled.pool)) {
+    throw new ClosedCliError(
+      `test shard: pooled shard ${selection.index}/${selection.count} is in the ${pooled.pool} pool and must run on ${poolPlatform(pooled.pool)}, not ${process.platform}.`
+    );
+  }
+  const plan = await buildVerifiedPlan({
+    repoRoot: REPO_ROOT,
+    count: pooled.selection.count,
+    pool: pooled.pool,
+  });
+  return {
+    label: `[test shard ${selection.index}/${selection.count} ${pooled.pool} ${pooled.selection.index}/${pooled.selection.count}]`,
+    plan,
+    files: plan.shards[pooled.selection.index - 1] ?? [],
+  };
+}
+
+function printPlanLoads(opts: {
+  readonly name: string;
+  readonly plan: ShardPlan;
+}): void {
+  for (const [index, shard] of opts.plan.shards.entries()) {
     const seconds = shard.reduce(
       (total, file) =>
-        total + plannedSeconds({ file, durations: plan.durations }),
+        total + plannedSeconds({ file, durations: opts.plan.durations }),
       0
     );
     const unknown = shard.filter(
-      (file) => !Object.hasOwn(plan.durations, file)
+      (file) => !Object.hasOwn(opts.plan.durations, file)
     ).length;
     console.log(
-      `  shard ${index + 1}/${count}: ${shard.length} files, planned ${formatDuration(seconds)}${unknown > 0 ? ` (${unknown} without a recorded duration)` : ""}`
+      `  ${opts.name} ${index + 1}/${opts.plan.shards.length}: ${shard.length} files, planned ${formatDuration(seconds)}${unknown > 0 ? ` (${unknown} without a recorded duration)` : ""}`
     );
   }
+}
+
+async function commandVerify(args: readonly string[]): Promise<number> {
+  const count = Number(optionValue(args, "count") ?? "");
+  const layout = parseTestLayout(optionValue(args, "layout"));
+  if (layout === "full") {
+    const plan = await buildVerifiedPlan({ repoRoot: REPO_ROOT, count });
+    console.log(
+      `test shard plan: ${plan.files.length} files in ${count} shards cover the full test set exactly once.`
+    );
+    printPlanLoads({ name: "shard", plan });
+    return 0;
+  }
+  const macos = pooledSelection({ index: 1, count });
+  const linux = pooledSelection({ index: count, count });
+  const macosPlan = await buildVerifiedPlan({
+    repoRoot: REPO_ROOT,
+    count: macos.selection.count,
+    pool: "macos",
+  });
+  const linuxPlan = await buildVerifiedPlan({
+    repoRoot: REPO_ROOT,
+    count: linux.selection.count,
+    pool: "linux",
+  });
+  console.log(
+    `test shard plan (pooled): ${macosPlan.files.length} files; ${macosPlan.scope.length} in ${macos.selection.count} macOS shards and ${linuxPlan.scope.length} in ${linux.selection.count} Linux shards cover the full test set exactly once.`
+  );
+  printPlanLoads({ name: "macos shard", plan: macosPlan });
+  printPlanLoads({ name: "linux shard", plan: linuxPlan });
   return 0;
 }
 
 async function commandPlan(args: readonly string[]): Promise<number> {
-  const selection = requireSelection(args);
-  const plan = await buildVerifiedPlan({
-    repoRoot: REPO_ROOT,
-    count: selection.count,
-  });
-  for (const file of plan.shards[selection.index - 1] ?? []) {
+  const target = await resolveTarget({ args, requireHost: false });
+  for (const file of target.files) {
     console.log(file);
   }
   return 0;
 }
 
 async function commandRun(args: readonly string[]): Promise<number> {
-  const selection = requireSelection(args);
   const fileTimeoutSeconds = positiveSeconds(
     optionValue(args, "file-timeout-seconds"),
     DEFAULT_FILE_TIMEOUT_SECONDS
@@ -536,15 +642,13 @@ async function commandRun(args: readonly string[]): Promise<number> {
     DEFAULT_DEADLINE_SECONDS
   );
   const durationsOut = optionValue(args, "durations-out");
-  const label = `[test shard ${selection.index}/${selection.count}]`;
   const startedAt = Date.now();
   runPackageScript("check:bun-version");
   runPackageScript("test:preflight");
-  const plan = await buildVerifiedPlan({
-    repoRoot: REPO_ROOT,
-    count: selection.count,
+  const { label, plan, files } = await resolveTarget({
+    args,
+    requireHost: true,
   });
-  const files = plan.shards[selection.index - 1] ?? [];
   const state: ShardState = {
     label,
     files,
@@ -558,7 +662,7 @@ async function commandRun(args: readonly string[]): Promise<number> {
     0
   );
   console.log(
-    `${label} ${files.length} of ${plan.files.length} files, planned ${formatDuration(planned)}; file timeout ${formatDuration(fileTimeoutSeconds)}, shard deadline ${formatDuration(deadlineSeconds)}.`
+    `${label} ${files.length} of ${plan.scope.length} files in scope (${plan.files.length} in the full set), planned ${formatDuration(planned)}; file timeout ${formatDuration(fileTimeoutSeconds)}, shard deadline ${formatDuration(deadlineSeconds)}.`
   );
   const interrupt = new AbortController();
   let signalName: string | null = null;
@@ -677,7 +781,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         return await commandUpdateDurations(args);
       default:
         throw new ClosedCliError(
-          "test shard: usage: bun scripts/test-shard.ts verify --count=n | plan --shard=i/n | run --shard=i/n | update-durations --source=TEXT FILE..."
+          "test shard: usage: bun scripts/test-shard.ts verify --count=n [--layout=full|pooled] | plan (--shard=i/n [--layout=full|pooled] | --focus=docs[,runtime-core]) | run (--shard=i/n [--layout=full|pooled] | --focus=docs[,runtime-core]) | update-durations --source=TEXT FILE..."
         );
     }
   } catch (error) {

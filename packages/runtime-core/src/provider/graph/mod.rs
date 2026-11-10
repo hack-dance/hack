@@ -148,6 +148,9 @@ mod shutdown;
 pub use service_logs::{
     ServiceLogOptions, ServiceLogResult, ServiceSelection, service_logs, service_selection,
 };
+pub use shutdown::{
+    inspect_rebase as inspect_shutdown_rebase, recover_rebase as recover_shutdown_rebase,
+};
 mod source;
 pub use super::environment::{ManagedFile, ManagedFiles, ManagedInput};
 use super::{engine::Engine, state};

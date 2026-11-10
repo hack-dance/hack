@@ -594,6 +594,82 @@ pub fn recover_orphan(
     recover_record(candidate, record, None)?;
     Ok(serde_json::json!({"run":run,"released":true}))
 }
+/// Release the reservation of a retained restore that never reached admission.
+/// The caller holds the provider lease and the dead foreground publication of
+/// `process`; only a record made by that exact process is released, and only
+/// through the ordinary dead-owner path checks. Returns whether one was released.
+#[cfg(target_os = "macos")]
+pub(super) fn recover_unadmitted(
+    candidate: &Candidate,
+    run: &str,
+    process: &ProcessIdentity,
+) -> Result<bool, CandidateError> {
+    let Some(record) = unadmitted_record(candidate, run, process)? else {
+        return Ok(false);
+    };
+    recover_record(candidate, &record, None)?;
+    Ok(true)
+}
+/// Select-only form of [`recover_unadmitted`]: refuses a reservation of any other
+/// process, or of a live one, before the caller makes any effect.
+#[cfg(target_os = "macos")]
+pub(super) fn unadmitted_reservation(
+    candidate: &Candidate,
+    run: &str,
+    process: &ProcessIdentity,
+) -> Result<bool, CandidateError> {
+    unadmitted_record(candidate, run, process).map(|record| record.is_some())
+}
+#[cfg(target_os = "macos")]
+fn unadmitted_record(
+    candidate: &Candidate,
+    run: &str,
+    process: &ProcessIdentity,
+) -> Result<Option<Record>, CandidateError> {
+    if !reservation_recorded(candidate, run)? {
+        return Ok(None);
+    }
+    let owner = state::Owner::load(candidate)?;
+    let values = records(
+        &root(candidate),
+        &owner.token,
+        owner.dependency_sockets.map_or(0, |v| v.slots),
+    )?;
+    let record = values
+        .into_iter()
+        .find(|r| r.run == run)
+        .ok_or_else(refused)?;
+    if &record.process != process
+        || record.owner != owner.token
+        || identity::alive(record.process.pid)?
+    {
+        return Err(refused());
+    }
+    Ok(Some(record))
+}
+/// Record a reservation for `run` made by `process`, as a foreground restore owner
+/// does before it publishes. The caller saved owner capacity for `slot`.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn fixture_reservation(
+    candidate: &Candidate,
+    run: &str,
+    process: ProcessIdentity,
+    slot: u8,
+) {
+    let owner = state::Owner::load(candidate).unwrap();
+    let record = Record {
+        version: 1,
+        owner: owner.token,
+        boot: "1".repeat(36),
+        run: run.into(),
+        token: "c".repeat(32),
+        process,
+        slots: BTreeMap::from([(0, slot)]),
+        sockets: BTreeMap::new(),
+    };
+    state::private_directory(&root(candidate)).unwrap();
+    state::write(&root(candidate).join(format!("{run}.json")), &record).unwrap();
+}
 /// Caller holds Engine lease and has completed dead-owner cleanup/verification.
 pub(super) fn recover_cleaned(
     candidate: &Candidate,

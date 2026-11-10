@@ -227,6 +227,71 @@ async function recoverLiveOwner(opts: {
   }
 }
 
+/**
+ * A retained run whose foreground owner died before the runtime admitted its
+ * restore: the receipt is still the acknowledged retained stop. "uncertain"
+ * also covers a retirement of that owner interrupted between its two renames,
+ * which only the runtime can tell apart from a foreign publication.
+ */
+function unadmittedRetainedOwner(selection: ForegroundOwnerSelection): boolean {
+  return (
+    selection.liveOwnerRecovery === null &&
+    selection.phase === "stopped-data-retained" &&
+    (selection.foreground === "exited" || selection.foreground === "uncertain")
+  );
+}
+
+/**
+ * Retire the dead owner of an unadmitted retained restore, selected by the exact
+ * receipt observed here. The runtime proves the owner is dead, the receipt is the
+ * unchanged acknowledged stop and the relay and reservation it left are that same
+ * process's; it stops, creates and removes nothing in the guest.
+ */
+async function retireUnadmittedOwner(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: NativeProjectRun;
+  readonly invoke: typeof invokeNativeRuntime;
+  readonly expectReceipt: string;
+}): Promise<void> {
+  let result: unknown;
+  try {
+    result = await opts.invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: [
+        "graph",
+        "retire-unadmitted-owner",
+        "--run-id",
+        opts.run.run,
+        "--expect-receipt",
+        opts.expectReceipt,
+        "--json",
+      ],
+      timeoutMs: 60_000,
+    });
+  } catch (error) {
+    if (
+      error instanceof NativeRuntimeRequestError &&
+      error.nativeCode === "graph_unadmitted_owner_recovery"
+    ) {
+      throw new ClosedCliError(
+        "Native down --recover could not prove that this run's foreground owner exited before its restore was admitted. Data is retained; keep the native home unchanged for inspection."
+      );
+    }
+    throw error;
+  }
+  if (
+    !isRecord(result) ||
+    result.run !== opts.run.run ||
+    result.recovered !== true ||
+    result.data_retained !== true ||
+    result.publisher_retired !== true
+  ) {
+    throw ownerRecoveryRefused();
+  }
+}
+
 /** Refuse `--recover` states that have no supported owned stop, before any hook. */
 function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
   if (selection.foreground === "running") {
@@ -235,8 +300,12 @@ function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
     );
   }
   // An interrupted recovery resumes by its own selection, whatever the receipt
-  // phase or partial publication retirement it left behind.
-  if (selection.liveOwnerRecovery !== null) {
+  // phase or partial publication retirement it left behind. An owner that died
+  // before admission is retired by the runtime's own proof.
+  if (
+    selection.liveOwnerRecovery !== null ||
+    unadmittedRetainedOwner(selection)
+  ) {
     return;
   }
   if (selection.foreground === "uncertain") {
@@ -287,7 +356,8 @@ export async function nativeProjectDown(opts: {
   readonly invoke?: typeof invokeNativeRuntime;
   /**
    * `hack down --recover`: also stop a ready run whose foreground owner exited
-   * without retiring its publication (see {@link requestOwnedStop}).
+   * without retiring its publication (see {@link requestOwnedStop}), or retire
+   * the owner of a retained restore that died before admission.
    */
   readonly recover?: boolean;
   /** Only the restart coordinator may defer to its already captured exact wait/recovery. */
@@ -332,6 +402,18 @@ export async function nativeProjectDown(opts: {
       run,
       invoke,
       expectReceipt: selection.liveOwnerRecovery,
+    });
+    initial = await inspect();
+    verify(initial, run, false);
+  } else if (selection && unadmittedRetainedOwner(selection)) {
+    // Compute is already stopped; only the dead attempt's publications remain.
+    // The stopped path below then retires host processes and owed hooks.
+    await retireUnadmittedOwner({
+      runtime: opts.runtime,
+      projectRoot: opts.scope.projectRoot,
+      run,
+      invoke,
+      expectReceipt: selection.receiptSha256,
     });
     initial = await inspect();
     verify(initial, run, false);

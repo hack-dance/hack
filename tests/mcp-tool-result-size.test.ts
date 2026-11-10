@@ -15,6 +15,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { MCP_OUTPUT_LIMIT_BYTES } from "../src/mcp/output-budget.ts";
 import {
   boundMcpToolResult,
+  MCP_LOG_RESULT_CUT_NOTE,
   MCP_TOOL_RESULT_CUT_NOTE,
   MCP_TOOL_RESULT_LIMIT_BYTES,
   MCP_TOOL_RESULT_TEXT_LIMIT_BYTES,
@@ -170,14 +171,15 @@ async function startSession(scenario: string) {
   // Listing tools makes the SDK validate each result against its outputSchema.
   await client.listTools();
 
-  const call = async (
+  /** One call, without reading the wire, which may hold a partial line while
+   * another call's result is still being written. */
+  const invoke = async (
     name: string,
     args: Record<string, unknown>
   ): Promise<{
     readonly result: CallToolResult;
     readonly payload: Payload;
     readonly text: Payload;
-    readonly wireBytes: number;
   }> => {
     const result = (await client.callTool(
       { name, arguments: args },
@@ -189,15 +191,21 @@ async function startSession(scenario: string) {
       result,
       payload: result.structuredContent as Payload,
       text: JSON.parse(block?.type === "text" ? block.text : "null") as Payload,
-      wireBytes: await largestWireLine(wire),
     };
   };
+  const largestWire = (): Promise<number> => largestWireLine(wire);
+  const call = async (name: string, args: Record<string, unknown>) => ({
+    ...(await invoke(name, args)),
+    wireBytes: await largestWire(),
+  });
   /** The session must survive the large result. */
   const expectAlive = async (): Promise<void> => {
     await client.listTools();
     expect(closed).toBe(false);
   };
-  return { call, expectAlive };
+  const toolNames = async (): Promise<readonly string[]> =>
+    (await client.listTools()).tools.map((tool) => tool.name);
+  return { call, invoke, largestWire, expectAlive, toolNames };
 }
 
 /** Bytes of the largest message sent. Each line must also be whole JSON. */
@@ -247,12 +255,13 @@ function expectWholeBulkEvents(payload: Payload): void {
 function expectTruthfulTextView(opts: {
   readonly text: Payload;
   readonly payload: Payload;
+  readonly note: string;
 }): void {
   const { text, payload } = opts;
   expect(text.ok).toBe(payload.ok);
   expect(text.exitCode).toBe(payload.exitCode);
   expect(text.outputTruncated).toBe(true);
-  expect(text.stderr).toContain(MCP_TOOL_RESULT_CUT_NOTE);
+  expect(text.stderr).toContain(opts.note);
   expectNoSplitCodePoint(text);
 }
 
@@ -290,8 +299,15 @@ for (const tool of [
       if (tool === "hack.project.logs.tail") {
         expect(payload.data?.stop_reason).toBe("output_limit");
       }
+      // Both the capture cut and the result cut tell a log caller how to
+      // narrow the next call, not only to leave MCP.
+      expect(payload.stderr).toContain(
+        "8 MiB capture limit; narrow the request with tail, since, until or service"
+      );
+      expect(payload.stderr).toContain(MCP_LOG_RESULT_CUT_NOTE);
+      expect(payload.stderr).not.toContain(MCP_TOOL_RESULT_CUT_NOTE);
 
-      expectTruthfulTextView({ text, payload });
+      expectTruthfulTextView({ text, payload, note: MCP_LOG_RESULT_CUT_NOTE });
       const preview = expectEventPrefix(text);
       expect(preview).toBeGreaterThan(0);
       expect(preview).toBeLessThan(kept);
@@ -320,7 +336,7 @@ test(
     expect(payload.ok).toBe(true);
     expect(payload.exitCode).toBe(0);
     expect(payload.outputTruncated).toBe(true);
-    expect(payload.stderr).toContain(MCP_TOOL_RESULT_CUT_NOTE);
+    expect(payload.stderr).toContain(MCP_LOG_RESULT_CUT_NOTE);
     // Collection reached end of stream; the result is what was cut.
     expect(payload.data?.stop_reason).toBe("eof");
     expect(payload.data?.cutoff).toEqual({
@@ -330,7 +346,40 @@ test(
     const kept = expectEventPrefix(payload);
     expect(kept).toBeGreaterThan(0);
     expect(kept).toBeLessThan(200);
-    expectTruthfulTextView({ text, payload });
+    expectTruthfulTextView({ text, payload, note: MCP_LOG_RESULT_CUT_NOTE });
+  },
+  TEST_TIMEOUT_MS
+);
+
+test(
+  "concurrent oversized results on one session each stay within the client limit",
+  async () => {
+    // The 512 KiB margin assumes the client drains each whole line before the
+    // next result's bytes pile up behind it. Two large results in flight at
+    // once is the case that would break that assumption.
+    const session = await startSession("logs-over-capture");
+    const calls = await Promise.all(
+      (["hack.project.logs.snapshot", "hack.project.logs.tail"] as const).map(
+        (tool) =>
+          session.invoke(tool, {
+            projectName: "demo",
+            tail: 10_000,
+            ...(tool === "hack.project.logs.tail"
+              ? { maxEvents: 10_000, maxMs: 60_000 }
+              : {}),
+          })
+      )
+    );
+    await session.expectAlive();
+    // Every line on the wire, both large results included, fits on its own.
+    expectWithinLimits(await session.largestWire());
+    for (const { result, payload } of calls) {
+      expect(result.isError).toBeUndefined();
+      expect(payload.ok).toBe(true);
+      expect(payload.outputTruncated).toBe(true);
+      expect(expectEventPrefix(payload)).toBeGreaterThan(0);
+      expectWholeBulkEvents(payload);
+    }
   },
   TEST_TIMEOUT_MS
 );
@@ -354,7 +403,7 @@ test(
     expect(payload.stdout.length).toBeGreaterThan(0);
     expect(payload.stderr).toContain(MCP_TOOL_RESULT_CUT_NOTE);
     expectNoSplitCodePoint(payload);
-    expectTruthfulTextView({ text, payload });
+    expectTruthfulTextView({ text, payload, note: MCP_TOOL_RESULT_CUT_NOTE });
   },
   TEST_TIMEOUT_MS
 );
@@ -379,7 +428,7 @@ test(
     expect(payload.stdout.length).toBeGreaterThan(1024 * 1024);
     expect(payload.stdout).toBe("\u0001".repeat(payload.stdout.length));
     expect(payload.stderr).toBe(`${MCP_TOOL_RESULT_CUT_NOTE}\n`);
-    expectTruthfulTextView({ text, payload });
+    expectTruthfulTextView({ text, payload, note: MCP_TOOL_RESULT_CUT_NOTE });
   },
   TEST_TIMEOUT_MS
 );
@@ -400,7 +449,7 @@ test(
     expect(payload.stderr).toBe("");
     expect(payload.data?.items).toBe("😀".repeat(1024 * 1024));
     expect(JSON.parse(payload.stdout)).toEqual(payload.data);
-    expectTruthfulTextView({ text, payload });
+    expectTruthfulTextView({ text, payload, note: MCP_TOOL_RESULT_CUT_NOTE });
     expect(text.data).toBeUndefined();
   },
   TEST_TIMEOUT_MS
@@ -419,6 +468,79 @@ test(
     ]);
   },
   TEST_TIMEOUT_MS
+);
+
+/**
+ * Arguments that pass each tool's input schema, so the call reaches the child
+ * instead of stopping at a refusal. A tool missing here is still called, with
+ * the project selector alone.
+ */
+const SWEEP_ARGS: Readonly<Record<string, Record<string, unknown>>> = {
+  "hack.projects.list": {},
+  "hack.project.init": { path: "." },
+  "hack.project.run": { projectName: "demo", service: "web", cmd: ["true"] },
+  "hack.project.exec": { projectName: "demo", service: "web", cmd: ["true"] },
+  "hack.project.env.explain": { projectName: "demo", key: "PORT" },
+  "hack.project.task.inspect": { projectName: "demo", task: "build" },
+};
+
+test(
+  "every listed tool keeps an oversized child result within the client limit",
+  async () => {
+    // The bound sits in the dispatcher, so no tool can bypass it. This sweep
+    // holds that for every tool the server lists, including tools added later:
+    // each child writes 5 MiB that JSON escaping grows past the client limit.
+    const session = await startSession("plain-escaped");
+    const names = await session.toolNames();
+    expect(names.length).toBeGreaterThanOrEqual(18);
+    const cut: string[] = [];
+    for (const name of names) {
+      const { result, payload } = await session.invoke(
+        name,
+        SWEEP_ARGS[name] ?? { projectName: "demo" }
+      );
+      // What the client parsed, named so a failure says which tool; the wire
+      // check below covers the envelope.
+      expect({
+        name,
+        fits: serializedBytes(result) <= MCP_TOOL_RESULT_LIMIT_BYTES,
+      }).toEqual({ name, fits: true });
+      if (payload.outputTruncated) {
+        cut.push(name);
+        expect(payload.stderr).toContain(
+          name.startsWith("hack.project.logs.")
+            ? MCP_LOG_RESULT_CUT_NOTE
+            : MCP_TOOL_RESULT_CUT_NOTE
+        );
+        // A cut keeps a prefix of the child's output and invents nothing.
+        expect(payload.stdout).toBe("\u0001".repeat(payload.stdout.length));
+        expectNoSplitCodePoint(payload);
+      } else {
+        // A tool that withholds or projects stdout never carried the bulk.
+        expect(payload.stdout.length).toBeLessThan(1024 * 1024);
+      }
+    }
+    await session.expectAlive();
+    expectWithinLimits(await session.largestWire());
+    // Every tool that passes child stdout through had to be cut.
+    expect(cut).toEqual(
+      expect.arrayContaining([
+        "hack.projects.list",
+        "hack.project.status",
+        "hack.project.up",
+        "hack.project.down",
+        "hack.project.restart",
+        "hack.project.run",
+        "hack.project.logs.snapshot",
+        "hack.project.logs.tail",
+        "hack.project.open",
+        "hack.project.init",
+        "hack.project.exec",
+        "hack.project.doctor",
+      ])
+    );
+  },
+  TEST_TIMEOUT_MS * 3
 );
 
 function toolResult(payload: Record<string, unknown>): CallToolResult {
@@ -561,4 +683,42 @@ test("an unexpected oversized field still cannot pass the limit", () => {
   expect(payload.ok).toBe(false);
   expect(payload.exitCode).toBe(3);
   expect(payload.outputTruncated).toBe(true);
+  // Even the last resort tells a log caller how to narrow the request.
+  expect(payload.stderr).toBe(`${MCP_LOG_RESULT_CUT_NOTE}\n`);
+});
+
+test("only log payloads get the narrowing hint, in both channels", () => {
+  const limits = { limitBytes: 32 * 1024, textLimitBytes: 4096 };
+  const cut = (data?: Record<string, unknown>) => {
+    const bounded = boundMcpToolResult(
+      toolResult({
+        ...basePayload,
+        stdout: "o".repeat(64 * 1024),
+        ...(data ? { data } : {}),
+      }),
+      limits
+    );
+    const block = bounded.content[0];
+    expect(serializedBytes(bounded)).toBeLessThanOrEqual(limits.limitBytes);
+    return {
+      payload: bounded.structuredContent as Payload,
+      text: JSON.parse(block?.type === "text" ? block.text : "null") as Payload,
+    };
+  };
+
+  const log = cut({
+    events: [{ n: 1, raw: "x".repeat(64 * 1024) }],
+    count: 1,
+    cutoff: null,
+  });
+  for (const channel of [log.payload, log.text]) {
+    expect(channel.outputTruncated).toBe(true);
+    expect(channel.stderr).toBe(`${MCP_LOG_RESULT_CUT_NOTE}\n`);
+  }
+
+  const plain = cut({ items: ["one"] });
+  for (const channel of [plain.payload, plain.text]) {
+    expect(channel.outputTruncated).toBe(true);
+    expect(channel.stderr).toBe(`${MCP_TOOL_RESULT_CUT_NOTE}\n`);
+  }
 });

@@ -2265,7 +2265,7 @@ async function runHackLogCollect(opts: {
 
     if (output.exceeded()) {
       stderrLines.push(
-        "MCP output exceeded the 8 MiB capture limit; use the CLI for full output."
+        "MCP output exceeded the 8 MiB capture limit; narrow the request with tail, since, until or service, or use the CLI for full output."
       );
     }
     const command = formatCommand(cmd);

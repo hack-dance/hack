@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CliUsageError } from "../src/cli/command.ts";
 import { loadDevCommand } from "../src/commands/dev.ts";
 
 const fixtures: string[] = [];
@@ -244,8 +245,10 @@ test("a replacement file cannot supply bytes after a different inode passed vali
       } catch (error) {
         if (
           !(
-            error instanceof Error &&
-            error.message.includes("without shared write access")
+            error instanceof CliUsageError &&
+            (error.message.includes("without shared write access") ||
+              error.message.startsWith("Cannot safely open") ||
+              error.message.startsWith("Cannot verify private dev access"))
           )
         ) {
           throw error;
@@ -255,7 +258,13 @@ test("a replacement file cannot supply bytes after a different inode passed vali
   } finally {
     await swapping;
   }
-});
+  await writeFile(
+    destination,
+    JSON.stringify({ version: 1, command: ["trusted"] })
+  );
+  await chmod(destination, 0o600);
+  expect((await loadDevCommand({ cwd: root })).command).toEqual(["trusted"]);
+}, 15_000);
 
 test("umask 002 checkouts receive path, mode and remediation instead of an opaque refusal", async () => {
   if (process.getuid === undefined) {

@@ -3,6 +3,7 @@ import { lstat, open, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
+import { hasDevMutationAcl } from "../lib/dev-acl.ts";
 import { isRecord, isStringArray } from "../lib/guards.ts";
 import { exec } from "../lib/shell.ts";
 
@@ -43,8 +44,9 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
     );
   }
   let declaration: unknown;
-  await verifyDevDirectories(root);
-  await verifyDevDirectories(dirname(configPath));
+  const checkedDirectories = new Set<string>();
+  await verifyDevDirectories(root, checkedDirectories);
+  await verifyDevDirectories(dirname(configPath), checkedDirectories);
   try {
     const handle = await open(
       configPath,
@@ -61,6 +63,7 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
           `The dev declaration must be a current-user-owned file without shared write access: ${modeHint(configPath, info.mode)}`
         );
       }
+      await verifyDevAcl(configPath);
       const text = await handle.readFile("utf8");
       try {
         declaration = JSON.parse(text);
@@ -94,13 +97,19 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
 }
 
 /** Reject shared rename authority so checked paths remain stable through spawn. */
-async function verifyDevDirectories(directory: string): Promise<void> {
+async function verifyDevDirectories(
+  directory: string,
+  checked: Set<string>
+): Promise<void> {
   const uid = process.getuid?.();
   if (uid === undefined) {
     return;
   }
   let current = directory;
   while (true) {
+    if (checked.has(current)) {
+      return;
+    }
     const info = await lstat(current);
     const writable = (info.mode & 0o022) !== 0;
     const protectedAncestor =
@@ -114,11 +123,29 @@ async function verifyDevDirectories(directory: string): Promise<void> {
         `Dev declaration and launch directories must not be writable or replaceable by other users: ${modeHint(current, info.mode)}`
       );
     }
+    await verifyDevAcl(current);
+    checked.add(current);
     const parent = dirname(current);
     if (parent === current) {
       return;
     }
     current = parent;
+  }
+}
+
+async function verifyDevAcl(path: string): Promise<void> {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  const result = await exec(["/bin/ls", "-blde", path], {
+    timeoutMs: 3000,
+    stdin: "ignore",
+    env: { LC_ALL: "C", CLICOLOR: "", CLICOLOR_FORCE: "" },
+  });
+  if (result.exitCode !== 0 || hasDevMutationAcl(result.stdout)) {
+    throw new CliUsageError(
+      `Cannot verify private dev access for ${path}: extended ACLs must not grant mutation rights. Use a private checkout; no ACLs are changed automatically.`
+    );
   }
 }
 

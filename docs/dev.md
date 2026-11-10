@@ -39,3 +39,9 @@ is unnecessary, remove that bit with `chmod g-w PATH`. Otherwise use a private
 checkout created under `umask 022` instead of changing a shared team's permissions.
 World-writable paths also require removing other-write access. Git worktrees and
 native projects follow the same policy.
+
+On macOS the same check also reads extended ACLs, which can grant write/delete
+rights independently of the mode bits. Read-only and deny-only entries are
+accepted. Mutation grants or unknown ACL rights require a private checkout;
+Hack does not change ACLs. Checked directory ancestry is reused only within the
+current invocation.

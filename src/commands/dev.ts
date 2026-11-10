@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { realpath } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
 import { isRecord, isStringArray } from "../lib/guards.ts";
@@ -6,15 +7,31 @@ import { findUpFile } from "../lib/path.ts";
 
 /** Native projects can declare a dev runner without a Compose stack. No shell expansion. */
 export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
-  const root = await findUpFile(cwd, ".hack/dev.json");
-  if (!root) {
+  const start = await realpath(cwd);
+  const boundary = (await findUpFile(start, ".git")) ?? start;
+  let root = start;
+  while (!(await Bun.file(resolve(root, ".hack/dev.json")).exists())) {
+    if (root === boundary) {
+      throw new CliUsageError(
+        "No .hack/dev.json found in this repository. Declare a side-by-side dev command first."
+      );
+    }
+    root = dirname(root);
+  }
+  const configPath = await realpath(resolve(root, ".hack/dev.json"));
+  const configRelative = relative(boundary, configPath);
+  if (
+    isAbsolute(configRelative) ||
+    configRelative === ".." ||
+    configRelative.startsWith("../")
+  ) {
     throw new CliUsageError(
-      "No .hack/dev.json found. Declare a side-by-side dev command first."
+      "The dev declaration must stay inside this repository."
     );
   }
   let declaration: unknown;
   try {
-    declaration = await Bun.file(resolve(root, ".hack/dev.json")).json();
+    declaration = await Bun.file(configPath).json();
   } catch {
     throw new CliUsageError("Cannot read .hack/dev.json: expected valid JSON.");
   }

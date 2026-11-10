@@ -9,7 +9,9 @@ Commit `.hack/dev.json` in the project:
 {"version": 1, "command": ["bun", "scripts/dev.ts"]}
 ```
 
-Hack discovers the nearest declaration in the current directory or its parents,
+Hack discovers the nearest declaration from the current directory up to its Git
+checkout root. Without a Git checkout, only the selected directory is searched.
+Declarations that resolve outside that boundary are refused. Hack
 runs the argv array from that root, inherits terminal I/O and returns the runner's
 exit status. Arguments are literal; shell strings and interpolation are unsupported.
 Ctrl-C and SIGTERM are forwarded to the runner. Run declarations only from trusted

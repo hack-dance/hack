@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadDevCommand } from "../src/commands/dev.ts";
@@ -13,6 +13,7 @@ afterEach(async () => {
 async function fixture(value: unknown) {
   const root = await mkdtemp(join(tmpdir(), "hack-dev-test-"));
   fixtures.push(root);
+  await mkdir(join(root, ".git"));
   await mkdir(join(root, ".hack"));
   await mkdir(join(root, "nested"));
   await Bun.write(join(root, ".hack/dev.json"), JSON.stringify(value));
@@ -113,5 +114,20 @@ test("malformed JSON and missing executables return actionable errors", async ()
   await Bun.write(join(root, ".hack/dev.json"), "{bad json");
   await expect(loadDevCommand({ cwd: root })).rejects.toThrow(
     "expected valid JSON"
+  );
+});
+
+test("does not execute declarations outside the selected checkout", async () => {
+  const outer = await fixture({ version: 1, command: ["attacker-command"] });
+  const inner = join(outer, "victim");
+  await mkdir(join(inner, ".git"), { recursive: true });
+  await mkdir(join(inner, "nested"));
+  await expect(loadDevCommand({ cwd: join(inner, "nested") })).rejects.toThrow(
+    "No .hack/dev.json found in this repository"
+  );
+  await mkdir(join(inner, ".hack"));
+  await symlink(join(outer, ".hack/dev.json"), join(inner, ".hack/dev.json"));
+  await expect(loadDevCommand({ cwd: inner })).rejects.toThrow(
+    "must stay inside this repository"
   );
 });

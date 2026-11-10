@@ -188,7 +188,26 @@ export const composeRuntimeBackend: RuntimeBackend = {
       stdin: "inherit",
       stdout: "pipe",
       stderr: "pipe",
+      // Keep terminal group SIGINT delivery out of Compose's group: the parent
+      // forwards each interrupt once, including a second one during shutdown.
+      detached: true,
     });
+
+    let interrupted: number | null = null;
+    const forwardInterrupt = (): void => {
+      interrupted ??= 130;
+      if (proc.exitCode === null) {
+        proc.kill("SIGINT");
+      }
+    };
+    const forwardTerminate = (): void => {
+      interrupted ??= 143;
+      if (proc.exitCode === null) {
+        proc.kill("SIGTERM");
+      }
+    };
+    process.on("SIGINT", forwardInterrupt);
+    process.on("SIGTERM", forwardTerminate);
 
     const stdoutTarget = opts.routeStdoutToStderr
       ? process.stderr
@@ -212,11 +231,16 @@ export const composeRuntimeBackend: RuntimeBackend = {
       }
     })();
 
-    const exitCode = await proc.exited;
-    await Promise.all([stdoutTask, stderrTask]);
-    stdoutGrouper.flush();
-    stderrGrouper.flush();
-    return exitCode;
+    try {
+      const exitCode = await proc.exited;
+      await Promise.all([stdoutTask, stderrTask]);
+      stdoutGrouper.flush();
+      stderrGrouper.flush();
+      return interrupted ?? exitCode;
+    } finally {
+      process.off("SIGINT", forwardInterrupt);
+      process.off("SIGTERM", forwardTerminate);
+    }
   },
   async down(opts) {
     const cmd = [...buildComposeArgs(opts), "down"];

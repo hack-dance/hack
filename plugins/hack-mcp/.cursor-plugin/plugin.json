@@ -1,6 +1,6 @@
 {
   "name": "hack-mcp",
-  "version": "4.2.7",
+  "version": "4.3.0",
   "description": "Opt-in Hack MCP server (`hack mcp serve`) for agent clients without shell access.",
   "author": {
     "name": "Hack Dance LLC"

@@ -620,7 +620,12 @@ hosts, use the `encrypted_file` secrets backend with its key file in place or
 
 `--local` writes to the worktree-local override file (`.hack/hack.env.local.yaml` or
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
-per-checkout values you don't want to commit.
+per-checkout values you don't want to commit. A machine-local layer that `hack env set --local`,
+`hack env unset --local` or `hack env hydrate` creates is private (mode 0600) from creation,
+whatever your umask, because it can hold plaintext values. An existing layer keeps its mode;
+tighten it yourself with `chmod 600` if it was created by an older version. Tracked layers
+keep the umask default. These commands create no new directory for values: the layers live
+in the existing `.hack` directory, whose mode they don't change.
 
 With no env layers yet, `hack env set --local` writes legacy `.hack/.env` (or
 `.hack/.env.<overlay>`), including when a `hack.env.json` contract exists.
@@ -1356,9 +1361,43 @@ All tracked and effective local destinations are checked for collisions before a
 writes, including compatibility paths. For example, `.env.staging` together with
 `.env.staging.local` is refused because both would write `hack.env.staging.local.yaml`.
 Collision checks include case-only aliases for checkouts with case-insensitive filenames.
-If a legacy dotenv file cannot be read, migration refuses cleanup and leaves
-legacy artifacts in place. Env layers may already have been written; check read
+With `hack.env.json`, the migration refuses (`E_PERMISSION`) before it writes any env layer
+when `.hack/.env`, a legacy overlay or the configured default overlay exists but can't be
+read, for example mode 000, because reading it as empty would migrate it without its values.
+A missing file still counts as empty. If a legacy dotenv file becomes unreadable after the
+layers were written, cleanup still refuses and leaves legacy artifacts in place; check read
 access and preserve the remaining entries before cleaning up manually.
+
+With `hack.env.json`, the migration also refuses (`E_CONFIG_INVALID`), writing no env layer,
+when Compose `env_file` loads a legacy overlay that isn't `env.defaultOverlay` and that sets a
+contract key differently from `.hack/.env`, or when the `env_file` order gives a contract key a
+different value from the layers, where the default overlay wins over `.hack/.env`. After the
+migration Hack delivers the layers a launch without `--env` selects, and they outrank
+`env_file`, so the service would switch values. `hack doctor --migrate-env-config` compares
+every key in those files, not only the contract's, because its Compose repair then removes the
+`env_file` entries. Set `env.defaultOverlay` to that overlay, list `.env` first, or make the
+files agree, then retry. The error names files, services and keys, never values.
+
+With `hack.env.json` and an `encrypted_file` (or `cloud` shim) secret backend, the migration
+lists the store's entries read-only before it writes anything, without creating key material.
+An overlay that exists only in the store, such as a value from
+`hack env set KEY --secret --env staging` with no `.hack/.env.staging`, is migrated like an
+overlay file. A stored overlay whose name can't be an env layer name refuses
+(`E_CONFIG_INVALID`). Doctor offers a configured store inside the project for cleanup only
+when the env layers now deliver every entry it holds for this project and it holds none for
+another; otherwise it keeps the store and names the entries that would be lost, never their
+values. A store it can't list (its key isn't available, it can't be read, or the backend is
+the keychain) is kept too. A store key file inside the project is offered only when no store
+that needs it stays behind. While a store exists, the migration keeps its pointer in
+`hack.config.json` (`controlPlane.secrets.encryptedFile` and `backend: encrypted_file`) on
+every route, including implicit ones such as `hack env add`, so entries it still holds stay
+readable through the secret store without hand edits; Hack reports the kept pointer with the
+key names still in the store, never values. The pointer is dropped only after doctor's
+cleanup has removed the store, so a declined or failed removal leaves it in place. A `cloud`
+backend reads the same pointer, so it always keeps it, and its store and key file are never
+offered for cleanup. The keychain backend can't list its entries, so with it an overlay
+that has no legacy file and isn't the default overlay isn't found; its keychain items are left
+as they are, so set those values again with `hack env set --secret --env <name>`.
 
 `hack doctor` also warns when a repo still depends on the old format. Its `env mode`
 check reports an error, not the legacy format, when a `.hack/hack.env.*.yaml` entry is a

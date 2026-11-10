@@ -389,7 +389,9 @@ export class AtomicWriteConflictError extends ClosedCliError {
  * An existing target keeps its permission bits, owner and group, and an
  * existing symlink keeps pointing where it did: the replacement lands at the
  * link's resolved path, as a plain write through the link would. A new file
- * gets the umask default. Unlike an in-place write, a dangling symlink is
+ * gets the umask default, or `createMode` (still narrowed by the umask) when
+ * given: the staging file is opened with that mode, so a private file is
+ * never readable more widely, even briefly. Unlike an in-place write, a dangling symlink is
  * replaced by a regular file, a hard link to the target is detached (its other
  * names keep the previous contents), and the containing directory must be
  * writable: a directory that refuses the staging file is reported as an
@@ -410,6 +412,8 @@ export async function writeTextFileAtomicIfChanged(
     readonly expectedExisting?: string | null;
     /** Policy check on the selected path and resolved destination, before read/stage/commit. */
     readonly validatePath?: (path: string) => Promise<void>;
+    /** Permission bits for a file this write creates; an existing file keeps its own. */
+    readonly createMode?: number;
   } = {}
 ): Promise<{ readonly changed: boolean }> {
   await options.validatePath?.(absolutePath);
@@ -442,7 +446,11 @@ export async function writeTextFileAtomicIfChanged(
     dirname(target),
     `.${basename(target)}.${randomUUID()}.tmp`
   );
-  const file = await openAtomicWriteStaging({ staging, path: absolutePath });
+  const file = await openAtomicWriteStaging({
+    staging,
+    path: absolutePath,
+    mode: options.createMode ?? 0o666,
+  });
   let committed = false;
   try {
     if (existing.kind === "existing") {
@@ -488,6 +496,7 @@ export async function writeTextFileAtomicIfChanged(
 async function openAtomicWriteStaging(opts: {
   readonly staging: string;
   readonly path: string;
+  readonly mode: number;
 }): Promise<Awaited<ReturnType<typeof open>>> {
   try {
     return await open(
@@ -496,7 +505,7 @@ async function openAtomicWriteStaging(opts: {
         constants.O_EXCL |
         constants.O_NOFOLLOW |
         constants.O_WRONLY,
-      0o666
+      opts.mode
     );
   } catch (error: unknown) {
     throw atomicWriteStagingError({ error, path: opts.path });

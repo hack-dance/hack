@@ -51,10 +51,20 @@ DaemonRestart == /\ Present /\ daemonRestarts = 0
 \* ---- Owner -----------------------------------------------------------------
 \* A generation-bound consumer (endpoint, exec, relay target) binds to the
 \* currently observed incarnation: container ID plus StartedAt.
-Bind == /\ phase = "serving" /\ engine = "running" /\ bound # incarnation
+Bind == /\ phase = "serving" /\ engine = "running" /\ bound = 0
+        /\ incarnation = 1
         /\ bound' = incarnation
         /\ UNCHANGED <<engine, policy, cancelled, incarnation, phase,
                         daemonRestarts, lateStart, unsafeTerminal, staleUse>>
+\* A policy restart cannot silently repin a live bridge. RefuseStale models
+\* full old-reservation retirement, including publisher reaping (bound = 0).
+\* Rebind abstracts fresh ownership/attachment admission, a fresh reservation
+\* and one launch. Relay lifecycle/fence/staging models expand those boundaries.
+Rebind == /\ phase = "serving" /\ engine = "running"
+          /\ policy = "armed" /\ bound = 0 /\ incarnation > 1
+          /\ bound' = incarnation
+          /\ UNCHANGED <<engine, policy, cancelled, incarnation, phase,
+                          daemonRestarts, lateStart, unsafeTerminal, staleUse>>
 \* Use re-verifies the bound generation at the effect boundary.
 Use == /\ phase = "serving" /\ bound # 0
        /\ (EnforceGeneration => (bound = incarnation /\ engine = "running"))
@@ -108,7 +118,7 @@ Remove == /\ phase = "stopped" /\ engine = "exited"
           /\ UNCHANGED <<policy, cancelled, incarnation, bound, daemonRestarts,
                           lateStart, unsafeTerminal, staleUse>>
 
-Next == Exit \/ EngineRestart \/ DaemonRestart \/ Bind \/ Use \/ RefuseStale
+Next == Exit \/ EngineRestart \/ DaemonRestart \/ Bind \/ Rebind \/ Use \/ RefuseStale
         \/ Disarm \/ RequestStop \/ EngineStop \/ ObserveTerminal
         \/ RefuseNonTerminal \/ Remove
 Spec == Init /\ [][Next]_vars
@@ -129,4 +139,5 @@ TerminalProof == ~unsafeTerminal
 Safe == NoStaleIncarnation /\ NoIncarnationAfterStop /\ TerminalProof
 \* Control: cleanup completion is reachable in the positive configuration.
 NeverRemoved == phase # "removed"
+NeverRebound == bound < 2
 =============================================================================

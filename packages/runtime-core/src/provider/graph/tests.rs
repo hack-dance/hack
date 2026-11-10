@@ -554,7 +554,7 @@ fn restarting_observation_requires_receipt_admission() {
     assert_eq!(observation(&stopped).unwrap(), Observation::Dead);
 }
 #[test]
-fn receipt_restart_authority_excludes_incarnation_bound_publication() {
+fn receipt_restart_authority_admits_owner_supervised_publication() {
     let container = Resource {
         routing: None,
         loopback_ports: Vec::new(),
@@ -582,17 +582,17 @@ fn receipt_restart_authority_excludes_incarnation_bound_publication() {
         host_port: 8787,
         target: 3000,
     }];
-    assert!(!restart_policy_valid(
+    assert!(restart_policy_valid(
         &published,
         false,
         Some(&Condition::Started)
     ));
-    // The planner never records a policy next to a route either.
+    // The foreground owner also supervises routed restart policies.
     let mut routed = container.clone();
     routed.routing = Some(
         serde_json::from_value(json!({"hostnames":["worker.example.test"],"port":3000})).unwrap(),
     );
-    assert!(!restart_policy_valid(
+    assert!(restart_policy_valid(
         &routed,
         false,
         Some(&Condition::Started)
@@ -3285,8 +3285,7 @@ fn restart_policy_is_not_applied_to_published_or_routed_services() {
     let mut routed = compose(&image, "marker", false);
     routed["services"]["web"]["labels"] = json!({"caddy":"web.example.test",
         "caddy.reverse_proxy":"{{upstreams 3000}}","caddy.tls":"internal"});
-    // Routes require the native HTTP probe; a routed restart policy would also
-    // have been refused for the probe, so this proves the route degrade runs first.
+    // Routes retain native HTTP readiness; their exec probe must be rearmed per incarnation.
     routed["services"]["web"]["healthcheck"] = json!({"x-hack-http":{"port":3000,
         "path":"/health","interval_ms":100,"timeout_ms":500,"retries":3,"start_period_ms":0}});
     // Lowering a route's native HTTP probe needs the native-http-probe build
@@ -3320,23 +3319,19 @@ fn restart_policy_is_not_applied_to_published_or_routed_services() {
             .iter()
             .filter(|d| d.code == "restart_policy_not_applied")
             .collect::<Vec<_>>();
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].severity, "warning");
-        assert_eq!(warnings[0].field, "services.web.restart");
-        assert!(warnings[0].message.contains("HACK-1935"));
+        assert!(warnings.is_empty());
         if !lowered {
             continue;
         }
         let prepared = prepare(&document, options);
-        // The bridged service starts with the engine's `no` and no receipt
-        // policy, so no restart authority or `restarting` state is admitted.
+        // The bridged service records the engine policy and restart authority.
         assert_eq!(
             prepared.configs["web"]["HostConfig"]["RestartPolicy"],
-            json!({"Name":"no"})
+            json!({"Name":"unless-stopped","MaximumRetryCount":0})
         );
         let web = &prepared.resources["container:web"];
-        assert!(web.restart_policy.is_none());
-        assert!(!restart_policy::admits_restarting(web));
+        assert!(web.restart_policy.is_some());
+        assert!(restart_policy::admits_restarting(web));
         assert_eq!(
             prepared.resources["container:init"].restart_policy,
             Some(restart_policy::RestartPolicy::OnFailure {

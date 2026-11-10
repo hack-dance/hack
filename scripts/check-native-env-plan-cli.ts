@@ -249,15 +249,33 @@ try {
   await Bun.write(join(checkout, ".hack/hack.config.json"), "{}");
   await refused([], "E_NATIVE_PROJECT_CONFLICT", checkout);
   await rm(join(checkout, ".hack/hack.config.json"));
-  const unsupported = await invoke(["up", "--detach", "--json"], checkout, {
-    HACK_RUNTIME_BACKEND: "native",
-  });
+  const unsupported = await invoke(
+    ["up", "web", "--detach", "--json"],
+    checkout,
+    {
+      HACK_RUNTIME_BACKEND: "native",
+      HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
+      HACK_NATIVE_HOME: join(home, "native"),
+    }
+  );
   require(unsupported.exit !== 0 &&
     (unsupported.stdout + unsupported.stderr).includes(
-      // On macOS authored foreground up is supported, so --detach gets the
-      // shared one-line E_USAGE refusal; elsewhere it is unsupported.
-      process.platform === "darwin" ? "E_USAGE" : "E_NATIVE_PROJECT_UNSUPPORTED"
-    ), "native detached up refuses before input or runtime work");
+      "E_USAGE"
+    ), "native detached service selection refuses before input or runtime work");
+  // Whole-project detach is admitted. Invalid input keeps this relocated-bundle
+  // check offline on supported hosts; unsupported hosts also fail before ready.
+  await Bun.write(join(checkout, ".hack/hack.project.json"), "{");
+  const detached = await invoke(["up", "--detach", "--json"], checkout, {
+    HACK_RUNTIME_BACKEND: "native",
+    HACK_NATIVE_BINARY: join(bundle, "absent-runtime"),
+    HACK_NATIVE_HOME: join(home, "native"),
+  });
+  const detachedResult = record(JSON.parse(detached.stdout));
+  require(detached.exit === 1 &&
+    detached.stderr === "" &&
+    detachedResult.ok === false &&
+    record(detachedResult.error).code ===
+      "E_STARTUP_INCOMPLETE", "admitted detached startup returns one JSON failure envelope without readiness");
   require((await readdir(home)).length === 0 &&
     !(await readdir(join(checkout, ".hack"))).some(
       (name) => name === ".internal" || name === ".branch"

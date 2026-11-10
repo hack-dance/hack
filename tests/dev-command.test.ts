@@ -23,9 +23,10 @@ async function fixture(value: unknown) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "hack-dev-test-")));
   fixtures.push(root);
   await initRepo(root);
-  await mkdir(join(root, ".hack"));
-  await mkdir(join(root, "nested"));
+  await mkdir(join(root, ".hack"), { mode: 0o700 });
+  await mkdir(join(root, "nested"), { mode: 0o700 });
   await Bun.write(join(root, ".hack/dev.json"), JSON.stringify(value));
+  await chmod(join(root, ".hack/dev.json"), 0o600);
   return root;
 }
 async function initRepo(root: string) {
@@ -254,4 +255,22 @@ test("a replacement file cannot supply bytes after a different inode passed vali
   } finally {
     await swapping;
   }
+});
+
+test("umask 002 checkouts receive path, mode and remediation instead of an opaque refusal", async () => {
+  if (process.getuid === undefined) {
+    return;
+  }
+  const root = await fixture({ version: 1, command: ["unused"] });
+  const path = join(root, ".hack/dev.json");
+  await chmod(path, 0o664);
+  for (const expected of [path, "mode 664", "chmod g-w", "umask 022"]) {
+    await expect(loadDevCommand({ cwd: root })).rejects.toThrow(expected);
+  }
+  await chmod(path, 0o600);
+  await chmod(root, 0o775);
+  for (const expected of [root, "mode 775", "chmod g-w", "umask 022"]) {
+    await expect(loadDevCommand({ cwd: root })).rejects.toThrow(expected);
+  }
+  await chmod(root, 0o700);
 });

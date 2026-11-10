@@ -26,7 +26,12 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
     }
     root = dirname(root);
   }
-  const configPath = await realpath(resolve(root, ".hack/dev.json"));
+  let configPath: string;
+  try {
+    configPath = await realpath(resolve(root, ".hack/dev.json"));
+  } catch {
+    throw new CliUsageError("Cannot safely open .hack/dev.json.");
+  }
   const configRelative = relative(boundary, configPath);
   if (
     isAbsolute(configRelative) ||
@@ -53,10 +58,17 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
         (uid !== undefined && (info.uid !== uid || (info.mode & 0o022) !== 0))
       ) {
         throw new CliUsageError(
-          "The dev declaration must be a current-user-owned file without shared write access."
+          `The dev declaration must be a current-user-owned file without shared write access: ${modeHint(configPath, info.mode)}`
         );
       }
-      declaration = JSON.parse(await handle.readFile("utf8"));
+      const text = await handle.readFile("utf8");
+      try {
+        declaration = JSON.parse(text);
+      } catch {
+        throw new CliUsageError(
+          "Cannot read .hack/dev.json: expected valid JSON."
+        );
+      }
     } finally {
       await handle.close();
     }
@@ -64,7 +76,7 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
     if (error instanceof CliUsageError) {
       throw error;
     }
-    throw new CliUsageError("Cannot read .hack/dev.json: expected valid JSON.");
+    throw new CliUsageError("Cannot safely open or read .hack/dev.json.");
   }
   if (
     !isRecord(declaration) ||
@@ -99,7 +111,7 @@ async function verifyDevDirectories(directory: string): Promise<void> {
       (writable && !protectedAncestor)
     ) {
       throw new CliUsageError(
-        "Dev declaration and launch directories must not be writable or replaceable by other users."
+        `Dev declaration and launch directories must not be writable or replaceable by other users: ${modeHint(current, info.mode)}`
       );
     }
     const parent = dirname(current);
@@ -108,6 +120,10 @@ async function verifyDevDirectories(directory: string): Promise<void> {
     }
     current = parent;
   }
+}
+
+function modeHint(path: string, mode: number): string {
+  return `${path} (mode ${(mode & 0o7777).toString(8)}). For your own group-writable paths, use chmod g-w on this path, or create a private checkout with umask 022. Remove other-write access too if present.`;
 }
 
 /** A marker alone is insufficient in shared ancestors; ask Git and check ownership. */

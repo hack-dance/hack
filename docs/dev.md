@@ -31,3 +31,11 @@ and an example-only loopback service on a dev-specific port.
 Native rebuilds restart the dev app, so save edits before changing its source.
 Terminal Ctrl-C may also reach the runner directly; shutdown handlers must tolerate
 repeated signals and wait for cleanup before exiting.
+
+The POSIX policy is conservative: it also rejects `775` directories and `664`
+declarations made with `umask 002`, even when the group is a private primary group.
+The error identifies the exact path and mode. If you own the path and group write
+is unnecessary, remove that bit with `chmod g-w PATH`. Otherwise use a private
+checkout created under `umask 022` instead of changing a shared team's permissions.
+World-writable paths also require removing other-write access. Git worktrees and
+native projects follow the same policy.

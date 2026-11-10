@@ -203,7 +203,9 @@ async function startSession(scenario: string) {
     await client.listTools();
     expect(closed).toBe(false);
   };
-  return { call, invoke, largestWire, expectAlive };
+  const toolNames = async (): Promise<readonly string[]> =>
+    (await client.listTools()).tools.map((tool) => tool.name);
+  return { call, invoke, largestWire, expectAlive, toolNames };
 }
 
 /** Bytes of the largest message sent. Each line must also be whole JSON. */
@@ -466,6 +468,79 @@ test(
     ]);
   },
   TEST_TIMEOUT_MS
+);
+
+/**
+ * Arguments that pass each tool's input schema, so the call reaches the child
+ * instead of stopping at a refusal. A tool missing here is still called, with
+ * the project selector alone.
+ */
+const SWEEP_ARGS: Readonly<Record<string, Record<string, unknown>>> = {
+  "hack.projects.list": {},
+  "hack.project.init": { path: "." },
+  "hack.project.run": { projectName: "demo", service: "web", cmd: ["true"] },
+  "hack.project.exec": { projectName: "demo", service: "web", cmd: ["true"] },
+  "hack.project.env.explain": { projectName: "demo", key: "PORT" },
+  "hack.project.task.inspect": { projectName: "demo", task: "build" },
+};
+
+test(
+  "every listed tool keeps an oversized child result within the client limit",
+  async () => {
+    // The bound sits in the dispatcher, so no tool can bypass it. This sweep
+    // holds that for every tool the server lists, including tools added later:
+    // each child writes 5 MiB that JSON escaping grows past the client limit.
+    const session = await startSession("plain-escaped");
+    const names = await session.toolNames();
+    expect(names.length).toBeGreaterThanOrEqual(18);
+    const cut: string[] = [];
+    for (const name of names) {
+      const { result, payload } = await session.invoke(
+        name,
+        SWEEP_ARGS[name] ?? { projectName: "demo" }
+      );
+      // What the client parsed, named so a failure says which tool; the wire
+      // check below covers the envelope.
+      expect({
+        name,
+        fits: serializedBytes(result) <= MCP_TOOL_RESULT_LIMIT_BYTES,
+      }).toEqual({ name, fits: true });
+      if (payload.outputTruncated) {
+        cut.push(name);
+        expect(payload.stderr).toContain(
+          name.startsWith("hack.project.logs.")
+            ? MCP_LOG_RESULT_CUT_NOTE
+            : MCP_TOOL_RESULT_CUT_NOTE
+        );
+        // A cut keeps a prefix of the child's output and invents nothing.
+        expect(payload.stdout).toBe("\u0001".repeat(payload.stdout.length));
+        expectNoSplitCodePoint(payload);
+      } else {
+        // A tool that withholds or projects stdout never carried the bulk.
+        expect(payload.stdout.length).toBeLessThan(1024 * 1024);
+      }
+    }
+    await session.expectAlive();
+    expectWithinLimits(await session.largestWire());
+    // Every tool that passes child stdout through had to be cut.
+    expect(cut).toEqual(
+      expect.arrayContaining([
+        "hack.projects.list",
+        "hack.project.status",
+        "hack.project.up",
+        "hack.project.down",
+        "hack.project.restart",
+        "hack.project.run",
+        "hack.project.logs.snapshot",
+        "hack.project.logs.tail",
+        "hack.project.open",
+        "hack.project.init",
+        "hack.project.exec",
+        "hack.project.doctor",
+      ])
+    );
+  },
+  TEST_TIMEOUT_MS * 3
 );
 
 function toolResult(payload: Record<string, unknown>): CallToolResult {

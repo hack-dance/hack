@@ -245,6 +245,32 @@ pub struct EngineInfo {
     pub transport: &'static str,
 }
 
+/// The connection capability selected before any graph effect is admitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConnectionMode {
+    Allocation,
+    Cleanup,
+}
+
+impl ConnectionMode {
+    fn from_cleanup(cleanup_only: bool) -> Self {
+        if cleanup_only {
+            Self::Cleanup
+        } else {
+            Self::Allocation
+        }
+    }
+
+    pub(super) fn admit(self, method: &Method) -> Result<(), CandidateError> {
+        if self == Self::Cleanup && ![Method::GET, Method::HEAD, Method::DELETE].contains(method) {
+            return Err(failure(
+                "A cleanup connection cannot allocate or start resources.",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct Engine<'a> {
     guest: OwnedGuest<'a>,
     transport: Transport,
@@ -266,11 +292,7 @@ impl<'a> Engine<'a> {
         body: Option<&Value>,
         deadline: Instant,
     ) -> Result<Value, CandidateError> {
-        if self.cleanup_only && ![Method::GET, Method::HEAD, Method::DELETE].contains(&method) {
-            return Err(failure(
-                "A cleanup connection cannot allocate or start resources.",
-            ));
-        }
+        ConnectionMode::from_cleanup(self.cleanup_only).admit(&method)?;
         self.guest.verify()?;
         if ![Method::GET, Method::HEAD, Method::DELETE].contains(&method) {
             self.guest.before_effect()?;
@@ -499,6 +521,14 @@ impl<'a> Engine<'a> {
         Self::connect_mode(candidate, false)
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn connect_in_mode(
+        candidate: &'a Candidate,
+        mode: ConnectionMode,
+    ) -> Result<Self, CandidateError> {
+        Self::connect_mode(candidate, mode == ConnectionMode::Cleanup)
+    }
+
     /// Wait only for the mutation lease. A busy acquisition admits no operation;
     /// other verification or transport failures are returned without replay.
     #[cfg(target_os = "macos")]
@@ -607,11 +637,7 @@ impl<'a> Engine<'a> {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, CandidateError> {
-        if self.cleanup_only && ![Method::GET, Method::HEAD, Method::DELETE].contains(&method) {
-            return Err(failure(
-                "A cleanup connection cannot allocate or start resources.",
-            ));
-        }
+        ConnectionMode::from_cleanup(self.cleanup_only).admit(&method)?;
         self.guest.verify()?;
         // Cleanup must remain possible when a capacity check blocks new allocations.
         if method != Method::GET && method != Method::HEAD && method != Method::DELETE {

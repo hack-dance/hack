@@ -1054,18 +1054,6 @@ pub(super) fn compile(
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
             platform,amd64_emulation,labels,routing,dependency_cache,one_shot,inert_route_labels,interactive,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,capabilities,
         });
-        // Appended after the service's own findings, so plans without this case
-        // keep their identity. Graph admission applies the same rule.
-        if result
-            .get(name.as_str())
-            .is_some_and(|service| service.active && service.restart_policy_not_applied())
-        {
-            diagnostics.push(Diagnostic::warning(
-                "restart_policy_not_applied",
-                &format!("{field}.restart"),
-                "Restart policies are not applied yet to services with published ports or routes (HACK-1935); the service starts without automatic restarts.",
-            ));
-        }
     }
     Ok(result)
 }

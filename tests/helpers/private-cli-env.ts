@@ -62,6 +62,8 @@ export type PrivateCliEnvOptions = {
 /**
  * Builds the complete environment for a child process that runs the source CLI
  * (`process.execPath index.ts ...`). Use it instead of `{ ...process.env }`.
+ * Use `process.execPath` for the executable and fixture-script shebangs too:
+ * a PATH runtime shim may depend on the real HOME that this helper removes.
  *
  * Invariant: the child's HOME is always private to the fixture, and no
  * variable from the test runner reaches the child unless it is on

@@ -14,6 +14,10 @@ checkout root, validated by Git and owned by the current user on POSIX hosts.
 An arbitrary `.git` marker grants no trust. Without a trusted Git checkout, only
 the selected directory is searched. Declarations must be owned by the current user
 on POSIX hosts.
+POSIX declaration files and launch directories must not grant shared write access;
+directory ancestry must prevent another user from renaming the checked paths.
+The declaration is opened without following a final symlink, then validated and
+parsed through that same handle.
 Declarations that resolve outside that boundary are refused. Hack
 runs the argv array from that root, inherits terminal I/O and returns the runner's
 exit status. Arguments are literal; shell strings and interpolation are unsupported.

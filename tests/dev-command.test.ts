@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadDevCommand } from "../src/commands/dev.ts";
@@ -11,7 +20,7 @@ afterEach(async () => {
   }
 });
 async function fixture(value: unknown) {
-  const root = await mkdtemp(join(tmpdir(), "hack-dev-test-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "hack-dev-test-")));
   fixtures.push(root);
   await initRepo(root);
   await mkdir(join(root, ".hack"));
@@ -179,4 +188,70 @@ test("empty non-executable argv values remain literal", async () => {
   );
   expect(await child.exited).toBe(0);
   expect((await new Response(child.stdout).text()).trim()).toBe('[""]');
+});
+
+test("shared write access cannot replace the checked declaration or launch directory", async () => {
+  if (process.getuid === undefined) {
+    return;
+  }
+  const root = await fixture({ version: 1, command: ["unused"] });
+  const declaration = join(root, ".hack/dev.json");
+  await chmod(declaration, 0o666);
+  await expect(loadDevCommand({ cwd: root })).rejects.toThrow(
+    "without shared write access"
+  );
+  await chmod(declaration, 0o600);
+  await chmod(join(root, ".hack"), 0o777);
+  await expect(loadDevCommand({ cwd: root })).rejects.toThrow(
+    "replaceable by other users"
+  );
+  await chmod(join(root, ".hack"), 0o700);
+  await chmod(root, 0o777);
+  await expect(loadDevCommand({ cwd: root })).rejects.toThrow(
+    "replaceable by other users"
+  );
+  await chmod(root, 0o700);
+});
+
+test("a replacement file cannot supply bytes after a different inode passed validation", async () => {
+  if (process.getuid === undefined) {
+    return;
+  }
+  const root = await fixture({ version: 1, command: ["trusted"] });
+  const destination = join(root, ".hack/dev.json");
+  const swapping = (async () => {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const next = join(root, ".hack/replacement");
+      const trusted = attempt % 2 === 0;
+      await writeFile(
+        next,
+        JSON.stringify({
+          version: 1,
+          command: [trusted ? "trusted" : "untrusted"],
+        })
+      );
+      await chmod(next, trusted ? 0o600 : 0o666);
+      await rename(next, destination);
+    }
+  })();
+  try {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      try {
+        expect((await loadDevCommand({ cwd: root })).command).toEqual([
+          "trusted",
+        ]);
+      } catch (error) {
+        if (
+          !(
+            error instanceof Error &&
+            error.message.includes("without shared write access")
+          )
+        ) {
+          throw error;
+        }
+      }
+    }
+  } finally {
+    await swapping;
+  }
 });

@@ -1,4 +1,5 @@
-import { realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
@@ -26,12 +27,6 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
     root = dirname(root);
   }
   const configPath = await realpath(resolve(root, ".hack/dev.json"));
-  const uid = process.getuid?.();
-  if (uid !== undefined && (await stat(configPath)).uid !== uid) {
-    throw new CliUsageError(
-      "The dev declaration must be owned by the current user."
-    );
-  }
   const configRelative = relative(boundary, configPath);
   if (
     isAbsolute(configRelative) ||
@@ -43,9 +38,32 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
     );
   }
   let declaration: unknown;
+  await verifyDevDirectories(root);
+  await verifyDevDirectories(dirname(configPath));
   try {
-    declaration = await Bun.file(configPath).json();
-  } catch {
+    const handle = await open(
+      configPath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
+    );
+    try {
+      const info = await handle.stat();
+      const uid = process.getuid?.();
+      if (
+        !info.isFile() ||
+        (uid !== undefined && (info.uid !== uid || (info.mode & 0o022) !== 0))
+      ) {
+        throw new CliUsageError(
+          "The dev declaration must be a current-user-owned file without shared write access."
+        );
+      }
+      declaration = JSON.parse(await handle.readFile("utf8"));
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (error instanceof CliUsageError) {
+      throw error;
+    }
     throw new CliUsageError("Cannot read .hack/dev.json: expected valid JSON.");
   }
   if (
@@ -61,6 +79,35 @@ export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
     );
   }
   return { root, command: declaration.command };
+}
+
+/** Reject shared rename authority so checked paths remain stable through spawn. */
+async function verifyDevDirectories(directory: string): Promise<void> {
+  const uid = process.getuid?.();
+  if (uid === undefined) {
+    return;
+  }
+  let current = directory;
+  while (true) {
+    const info = await lstat(current);
+    const writable = (info.mode & 0o022) !== 0;
+    const protectedAncestor =
+      current !== directory && (info.mode & 0o1000) !== 0;
+    if (
+      !info.isDirectory() ||
+      (info.uid !== uid && info.uid !== 0) ||
+      (writable && !protectedAncestor)
+    ) {
+      throw new CliUsageError(
+        "Dev declaration and launch directories must not be writable or replaceable by other users."
+      );
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return;
+    }
+    current = parent;
+  }
 }
 
 /** A marker alone is insufficient in shared ancestors; ask Git and check ownership. */

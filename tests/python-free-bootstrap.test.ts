@@ -43,7 +43,7 @@ function fixture(
   for (const tool of ["shasum", "mktemp", "chmod", "rm", "cp", "date"]) {
     const executable = Bun.which(tool);
     if (!executable) {
-      throw new Error(`Bootstrap fixture requires ${tool} on PATH`);
+      throw new Error(`Required bootstrap fixture tool unavailable: ${tool}`);
     }
     symlinkSync(executable, join(bin, tool));
   }

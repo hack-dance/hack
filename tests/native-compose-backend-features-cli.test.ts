@@ -659,13 +659,13 @@ test(
 );
 
 test(
-  "native up --detach keeps its one-line foreground-only refusal",
+  "native up --detach reports a closed failure when the background owner cannot start",
   async () => {
     const f = await fixture({ services: { web: { image: IMAGE } } });
-    const result = await cli(f, ["up", "--detach"]);
+    const result = await cli(f, ["up", "--detach"], {});
     expectOneClosedLine(
       result,
-      "E_USAGE: Native `hack up` runs in the foreground only, so --detach is not supported. Run `hack up` without --detach in its own terminal and keep it open; use `hack ps` and `hack logs` from another terminal, and press Ctrl-C to stop it."
+      "E_STARTUP_INCOMPLETE: Native detached startup was not confirmed. Inspect hack ps before retrying; retained owners and recovery evidence are preserved."
     );
     expect(await f.calls()).toEqual([]);
   },

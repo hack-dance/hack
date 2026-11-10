@@ -3304,11 +3304,25 @@ printf 'verified-cache\n'
         fs::remove_file(&path).unwrap();
         // Any reply byte, even of an unexpected response, is an answer.
         let listener = UnixListener::bind(&path).unwrap();
-        let answering = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream.write_all(b"?").unwrap();
-        });
+        // Answer every probe connection: on a loaded host the first ping can time out
+        // before this thread runs, and the next ping must still reach a listener.
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let answering = {
+            let done = std::sync::Arc::clone(&done);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if done.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                    // The probe may already have given up on this connection.
+                    let _ = stream.unwrap().write_all(b"?");
+                }
+            })
+        };
         assert!(!agent_silent_at(&path));
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Wake the accept loop so it observes `done` and exits.
+        drop(std::os::unix::net::UnixStream::connect(&path));
         answering.join().unwrap();
         fs::remove_file(&path).unwrap();
         // A connection the guest side ends before replying is silence.

@@ -35,6 +35,7 @@ enum Frontend<'a> {
 #[derive(Default)]
 pub(super) struct Publishers {
     children: Vec<Owned>,
+    probe_generations: BTreeMap<String, String>,
 }
 
 fn command(
@@ -128,6 +129,14 @@ impl Publishers {
             return Ok(());
         }
         let executable = std::env::current_exe().map_err(|_| refused())?;
+        self.probe_generations.clear();
+        graph::bridges::supervise_probes(
+            candidate,
+            &receipt.run,
+            &mut self.probe_generations,
+            true,
+            &|| check_deadline(signals, deadline),
+        )?;
         if !routes.is_empty() {
             self.start_routes(
                 candidate,
@@ -279,6 +288,149 @@ impl Publishers {
             published(candidate, owned)?;
         }
         Ok(())
+    }
+
+    /// The foreground owner alone follows engine restart generations. Fully
+    /// retire and reap one old reservation before reserving its replacement;
+    /// neighboring publishers remain enrolled and watched throughout.
+    pub(super) fn supervise_restarts(
+        &mut self,
+        candidate: &Candidate,
+        run: &str,
+        signals: &signals::Events,
+    ) -> Result<(), CandidateError> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let check = || check_deadline(signals, deadline);
+        graph::bridges::supervise_probes(
+            candidate,
+            run,
+            &mut self.probe_generations,
+            false,
+            &check,
+        )?;
+        for selected in graph::bridges::changed_publications(candidate, run)? {
+            let index = self
+                .children
+                .iter()
+                .position(|child| {
+                    child.run == run && child.reservation == selected.previous.reservation
+                })
+                .ok_or_else(refused)?;
+            check_deadline(signals, deadline)?;
+            if !graph::bridges::retire_rebind(candidate, &selected, &check)? {
+                continue;
+            }
+            self.reap_one_after_cleanup(index, signals, deadline)?;
+            let assignment = match graph::bridges::reserve_rebind(candidate, &selected, &check) {
+                Err(error) if error.code == "published_port_in_use" => {
+                    eprintln!("Published port busy; publication remains retired.");
+                    continue;
+                }
+                outcome => outcome?,
+            };
+            check_deadline(signals, deadline)?;
+            graph::start_bridge(candidate, run, selected.slot, &assignment.reservation)?;
+            check_deadline(signals, deadline)?;
+            let executable = std::env::current_exe().map_err(|_| refused())?;
+            let frontend = self.frontend_for(candidate, run, &assignment)?;
+            let reservation = assignment.reservation.clone();
+            let child = command(
+                &executable,
+                &candidate.checkout,
+                run,
+                selected.slot,
+                &assignment.reservation,
+                match frontend.0 {
+                    Some(port) => Frontend::Port(port),
+                    None => Frontend::Hostnames(&frontend.1),
+                },
+            )
+            .spawn()
+            .map_err(|_| refused())?;
+            self.children.push(Owned {
+                child,
+                run: run.into(),
+                reservation: assignment.reservation,
+                port: frontend.0,
+                hostnames: frontend.1,
+            });
+            if let Err(error) = self.await_published(candidate, signals, deadline) {
+                // The listener can be taken after reservation. Never reuse this
+                // launch intent: fully retire it and retain unrelated children.
+                let exited = self
+                    .children
+                    .last_mut()
+                    .ok_or_else(refused)?
+                    .child
+                    .try_wait()
+                    .map_err(|_| refused())?
+                    .is_some();
+                let busy = exited
+                    && frontend.0.is_some_and(|port| {
+                        publication::require_loopback_port_free(port)
+                            .is_err_and(|e| e.code == "published_port_in_use")
+                    });
+                if !busy {
+                    return Err(error);
+                }
+                graph::release_bridge(candidate, run, selected.slot, &reservation)?;
+                self.reap_one_after_cleanup(
+                    self.children.len() - 1,
+                    signals,
+                    Instant::now() + Duration::from_secs(5),
+                )?;
+                eprintln!("Published port busy; publication remains retired.");
+            }
+        }
+        Ok(())
+    }
+
+    fn frontend_for(
+        &self,
+        candidate: &Candidate,
+        run: &str,
+        assignment: &graph::bridges::Assignment,
+    ) -> Result<(Option<u16>, Vec<String>), CandidateError> {
+        if let Some(port) = assignment.loopback_port {
+            return Ok((Some(port.host_port), Vec::new()));
+        }
+        let snapshot = graph::inspect(candidate, run)?;
+        let route = snapshot
+            .receipt
+            .resources
+            .get(&format!("container:{}", assignment.service))
+            .and_then(|r| r.routing.as_ref())
+            .ok_or_else(refused)?;
+        Ok((None, route.hostnames.clone()))
+    }
+
+    /// Exact single-child counterpart of whole-graph reaping. No kill, PID-based
+    /// retirement or handle loss on timeout; the bridge journal authorizes this.
+    fn reap_one_after_cleanup(
+        &mut self,
+        index: usize,
+        signals: &signals::Events,
+        deadline: Instant,
+    ) -> Result<(), CandidateError> {
+        signals.unwatch_child(&self.children.get(index).ok_or_else(refused)?.child)?;
+        loop {
+            if self
+                .children
+                .get_mut(index)
+                .ok_or_else(refused)?
+                .child
+                .try_wait()
+                .map_err(|_| refused())?
+                .is_some()
+            {
+                self.children.remove(index);
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(refused());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Call only after graph-owned cleanup. Never kills a publisher or substitutes

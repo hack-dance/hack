@@ -111,6 +111,8 @@ const code = await restart.catch((error: unknown) => {
   say(`error ${error instanceof Error ? error.message : String(error)}`);
   return 1;
 });
-say(`pending ${pending?.phase ?? "none"}`);
+// Assigned in the callbacks above, which control-flow narrowing does not see.
+const left = pending as NativeRestartIntent | null;
+say(`pending ${left?.phase ?? "none"}`);
 say(`exit ${code} listeners=${process.listenerCount("SIGINT")}`);
 process.exit(code);

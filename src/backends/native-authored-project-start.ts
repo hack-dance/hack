@@ -192,7 +192,8 @@ type Options = {
   readonly forceSignal?: AbortSignal;
   /** Observation after publication; the immutable selection grants no runtime authority. */
   readonly onReady?: (
-    selection: NativeAuthoredProjectRunSelection
+    selection: NativeAuthoredProjectRunSelection,
+    identity: { readonly projectName: string }
   ) => undefined;
   readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
   readonly onHookDiagnostic?: (event: NativeHookDiagnostic) => void;
@@ -233,9 +234,15 @@ function observeSelectedEnvironment(
 
 function observedReady(
   opts: Options,
-  ready: NativeAuthoredProjectRunSelection
+  ready: NativeAuthoredProjectRunSelection,
+  projectName: unknown
 ): void {
-  const observed: unknown = opts.onReady?.(ready);
+  if (typeof projectName !== "string" || projectName.length === 0) {
+    throw new Error(
+      "Native admitted project name is unavailable; values omitted."
+    );
+  }
+  const observed: unknown = opts.onReady?.(ready, { projectName });
   if (observed !== undefined) {
     void Promise.resolve(observed).catch(() => undefined);
     throw new Error(
@@ -699,7 +706,8 @@ async function runPreparedLifecycle(ctx: {
           {
             run: ctx.options.run,
             observe: (event) => observeHook(ctx.options, event),
-            onReady: (value) => observedReady(ctx.options, value),
+            onReady: (value) =>
+              observedReady(ctx.options, value, ctx.inputs().result.plan.name),
             payload: () => ctx.payload,
             admitted: ctx.admitted,
             hookOwner: ctx.hookOwner,

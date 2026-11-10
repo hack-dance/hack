@@ -1,10 +1,19 @@
-import { writeFile } from "node:fs/promises";
+import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   nativeDetachedUpReady,
   runNativeDetachedOwner,
   startNativeDetachedUp,
 } from "../../src/lib/native-detached-up.ts";
+
+/**
+ * Publish a marker file atomically. Tests poll these files, and a plain
+ * writeFile is visible empty before its contents land.
+ */
+async function publish(path: string, contents: string): Promise<void> {
+  await writeFile(`${path}.tmp`, contents);
+  await rename(`${path}.tmp`, path);
+}
 
 const [role, root, mode] = Bun.argv.slice(2);
 if (!(root && mode)) {
@@ -47,7 +56,7 @@ if (role === "launcher") {
           return new Response("stopping");
         },
       });
-      await writeFile(join(root, "owner.pid"), String(process.pid));
+      await publish(join(root, "owner.pid"), String(process.pid));
       process.stdout.write(
         "synthetic hook output must not reach launcher stdout\n"
       );
@@ -91,8 +100,8 @@ if (role === "launcher") {
       process.off("message", cancelAtAccept);
       server.stop(true);
       process.off("SIGTERM", terminate);
-      await writeFile(join(root, "stop-signals"), String(stopSignals));
-      await writeFile(
+      await publish(join(root, "stop-signals"), String(stopSignals));
+      await publish(
         join(root, "stopped"),
         "down.before\nprocess.stop\ndown.after\n"
       );

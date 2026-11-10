@@ -174,7 +174,7 @@ exec ${quoteShellWord(tmux ?? "tmux")} "$@"
           result: after,
         });
         expect({
-          that: !(await Bun.file(logPath).text()).includes(
+          that: !`${await Bun.file(logPath).text()}\n${await errorLog.text()}`.includes(
             "docker compose up failed"
           ),
           message: "an intentional interrupt is not a Compose startup failure",

@@ -7,7 +7,14 @@ import { findUpFile } from "../lib/path.ts";
 
 /** Native projects can declare a dev runner without a Compose stack. No shell expansion. */
 export async function loadDevCommand({ cwd }: { readonly cwd: string }) {
-  const start = await realpath(cwd);
+  let start: string;
+  try {
+    start = await realpath(cwd);
+  } catch {
+    throw new CliUsageError(
+      "Cannot find the selected dev directory. Check --path."
+    );
+  }
   const boundary = (await findUpFile(start, ".git")) ?? start;
   let root = start;
   while (!(await Bun.file(resolve(root, ".hack/dev.json")).exists())) {
@@ -79,13 +86,16 @@ export const devCommand = withHandler(
     }
     const interrupt = () => child.kill("SIGINT");
     const terminate = () => child.kill("SIGTERM");
+    const hangup = () => child.kill("SIGHUP");
     process.on("SIGINT", interrupt);
     process.on("SIGTERM", terminate);
+    process.on("SIGHUP", hangup);
     try {
       return await child.exited;
     } finally {
       process.off("SIGINT", interrupt);
       process.off("SIGTERM", terminate);
+      process.off("SIGHUP", hangup);
     }
   }
 );

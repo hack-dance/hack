@@ -59,7 +59,10 @@ test("CLI preserves argv, cwd and child failure status", async () => {
   );
 });
 
-test("SIGTERM reaches the declared runner and waits for cleanup", async () => {
+test.each([
+  "SIGTERM",
+  "SIGHUP",
+] as const)("%s reaches the declared runner and waits for cleanup", async (signal) => {
   const root = await fixture({
     version: 1,
     command: [process.execPath, "runner.ts"],
@@ -67,7 +70,7 @@ test("SIGTERM reaches the declared runner and waits for cleanup", async () => {
   await Bun.write(
     join(root, "runner.ts"),
     `
-    process.on("SIGTERM", async () => {
+    process.on("${signal}", async () => {
       await Bun.write("stopped", "cleaned");
       process.exit(0);
     });
@@ -88,7 +91,7 @@ test("SIGTERM reaches the declared runner and waits for cleanup", async () => {
     const ready = await reader.read();
     expect(new TextDecoder().decode(ready.value)).toContain("ready");
     reader.releaseLock();
-    child.kill("SIGTERM");
+    child.kill(signal);
     expect(await child.exited).toBe(0);
     expect(await Bun.file(join(root, "stopped")).text()).toBe("cleaned");
   } finally {
@@ -129,5 +132,12 @@ test("does not execute declarations outside the selected checkout", async () => 
   await symlink(join(outer, ".hack/dev.json"), join(inner, ".hack/dev.json"));
   await expect(loadDevCommand({ cwd: inner })).rejects.toThrow(
     "must stay inside this repository"
+  );
+});
+
+test("missing --path returns an actionable usage error", async () => {
+  const root = await fixture({ version: 1, command: ["unused"] });
+  await expect(loadDevCommand({ cwd: join(root, "missing") })).rejects.toThrow(
+    "Check --path"
   );
 });

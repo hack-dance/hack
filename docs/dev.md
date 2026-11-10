@@ -14,7 +14,7 @@ checkout root. Without a Git checkout, only the selected directory is searched.
 Declarations that resolve outside that boundary are refused. Hack
 runs the argv array from that root, inherits terminal I/O and returns the runner's
 exit status. Arguments are literal; shell strings and interpolation are unsupported.
-Ctrl-C and SIGTERM are forwarded to the runner. Run declarations only from trusted
+Ctrl-C, SIGTERM and SIGHUP are forwarded to the runner. Run declarations only from trusted
 checkouts, just as you would a package script.
 
 The project runner owns its separate app name, bundle ID, ports, data directories,

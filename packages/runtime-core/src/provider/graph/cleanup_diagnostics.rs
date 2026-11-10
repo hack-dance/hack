@@ -46,7 +46,18 @@ pub(super) fn pending(
             && observations
                 .get(*key)
                 .is_some_and(|value| value["state"] == "created")
-    }) {
+    }) || (receipt.startup_failure.is_some()
+        && containers.iter().all(|(key, _)| {
+            observations.get(*key).is_some_and(|value| {
+                matches!(
+                    value["state"].as_str(),
+                    Some("exited" | "absent" | "created" | "dead")
+                )
+            })
+        }))
+    {
+        // A recorded startup failure whose containers all have no process is a failed
+        // start, never a ready graph's interrupted shutdown (HACK-1968).
         KindHint::InterruptedStartupCandidate
     } else if containers.iter().all(|(key, resource)| {
         resource.phase == "started"
@@ -122,6 +133,38 @@ mod tests {
             KindHint::InterruptedStartupCandidate
         );
         observations.insert("container:web".into(), json!({"state":"running"}));
+        assert_eq!(
+            pending(&receipt, &observations, false).unwrap().kind,
+            KindHint::Unclassified
+        );
+    }
+
+    #[test]
+    fn a_recorded_startup_failure_with_no_process_left_is_a_startup_candidate() {
+        let mut receipt = receipt();
+        receipt.startup_failure = Some(
+            serde_json::from_value(json!({
+                "service":"job","container":"f".repeat(64),
+                "observation":{"state":"exited","code":1}
+            }))
+            .unwrap(),
+        );
+        let mut observations = observations();
+        // The removal of the failed initializer failed, so the engine reports it dead.
+        observations.insert("container:job".into(), json!({"state":"dead"}));
+        observations.insert("container:web".into(), json!({"state":"absent"}));
+        assert_eq!(
+            pending(&receipt, &observations, false).unwrap().kind,
+            KindHint::InterruptedStartupCandidate
+        );
+        // Anything still running keeps the hint off the failed-start path.
+        observations.insert("container:web".into(), json!({"state":"running"}));
+        observations.insert("container:job".into(), json!({"state":"exited","code":1}));
+        assert_eq!(
+            pending(&receipt, &observations, false).unwrap().kind,
+            KindHint::PartialShutdown
+        );
+        observations.remove("container:web");
         assert_eq!(
             pending(&receipt, &observations, false).unwrap().kind,
             KindHint::Unclassified

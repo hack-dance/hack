@@ -31,6 +31,21 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     if *action == "native" {
         return native::command(candidate, args);
     }
+    if *action == "inspect-shutdown-rebase" {
+        let run = match *args {
+            ["--run-id", run] | ["--run-id", run, "--json"] => run,
+            _ => return Err(invalid()),
+        };
+        return graph::inspect_shutdown_rebase(candidate, run);
+    }
+    if *action == "recover-shutdown-rebase" {
+        let (run, expected) = match *args {
+            ["--run-id", run, "--expect-selection", expected]
+            | ["--run-id", run, "--expect-selection", expected, "--json"] => (run, expected),
+            _ => return Err(invalid()),
+        };
+        return graph::recover_shutdown_rebase(candidate, run, expected);
+    }
     if *action == "inspect-interrupted-start-cleanup" {
         let run = match *args {
             ["--run-id", run] | ["--run-id", run, "--json"] => run,

@@ -25,6 +25,10 @@ fn published_owner_refused(candidate: &Candidate, run: &str) -> CandidateError {
             "graph_foreground_owner_exited",
             "The previous foreground owner of this run exited while its services were running and did not retire its publication. Run hack down --recover to stop the orphaned services with data retained, then hack up.",
         ),
+        Ok(PublishedOwner::Exited) if exited_unadmitted_retained(candidate, run) => error(
+            "graph_foreground_owner_exited_unadmitted",
+            "The previous foreground owner of this run exited before its restore was admitted and did not retire its publication. Data is retained. Run hack down --recover to retire that attempt, then hack up.",
+        ),
         Ok(PublishedOwner::Exited) => error(
             "graph_foreground_owner_exited_unadmitted",
             "The previous foreground owner of this run exited before its start was confirmed and did not retire its publication. Data is retained, but no supported command can prove and retire that attempt yet; keep the native home unchanged for inspection.",
@@ -45,6 +49,16 @@ fn exited_ready(candidate: &Candidate, run: &str) -> bool {
         })
 }
 
+/// The receipt is still the acknowledged retained stop the dead owner started
+/// from: `hack down --recover` can prove and retire that attempt. Presentation
+/// only; the recovery revalidates everything itself.
+fn exited_unadmitted_retained(candidate: &Candidate, run: &str) -> bool {
+    Owner::load(candidate)
+        .ok()
+        .and_then(|owner| load_at(directory(candidate, run).ok()?, run, &owner.token).ok())
+        .is_some_and(|(receipt, _)| receipt.phase == "stopped-data-retained")
+}
+
 fn no_file(root: &Path, name: &str) -> Result<(), CandidateError> {
     match fs::symlink_metadata(root.join(name)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -52,7 +66,12 @@ fn no_file(root: &Path, name: &str) -> Result<(), CandidateError> {
     }
 }
 
-fn checked(candidate: &Candidate, run: &str) -> Result<(Owner, Receipt), CandidateError> {
+/// Offline eligibility of a retained start, except the foreground publication:
+/// a clean unchanged owned runtime and an acknowledged retained stop of `run`.
+pub(in crate::provider::graph) fn checked(
+    candidate: &Candidate,
+    run: &str,
+) -> Result<(Owner, Receipt), CandidateError> {
     no_file(&candidate.state_root.join("run/smolvm"), "owner.pending")?;
     let owner = Owner::load(candidate)?;
     if !owner.created
@@ -166,18 +185,20 @@ pub fn preflight(candidate: &Candidate, run: &str) -> Result<Value, CandidateErr
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::provider::graph) mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
-    struct Fixture {
-        root: super::super::tests::Fixture,
-        candidate: Candidate,
-        run: String,
+    /// A stopped clean owned runtime with one acknowledged retained run whose
+    /// previous foreground publication was retired.
+    pub(in crate::provider::graph) struct Fixture {
+        pub(in crate::provider::graph) root: super::super::tests::Fixture,
+        pub(in crate::provider::graph) candidate: Candidate,
+        pub(in crate::provider::graph) run: String,
         aliases: Vec<PathBuf>,
     }
     impl Fixture {
-        fn new() -> Self {
+        pub(in crate::provider::graph) fn new() -> Self {
             let root = super::super::tests::Fixture::new();
             let candidate = Candidate::discover(&root.0).unwrap();
             let mut owner = Owner::create(
@@ -245,10 +266,10 @@ mod tests {
                 aliases: vec![alias],
             }
         }
-        fn graph(&self) -> PathBuf {
+        pub(in crate::provider::graph) fn graph(&self) -> PathBuf {
             directory(&self.candidate, &self.run).unwrap()
         }
-        fn receipt(&self) -> Receipt {
+        pub(in crate::provider::graph) fn receipt(&self) -> Receipt {
             state::read(&self.graph().join("state.json")).unwrap()
         }
         fn replace_owner(&mut self) {
@@ -488,15 +509,24 @@ mod tests {
         assert_eq!(state(&fixture), before);
         drop(live);
         // An owner that exited before its restore was admitted: the receipt is the
-        // unchanged stopped one, and no supported recovery is claimed.
+        // unchanged stopped one, so the refusal names `hack down --recover`.
         let fixture = Fixture::new();
         foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
         let before = state(&fixture);
-        assert_eq!(
-            refusal(&fixture),
-            "graph_foreground_owner_exited_unadmitted"
-        );
+        let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+        assert_eq!(error.code, "graph_foreground_owner_exited_unadmitted");
+        assert!(error.message.contains("hack down --recover"));
         assert_eq!(state(&fixture), before);
+        // An exited owner whose receipt left the retained stop (it was admitted and
+        // then failed) is still named, but no recovery is claimed for it.
+        let fixture = Fixture::new();
+        let mut receipt = fixture.receipt();
+        receipt.phase = "failed-retained".into();
+        state::write(&fixture.graph().join("state.json"), &receipt).unwrap();
+        foreground::transport::fixture_exited_publication(&fixture.candidate, &fixture.run);
+        let error = preflight(&fixture.candidate, &fixture.run).unwrap_err();
+        assert_eq!(error.code, "graph_foreground_owner_exited_unadmitted");
+        assert!(!error.message.contains("hack down --recover"));
         // An owner that exited while its graph was ready names `hack down --recover`.
         let fixture = Fixture::new();
         let mut receipt = fixture.receipt();

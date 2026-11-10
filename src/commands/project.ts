@@ -8716,6 +8716,13 @@ async function displayNativePs(
     emitCliResult({ result: okResult({ data: result }) });
     return;
   }
+  if (result.status === "pending") {
+    logger.info({
+      message:
+        "Native project startup is pending: a foreground up is starting, or an interrupted start retained its intent. No current service status is confirmed.",
+    });
+    return;
+  }
   if (result.status === "not_started") {
     logger.info({ message: "Native project has not been started." });
   } else if (result.status === "runtime_not_running") {

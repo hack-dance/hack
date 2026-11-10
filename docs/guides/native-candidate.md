@@ -893,6 +893,9 @@ recorded container's ownership, runs no probes and grants no authority; foregrou
 report that contains an error diagnostic. With `--json` it exits 0 and the report is
 the result: `diagnostics` and `enrollment_compatible` carry the outcome, because Hack
 plans original input that its normalization adapts afterwards.
+JSON exit 0 means a report was produced, not that execution is admitted. Automation
+must check `plan.enrollment_compatible` and `plan.diagnostics` before proceeding;
+parse, input and transport failures still exit non-zero in JSON mode.
 Exec requires a running service and returns Base64 stdout/stderr to preserve arbitrary
 bytes, an exit code, and a truncation flag. The CLI also exits with the command's exit
 code. Retained exec output is limited to 1 MiB per stream.
@@ -1434,9 +1437,14 @@ A provider lease held for the whole bounded read, for example by a starting
 foreground `up`, is also an ordinary state: `ps` exits 0 and reports
 `runtime_busy` (no phase, no service rows). Reads retry brief lease contention.
 `hack ps --json` prints the standard `{ok: true, data}` envelope; `data` holds
-`backend: "native"`, `status` (`not_started`, `runtime_not_running`,
+`backend: "native"`, `status` (`not_started`, `pending`, `runtime_not_running`,
 `runtime_busy`, `observed`, `owner_unconfirmed` or `runtime_degraded`), `run`,
-`phase` and `items`. Bounded
+`phase` and `items`. Before a mapping exists, `pending` means a frontend start's
+advisory marker still has a possibly present owner; run and phase are null and
+items is empty. It proves neither process liveness nor service readiness. A crashed
+owner proven absent no longer counts as pending; PID reuse or inaccessible owners
+remain uncertain. Reading `ps` never retires runtime resources or deletes markers.
+Bounded
 logs refuse a stopped runtime with `E_DOCKER_UNAVAILABLE` and exit 1. Native `exec` and `run` refresh admitted host dependencies once before
 command selection and managed environment preparation. They proceed only with
 fresh ownership and runtime proof, even if containers still appear running.
@@ -1942,6 +1950,13 @@ owned graph resources, closes its dependency listeners, and releases its reserva
 before reporting success. A sibling graph's reservations and listeners remain owned
 by that sibling. Low-level callers without this flag keep exact slot semantics and
 must also respect existing reservations.
+
+Before starting the VM, foreground startup checks explicit `host_pid`/`host_port`
+selections with read-only `graph dependency-check --host-pid PID --host-port PORT`.
+A refusal names the service, binding, aliases and ports without exposing process
+values. This observation grants no durable authority; dependency planning and
+execution still capture and verify the exact listener again. Malformed dependency
+selection files report invalid UTF-8 JSON without including parser excerpts.
 
 `graph dependency-reservations --json` inspects the durable claims. A dead owner
 that never enrolled a graph can release a coherent claim with

@@ -528,7 +528,11 @@ did not finish quiescing is reported on the first attempt and stays `quiescing`.
 The next `runtime down`, or `runtime recover`, resumes the quiesce once; if the
 engine again does not exit, it stops this home's verified provider and records
 `recovered-unclean`, so the pool never needs a manual signal. As after any unclean
-stop, the next start checks the retained disks.
+stop, the next start checks the retained disks. A guest whose owner, boot or engine
+identity does not match the receipt is never stopped this way: `down` and `recover`
+report `guest_identity_mismatch` on every attempt and leave the provider running.
+Once that provider has exited or its guest stops answering, `runtime recover` records
+the stop.
 
 A physical macOS reboot may also renumber the mounted filesystem device. Strict
 disk and source checks still refuse a changed device number; missing-HOME recovery

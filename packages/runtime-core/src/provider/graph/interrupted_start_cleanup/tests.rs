@@ -566,3 +566,43 @@ fn legacy_cleanup_selection_serialization_keeps_its_original_shape() {
     assert!(!decoded.shutdown_rebased);
     assert_eq!(decoded.digest().unwrap(), selection.digest().unwrap());
 }
+
+/// PR 660 review: two recoveries of one restored run both validated the superseded
+/// journal. The first retires it and publishes a new journal with a pending-effect
+/// fence; the second's stale retirement must refuse instead of moving that new journal
+/// over the archive. A rewrite with identical bytes is still a different file.
+#[test]
+fn a_stale_retirement_never_moves_a_journal_it_did_not_validate() {
+    let root = ShortRoot::new();
+    let journal = root.0.join(JOURNAL);
+    let archive = root
+        .0
+        .join(format!("{RETIRED_PREFIX}{}.json", "f".repeat(64)));
+    let old = json!({"generation":"old","reservation_released":true});
+    state::write(&journal, &old).unwrap();
+    let first = journal_identity(&root.0).unwrap().unwrap();
+    let second = journal_identity(&root.0).unwrap().unwrap();
+    assert_eq!(first, second);
+    rename_unchanged(&root.0, &archive, &first).unwrap();
+    assert!(journal_identity(&root.0).unwrap().is_none());
+    let fenced = json!({"generation":"new","pending":true});
+    state::write(&journal, &fenced).unwrap();
+    assert!(rename_unchanged(&root.0, &archive, &second).is_err());
+    let read = |path: &Path| state::read_bounded::<Value>(path, LIMIT).unwrap();
+    assert_eq!(read(&journal), fenced);
+    assert_eq!(read(&archive), old);
+
+    // The same bytes rewritten between check and rename are a different file.
+    let other = root
+        .0
+        .join(format!("{RETIRED_PREFIX}{}.json", "e".repeat(64)));
+    let checked = journal_identity(&root.0).unwrap().unwrap();
+    state::write(&journal, &fenced).unwrap();
+    assert!(rename_unchanged(&root.0, &other, &checked).is_err());
+    assert!(fs::symlink_metadata(&other).is_err());
+    // An unchanged journal still refuses an existing archive target.
+    let unchanged = journal_identity(&root.0).unwrap().unwrap();
+    assert!(rename_unchanged(&root.0, &archive, &unchanged).is_err());
+    assert_eq!(read(&journal), fenced);
+    assert_eq!(read(&archive), old);
+}

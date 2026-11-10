@@ -686,16 +686,22 @@ fn superseded(record: &recovery::Journal, current: &Receipt) -> bool {
 /// Move a superseded finished journal (see [`superseded`]) aside as bounded history, so
 /// the new failed start can be selected on its own evidence. An atomic rename keeps the
 /// old record intact; a bounded count and an existing target refuse.
-fn retire_superseded(root: &Path, run: &str) -> Result<(), CandidateError> {
-    let Some(record) = journal(root)? else {
-        return Ok(());
-    };
-    record.validate_basic(run, &record.selection_sha256)?;
-    no_pending(root)?;
-    let current: Receipt = state::read_bounded(&root.join("state.json"), LIMIT)?;
-    if !superseded(&record, &current) {
+///
+/// Concurrent recoveries of one run must not both retire: the second could move the new
+/// journal the first published (with its pending-effect fence) over the archive. So the
+/// retirement takes the run's operation lock and the provider lease, in the order and
+/// under the same locks recovery holds while it writes a journal, re-reads every fact
+/// under them, and renames only the exact journal file it validated (see
+/// [`rename_unchanged`]). A run with no superseded journal takes no lock here.
+fn retire_superseded(candidate: &Candidate, root: &Path, run: &str) -> Result<(), CandidateError> {
+    if retirable(root, run)?.is_none() {
         return Ok(());
     }
+    let _owner = foreground::transport::DeadOwner::acquire(candidate, run)?;
+    let _engine = Engine::connect_cleanup_wait(candidate)?;
+    let Some((record, identity)) = retirable(root, run)? else {
+        return Ok(());
+    };
     let mut retired = 0;
     for entry in fs::read_dir(root).map_err(state::io)? {
         let name = entry.map_err(state::io)?.file_name();
@@ -710,11 +716,75 @@ fn retire_superseded(root: &Path, run: &str) -> Result<(), CandidateError> {
         }
     }
     let target = root.join(format!("{RETIRED_PREFIX}{}.json", record.selection_sha256));
-    match fs::symlink_metadata(&target) {
+    rename_unchanged(root, &target, &identity)
+}
+
+/// The superseded journal at `root` and the identity of the file it was read from, or
+/// `None` when there is no journal or it is not superseded. A file that changed during
+/// the read refuses.
+fn retirable(
+    root: &Path,
+    run: &str,
+) -> Result<Option<(recovery::Journal, JournalIdentity)>, CandidateError> {
+    let Some(before) = journal_identity(root)? else {
+        return Ok(None);
+    };
+    let Some(record) = journal(root)? else {
+        return Err(refused());
+    };
+    if journal_identity(root)?.as_ref() != Some(&before) {
+        return Err(refused());
+    }
+    record.validate_basic(run, &record.selection_sha256)?;
+    no_pending(root)?;
+    let current: Receipt = state::read_bounded(&root.join("state.json"), LIMIT)?;
+    Ok(superseded(&record, &current).then_some((record, before)))
+}
+
+/// A journal file's device, inode and content digest. Every journal write replaces the
+/// file by rename, so a rewrite, even with the same bytes, changes the inode.
+#[derive(Debug, PartialEq, Eq)]
+struct JournalIdentity {
+    device: u64,
+    inode: u64,
+    sha256: String,
+}
+
+fn journal_identity(root: &Path) -> Result<Option<JournalIdentity>, CandidateError> {
+    use std::os::unix::fs::MetadataExt;
+    let path = root.join(JOURNAL);
+    let metadata = match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(state::io(e)),
+        Ok(metadata) => metadata,
+    };
+    let bytes = host_pin_recovery::read_raw(&path, LIMIT)?;
+    let after = fs::symlink_metadata(&path).map_err(state::io)?;
+    if (metadata.dev(), metadata.ino()) != (after.dev(), after.ino()) {
+        return Err(refused());
+    }
+    Ok(Some(JournalIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        sha256: digest(&bytes),
+    }))
+}
+
+/// Rename the journal to `target` only if it is still the exact file `expected`
+/// describes and `target` is absent; otherwise refuse and change nothing.
+fn rename_unchanged(
+    root: &Path,
+    target: &Path,
+    expected: &JournalIdentity,
+) -> Result<(), CandidateError> {
+    if journal_identity(root)?.as_ref() != Some(expected) {
+        return Err(refused());
+    }
+    match fs::symlink_metadata(target) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         _ => return Err(refused()),
     }
-    fs::rename(root.join(JOURNAL), &target).map_err(state::io)?;
+    fs::rename(root.join(JOURNAL), target).map_err(state::io)?;
     fs::File::open(root)
         .and_then(|file| file.sync_all())
         .map_err(state::io)
@@ -770,6 +840,6 @@ pub fn recover(candidate: &Candidate, run: &str, expected: &str) -> Result<Value
         return Err(refused());
     }
     // A restored run that failed again: its earlier, finished recovery is history.
-    retire_superseded(&directory(candidate, run)?, run)?;
+    retire_superseded(candidate, &directory(candidate, run)?, run)?;
     recovery::recover(candidate, run, expected)
 }

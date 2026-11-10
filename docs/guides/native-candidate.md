@@ -383,10 +383,24 @@ commands and pipelines. The command keeps the pane's terminal stdin. Failed send
 remove their staged payload; if the pane never executes a successfully sent command,
 the private payload remains until it is consumed or explicitly cleaned up.
 
-Native `up` and `restart` also stay in the foreground in every project:
-`--detach` refuses with one `E_USAGE` line. Run `hack up` in its own terminal and
-keep it open, use `hack ps` and `hack logs` from another terminal, and press
-Ctrl-C to stop it. For detached startup, use the Compose backend.
+Native `hack up -d` (also `--detach`, `--json`, or both) starts the existing
+frontend and Rust foreground owners in a background session, returning after
+readiness and up-after hooks. The frontend keeps host lifecycle processes and
+down hooks alive. From any terminal, use `hack ps`, `hack logs`, `hack exec`,
+`hack restart` or `hack down` through the existing authenticated controls.
+Restart starts a new foreground generation; `restart --detach` remains unsupported.
+Without these flags, `hack up` stays attached and Ctrl-C requests ordinary stop.
+Detached startup has no terminal stdin and suppresses hook/owner output rather
+than persisting potentially private values. Service logs remain available through
+`hack logs`. Its JSON result uses the v4 lifecycle envelope.
+
+A private IPC readiness/acceptance exchange transfers only launcher responsibility;
+it creates no new runtime authority. Launcher loss before acceptance requests
+ordinary graceful stop. After acceptance, terminal exit does not stop the owner.
+An unconfirmed startup keeps the original recovery evidence: inspect `hack ps`
+before retrying. Owner death uses the existing explicit recovery path, with its
+same incarnation checks and retained-uncertainty limits. No daemon adoption,
+automatic replay, or separate graph supervision tick is introduced.
 
 Foreground image-project `up` prints each startup step (input, runtime, images,
 services) and one ready line, `Project is ready (SERVICES; run RUN)`, after the
@@ -3104,8 +3118,23 @@ same-boot `graph recover-live-owner` described below, retaining data and
 retiring the stale publication. If the frontend that owned the run also exited
 before confirming its cleanup, `hack down --recover` prints the exact
 `hack restart --recover-frontend --expect-finalization-attempt ATTEMPT` step.
-An owner that exited before its restore was admitted is reported, with data
-retained, but no command retires that attempt yet.
+
+An owner of a retained run that exited before the runtime admitted its restore
+is also retired by `hack down --recover`. The admission's first durable write
+replaces the acknowledged `stopped-data-retained` receipt, so an unchanged
+receipt proves the attempt never reached the guest. That command calls
+`graph retire-unadmitted-owner --run-id RUN --expect-receipt SHA --json` with
+the receipt it selected. The runtime holds the publication gate, the provider
+lease and the dead owner's publication lock, requires the full retained-start
+eligibility of that exact receipt, and releases only the relay publication and
+dependency reservation that name the same dead process before it retires the
+foreground publication. It records the selected relay publication durably
+before it unlinks either relay path, so a retry after an interrupted relay
+retirement resumes from that exact selection and refuses any other. Nothing in
+the guest is stopped, created or removed,
+and data is retained. Then `hack up` restores the run. An owner that exited
+after its restore was admitted is still reported without a supported
+retirement.
 
 Read-only `hack ps` and `hack logs` hold the provider lease only briefly. Native
 startup, retained-start eligibility, restore admission, inspections inside

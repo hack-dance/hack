@@ -1191,8 +1191,8 @@ test.each([
     text: "found a running foreground owner",
   },
   {
-    name: "an owner that exited before its start was confirmed",
-    selection: ownerSelection("exited", "stopped-data-retained"),
+    name: "an owner that exited after its restore was admitted",
+    selection: ownerSelection("exited", "failed-retained"),
     text: "no supported command can prove and retire that attempt yet",
   },
   {
@@ -1240,6 +1240,102 @@ test.each([
     text
   );
   expect(calls).toEqual(["inspect", "foreground-owner"]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test.each([
+  "exited",
+  "uncertain",
+])("down --recover retires a retained restore owner that died before admission (%s publication)", async (foreground) => {
+  const opts = await fixture();
+  const events: string[] = [];
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    before: async () => {
+      events.push("before");
+    },
+    retireHostProcesses: async () => {
+      events.push("retire-host");
+    },
+    invoke: async (request) => {
+      events.push(request.args[1]!);
+      if (request.args[1] === "foreground-owner") {
+        return ownerSelection(foreground, "stopped-data-retained");
+      }
+      if (request.args[1] === "retire-unadmitted-owner") {
+        expect(request.args).toEqual([
+          "graph",
+          "retire-unadmitted-owner",
+          "--run-id",
+          run.run,
+          "--expect-receipt",
+          receiptSha,
+          "--json",
+        ]);
+        return {
+          version: 1,
+          run: run.run,
+          phase: "stopped-data-retained",
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+          relay_retired: true,
+          dependency_reservation_released: false,
+        };
+      }
+      expect(request.args[1]).toBe("inspect");
+      return snapshot(true);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(result.dataPreserved).toBe(true);
+  // Compute was never admitted: no before hook, stop or cleanup is requested.
+  expect(events).toEqual([
+    "inspect",
+    "foreground-owner",
+    "retire-unadmitted-owner",
+    "inspect",
+    "retire-host",
+  ]);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});
+
+test("down --recover names a refused unadmitted owner retirement without hooks or a stop", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  await expectClosedRefusal(
+    nativeProjectDown({
+      ...opts,
+      recover: true,
+      before: async () => {
+        calls.push("before");
+      },
+      retireHostProcesses: async () => {
+        calls.push("retire-host");
+      },
+      invoke: async (request) => {
+        calls.push(request.args[1]!);
+        if (request.args[1] === "foreground-owner") {
+          return ownerSelection("uncertain", "stopped-data-retained");
+        }
+        if (request.args[1] === "retire-unadmitted-owner") {
+          throw new NativeRuntimeRequestError({
+            message:
+              "Native runtime request failed (graph_unadmitted_owner_recovery).",
+            nativeCode: "graph_unadmitted_owner_recovery",
+          });
+        }
+        return snapshot(true);
+      },
+    }),
+    "could not prove that this run's foreground owner exited before its restore was admitted"
+  );
+  expect(calls).toEqual([
+    "inspect",
+    "foreground-owner",
+    "retire-unadmitted-owner",
+  ]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 

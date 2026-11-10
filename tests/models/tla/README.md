@@ -707,7 +707,7 @@ Actual Rosetta execution in the guest needs host evidence.
 ## Stopped retained-pool startup
 
 `native-startup-owner/Owner.tla` checks project ownership after a foreground
-Compose startup fails (HACK-1917). The positive control explores 32 states.
+Compose startup fails (HACK-1917). The positive control explores 136 states.
 Readiness publishes the run mapping. A failure before readiness lets the graph
 owner's retaining cleanup either complete or be refused; the frontend then makes
 one read-only inspection that authenticates the exact receipt or is refused.
@@ -720,6 +720,31 @@ gap explicit: when inspection itself is refused, nothing can be authenticated an
 only the runtime journal retains the graph. The model does not cover crashes
 between finalization registration and mapping publication, concurrent starts, or
 the later dead-owner recovery, which other models and runtime tests own.
+
+HACK-1940 extends this same owner model with launcher notification, acceptance,
+owner acknowledgement, return and channel loss. `NoPrematureReturn` requires
+readiness, committed down-hook bookkeeping and acceptance before detached success; `NoLostHandoff` prevents a
+lost pre-acceptance launcher from being handed off later. The
+`detached-before-ready` negative control bypasses both notification gates and returns
+before Ready.
+`Bookkeep` separates graph readiness from successful journal completion and its
+cancellation fence. The `detached-before-bookkeeping` control keeps Ready but
+removes the journal guard, allowing false success while `bookkept = FALSE`.
+The delayed, failed and canceled journal regressions in `native-project-start.test.ts`
+map that boundary to `stop.owe` before `onReady`. Source: `native-detached-up.ts`, image onReady after hooks,
+and authored `startupSelection.onReady` after durable publication. The synthetic
+`native-detached-up.test.ts` process fixtures cover post-launcher control,
+pre-acceptance launcher death, timeout and child failure. They do not execute
+real hooks or a VM.
+
+The existing `native-frontend-recovery` model also distinguishes launcher loss
+from retained owner death. `TryLauncherRecovery` abstracts recovery admission:
+with a live exact frontend it must refuse, even when its launcher is gone. The
+positive now explores 1752 states. `live-launcher-recovery` disables this guard
+and fails `NoLiveLauncherRecovery`; `live-launcher-refusal-reachable` proves the
+refusal is reachable. Original publication, crash, binding and lease transitions
+remain unchanged. The model bounds two recovery candidates and does not model
+OS IPC delivery, process incarnation probing or real resource cleanup.
 
 `stopped-pool-startup/Resume.tla` checks one explicit startup from shape-valid
 stopped owner/retained receipt evidence. The positive control explores 71 states.

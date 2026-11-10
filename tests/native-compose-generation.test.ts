@@ -1411,6 +1411,7 @@ test("random reservation precedes render; exact immutable document and private r
   });
   expect(JSON.stringify(saved)).not.toContain(REVISION);
   expect(JSON.stringify(saved)).not.toContain("synthetic-secret");
+  // readdir order is filesystem-defined (sorted on APFS, hashed on ext4).
   expect((await readdir(dirname(generation.composeFile))).sort()).toEqual([
     "compose.json",
     "manifest.json",

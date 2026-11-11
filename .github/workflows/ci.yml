@@ -322,6 +322,9 @@ jobs:
         if: ${{ needs.changes.outputs.docs_site == 'true' }}
       - run: bun run docs:typecheck
         if: ${{ needs.changes.outputs.docs_site == 'true' }}
+      # DOM test of the full-size diagram control (open, zoom, close).
+      - run: bun run --cwd site test
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
       # The Vercel build command (site/vercel.json) after docs:prepare.
       - run: bun run --cwd site build
         if: ${{ needs.changes.outputs.docs_site == 'true' }}

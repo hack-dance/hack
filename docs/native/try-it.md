@@ -15,7 +15,7 @@ run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.12/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -52,9 +52,8 @@ refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and change nothing. See
 "$HOME/.hack-next/bin/hack-next" up --path /absolute/project
 ```
 
-Native `up` runs in the foreground and holds the project until you stop it.
-Prereleases after next.12 also accept `hack up -d` to run it in the background. From
-a second terminal:
+Native `up` runs in the foreground and holds the project until you stop it. Add
+`-d` to run it in the background instead. From a second terminal, or after `up -d`:
 
 ```sh
 "$HOME/.hack-next/bin/hack-next" ps --path /absolute/project

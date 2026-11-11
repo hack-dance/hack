@@ -105,6 +105,48 @@ for (const [old, target] of [
   }
 }
 
+// Every rendered diagram a staged page references must reach the browser: the
+// page HTML carries both theme variants as images, and each SVG is served.
+const stagedRoot = new URL("../../site/content/docs/", import.meta.url)
+  .pathname;
+const diagramReference = /\/diagrams\/[a-f0-9]+\.(?:light|dark)\.svg/g;
+let diagramCount = 0;
+for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedRoot })) {
+  const references = new Set(
+    (await Bun.file(`${stagedRoot}${file}`).text()).match(diagramReference)
+  );
+  if (references.size === 0) {
+    continue;
+  }
+  const route = `/docs/${file.replace(/\.md$/, "").replace(/\/index$/, "")}`;
+  const html = await (await fetch(new URL(route, base))).text();
+  for (const reference of references) {
+    const variant = reference.includes(".dark.") ? "dark" : "light";
+    if (
+      !new RegExp(
+        `<img[^>]*class="diagram diagram-${variant}"[^>]*src="${reference}"|<img[^>]*src="${reference}"[^>]*class="diagram diagram-${variant}"`
+      ).test(html)
+    ) {
+      throw new Error(`Diagram image missing from ${route}: ${reference}`);
+    }
+    const image = await fetch(new URL(reference, base));
+    if (
+      !(
+        image.ok &&
+        image.headers.get("content-type")?.startsWith("image/svg+xml") &&
+        (await image.text()).includes("<svg")
+      )
+    ) {
+      throw new Error(`Diagram not served as SVG: ${reference}`);
+    }
+    diagramCount += 1;
+  }
+}
+if (diagramCount === 0) {
+  throw new Error("No rendered diagrams found in the staged corpus");
+}
+console.log(`Diagram smoke passed: ${diagramCount} images served.`);
+
 // v5 pages that moved into the native section keep their old routes, with and
 // without the version prefix.
 for (const [old, target] of [

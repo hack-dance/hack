@@ -374,6 +374,9 @@ async function stageVersion(
     );
     corpus.push(`<!-- ${provenance}; URL: ${url} -->\n${text}`);
   }
+  // Pages only some versions publish appear in the sidebar only where they exist.
+  const optional = (slug: string): string[] =>
+    pages.some((entry) => entry.slug === slug) ? [slug] : [];
   staged.set(
     `${version}/meta.json`,
     JSON.stringify({
@@ -382,11 +385,13 @@ async function stageVersion(
         "index",
         "install",
         "getting-started",
+        ...optional("release-notes"),
         "upgrade",
         "core",
         "env",
         "lifecycle",
         "sessions",
+        ...optional("dev"),
         "agent-handoff",
         "guides",
         "integrations",

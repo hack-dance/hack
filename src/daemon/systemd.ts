@@ -893,6 +893,8 @@ export async function installSystemdUnit(opts: {
    * `NeedDaemonReload=yes`, so an earlier reload after a write failed.
    */
   readonly forceReload?: boolean;
+  /** Hack's own directories (for the service PATH check before enable). */
+  readonly hackHome?: string | null;
 }): Promise<SystemdInstallResult> {
   const access = resolveSystemdAccess({ env: opts.deps.env });
   if (!access.allowed) {
@@ -954,6 +956,24 @@ export async function installSystemdUnit(opts: {
   }
   if (opts.enable === false) {
     return { ok: true, changed };
+  }
+  // A drop-in can override PATH: check what systemd now has loaded before
+  // the unit is enabled to start at login.
+  const servicePath = await readSystemdServicePathDirectories({
+    deps: opts.deps,
+  });
+  const pathError =
+    "error" in servicePath
+      ? servicePath.error
+      : await checkServicePathDirectories({
+          dirs: servicePath.dirs,
+          hackHome: opts.hackHome ?? null,
+        });
+  if (pathError !== null) {
+    return {
+      ok: false,
+      error: `Not enabling ${SYSTEMD_UNIT_NAME}: ${pathError}`,
+    };
   }
   const enable = await opts.deps.run("systemctl", [
     "--user",

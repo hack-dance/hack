@@ -367,6 +367,7 @@ test("install writes, reloads and enables; a second install is a no-op", async (
     "systemctl --user --no-pager show --property=Version",
     "systemctl --user --no-pager show --property=UnitPath",
     "systemctl --user daemon-reload",
+    "systemctl --user --no-pager show hackd.service --property=Environment",
     "systemctl --user enable hackd.service",
   ]);
 
@@ -2192,4 +2193,24 @@ test("every directory on the service PATH is checked at install and start", asyn
   } finally {
     await chmod(root, 0o700);
   }
+});
+
+test("a drop-in PATH with a shared directory stops install before enable", async () => {
+  // Codex review: the effective PATH (drop-ins included) was checked only
+  // before start, after the unit was already enabled for login.
+  const fake = fakeSystemd();
+  const shared = join(root, "shared-path");
+  await mkdir(shared);
+  await chmod(shared, 0o1777);
+  fake.unitEnvironment = `"PATH=${shared}:/usr/bin"`;
+  const result = await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+  });
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.error).toContain("Not enabling");
+  }
+  expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
 });

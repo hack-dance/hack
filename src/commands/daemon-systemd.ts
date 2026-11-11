@@ -627,6 +627,7 @@ export async function installDaemonSystemdService(
     unitText: expected.unitText,
     deps,
     forceReload: before?.needsReload === true,
+    hackHome: dirname(hooks.paths.root),
   });
   if (!installed.ok) {
     logger.error({

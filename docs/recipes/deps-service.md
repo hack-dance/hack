@@ -154,8 +154,15 @@ volume. A linked worktree (or `--branch <name>`) installs into
 `<project>--<branch>_node_modules`. That is simple and safe, but every worktree
 installs from scratch once.
 
-To share one install between instances that have the same lockfile, label the
-`deps` service and set its platform:
+Share installs only between worktrees you trust equally. The fingerprint is a
+cache key, not an integrity check: an installer or package script in one
+worktree can change packages used by every instance sharing that volume. A
+frozen install can preserve modified packages. Keep untrusted worktrees on the
+default per-instance volumes and do not give them shared-cache labels.
+
+To share one install between trusted instances that have the same lockfile,
+label the `deps` service and set its platform. Mount the dependency volume
+read-only in every service except the installer, including `app`:
 
 ```yaml
   deps:
@@ -169,6 +176,11 @@ To share one install between instances that have the same lockfile, label the
     labels:
       hack.dependencies.cache-volume: node_modules
       hack.dependencies.lockfiles: bun.lock,package.json
+
+  app:
+    volumes:
+      - ..:/app
+      - node_modules:/app/node_modules:ro
 ```
 
 Hack then names the volume from a fingerprint of the lockfiles, the installer

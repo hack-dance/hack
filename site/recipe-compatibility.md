@@ -11,6 +11,12 @@ All eleven pages fit next.13; none waits for a newer runtime. This is a source
 compatibility audit, not a new execution of their examples. The pages retain
 the original authors' execution evidence and platform limits.
 
+Editorial corrections are also retained in the canonical recipe sources:
+navigation fixes, host-scoped tunnel tokens (`--service host`, available in
+next.13), and read-only shared-cache consumers with an explicit equal-trust
+requirement. The linked source revision and example projects predate these
+corrections; use the instructions on the published page for these details.
+
 ## Command and configuration audit
 
 Commands and flags were checked against `docs/reference/cli.md` at the next.13
@@ -23,7 +29,7 @@ top-level keys, so reader checks below also matter.
 | --- | --- |
 | Recipes | `run`, `exec`, `host exec`, `doctor`; default Compose framing |
 | CLI sign-in | `up -d`, `logs --no-follow`, `env get --service`, `env add --service --secret --local --value-stdin`; `lifecycle.up.before`, `down.after`, hook `name` and `command` |
-| Tunnels | `up -d`, `down`, `logs --no-follow --tail`; `lifecycle.processes`; `init`'s OAuth alias |
+| Tunnels | `up -d`, `down`, `logs --no-follow --tail`, `env add --service host --secret --local --value-stdin`; `lifecycle.processes`; `init`'s OAuth alias |
 | Remote database | `up -d --env`, `exec --env`, `host exec --env --scope`, `down --env`, `env add --env --local --service --secret --value-stdin`; lifecycle `singleton.ports` and `onConflict` |
 | Migrations | `up -d --branch --env`, `logs --no-follow`, `run`, `exec`; `lifecycle.up.after`; Compose `service_completed_successfully` handling |
 | Environments | `env list` and `env explain --env --service`, `host exec --env --scope`, `logs --branch`, `config set env.defaultOverlay`, `env apply --service`, `env add --local`, `restart` |

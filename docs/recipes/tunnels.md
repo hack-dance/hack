@@ -93,9 +93,10 @@ that you register in advance, so they need a hostname that stays the same:
 
 - **A named tunnel.** Create it once in your tunnel provider's account and run
   it with a token instead of `--url`. Store the token with
-  `<secret-source> | hack env add TUNNEL_TOKEN --secret --local --value-stdin`;
-  lifecycle processes receive managed env values in the global and `host`
-  scopes. For `cloudflared`, the process command is then just
+  `<secret-source> | hack env add TUNNEL_TOKEN --service host --secret --local --value-stdin`.
+  The `host` scope delivers it to lifecycle processes without adding it to
+  application containers. Use this scope rather than `global`, which delivers
+  values to every service. For `cloudflared`, the process command is then just
   `cloudflared tunnel run`: it reads `TUNNEL_TOKEN` from its environment
   (`cloudflared tunnel run --help` lists it). Do not write
   `--token "$TUNNEL_TOKEN"`; that puts the token in the process's arguments,

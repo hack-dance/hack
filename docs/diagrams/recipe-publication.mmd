@@ -1,0 +1,11 @@
+---
+title: Recipe publication with the next.13 runtime pin
+---
+flowchart TD
+  Release["next.13 snapshots"] --> Prepare["Prepare selected pages"]
+  Recipes["Explicit recipe sources"] --> Audit["Audit next.13 compatibility"]
+  Audit --> Prepare
+  Prepare --> Checks["Check, build, smoke"]
+  Checks --> Preview["PR preview"]
+  Preview --> Merge["Separate authorized merge"]
+  Merge --> Production["Production deploy from next"]

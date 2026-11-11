@@ -74,6 +74,7 @@ import {
 } from "../lib/runtime-projects.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
+import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
 
 const optDetails = defineOption({
@@ -515,6 +516,7 @@ async function runNativeStatus(opts: {
     );
   }
   const branch = resolved.source === "worktree" ? resolved.branch : null;
+  noteNativeBackendBeta({ json: opts.json });
   const result = await (opts.ps ?? nativeProjectPs)({
     runtime: opts.native,
     scope: {

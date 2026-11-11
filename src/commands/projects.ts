@@ -497,6 +497,8 @@ async function runNativeStatus(opts: {
   readonly ps?: typeof nativeProjectPs;
   readonly authored?: typeof tryNativeComposeCommand;
 }): Promise<number> {
+  // Once, whichever native observer answers (HACK-2026).
+  noteNativeBackendBeta({ json: opts.json });
   // A native-authored project (`.hack/hack.project.json`) has its own observer,
   // and legacy project discovery below refuses its inputs. Dispatch it first,
   // exactly as `hack ps` does.
@@ -530,7 +532,6 @@ async function runNativeStatus(opts: {
     );
   }
   const branch = resolved.source === "worktree" ? resolved.branch : null;
-  noteNativeBackendBeta({ json: opts.json });
   const result = await (opts.ps ?? nativeProjectPs)({
     runtime: opts.native,
     scope: {

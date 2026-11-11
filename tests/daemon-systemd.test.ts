@@ -1849,3 +1849,20 @@ test("a loaded drop-in's whole ancestor chain is checked", async () => {
     await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
   ).toBeNull();
 });
+
+test("a symlink hop owned by another account is refused", async () => {
+  // Codex review: another account's link in a sticky directory can be
+  // replaced by that account, redirecting the service.
+  const hackHome = join(root, ".hack");
+  const link = join(root, "stable-link");
+  await symlink(program, link);
+  const own = process.getuid?.() ?? 0;
+  // Modelled with the uid the check compares to: the link (and everything
+  // else this user owns) then counts as another account's.
+  expect(
+    await checkServiceExecutableTrusted({ path: link, hackHome, uid: own + 1 })
+  ).toContain("owned by another user");
+  expect(
+    await checkServiceExecutableTrusted({ path: link, hackHome })
+  ).toBeNull();
+});

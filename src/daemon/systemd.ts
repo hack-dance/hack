@@ -1359,13 +1359,15 @@ async function checkServicePathEntry(opts: {
   } catch (error: unknown) {
     return `${opts.path} could not be inspected: ${errorMessage(error)}`;
   }
-  if (info.isSymbolicLink()) {
-    // A link cannot be rewritten in place: its directory is checked, and
-    // its target's chain is followed as another hop.
-    return null;
-  }
+  // Ownership first, links included: in a sticky directory the owner of a
+  // link can still replace it.
   if (opts.uid >= 0 && info.uid !== opts.uid && info.uid !== 0) {
     return `${opts.path} is owned by another user (uid ${info.uid})`;
+  }
+  if (info.isSymbolicLink()) {
+    // Otherwise a link cannot be rewritten in place: its directory is
+    // checked, and its target's chain is followed as another hop.
+    return null;
   }
   const sticky = info.isDirectory() && (info.mode & 0o1000) !== 0;
   if ((info.mode & 0o022) === 0 || sticky) {

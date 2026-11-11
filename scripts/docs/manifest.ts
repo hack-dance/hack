@@ -32,6 +32,11 @@ export const documents = [
     "Certificate trust",
   ],
   [
+    "docs/guides/linux-certificate-trust.md",
+    "guides/linux-certificate-trust",
+    "Linux certificate trust",
+  ],
+  [
     "docs/guides/codex-managed-environments.md",
     "guides/codex-managed-environments",
     "Managed environments",

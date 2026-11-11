@@ -157,6 +157,7 @@ import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
 import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
+import { configureLinuxSystemAndBrowserTrust } from "./global-linux-trust.ts";
 
 /** Regex to split strings on whitespace. */
 const WHITESPACE_PATTERN = /\s+/;
@@ -367,7 +368,8 @@ type GlobalStatusArgs = CommandArgs<
 
 const globalTrustSpec = defineCommand({
   name: "trust",
-  summary: "Trust Caddy Local CA (macOS) so https://*.hack is trusted",
+  summary:
+    "Trust Caddy Local CA (macOS keychain; Linux trust store and NSS) so https://*.hack is trusted",
   group: "Global",
   options: [],
   positionals: [],
@@ -3246,8 +3248,8 @@ async function globalTrust(): Promise<number> {
     return 0;
   }
 
-  await configureLinuxHostTlsTrust({ certPath });
-  return 0;
+  const linuxTrustOk = await configureLinuxHostTlsTrust({ certPath });
+  return linuxTrustOk ? 0 : 1;
 }
 
 async function handleGlobalCa({
@@ -4203,12 +4205,12 @@ export async function writeLinuxHostTrustBundle(input: {
 
 /**
  * Linux host trust setup: generates the combined bundle and the shell env
- * script. System trust-store installation (update-ca-certificates and
- * friends) stays a manual, distro-specific step.
+ * script, then adds the CA to the distribution trust store (confirmed sudo)
+ * and to NSS browser databases. Returns false when an attempted step failed.
  */
 async function configureLinuxHostTlsTrust(input: {
   readonly certPath: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const bundlePath = await writeLinuxHostTrustBundle({
     certPath: input.certPath,
   });
@@ -4227,13 +4229,10 @@ async function configureLinuxHostTlsTrust(input: {
       ? "Generated the combined public+local trust bundle and host trust env."
       : "Prepared host trust env (NODE_EXTRA_CA_CERTS only; no system bundle found).",
   });
-  note(
-    [
-      `Current shell: source ${scriptPath}`,
-      "To trust the CA system-wide, add it to your distro trust store (for example: copy the CA into /usr/local/share/ca-certificates/ and run update-ca-certificates).",
-    ].join("\n"),
-    "Host TLS"
-  );
+  note(`Current shell: source ${scriptPath}`, "Host TLS");
+  return await configureLinuxSystemAndBrowserTrust({
+    certPath: input.certPath,
+  });
 }
 
 async function exportCaddyLocalCaCert(): Promise<string | null> {

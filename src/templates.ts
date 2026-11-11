@@ -547,6 +547,19 @@ export function renderProjectConfigSchemaJson(): string {
           retention_period: { type: "string" },
         },
       },
+      native: {
+        type: "object",
+        additionalProperties: true,
+        properties: {
+          sourceLimitMiB: {
+            description:
+              "Native backend limit on selected (non-ignored) project source content, in MiB. Default 128; maximum 512.",
+            type: "integer",
+            minimum: 1,
+            maximum: 512,
+          },
+        },
+      },
       internal: {
         type: "object",
         additionalProperties: true,

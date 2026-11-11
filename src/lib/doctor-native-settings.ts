@@ -3,6 +3,10 @@ import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { YAML } from "bun";
 import { adaptNativeProject } from "../backends/native-project-adaptation.ts";
+import {
+  NATIVE_HOST_DEPENDENCY_DEFAULT_WAIT_SECONDS,
+  NATIVE_HOST_DEPENDENCY_MAX_WAIT_SECONDS,
+} from "../backends/native-project-dependencies.ts";
 import type { NativeProjectInput } from "../backends/native-project-input.ts";
 import {
   readNativeSelection,
@@ -28,6 +32,7 @@ import {
   type ProjectContext,
   readProjectDefaultEnvConfig,
 } from "./project.ts";
+import { resolvePersistentLifecycleNames } from "./project-lifecycle-controller.ts";
 
 /** Doctor check id for the native settings report. */
 export const NATIVE_SETTINGS_CHECK = "native settings";
@@ -57,6 +62,17 @@ export type NativeSettingsReport = {
   readonly warnings: readonly NativeSettingsWarning[];
   /** Number of routed services without a native HTTP probe after adaptation. */
   readonly routesWithoutProbes?: number;
+  /**
+   * Present when a host dependency selection is configured and persistent
+   * `up.before` hooks or lifecycle processes may start its listeners: the
+   * per-binding `host_wait_seconds` window `up` applies. Informational only;
+   * the selection file itself is not read here.
+   */
+  readonly dependencyWait?: {
+    readonly persistentHooks: number;
+    readonly defaultSeconds: number;
+    readonly maxSeconds: number;
+  };
 };
 
 const WARNING_TEXT: Readonly<Record<NativeSettingsWarning, string>> = {
@@ -248,7 +264,32 @@ function describe(report: NativeSettingsReport): string {
               : WARNING_TEXT[warning]
           )
           .join("; ")}.`;
-  return `Origins (${origins}).${machine}${warnings}`;
+  const wait = report.dependencyWait
+    ? ` Host dependency listeners: ${report.dependencyWait.persistentHooks} persistent hook(s) or process(es) may start them; native up waits for each discovered binding up to its host_wait_seconds (default ${report.dependencyWait.defaultSeconds} s, at most ${report.dependencyWait.maxSeconds} s) after the up.before hooks.`
+    : "";
+  return `Origins (${origins}).${machine}${warnings}${wait}`;
+}
+
+/** The listener wait note, when a selection and persistent hooks are both configured. */
+function dependencyWaitNote(opts: {
+  readonly host: Awaited<ReturnType<typeof resolveNativeHostSettings>>;
+  readonly cfg: ProjectConfig;
+}): Pick<NativeSettingsReport, "dependencyWait"> {
+  const selected =
+    opts.host.dependencyFile !== undefined ||
+    Object.keys(opts.host.dependencyFileByEnv ?? {}).length > 0;
+  const persistentHooks = resolvePersistentLifecycleNames(
+    opts.cfg.lifecycle
+  ).length;
+  return selected && persistentHooks > 0
+    ? {
+        dependencyWait: {
+          persistentHooks,
+          defaultSeconds: NATIVE_HOST_DEPENDENCY_DEFAULT_WAIT_SECONDS,
+          maxSeconds: NATIVE_HOST_DEPENDENCY_MAX_WAIT_SECONDS,
+        },
+      }
+    : {};
 }
 
 /**
@@ -328,6 +369,7 @@ export async function checkNativeSettings(opts: {
             },
       warnings,
       ...(routesWithoutProbes > 0 ? { routesWithoutProbes } : {}),
+      ...dependencyWaitNote({ host, cfg }),
     };
     return {
       name: NATIVE_SETTINGS_CHECK,

@@ -14,7 +14,7 @@ import type {
 } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
-import { ensureDir, readTextFile } from "./fs.ts";
+import { ensureDir, readOptionalTextFile, readTextFile } from "./fs.ts";
 import { resolveUserHomeDir } from "./home-dir.ts";
 import { isKeychainDisabled, keychain } from "./keychain.ts";
 import { NativeKeychainTimeoutError } from "./native-keychain.ts";
@@ -126,6 +126,129 @@ export async function resolveSecretStore(input: {
     });
   }
   return createKeychainSecretStore({ projectName: input.projectName });
+}
+
+/**
+ * What a project's encrypted-file secret store holds, for a migration that must
+ * know whether every entry was carried over before it offers the store and its
+ * key file for removal. Values are only compared with what env layers deliver;
+ * reports name keys, never values. `storePath` and `keyPath` are the configured
+ * locations, resolved the way the store resolves them.
+ *
+ * - `inactive`: the backend is the keychain, so the store isn't read, and it
+ *   isn't opened here either (that could prompt for a keychain item).
+ * - `listed`: `ownEntries` maps this project's keys (as `resolveEnvSecretKey`
+ *   names them, such as `TOKEN` or `env.staging.TOKEN`) to their values;
+ *   `foreignEntryCount` counts entries for any other project or scope.
+ * - `unreadable`: the store exists but couldn't be read without provisioning a
+ *   key (missing or wrong key, unreadable or corrupt file, incomplete config).
+ */
+export type FileSecretStoreListing = {
+  readonly storePath: string;
+  readonly keyPath: string;
+} & (
+  | { readonly kind: "inactive" }
+  | {
+      readonly kind: "listed";
+      readonly ownEntries: ReadonlyMap<string, string>;
+      readonly foreignEntryCount: number;
+    }
+  | { readonly kind: "unreadable" }
+);
+
+/**
+ * Lists a project's encrypted-file (or cloud shim) secret store read-only. It
+ * never generates, copies or persists key material, and it reports a store it
+ * can't open as `unreadable` instead of throwing. An absent or empty store is
+ * listed with no entries without reading any key.
+ */
+export async function listFileSecretStoreEntries(input: {
+  readonly projectName: string;
+  readonly projectDir: string;
+}): Promise<FileSecretStoreListing> {
+  const controlPlane = await readControlPlaneConfig({
+    projectDir: input.projectDir,
+  });
+  const secretsConfig = controlPlane.config.secrets;
+  const storePath = resolveConfiguredPath({
+    path: secretsConfig.encryptedFile.path,
+    projectDir: input.projectDir,
+  });
+  const keyPath = resolveConfiguredPath({
+    path:
+      secretsConfig.encryptedFile.keyPath ?? DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+    projectDir: input.projectDir,
+  });
+  let scope: string;
+  if (secretsConfig.backend === "encrypted_file") {
+    scope = input.projectName;
+  } else if (secretsConfig.backend === "cloud") {
+    const provider = secretsConfig.cloud.provider;
+    if (!provider) {
+      return { kind: "unreadable", storePath, keyPath };
+    }
+    scope = [
+      "cloud",
+      provider,
+      secretsConfig.cloud.project?.trim() || "default",
+      secretsConfig.cloud.secretPrefix.trim() || "hack",
+      input.projectName,
+    ].join(":");
+  } else {
+    return { kind: "inactive", storePath, keyPath };
+  }
+  // A strict read: an existing store that can't be read is unreadable, never
+  // empty, so a caller can't mistake it for one with nothing to keep.
+  const read = await readOptionalTextFile(storePath);
+  if (read.kind === "unreadable") {
+    return { kind: "unreadable", storePath, keyPath };
+  }
+  if (read.kind === "absent" || read.text.length === 0) {
+    return {
+      kind: "listed",
+      storePath,
+      keyPath,
+      ownEntries: new Map(),
+      foreignEntryCount: 0,
+    };
+  }
+  let entries: Record<string, string>;
+  try {
+    const { key } = await resolveEncryptedFileKeyMaterial({
+      keyPath,
+      storePath,
+      allowKeyProvisioning: false,
+    });
+    entries = decryptEncryptedEntriesText({
+      filePath: storePath,
+      text: read.text,
+      encryptionKey: key,
+    });
+  } catch {
+    return { kind: "unreadable", storePath, keyPath };
+  }
+  const prefix = `${encodeURIComponent(scope)}::`;
+  const ownEntries = new Map<string, string>();
+  let foreignEntryCount = 0;
+  for (const [scopedKey, value] of Object.entries(entries)) {
+    const ownKey = scopedKey.startsWith(prefix)
+      ? decodeScopedKey(scopedKey.slice(prefix.length))
+      : null;
+    if (ownKey === null) {
+      foreignEntryCount += 1;
+    } else {
+      ownEntries.set(ownKey, value);
+    }
+  }
+  return { kind: "listed", storePath, keyPath, ownEntries, foreignEntryCount };
+}
+
+function decodeScopedKey(encoded: string): string | null {
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
 }
 
 export async function resolveSecretStoreDescriptor(input: {
@@ -275,6 +398,9 @@ async function createCloudSecretStore(input: {
   const adapter = await createCloudProviderAdapter({
     provider,
     projectName: input.projectName,
+    // Relative store and key paths belong to the project, like the
+    // encrypted_file backend and the read-only listing (HACK-2001).
+    projectDir: input.projectDir,
     secretsConfig: input.secretsConfig,
     allowKeyProvisioning: input.allowKeyProvisioning,
   });
@@ -852,6 +978,16 @@ async function readEncryptedEntries(input: {
   if (!text) {
     return {};
   }
+  return decryptEncryptedEntriesText({ ...input, text });
+}
+
+/** Parses and decrypts a store's text; every failure is a fixed, value-free error. */
+function decryptEncryptedEntriesText(input: {
+  readonly filePath: string;
+  readonly text: string;
+  readonly encryptionKey: string;
+}): Record<string, string> {
+  const { text } = input;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);

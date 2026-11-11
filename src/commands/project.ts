@@ -7,6 +7,7 @@ import {
   resolveLifecycleCommandServiceName,
   resolveLifecycleCwd,
   resolveLifecycleSessionName,
+  resolvePersistentLifecycleNames,
   resolveProjectLifecycleDefinitionHash,
   SHARED_HELPER_MUX_UNSUPPORTED_MESSAGE,
   stopLifecycleProcessController,
@@ -84,7 +85,10 @@ import {
   type NativeStartupProgress,
   startNativeProject,
 } from "../backends/native-project-start.ts";
-import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
+import {
+  invokeNativeRuntime,
+  resolveNativeRuntimeSelection,
+} from "../backends/native-runtime-client.ts";
 import type { NativeServiceExit } from "../backends/native-service-exit-monitor.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -5865,6 +5869,11 @@ function reportNativeStartupProgress(event: NativeStartupProgress): void {
         message: `Starting services: ${event.services.join(", ")}…`,
       });
       return;
+    case "dependency-wait":
+      logger.step({
+        message: `Waiting for host listener ${event.binding} (service ${event.service}, host port ${event.hostPort}): ${event.waitedSeconds} s of ${event.limitSeconds} s…`,
+      });
+      return;
     case "ready":
       logger.success({
         message: [
@@ -6067,6 +6076,7 @@ async function handleNativeUp({
         });
       return {
         cleanup,
+        listenerHooks: resolvePersistentLifecycleNames(cfg.lifecycle),
         ...(down?.before?.length || down?.after?.length
           ? { stop: { before: stopPhase("before"), after: stopPhase("after") } }
           : {}),
@@ -6206,7 +6216,7 @@ async function restartNativeImageProject({
             }),
         }
       : undefined,
-    preflight: async (run, { cleanedRetry }) => {
+    preflight: async (run, { cleanedRetry, preparedRetry }) => {
       await preflightNativeProjectSource({
         runtime: native,
         projectRoot: startup.scope.projectRoot,
@@ -6227,6 +6237,7 @@ async function restartNativeImageProject({
         httpsPort: startup.https?.httpsPort ?? null,
         run,
         cleanedRetry,
+        preparedRetry,
         recoverStopped: recovery !== undefined,
       });
     },
@@ -6235,6 +6246,11 @@ async function restartNativeImageProject({
       const code = await handleDown({
         ctx,
         deferFinalization: true,
+        // The restart handles Ctrl-C itself and lets this committed stop
+        // finish; its runtime requests must not die with the terminal's
+        // process group (HACK-1953).
+        invoke: (request) =>
+          invokeNativeRuntime({ ...request, processGroup: "own" }),
         args: {
           options: {
             path: args.options.path,
@@ -6984,10 +7000,13 @@ async function handleDown({
   ctx,
   args,
   deferFinalization,
+  invoke,
 }: {
   readonly ctx: CliContext;
   readonly args: DownArgs;
   readonly deferFinalization?: boolean;
+  /** The native runtime requests of this down; a restart starts them in their own process group. */
+  readonly invoke?: typeof invokeNativeRuntime;
 }): Promise<number> {
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
@@ -7084,6 +7103,7 @@ async function handleDown({
       scope,
       recover: args.options.recoverNativeCompose,
       deferFinalization,
+      invoke,
       retireHostProcesses: async () => {
         await stopLifecycleProcesses({
           project,

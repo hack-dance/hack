@@ -1674,7 +1674,17 @@ cleanup. Retry still reviews the public dependency intent and all source, plan,
 environment, network and admission checks. It captures
 listener identities after the startup hooks recreate them, rather than requiring
 already stopped listeners before those hooks run. An interrupted operation lock
-requires ownership inspection rather than automatic removal. Restart does not
+requires ownership inspection rather than automatic removal.
+Ctrl-C while restart stops the previous run lets that stop finish: the stop's
+runtime requests run in their own process group, so the terminal's interrupt
+reaches only the restart. It then exits 130 as a stopped project with data
+retained, and a plain `up` resumes it. If the stop cannot be confirmed (for
+example the restart itself was killed, or a down hook failed), the saved intent
+stays and `up` refuses with `use hack restart`. Run `hack restart` then: it
+resumes the exact saved run, owner and plan, stopping the previous run if it is
+still active or confirming from fresh native observations that its own owner
+already stopped it, and it waits for that owner's frontend to finish before
+starting the replacement. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
 When an interrupted frontend cannot write that final acknowledgement, an explicit
 `restart --recover-frontend --expect-finalization-attempt <32-hex>` can resume
@@ -2095,17 +2105,59 @@ and the frontend never persists the resolved PIDs. Restart preflight resolves th
 same owners against the running instance; a cleaned retry validates the intent
 only and resolves owners after its hooks.
 
-Startup allows up to 60 seconds total for persistent hooks to create all selected
-listeners, with cancellable waits and bounded read-only discovery requests. It
-retries only native endpoint-identity refusals; malformed selections and other
-failures stop immediately. A refusal is one `E_CONFIG_INVALID` line that names the
+Startup waits for persistent hooks to create each discovered listener
+(`host_executable`, `host_lifecycle` or `host_shared_helper`), with cancellable
+waits and bounded read-only discovery requests. Each binding may wait up to its
+`host_wait_seconds`, an integer from 1 through 900 that defaults to 60. Every
+binding's wait is measured from the moment the `up.before` hooks return, and
+independent listeners are discovered at the same time, so a slow binding never
+shortens another one, whatever their order in the selection. When several entries
+share one listener, it is discovered once and the longest wait among them applies. A fixed `host_pid` entry is never
+waited for and refuses `host_wait_seconds`. For example, a hook that opens
+tunnels taking about three minutes needs:
+
+```json
+{
+  "version": 2,
+  "dependencies": [{
+    "binding": "search",
+    "guest_port": 443,
+    "aliases": ["search.example.com"],
+    "host_executable": "/usr/local/bin/tunnel",
+    "host_port": 8443,
+    "host_wait_seconds": 240
+  }]
+}
+```
+
+While a listener is still missing, foreground `up` prints `Waiting for host
+listener BINDING (service SERVICE, host port PORT): N s of LIMIT s…` on the first
+retry and then every ten seconds.
+
+Discovery retries only native endpoint-identity refusals; malformed selections and
+other failures stop immediately, and stop the discoveries still waiting. A refusal is one `E_CONFIG_INVALID` line that names the
 reason and the affected entry by position, service, binding, aliases, guest port and
 host port, each shown only after it validates. For example, a listener that never
 appears on the selected port reports `no listener owned by host_executable answered
-on host_port before the discovery deadline`. Host PIDs, executable paths and the
-contents of unrecognized fields are never printed. A listener must pass the complete ownership checks
-before any VM or graph effects. Restart preflight does not wait or stop the graph
-when its current selection cannot be verified.
+on host_port before the discovery deadline`, followed by how long it waited, the
+names of the persistent `up.before` hooks and lifecycle processes that ran, and the
+`host_wait_seconds` default and maximum. A missing listener does not stop the
+other bindings: startup keeps resolving them, each against its own wait, and when
+more than one is still missing the single refusal lists every one of them with its
+wait, in selection order. Host PIDs, executable paths, hook commands and the contents of
+unrecognized fields are never printed.
+
+A `host_executable` listener needs a running parent process: native review pins
+at least one supervisor link and refuses a parent at PID 1. A listener started
+with `nohup … &`, `ssh -f` or another daemonizing fork from a shell that then exits
+is adopted by launchd, so discovery refuses it at once, without retrying or
+starting the VM: `the listener on host_port has no supervising parent process (its
+parent is PID 1, …)`. Start it under a parent that stays running, for example a
+persistent `up.before` hook that `exec`s or `wait`s for it.
+
+A listener must pass the complete ownership checks before any VM or graph effects.
+Restart preflight does not wait or stop the graph when its current selection cannot
+be verified.
 
 For an already ready foreground graph, `graph refresh-dependencies --run-id RUN
 --json` asks its authenticated live owner to refresh stale admitted listeners.
@@ -2648,9 +2700,69 @@ the machine settings path with your home shown as `~`. With `--json`, the check'
 | `aws_region_without_profile` | `HACK_NATIVE_AWS_REGION` is set without `HACK_NATIVE_AWS_PROFILE` and is ignored. |
 | `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |
 
+When a host dependency selection is configured (`HACK_NATIVE_DEPENDENCIES` or the
+machine `dependencies` or `dependenciesByEnv` setting) and the project has persistent `up.before` hooks or
+`lifecycle.processes`, the check also notes the listener wait: native `up` waits
+for each discovered binding up to its `host_wait_seconds` (default 60 s, at most
+900 s) after the hooks. `nativeSettings.dependencyWait` holds `persistentHooks`,
+`defaultSeconds` and `maxSeconds`. The note does not change the check's status, and
+the selection file is not read.
+
 An invalid settings file makes the check an error with the same closed line native
 `up` prints. Each adaptation file (the base and every `adaptation.<env>.json`) is
 checked against the Compose file with the validator native `up` uses. The check runs no runtime request, credential export or network call.
+
+### Source size limit
+
+Native `up` reads the selected project source into memory to bind a source
+revision when an active service bind-mounts project source or declares a
+dependency cache (`hack.dependencies.*` labels). An image-only graph (no active
+bind mount and no dependency cache) never reads source content, so the limit
+does not apply to it and `up` and `restart` do not measure it. The selection
+is every file the project's `.gitignore` and `.ignore` files do not exclude,
+minus the fixed credential, generated and dependency exclusions (`.git`,
+`node_modules`, `.env*` and similar). Its total size is limited to **128 MiB**
+by default.
+
+To raise the limit for a project, set `native.sourceLimitMiB` in the committed
+`.hack/hack.config.json`:
+
+```json
+{
+  "native": { "sourceLimitMiB": 256 }
+}
+```
+
+The value is a whole number of MiB from 1 to **512**, the safe maximum. Capture
+holds the selected content and its archive at once, so peak runtime memory is
+about twice the limit. Another value refuses with `source_limit_config`. The
+runtime reads only a regular `.hack/hack.config.json` (not a symlink); a missing,
+aliased or malformed file keeps the default. The limit is an admission threshold
+only. Changing it does not change the reviewed plan, so `restart` keeps the
+retained run.
+
+For a graph that captures source, native `up` and `restart` measure the selection
+from file metadata first, before hooks, the runtime, image pulls or builds (and,
+for `restart`, before the current graph is stopped). Over the limit, they refuse with
+`E_NATIVE_PROJECT_UNSUPPORTED`. The message gives the total size, the limit, the
+largest directories (first two levels) and the largest files. To get under the
+limit, add paths the containers do not need to the project's `.gitignore` or
+`.ignore` file (for example `assets/video/`), or raise `native.sourceLimitMiB`.
+Note that `.ignore` also hides files from tools such as ripgrep. The capture
+checks the same limit again, so a project that grows between the check and the
+capture still refuses before any content is read.
+
+`hack doctor` on the native backend adds a `native source size` check. It reports
+the selected size and the limit, and warns when the project is over the limit.
+Doctor does not review the Compose graph, so it reports the size for image-only
+projects too; their `up` is not limited. The
+warning names the same largest paths and remedies. With `--json`, the check's
+`nativeSource` holds `totalBytes`, `fileCount`, `limitBytes`, `limitOrigin`
+(`default` or `project`), `maximumLimitBytes`, `withinLimit`, `largestFiles` and
+`largestDirectories` (project-relative paths). The check reads metadata only,
+through the runtime's `project source-size --project <root> --json`. Declared
+`env_file` inputs are not known to that request, so the doctor total can include
+them; the default `.env*` names are always excluded.
 
 ### Optional prepared base for a fresh pool
 

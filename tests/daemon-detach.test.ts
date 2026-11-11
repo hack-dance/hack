@@ -59,6 +59,9 @@ async function createFixture(): Promise<Fixture> {
   const bin = join(root, "bin");
   await mkdir(home, { recursive: true });
   await mkdir(bin, { recursive: true });
+  // hackd refuses a state directory under a group-writable parent; hold
+  // whatever the runner's umask.
+  await chmod(home, 0o755);
   const wrapper = join(bin, "hack");
   await writeFile(
     wrapper,

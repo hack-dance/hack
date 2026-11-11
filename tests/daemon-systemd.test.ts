@@ -34,6 +34,7 @@ import {
   checkSystemdUnitDropIns,
   checkSystemdUnitFile,
   checkSystemdUnitLoadPaths,
+  defaultSystemdDeps,
   ensureOwnerWritableOnlyDirectories,
   extractSystemdExecProgram,
   installSystemdUnit,
@@ -2213,4 +2214,28 @@ test("a drop-in PATH with a shared directory stops install before enable", async
     expect(result.error).toContain("Not enabling");
   }
   expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
+});
+
+test("systemctl found on a PATH directory others can write is not run", async () => {
+  // Codex security review: a first-on-PATH systemctl in a writable directory
+  // ran as the user from status, doctor, start and install.
+  const planted = join(root, "planted-bin");
+  await mkdir(planted);
+  const marker = join(root, "planted-ran");
+  await writeFile(
+    join(planted, "systemctl"),
+    `#!/bin/sh\necho ran > ${JSON.stringify(marker)}\necho Version=255\n`
+  );
+  await chmod(join(planted, "systemctl"), 0o755);
+  await chmod(planted, 0o777);
+  const deps = defaultSystemdDeps({ env: { PATH: planted, HOME: root } });
+  const refused = await deps.run("systemctl", ["--user", "show"]);
+  expect(refused.exitCode).toBe(126);
+  expect(refused.stderr).toContain("refusing to run");
+  expect(await Bun.file(marker).exists()).toBe(false);
+  // The same tool in a protected directory runs.
+  await chmod(planted, 0o755);
+  const ran = await deps.run("systemctl", ["--user", "show"]);
+  expect(ran.exitCode).toBe(0);
+  expect(await Bun.file(marker).exists()).toBe(true);
 });

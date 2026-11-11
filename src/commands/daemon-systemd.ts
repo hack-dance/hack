@@ -754,11 +754,17 @@ function reportLinger(opts: { readonly linger: boolean | null }): void {
 /** `hack daemon uninstall` on Linux. */
 export async function uninstallDaemonSystemdService(opts: {
   readonly deps?: SystemdDeps;
+  /** hackd's state directory, for the install restart-pending marker. */
+  readonly daemonRoot?: string;
 }): Promise<number> {
   const deps = opts.deps ?? defaultSystemdDeps();
   assertSystemdAccess(deps);
   const unitPath = resolveSystemdUnitPath({ env: deps.env });
   const result = await uninstallSystemdUnit({ unitPath, deps });
+  if (result.ok && opts.daemonRoot) {
+    // Without a unit there is nothing left to restart.
+    await rm(resolve(opts.daemonRoot, RESTART_PENDING_FILE), { force: true });
+  }
   if (!result.ok) {
     logger.error({
       message: `Failed to uninstall the hackd systemd user service: ${result.error}`,

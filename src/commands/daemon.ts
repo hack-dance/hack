@@ -1117,7 +1117,9 @@ async function handleDaemonUninstall({
   readonly args: DaemonUninstallArgs;
 }): Promise<number> {
   if (process.platform === "linux") {
-    return await uninstallDaemonSystemdService({});
+    return await uninstallDaemonSystemdService({
+      daemonRoot: resolveDaemonPaths({}).root,
+    });
   }
   if (process.platform !== "darwin") {
     logger.warn({

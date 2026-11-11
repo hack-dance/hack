@@ -1152,3 +1152,16 @@ test("a restart is kept pending across an enable failure", async () => {
   await installDaemonSystemdService(hooks);
   expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
 });
+
+test("uninstall clears a leftover restart-pending marker", async () => {
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const daemonRoot = resolveDaemonPaths({ home: root }).root;
+  await mkdir(daemonRoot, { recursive: true });
+  const marker = join(daemonRoot, "hackd.service.restart-pending");
+  await writeFile(marker, "x");
+  expect(
+    await uninstallDaemonSystemdService({ deps: fake.deps, daemonRoot })
+  ).toBe(0);
+  expect(await Bun.file(marker).exists()).toBe(false);
+});

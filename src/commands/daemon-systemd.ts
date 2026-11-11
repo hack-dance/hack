@@ -557,10 +557,12 @@ export async function installDaemonSystemdService(
 
   await handOverDirectDaemon({ hooks, before });
 
+  // A running service must be restarted when its loaded config changed:
+  // either this install wrote a new unit, or it completed a reload that an
+  // earlier write left pending (`NeedDaemonReload=yes`).
+  const configChanged = installed.changed || before?.needsReload === true;
   const action =
-    installed.changed && before?.active
-      ? ("restart" as const)
-      : ("start" as const);
+    configChanged && before?.active ? ("restart" as const) : ("start" as const);
   if (before?.activeState === "failed") {
     await systemdServiceAction({ action: "reset-failed", deps });
   }

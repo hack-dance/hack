@@ -1093,3 +1093,22 @@ test("status and doctor point an incompatible systemd-run old hack at install", 
     ).nextStep
   ).toBe("hack daemon restart");
 });
+
+test("an install retry after a failed reload restarts the running service", async () => {
+  // The file already has the new content (an earlier reload failed), the
+  // unit is active with the old config loaded.
+  const fake = fakeSystemd({ active: true, mainPid: 4242 });
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  fake.needsReload = true;
+  fake.calls.length = 0;
+  const stopped: number[] = [];
+  await installDaemonSystemdService({
+    ...installHooks(fake, stopped),
+    isPidInUnit: () => Promise.resolve(true),
+  });
+  const reload = fake.calls.indexOf("systemctl --user daemon-reload");
+  const restart = fake.calls.indexOf("systemctl --user restart hackd.service");
+  expect(reload).toBeGreaterThanOrEqual(0);
+  expect(restart).toBeGreaterThan(reload);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+});

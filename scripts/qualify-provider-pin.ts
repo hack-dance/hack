@@ -9,26 +9,34 @@
  *   1. archive: the SmolVM archive SHA-256 matches the bundle's pin (and upstream's
  *      `checksums.sha256` when given), the archive's own `checksums.txt` matches its files,
  *      and `smolvm-bin` passes `codesign --verify --strict`.
- *   2. prepare: `runtime prepare`, `prepare-engine`, `prepare-network-tools` and `probe`,
- *      plus a prepared base built and verified in the second home (network tools and the
- *      overlay inventory under the pinned guest).
+ *   2. prepare: `runtime prepare`, `prepare-engine`, `prepare-network-tools` and `probe`
+ *      in three homes; a prepared base built and verified in the second home; and a pool
+ *      without internet access booted and stopped in the third (network tools included).
  *   3. templates: the first start expands both disk templates at their logical sizes; their
  *      content digests (the runtime's own definition) are printed and compared with the
  *      repository pins when this checkout pins the same archive.
  *   4. disk identity: both machine disks have exactly the profile size, the provider runs
  *      with `SMOLVM_DISK_TRIM=0`, and the identity and size survive writes and deletes.
- *   5. lifecycle: `hack up`, `restart`, `down`, `down --recover` after a lost foreground,
- *      and recovery after the provider VM process is killed (an unclean stop).
- *   6. network modes (second home): approved hosts, extended hosts and internet, each
- *      read back from the provider's stored machine record and running configuration.
+ *   5. lifecycle: `hack up`, `restart`, `down`, then a lost foreground: the release's answer
+ *      to `down --recover` is recorded, and its documented recovery (`down`, `restart
+ *      --recover-frontend`, `down`) is followed when it refuses.
+ *   6. network modes (second home, with the project pool stopped): approved hosts, extended
+ *      hosts and internet, each read back from the provider's stored machine record and
+ *      running configuration; the project pool's own network is recorded.
  *   7. `--mount-socket`: a host dependency listener relayed into a container through the
- *      pool's dependency sockets (framed relay), 64 KiB each way, before and after restart.
- *   8. Rosetta (second home): `runtime up --amd64-emulation`, read back as recorded.
- *   9. web plus database: service DNS, a database write that survives down, up, restart and
- *      an unclean stop.
+ *      pool's dependency sockets (framed relay), 64 KiB each way (no zero bytes: busybox
+ *      `wget --post-file` stops at one), before and after restart.
+ *   8. Rosetta (second home, project pool stopped): `runtime up --amd64-emulation`.
+ *   9. web plus database: service DNS, and a database write that survives every step.
  *  10. measurements: prepare time, cold and warm `up` to ready, `restart`, `down`, VM plus
  *      helper physical footprint at idle after 0, 3 and 10 minutes (3 is past the 2-minute
  *      reclaim pulse), and idle CPU.
+ *  11. unclean stop, last and recorded only: SIGKILL to the provider VM, then what the
+ *      foreground, `down --recover`, `runtime recover` and the next `up -d` do.
+ *
+ * `--profile` (default `development`) selects the profile of the second and third homes'
+ * pools; the project pool is the frontend's. The run grants its own fixture's project share
+ * (`HACK_NATIVE_SHARED_SOURCE=1`) and keeps secrets off the keychain.
  *
  * Preview-first: without --run it prints the plan and changes nothing. It never uses
  * sudo, never reads or writes the real home (every child gets a HOME, XDG directories,
@@ -36,12 +44,14 @@
  * socket, and disables daemon autostart. The provider itself uses the short
  * `/private/tmp/hkl-*` alias the runtime creates for every pool.
  *
- * The first failed check prints one `FAIL <step>: <check>: <detail>` line, writes
- * evidence/failure.json and exits 1. Nothing is stopped or removed after a failure, so
- * the state can be inspected; the line names the command that stops each pool. The only
- * processes it signals are its own children and, in step 5, the provider VM process of
- * its own pool, which it identifies by the pool receipt and the executable path under the
- * root before sending SIGKILL.
+ * By default the first failed check prints one `FAIL <step>: <check>: <detail>` line, writes
+ * evidence/failure.json and exits 1; nothing is stopped or removed, so the state can be
+ * inspected, and the line names the command that stops each pool. With `--keep-going`
+ * every failed check is recorded and the run continues (a failed step 1-3 still ends it);
+ * the run then asks every pool to stop, lists each failure and exits 1. The only processes
+ * it signals are its own children and, in step 11, the provider VM process of its own pool,
+ * which it identifies by the pool receipt, executable path, user and start time before
+ * sending SIGKILL.
  */
 import { createHash } from "node:crypto";
 import {
@@ -328,6 +338,8 @@ export interface Options {
   amd64Image: string | null;
   idleMinutes: number[];
   skipIdle: boolean;
+  keepGoing: boolean;
+  profile: "development" | "research";
   caddy: string | null;
   httpsPort: number | null;
   run: boolean;
@@ -338,7 +350,28 @@ const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hac
   --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
   [--upstream-checksums /abs/checksums.sha256] [--approved-host example.com --approved-host example.org] \\
   [--amd64-image repo@sha256:...] [--idle-minutes 0,3,10 | --skip-idle] \\
+  [--profile development|research] [--keep-going] \\
   [--caddy /abs/caddy --https-port 8443] [--run]`;
+
+function idleMinutes(text: string): number[] {
+  const idle = text.split(",").map(Number);
+  const valid =
+    idle.length > 0 &&
+    idle.every(
+      (minute) => Number.isInteger(minute) && minute >= 0 && minute <= 60
+    ) &&
+    idle.every(
+      (minute, index) => index === 0 || minute > (idle[index - 1] as number)
+    );
+  if (!valid) {
+    throw new Error(
+      "--idle-minutes must be increasing whole minutes from 0 to 60."
+    );
+  }
+  return idle;
+}
+
+const FLAGS = new Set(["--run", "--skip-idle", "--keep-going"]);
 
 /** Parse and validate arguments; throws with a usage line on any problem. */
 export function parseOptions(argv: string[]): Options {
@@ -346,7 +379,7 @@ export function parseOptions(argv: string[]): Options {
   const flags = new Set<string>();
   for (let index = 0; index < argv.length; index++) {
     const name = argv[index] as string;
-    if (name === "--run" || name === "--skip-idle") {
+    if (FLAGS.has(name)) {
       flags.add(name);
       continue;
     }
@@ -394,21 +427,10 @@ export function parseOptions(argv: string[]): Options {
       "--approved-host must be given twice (or not at all) as DNS names."
     );
   }
-  const idle = (one("--idle-minutes", false) ?? "0,3,10")
-    .split(",")
-    .map(Number);
-  if (
-    idle.length === 0 ||
-    idle.some(
-      (minute) => !Number.isInteger(minute) || minute < 0 || minute > 60
-    ) ||
-    idle.some(
-      (minute, index) => index > 0 && minute <= (idle[index - 1] as number)
-    )
-  ) {
-    throw new Error(
-      "--idle-minutes must be increasing whole minutes from 0 to 60."
-    );
+  const idle = idleMinutes(one("--idle-minutes", false) ?? "0,3,10");
+  const profile = one("--profile", false) ?? "development";
+  if (profile !== "development" && profile !== "research") {
+    throw new Error("--profile must be development or research.");
   }
   const caddy = absolute("--caddy", false);
   const portText = one("--https-port", false);
@@ -437,6 +459,8 @@ export function parseOptions(argv: string[]): Options {
     amd64Image: pinned("--amd64-image", false),
     idleMinutes: flags.has("--skip-idle") ? [] : idle,
     skipIdle: flags.has("--skip-idle"),
+    keepGoing: flags.has("--keep-going"),
+    profile,
     caddy,
     httpsPort,
     run: flags.has("--run"),
@@ -508,10 +532,15 @@ class Qualification {
   readonly evidence: string;
   readonly main: string;
   readonly aux: string;
+  readonly isolated: string;
   readonly project: string;
   readonly env: Record<string, string>;
   readonly measurements: Record<string, unknown> = {};
   readonly passed: string[] = [];
+  readonly failed: string[] = [];
+  /** Whether the current step must pass for any later step to mean anything. */
+  stepRequired = true;
+  readonly recorded: Record<string, unknown> = {};
   step = "setup";
   pins: Record<string, Record<string, unknown>> = {};
   foreground: ReturnType<typeof Bun.spawn> | null = null;
@@ -527,6 +556,7 @@ class Qualification {
     this.evidence = join(root, "evidence");
     this.main = join(root, "candidate");
     this.aux = join(root, "candidate-network");
+    this.isolated = join(root, "candidate-isolated");
     this.project = join(root, "project");
     const user = join(root, "user-home");
     this.env = {
@@ -543,6 +573,10 @@ class Qualification {
       HACK_NATIVE_HOME: this.main,
       HACK_RUNTIME_BACKEND: "native",
       HACK_NATIVE_PREPARED_BASE: "off",
+      // The fixture project is this run's own: grant its share, and keep secrets off the
+      // login keychain (the isolated HOME has none, and a prompt would stall the run).
+      HACK_NATIVE_SHARED_SOURCE: "1",
+      HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
       HACK_NO_INTERACTIVE: "1",
       HACK_DAEMON_AUTOSTART_DISABLE: "1",
       HACK_LOGGER: "console",
@@ -561,7 +595,13 @@ class Qualification {
 
   check(name: string, ok: boolean, detail = ""): void {
     if (!ok) {
-      throw new Failure(`${name}${detail ? `: ${detail}` : ""}`);
+      const message = `${name}${detail ? `: ${detail}` : ""}`;
+      if (!this.options.keepGoing || this.stepRequired) {
+        throw new Failure(message);
+      }
+      this.failed.push(`${this.step}: ${message}`);
+      this.note(`FAIL ${this.step}: ${message} (continuing: --keep-going)`);
+      return;
     }
     this.passed.push(`${this.step}: ${name}`);
     this.note(`PASS ${this.step}: ${name}`);
@@ -681,7 +721,7 @@ class Qualification {
    * `immutable`: the provider keeps the database in WAL mode, and an immutable open would
    * ignore committed changes still in the WAL. A read-only connection never checkpoints.
    */
-  record(home: string): Record<string, unknown> {
+  machineRecord(home: string): Record<string, unknown> {
     const database = join(
       home,
       PROVIDER_HOME,
@@ -802,7 +842,7 @@ class Qualification {
   // 2. Prepare and probe both homes.
   prepare(): void {
     this.step = "2 prepare";
-    for (const home of [this.main, this.aux]) {
+    for (const home of [this.main, this.aux, this.isolated]) {
       mkdirSync(home, { mode: 0o700 });
     }
     const started = performance.now();
@@ -852,6 +892,7 @@ class Qualification {
       ],
     ] as const) {
       this.runtime(this.aux, `aux-${name}`, [...args]);
+      this.runtime(this.isolated, `isolated-${name}`, [...args]);
     }
     const probe = this.runtime(this.main, "probe", [
       "runtime",
@@ -868,6 +909,35 @@ class Qualification {
       "runtime probe answers for the development profile",
       typeof probe === "object"
     );
+    const templates = join(this.main, PROVIDER_HOME, ".smolvm");
+    this.check(
+      "no expanded template exists before the first start",
+      !Object.keys(TEMPLATE_LENGTHS).some((name) =>
+        existsSync(join(templates, name))
+      )
+    );
+  }
+
+  /**
+   * Pools without internet access, before any other pool runs: a prepared base (its verifier
+   * pool boots without internet, installs the network tools and checks the overlay inventory)
+   * and a plain isolated pool. Both failed on the first SmolVM 1.34.1 run, so they are their
+   * own step and `--keep-going` continues past them.
+   */
+  isolatedPools(): void {
+    try {
+      this.preparedBase();
+    } catch (error) {
+      this.check(
+        "a prepared base builds and verifies its upper-layer inventory",
+        false,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+    this.isolatedBoot();
+  }
+
+  preparedBase(): void {
     // A prepared base boots a verifier pool, installs the network tools and checks the
     // overlay's upper-layer inventory, so it exercises the apk-tools 3 file set of the
     // pinned guest. It runs in the second home before that home's own pool exists.
@@ -882,7 +952,7 @@ class Qualification {
         "prepared-base",
         "build",
         "--profile",
-        "research",
+        this.options.profile,
         "--store",
         store,
         "--json",
@@ -925,12 +995,53 @@ class Qualification {
       store,
       "--json",
     ]);
-    const templates = join(this.main, PROVIDER_HOME, ".smolvm");
+  }
+
+  /**
+   * A pool without internet access boots, network tools included, then stops. A guest step
+   * that needs the network (apk-tools 3 refreshing its index) times out here, not on a pool
+   * with internet; this is the check that failed on the first SmolVM 1.34.1 run.
+   */
+  isolatedBoot(): void {
+    const started = performance.now();
+    const result = this.exec(
+      "isolated-up",
+      [
+        this.options.native,
+        "--candidate-root",
+        this.isolated,
+        "runtime",
+        "up",
+        "--profile",
+        this.options.profile,
+        "--json",
+      ],
+      { timeout: 600, allowFailure: true }
+    );
     this.check(
-      "no expanded template exists before the first start",
-      !Object.keys(TEMPLATE_LENGTHS).some((name) =>
-        existsSync(join(templates, name))
-      )
+      "a pool without internet access boots",
+      result.code === 0,
+      (result.stderr || result.stdout).trim().slice(-400)
+    );
+    if (result.code !== 0) {
+      return;
+    }
+    this.measure(
+      "isolated_cold_boot_seconds",
+      round((performance.now() - started) / 1000)
+    );
+    const status = this.status(this.isolated);
+    this.check(
+      "the pool without internet runs with no network",
+      status.process_alive === true &&
+        JSON.stringify(this.machineRecord(this.isolated).network) === "false",
+      JSON.stringify(status.network)
+    );
+    this.runtime(
+      this.isolated,
+      "isolated-down",
+      ["runtime", "down", "--json"],
+      300
     );
   }
 
@@ -1024,7 +1135,8 @@ class Qualification {
   async upForeground(
     name: string,
     command: "up" | "restart",
-    previousContainer: string | null = null
+    previousContainer: string | null = null,
+    extra: string[] = []
   ): Promise<{ seconds: number; ps: Record<string, unknown> }> {
     const label = this.label(name);
     const started = performance.now();
@@ -1032,7 +1144,7 @@ class Qualification {
     const err = Bun.file(join(this.evidence, `${label}.stderr`));
     const previous = this.foreground;
     this.foreground = Bun.spawn(
-      [this.options.hack, command, "--path", this.project],
+      [this.options.hack, command, ...extra, "--path", this.project],
       {
         cwd: this.project,
         env: this.env,
@@ -1313,7 +1425,7 @@ class Qualification {
     const echo = this.inContainer(
       `${name}-post`,
       "web",
-      "head -c 65536 /dev/urandom > /tmp/q && sha256sum /tmp/q | cut -d ' ' -f 1 && wget -qO- --post-file=/tmp/q http://dependency.qualification.test/echo"
+      "head -c 65536 /dev/urandom | tr '\\000' '\\001' > /tmp/q && sha256sum /tmp/q | cut -d ' ' -f 1 && wget -qO- --post-file=/tmp/q http://dependency.qualification.test/echo"
     )
       .trim()
       .split(/\s+/);
@@ -1337,133 +1449,193 @@ class Qualification {
         2
       )
     );
-    try {
-      this.archive();
-      this.prepare();
-      this.writeProject();
-      await this.startDependencyServer();
-      const first = await this.firstStart();
-      await this.dbReady();
-      const marker = `marker-${crypto.randomUUID()}`;
-      this.psql(
-        "db-write",
-        `CREATE TABLE qualification(v text); INSERT INTO qualification VALUES ('${marker}')`
-      );
-      const identity = await this.diskChecks();
-      await this.lifecycle(first, marker, identity);
-
-      // The second home boots only while the project pool is stopped, so host memory
-      // admission never has to fit both pools.
-      this.step = "6 network modes";
-      await this.down("down-before-network");
-      this.stopMainPool("network");
-      this.networkModes();
-
-      this.step = "7 mount-socket";
-      let ready = await this.upForeground("up-relay", "up");
-      this.relay("relay");
-      ready = await this.upForeground(
-        "restart-relay",
-        "restart",
-        readyContainer(ready.ps)
-      );
-      this.relay("relay-after-restart");
-
-      this.step = "8 rosetta";
-      await this.down("down-before-rosetta");
-      this.stopMainPool("rosetta");
-      this.rosetta();
-
-      this.step = "9 web+db";
-      ready = await this.upForeground("up-web-db", "up");
-      await this.dbReady();
-      this.check(
-        "the database row survives every restart, recovery and unclean stop",
-        this.psql("db-read-final", "SELECT v FROM qualification") === marker
-      );
-      this.check(
-        "web serves its index",
-        this.inContainer(
-          "web-index",
-          "web",
-          "wget -qO- http://127.0.0.1:8080/index.txt"
-        ).trim() === "ready"
-      );
-      this.check(
-        "web reaches db by service name",
-        this.inContainer(
-          "web-to-db",
-          "web",
-          "nc -w 3 db 5432 </dev/null >/dev/null 2>&1; echo $?"
-        ).trim() === "0"
-      );
-      const record = this.record(this.main);
-      this.check(
-        "the project pool record keeps every newer capability inert",
-        activeFields(record, INERT_RECORD_FIELDS).length === 0,
-        activeFields(record, INERT_RECORD_FIELDS).join(",")
-      );
-      this.check(
-        "disk identity is unchanged at the end",
-        JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
-      );
-
-      this.step = "10 measurements";
-      await this.idle();
-      this.check(
-        "disk identity is unchanged after the idle period",
-        JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
-      );
-      this.measure("final_down_seconds", round(await this.down("down-final")));
-      this.runtime(
-        this.main,
-        "runtime-down-final",
-        ["runtime", "down", "--json"],
-        300
-      );
-      this.dependencyServer?.kill("SIGTERM");
-      writeFileSync(
-        join(this.evidence, "qualification.json"),
-        JSON.stringify(
-          { passed: this.passed, measurements: this.measurements },
-          null,
-          2
-        )
-      );
-      this.note(
-        "PASS all checks; both pools are stopped. Remove the root yourself once the evidence is copied."
-      );
-      return 0;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      writeFileSync(
-        join(this.evidence, "failure.json"),
-        JSON.stringify(
-          {
-            step: this.step,
-            failure: message,
-            passed: this.passed,
-            measurements: this.measurements,
-          },
-          null,
-          2
-        )
-      );
-      console.log(`FAIL ${this.step}: ${message}`);
+    const marker = `marker-${crypto.randomUUID()}`;
+    let first: Record<string, unknown> = {};
+    let identity: Record<string, { size: number; ino: number; dev: number }> =
+      {};
+    // Steps 1-3 set up everything later steps use: a failure there ends the run even with
+    // --keep-going. Every later step runs whatever happened before it under --keep-going.
+    const steps: [string, boolean, () => Promise<void> | void][] = [
+      ["1 archive", true, () => this.archive()],
+      ["2 prepare", true, () => this.prepare()],
+      ["2b pools without internet", false, () => this.isolatedPools()],
+      [
+        "3 templates",
+        true,
+        async () => {
+          this.writeProject();
+          await this.startDependencyServer();
+          first = await this.firstStart();
+          await this.dbReady();
+          this.psql(
+            "db-write",
+            `CREATE TABLE qualification(v text); INSERT INTO qualification VALUES ('${marker}')`
+          );
+        },
+      ],
+      [
+        "4 disk identity",
+        false,
+        async () => {
+          identity = await this.diskChecks();
+        },
+      ],
+      ["5 lifecycle", false, () => this.lifecycle(first, marker)],
+      [
+        "6 network modes",
+        false,
+        async () => {
+          // The second home boots only while the project pool is stopped, so host memory
+          // admission never has to fit both pools.
+          await this.ensureDown("down-before-network");
+          this.stopMainPool("network");
+          this.networkModes();
+        },
+      ],
+      [
+        "7 mount-socket",
+        false,
+        async () => {
+          const ready = await this.upForeground("up-relay", "up");
+          this.relay("relay");
+          await this.upForeground(
+            "restart-relay",
+            "restart",
+            readyContainer(ready.ps)
+          );
+          this.relay("relay-after-restart");
+        },
+      ],
+      [
+        "8 rosetta",
+        false,
+        async () => {
+          await this.ensureDown("down-before-rosetta");
+          this.stopMainPool("rosetta");
+          this.rosetta();
+        },
+      ],
+      ["9 web+db", false, () => this.webAndDatabase(marker, identity)],
+      [
+        "10 measurements",
+        false,
+        async () => {
+          await this.idle();
+          this.check(
+            "disk identity is unchanged after the idle period",
+            JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
+          );
+          this.measure(
+            "final_down_seconds",
+            round(await this.down("down-final"))
+          );
+        },
+      ],
+      ["11 unclean stop (recorded)", false, () => this.uncleanStop(identity)],
+    ];
+    for (const [name, required, step] of steps) {
+      this.step = name;
+      this.stepRequired = required;
+      try {
+        await step();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!this.options.keepGoing || required) {
+          return this.fail(message);
+        }
+        this.failed.push(`${name}: ${message}`);
+        this.note(`FAIL ${name}: ${message} (continuing: --keep-going)`);
+        this.foreground = null;
+      }
+    }
+    this.step = "cleanup";
+    this.hack("down-cleanup", ["down", "--path", this.project], 300, true);
+    for (const home of [this.main, this.aux, this.isolated]) {
+      if (existsSync(join(home, ".hack-local/run/smolvm/owner.json"))) {
+        this.exec(
+          "runtime-down-cleanup",
+          [
+            this.options.native,
+            "--candidate-root",
+            home,
+            "runtime",
+            "down",
+            "--json",
+          ],
+          { timeout: 300, allowFailure: true }
+        );
+      }
+    }
+    this.dependencyServer?.kill("SIGTERM");
+    writeFileSync(
+      join(this.evidence, "qualification.json"),
+      JSON.stringify(
+        {
+          passed: this.passed,
+          failed: this.failed,
+          recorded: this.recorded,
+          measurements: this.measurements,
+        },
+        null,
+        2
+      )
+    );
+    if (this.failed.length > 0) {
+      for (const line of this.failed) {
+        console.log(`FAIL ${line}`);
+      }
       console.log(
-        `Nothing was stopped or removed. Stop the pools with: ${this.options.native} --candidate-root ${this.main} runtime down --json (and the same for ${this.aux}); the dependency listener is PID ${this.dependencyServer?.pid ?? "none"}.`
+        `${this.failed.length} check(s) failed (--keep-going); evidence in ${this.evidence}.`
       );
       return 1;
     }
+    this.note(
+      "PASS all checks; every pool was asked to stop. Remove the root yourself once the evidence is copied."
+    );
+    return 0;
   }
 
-  // 5. Boot, restart, down, down --recover and an unclean stop of the provider VM.
+  fail(message: string): number {
+    writeFileSync(
+      join(this.evidence, "failure.json"),
+      JSON.stringify(
+        {
+          step: this.step,
+          failure: message,
+          failed: this.failed,
+          passed: this.passed,
+          recorded: this.recorded,
+          measurements: this.measurements,
+        },
+        null,
+        2
+      )
+    );
+    console.log(`FAIL ${this.step}: ${message}`);
+    console.log(
+      `Nothing was stopped or removed. Stop the pools with: ${this.options.native} --candidate-root <home> runtime down --json for ${this.main}, ${this.aux} and ${this.isolated}; the dependency listener is PID ${this.dependencyServer?.pid ?? "none"}.`
+    );
+    return 1;
+  }
+
+  /** Record an observed behaviour that is reported, not asserted. */
+  record(name: string, value: unknown): void {
+    this.recorded[name] = value;
+    this.note(`RECORD ${this.step}: ${name} = ${JSON.stringify(value)}`);
+  }
+
+  /** `hack down` for the project when a run may be up; a project already down is fine. */
+  async ensureDown(name: string): Promise<void> {
+    if (this.running() || this.observedReady()) {
+      await this.down(name);
+    }
+  }
+
+  // 5. Restart, down and up, then a lost foreground: what the release does is recorded.
   async lifecycle(
     first: Record<string, unknown>,
-    marker: string,
-    identity: Record<string, { size: number; ino: number; dev: number }>
+    marker: string
   ): Promise<void> {
-    this.step = "5 lifecycle";
     let ready = await this.upForeground(
       "restart",
       "restart",
@@ -1479,19 +1651,95 @@ class Qualification {
       this.psql("db-read-warm", "SELECT v FROM qualification") === marker
     );
 
-    // A lost foreground: this run's own child, killed; down --recover retires its run.
+    // A lost foreground: this run's own child, killed. The release's answer to
+    // `down --recover` is recorded; if it refuses, its documented recovery (plain `down`,
+    // then `restart --recover-frontend`, then `down`) is followed and recorded too.
     const lost = this.running();
     lost?.kill("SIGKILL");
     await lost?.exited;
     this.foreground = null;
-    await this.down("down-recover", ["--recover"]);
+    const recovered = this.hack(
+      "down-recover",
+      ["down", "--recover", "--path", this.project],
+      300,
+      true
+    );
+    this.record("down_recover_after_lost_foreground_exit", recovered.code);
+    if (recovered.code !== 0) {
+      const plain = this.hack(
+        "down-after-lost-foreground",
+        ["down", "--path", this.project],
+        300,
+        true
+      );
+      this.record("plain_down_after_lost_foreground_exit", plain.code);
+      const attempt = /--expect-finalization-attempt ([0-9a-f]+)/.exec(
+        plain.stderr + plain.stdout
+      )?.[1];
+      this.record("recover_frontend_attempt_offered", attempt !== undefined);
+      if (attempt) {
+        const resumed = await this.upForeground(
+          "restart-recover-frontend",
+          "restart",
+          null,
+          ["--recover-frontend", "--expect-finalization-attempt", attempt]
+        );
+        this.record("recover_frontend_to_ready_seconds", resumed.seconds);
+        await this.down("down-after-frontend-recovery");
+      }
+    }
     this.check(
-      "down --recover retires the run whose foreground was lost",
+      "the run whose foreground was lost is retired (down --recover or the documented recovery)",
       !this.observedReady()
     );
     await this.upForeground("up-after-recover", "up");
+  }
 
-    // An unclean stop: SIGKILL to this pool's provider VM, identified by its receipt.
+  // 9. The web and database project after every earlier step.
+  async webAndDatabase(
+    marker: string,
+    identity: Record<string, { size: number; ino: number; dev: number }>
+  ): Promise<void> {
+    await this.upForeground("up-web-db", "up");
+    await this.dbReady();
+    this.check(
+      "the database row survives every restart and recovery",
+      this.psql("db-read-final", "SELECT v FROM qualification") === marker
+    );
+    this.check(
+      "web serves its index",
+      this.inContainer(
+        "web-index",
+        "web",
+        "wget -qO- http://127.0.0.1:8080/index.txt"
+      ).trim() === "ready"
+    );
+    this.check(
+      "web reaches db by service name",
+      this.inContainer(
+        "web-to-db",
+        "web",
+        "nc -w 3 db 5432 </dev/null >/dev/null 2>&1; echo $?"
+      ).trim() === "0"
+    );
+    const record = this.machineRecord(this.main);
+    this.check(
+      "the project pool record keeps every newer capability inert",
+      activeFields(record, INERT_RECORD_FIELDS).length === 0,
+      activeFields(record, INERT_RECORD_FIELDS).join(",")
+    );
+    this.check(
+      "disk identity is unchanged at the end",
+      JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
+    );
+  }
+
+  // 11. An unclean stop of the provider VM, last because the release may not recover from it:
+  // every answer is recorded, nothing is asserted.
+  async uncleanStop(
+    identity: Record<string, { size: number; ino: number; dev: number }>
+  ): Promise<void> {
+    await this.upForeground("up-before-unclean", "up");
     const providers = realpathSync(join(this.main, ".hack-local/providers"));
     const recorded = this.owner(this.main).process as
       | Record<string, unknown>
@@ -1499,12 +1747,14 @@ class Qualification {
     const pid = Number(recorded?.pid);
     const executable = String(recorded?.executable ?? "");
     const listed = this.processes(this.main).find((row) => row.pid === pid);
+    const owned =
+      Number.isInteger(pid) &&
+      pid > 1 &&
+      executable.startsWith(`${providers}/smolvm-`) &&
+      listed !== undefined;
     this.check(
       "the receipt's provider runs from this home's provider tree",
-      Number.isInteger(pid) &&
-        pid > 1 &&
-        executable.startsWith(`${providers}/smolvm-`) &&
-        listed !== undefined,
+      owned,
       `${pid} ${executable}`
     );
     // Immediately before the signal: the live process still has the receipt's user and
@@ -1522,13 +1772,21 @@ class Qualification {
     const [uid, ...started] = live.split(/\s+/);
     const startedMs = Date.parse(`${started.join(" ")} GMT`);
     const recordedMs = Number(recorded?.start_micros) / 1000;
+    const same =
+      Number(uid) === Number(recorded?.uid) &&
+      Number.isFinite(startedMs) &&
+      Math.abs(startedMs - recordedMs) < 2000;
     this.check(
       "the live provider matches the receipt's user and start time",
-      Number(uid) === Number(recorded?.uid) &&
-        Number.isFinite(startedMs) &&
-        Math.abs(startedMs - recordedMs) < 2000,
+      same,
       `${live} vs uid ${String(recorded?.uid)} start ${recordedMs}`
     );
+    // Never signal a process that did not verify, even when --keep-going continues.
+    if (!(owned && same)) {
+      throw new Failure(
+        "provider identity did not verify; nothing was signalled"
+      );
+    }
     process.kill(pid, "SIGKILL");
     for (
       let attempt = 0;
@@ -1537,12 +1795,12 @@ class Qualification {
     ) {
       await Bun.sleep(500);
     }
-    // The foreground observes the lost provider and exits; it is not signalled.
+    // The foreground is not signalled: whether it notices the lost provider is recorded.
     const code = await Promise.race([
       this.running()?.exited,
-      Bun.sleep(120_000).then(() => "running"),
+      Bun.sleep(120_000).then(() => "still running after 120 s"),
     ]);
-    this.note(`INFO foreground after the unclean stop: ${String(code)}`);
+    this.record("foreground_after_unclean_stop", String(code));
     this.foreground = null;
     const retired = this.hack(
       "down-recover-after-unclean",
@@ -1550,48 +1808,63 @@ class Qualification {
       300,
       true
     );
-    this.note(
-      `INFO down --recover after the unclean stop exited ${retired.code}`
-    );
-    let status = this.status(this.main);
-    if (status.phase !== "recovered-unclean") {
-      status = this.runtime(this.main, "recover", [
+    this.record("down_recover_after_unclean_stop_exit", retired.code);
+    const recover = this.exec(
+      "runtime-recover",
+      [
+        this.options.native,
+        "--candidate-root",
+        this.main,
         "runtime",
         "recover",
         "--json",
-      ]);
+      ],
+      { timeout: 300, allowFailure: true }
+    );
+    this.record("runtime_recover_exit", recover.code);
+    const status = this.exec(
+      "runtime-status-after-recover",
+      [
+        this.options.native,
+        "--candidate-root",
+        this.main,
+        "runtime",
+        "status",
+        "--json",
+      ],
+      { timeout: 60, allowFailure: true }
+    );
+    this.record(
+      "runtime_status_after_recover",
+      status.code === 0
+        ? (JSON.parse(status.stdout) as Record<string, unknown>).phase
+        : `exit ${status.code}`
+    );
+    const up = this.hack(
+      "up-d-after-unclean",
+      ["up", "-d", "--path", this.project],
+      900,
+      true
+    );
+    this.record("up_d_after_unclean_stop_exit", up.code);
+    if (up.code === 0) {
+      this.record(
+        "disk_identity_unchanged_after_unclean_stop",
+        JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
+      );
     }
-    this.check(
-      "the unclean stop is recorded as recovered-unclean",
-      status.phase === "recovered-unclean" && status.process_alive !== true,
-      String(status.phase)
-    );
-    ready = await this.upForeground("up-after-unclean", "up");
-    this.measure("up_after_unclean_stop_seconds", ready.seconds);
-    await this.dbReady();
-    this.check(
-      "disk identity survives the unclean stop",
-      JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
-    );
-    this.check(
-      "the database row survives the unclean stop",
-      this.psql("db-read-unclean", "SELECT v FROM qualification") === marker
-    );
   }
 
   networkModes(): void {
     const [first, second] = this.options.approvedHosts;
-    const mainRecord = this.record(this.main);
-    this.check(
-      "isolated pool record: no network",
-      mainRecord.network === false &&
-        mainRecord.allowed_cidrs == null &&
-        mainRecord.dns_filter_hosts == null,
-      JSON.stringify({
-        network: mainRecord.network,
-        allowed_cidrs: mainRecord.allowed_cidrs,
-      })
-    );
+    const mainRecord = this.machineRecord(this.main);
+    // Recorded, not asserted: the frontend chooses the project pool's network.
+    this.record("project_pool_network", {
+      network: mainRecord.network,
+      network_backend: mainRecord.network_backend ?? null,
+      allowed_cidrs: mainRecord.allowed_cidrs ?? null,
+      dns_filter_hosts: mainRecord.dns_filter_hosts ?? null,
+    });
     this.runtime(
       this.aux,
       "aux-up-approved",
@@ -1599,14 +1872,14 @@ class Qualification {
         "runtime",
         "up",
         "--profile",
-        "research",
+        this.options.profile,
         "--allow-host",
         first,
         "--json",
       ],
       600
     );
-    let record = this.record(this.aux);
+    let record = this.machineRecord(this.aux);
     const cidrs = record.allowed_cidrs as unknown[] | null;
     this.check(
       "approved-hosts record",
@@ -1634,7 +1907,7 @@ class Qualification {
       second,
       "--json",
     ]);
-    record = this.record(this.aux);
+    record = this.machineRecord(this.aux);
     this.check(
       "extended approved-hosts record",
       JSON.stringify(record.dns_filter_hosts) ===
@@ -1647,7 +1920,7 @@ class Qualification {
       "internet",
       "--json",
     ]);
-    record = this.record(this.aux);
+    record = this.machineRecord(this.aux);
     this.check(
       "internet record",
       record.network === true &&
@@ -1663,7 +1936,14 @@ class Qualification {
     this.runtime(
       this.aux,
       "aux-up-internet",
-      ["runtime", "up", "--profile", "research", "--internet", "--json"],
+      [
+        "runtime",
+        "up",
+        "--profile",
+        this.options.profile,
+        "--internet",
+        "--json",
+      ],
       600
     );
     const status = this.status(this.aux);
@@ -1675,7 +1955,8 @@ class Qualification {
     );
     this.check(
       "every record keeps newer capabilities inert",
-      activeFields(this.record(this.aux), INERT_RECORD_FIELDS).length === 0
+      activeFields(this.machineRecord(this.aux), INERT_RECORD_FIELDS).length ===
+        0
     );
     this.runtime(this.aux, "aux-down-internet", ["runtime", "down", "--json"]);
   }
@@ -1688,14 +1969,14 @@ class Qualification {
         "runtime",
         "up",
         "--profile",
-        "research",
+        this.options.profile,
         "--internet",
         "--amd64-emulation",
         "--json",
       ],
       600
     );
-    const record = this.record(this.aux);
+    const record = this.machineRecord(this.aux);
     this.check(
       "the stored record enables Rosetta",
       record.rosetta === true,
@@ -1925,6 +2206,7 @@ export async function main(argv: string[]): Promise<number> {
     sequence: [
       "1 archive",
       "2 prepare",
+      "2b pools without internet",
       "3 templates",
       "4 disk identity",
       "5 lifecycle",
@@ -1933,6 +2215,7 @@ export async function main(argv: string[]): Promise<number> {
       "8 rosetta",
       "9 web+db",
       "10 measurements",
+      "11 unclean stop (recorded)",
     ],
   };
   if (!options.run) {

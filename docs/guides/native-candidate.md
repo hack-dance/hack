@@ -881,6 +881,12 @@ provider pin note above), so prepare the new files in a fresh candidate home.
 | `libnftnl-1.3.1-r0.apk` | `8b31395671e910c294d7f0e29d3ac3c7efe9d89264db255f39aa9944dd4b6cac` |
 | `libxtables-1.8.13-r0.apk` | `7535f18d9c7229178bc5e3809e5fea171033e33dfa054d88846512e1f25eefa8` |
 
+At each pool's first start the guest installs these files from the private copy and reads
+only its installed package database: it never contacts a package repository, so pools
+without internet access start the same way. An install that a failed first start
+interrupted resumes on the next start; a guest receipt that names another pool or package
+set is refused.
+
 All APKs are validated before candidate state is changed. Installation publishes a
 complete private directory atomically; an existing installation is revalidated and
 reused without overwriting files. Corrupt installs or interrupted

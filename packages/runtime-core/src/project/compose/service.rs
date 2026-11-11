@@ -60,6 +60,49 @@ fn build(
     }
     Ok(Some(BuildPlan { context:relative(project,&context), dockerfile:relative(project,&dockerfile), target, arguments:args, context_policy:"filtered node-native source; Dockerfile is not executed or read; actual build qualification remains WU04/WU07".into() }))
 }
+/// Docker Desktop's host file-sharing consistency settings. They never change
+/// what a container sees.
+const HOST_CONSISTENCY_HINTS: [&str; 3] = ["consistent", "cached", "delegated"];
+
+/// Parses the optional third field of a short mount (`source:target:MODE`).
+///
+/// `ro` and `rw` are the only modes that change the mount. The consistency
+/// hints above and the SELinux relabel flags `z`/`Z` configure the Docker
+/// host, not the container; the native guest shares source one way and has no
+/// SELinux policy, so they are accepted and ignored. The second value reports
+/// whether any such hint was present. Everything else (`nocopy`, propagation
+/// modes, unknown or empty words, both `ro` and `rw`) still refuses: those
+/// change behaviour this backend does not implement.
+fn short_mount_mode(mode: Option<&str>) -> Result<(bool, bool), CandidateError> {
+    let Some(mode) = mode else {
+        return Ok((false, false));
+    };
+    let mut access = None;
+    let mut hinted = false;
+    for word in mode.split(',') {
+        match word {
+            "ro" | "rw" if access.is_none() => access = Some(word == "ro"),
+            "z" | "Z" => hinted = true,
+            word if HOST_CONSISTENCY_HINTS.contains(&word) => hinted = true,
+            _ => {
+                return Err(problem(
+                    "unsupported_mount_option",
+                    "Mount modes are ro or rw, optionally with the host-only hints cached, delegated, consistent, z or Z.",
+                ));
+            }
+        }
+    }
+    Ok((access.unwrap_or(false), hinted))
+}
+
+fn host_hint_ignored(field: &str) -> Diagnostic {
+    Diagnostic::warning(
+        "mount_host_hint_ignored",
+        field,
+        "A host file-sharing hint on this mount (cached, delegated, consistent, z or Z) has no effect on the native backend and was ignored.",
+    )
+}
+
 fn mounts(
     project: &Path,
     base: &Path,
@@ -86,16 +129,10 @@ fn mounts(
                         "Use source:target[:ro|rw]; anonymous volumes and colon-bearing paths are outside this subset.",
                     ));
                 }
-                let readonly = match parts.get(2).copied().unwrap_or("rw") {
-                    "ro" => true,
-                    "rw" => false,
-                    _ => {
-                        return Err(problem(
-                            "unsupported_mount_option",
-                            "Only ro/rw mount modes are supported.",
-                        ));
-                    }
-                };
+                let (readonly, hinted) = short_mount_mode(parts.get(2).copied())?;
+                if hinted {
+                    diagnostics.push(host_hint_ignored(field));
+                }
                 (
                     if parts[0].starts_with('.') || parts[0].starts_with('/') {
                         "bind"
@@ -134,10 +171,26 @@ fn mounts(
                 };
                 keys(
                     m,
-                    &["type", "source", "target", "read_only", "volume"],
+                    &[
+                        "type",
+                        "source",
+                        "target",
+                        "read_only",
+                        "volume",
+                        "consistency",
+                    ],
                     field,
                     diagnostics,
                 );
+                if let Some(consistency) = m.get("consistency") {
+                    if !HOST_CONSISTENCY_HINTS.contains(&string(consistency)?) {
+                        return Err(problem(
+                            "unsupported_mount_option",
+                            "Mount consistency must be consistent, cached or delegated.",
+                        ));
+                    }
+                    diagnostics.push(host_hint_ignored(field));
+                }
                 (
                     m.get("type").map(string).transpose()?.unwrap_or("volume"),
                     string(

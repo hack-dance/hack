@@ -34,18 +34,26 @@ Already have a project? Follow [Project setup](guides/init-project.md), or use
 If something is wrong, run `hack doctor` and follow the diagnosis. Review what a
 repair touches before `hack doctor --fix`.
 
+## Native backend (beta)
+
+The native backend (beta, Apple Silicon macOS) is a second way to run the same
+project: Hack starts its own small Linux virtual machine instead of using a Docker
+app. It is opt-in and ships only through the `hack-next` channel, not in stable
+Hack. Compose stays the default.
+
+- [Overview](native/README.md) — what it is, what it is not, and why to try it.
+- [Try it](native/try-it.md) — install, run one project on native, switch back.
+- [What works and known limits](native/limits.md)
+- [Reference](native/reference.md) — the detailed pages, by topic.
+
 ## v5
 
 v5 keeps the v4 project model and commands, and Compose stays the default backend.
-The native backend (beta, Apple Silicon macOS) is opt-in and ships only through the
-`hack-next` channel, not in stable Hack.
 
 - [What's new in v5](guides/v5-release-notes.md) — the 5.0.0 release notes.
 - [Upgrade to v5](guides/upgrade-to-v5.md) — what changed, what was retired, how to try it.
 - [Prerelease channel](guides/prereleases.md) — versions, platforms and publication.
 - [Install a prerelease](guides/candidate-install.md) — `hack-next` beside stable Hack.
-- [Native backend (beta)](guides/native-candidate.md) — preparation, limits and verification.
-- [Native config import](reference/native-config-import.md) — preview and adopt existing configuration.
 - [Qualify a project on v5](guides/v5-dogfooding.md) — a staged, reversible rollout.
 
 ## Contribute

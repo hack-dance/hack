@@ -25,6 +25,10 @@ import type { ProjectContext } from "../lib/project.ts";
 import { findProjectContext } from "../lib/project.ts";
 import { assertLegacyProjectDirectory } from "../lib/project-input-selection.ts";
 import { upsertProjectRegistration } from "../lib/projects-registry.ts";
+import {
+  PROXY_BIND_CONFIG_KEY,
+  parseProxyBindAddress,
+} from "../lib/proxy-bind.ts";
 import { logger } from "../ui/logger.ts";
 import { configAdoptCommand } from "./config-adopt.ts";
 import { configImportCommand } from "./config-import.ts";
@@ -226,6 +230,9 @@ function parseConfigSetValue(opts: {
   readonly raw: string;
 }): unknown {
   const value = parseValue({ raw: opts.raw });
+  if (opts.path.join(".") === PROXY_BIND_CONFIG_KEY) {
+    return parseGlobalProxyBind({ target: opts.target, value });
+  }
   if (opts.path.join(".") !== DEFAULT_DOMAIN_CONFIG_KEY) {
     return value;
   }
@@ -243,6 +250,25 @@ function parseConfigSetValue(opts: {
   }
 }
 
+function parseGlobalProxyBind(opts: {
+  readonly target: ConfigTarget;
+  readonly value: unknown;
+}): string {
+  if (opts.target.scope === "project") {
+    throw new CliUsageError(
+      `${PROXY_BIND_CONFIG_KEY} is global-only. Re-run with --global.`
+    );
+  }
+  try {
+    return parseProxyBindAddress(opts.value);
+  } catch (error) {
+    throw new CliUsageError(
+      error instanceof Error
+        ? error.message
+        : `Invalid ${PROXY_BIND_CONFIG_KEY}`
+    );
+  }
+}
 async function resolveProjectForArgs(opts: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;

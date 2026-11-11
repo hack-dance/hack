@@ -24,13 +24,17 @@ import {
   LEGACY_SCHEMAS_HOST,
 } from "./constants.ts";
 import { parseDefaultDomain } from "./lib/default-domain.ts";
+import { PROXY_PORTS, renderProxyPortMapping } from "./lib/proxy-bind.ts";
 
 export function renderGlobalCaddyCompose(opts?: {
   readonly useStaticCoreDnsIp?: boolean;
   readonly useStaticCaddyIp?: boolean;
+  /** Host address for ports 80/443; `null` or absent publishes on all interfaces. */
+  readonly bindAddress?: string | null;
 }): string {
   const useStaticCoreDnsIp = opts?.useStaticCoreDnsIp === true;
   const useStaticCaddyIp = opts?.useStaticCaddyIp === true;
+  const bindAddress = opts?.bindAddress ?? null;
   return [
     "name: hack-dev-proxy",
     "services:",
@@ -41,8 +45,9 @@ export function renderGlobalCaddyCompose(opts?: {
     "      - --polling-interval",
     "      - 5s",
     "    ports:",
-    '      - "80:80"',
-    '      - "443:443"',
+    ...PROXY_PORTS.map(
+      (port) => `      - ${renderProxyPortMapping({ bindAddress, port })}`
+    ),
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock",
     "      - caddy_data:/data",

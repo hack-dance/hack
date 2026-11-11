@@ -32,7 +32,7 @@ flowchart TD
   Docs --> Tasks["Tasks"]
   Docs --> Config["Config reference"]
   Docs --> Ref["Reference (generated)"]
-  Docs --> More["Agents, native (beta), extension points"]
+  Docs --> More["Agents, native (beta)"]
 
   Start --> S1["Overview"]
   Start --> S2["Install: macOS, Linux"]
@@ -127,16 +127,13 @@ reference.
 The existing section: Overview, Try it, What works and known limits, Install the
 prerelease, Reference map, Command contract, Config import, Full reference.
 
-### Extension points
-
-One short page (new) on the places where Hack is meant to be extended or adapted:
-
-- secret storage backends for env values,
-- agent client integrations (the plugin, the MCP server),
-- the runtime backends (Compose, native),
-- on the native backend, the credential adapters (the AWS profile adapter and the
-  gcloud application-default-credentials adapter) and the committed project
-  adaptation file.
+- Cloud credentials (AWS and gcloud) (new): for services that mount `~/.aws` or the
+  gcloud application-default-credentials file. The page covers the problem the
+  credential adapters solve, a sequence diagram from the lifecycle login hook
+  through the adapter to short-lived credentials in the selected services, how to
+  turn each adapter on, what is accepted and refused, expiry and renewal, what
+  `exec` and `run` do, and how Compose differs (plain bind mounts, no adapter). The
+  lifecycle and env pages link to it.
 
 ### Guides
 

@@ -204,16 +204,23 @@ release, verify it against that release's `INSTALLER-SHA256SUMS`, then run that
 file against your channel root:
 
 ```sh
+dir=$(mktemp -d) && cd "$dir" &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
   https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/hack-next-manager-darwin-arm64 \
-  --output hack-next-manager-darwin-arm64
+  --output hack-next-manager-darwin-arm64 &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
   https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/INSTALLER-SHA256SUMS \
-  --output INSTALLER-SHA256SUMS
-shasum -a 256 --check --ignore-missing INSTALLER-SHA256SUMS
-chmod 0700 hack-next-manager-darwin-arm64
+  --output INSTALLER-SHA256SUMS &&
+grep '[ *]hack-next-manager-darwin-arm64$' INSTALLER-SHA256SUMS > manager.sha256 &&
+shasum -a 256 --check manager.sha256 &&
+codesign --verify --strict hack-next-manager-darwin-arm64 &&
+chmod 0700 hack-next-manager-darwin-arm64 &&
 ./hack-next-manager-darwin-arm64 --root "$HOME/.hack-next" upgrade-manager
 ```
+
+Run it as one command. Every step is joined with `&&`, so a failed download, a
+missing or mismatched checksum, or a failed signature check stops before the
+manager runs. The work happens in a new private temporary directory.
 
 The upgrade takes the channel lock, refuses active launchers, recognizes only
 reviewed predecessor managers and the standard launcher, and keeps every installed

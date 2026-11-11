@@ -14,6 +14,7 @@ import {
   requestIdentity,
   selfInvocation,
   startBackgroundCommand,
+  withoutBunRuntimeEnv,
 } from "../lib/background-command/launch.ts";
 import { pruneStore } from "../lib/background-command/store.ts";
 import { HackCliError } from "../lib/cli-result.ts";
@@ -328,7 +329,8 @@ export async function startNativeBackgroundCommand(opts: {
         }),
       ],
       cwd: opts.cwd,
-      env: spawnEnv({ HACK_NO_INTERACTIVE: "1" }),
+      // The native child is this hack binary: no Bun runtime settings.
+      env: withoutBunRuntimeEnv(spawnEnv({ HACK_NO_INTERACTIVE: "1" })),
     },
     redactValues: [],
     requestIdentity: callerIdentity({

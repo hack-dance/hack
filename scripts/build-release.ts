@@ -87,9 +87,14 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
       "build",
       "index.ts",
       "--compile",
-      // A compiled hack must not load a bunfig.toml (preloads) from the
-      // directory it runs in: that directory may be an untrusted project.
+      // A compiled hack must not load a .env (which could set BUN_OPTIONS)
+      // or a bunfig.toml (preloads) from the directory it runs in: that
+      // directory may be an untrusted project. Same flags as the prerelease
+      // manager.
+      "--no-compile-autoload-dotenv",
       "--no-compile-autoload-bunfig",
+      "--no-compile-autoload-tsconfig",
+      "--no-compile-autoload-package-json",
       "--outfile",
       binaryPath,
     ],

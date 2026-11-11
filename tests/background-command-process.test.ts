@@ -722,7 +722,7 @@ describe("background command processes", () => {
   );
 
   test(
-    "the supervisor never loads the project's bunfig.toml or BUN_OPTIONS; the command still gets its cwd and env",
+    "the supervisor never loads the project's bunfig.toml or BUN_OPTIONS (from the command's or the launcher's environment); the command still gets its cwd and env",
     async () => {
       // A preload that records only when the supervisor loads it (the test's
       // own launcher runs in the same directory and may load it too).
@@ -739,6 +739,8 @@ describe("background command processes", () => {
       const launched = await launch({
         argv: ["sh", "-c", 'pwd; echo "opts=$BUN_OPTIONS"'],
         childEnv: { BUN_OPTIONS: `--preload ${preload}` },
+        // As if a project .env had put it into the launcher's own process.
+        extraEnv: { BUN_OPTIONS: `--preload ${preload}` },
       });
       const read = await readUntilEnded({
         journal: launched.journal as LoadedJournal,

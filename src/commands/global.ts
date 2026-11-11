@@ -157,6 +157,12 @@ import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
 import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
+import {
+  bootstrapLinuxGlobalDns,
+  inspectLinuxGlobalDns,
+  linuxDnsStatusPayload,
+  offerLinuxGlobalDnsRemoval,
+} from "./global-linux-dns.ts";
 
 /** Regex to split strings on whitespace. */
 const WHITESPACE_PATTERN = /\s+/;
@@ -946,7 +952,7 @@ async function globalInstall(): Promise<number> {
   await materializeGlobalInstallFiles({ paths, useStaticIps });
   logger.success({ message: "Global files ready in ~/.hack/" });
   await globalUp();
-  await completeGlobalInstallHostBootstrap();
+  await completeGlobalInstallHostBootstrap({ useStaticIps });
   note(
     [
       "Next:",
@@ -1143,14 +1149,20 @@ async function writeGlobalInstallAssets(opts: {
   );
 }
 
-async function completeGlobalInstallHostBootstrap(): Promise<void> {
+async function completeGlobalInstallHostBootstrap(opts: {
+  readonly useStaticIps: boolean;
+}): Promise<void> {
   if (isMac()) {
     await bootstrapMacGlobalInstall();
     return;
   }
+  if (isLinux()) {
+    await bootstrapLinuxGlobalDns({ useStaticIps: opts.useStaticIps });
+    return;
+  }
 
   logger.warn({
-    message: "Skipping DNS bootstrap (only implemented for macOS for now).",
+    message: "Skipping DNS bootstrap (implemented for macOS and Linux).",
   });
   note(
     [
@@ -2302,6 +2314,10 @@ async function globalDown(): Promise<number> {
     });
   }
 
+  if (isLinux()) {
+    await offerLinuxGlobalDnsRemoval();
+  }
+
   if (isMac()) {
     const ok = await confirmSafe({
       message: `Stop dnsmasq? (disables *.${DEFAULT_PROJECT_TLD}, *.${DEFAULT_NEW_PROJECT_TLD} and *.${DEFAULT_OAUTH_ALIAS_ROOT} DNS; requires sudo)`,
@@ -2449,17 +2465,21 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
   const paths = getGlobalPaths();
 
   if (opts.json) {
-    const [caddy, logging, networks, gateway] = await Promise.all([
+    const [caddy, logging, networks, gateway, hostDns] = await Promise.all([
       readComposeStatus(paths.caddyCompose),
       readComposeStatus(paths.loggingCompose),
       readNetworksStatus([DEFAULT_INGRESS_NETWORK, DEFAULT_LOGGING_NETWORK]),
       collectGatewayStatus(),
+      readLinuxHostDnsStatus(),
     ]);
     const summary = {
       caddy_ok: caddy.ok,
       logging_ok: logging.ok,
       networks_ok: networks.ok,
       gateway_enabled: gateway.gateway_enabled,
+      ...(hostDns === null
+        ? {}
+        : { host_dns_ok: hostDns.state === "configured" }),
       ok: caddy.ok && logging.ok && networks.ok,
     };
     const payload = {
@@ -2468,6 +2488,7 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
       logging,
       networks,
       gateway,
+      ...(hostDns === null ? {} : { host_dns: hostDns }),
       summary,
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -2486,7 +2507,32 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
   await display.section("Gateway");
   await renderGatewayStatus();
 
+  const hostDns = await readLinuxHostDnsStatus();
+  if (hostDns) {
+    await display.section("Host DNS");
+    await display.panel({
+      title: `Linux DNS (${hostDns.resolver})`,
+      tone: hostDns.state === "configured" ? "success" : "warn",
+      lines: [
+        hostDns.code
+          ? `${hostDns.message} (code=${hostDns.code})`
+          : hostDns.message,
+        ...hostDns.fix.map((line) => `fix: ${line}`),
+      ],
+    });
+  }
+
   return 0;
+}
+
+/** Linux host DNS route, or `null` on other platforms. */
+async function readLinuxHostDnsStatus(): Promise<ReturnType<
+  typeof linuxDnsStatusPayload
+> | null> {
+  if (!isLinux()) {
+    return null;
+  }
+  return linuxDnsStatusPayload(await inspectLinuxGlobalDns());
 }
 
 type ComposeServiceStatus = {

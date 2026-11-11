@@ -1,0 +1,540 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+  DEFAULT_COREDNS_IP,
+  DEFAULT_INGRESS_GATEWAY,
+} from "../src/constants.ts";
+import {
+  detectLinuxResolver,
+  LINUX_DNS_UDEV_RULE_PATH,
+  LINUX_DNS_UNIT_PATH,
+  type LinuxLinkRoute,
+  NM_DNSMASQ_HACK_PATH,
+  parseLinkForAddress,
+  parseNetworkManagerDnsMode,
+  parseResolvectlLinkValues,
+  renderLinuxDnsUdevRule,
+  renderLinuxDnsUnit,
+} from "../src/lib/linux-dns.ts";
+import {
+  applyLinuxDns,
+  inspectLinuxDns,
+  type LinuxDnsHost,
+  removeLinuxDns,
+  renderPrivilegedCommand,
+} from "../src/lib/linux-dns-setup.ts";
+
+const DOMAINS = ["hack", "hack.local", "hack.gy"] as const;
+const STUB_RESOLV = "nameserver 127.0.0.53\noptions edns0 trust-ad\n";
+const BRIDGE = "br-0123456789ab";
+
+type FakeHostState = {
+  files: Map<string, string>;
+  dirs: Map<string, string[]>;
+  resolvedActive: boolean;
+  link: string | null;
+  routes: Map<string, LinuxLinkRoute>;
+  staged: Map<string, string>;
+  privileged: string[][];
+  /** Exit code per command verb (argv[0] plus argv[1]); default 0. */
+  failOn?: string;
+};
+
+/**
+ * In-memory host. Privileged commands mutate the fake `/etc` and link state
+ * the way the real commands would, so a re-inspection sees their effect.
+ */
+function createFakeHost(init: Partial<FakeHostState> = {}): {
+  readonly host: LinuxDnsHost;
+  readonly state: FakeHostState;
+} {
+  const state: FakeHostState = {
+    files: init.files ?? new Map([["/etc/resolv.conf", STUB_RESOLV]]),
+    dirs: init.dirs ?? new Map(),
+    resolvedActive: init.resolvedActive ?? true,
+    link: init.link === undefined ? BRIDGE : init.link,
+    routes: init.routes ?? new Map(),
+    staged: new Map(),
+    privileged: [],
+    failOn: init.failOn,
+  };
+  const host: LinuxDnsHost = {
+    readFile: async (path) => state.files.get(path) ?? null,
+    listDir: async (path) => state.dirs.get(path) ?? [],
+    isResolvedActive: async () => state.resolvedActive,
+    findLinkWithAddress: async (address) =>
+      address === DEFAULT_INGRESS_GATEWAY ? state.link : null,
+    readLinkRoute: async (link) =>
+      state.routes.get(link) ?? { dns: [], domains: [], defaultRoute: true },
+    stageFile: async ({ name, content }) => {
+      const path = `/fake-stage/${name}`;
+      state.staged.set(path, content);
+      return path;
+    },
+    runPrivileged: async (argv) => {
+      state.privileged.push([...argv]);
+      if (state.failOn && argv.join(" ").startsWith(state.failOn)) {
+        return 1;
+      }
+      const [verb] = argv;
+      if (verb === "install") {
+        const source = argv.at(-2) ?? "";
+        const target = argv.at(-1) ?? "";
+        state.files.set(target, state.staged.get(source) ?? "");
+      } else if (verb === "rm") {
+        for (const path of argv.slice(2)) {
+          state.files.delete(path);
+        }
+      } else if (verb === "systemctl" && argv[1] === "restart") {
+        const link = /^hack-dns@(.+)\.service$/.exec(argv[2] ?? "")?.[1];
+        const unit = state.files.get(LINUX_DNS_UNIT_PATH);
+        if (link && unit && link === state.link) {
+          state.routes.set(link, routeFromUnit(unit));
+        }
+      } else if (verb === "resolvectl" && argv[1] === "revert") {
+        state.routes.delete(argv[2] ?? "");
+      }
+      return 0;
+    },
+  };
+  return { host, state };
+}
+
+/** What the unit's ExecStart lines would set on the link. */
+function routeFromUnit(unit: string): LinuxLinkRoute {
+  const dns = /ExecStart=resolvectl dns %i (\S+)/.exec(unit)?.[1] ?? "";
+  const domains =
+    /ExecStart=resolvectl domain %i (.+)/.exec(unit)?.[1]?.split(" ") ?? [];
+  return { dns: [dns], domains, defaultRoute: false };
+}
+
+function configuredFiles(domains: readonly string[] = DOMAINS) {
+  return new Map([
+    ["/etc/resolv.conf", STUB_RESOLV],
+    [LINUX_DNS_UNIT_PATH, renderLinuxDnsUnit({ domains })],
+    [LINUX_DNS_UDEV_RULE_PATH, renderLinuxDnsUdevRule()],
+  ]);
+}
+
+const appliedRoute = (
+  domains: readonly string[] = DOMAINS
+): LinuxLinkRoute => ({
+  dns: [DEFAULT_COREDNS_IP],
+  domains: domains.map((domain) => `~${domain}`),
+  defaultRoute: false,
+});
+
+describe("detectLinuxResolver", () => {
+  test("resolved with the stub in resolv.conf", () => {
+    expect(
+      detectLinuxResolver({
+        resolvedActive: true,
+        resolvConf: STUB_RESOLV,
+        nsswitchConf: null,
+        networkManagerConf: null,
+      })
+    ).toEqual({
+      kind: "systemd-resolved-stub",
+      nameservers: ["127.0.0.53"],
+      lookupsBypassResolved: false,
+    });
+  });
+
+  test("resolved without the stub reports whether nsswitch reaches it", () => {
+    const base = {
+      resolvedActive: true,
+      resolvConf: "nameserver 192.0.2.1\n",
+      networkManagerConf: null,
+    };
+    expect(
+      detectLinuxResolver({
+        ...base,
+        nsswitchConf: "hosts: files resolve [!UNAVAIL=return] dns\n",
+      })
+    ).toMatchObject({ kind: "systemd-resolved", lookupsBypassResolved: false });
+    expect(
+      detectLinuxResolver({ ...base, nsswitchConf: "hosts: files dns\n" })
+    ).toMatchObject({ kind: "systemd-resolved", lookupsBypassResolved: true });
+  });
+
+  test("NetworkManager dnsmasq, plain resolv.conf and none", () => {
+    expect(
+      detectLinuxResolver({
+        resolvedActive: false,
+        resolvConf: "nameserver 127.0.0.1\n",
+        nsswitchConf: null,
+        networkManagerConf: "[main]\nplugins=keyfile\n\n[main]\ndns=dnsmasq\n",
+      }).kind
+    ).toBe("networkmanager-dnsmasq");
+    expect(
+      detectLinuxResolver({
+        resolvedActive: false,
+        resolvConf: "nameserver 192.0.2.1\n",
+        nsswitchConf: null,
+        networkManagerConf: null,
+      }).kind
+    ).toBe("resolv-conf");
+    expect(
+      detectLinuxResolver({
+        resolvedActive: false,
+        resolvConf: null,
+        nsswitchConf: null,
+        networkManagerConf: null,
+      }).kind
+    ).toBe("none");
+  });
+
+  test("NetworkManager dns= outside [main] and later overrides", () => {
+    expect(parseNetworkManagerDnsMode("[logging]\ndns=dnsmasq\n")).toBeNull();
+    expect(
+      parseNetworkManagerDnsMode(
+        "[main]\ndns=dnsmasq\n[main]\ndns=systemd-resolved\n"
+      )
+    ).toBe("systemd-resolved");
+  });
+});
+
+describe("rendered route files", () => {
+  test("unit routes every suffix without naming a bridge", () => {
+    const unit = renderLinuxDnsUnit({ domains: [...DOMAINS, "example.test"] });
+    expect(unit).toContain(`ExecStart=resolvectl dns %i ${DEFAULT_COREDNS_IP}`);
+    expect(unit).toContain(
+      "ExecStart=resolvectl domain %i ~hack ~hack.local ~hack.gy ~example.test"
+    );
+    expect(unit).toContain("ExecStart=resolvectl default-route %i no");
+    expect(unit).toContain(` inet ${DEFAULT_INGRESS_GATEWAY}/`);
+    expect(unit).not.toContain("br-");
+    expect(renderLinuxDnsUdevRule()).toContain(
+      'ENV{SYSTEMD_WANTS}+="hack-dns@%k.service"'
+    );
+  });
+
+  test("ExecCondition is valid sh once systemd turns $$ into $", async () => {
+    const unit = renderLinuxDnsUnit({ domains: DOMAINS });
+    const line = unit
+      .split("\n")
+      .find((entry) => entry.startsWith("ExecCondition="));
+    const script = /\/bin\/sh -c '(.*)' hack-dns %i$/.exec(line ?? "")?.[1];
+    expect(script).toBeDefined();
+    const dir = await mkdtemp(join(tmpdir(), "hack-linux-dns-"));
+    try {
+      const path = join(dir, "condition.sh");
+      await writeFile(path, `${(script ?? "").replaceAll("$$", "$")}\n`);
+      const proc = Bun.spawn(["sh", "-n", path], { stderr: "pipe" });
+      expect(await proc.exited).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("parsers", () => {
+  test("ip -o -4 addr show", () => {
+    const output = [
+      "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever",
+      `7: ${BRIDGE}    inet ${DEFAULT_INGRESS_GATEWAY}/16 brd 172.30.255.255 scope global ${BRIDGE}\\       valid_lft forever`,
+    ].join("\n");
+    expect(
+      parseLinkForAddress({
+        ipOutput: output,
+        address: DEFAULT_INGRESS_GATEWAY,
+      })
+    ).toBe(BRIDGE);
+    expect(
+      parseLinkForAddress({ ipOutput: output, address: "172.30.0.10" })
+    ).toBeNull();
+  });
+
+  test("resolvectl link values", () => {
+    expect(
+      parseResolvectlLinkValues(`Link 7 (${BRIDGE}): ~hack ~hack.local\n`)
+    ).toEqual(["~hack", "~hack.local"]);
+    expect(parseResolvectlLinkValues(`Link 7 (${BRIDGE}):\n`)).toEqual([]);
+  });
+});
+
+describe("applyLinuxDns", () => {
+  test("fresh install shows the plan, asks once and installs both files", async () => {
+    const { host, state } = createFakeHost();
+    const shown: string[][] = [];
+    let asked = 0;
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: (plan) => shown.push(plan.files.map((file) => file.path)),
+      confirm: async () => {
+        asked += 1;
+        return true;
+      },
+    });
+    expect(outcome.status).toBe("configured");
+    expect(asked).toBe(1);
+    expect(shown).toEqual([[LINUX_DNS_UNIT_PATH, LINUX_DNS_UDEV_RULE_PATH]]);
+    expect(state.privileged.map((argv) => argv.slice(0, 2).join(" "))).toEqual([
+      "install -D",
+      "install -D",
+      "systemctl daemon-reload",
+      "udevadm control",
+      "systemctl restart",
+    ]);
+    expect(state.privileged.at(-1)).toEqual([
+      "systemctl",
+      "restart",
+      `hack-dns@${BRIDGE}.service`,
+    ]);
+    expect(state.files.get(LINUX_DNS_UNIT_PATH)).toBe(
+      renderLinuxDnsUnit({ domains: DOMAINS })
+    );
+  });
+
+  test("already configured changes nothing and does not prompt", async () => {
+    const { host, state } = createFakeHost({
+      files: configuredFiles(),
+      routes: new Map([[BRIDGE, appliedRoute()]]),
+    });
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => {
+        throw new Error("no plan expected");
+      },
+      confirm: async () => {
+        throw new Error("no prompt expected");
+      },
+    });
+    expect(outcome.status).toBe("configured");
+    expect(state.privileged).toEqual([]);
+    expect(state.staged.size).toBe(0);
+  });
+
+  test("drifted config (new default_domain) is reported stale and rewritten", async () => {
+    const { host, state } = createFakeHost({
+      files: configuredFiles(),
+      routes: new Map([[BRIDGE, appliedRoute()]]),
+    });
+    const domains = [...DOMAINS, "example.test"];
+    const before = await inspectLinuxDns({ host, domains });
+    expect(before).toMatchObject({
+      state: "stale",
+      code: "linux_dns_route_stale",
+    });
+    const outcome = await applyLinuxDns({
+      host,
+      domains,
+      canPrompt: true,
+      show: () => undefined,
+      confirm: async () => true,
+    });
+    expect(outcome.status).toBe("configured");
+    expect(state.files.get(LINUX_DNS_UNIT_PATH)).toContain("~example.test");
+  });
+
+  test("files present but link not routed only restarts the unit", async () => {
+    const { host, state } = createFakeHost({ files: configuredFiles() });
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => undefined,
+      confirm: async () => true,
+    });
+    expect(outcome.status).toBe("configured");
+    expect(state.privileged).toEqual([
+      ["systemctl", "restart", `hack-dns@${BRIDGE}.service`],
+    ]);
+  });
+
+  test("non-interactive returns the commands with a stable code and runs nothing", async () => {
+    const { host, state } = createFakeHost();
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: false,
+      show: () => undefined,
+      confirm: async () => {
+        throw new Error("must not prompt");
+      },
+    });
+    expect(outcome.status).toBe("pending");
+    if (outcome.status !== "pending") {
+      return;
+    }
+    expect(outcome.code).toBe("linux_dns_route_missing");
+    expect(state.privileged).toEqual([]);
+    expect(outcome.plan.commands.map(renderPrivilegedCommand)[0]).toBe(
+      `sudo install -D -o root -g root -m 0644 /fake-stage/hack-dns@.service ${LINUX_DNS_UNIT_PATH}`
+    );
+  });
+
+  test("declined prompt is pending, not applied", async () => {
+    const { host, state } = createFakeHost();
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => undefined,
+      confirm: async () => false,
+    });
+    expect(outcome.status).toBe("pending");
+    expect(state.privileged).toEqual([]);
+  });
+
+  test("resolved inactive gives manual steps and never prompts", async () => {
+    const { host, state } = createFakeHost({
+      resolvedActive: false,
+      files: new Map([["/etc/resolv.conf", "nameserver 192.0.2.1\n"]]),
+    });
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => {
+        throw new Error("no plan expected");
+      },
+      confirm: async () => {
+        throw new Error("no prompt expected");
+      },
+    });
+    expect(outcome.status).toBe("manual");
+    if (outcome.status !== "manual") {
+      return;
+    }
+    expect(outcome.inspection.code).toBe("linux_dns_resolver_manual");
+    expect(outcome.inspection.resolver.kind).toBe("resolv-conf");
+    expect(outcome.inspection.fix.join("\n")).toContain(
+      "sudo systemctl enable --now systemd-resolved"
+    );
+    expect(state.privileged).toEqual([]);
+  });
+
+  test("NetworkManager dnsmasq: manual steps, then configured once routed", async () => {
+    const files = new Map([
+      ["/etc/resolv.conf", "nameserver 127.0.0.1\n"],
+      ["/etc/NetworkManager/NetworkManager.conf", "[main]\ndns=dnsmasq\n"],
+    ]);
+    const { host, state } = createFakeHost({ resolvedActive: false, files });
+    const manual = await inspectLinuxDns({ host, domains: DOMAINS });
+    expect(manual.state).toBe("manual");
+    expect(manual.fix.join("\n")).toContain(NM_DNSMASQ_HACK_PATH);
+    expect(manual.fix.join("\n")).toContain(
+      `server=/hack.gy/${DEFAULT_COREDNS_IP}`
+    );
+
+    state.dirs.set("/etc/NetworkManager/dnsmasq.d", ["hack.conf"]);
+    state.files.set(
+      NM_DNSMASQ_HACK_PATH,
+      DOMAINS.map((domain) => `server=/${domain}/${DEFAULT_COREDNS_IP}`).join(
+        "\n"
+      )
+    );
+    expect((await inspectLinuxDns({ host, domains: DOMAINS })).state).toBe(
+      "configured"
+    );
+  });
+
+  test("no bridge carries the gateway: install files, report bridge_missing", async () => {
+    const { host, state } = createFakeHost({ link: null });
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => undefined,
+      confirm: async () => true,
+    });
+    expect(outcome.status).toBe("applied_unverified");
+    if (outcome.status !== "applied_unverified") {
+      return;
+    }
+    expect(outcome.inspection.code).toBe("linux_dns_bridge_missing");
+    expect(state.privileged.some((argv) => argv[1] === "restart")).toBe(false);
+  });
+
+  test("a failing privileged step stops and reports it", async () => {
+    const { host, state } = createFakeHost({
+      failOn: "systemctl daemon-reload",
+    });
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => undefined,
+      confirm: async () => true,
+    });
+    expect(outcome).toMatchObject({
+      status: "failed",
+      failedCommand: ["systemctl", "daemon-reload"],
+      exitCode: 1,
+    });
+    expect(state.privileged).toHaveLength(3);
+  });
+
+  test("resolved reached only through nsswitch-less resolv.conf is flagged", async () => {
+    const files = configuredFiles();
+    files.set("/etc/resolv.conf", "nameserver 192.0.2.1\n");
+    files.set("/etc/nsswitch.conf", "hosts: files dns\n");
+    const { host } = createFakeHost({
+      files,
+      routes: new Map([[BRIDGE, appliedRoute()]]),
+    });
+    expect(await inspectLinuxDns({ host, domains: DOMAINS })).toMatchObject({
+      state: "manual",
+      code: "linux_dns_resolved_bypassed",
+    });
+  });
+});
+
+describe("removeLinuxDns", () => {
+  test("reverts the link and deletes both files after confirmation", async () => {
+    const { host, state } = createFakeHost({
+      files: configuredFiles(),
+      routes: new Map([[BRIDGE, appliedRoute()]]),
+    });
+    const outcome = await removeLinuxDns({
+      host,
+      domains: DOMAINS,
+      confirm: async () => true,
+    });
+    expect(outcome.status).toBe("removed");
+    expect(state.privileged).toEqual([
+      ["resolvectl", "revert", BRIDGE],
+      ["rm", "-f", LINUX_DNS_UNIT_PATH, LINUX_DNS_UDEV_RULE_PATH],
+      ["systemctl", "daemon-reload"],
+      ["udevadm", "control", "--reload"],
+    ]);
+    expect((await inspectLinuxDns({ host, domains: DOMAINS })).state).toBe(
+      "missing"
+    );
+  });
+
+  test("declined or absent changes nothing", async () => {
+    const configured = createFakeHost({ files: configuredFiles() });
+    expect(
+      (
+        await removeLinuxDns({
+          host: configured.host,
+          domains: DOMAINS,
+          confirm: async () => false,
+        })
+      ).status
+    ).toBe("declined");
+    expect(configured.state.privileged).toEqual([]);
+
+    const absent = createFakeHost();
+    expect(
+      (
+        await removeLinuxDns({
+          host: absent.host,
+          domains: DOMAINS,
+          confirm: async () => {
+            throw new Error("no prompt expected");
+          },
+        })
+      ).status
+    ).toBe("absent");
+  });
+});

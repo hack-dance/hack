@@ -370,7 +370,8 @@ export function limitOutputFileSize(
 /**
  * The file-size wrapper picks its `ulimit -f` unit from `BASH_VERSION`. Bash
  * sets that itself at startup, but other shells (dash, ash, ksh) would read an
- * inherited one, so a project env setting it could double the cap. Bash
+ * inherited one, so a project env setting it could pick the wrong unit (on
+ * dash, an inherited 4.x value halved the cap to 32 MiB). Bash
  * resets it for anything bash runs; nothing else is expected to read it.
  */
 export function withoutInheritedBashVersion(

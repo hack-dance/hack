@@ -111,6 +111,8 @@ for (const [old, target] of [
 const repositoryRoot = new URL("../../", import.meta.url).pathname;
 const mermaidFence = /^(?:```|~~~)mermaid[ \t]*$/gm;
 const diagramImage = /<img\b[^>]*>/g;
+const expandControl =
+  /<button\b[^>]*aria-label="Open diagram full size: [^"]*"[^>]*class="diagram-expand"|<button\b[^>]*class="diagram-expand"[^>]*aria-label="Open diagram full size: [^"]*"/g;
 const diagramSource = /src="(\/diagrams\/[a-f0-9]+\.(light|dark)\.svg)"/;
 let diagramBlocks = 0;
 const diagramFiles = new Set<string>();
@@ -135,7 +137,8 @@ for (const version of ["v4", "v5"] as const) {
     }
     const route = `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
     const shown = { light: 0, dark: 0 };
-    for (const tag of (await read(route)).match(diagramImage) ?? []) {
+    const html = await read(route);
+    for (const tag of html.match(diagramImage) ?? []) {
       const source = diagramSource.exec(tag);
       const variant = source?.[2] as "light" | "dark" | undefined;
       if (
@@ -150,6 +153,13 @@ for (const version of ["v4", "v5"] as const) {
     if (shown.light !== blocks || shown.dark !== blocks) {
       throw new Error(
         `${route}: ${blocks} Mermaid blocks but ${shown.light} light and ${shown.dark} dark diagram images`
+      );
+    }
+    // Each image carries the control that opens it full size.
+    const controls = (html.match(expandControl) ?? []).length;
+    if (controls !== blocks * 2) {
+      throw new Error(
+        `${route}: ${blocks * 2} diagram images but ${controls} full-size controls`
       );
     }
     diagramBlocks += blocks;

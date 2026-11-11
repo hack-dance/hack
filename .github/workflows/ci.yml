@@ -293,6 +293,8 @@ jobs:
       - run: bun run docs:prepare
       - run: bun run docs:check
       - run: bun run docs:typecheck
+      # DOM test of the full-size diagram control (open, zoom, close).
+      - run: bun run --cwd site test
       # The Vercel build command (site/vercel.json) after docs:prepare.
       - run: bun run --cwd site build
       - name: HTTP smoke of the production build

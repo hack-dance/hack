@@ -372,6 +372,9 @@ fn inert_logging_and_metadata_labels_are_admitted_with_review_warnings() {
     // Router, runtime and ownership labels are never treated as inert.
     for key in [
         "traefik.enable",
+        "caddy.header",
+        "caddy_ingress_network",
+        "caddy_0",
         "com.docker.compose.project",
         "hack.custom",
         "io.hack-local.owner",

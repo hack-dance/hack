@@ -248,16 +248,58 @@ pub(super) fn compile(
     })
 }
 
-/// Prefixes of labels that carry router, runtime or Hack meaning. A label under
-/// one of them is either recognized by a specific feature or refused at review.
-const RESERVED_LABEL_PREFIXES: [&str; 4] = ["caddy", "traefik", "hack", "com.docker.compose"];
+/// Router label families. Caddy and Traefik label dialects also use forms
+/// such as `caddy_0` and `caddy_ingress_network`, so any key that starts with
+/// the word belongs to the router, not only the dotted ones.
+const ROUTER_LABEL_WORDS: [&str; 2] = ["caddy", "traefik"];
+
+/// Runtime and Hack namespaces: the exact key and everything under it.
+const RESERVED_LABEL_NAMESPACES: [&str; 2] = ["hack", "com.docker.compose"];
 
 /// Whether a service label is plain metadata: outside every Hack ownership
-/// namespace and every reserved prefix. Such a label is never sent to the
-/// engine (graph labels are ownership-only), so it cannot change a run.
+/// namespace, every router label family and every reserved namespace. Such a
+/// label is never sent to the engine (graph labels are ownership-only), so it
+/// cannot change a run. The TypeScript admission mirrors this rule
+/// (`isInertMetadataLabel` in `src/backends/native-project-routing.ts`).
 pub(crate) fn inert_metadata_label(key: &str) -> bool {
     !ownership_labels::is_hack_ownership_label(key)
-        && !RESERVED_LABEL_PREFIXES
+        && !ROUTER_LABEL_WORDS.iter().any(|word| key.starts_with(word))
+        && !RESERVED_LABEL_NAMESPACES
             .iter()
             .any(|prefix| key == *prefix || key.starts_with(&format!("{prefix}.")))
+}
+
+#[cfg(test)]
+mod inert_label_tests {
+    use super::inert_metadata_label;
+
+    /// The same table as `tests/native-project-routing.test.ts`: the CLI
+    /// admission and this review must agree key by key.
+    #[test]
+    fn metadata_labels_are_inert_and_router_runtime_and_ownership_labels_are_not() {
+        for key in [
+            "other",
+            "com.example.team",
+            "org.opencontainers.image.source",
+            "hackathon",
+            "com.docker.composed",
+        ] {
+            assert!(inert_metadata_label(key), "{key}");
+        }
+        for key in [
+            "caddy",
+            "caddy.header",
+            "caddy_ingress_network",
+            "caddy_0",
+            "traefik.enable",
+            "hack",
+            "hack.custom",
+            "com.docker.compose",
+            "com.docker.compose.project",
+            "io.hack-local",
+            "io.hack-local.owner",
+        ] {
+            assert!(!inert_metadata_label(key), "{key}");
+        }
+    }
 }

@@ -8,6 +8,7 @@ import {
   test,
 } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { closeSync, openSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -28,8 +29,10 @@ import {
   GUEST_STOP_SCRIPT,
 } from "../src/lib/background-command/container-stop.ts";
 import {
+  type CommandMeta,
   type EventEnvelope,
   journalPaths,
+  OUTPUT_FILE_LIMIT_BYTES,
   readChild,
   readEvents,
   readOwner,
@@ -47,6 +50,7 @@ import {
   readCommandEvents,
 } from "../src/lib/background-command/reader.ts";
 import { acceptCommand } from "../src/lib/background-command/store.ts";
+import { limitOutputFileSize } from "../src/lib/background-command/supervisor.ts";
 
 // ---------------------------------------------------------------------------
 // HACK-2085: real detached supervisors and children, on this host's kernel.
@@ -947,21 +951,55 @@ describe("background command processes", () => {
   );
 
   test(
+    "the file-size wrapper stops a writer at exactly the output file limit",
+    async () => {
+      // The wrapper alone, with no supervisor cutting the file back: the
+      // kernel limit is the only thing between the writer and the disk.
+      const path = join(fixture.root, "capped");
+      const fd = openSync(path, "a", 0o600);
+      try {
+        const argv = limitOutputFileSize(
+          { capture: "full", backend: "compose" } as CommandMeta,
+          [
+            "head",
+            "-c",
+            String(OUTPUT_FILE_LIMIT_BYTES + 1024 * 1024),
+            "/dev/zero",
+          ]
+        );
+        const proc = Bun.spawn(argv, {
+          stdin: "ignore",
+          stdout: fd,
+          stderr: "ignore",
+        });
+        // head reports EFBIG ("File too large") and fails.
+        expect(await proc.exited).not.toBe(0);
+      } finally {
+        closeSync(fd);
+      }
+      expect((await stat(path)).size).toBe(OUTPUT_FILE_LIMIT_BYTES);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
     "a burst between two polls cannot grow an output file past the kernel file-size limit",
     async () => {
-      // 100 MiB in one burst, faster than the 200 ms poll; the file-size
-      // limit (64 MiB) makes the writer's further writes fail instead.
+      // 100 MiB in one burst. Capture stops at 8 MiB and the supervisor cuts
+      // the file back; whether the writer also hits the 64 MiB kernel limit
+      // (and fails with EFBIG) depends on how fast it writes relative to the
+      // 200 ms poll, so only the bound is asserted here. The wrapper test
+      // above proves the limit itself.
       const launched = await launch({
-        // Capture stops at 8 MiB, so the writer's own exit status is the
-        // evidence: head fails with EFBIG ("File too large") at the limit.
         argv: ["sh", "-c", "head -c 104857600 /dev/zero"],
       });
       const journal = launched.journal as LoadedJournal;
       const read = await readUntilEnded({ journal });
-      expect(read.outcome).toBe("failed");
-      expect(read.exitCode).toBe(1);
+      expect(read.outcome === "failed" || read.outcome === "succeeded").toBe(
+        true
+      );
       expect((await stat(journal.paths.stdout)).size).toBeLessThanOrEqual(
-        64 * 1024 * 1024
+        OUTPUT_FILE_LIMIT_BYTES
       );
     },
     TEST_TIMEOUT_MS

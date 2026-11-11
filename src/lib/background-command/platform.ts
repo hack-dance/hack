@@ -1,3 +1,4 @@
+import { dlopen, FFIType } from "bun:ffi";
 import { spawn } from "node:child_process";
 import { closeSync, constants, fstatSync, openSync } from "node:fs";
 import { parseObservedProcesses } from "../host-command-observation.ts";
@@ -9,7 +10,9 @@ import { exec } from "../shell.ts";
  *
  * Linux and macOS share one implementation. Both provide setsid(2) through a
  * detached spawn, O_APPEND regular files, kill(2) on a negative process-group
- * id, and `ps -o lstart=,sess=` with `LC_ALL=C`. Anything outside this module
+ * id, `ps -o lstart=` with `LC_ALL=C`, and getsid(2) from libc (macOS `ps`
+ * prints 0 for `sess`, so the session id is read through libc, with `ps` only
+ * as a fallback). Anything outside this module
  * that needs one of these effects goes through it, so a third platform has one
  * place to differ.
  */
@@ -239,6 +242,10 @@ export async function readOwnIdentity(): Promise<{
 }
 
 export async function readSessionId(pid: number): Promise<number | null> {
+  const fromLibc = getsidFromLibc(pid);
+  if (fromLibc !== undefined) {
+    return fromLibc;
+  }
   try {
     const result = await exec(["ps", "-o", "sess=", "-p", String(pid)], {
       stdin: "ignore",
@@ -312,3 +319,35 @@ export async function readBootTimeMs(): Promise<number | null> {
 
 const BTIME_PATTERN = /^btime (\d+)$/m;
 const BOOTTIME_PATTERN = /sec = (\d+)/;
+
+let libcGetsid: ((pid: number) => number) | null | undefined;
+
+/**
+ * getsid(2) through libc: a positive session id, null when the process does
+ * not exist (or is not visible), undefined when libc cannot be loaded (the
+ * caller then falls back to `ps`).
+ */
+function getsidFromLibc(pid: number): number | null | undefined {
+  if (libcGetsid === undefined) {
+    try {
+      const library =
+        process.platform === "darwin"
+          ? "/usr/lib/libSystem.B.dylib"
+          : "libc.so.6";
+      const libc = dlopen(library, {
+        getsid: { args: [FFIType.i32], returns: FFIType.i32 },
+      });
+      libcGetsid = (target) => libc.symbols.getsid(target);
+    } catch {
+      libcGetsid = null;
+    }
+  }
+  if (libcGetsid === null) {
+    return undefined;
+  }
+  if (!(Number.isSafeInteger(pid) && pid > 0)) {
+    return null;
+  }
+  const session = libcGetsid(pid);
+  return session > 0 ? session : null;
+}

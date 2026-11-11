@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
+  copyFileSync,
   ftruncateSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
   rmSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,12 +26,15 @@ import {
   inertField,
   isExecutor,
   main,
+  type Options,
   parseCpuTime,
   parseFootprint,
   parseOptions,
   parseProcessRows,
   parseTopMemory,
   providerProcesses,
+  Qualification,
+  readJson,
   readyData,
   rootProblem,
   sourceTemplatePins,
@@ -348,6 +355,12 @@ describe("provider pin qualification", () => {
       )
     ).toBeNull();
     expect(readyData(JSON.stringify({ ok: false, data: ready }))).toBeNull();
+    expect(readJson('{"receipt":{"base_id":"b"}}')).toEqual({
+      receipt: { base_id: "b" },
+    });
+    for (const other of ["", "[]", "null", "mount warning:"]) {
+      expect(readJson(other)).toBeNull();
+    }
     expect(readyData("not json")).toBeNull();
   });
 
@@ -361,5 +374,197 @@ describe("provider pin qualification", () => {
       "new Uint8Array(65536).map((_, i) => i % 251)"
     );
     expect(BLOB_SHA256).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// The run's cleanup between steps, against a fake `hack`: `up`/`restart` stay in the
+// foreground until `down` (or, when `stubborn` exists, ignore it), and `ps` reports a
+// ready container named after the latest start. No pool, VM or real `hack` is involved.
+describe("keep-going cleanup and bounded waits (fake hack)", () => {
+  function fixture() {
+    const root = mkdtempSync(join(tmpdir(), "qualify-cleanup-"));
+    for (const directory of ["evidence", "project", "tmp", "bin"]) {
+      mkdirSync(join(root, directory), { mode: 0o700 });
+    }
+    const hack = join(root, "bin", "hack");
+    writeFileSync(
+      hack,
+      `#!/bin/sh
+echo "$*" >> '${root}/hack.log'
+case "$1" in
+  ps) printf '{"ok":true,"data":{"status":"observed","phase":"ready-observed","items":[{"service":"web","container":"c-%s"}]}}' "$(cat '${root}/gen' 2>/dev/null)" ;;
+  up|restart)
+    n=$(( $(cat '${root}/gen' 2>/dev/null || echo 0) + 1 )); echo "$n" > '${root}/gen'
+    if [ -e '${root}/stubborn' ]; then exec sleep 20; fi
+    while [ ! -e '${root}/stop' ]; do sleep 0.05; done; rm -f '${root}/stop' ;;
+  down) touch '${root}/stop' ;;
+esac
+`,
+      { mode: 0o700 }
+    );
+    const options = {
+      hack,
+      native: "/bin/true",
+      root,
+      keepGoing: true,
+    } as unknown as Options;
+    const run = new Qualification(options);
+    run.exitWaitMs = 1500;
+    run.note = () => undefined;
+    const children = () => [
+      ...run.strays,
+      ...(run.foreground ? [run.foreground] : []),
+    ];
+    const done = () => {
+      for (const child of children()) {
+        child.kill("SIGKILL");
+      }
+      rmSync(root, { recursive: true, force: true });
+    };
+    return { root, run, done };
+  }
+
+  test("a failed step's foreground is stopped and shown gone before the next step", async () => {
+    const { root, run, done } = fixture();
+    try {
+      let later = false;
+      const code = await run.runSteps([
+        [
+          "boots then fails",
+          false,
+          async () => {
+            await run.upForeground("up", "up");
+            throw new Error("synthetic failure after boot");
+          },
+        ],
+        [
+          "next",
+          false,
+          () => {
+            later = true;
+          },
+        ],
+      ]);
+      expect(code).toBeNull();
+      expect(later).toBe(true);
+      expect(run.blocked).toBeNull();
+      expect(run.strays).toHaveLength(0);
+      expect(run.recorded.stopped_after_boots_then_fails).toEqual({
+        foregrounds_running: [],
+        providers_running: [],
+      });
+      expect(readFileSync(join(root, "hack.log"), "utf8")).toContain(
+        `down --path ${join(root, "project")}`
+      );
+    } finally {
+      done();
+    }
+  });
+
+  test("a foreground that outlives cleanup skips every later step and keeps its handle", async () => {
+    const { root, run, done } = fixture();
+    try {
+      writeFileSync(join(root, "stubborn"), "");
+      let later = false;
+      const code = await run.runSteps([
+        [
+          "boots then fails",
+          false,
+          async () => {
+            await run.upForeground("up", "up");
+            throw new Error("synthetic failure after boot");
+          },
+        ],
+        [
+          "next",
+          false,
+          () => {
+            later = true;
+          },
+        ],
+      ]);
+      expect(code).toBeNull();
+      expect(later).toBe(false);
+      expect(run.blocked).toContain("left processes running");
+      expect(run.failed.at(-1)).toStartWith("next: skipped:");
+      expect(run.strays).toHaveLength(1);
+      expect(run.strays[0]?.exitCode).toBeNull();
+    } finally {
+      done();
+    }
+  });
+
+  test("a cleanup check that throws counts as processes left running", async () => {
+    const { run, done } = fixture();
+    try {
+      run.runningProviders = () => {
+        throw new Error("synthetic ps failure");
+      };
+      let later = false;
+      const code = await run.runSteps([
+        [
+          "fails",
+          false,
+          () => {
+            throw new Error("synthetic failure");
+          },
+        ],
+        [
+          "next",
+          false,
+          () => {
+            later = true;
+          },
+        ],
+      ]);
+      expect(code).toBeNull();
+      expect(later).toBe(false);
+      expect(run.blocked).toContain("synthetic ps failure");
+      expect(run.recorded.stopped_after_fails).toEqual({
+        cleanup_check_failed: "synthetic ps failure",
+      });
+    } finally {
+      done();
+    }
+  });
+
+  test("a verifier VM left in the prepared-base store blocks every later step", async () => {
+    const { root, run, done } = fixture();
+    const work = join(root, "prepared-bases", ".work", "fixture");
+    mkdirSync(work, { recursive: true, mode: 0o700 });
+    const binary = join(work, "smolvm");
+    copyFileSync("/bin/sleep", binary);
+    chmodSync(binary, 0o700);
+    const verifier = Bun.spawn([binary, "20"]);
+    try {
+      expect(run.runningProviders()).toEqual([
+        `prepared-bases:${verifier.pid}`,
+      ]);
+      await run.settleProviders("2a prepared base");
+      expect(run.blocked).toContain(`prepared-bases:${verifier.pid}`);
+      verifier.kill("SIGKILL");
+      await verifier.exited;
+      expect(run.runningProviders()).toEqual([]);
+    } finally {
+      verifier.kill("SIGKILL");
+      done();
+    }
+  });
+
+  test("restart reports a previous foreground that never exits instead of waiting forever", async () => {
+    const { root, run, done } = fixture();
+    try {
+      writeFileSync(join(root, "stubborn"), "");
+      await run.upForeground("up", "up");
+      const previous = run.foreground;
+      const started = performance.now();
+      await expect(
+        run.upForeground("restart", "restart", "c-1")
+      ).rejects.toThrow(/previous foreground is still running 1\.5 s after/);
+      expect(performance.now() - started).toBeLessThan(15_000);
+      expect(run.strays).toEqual([previous as NonNullable<typeof previous>]);
+    } finally {
+      done();
+    }
   });
 });

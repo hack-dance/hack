@@ -659,9 +659,15 @@ for a security fix, so each bump stays small enough to review against upstream n
 3. On an Apple Silicon Mac, run [`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts)
    once with a bundle built from the current pin (baseline) and once with the bump,
    each in its own empty private root. It checks the archive and signature, prepare,
-   template expansion and digests, exact disk identity, lifecycle and recovery,
-   network modes, the dependency-socket relay, Rosetta and a web-plus-database
-   project, then prints the timing and idle-footprint measurements to compare.
+   a prepared base built and verified (its overlay inventory), a pool without internet,
+   template expansion and digests, exact disk identity, restart, down and up, network
+   modes, the dependency-socket relay, Rosetta and a web-plus-database project, then
+   prints the timing and idle-footprint measurements to compare. What `down --recover`
+   does after a lost foreground, and how the pool recovers from an unclean provider
+   stop, are recorded in `qualification.json` but not asserted: exit 0 does not show
+   that recovery works, so read those recorded outcomes. With `--keep-going`, a failed
+   step's pools are stopped and shown gone before the next step; if that cannot be
+   shown, the remaining steps are skipped.
 4. A home prepared under one pin refuses another pin (`provider_pin_changed`);
    say so in the release notes, because users prepare a fresh candidate home.
 

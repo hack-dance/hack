@@ -10,7 +10,8 @@
  *      `checksums.sha256` when given), the archive's own `checksums.txt` matches its files,
  *      and `smolvm-bin` passes `codesign --verify --strict`.
  *   2. prepare: `runtime prepare`, `prepare-engine`, `prepare-network-tools` and `probe`
- *      in three homes; a prepared base built and verified in the second home; and a pool
+ *      in three homes. 2a: `prepared-base build`, `verify` (both disks and the overlay's
+ *      upper-layer inventory) and `remove` in the second home, each its own check. 2b: a pool
  *      without internet access booted and stopped in the third (network tools included).
  *   3. templates: the first start expands both disk templates at their logical sizes; their
  *      content digests (the runtime's own definition) are printed and compared with the
@@ -51,9 +52,16 @@
  * By default the first failed check prints one `FAIL <step>: <check>: <detail>` line, writes
  * evidence/failure.json and exits 1; nothing is stopped or removed, so the state can be
  * inspected, and the line names the command that stops each pool. With `--keep-going`
- * every failed check is recorded and the run continues (a failed step 1-3 still ends it);
- * the run then asks every pool to stop, lists each failure and exits 1. The only processes
- * it signals are its own children and, in step 11, the provider VM process of its own pool,
+ * every failed check is recorded and the run continues (a failed step 1-3 still ends it).
+ * After a step that throws, every pool of the run is asked to stop and the run shows that no
+ * provider of its homes and no foreground it started is still running before the next step
+ * boots a pool; when it cannot, every later step is skipped and the evidence recorded. At
+ * the end the run asks every pool to stop, lists each failure and exits 1. Exit 0 means
+ * every check passed; the recovery answers of steps 5 and 11 are recorded, not checked, so
+ * read them in qualification.json. At the end it also checks that no provider of its homes
+ * is still running (a run that leaves one fails and lists it). The only processes it
+ * signals are its own children (a foreground still running after every pool was asked to
+ * stop gets SIGTERM at cleanup) and, in step 11, the provider VM process of its own pool,
  * which it identifies by the pool receipt, executable path, user and start time before
  * sending SIGKILL.
  */
@@ -72,7 +80,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 export const GIB = 1024 * 1024 * 1024;
 
@@ -653,7 +661,7 @@ const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 /** A candidate home's provider `$HOME` (the runtime's `run/smolvm/home`). */
 const PROVIDER_HOME = join(".hack-local", "run", "smolvm", "home");
 
-class Qualification {
+export class Qualification {
   readonly evidence: string;
   readonly main: string;
   readonly aux: string;
@@ -669,6 +677,12 @@ class Qualification {
   step = "setup";
   pins: Record<string, Record<string, unknown>> = {};
   foreground: ReturnType<typeof Bun.spawn> | null = null;
+  /** Foregrounds of this run that were replaced or abandoned while still running. */
+  readonly strays: ReturnType<typeof Bun.spawn>[] = [];
+  /** Set when a failed step's pools or foregrounds could not be shown stopped. */
+  blocked: string | null = null;
+  /** How long a foreground of this run gets to exit after it was asked to. */
+  exitWaitMs = 120_000;
   dependencyServer: ReturnType<typeof Bun.spawn> | null = null;
   dependencyPort = 0;
   sequence = 0;
@@ -1044,82 +1058,110 @@ class Qualification {
   }
 
   /**
-   * Pools without internet access, before any other pool runs: a prepared base (its verifier
-   * pool boots without internet, installs the network tools and checks the overlay inventory)
-   * and a plain isolated pool. Both failed on the first SmolVM 1.34.1 run, so they are their
-   * own step and `--keep-going` continues past them.
+   * 2a. A prepared base, before any other pool runs: `build` boots a verifier pool without
+   * internet in the second home (installing the network tools), and `verify` boots it again
+   * and checks both disks, including the overlay's upper-layer inventory against the pinned
+   * guest's file set. Each command is its own check; the base is removed afterwards.
    */
-  isolatedPools(): void {
+  async preparedBase(): Promise<void> {
     try {
-      this.preparedBase();
-    } catch (error) {
-      this.check(
-        "a prepared base builds and verifies its upper-layer inventory",
-        false,
-        error instanceof Error ? error.message : String(error)
-      );
+      this.preparedBaseCommands();
+    } finally {
+      // A verifier VM left running (a failed teardown, or a command killed at its timeout)
+      // must not share the host with the next step's pool: wait, then block later steps.
+      await this.settleProviders("2a prepared base");
     }
-    this.isolatedBoot();
   }
 
-  preparedBase(): void {
-    // A prepared base boots a verifier pool, installs the network tools and checks the
-    // overlay's upper-layer inventory, so it exercises the apk-tools 3 file set of the
-    // pinned guest. It runs in the second home before that home's own pool exists.
-    const store = join(this.options.root, "prepared-bases");
+  /**
+   * Wait for every provider of the run to exit; when one does not, or the check fails,
+   * record it and skip every later step.
+   */
+  async settleProviders(after: string): Promise<void> {
+    const key = `providers_after_${after.replace(/\W+/g, "_")}`;
+    try {
+      const left = await this.lingeringProviders();
+      if (left.length > 0) {
+        this.record(key, left);
+        this.blocked = `step ${after} left provider processes running: ${left.join(", ")}`;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.record(key, { check_failed: message });
+      this.blocked = `the provider check after step ${after} failed: ${message}`;
+    }
+  }
+
+  preparedBaseCommands(): void {
+    const store = this.store();
     mkdirSync(store, { mode: 0o700 });
-    const buildStarted = performance.now();
-    const built = this.runtime(
-      this.aux,
-      "prepared-base-build",
-      [
-        "runtime",
-        "prepared-base",
-        "build",
-        "--profile",
-        this.options.profile,
-        "--store",
-        store,
-        "--json",
-      ],
-      900
-    );
+    const native = (name: string, args: string[]) =>
+      this.exec(
+        name,
+        [
+          this.options.native,
+          "--candidate-root",
+          this.aux,
+          "runtime",
+          "prepared-base",
+          ...args,
+          "--store",
+          store,
+          "--json",
+        ],
+        { timeout: 900, allowFailure: true }
+      );
+    const detail = (result: Result) =>
+      (result.stderr || result.stdout).trim().slice(-600);
+    let started = performance.now();
+    const built = native("prepared-base-build", [
+      "build",
+      "--profile",
+      this.options.profile,
+    ]);
     const base = String(
-      (built.receipt as Record<string, unknown> | undefined)?.base_id ?? ""
-    );
-    this.measure(
-      "prepared_base_build_seconds",
-      round((performance.now() - buildStarted) / 1000)
-    );
-    this.runtime(
-      this.aux,
-      "prepared-base-verify",
-      [
-        "runtime",
-        "prepared-base",
-        "verify",
-        "--base-id",
-        base,
-        "--store",
-        store,
-        "--json",
-      ],
-      900
+      (readJson(built.stdout)?.receipt as Record<string, unknown> | undefined)
+        ?.base_id ?? ""
     );
     this.check(
-      "a prepared base builds and verifies its upper-layer inventory",
-      base.length > 0
+      "prepared-base build succeeds",
+      built.code === 0 && base.length > 0,
+      detail(built)
     );
-    this.runtime(this.aux, "prepared-base-remove", [
-      "runtime",
-      "prepared-base",
+    if (built.code !== 0 || base.length === 0) {
+      return;
+    }
+    this.measure(
+      "prepared_base_build_seconds",
+      round((performance.now() - started) / 1000)
+    );
+    started = performance.now();
+    const verified = native("prepared-base-verify", [
+      "verify",
+      "--base-id",
+      base,
+    ]);
+    this.check(
+      "prepared-base verify accepts the base's disks and upper-layer inventory",
+      verified.code === 0,
+      detail(verified)
+    );
+    if (verified.code === 0) {
+      this.measure(
+        "prepared_base_verify_seconds",
+        round((performance.now() - started) / 1000)
+      );
+    }
+    const removed = native("prepared-base-remove", [
       "remove",
       "--base-id",
       base,
-      "--store",
-      store,
-      "--json",
     ]);
+    this.check(
+      "prepared-base remove succeeds",
+      removed.code === 0,
+      detail(removed)
+    );
   }
 
   /**
@@ -1299,9 +1341,20 @@ class Qualification {
       if (data && items.length > 0 && container !== previousContainer) {
         const seconds = round((performance.now() - started) / 1000);
         if (previous && command === "restart") {
+          const code = await Promise.race([
+            previous.exited,
+            Bun.sleep(this.exitWaitMs).then(() => null),
+          ]);
+          if (code === null) {
+            this.strays.push(previous);
+            throw new Failure(
+              `${name}: the previous foreground is still running ${this.exitWaitMs / 1000} s after its replacement became ready (${this.identity(previous)}); it is kept for cleanup`
+            );
+          }
           this.check(
             `${name}: the previous foreground exits 0`,
-            (await previous.exited) === 0
+            code === 0,
+            `exit ${code}`
           );
         }
         return { seconds, ps: data };
@@ -1320,8 +1373,12 @@ class Qualification {
     if (this.foreground) {
       const code = await Promise.race([
         this.foreground.exited,
-        Bun.sleep(120_000).then(() => -1),
+        Bun.sleep(this.exitWaitMs).then(() => -1),
       ]);
+      if (code === -1) {
+        this.strays.push(this.foreground);
+      }
+      this.foreground = null;
       if (extra.length === 0) {
         this.check(
           `${name}: the foreground exits 0 after down`,
@@ -1329,9 +1386,155 @@ class Qualification {
           `exit ${code}`
         );
       }
-      this.foreground = null;
     }
     return result.seconds;
+  }
+
+  /** PID, start time and command of a child of this run, for a report. */
+  identity(child: ReturnType<typeof Bun.spawn>): string {
+    const row = this.exec(
+      "foreground-identity",
+      [
+        "/bin/ps",
+        "-ww",
+        "-o",
+        "pid=,lstart=,command=",
+        "-p",
+        String(child.pid),
+      ],
+      { timeout: 30, allowFailure: true }
+    ).stdout.trim();
+    return row || `PID ${child.pid}, no longer listed`;
+  }
+
+  /** The children of this run that are still running after waiting up to `ms`. */
+  async alive(
+    children: ReturnType<typeof Bun.spawn>[],
+    ms: number
+  ): Promise<ReturnType<typeof Bun.spawn>[]> {
+    await Promise.race([
+      Promise.all(children.map((child) => child.exited)),
+      Bun.sleep(ms),
+    ]);
+    return children.filter(
+      (child) => child.exitCode === null && child.signalCode === null
+    );
+  }
+
+  /** Provider processes running from a home's own provider tree. */
+  providerPids(home: string): number[] {
+    if (!existsSync(join(home, ".hack-local/providers"))) {
+      return [];
+    }
+    return this.processes(home).map((row) => row.pid);
+  }
+
+  /** The prepared-base store; its verifier VMs run from work roots below `.work/`. */
+  store(): string {
+    return join(this.options.root, "prepared-bases");
+  }
+
+  /** Every pool home of this run. */
+  homes(): string[] {
+    return [this.main, this.aux, this.isolated];
+  }
+
+  /** Ask every pool of this run to stop: the project first, then each home's pool. */
+  stopAll(name: string): void {
+    this.hack(`down-${name}`, ["down", "--path", this.project], 300, true);
+    for (const home of this.homes()) {
+      if (existsSync(join(home, ".hack-local/run/smolvm/owner.json"))) {
+        this.exec(
+          `runtime-down-${name}`,
+          [
+            this.options.native,
+            "--candidate-root",
+            home,
+            "runtime",
+            "down",
+            "--json",
+          ],
+          { timeout: 300, allowFailure: true }
+        );
+      }
+    }
+  }
+
+  /**
+   * After a failed step under --keep-going, before another step boots a pool: stop what this
+   * run owns, then show that no provider of any of its homes and no foreground it started is
+   * still running. Without that, every later step is skipped (each boots a pool, and two
+   * pools must never run at once, nor may a stale one skew measurements); the evidence is
+   * kept and recorded.
+   */
+  async settle(after: string): Promise<void> {
+    if (this.foreground) {
+      this.strays.push(this.foreground);
+      this.foreground = null;
+    }
+    const key = `stopped_after_${after.replace(/\W+/g, "_")}`;
+    try {
+      this.stopAll("after-failed-step");
+      const foregrounds = await this.alive(this.strays, this.exitWaitMs);
+      const evidence = {
+        foregrounds_running: foregrounds.map((child) => this.identity(child)),
+        providers_running: await this.lingeringProviders(),
+      };
+      this.record(key, evidence);
+      if (
+        evidence.foregrounds_running.length > 0 ||
+        evidence.providers_running.length > 0
+      ) {
+        this.blocked = `step ${after} left processes running after cleanup: ${JSON.stringify(evidence)}`;
+      } else {
+        this.strays.length = 0;
+      }
+    } catch (error) {
+      // An absence that could not be shown is treated as presence.
+      const message = error instanceof Error ? error.message : String(error);
+      this.record(key, { cleanup_check_failed: message });
+      this.blocked = `the cleanup check after step ${after} failed: ${message}`;
+    }
+  }
+
+  /**
+   * Provider processes of every home of this run, as `home:pid`, and of the prepared-base
+   * store's work roots, as `prepared-bases:pid`.
+   */
+  runningProviders(): string[] {
+    const running = this.homes().flatMap((home) =>
+      this.providerPids(home).map((pid) => `${basename(home)}:${pid}`)
+    );
+    if (existsSync(join(this.store(), ".work"))) {
+      const work = `${realpathSync(join(this.store(), ".work"))}/`;
+      const listing = this.exec("ps", [
+        "/bin/ps",
+        "-A",
+        "-ww",
+        "-o",
+        "pid=,ppid=,rss=,time=,command=",
+      ]);
+      for (const row of parseProcessRows(listing.stdout)) {
+        if (row.command.startsWith(work)) {
+          running.push(`prepared-bases:${row.pid}`);
+        }
+      }
+    }
+    return running;
+  }
+
+  /**
+   * Provider processes still running after up to `exitWaitMs`: `runtime down` waits only for
+   * the receipt's VM process, and a helper of the same tree may take a moment longer.
+   */
+  async lingeringProviders(): Promise<string[]> {
+    const deadline = performance.now() + this.exitWaitMs;
+    let running = this.runningProviders();
+    while (running.length > 0 && performance.now() < deadline) {
+      await Bun.sleep(500);
+      running = this.runningProviders();
+    }
+    return running;
   }
 
   /** The current foreground; a method so flow narrowing does not pin an earlier value. */
@@ -1583,7 +1786,8 @@ class Qualification {
     const steps: [string, boolean, () => Promise<void> | void][] = [
       ["1 archive", true, () => this.archive()],
       ["2 prepare", true, () => this.prepare()],
-      ["2b pools without internet", false, () => this.isolatedPools()],
+      ["2a prepared base", false, () => this.preparedBase()],
+      ["2b pool without internet", false, () => this.isolatedBoot()],
       [
         "3 templates",
         true,
@@ -1674,38 +1878,40 @@ class Qualification {
           ],
         ]
       : steps;
-    for (const [name, required, step] of selected) {
-      this.step = name;
-      this.stepRequired = required;
-      try {
-        await step();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!this.options.keepGoing || required) {
-          return this.fail(message);
-        }
-        this.failed.push(`${name}: ${message}`);
-        this.note(`FAIL ${name}: ${message} (continuing: --keep-going)`);
-        this.foreground = null;
-      }
+    const failed = await this.runSteps(selected);
+    if (failed !== null) {
+      return failed;
     }
     this.step = "cleanup";
-    this.hack("down-cleanup", ["down", "--path", this.project], 300, true);
-    for (const home of [this.main, this.aux, this.isolated]) {
-      if (existsSync(join(home, ".hack-local/run/smolvm/owner.json"))) {
-        this.exec(
-          "runtime-down-cleanup",
-          [
-            this.options.native,
-            "--candidate-root",
-            home,
-            "runtime",
-            "down",
-            "--json",
-          ],
-          { timeout: 300, allowFailure: true }
-        );
+    this.stopAll("cleanup");
+    const children = this.foreground
+      ? [...this.strays, this.foreground]
+      : [...this.strays];
+    // Only this run's own children, after every pool was asked to stop.
+    const lingering = await this.alive(children, this.exitWaitMs);
+    if (lingering.length > 0) {
+      this.record(
+        "foregrounds_terminated_at_cleanup",
+        lingering.map((child) => this.identity(child))
+      );
+      for (const child of lingering) {
+        child.kill("SIGTERM");
       }
+    }
+    // Pools asked to stop must be gone: one still running fails the run and is listed.
+    let left: string[];
+    try {
+      left = await this.lingeringProviders();
+    } catch (error) {
+      left = [
+        `not shown: ${error instanceof Error ? error.message : String(error)}`,
+      ];
+    }
+    this.record("providers_running_at_exit", left);
+    if (left.length > 0) {
+      this.failed.push(
+        `cleanup: provider processes still running after runtime down: ${left.join(", ")}`
+      );
     }
     this.dependencyServer?.kill("SIGTERM");
     writeFileSync(
@@ -1726,14 +1932,44 @@ class Qualification {
         console.log(`FAIL ${line}`);
       }
       console.log(
-        `${this.failed.length} check(s) failed (--keep-going); evidence in ${this.evidence}.`
+        `${this.failed.length} check(s) failed${this.options.keepGoing ? " (--keep-going)" : ""}; evidence in ${this.evidence}.`
       );
       return 1;
     }
     this.note(
-      "PASS all checks; every pool was asked to stop. Remove the root yourself once the evidence is copied."
+      "PASS all checks; every pool was asked to stop. Recovery outcomes are recorded, not checked: read `recorded` in qualification.json. Remove the root yourself once the evidence is copied."
     );
     return 0;
+  }
+
+  /**
+   * Run the steps in order. Returns the exit code when a failure ends the run, or null when
+   * every step ran or was recorded as failed or skipped under --keep-going.
+   */
+  async runSteps(
+    steps: [string, boolean, () => Promise<void> | void][]
+  ): Promise<number | null> {
+    for (const [name, required, step] of steps) {
+      this.step = name;
+      this.stepRequired = required;
+      if (this.blocked) {
+        this.failed.push(`${name}: skipped: ${this.blocked}`);
+        this.note(`SKIP ${name}: ${this.blocked}`);
+        continue;
+      }
+      try {
+        await step();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!this.options.keepGoing || required) {
+          return this.fail(message);
+        }
+        this.failed.push(`${name}: ${message}`);
+        this.note(`FAIL ${name}: ${message} (continuing: --keep-going)`);
+        await this.settle(name);
+      }
+    }
+    return null;
   }
 
   fail(message: string): number {
@@ -1754,7 +1990,7 @@ class Qualification {
     );
     console.log(`FAIL ${this.step}: ${message}`);
     console.log(
-      `Nothing was stopped or removed. Stop the pools with: ${this.options.native} --candidate-root <home> runtime down --json for ${this.main}, ${this.aux} and ${this.isolated}; the dependency listener is PID ${this.dependencyServer?.pid ?? "none"}.`
+      `Nothing was stopped or removed. Stop the pools with: ${this.options.native} --candidate-root <home> runtime down --json for ${this.main}, ${this.aux} and ${this.isolated}; the dependency listener is PID ${this.dependencyServer?.pid ?? "none"}; foregrounds of this run: ${[...this.strays, ...(this.foreground ? [this.foreground] : [])].map((child) => child.pid).join(", ") || "none"}.`
     );
     return 1;
   }
@@ -1942,6 +2178,10 @@ class Qualification {
       Bun.sleep(120_000).then(() => "still running after 120 s"),
     ]);
     this.record("foreground_after_unclean_stop", String(code));
+    const after = this.running();
+    if (after && after.exitCode === null && after.signalCode === null) {
+      this.strays.push(after);
+    }
     this.foreground = null;
     const retired = this.hack(
       "down-recover-after-unclean",
@@ -2339,6 +2579,18 @@ function readyContainer(status: Record<string, unknown>): string | null {
   );
 }
 
+/** A JSON object printed by a command, or null when it printed anything else. */
+export function readJson(stdout: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(stdout);
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** `hack ps --json` data when the run is observed ready. */
 export function readyData(stdout: string): Record<string, unknown> | null {
   try {
@@ -2447,7 +2699,8 @@ export async function main(argv: string[]): Promise<number> {
     sequence: [
       "1 archive",
       "2 prepare",
-      "2b pools without internet",
+      "2a prepared base",
+      "2b pool without internet",
       "3 templates",
       "4 disk identity",
       "5 lifecycle",

@@ -455,7 +455,10 @@ the enabled unit runs code as you at the next login. For the same reason,
 there must be a file you own that others cannot write, or they refuse to use the
 unit until you review it. `start` (and autostart) also runs the unit only when
 `hackd.service` is a regular file you own that others cannot write, in
-directories that pass the same check; a symlinked unit is refused. The
+directories that pass the same check; a symlinked unit is refused. A unit or
+drop-in file that others could write is refused, not repaired, since its contents
+may already be someone else's; `install` replaces such a unit file with a fresh
+one. The
 directories above `$XDG_CONFIG_HOME`, up to `/` and through any symlinks, must not
 be writable by your group or others either (Hack refuses and prints the
 `chmod go-w` to run; it does not change your home directory). Right before

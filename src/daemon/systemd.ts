@@ -924,6 +924,12 @@ export async function installSystemdUnit(opts: {
   if (dropIns !== null) {
     return { ok: false, error: dropIns };
   }
+  // Install writes the whole file: an existing one that another account
+  // could have written (or a link) is removed and written fresh, never
+  // trusted for being unchanged.
+  if (await isUnitFileReplaceable({ unitPath: opts.unitPath })) {
+    await rm(opts.unitPath, { force: true });
+  }
   const { changed } = await writeTextFileAtomicIfChanged(
     opts.unitPath,
     opts.unitText,
@@ -1049,6 +1055,10 @@ async function checkOwnerControlledPath(opts: {
   }
   if ((info.mode & 0o022) === 0) {
     return null;
+  }
+  if (!opts.directory) {
+    // Its contents may already be someone else's: a chmod would keep them.
+    return `${shown} was writable by other users (mode ${(info.mode & 0o777).toString(8)}), so its contents cannot be trusted`;
   }
   try {
     await chmod(real, info.mode & 0o7755);
@@ -1463,6 +1473,23 @@ async function checkUnitLoadDirectory(opts: {
     }
   }
   return null;
+}
+
+/** True when an existing unit file is a link, another user's, or writable by others. */
+async function isUnitFileReplaceable(opts: {
+  readonly unitPath: string;
+}): Promise<boolean> {
+  try {
+    const info = await lstat(opts.unitPath);
+    const uid = process.getuid?.() ?? -1;
+    return (
+      !info.isFile() ||
+      (uid >= 0 && info.uid !== uid) ||
+      (info.mode & 0o022) !== 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 function errorMessage(error: unknown): string {

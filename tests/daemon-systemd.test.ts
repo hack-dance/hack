@@ -1506,10 +1506,15 @@ test("drop-ins another account could have written are refused before use", async
   // Owned by another user (modelled with the uid the check compares to).
   const foreign = await checkSystemdUnitDropIns({ unitPath, uid: own + 1 });
   expect(foreign).toContain("owned by another user");
-  // This user's drop-in that others could write: write access removed.
+  // This user's drop-in that others could write: its contents may be
+  // someone else's, so it is refused, not repaired (Codex security review).
   await chmod(override, 0o666);
+  expect(await checkSystemdUnitDropIns({ unitPath })).toContain(
+    "contents cannot be trusted"
+  );
+  expect((await stat(override)).mode & 0o777).toBe(0o666);
+  await chmod(override, 0o644);
   expect(await checkSystemdUnitDropIns({ unitPath })).toBeNull();
-  expect((await stat(override)).mode & 0o777).toBe(0o644);
   // The generic service.d is checked too.
   const generic = join(userDir, "service.d");
   await mkdir(generic);
@@ -1554,12 +1559,29 @@ test("start runs only a unit file this user controls", async () => {
     "owned by another user"
   );
 
-  // This user's unit and directory, writable by the group: fixed, started.
+  // A unit file others could write: start refuses it (its contents may be
+  // someone else's); install replaces it with a fresh file.
   await chmod(unitPath, 0o664);
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+  expect(
+    (
+      await installSystemdUnit({
+        unitPath,
+        unitText: unitText(),
+        deps: fake.deps,
+      })
+    ).ok
+  ).toBe(true);
+  expect((await stat(unitPath)).mode & 0o777).toBe(0o644);
+  expect(await readFile(unitPath, "utf8")).toBe(unitText());
+
+  // This user's unit directory, writable by the group: repaired, started
+  // (the files inside are checked separately).
   await chmod(userDir, 0o775);
   fake.calls.length = 0;
   expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
-  expect((await stat(unitPath)).mode & 0o777).toBe(0o644);
   expect((await stat(userDir)).mode & 0o777).toBe(0o755);
   expect(fake.calls).toContain("systemctl --user start hackd.service");
 

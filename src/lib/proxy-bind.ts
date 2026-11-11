@@ -80,12 +80,15 @@ function splitHostPort(raw: string): { address: string; port: number } | null {
   if (!(match?.[1] && match[2])) {
     return null;
   }
-  let address = match[1];
-  if (address.startsWith("[") && address.endsWith("]")) {
-    address = address.slice(1, -1);
+  // Drop an interface scope first (`0.0.0.0%lo`, `[fe80::1]%eth0`), then
+  // the IPv6 brackets.
+  let address = match[1].split("%")[0] ?? match[1];
+  if (address.startsWith("[")) {
+    address = address.slice(1);
   }
-  // `ss` prints a scoped wildcard as `*` or `0.0.0.0%lo`; drop the scope.
-  address = address.split("%")[0] ?? address;
+  if (address.endsWith("]")) {
+    address = address.slice(0, -1);
+  }
   return { address, port: Number(match[2]) };
 }
 
@@ -162,6 +165,23 @@ export function findProxyPortConflicts(opts: {
     }
     return listener.address === bind;
   });
+}
+
+/**
+ * Printed when the proxy failed but no conflicting listener was visible: a
+ * root-owned listener (common for VPN clients) is hidden from an unprivileged
+ * `lsof`, and Docker without its userland proxy or another container's
+ * published port shows no host listener at all.
+ */
+export function renderProxyStartFailureHint(
+  bindAddress: string | null
+): string {
+  const bindLabel =
+    bindAddress === null ? "all interfaces (Docker's default)" : bindAddress;
+  return [
+    `The proxy could not start on ports ${PROXY_PORTS.join(" and ")} (${bindLabel}). If another program or container already uses one of them (a VPN client, for example), stop it or publish the proxy on another address:`,
+    `  hack config set --global ${PROXY_BIND_CONFIG_KEY} 127.0.0.1 && hack global install`,
+  ].join("\n");
 }
 
 /** Human message naming each conflicting listener and the setting to change. */

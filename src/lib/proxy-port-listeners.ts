@@ -5,6 +5,7 @@ import {
   parseLsofListeners,
   parseSsListeners,
   renderProxyPortConflictMessage,
+  renderProxyStartFailureHint,
 } from "./proxy-bind.ts";
 import { exec } from "./shell.ts";
 
@@ -30,22 +31,20 @@ export async function listHostTcpListeners(): Promise<
 
 /**
  * After the proxy failed to start: a message naming the listeners that hold
- * the proxy ports and the setting to change, or `null` when none is found.
+ * the proxy ports and the setting to change, or a generic hint naming the
+ * setting when no conflicting listener is visible.
  */
 export async function diagnoseProxyPortConflict(opts: {
   readonly bindAddress: string | null;
   readonly listListeners?: () => Promise<readonly HostListener[] | null>;
-}): Promise<string | null> {
+}): Promise<string> {
   const listeners = await (opts.listListeners ?? listHostTcpListeners)();
-  if (listeners === null) {
-    return null;
-  }
-  const conflicts = findProxyPortConflicts({
-    listeners,
-    bindAddress: opts.bindAddress,
-  });
+  const conflicts =
+    listeners === null
+      ? []
+      : findProxyPortConflicts({ listeners, bindAddress: opts.bindAddress });
   return conflicts.length === 0
-    ? null
+    ? renderProxyStartFailureHint(opts.bindAddress)
     : renderProxyPortConflictMessage({
         conflicts,
         bindAddress: opts.bindAddress,

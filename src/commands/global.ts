@@ -1842,9 +1842,7 @@ export async function globalUp(): Promise<number> {
         (await readTextFile(paths.caddyCompose)) ?? ""
       ),
     });
-    if (conflict) {
-      logger.error({ message: conflict });
-    }
+    logger.error({ message: conflict });
     return caddyExit;
   }
   const remoteRoutes = await reconcileRemoteCaddyRoutesStack();

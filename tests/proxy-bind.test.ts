@@ -56,12 +56,14 @@ describe("listener parsing", () => {
       "LISTEN 0      511        0.0.0.0:80         0.0.0.0:*",
       'LISTEN 0      4096          [::]:22            [::]:*    users:(("sshd",pid=1,fd=3))',
       "LISTEN 0      4096   127.0.0.53%lo:53        0.0.0.0:*",
+      "LISTEN 0      4096   [fe80::1]%eth0:443        [::]:*",
     ].join("\n");
     expect(parseSsListeners(output)).toEqual([
       { address: "10.8.0.2", port: 443, process: "vpn-client", pid: 4242 },
       { address: "0.0.0.0", port: 80, process: null, pid: null },
       { address: "::", port: 22, process: "sshd", pid: 1 },
       { address: "127.0.0.53", port: 53, process: null, pid: null },
+      { address: "fe80::1", port: 443, process: null, pid: null },
     ]);
   });
 
@@ -141,17 +143,15 @@ describe("port conflicts", () => {
         listListeners: async () => [vpn],
       })
     ).toContain("vpn-client");
-    expect(
-      await diagnoseProxyPortConflict({
+    // Nothing visible (root-owned listener, no userland proxy): still name
+    // the setting.
+    for (const listListeners of [async () => [vpn], async () => null]) {
+      const hint = await diagnoseProxyPortConflict({
         bindAddress: "127.0.0.1",
-        listListeners: async () => [vpn],
-      })
-    ).toBeNull();
-    expect(
-      await diagnoseProxyPortConflict({
-        bindAddress: null,
-        listListeners: async () => null,
-      })
-    ).toBeNull();
+        listListeners,
+      });
+      expect(hint).toContain("could not start");
+      expect(hint).toContain(PROXY_BIND_CONFIG_KEY);
+    }
   });
 });

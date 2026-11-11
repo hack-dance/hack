@@ -647,6 +647,41 @@ test("hack daemon restart replaces a stale pid file without signalling its pid",
   expect(process.kill(sleeper.pid, 0)).toBe(true);
 }, 20_000);
 
+test.skipIf(process.platform !== "linux")(
+  "a source daemon started with a relative entry is proven and stopped (real process)",
+  async () => {
+    const daemonRoot = join(root, "relative");
+    await mkdir(daemonRoot);
+    const socket = join(daemonRoot, "hackd.sock");
+    const ready = join(daemonRoot, "ready");
+    const { child, expectation } = await spawnHackdLikeFixture({
+      dir: root,
+      socket,
+      ready,
+      relativeEntry: true,
+    });
+    children.push(child);
+    for (let i = 0; i < 100 && !(await Bun.file(ready).exists()); i++) {
+      await Bun.sleep(20);
+    }
+    const proof = await proveOwnedDaemonProcess({
+      pid: child.pid,
+      daemonRoot,
+      expectation,
+    });
+    expect(proof.kind).toBe("owned");
+    if (proof.kind !== "owned") {
+      return;
+    }
+    expect(proof.image.argv[1]).toBe("hack-fixture.ts");
+    expect(
+      await terminateProvenDaemon({ proof, daemonRoot, expectation })
+    ).toEqual({ kind: "exited" });
+    await child.exited;
+  },
+  10_000
+);
+
 test("the identity rule uses the resolved executable and exact argv", () => {
   const entry = "/src/hack repo/index.ts";
   const expectation: DaemonIdentityExpectation = {
@@ -681,6 +716,29 @@ test("the identity rule uses the resolved executable and exact argv", () => {
     matches({
       executable: "/usr/bin/dash",
       argv: ["/bin/sh", "/usr/local/bin/hack", ...daemonArgs],
+    })
+  ).toBe(false);
+  // Codex P2: a relative entry resolves against the process's cwd.
+  expect(
+    matches({
+      executable: "/usr/bin/bun",
+      argv: ["bun", "index.ts", ...daemonArgs],
+      cwd: "/src/hack repo",
+    })
+  ).toBe(true);
+  expect(
+    matches({
+      executable: "/usr/bin/bun",
+      argv: ["bun", "index.ts", ...daemonArgs],
+      cwd: "/other",
+    })
+  ).toBe(false);
+  // Unknown cwd: a relative entry does not match.
+  expect(
+    matches({
+      executable: "/usr/bin/bun",
+      argv: ["bun", "index.ts", ...daemonArgs],
+      cwd: null,
     })
   ).toBe(false);
   // Another checkout's entry.

@@ -21,6 +21,12 @@ import { readTextFile } from "../lib/fs.ts";
 export interface ProcessImage {
   readonly executable: string;
   readonly argv: readonly string[];
+  /**
+   * The working directory, so a relative argv entry (`bun index.ts ...`)
+   * can be resolved. Null when unknown (macOS, or unreadable); a relative
+   * entry then does not match.
+   */
+  readonly cwd?: string | null;
 }
 
 const LINUX_DELETED_SUFFIX = " (deleted)";
@@ -64,7 +70,13 @@ async function readLinuxProcessImage(
   if (argv.at(-1) === "") {
     argv.pop();
   }
-  return argv.length > 0 ? { executable, argv } : null;
+  let cwd: string | null = null;
+  try {
+    cwd = await readlink(`/proc/${pid}/cwd`);
+  } catch {
+    // Unknown: a relative entry will not match.
+  }
+  return argv.length > 0 ? { executable, argv, cwd } : null;
 }
 
 const CTL_KERN = 1;

@@ -864,9 +864,10 @@ function isForegroundDaemonStartArgs(args: readonly string[]): boolean {
  *
  * - a Hack binary: the executable is named `hack` or `hack-*` and the
  *   arguments after argv[0] are a foreground daemon start; or
- * - a source run: the executable is `bun`, argv[1] is one of this
- *   checkout's entry files ({@link DaemonIdentityExpectation}), and the
- *   arguments after it are a foreground daemon start.
+ * - a source run: the executable is `bun`, argv[1] (resolved against the
+ *   process's working directory when relative) is one of this checkout's
+ *   entry files ({@link DaemonIdentityExpectation}), and the arguments
+ *   after it are a foreground daemon start.
  *
  * A script named `hack` that runs another interpreter resolves to that
  * interpreter and does not match.
@@ -882,9 +883,17 @@ export function isHackDaemonImage(opts: {
   if (basename(executable).toLowerCase() !== "bun") {
     return false;
   }
-  const entry = argv[1] ?? "";
+  const raw = argv[1] ?? "";
+  // `bun index.ts ...` from the checkout keeps the relative entry in argv;
+  // resolve it against the process's own working directory.
+  let entry: string | null = null;
+  if (isAbsolute(raw)) {
+    entry = raw;
+  } else if (raw.length > 0 && opts.image.cwd) {
+    entry = resolve(opts.image.cwd, raw);
+  }
   return (
-    isAbsolute(entry) &&
+    entry !== null &&
     opts.expectation.entryFiles.has(entry) &&
     isForegroundDaemonStartArgs(argv.slice(2))
   );

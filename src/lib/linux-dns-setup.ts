@@ -391,13 +391,15 @@ async function buildApplyPlan(opts: {
 }
 
 /**
- * Root copies the user-writable staged file into a root-owned temp file,
+ * Root copies the user-writable staged file into a root-owned 0700
+ * directory it creates under /tmp (named explicitly, never `TMPDIR`, so
+ * the copy cannot sit in a directory the user can write),
  * checks the copy against the digest of the bytes the user approved, and
  * installs only that copy. Replacing the staged file after the plan was
  * shown therefore fails the step instead of installing other content.
  */
 export const VERIFIED_INSTALL_SCRIPT =
-  'set -eu; t=$(mktemp); trap \'rm -f "$t"\' EXIT; cat -- "$1" > "$t"; printf "%s  %s\\n" "$2" "$t" | sha256sum -c --status; install -D -o root -g root -m 0644 "$t" "$3"';
+  'set -eu; umask 077; d=$(mktemp -d /tmp/hack-root.XXXXXXXX); trap \'rm -rf "$d"\' EXIT; t="$d/copy"; cat -- "$1" > "$t"; printf "%s  %s\\n" "$2" "$t" | sha256sum -c --status; install -D -o root -g root -m 0644 "$t" "$3"';
 
 function verifiedInstallArgv(opts: {
   readonly source: string;

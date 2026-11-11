@@ -33,6 +33,11 @@ const UNSAFE_ENV_KEYS = [
   "SHELLOPTS",
   "IFS",
   "SUDO_ASKPASS",
+  // A preserved temp dir could put root's verified copy in a user-writable
+  // directory; root scripts name /tmp explicitly.
+  "TMPDIR",
+  "TMP",
+  "TEMP",
 ] as const;
 
 export type FileFacts = {

@@ -125,7 +125,12 @@ describe("runTrustedSudo", () => {
     expect(
       (calls[0]?.opts as { unsetEnvKeys: readonly string[] }).unsetEnvKeys
     ).toEqual(
-      expect.arrayContaining(["LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV"])
+      expect.arrayContaining([
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "BASH_ENV",
+        "TMPDIR",
+      ])
     );
   });
 

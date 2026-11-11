@@ -12,6 +12,7 @@ import { join, relative } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import {
   type ComposeBackendFeature,
+  RESERVED_OWNERSHIP_LABEL_PREFIXES,
   readComposeBackendReading,
   readNativeComposeDocument,
 } from "../lib/native-compose-backend-features.ts";
@@ -136,7 +137,7 @@ const FEATURE_FINDINGS: Readonly<Record<ComposeBackendFeature, Explanation>> = {
   reserved_label: {
     message:
       "A service, network or volume has a label in a namespace that Docker Compose or Hack owns.",
-    fix: "Remove labels that start with com.docker.compose. or io.hack.",
+    fix: `Remove labels in these namespaces: ${RESERVED_OWNERSHIP_LABEL_PREFIXES.map((prefix) => `${prefix}*`).join(", ")}.`,
   },
   unsupported_build: {
     message: "A service build uses a field native builds do not implement.",

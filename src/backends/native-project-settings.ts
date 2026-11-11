@@ -64,6 +64,7 @@ const MACHINE_KEYS = new Set([
   "version",
   "projectRoots",
   "sharedSource",
+  "shellEnvironmentAllow",
   "dependencies",
   "dependenciesByEnv",
   "allowHosts",
@@ -72,6 +73,7 @@ const MACHINE_KEYS = new Set([
   "aws",
 ]);
 const ENV_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SHELL_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SIBLING_FILE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
 const PROJECT_ENTRY_LIMIT = 64;
 const PROJECT_ROOT_LIMIT = 16;
@@ -261,6 +263,8 @@ export function nativeAdaptationCandidates(opts: {
 /** Grants and host authority, resolved from the environment and machine settings. */
 export interface NativeHostSettings {
   readonly sharedSource: boolean;
+  /** Shell source names granted only by the private machine record. No env override. */
+  readonly shellEnvironmentAllow?: readonly string[];
   readonly dependencyFile?: string;
   readonly dependencyFileByEnv?: Readonly<Record<string, string>>;
   readonly allowedHosts: readonly string[];
@@ -532,6 +536,7 @@ function validMachineRecord(value: unknown): Record<string, unknown> {
 
 type MachineValues = {
   readonly sharedSource?: boolean;
+  readonly shellEnvironmentAllow?: readonly string[];
   readonly dependencies: ReturnType<typeof machineDependencies>;
   readonly allowHosts?: readonly string[];
   readonly preparedBase?: NativePreparedBase;
@@ -540,6 +545,20 @@ type MachineValues = {
   readonly https?: NativeHttpsSelection;
   readonly aws?: { readonly profile: string; readonly region?: string };
 };
+
+function machineShellEnvironmentAllow(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.length > 256) {
+    throw fieldRefused("shellEnvironmentAllow");
+  }
+  const names: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !SHELL_VARIABLE_NAME.test(entry.trim())) {
+      throw fieldRefused("shellEnvironmentAllow");
+    }
+    names.push(entry.trim());
+  }
+  return [...new Set(names)];
+}
 
 /** Validate every machine value, even ones a variable overrides. */
 function machineValues(
@@ -556,6 +575,13 @@ function machineValues(
     ...(typeof settings.sharedSource === "boolean"
       ? { sharedSource: settings.sharedSource }
       : {}),
+    ...(settings.shellEnvironmentAllow === undefined
+      ? {}
+      : {
+          shellEnvironmentAllow: machineShellEnvironmentAllow(
+            settings.shellEnvironmentAllow
+          ),
+        }),
     dependencies: machineDependencies(machine.directory, settings),
     ...(settings.allowHosts === undefined
       ? {}
@@ -674,6 +700,9 @@ export async function resolveNativeHostSettings(opts: {
   });
   return {
     sharedSource: sharedSource.value,
+    ...(values.shellEnvironmentAllow === undefined
+      ? {}
+      : { shellEnvironmentAllow: values.shellEnvironmentAllow }),
     ...(dependencies.value.file === undefined
       ? {}
       : { dependencyFile: dependencies.value.file }),

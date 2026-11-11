@@ -13,6 +13,8 @@ import {
 } from "../lib/project-env-config.ts";
 import type { NativeEmulationPolicy } from "./native-project-platform.ts";
 import {
+  NativeShellConsentError,
+  requireShellEnvironmentConsent,
   resolveShellEnvironment,
   shellDeliveryProblem,
 } from "./native-shell-environment.ts";
@@ -248,13 +250,26 @@ function normalizeManagedEnvironment(
 function resolveServiceShellEnvironment(opts: {
   readonly services: Record<string, unknown>;
   readonly managedEnvironment: Record<string, Record<string, string>>;
-  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly shellEnvironmentAllow?: readonly string[];
 }): {
   readonly shellEnvironment: Record<string, Record<string, string>>;
   readonly notices: NativeEnvironmentNotice[];
 } {
   const shellEnvironment: Record<string, Record<string, string>> = {};
   const notices: NativeEnvironmentNotice[] = [];
+  if (opts.env !== undefined) {
+    for (const [name, service] of Object.entries(opts.services)) {
+      if (!isRecord(service) || service.environment == null) {
+        continue;
+      }
+      requireShellEnvironmentConsent({
+        environment: environment(service.environment, name),
+        managed: new Set(Object.keys(opts.managedEnvironment[name] ?? {})),
+        allowed: opts.shellEnvironmentAllow,
+      });
+    }
+  }
   for (const [name, service] of Object.entries(opts.services)) {
     // An `environment:` key with every entry commented out is YAML null.
     if (
@@ -268,6 +283,7 @@ function resolveServiceShellEnvironment(opts: {
       service: name,
       environment: environment(service.environment, name),
       env: opts.env,
+      allowed: opts.shellEnvironmentAllow,
       managed: new Set(Object.keys(opts.managedEnvironment[name] ?? {})),
     });
     if (resolution === null) {
@@ -447,6 +463,8 @@ export async function prepareNativeProjectInput(opts: {
    * process environment.
    */
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Caller consent from the private native machine settings, never project intent. */
+  readonly shellEnvironmentAllow?: readonly string[];
 }): Promise<NativeProjectInput> {
   try {
     const bytes = await readCompose(opts.composeFile);
@@ -495,7 +513,8 @@ export async function prepareNativeProjectInput(opts: {
     const shell = resolveServiceShellEnvironment({
       services: compose.services,
       managedEnvironment,
-      env: opts.env ?? {},
+      env: opts.env,
+      shellEnvironmentAllow: opts.shellEnvironmentAllow,
     });
     const normalizedComposeJson = JSON.stringify(compose);
     if (Buffer.byteLength(normalizedComposeJson) > LIMIT) {
@@ -529,6 +548,9 @@ export async function prepareNativeProjectInput(opts: {
       environmentNotices: shell.notices,
     };
   } catch (error: unknown) {
+    if (error instanceof NativeShellConsentError) {
+      throw refused(error.message);
+    }
     // Only this module's closed refusals carry a cause; anything else stays generic.
     throw error instanceof NativeProjectInputRefusal ? error : refused();
   }

@@ -40,6 +40,15 @@ const BRACED = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 /** The whole value is one unbraced reference. */
 const UNBRACED = /^\$([A-Za-z_][A-Za-z0-9_]*)$/;
 
+/** Closed refusal: neither the referenced value nor the machine record is echoed. */
+export class NativeShellConsentError extends Error {
+  constructor() {
+    super(
+      'Shell variable forwarding requires explicit consent: add the exact source variable names to "shellEnvironmentAllow" in the private native machine settings for this project'
+    );
+  }
+}
+
 /**
  * Names the native runtime binds itself during review. Taking one from the
  * shell would give a service another instance's value and remove the
@@ -124,6 +133,21 @@ export type ShellEnvironmentResolution = {
   readonly notices: string[];
 };
 
+/** Validate names only; callers validate the whole project before acquiring values. */
+export function requireShellEnvironmentConsent(opts: {
+  readonly environment: Readonly<Record<string, unknown>>;
+  readonly managed: ReadonlySet<string>;
+  readonly allowed?: readonly string[];
+}): void {
+  const allowed = new Set(opts.allowed ?? []);
+  for (const [key, value] of Object.entries(opts.environment)) {
+    const name = shellReference({ key, value, managed: opts.managed });
+    if (name !== undefined && !allowed.has(name)) {
+      throw new NativeShellConsentError();
+    }
+  }
+}
+
 /**
  * Resolves every shell reference of one service. Returns `null` when the
  * service has none, so the caller leaves its `environment` untouched.
@@ -138,9 +162,16 @@ export function resolveShellEnvironment(opts: {
   readonly service: string;
   /** The service's environment as a mapping (`NAME` → value or `null`). */
   readonly environment: Readonly<Record<string, unknown>>;
-  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Exact source names granted by the private, project-root-bound machine record. */
+  readonly allowed?: readonly string[];
   readonly managed: ReadonlySet<string>;
 }): ShellEnvironmentResolution | null {
+  // Validate every reference before acquiring any values. Preparation without
+  // `env` only normalizes public references for exec and stale-input checks.
+  if (opts.env !== undefined) {
+    requireShellEnvironmentConsent(opts);
+  }
   // Null-prototype maps: `__proto__` is a valid variable name.
   const environment: Record<string, unknown> = Object.create(null);
   const delivered: Record<string, string> = Object.create(null);
@@ -153,7 +184,8 @@ export function resolveShellEnvironment(opts: {
       continue;
     }
     changed = true;
-    const found = shellValue(opts.env, name);
+    const found =
+      opts.env === undefined ? undefined : shellValue(opts.env, name);
     environment[key] = null;
     delivered[key] = found ?? "";
     if (found === undefined) {

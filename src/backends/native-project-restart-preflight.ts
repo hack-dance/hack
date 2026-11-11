@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { ClosedCliError } from "../lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { requireWrappableNativeProcesses } from "../lib/native-process-wrappers.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
@@ -30,6 +30,8 @@ import {
 import {
   mergeNativeShellEnvironment,
   prepareNativeProjectInput,
+  requireNativeShellDeliveryFits,
+  selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
@@ -378,6 +380,7 @@ async function pinRestartImages(opts: {
 
 /** Review the same public graph before stopping anything; never run startup hooks here. */
 export async function preflightNativeRestart(opts: {
+  readonly shellEnvironmentAllow?: readonly string[];
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
@@ -451,6 +454,7 @@ export async function preflightNativeRestart(opts: {
       envName: selected.envName,
       // As native start: `environment` references read the caller's shell.
       env: process.env,
+      shellEnvironmentAllow: opts.shellEnvironmentAllow,
     })
   );
   const environmentChange = nativeRunEnvironmentChange({
@@ -647,6 +651,21 @@ export async function preflightNativeRestart(opts: {
     invoke: deps.invoke,
     input: { ...input, normalizedComposeJson: JSON.stringify(compose) },
     run: async (review) => {
+      try {
+        requireNativeShellDeliveryFits(
+          selectActiveNativeProjectInput({
+            input,
+            reviewedPlan: review.report.plan,
+          })
+        );
+      } catch (error: unknown) {
+        if (error instanceof HackCliError) {
+          throw new ClosedCliError(
+            `${error.message}. The current graph was not stopped.`
+          );
+        }
+        throw error;
+      }
       if (review.namespace !== opts.run.namespace) {
         throw new ClosedCliError(
           "Native restart configuration changed; the current graph was not stopped."

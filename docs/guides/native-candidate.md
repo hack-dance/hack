@@ -1249,7 +1249,27 @@ by an older bundle, so clean up such a graph with the bundle that started it.
 
 Compose reads a variable reference from the shell that runs it. The native runtime
 reads no ambient environment, so two forms of a service `environment` entry could
-never start on native. `hack up` and `hack restart` now resolve them from your shell:
+never start on native. `hack up` and `hack restart` resolve them only after you
+grant the exact source names in the private native machine settings:
+
+```json
+{
+  "version": 1,
+  "projectRoots": ["/absolute/project"],
+  "shellEnvironmentAllow": ["API_KEY", "TOKEN"]
+}
+```
+
+This is the existing `settings.json` outside the project, under
+`${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/`. Its directory must
+be `0700`, its file `0600`, and `projectRoots` must grant this canonical checkout.
+The list contains at most 256 exact variable names, with no wildcards or empty
+entries. Whitespace around a name is trimmed. There is no environment or
+project-file override: a repository `.env` cannot grant consent. An unapproved
+reference refuses before shell values are read, and restart refuses before it
+stops the current graph. Keep credentials in Hack managed env when practical.
+
+With consent:
 
 | Entry | Shell has the variable | Shell does not |
 | --- | --- | --- |
@@ -1287,8 +1307,10 @@ What stays as it was:
   An entry under either rule is left as written. It does not pass through as it
   would with Compose: the start still fails with `execution_environment_missing`,
   as it did before.
-- **A project `.env` file.** Compose also reads it for these references; native does
-  not, so "not set in your shell" can be printed for a variable your `.env` defines.
+- **A project `.env` file.** Hack does not parse it for shell references. A launch
+  runtime such as Bun may preload dotenv into its process environment; forwarded
+  names still require consent in the private machine settings. Dotenv cannot
+  create that grant, and a missing reference is reported as unset.
 
 Three consequences of the private delivery:
 
@@ -2775,6 +2797,9 @@ merged. For example, `HACK_NATIVE_ADAPTATION` replaces the committed adaptation,
 non-empty `HACK_NATIVE_AWS_PROFILE` selects the AWS variables; `HACK_NATIVE_AWS_REGION`
 without it is ignored, as before. Existing scripts that export the variables keep
 their exact behavior.
+
+`shellEnvironmentAllow` is an exception: it grants shell source names only from
+this private machine file. It has no environment or committed-project override.
 
 **Per-env files.** `adaptation.<env>.json` and `dependenciesByEnv.<env>` replace the
 base file for runs whose effective env is `<env>`: the `--env` you pass, the env a

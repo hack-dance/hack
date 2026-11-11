@@ -2790,3 +2790,81 @@ test.each([
     await rm(directory, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("oversized shell delivery is refused before restart cleanup, after adapter merge and active-service filtering", async () => {
+  for (const active of [true, false]) {
+    const f = fixture();
+    const value = "synthetic-shell-private-".repeat(900);
+    const input = {
+      originalSha256: "1".repeat(64),
+      environmentFiles: [],
+      serviceNames: ["app"],
+      normalizedComposeJson: JSON.stringify({
+        services: {
+          app: {
+            image: `sha256:${"9".repeat(64)}`,
+            environment: { TOKEN: null },
+          },
+        },
+      }),
+      managedEnvironment: {},
+      shellEnvironment: { app: { TOKEN: value } },
+      lifecycleHostEnvironment: {},
+      effectiveEnvName: "qa",
+    };
+    const preflight = async () =>
+      await preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope,
+        composeFile: "/fixture/.hack/docker-compose.yml",
+        run: { ...run, gcloud: { mode: "file" } },
+        dependencies: {
+          activeImages: async () => activeImageFixture(),
+          prepare: async () => input,
+          adapt: async ({ input }) => input,
+          gcloud: async ({ input }) => ({
+            input: {
+              ...input,
+              managedEnvironment: {
+                app: {
+                  ...input.managedEnvironment.app,
+                  ADAPTER: "x".repeat(16 * 1024),
+                },
+              },
+            },
+            receipt: { mode: "file", types: [], services: ["app"] },
+          }),
+          dependencies: async () => [],
+          invoke: async ({ args }) =>
+            args[1] === "probe" ? { admitted: true } : { network: "internet" },
+          review: async (options) => {
+            await options.run({
+              planId: run.planId,
+              namespace: run.namespace,
+              report: { plan: { services: { app: { active } } } },
+              projectArgs: [],
+            });
+            throw new ClosedCliError(
+              "delivery admitted; test stops before cleanup"
+            );
+          },
+        },
+      });
+    const error = await restartNativeProject({ ...f.options, preflight }).catch(
+      (error: unknown) => error
+    );
+    expect(error).toBeInstanceOf(ClosedCliError);
+    if (active) {
+      expect((error as Error).message).toContain("over 32 KiB");
+      expect((error as Error).message).toContain(
+        "The current graph was not stopped"
+      );
+    } else {
+      expect((error as Error).message).not.toContain("over 32 KiB");
+    }
+    expect(String(error)).not.toContain("synthetic-shell-private-");
+    expect(f.events).not.toContain("down");
+    expect(f.events).not.toContain("capture");
+    expect(f.events).not.toContain("start");
+  }
+});

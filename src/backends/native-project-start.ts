@@ -1748,6 +1748,7 @@ type NativeProjectStartOptions = {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
+  readonly shellEnvironmentAllow?: readonly string[];
   readonly restore?: NativeProjectRun;
   readonly onReady?: (services: {
     readonly started: readonly string[];
@@ -1878,6 +1879,7 @@ async function startNativeProjectAttempt(
     envName: selection.envName,
     // Service `environment` references are resolved from the caller's shell.
     env: process.env,
+    shellEnvironmentAllow: opts.shellEnvironmentAllow,
   });
   // Digest the selection now: later steps adapt the delivered values.
   const selectedEnvironment = opts.onEnvironmentReady

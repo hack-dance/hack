@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -59,7 +61,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture() {
+async function fixture(consent = true) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-shell-env-cli-"))
   );
@@ -71,6 +73,31 @@ async function fixture() {
   await mkdir(projectDir, { recursive: true });
   await mkdir(nativeHome, { mode: 0o700 });
   await mkdir(stub);
+  const xdg = {
+    XDG_CONFIG_HOME: join(root, "xdg-config"),
+    XDG_STATE_HOME: join(root, "xdg-state"),
+    XDG_CACHE_HOME: join(root, "xdg-cache"),
+    XDG_DATA_HOME: join(root, "xdg-data"),
+  };
+  if (consent) {
+    const directory = join(
+      xdg.XDG_CONFIG_HOME,
+      "hack",
+      "native",
+      "shell-env-fixture"
+    );
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(directory, 0o700);
+    await writeFile(
+      join(directory, "settings.json"),
+      JSON.stringify({
+        version: 1,
+        projectRoots: [project],
+        shellEnvironmentAllow: ["FIXTURE_API_KEY", "FIXTURE_REGION", "PASSED"],
+      }),
+      { mode: 0o600 }
+    );
+  }
   const composeFile = join(projectDir, "docker-compose.yml");
   await writeFile(composeFile, JSON.stringify(COMPOSE));
   await writeFile(
@@ -122,6 +149,7 @@ exit 1
     composeFile,
     binary,
     nativeHome,
+    xdg,
     calls: async () =>
       (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
         .split("\n")
@@ -141,6 +169,7 @@ test(
         env: privateCliEnv({
           root: f.root,
           env: {
+            ...f.xdg,
             HACK_RUNTIME_BACKEND: "native",
             HACK_NATIVE_BINARY: f.binary,
             HACK_NATIVE_HOME: f.nativeHome,
@@ -174,6 +203,14 @@ test(
     // The project passed the CLI's admission: the stub runtime was asked to start.
     expect(output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
     expect(await f.calls()).toContain("project plan");
+    for (const directory of [f.nativeHome, ...Object.values(f.xdg)]) {
+      for (const path of await regularFiles(directory)) {
+        expect(await readFile(path, "utf8")).not.toContain(PRIVATE);
+      }
+    }
+    expect(await readFile(join(f.root, "stub", "calls"), "utf8")).not.toContain(
+      PRIVATE
+    );
   },
   SPAWN_TIMEOUT_MS
 );
@@ -185,6 +222,7 @@ test("shell values travel only in the private stdin payload, never in the public
     projectDir: f.projectDir,
     composeFile: f.composeFile,
     env: { FIXTURE_API_KEY: PRIVATE, PASSED: `${PRIVATE}-passed` },
+    shellEnvironmentAllow: ["FIXTURE_API_KEY", "FIXTURE_REGION", "PASSED"],
   });
   expect(input.normalizedComposeJson).not.toContain(PRIVATE);
   const selection = {
@@ -225,6 +263,7 @@ test("a variable named like an Object.prototype property is an ordinary variable
       ["PLAIN", reference("toString")],
     ]),
     env: { FIXTURE_SET: PRIVATE },
+    allowed: ["FIXTURE_SET", "constructor", "toString"],
     managed: new Set(),
   });
   expect(Object.entries(resolution?.delivered ?? {})).toEqual([
@@ -238,4 +277,118 @@ test("a variable named like an Object.prototype property is an ordinary variable
     "constructor",
     "PLAIN",
   ]);
+});
+
+async function regularFiles(directory: string): Promise<string[]> {
+  const result: string[] = [];
+  const entries = await readdir(directory, { withFileTypes: true }).catch(
+    (error: unknown) => {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return [];
+      }
+      throw error;
+    }
+  );
+  for (const entry of entries) {
+    expect(entry.isSymbolicLink()).toBe(false);
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      result.push(...(await regularFiles(path)));
+    } else if (entry.isFile()) {
+      result.push(path);
+    }
+  }
+  return result;
+}
+
+test("unapproved references refuse before reading any shell value; normalization without env stays value-free", () => {
+  const environment = {
+    APPROVED: reference("ALLOWED"),
+    LEAK: reference("GITHUB_TOKEN"),
+  };
+  const untrusted = Object.defineProperties(
+    {},
+    {
+      ALLOWED: {
+        enumerable: true,
+        get() {
+          throw new Error(
+            "must not acquire approved value before consent validation"
+          );
+        },
+      },
+      GITHUB_TOKEN: {
+        enumerable: true,
+        get() {
+          throw new Error("must not read unapproved value");
+        },
+      },
+    }
+  );
+  expect(() =>
+    resolveShellEnvironment({
+      service: "web",
+      environment,
+      env: untrusted,
+      allowed: ["ALLOWED"],
+      managed: new Set(),
+    })
+  ).toThrow("shellEnvironmentAllow");
+  const normalized = resolveShellEnvironment({
+    service: "web",
+    environment,
+    managed: new Set(),
+  });
+  expect(normalized?.environment).toEqual({ APPROVED: null, LEAK: null });
+  expect(normalized?.delivered).toEqual({ APPROVED: "", LEAK: "" });
+});
+
+test("repository dotenv cannot grant shell-forwarding consent", async () => {
+  const f = await fixture(false);
+  await writeFile(
+    join(f.root, ".env"),
+    "HACK_NATIVE_SHELL_ENV_ALLOW=FIXTURE_API_KEY,FIXTURE_REGION,PASSED\n"
+  );
+  const child = Bun.spawn(
+    [process.execPath, entrypoint, "--path", f.project, "up"],
+    {
+      cwd: f.root,
+      env: privateCliEnv({
+        root: f.root,
+        env: {
+          ...f.xdg,
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_NATIVE_BINARY: f.binary,
+          HACK_NATIVE_HOME: f.nativeHome,
+          HACK_NATIVE_SHARED_SOURCE: "1",
+          HACK_NO_INTERACTIVE: "1",
+          HACK_LOGGER: "console",
+          FIXTURE_API_KEY: PRIVATE,
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: SPAWN_TIMEOUT_MS - 5000,
+    }
+  );
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(code).toBe(1);
+  expect(stdout + stderr).toContain("shellEnvironmentAllow");
+  expect(stdout + stderr).not.toContain(PRIVATE);
+  expect(await f.calls()).not.toContain("project plan");
+  for (const directory of [f.nativeHome, ...Object.values(f.xdg)]) {
+    for (const path of await regularFiles(directory)) {
+      expect(await readFile(path, "utf8")).not.toContain(PRIVATE);
+    }
+  }
 });

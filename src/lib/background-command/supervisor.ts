@@ -226,7 +226,13 @@ async function prepare(paths: JournalPaths): Promise<
   // First, before any child exists: the descriptor must not be inherited.
   const redactValues = parseRedactValues(await readPrivateInput());
   const own = await readOwnIdentity();
-  if (!(meta && launch && own)) {
+  // Never run with less redaction than was accepted: a truncated or missing
+  // private input fails the start before the owner record exists, so the
+  // launcher reports supervisor_failed_to_start and nothing runs.
+  if (
+    !(meta && launch && own && redactValues) ||
+    redactValues.length !== meta.redaction.values
+  ) {
     return "failed";
   }
   await createPrivateFileExclusive({
@@ -723,14 +729,16 @@ export function endedPayload(opts: {
 }
 
 /** Redaction values from the launcher's private input (a JSON array). */
-function parseRedactValues(text: string): string[] {
+/** Null when the input is not a complete JSON array of strings. */
+function parseRedactValues(text: string): string[] | null {
   try {
     const value: unknown = JSON.parse(text);
-    return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === "string")
-      : [];
+    return Array.isArray(value) &&
+      value.every((item): item is string => typeof item === "string")
+      ? value
+      : null;
   } catch {
-    return [];
+    return null;
   }
 }
 

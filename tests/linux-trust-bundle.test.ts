@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { writeLinuxHostTrustBundle } from "../src/commands/global.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const tempDirs = new Set<string>();
 
@@ -79,4 +80,32 @@ test("returns null when the local CA is unreadable", async () => {
   });
 
   expect(result).toBeNull();
+});
+
+test("Linux trust updates the system store before building the host bundle (rotation)", async () => {
+  const { configureLinuxHostTlsTrust } = await import(
+    "../src/commands/global.ts"
+  );
+  const order: string[] = [];
+  const savedHome = process.env.HACK_HOME;
+  const dir = await mkdtemp(join(tmpdir(), "hack-linux-trust-order-"));
+  process.env.HACK_HOME = dir;
+  try {
+    const ok = await configureLinuxHostTlsTrust({
+      certPath: join(dir, "ca.crt"),
+      applySystemTrust: async () => {
+        order.push("system");
+        return true;
+      },
+      writeBundle: async () => {
+        order.push("bundle");
+        return null;
+      },
+    });
+    expect(ok).toBe(true);
+    expect(order).toEqual(["system", "bundle"]);
+  } finally {
+    restoreEnv("HACK_HOME", savedHome);
+    await rm(dir, { recursive: true, force: true });
+  }
 });

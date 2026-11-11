@@ -4208,12 +4208,27 @@ export async function writeLinuxHostTrustBundle(input: {
  * script, then adds the CA to the distribution trust store (confirmed sudo)
  * and to NSS browser databases. Returns false when an attempted step failed.
  */
-async function configureLinuxHostTlsTrust(input: {
+export async function configureLinuxHostTlsTrust(input: {
   readonly certPath: string;
+  /** Test seams; default to the real system/NSS step and bundle writer. */
+  readonly applySystemTrust?: () => Promise<boolean>;
+  readonly writeBundle?: (certPath: string) => Promise<string | null>;
 }): Promise<boolean> {
-  const bundlePath = await writeLinuxHostTrustBundle({
-    certPath: input.certPath,
-  });
+  // System trust first: the host bundle copies the system bundle, so after a
+  // Caddy root rotation it must be built from the refreshed system bundle,
+  // not the one that still holds the superseded root.
+  const trustOk = await (
+    input.applySystemTrust ??
+    (() =>
+      configureLinuxSystemAndBrowserTrust({
+        certPath: input.certPath,
+        composeFile: getGlobalPaths().caddyCompose,
+      }))
+  )();
+  const bundlePath = await (
+    input.writeBundle ??
+    ((certPath: string) => writeLinuxHostTrustBundle({ certPath }))
+  )(input.certPath);
   const scriptPath = resolveHackHostTrustEnvScriptPath();
   await ensureDir(dirname(scriptPath));
   await writeTextFile(
@@ -4230,10 +4245,7 @@ async function configureLinuxHostTlsTrust(input: {
       : "Prepared host trust env (NODE_EXTRA_CA_CERTS only; no system bundle found).",
   });
   note(`Current shell: source ${scriptPath}`, "Host TLS");
-  return await configureLinuxSystemAndBrowserTrust({
-    certPath: input.certPath,
-    composeFile: getGlobalPaths().caddyCompose,
-  });
+  return trustOk;
 }
 
 async function exportCaddyLocalCaCert(): Promise<string | null> {

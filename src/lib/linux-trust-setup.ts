@@ -129,6 +129,13 @@ export async function applyLinuxSystemTrust(opts: {
   readonly host: LinuxTrustHost;
   readonly ca: ValidatedCa;
   readonly stagedPath: string;
+  /**
+   * Persistent CA path for commands the user runs later (pending or manual
+   * outcomes). The private staged copy is deleted when the command returns;
+   * the digest in each command still binds them to the approved bytes, so a
+   * changed file there is refused by root.
+   */
+  readonly manualCertPath: string;
   readonly canPrompt: boolean;
   readonly show: (
     commands: readonly (readonly string[])[],
@@ -146,7 +153,7 @@ export async function applyLinuxSystemTrust(opts: {
       code: "linux_trust_distro_unknown",
       family: null,
       steps: renderUnknownDistroTrustSteps({
-        certPath: stagedPath,
+        certPath: opts.manualCertPath,
         sha256: ca.pemSha256,
       }),
     };
@@ -189,7 +196,11 @@ export async function applyLinuxSystemTrust(opts: {
     status: "pending",
     code: "linux_trust_system_pending",
     family,
-    commands,
+    commands: linuxSystemTrustCommands({
+      family,
+      certPath: opts.manualCertPath,
+      sha256: ca.pemSha256,
+    }),
   } as const;
   // No root command runs without an interactive yes, and none at all when
   // prompting is unavailable (--no-interactive, HACK_NO_INTERACTIVE, no TTY).

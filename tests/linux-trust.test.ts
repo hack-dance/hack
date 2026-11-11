@@ -43,6 +43,7 @@ import {
 const UID = 1000;
 const HOME = "/fake-home";
 const STAGED = "/fake-private/caddy-local-ca.crt";
+const EXPORT = `${HOME}/.hack/caddy/pki/caddy-local-authority.crt`;
 const CERTUTIL = "/usr/bin/certutil";
 const SQL_PREFIX = /^sql:/;
 const PEM_ARMOR = /-----[^-]+-----/g;
@@ -445,6 +446,7 @@ describe("applyLinuxSystemTrust", () => {
       host,
       ca,
       stagedPath: STAGED,
+      manualCertPath: EXPORT,
       canPrompt: true,
       show: (_commands, fingerprint) => shown.push(fingerprint),
       confirm: yes,
@@ -466,6 +468,7 @@ describe("applyLinuxSystemTrust", () => {
       host,
       ca: await validated(CURRENT_CA_PEM),
       stagedPath: STAGED,
+      manualCertPath: EXPORT,
       canPrompt: true,
       show: noShow,
       confirm: yes,
@@ -487,6 +490,7 @@ describe("applyLinuxSystemTrust", () => {
       host,
       ca: await validated(CURRENT_CA_PEM),
       stagedPath: STAGED,
+      manualCertPath: EXPORT,
       canPrompt: true,
       show: () => {
         throw new Error("no plan expected");
@@ -512,6 +516,7 @@ describe("applyLinuxSystemTrust", () => {
       host,
       ca: await validated(CURRENT_CA_PEM),
       stagedPath: STAGED,
+      manualCertPath: EXPORT,
       canPrompt: false,
       show: () => {
         throw new Error("must not show a prompt plan");
@@ -525,6 +530,13 @@ describe("applyLinuxSystemTrust", () => {
       code: "linux_trust_system_pending",
     });
     expect(state.privileged).toEqual([]);
+    // The printed commands outlive the private staged copy: they name the
+    // persistent export and still carry the approved digest.
+    if (outcome.status === "pending") {
+      expect(outcome.commands[0]).toContain(EXPORT);
+      expect(outcome.commands[0]).toContain(sha256(CURRENT_CA_PEM));
+      expect(outcome.commands.flat()).not.toContain(STAGED);
+    }
   });
 
   test("declined is pending and runs nothing", async () => {
@@ -535,6 +547,7 @@ describe("applyLinuxSystemTrust", () => {
       host,
       ca: await validated(CURRENT_CA_PEM),
       stagedPath: STAGED,
+      manualCertPath: EXPORT,
       canPrompt: true,
       show: noShow,
       confirm: async () => false,
@@ -551,6 +564,7 @@ describe("applyLinuxSystemTrust", () => {
       host,
       ca: await validated(CURRENT_CA_PEM),
       stagedPath: STAGED,
+      manualCertPath: EXPORT,
       canPrompt: true,
       show: noShow,
       confirm: async () => {
@@ -571,6 +585,7 @@ describe("applyLinuxSystemTrust", () => {
         host: unknown.host,
         ca: await validated(CURRENT_CA_PEM),
         stagedPath: STAGED,
+        manualCertPath: EXPORT,
         canPrompt: true,
         show: noShow,
         confirm: yes,
@@ -582,6 +597,7 @@ describe("applyLinuxSystemTrust", () => {
         host: missing.host,
         ca: await validated(CURRENT_CA_PEM),
         stagedPath: STAGED,
+        manualCertPath: EXPORT,
         canPrompt: true,
         show: noShow,
         confirm: yes,

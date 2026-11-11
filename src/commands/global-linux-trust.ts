@@ -128,7 +128,12 @@ export async function configureLinuxSystemAndBrowserTrust(opts: {
   }
   const staged = await deps.stage(ca.pem);
   try {
-    const systemOk = await applySystem({ deps, ca, stagedPath: staged.path });
+    const systemOk = await applySystem({
+      deps,
+      ca,
+      stagedPath: staged.path,
+      manualCertPath: opts.certPath,
+    });
     const nssOk = await applyNss({ deps, ca, stagedPath: staged.path });
     return systemOk && nssOk;
   } finally {
@@ -140,12 +145,14 @@ async function applySystem(opts: {
   readonly deps: LinuxTrustCommandDeps;
   readonly ca: ValidatedCa;
   readonly stagedPath: string;
+  readonly manualCertPath: string;
 }): Promise<boolean> {
   const { deps, ca } = opts;
   const system = await applyLinuxSystemTrust({
     host: deps.host,
     ca,
     stagedPath: opts.stagedPath,
+    manualCertPath: opts.manualCertPath,
     canPrompt: deps.canPrompt(),
     show: (commands, fingerprint256) =>
       note(

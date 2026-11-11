@@ -232,7 +232,7 @@ Progress events are also closed: `lock-waiting`, `lock-acquired`, `claim-stale`,
 `bun test tests/shared-host-lifecycle.test.ts` runs portable local fixtures. Each
 fixture is a Bun process on a loopback port with a private HOME. No Docker, real
 HOME, keychain or privileged effect is involved. The file runs in one of the hosted
-macOS `test shard i/8` jobs; on pull requests it stays in the macOS pool because
+macOS `test shard i/8` jobs; it stays in the macOS pool on every run because
 it is platform-sensitive. The required `test` check accepts success or
 cancelled-only results, while failure or skipped shard results still fail unless
 the pull request's change scope leaves the bun shards out (see

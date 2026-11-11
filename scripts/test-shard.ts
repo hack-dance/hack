@@ -12,9 +12,9 @@
  *   bun scripts/test-shard.ts run --focus=docs[,runtime-core] [...]
  *   bun scripts/test-shard.ts update-durations --source=TEXT FILE...
  *
- * `--layout=pooled` (pull requests, HACK-1960) runs the platform-sensitive
- * files on the first shards, which must be macOS hosts, and the rest on Linux
- * hosts; `--focus` runs only the files that read documentation or runtime-core
+ * `--layout=pooled` (CI pushes and pull requests, HACK-1960, HACK-2028) runs
+ * the platform-sensitive files on the first shards, which must be macOS hosts,
+ * and the rest on Linux hosts; `--focus` runs only the files that read documentation or runtime-core
  * sources, in one process set. See scripts/test-shard-plan.ts.
  *
  * `run` first checks the Bun pin and the compiler preflight exactly as

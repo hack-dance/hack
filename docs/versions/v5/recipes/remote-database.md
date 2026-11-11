@@ -10,7 +10,7 @@ env overlay. A lifecycle process runs the proxy. Guard rails stop you from
 writing to production by accident.
 
 The complete project is in
-[`examples/recipes/remote-database`](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/examples/recipes/remote-database).
+[`examples/recipes/remote-database`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/remote-database).
 Its proxy, `scripts/tcp-forward.ts`, is a small stand-in for a real one. The
 "remote" database is a local stand-in started from `stand-in/`.
 

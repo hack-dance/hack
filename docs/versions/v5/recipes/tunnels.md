@@ -9,7 +9,7 @@ webhook sender, a phone, or a teammate. The tunnel runs as a Hack lifecycle
 process, so `hack up` starts it and `hack down` stops it.
 
 The complete project is in
-[`examples/recipes/tunnel`](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/examples/recipes/tunnel). It uses
+[`examples/recipes/tunnel`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/tunnel). It uses
 `cloudflared` quick tunnels, which need no account. Any tunnel CLI that runs in
 the foreground works the same way.
 
@@ -97,9 +97,11 @@ that you register in advance, so they need a hostname that stays the same:
 
 - **A named tunnel.** Create it once in your tunnel provider's account and run
   it with a token instead of `--url`. Store the token with
-  `<secret-source> | hack env add TUNNEL_TOKEN --secret --local --value-stdin`;
-  lifecycle processes receive managed env values in the global and `host`
-  scopes. For `cloudflared`, the process command is then just
+  `<secret-source> | hack env add TUNNEL_TOKEN --service host --secret --local --value-stdin`.
+  The `host` scope delivers it to host commands and lifecycle processes while
+  keeping it out of the `web` container. Use this pattern in projects without a
+  Compose service named `host`: that name otherwise selects the container's
+  service scope. For `cloudflared`, the process command is then just
   `cloudflared tunnel run`: it reads `TUNNEL_TOKEN` from its environment
   (`cloudflared tunnel run --help` lists it). Do not write
   `--token "$TUNNEL_TOKEN"`; that puts the token in the process's arguments,

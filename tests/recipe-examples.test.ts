@@ -124,7 +124,7 @@ async function runSourceCli(opts: {
   readonly cwd: string;
   readonly args: readonly string[];
   readonly input?: string;
-}): Promise<{ exitCode: number; stdout: string }> {
+}): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const child = Bun.spawn({
     cmd: [process.execPath, join(REPO_ROOT, "index.ts"), ...opts.args],
     cwd: opts.cwd,
@@ -137,12 +137,16 @@ async function runSourceCli(opts: {
     stderr: "pipe",
     timeout: CLI_TIMEOUT_MS,
   });
-  child.stdin.end(opts.input ?? "");
-  const [stdout, exitCode] = await Promise.all([
+  if (opts.input !== undefined) {
+    child.stdin.write(opts.input);
+  }
+  await child.stdin.end();
+  const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
     child.exited,
   ]);
-  return { exitCode, stdout };
+  return { exitCode, stdout, stderr };
 }
 
 const examples = await listRecipeExamples(REPO_ROOT);
@@ -333,7 +337,7 @@ test("the named-tunnel recipe delivers its token only to the host scope", async 
     args: ["env", "add", "TUNNEL_TOKEN", ...flags.split(/\s+/)],
     input: `${fixtureValue}\n`,
   });
-  expect(added.exitCode).toBe(0);
+  expect(added.exitCode, added.stdout + added.stderr).toBe(0);
   const host = await runSourceCli({
     root,
     cwd: project,

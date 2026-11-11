@@ -9,7 +9,7 @@ a production-like setup. Each environment is an env overlay file. You choose it
 with `--env`.
 
 The complete project is in
-[`examples/recipes/environments`](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/examples/recipes/environments).
+[`examples/recipes/environments`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/environments).
 
 ## Steps
 

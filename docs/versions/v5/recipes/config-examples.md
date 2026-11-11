@@ -5,7 +5,7 @@ The execution notes below come from the newer recipe source revision; the exampl
 were not rerun with the pinned binary.
 
 Copy-paste project setups for common shapes. Each one is a complete, working project in
-[`examples/configs`](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/examples/configs): `.hack/hack.config.json`, the env file,
+[`examples/configs`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/configs): `.hack/hack.config.json`, the env file,
 `.hack/docker-compose.yml` and a small app. Copy the directory, rename `name`, `dev_host`
 and the `caddy` labels, and replace the app.
 
@@ -70,7 +70,7 @@ services:
     command: ["bun", "run", "dev"]
     volumes:
       - ..:/app
-      - node_modules:/app/node_modules
+      - node_modules:/app/node_modules:ro
     depends_on:
       deps:
         condition: service_completed_successfully
@@ -150,7 +150,7 @@ services:
     command: ["bun", "run", "api"]
     volumes:
       - ..:/app
-      - node_modules:/app/node_modules
+      - node_modules:/app/node_modules:ro
     depends_on:
       deps:
         condition: service_completed_successfully
@@ -170,7 +170,7 @@ services:
     command: ["bun", "run", "worker"]
     volumes:
       - ..:/app
-      - node_modules:/app/node_modules
+      - node_modules:/app/node_modules:ro
     depends_on:
       deps:
         condition: service_completed_successfully
@@ -198,7 +198,7 @@ networks:
 
 ## Monorepo with two apps and a shared package
 
-Bun workspaces: `apps/web` and `apps/api` both import `packages/shared`. Bun writes a `node_modules` folder into each workspace package, so each has its own named volume, listed once in a YAML anchor.
+Bun workspaces: `apps/web` and `apps/api` both import `packages/shared`. Bun writes a `node_modules` folder into each workspace package, so each has its own named volume. The installer uses a writable volume list; the app services use a separate YAML anchor with read-only dependency mounts.
 The web app answers on `monorepo.hack.local`, the API on `api.monorepo.hack.local`. Add a volume to the anchor when you add a workspace package with dependencies.
 
 <!-- include: examples/configs/monorepo/.hack/hack.config.json -->
@@ -225,24 +225,31 @@ name: monorepo
 # Bun (like pnpm) writes a node_modules directory into each workspace package
 # as well as the root. Each one gets a named volume, so nothing is written to
 # the host checkout and every container sees the same Linux install.
-x-workspace-volumes: &workspace-volumes
+x-install-volumes: &install-volumes
   - ..:/app
   - node_modules:/app/node_modules
   - web_node_modules:/app/apps/web/node_modules
   - api_node_modules:/app/apps/api/node_modules
+
+# Application services read dependencies; only the installer writes them.
+x-app-volumes: &app-volumes
+  - ..:/app
+  - node_modules:/app/node_modules:ro
+  - web_node_modules:/app/apps/web/node_modules:ro
+  - api_node_modules:/app/apps/api/node_modules:ro
 
 services:
   deps:
     image: oven/bun:1.4.4-slim
     working_dir: /app
     command: ["bun", "install", "--frozen-lockfile"]
-    volumes: *workspace-volumes
+    volumes: *install-volumes
 
   web:
     image: oven/bun:1.4.4-slim
     working_dir: /app/apps/web
     command: ["bun", "run", "dev"]
-    volumes: *workspace-volumes
+    volumes: *app-volumes
     depends_on:
       deps:
         condition: service_completed_successfully
@@ -258,7 +265,7 @@ services:
     image: oven/bun:1.4.4-slim
     working_dir: /app/apps/api
     command: ["bun", "run", "dev"]
-    volumes: *workspace-volumes
+    volumes: *app-volumes
     depends_on:
       deps:
         condition: service_completed_successfully
@@ -326,7 +333,7 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - ..:/app
-      - venv:/venv
+      - venv:/venv:ro
     depends_on:
       deps:
         condition: service_completed_successfully
@@ -405,7 +412,7 @@ services:
     command: ["bun", "run", "watch"]
     volumes:
       - ..:/app
-      - node_modules:/app/node_modules
+      - node_modules:/app/node_modules:ro
       - site:/site
     depends_on:
       deps:
@@ -500,6 +507,10 @@ volumes:
 ```
 
 ## What was tested
+
+Dependency volumes now mount read-only in app services and remain writable in
+installers. This correction was checked statically, without rerunning the
+projects in Docker; the execution results below describe the original mounts.
 
 Each example was started with `hack up -d` against Docker Engine on Linux (amd64), and
 answered a request through `hack exec` or a published port. The `*.hack.local` routes

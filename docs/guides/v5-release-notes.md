@@ -22,8 +22,8 @@ This page is the readable summary. The generated
 - **`hack dev`.** One command runs a repository's own side-by-side development
   build. It first shipped in 4.3.0 and is part of the v5 core.
 - **Agent integrations are opt-in.** Hack no longer writes agent files on its own.
-- **Native backend (beta).** Apple Silicon macOS can run prepared projects without
-  Docker, through the `hack-next` channel.
+- **Native backend (beta, Apple Silicon macOS).** Prepared projects can run without
+  Docker. It ships through the `hack-next` channel, not in stable Hack.
 - **A smaller product.** Hosted accounts, the dashboard, Hack Tickets and the
   built-in GitHub and Linear integrations are gone.
 
@@ -32,7 +32,9 @@ This page is the readable summary. The generated
 1. Upgrade the CLI the way you installed it: `brew upgrade hack-dance/tap/hack`, or
    rerun the release installer.
 2. Run `hack doctor` in each project and follow its diagnosis.
-3. Start the project with `hack up` and check the application itself: sign-in,
+3. If a 4.x `hackd` was running during the upgrade, replace it with
+   `hack daemon restart`. See [the daemon after an upgrade](upgrade-to-v5.md#the-daemon-after-an-upgrade).
+4. Start the project with `hack up` and check the application itself: sign-in,
    data-backed pages, and anything that must survive a restart.
 
 Projects need no changes to keep running on Compose. Three behavior changes can
@@ -126,8 +128,10 @@ migrate` previews and applies a move to the plugin. See
 The native backend runs explicitly prepared projects on Apple Silicon macOS without
 Docker. It is a beta:
 
-- It is available only through the `hack-next` channel, which installs beside stable
-  Hack and leaves the stable executable and its state untouched.
+- It ships only through the `hack-next` channel, which installs beside stable Hack
+  and leaves the stable executable and its state untouched. The stable release
+  archives and the Homebrew formula do not contain it; stable `hack` asked for the
+  native backend refuses and points at [the install guide](candidate-install.md).
 - Docker Compose remains the default. Nothing selects the native backend for an
   existing project automatically.
 - It supports a bounded command subset and is qualified project by project. It does
@@ -137,7 +141,9 @@ Docker. It is a beta:
   `hack config adopt --dry-run` preview native configuration without starting
   anything.
 
-Start with a disposable project. See [the native backend guide](native-candidate.md),
+Start with a disposable project. See
+[candidate capability limits](prereleases.md#candidate-capability-limits),
+[the native backend guide](native-candidate.md),
 [Native config import](../reference/native-config-import.md) and the staged plan in
 [Qualify a project on v5](v5-dogfooding.md).
 

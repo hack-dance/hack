@@ -145,10 +145,12 @@ See [agent integrations](docs/integrations.md).
 
 Everything above is the supported core. The items below are opt-in.
 
-**Native backend (beta).** v5 adds a backend for Apple Silicon macOS that runs
-explicitly prepared projects without Docker. It is available only through the
-separate `hack-next` prerelease channel, supports a bounded command subset and is
-qualified project by project. Docker Compose stays the default backend. See
+**Native backend (beta, Apple Silicon macOS).** v5 adds a backend that runs
+explicitly prepared projects without Docker. It ships only through the separate
+`hack-next` channel, not in the stable archives or the Homebrew formula. It supports
+a bounded command subset and is qualified project by project. Docker Compose stays
+the default backend. See [installing it](docs/guides/candidate-install.md), its
+[limits](docs/guides/prereleases.md#candidate-capability-limits) and
 [the native backend guide](docs/guides/native-candidate.md).
 
 **v5 prereleases.** v5 keeps the same CLI and project model. `5.0.0-next.N` builds

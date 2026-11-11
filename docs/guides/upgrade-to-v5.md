@@ -15,7 +15,7 @@ is the runtime layer underneath and the product boundary around it.
 
 ## What is new
 
-- **Native backend (beta).** On Apple Silicon macOS, through the `hack-next` channel,
+- **Native backend (beta, Apple Silicon macOS).** Through the `hack-next` channel only,
   `HACK_RUNTIME_BACKEND=native` runs explicitly prepared projects without Docker. It
   supports a bounded command subset and is qualified project by project. See
   [the native backend](native-candidate.md).
@@ -63,3 +63,17 @@ repository but are unsupported; see [unsupported retained surfaces](../extension
 
 When 5.0.0 ships, `brew upgrade hack` or the release installer moves the stable
 executable to v5. Projects need no changes to keep running on Compose.
+
+## The daemon after an upgrade
+
+Installing 5.0.0 over a running 4.x does not replace the daemon. On Linux the old
+`hackd` keeps running: `hack daemon status` reports `incompatible` and exits 1,
+while `hack status` and `hack projects --json` still work. Replace it yourself:
+
+```bash
+hack daemon restart
+```
+
+`hack daemon start` does the same and prints `Replacing incompatible hackd (pid N)`.
+This was checked on Linux x86_64, upgrading 4.3.0 to a 5.0.0 build. The macOS
+behavior has not been checked yet.

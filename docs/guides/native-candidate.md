@@ -1448,6 +1448,11 @@ native graphs are not routed, so they have no alias or service URLs); a partial 
 work. `exec` observes the values stored in the running container, and one-off
 `run` uses the admitted environment.
 
+Under explicit native selection, `hack up`, `hack status` and `hack doctor` print one
+line naming the native backend as a beta for Apple Silicon macOS, delivered by the
+`hack-next` channel, with a link to
+[the install guide](candidate-install.md). The line is omitted with `--json`.
+
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps` and bounded
 `hack logs SERVICE --no-follow`. They verify the project/branch run mapping

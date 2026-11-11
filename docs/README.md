@@ -37,8 +37,8 @@ repair touches before `hack doctor --fix`.
 ## v5
 
 v5 keeps the v4 project model and commands, and Compose stays the default backend.
-The native backend for Apple Silicon macOS is beta: it is opt-in and available only
-through the `hack-next` channel.
+The native backend (beta, Apple Silicon macOS) is opt-in and ships only through the
+`hack-next` channel, not in stable Hack.
 
 - [What's new in v5](guides/v5-release-notes.md) — the 5.0.0 release notes.
 - [Upgrade to v5](guides/upgrade-to-v5.md) — what changed, what was retired, how to try it.

@@ -1,7 +1,11 @@
 # Install a native prerelease alongside stable Hack
 
-v5 prereleases carry the native backend (beta). They are opt-in Apple Silicon macOS
-bundles identified by `5.0.0-next.N`,
+The native backend is a beta for Apple Silicon macOS. It is not part of stable
+`hack`: the `hack-next` channel installs it, and neither the stable release archives
+nor the Homebrew formula contain it. Its current limits are listed under
+[candidate capability limits](prereleases.md#candidate-capability-limits).
+
+v5 prereleases are opt-in Apple Silicon macOS bundles identified by `5.0.0-next.N`,
 with a positive number and no leading zero. After a stable v5 release, candidates
 move to the next line, such as `5.1.0-next.N`; see
 [versions and artifacts](prereleases.md#versions-and-artifacts). Each release ships

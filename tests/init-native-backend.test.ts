@@ -286,3 +286,32 @@ test("hack init --auto on the Compose backend keeps the Compose scaffold and nex
     "external_network",
   ]);
 }, 30_000);
+
+test("hack init --auto refuses an existing .hack/ with a coded line, no stack and non-interactive next steps (HACK-2069)", async () => {
+  for (const backend of [undefined, "native"] as const) {
+    const root = await createTempDir();
+    const repo = join(root, "repo");
+    await mkdir(repo, { recursive: true });
+
+    expect((await runInitAuto({ root, repo, backend })).exitCode).toBe(0);
+    const configPath = join(repo, ".hack", "hack.config.json");
+    const before = await Bun.file(configPath).text();
+
+    const again = await runInitAuto({ root, repo, backend });
+    expect(again.exitCode).toBe(1);
+    expect(again.output).toContain("E_PROJECT_EXISTS:");
+    expect(again.output).toContain(
+      ".hack/ already exists, so this project is already initialized; nothing was written."
+    );
+    expect(again.output).toContain(
+      `Next: ${initNextSteps({ backend: backend ?? "compose", devHost: "x" }).autoCommand}.`
+    );
+    expect(again.output).toContain(
+      "hack init --auto --with <claude|codex|both>"
+    );
+    // The old advice needed an interactive run; a refusal needs no stack.
+    expect(again.output).not.toContain("Run without --auto");
+    expect(again.output).not.toMatch(/^\s+at\s/m);
+    expect(await Bun.file(configPath).text()).toBe(before);
+  }
+}, 60_000);

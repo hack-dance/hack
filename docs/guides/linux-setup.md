@@ -41,7 +41,8 @@ network is recreated. Hack therefore installs two files that never name it:
 - `/etc/systemd/system/hack-dns@.service` waits up to about ten seconds for the
   gateway address on that interface and exits without changes on every other
   bridge. On Hack's bridge it runs `resolvectl dns`, `resolvectl domain`,
-  `resolvectl default-route no` and `resolvectl dnssec no`.
+  `resolvectl default-route no`, `resolvectl dnssec no` and
+  `resolvectl dnsovertls no` (CoreDNS serves plain DNS).
 
 The design re-applies the route whenever Docker creates the bridge: after a
 reboot, and after the network is removed and recreated. Hack also starts the

@@ -215,6 +215,8 @@ export function renderLinuxDnsUnit(opts: {
     `resolvectl domain "$$1" ${quotedRoutingDomains(opts.domains)}`,
     'resolvectl default-route "$$1" no',
     'resolvectl dnssec "$$1" no',
+    // CoreDNS serves plain DNS; a global DNSOverTLS=yes must not apply here.
+    'resolvectl dnsovertls "$$1" no',
   ].join("; ");
   return [
     "# Managed by hack (hack global install). Remove with: hack global down",

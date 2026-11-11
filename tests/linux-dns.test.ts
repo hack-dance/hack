@@ -203,6 +203,61 @@ describe("detectLinuxResolver", () => {
     ).toBe("none");
   });
 
+  test("NetworkManager precedence: vendor and /run snippets before NetworkManager.conf, /etc after", async () => {
+    const files = new Map([
+      ["/etc/resolv.conf", "nameserver 127.0.0.1\n"],
+      ["/etc/NetworkManager/NetworkManager.conf", "[main]\ndns=dnsmasq\n"],
+      [
+        "/usr/lib/NetworkManager/conf.d/10-vendor.conf",
+        "[main]\ndns=systemd-resolved\n",
+      ],
+    ]);
+    const dirs = new Map([
+      ["/usr/lib/NetworkManager/conf.d", ["10-vendor.conf"]],
+    ]);
+    const vendorOnly = createFakeHost({ resolvedActive: false, files, dirs });
+    expect(
+      (await inspectLinuxDns({ host: vendorOnly.host, domains: DOMAINS }))
+        .resolver.kind
+    ).toBe("networkmanager-dnsmasq");
+
+    // An /etc snippet is parsed after NetworkManager.conf and wins.
+    const etcFiles = new Map(files);
+    etcFiles.set(
+      "/etc/NetworkManager/conf.d/90-local.conf",
+      "[main]\ndns=default\n"
+    );
+    const etcDirs = new Map(dirs);
+    etcDirs.set("/etc/NetworkManager/conf.d", ["90-local.conf"]);
+    const withEtc = createFakeHost({
+      resolvedActive: false,
+      files: etcFiles,
+      dirs: etcDirs,
+    });
+    expect(
+      (await inspectLinuxDns({ host: withEtc.host, domains: DOMAINS })).resolver
+        .kind
+    ).not.toBe("networkmanager-dnsmasq");
+
+    // Same name: /etc shadows the vendor snippet entirely.
+    const shadowFiles = new Map(files);
+    shadowFiles.set(
+      "/etc/NetworkManager/conf.d/10-vendor.conf",
+      "[logging]\nlevel=INFO\n"
+    );
+    const shadowDirs = new Map(dirs);
+    shadowDirs.set("/etc/NetworkManager/conf.d", ["10-vendor.conf"]);
+    const shadowed = createFakeHost({
+      resolvedActive: false,
+      files: shadowFiles,
+      dirs: shadowDirs,
+    });
+    expect(
+      (await inspectLinuxDns({ host: shadowed.host, domains: DOMAINS }))
+        .resolver.kind
+    ).toBe("networkmanager-dnsmasq");
+  });
+
   test("NetworkManager dns= outside [main] and later overrides", () => {
     expect(parseNetworkManagerDnsMode("[logging]\ndns=dnsmasq\n")).toBeNull();
     expect(
@@ -280,6 +335,7 @@ describe("rendered route files", () => {
         "domain br-x ~hack ~hack.local ~hack.gy",
         "default-route br-x no",
         "dnssec br-x no",
+        "dnsovertls br-x no",
       ]);
     } finally {
       await rm(dir, { recursive: true, force: true });

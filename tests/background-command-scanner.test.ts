@@ -161,18 +161,18 @@ describe("scanOutput", () => {
 
   test("a value overlapping one redacted on an earlier append is still found", () => {
     const { file } = simulate({
-      chunks: ["key=abcdef", "123456 end"],
+      chunks: ["val=abcdef", "123456 end"],
       secrets: ["abcdef", "def123456"],
     });
-    expect(decoder.decode(file)).toBe("key=************ end");
+    expect(decoder.decode(file)).toBe("val=************ end");
   });
 
   test("overlapping values are both redacted", () => {
     const { file } = simulate({
-      chunks: ["key=abcdef123456 end"],
+      chunks: ["val=abcdef123456 end"],
       secrets: ["abcdef", "def123456"],
     });
-    expect(decoder.decode(file)).toBe("key=************ end");
+    expect(decoder.decode(file)).toBe("val=************ end");
   });
 
   test("ranges never exceed the event size", () => {

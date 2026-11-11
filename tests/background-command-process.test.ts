@@ -618,6 +618,44 @@ describe("background command processes", () => {
         (await readFile(join(fixture.root, "grandchild.pid"), "utf8")).trim()
       );
       expect(grandchild).toBeGreaterThan(1);
+      await track(grandchild, false);
+      const deadline = Date.now() + 5000;
+      let alive = true;
+      while (alive && Date.now() < deadline) {
+        alive =
+          (await observeIdentities([grandchild]))?.has(grandchild) ?? true;
+        if (alive) {
+          await Bun.sleep(100);
+        }
+      }
+      expect(alive).toBe(false);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
+    "after the leader exits on SIGTERM, a remembered descendant that ignores it is killed",
+    async () => {
+      const launched = await launch({
+        argv: [
+          "sh",
+          "-c",
+          "(trap '' TERM; exec sleep 30) & echo $! > grandchild.pid; wait",
+        ],
+        timeoutMs: 1000,
+      });
+      const pidFile = join(fixture.root, "grandchild.pid");
+      const deadlinePid = Date.now() + 5000;
+      while (!(await Bun.file(pidFile).exists()) && Date.now() < deadlinePid) {
+        await Bun.sleep(25);
+      }
+      const grandchild = Number((await readFile(pidFile, "utf8")).trim());
+      // Registered for cleanup even if an assertion below fails.
+      await track(grandchild, false);
+      const read = await readUntilEnded({
+        journal: launched.journal as LoadedJournal,
+      });
+      expect(read.outcome).toBe("timed_out");
       const deadline = Date.now() + 5000;
       let alive = true;
       while (alive && Date.now() < deadline) {

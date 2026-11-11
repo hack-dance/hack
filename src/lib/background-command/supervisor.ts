@@ -341,9 +341,12 @@ async function superviseChild(opts: {
   }
   const exitCode = await proc.exited;
   // A cancel that arrived while output was being captured (the canceller
-  // also signals the group directly) is still a cancel, not a failure.
+  // also signals the group directly) is still a cancel, not a failure. A
+  // clean exit (0, no signal) stays `succeeded` even if a cancel raced it:
+  // reporting `cancelled` could make a caller run the command again.
+  const cleanExit = exitCode === 0 && proc.signalCode === null;
   if (
-    !stopping &&
+    !(stopping || cleanExit) &&
     (opts.stopRequested() || (await cancelRequested(opts.paths)))
   ) {
     stopping = "cancelled";

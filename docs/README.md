@@ -1,14 +1,17 @@
 # Hack documentation
 
-Hack runs a project's services, environment, secrets, local HTTPS and logs from
-configuration kept in the repository. Teammates, agents and parallel worktrees all
-use the same project definition. The public site is [hack.foo](https://hack.foo).
+Hack is a command-line tool that runs your whole project on your own machine. One
+command starts the project's services, loads its settings and secrets, and gives it
+a local web address with working HTTPS. The project's setup lives in a `.hack/`
+folder committed with the code, so teammates, agents and other worktrees all run it
+the same way. The public site is [hack.foo](https://hack.foo).
 
 ## Run your first project
 
-Start with [Getting started](guides/getting-started.md): install the CLI, set up
-local routing once, initialize a repository and run it with `hack up --detach`.
-The default runtime is Docker Compose. No account is required.
+Start with [Getting started](guides/getting-started.md). You install Hack, set up
+local addresses once per machine, add Hack to a repository, and start it with
+`hack up --detach`. Hack runs services with Docker Compose by default. You do not
+need an account.
 
 Already have a project? Follow [Project setup](guides/init-project.md), or use
 [Agent setup](guides/agent-first-setup.md) to let an agent configure it.

@@ -1342,6 +1342,87 @@ fn nested_interpolation_is_validated_without_exposing_defaults() {
     }
 }
 
+/// Docker Desktop told macOS users for years to add `:cached` or `:delegated`
+/// to source mounts, and Linux guides add `:z`/`:Z`. They tune host file
+/// sharing or SELinux labels and never change what the container sees, so a
+/// typical Compose file must not be refused for them.
+#[test]
+fn host_only_mount_hints_are_accepted_with_a_warning_and_real_modes_still_apply() {
+    let fixture = Fixture::new(&format!(
+        "{BASIC}    volumes:\n      - './src:/workspace:cached'\n      - './lib:/lib-src:ro,delegated'\n      - './etc:/config:z,ro'\n      - {{type: bind, source: ./docs, target: /docs, consistency: consistent}}\n      - {{type: bind, source: ./gen, target: /gen, read_only: true, consistency: delegated}}\n"
+    ));
+    for directory in ["src", "lib", "etc", "docs", "gen"] {
+        fs::create_dir(fixture.project.join(directory)).unwrap();
+    }
+    let plan = fixture.plan();
+    assert!(
+        plan.plan.diagnostics.iter().all(|d| d.severity != "error"),
+        "{:?}",
+        plan.plan.diagnostics
+    );
+    let mounts = &plan.plan.services["web"].mounts;
+    let seen: Vec<(&str, bool)> = mounts
+        .iter()
+        .map(|mount| (mount.target.as_str(), mount.read_only))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("/workspace", false),
+            ("/lib-src", true),
+            ("/config", true),
+            ("/docs", false),
+            ("/gen", true),
+        ]
+    );
+    // One warning per mount that carried a hint; the hint text is not echoed.
+    let ignored: Vec<_> = plan
+        .plan
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "mount_host_hint_ignored")
+        .collect();
+    assert_eq!(ignored.len(), 5);
+    assert!(ignored.iter().all(|d| d.severity == "warning"));
+}
+
+#[test]
+fn mount_options_that_change_container_behaviour_are_still_refused() {
+    for option in ["nocopy", "rshared", "ro,rw", "cached,", "exec", "CACHED"] {
+        let fixture = Fixture::new(&format!(
+            "{BASIC}    volumes: ['./src:/workspace:{option}']\n"
+        ));
+        fs::create_dir(fixture.project.join("src")).unwrap();
+        let error = project::plan(
+            &fixture.candidate,
+            PlanOptions {
+                branch: None,
+                project: &fixture.project,
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "unsupported_mount_option", "{option}");
+    }
+    let fixture = Fixture::new(&format!(
+        "{BASIC}    volumes:\n      - {{type: bind, source: ./src, target: /workspace, consistency: fast}}\n"
+    ));
+    fs::create_dir(fixture.project.join("src")).unwrap();
+    assert!(
+        project::plan(
+            &fixture.candidate,
+            PlanOptions {
+                branch: None,
+                project: &fixture.project,
+                compose_file: Path::new("compose.yaml"),
+                profiles: &[],
+            },
+        )
+        .is_err_and(|error| error.code == "unsupported_mount_option")
+    );
+}
+
 #[test]
 fn compose_relative_paths_and_normalized_reserved_targets_are_checked() {
     let fixture = Fixture::new(BASIC);

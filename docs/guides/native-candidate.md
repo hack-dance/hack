@@ -749,8 +749,9 @@ disks and provider database are made by the SmolVM release it was prepared with.
 an executor pins a different release, every start and `runtime prepare` in that home
 refuses with `provider_pin_changed` and names both versions. Nothing in the home is
 changed: its volumes and prepared tree stay in place, and a build that pins the
-recorded release still runs it. `runtime down` and `runtime probe` refuse the same
-way while the old provider runs, so stop a running pool (`hack down`, then
+recorded release still runs it. `runtime probe` and `runtime repair-provider-tree`
+refuse the same way, and so does `runtime down` while the old provider runs, so stop a
+running pool (`hack down`, then
 `runtime down`) before installing a build with a new pin; a pool left running must be
 stopped with the build that started it. Prepare a new candidate home with the pinned
 archives instead; there is no in-place provider upgrade.

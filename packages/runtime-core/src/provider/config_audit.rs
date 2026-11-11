@@ -335,8 +335,9 @@ fn verify_record(
 /// A pool never requests any of them, so each must be absent or at its inert default; any
 /// other value means something outside this runtime changed the machine. Bookkeeping the
 /// provider writes at every start (`engine_build`, `agent_rootfs_digest`,
-/// `agent_rootfs_path`) grants nothing and is not audited; every other added field is
-/// listed here, including workload stop settings that a pool without a workload never uses.
+/// `agent_rootfs_path`) grants nothing and is not audited, and `disk_durability` has its
+/// own full-only rule; every other added field is listed here, including workload stop
+/// settings that a pool without a workload never uses.
 const INERT_RECORD_FIELDS: [&str; 29] = [
     "pause_reason",
     "paused_checkpoint",

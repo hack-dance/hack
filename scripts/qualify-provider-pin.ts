@@ -1486,7 +1486,10 @@ class Qualification {
     );
     // Immediately before the signal: the live process still has the receipt's user and
     // start time, so a reused PID is never signalled.
+    // `lstart` is local time without a zone: print it in UTC and parse it as UTC.
     const live = this.exec("provider-identity", [
+      "/usr/bin/env",
+      "TZ=UTC",
       "/bin/ps",
       "-o",
       "uid=,lstart=",
@@ -1494,7 +1497,7 @@ class Qualification {
       String(pid),
     ]).stdout.trim();
     const [uid, ...started] = live.split(/\s+/);
-    const startedMs = Date.parse(started.join(" "));
+    const startedMs = Date.parse(`${started.join(" ")} GMT`);
     const recordedMs = Number(recorded?.start_micros) / 1000;
     this.check(
       "the live provider matches the receipt's user and start time",

@@ -80,8 +80,8 @@ function helperPid(text: string): number {
   return pid;
 }
 /** Waits until a helper this test started has exited (signal 0 finds no process). */
-function untilExited(pid: number): Promise<true> {
-  return until(async () => {
+async function untilExited(pid: number): Promise<void> {
+  await until(async () => {
     try {
       process.kill(pid, 0);
     } catch {

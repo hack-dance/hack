@@ -22,19 +22,20 @@ export default function Home() {
         </nav>
 
         <section aria-labelledby="home-about">
-          <h2 id="home-about">Run the whole project</h2>
+          <h2 id="home-about">One command runs the whole project</h2>
           <p>
             Services, environment, secrets, local HTTPS and logs belong to the
-            same project. Hack runs them from <code>.hack/</code> configuration
-            kept in your repository.
+            same project. Hack runs them from a small <code>.hack/</code> folder
+            committed with the repository, so anyone who clones it, teammate or
+            agent, is one <code>hack up</code> from a running environment.
           </p>
           <p>
-            Run projects and branches side by side, each at its own local URL.
-            The setup guide explains the runtime and platform prerequisites
-            before you start.
+            Every project gets its own trusted local URL. Projects and branches
+            run side by side without colliding. Nothing is hosted; your machine
+            is the platform.
           </p>
           <p>
-            <Link href="/docs/getting-started">Install and get started</Link>
+            <Link href="/docs/v5/install">Install and get started</Link>
           </p>
         </section>
 
@@ -42,25 +43,42 @@ export default function Home() {
           <h2 id="home-docs">Index</h2>
           <ul className="home-docs">
             <li>
-              <Link href="/docs/core">Core workflows</Link>
-              <span>Set up, run and inspect a project.</span>
+              <Link href="/docs/v5/core">Core concepts</Link>
+              <span>Projects, services, instances and local URLs.</span>
             </li>
             <li>
-              <Link href="/docs/env">Environment &amp; secrets</Link>
-              <span>Configuration and encrypted values.</span>
+              <Link href="/docs/v5/env">Environment &amp; secrets</Link>
+              <span>Committed configuration with encrypted values.</span>
             </li>
             <li>
-              <Link href="/docs/lifecycle">Lifecycle</Link>
-              <span>Startup hooks and host processes.</span>
+              <Link href="/docs/v5/lifecycle">Lifecycle</Link>
+              <span>
+                Hooks, tunnels and host helpers that start with the project.
+              </span>
             </li>
             <li>
-              <Link href="/docs/reference/cli">CLI reference</Link>
+              <Link href="/docs/v5/sessions">Sessions</Link>
+              <span>Persistent terminal workspaces per project.</span>
+            </li>
+            <li>
+              <Link href="/docs/v5/integrations">Agent integrations</Link>
+              <span>Optional: the plugin, its skills and the MCP server.</span>
+            </li>
+            <li>
+              <Link href="/docs/v5/reference/cli">CLI reference</Link>
               <span>Commands and options.</span>
+            </li>
+            <li>
+              <Link href="/docs/v5/upgrade">Upgrade from v4</Link>
+              <span>
+                Compose stays the default; the native backend is beta.
+              </span>
             </li>
           </ul>
         </section>
 
         <footer>
+          <Link href="/docs/v4">v4 docs</Link>
           <a href="/llms.txt">LLM index</a>
           <a href="/llms-full.txt">Public Markdown corpus</a>
         </footer>

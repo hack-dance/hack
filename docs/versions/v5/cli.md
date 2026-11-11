@@ -1,13 +1,14 @@
 # CLI Overview
 
 Hack is the local-first CLI surface. This page is a supported-surface overview with the
-running-things decision guide; for the curated per-command options and flags, see the
+running-things decision guide; for exhaustive per-command options and flags, see the generated
 [CLI reference](../reference/cli.md) (`bun run docs:cli-reference`, or `hack help <command>` in the
 terminal).
 
 ## Core commands
 
-- `hack init` — generate project configuration; select the appropriate runtime first
+- `hack init` — generate `.hack/` (compose + config); `--with claude|codex` also hands off to
+  agent-assisted onboarding
 - `hack up` / `hack down` / `hack restart`
 - `hack open` — open/print the project URL
 - `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
@@ -20,9 +21,10 @@ terminal).
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
-- `hack daemon` — optional local daemon for faster JSON status/ps
+- `hack daemon` — optional local daemon for faster JSON project status
 - `hack agent onboard` — agent-assisted onboarding for existing projects
-- Optional agent interfaces — [explicit CLI, skills and separate MCP](integrations.md)
+- `hack agent onboard` — print an onboarding prompt for an existing project
+- Optional agent interfaces — the [`hack` plugin, its skills and the separate MCP server](../integrations.md)
 
 Interactive diagnostics use compact status rows: healthy groups stay on one line, while warnings
 and errors expand with wrapped detail and recovery guidance. `hack doctor --json` remains the stable,
@@ -34,6 +36,15 @@ Use `hack doctor --browser-url https://your-service.hack.local --browser-result 
 to compare a manually observed browser failure with a verified CLI HTTPS request.
 See [macOS browser connectivity](../guides/macos-browser-network.md) for supported
 observations, Local Network permission guidance and the required browser recheck.
+
+On the native backend, `hack doctor` adds a `native settings` check. It reports where each native
+selection comes from (`env`, `machine`, `project` or `unset`) without its value, and warns about
+project configuration that native `up` refuses or does not apply. The committed
+`.hack/native/adaptation.json` and the per-machine
+`${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/settings.json` replace exported
+`HACK_NATIVE_*` variables; a variable that is set still wins. The machine file applies
+only to the project roots listed in its `projectRoots`. See
+[Native settings files](../guides/native-candidate.md#native-settings-files).
 
 Project names in the registry and `--project`/MCP selectors use the same lowercase,
 hyphenated key: for example, `my_app` selects `my-app`. Existing registry spellings
@@ -114,7 +125,7 @@ CLI surface. Use native `git` and `gh` for repository collaboration.
 
 ## Unsupported experimental
 
-These commands remain source-available but are outside the supported v3 product contract. They are
+These commands remain source-available but are outside the supported product. They are
 hidden from default `hack --help` (see `hack help --all`) and print a warning when invoked:
 
 - `hack remote`
@@ -128,13 +139,48 @@ Historical remote guides are excluded from the supported documentation.
 
 - `--json` on `hack up`/`down`/`restart`/`doctor` emits a `{ok, data | error: {code, message}}`
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
+- A `--path` (or working directory) without a `.hack/` project reports `E_PROJECT_NOT_FOUND`
+  from `up`, `down`, `restart`, `ps`, `logs`, `run`, `exec`, `open`, `tui`, `branch ...`,
+  `config get`/`set`, `env ...`, `host exec`/`shell` and `project owner`/`target`/`task`, for
+  example `hack ps -p <dir> --json` and `hack branch list -p <dir>`. Under `--json` it is one
+  error envelope; without `--json` it is one closed error message, `E_PROJECT_NOT_FOUND: <message>`,
+  and no stack trace. The logger decides how it looks: the console logger (`HACK_LOGGER=console`)
+  prints one line, `ERROR: E_PROJECT_NOT_FOUND: ...`, on stderr; gum prints one line with a styled
+  `ERROR` level on stderr; and clack prints two lines on stdout, its `│` guide line and then the
+  message after a `■` marker. `project target` and
+  `project task` use their own message, and `target` adds a
+  `detail`. These commands report something else:
+  - `tui` without a terminal refuses for that reason first.
+  - `env get` never prints a failure reason, since its output is raw values: it prints one fixed
+    line on stderr, with or without `--json`.
+  - `config validate`, `plan`, `import` and `adopt` read native configuration and keep their own
+    refusals: `E_NATIVE_PROJECT_UNSUPPORTED` for `validate`/`plan`, a refused preview for
+    `import --dry-run`, and `E_CONFIG_INVALID` for `adopt`.
+  - `init`, `doctor`, `crash-capture`, and the `setup`, `mcp` and `agent` commands do not need a
+    project.
+
+  `tests/missing-project-error-code.test.ts` pins each command that takes `--path`.
 - Known Hack errors and closed native runtime refusals print their message only, never a stack
   trace; set `HACK_DEBUG=1` to add the stack. Unexpected exceptions always print their stack.
 - `--no-interactive` (or `HACK_NO_INTERACTIVE=1`) is a global flag: commands never prompt — they
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
+- A run whose stdin or stdout is not a TTY (piped input, an agent harness, CI) is treated the same
+  way, with or without the flag: the command resolves every prompt by its documented
+  non-interactive policy within milliseconds and never waits on a prompt. Confirmations that have
+  a safe default apply it (`hack env unset KEY` removes the key; `hack doctor --fix` applies safe
+  remediations and skips destructive ones with a note); prompts that need a real answer fail
+  closed with `E_INTERACTIVE_REQUIRED`, naming the flag or argument that makes the invocation
+  scriptable (for example `hack update --yes`, `hack mcp --all`, `hack session attach <name>`,
+  `hack secrets delete <name> --yes`, `hack ssh --host <host>`). Destructive confirmations without
+  such a flag decline or refuse; they never proceed on their own.
+  Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
-Agent context is explicitly selected through the [versioned docs and optional interfaces](integrations.md). No guidance freshness or instruction-writing workflow is part of this onboarding. [Historical compatibility](reference/agent-compatibility.md) records next.5 history and the shipped next.6 retirement. See [release contracts](reference/next6-contracts.md) for new read-only task/target and env hydrate inputs.
+Automatic agent instruction management is retired in v5. `hack setup sync`, the
+standalone `hack setup cursor|claude|codex|agents` exports and `hack agent prime` refuse with a
+retirement notice, and ordinary commands, `hack update` and `hack doctor --fix` never write agent
+files. Guidance arrives through the opt-in `hack` plugin; see
+[Agent integrations](../integrations.md).
 
 ## First-run path
 
@@ -145,7 +191,26 @@ hack up --detach
 hack open
 ```
 
-For explicit agent assistance, use [Agent setup](guides/agent-first-setup.md). Review the printed onboarding prompt rather than installing client instructions as a project-setup side effect.
+Agent-assisted alternative for a new repo: `hack init --with claude|codex`. For an existing
+project without `.hack/`, use `hack agent onboard`. See
+[Agent-first setup](../guides/agent-first-setup.md).
+
+`--with both` has been removed. Choose `--with claude` or `--with codex`;
+a second-agent review is a separate, explicitly requested workflow.
+
+### Browser URL preference
+
+`hack open` keeps `dev_host` as the primary routing identity, but automatically opens the OAuth
+alias (for example, `myapp.hack.gy`) when `oauth.enabled` is true. Service shorthand and branch
+instances follow the same preference, so `hack open api --branch feature-x` resolves the
+branch-qualified alias URL.
+
+Set `open.prefer` in `.hack/hack.config.json` to `auto` (the default), `alias`, or `dev`. Override
+one invocation with `hack open --prefer <auto|alias|dev>`. Explicit URLs and fully qualified host
+targets are preserved. Selecting `alias` without an enabled OAuth alias fails with recovery
+guidance instead of silently opening the dev host. For a custom `dev_host` outside Hack's managed
+`.hack` namespace, `auto` keeps the development host because Hack does not synthesize a Caddy alias
+route for it.
 
 ## Running things (decision guide)
 
@@ -156,6 +221,59 @@ For explicit agent assistance, use [Agent setup](guides/agent-first-setup.md). R
 - Interactive host shell with injected env: `hack host shell --env <overlay> --scope <service>`.
 - Browser/host URL: use `hack open <service> --json`; OAuth aliases are preferred when enabled.
 - Container-to-container traffic: use Compose DNS rather than routing back through Caddy.
+
+For `run`, `exec`, `host exec`, `env exec`, `x` and the Beta `dispatch run`, Hack options go before
+the child command.
+From the child command's first word on, every argument belongs to the child, including flags
+that Hack also defines: `hack run web bun --version` runs `bun --version` in the container
+rather than printing Hack's version, and a child `--json` does not switch Hack's own error output
+to JSON. A `--` before the child command is optional and is not passed on; a later `--` (as in
+`hack run web npm test -- --watch`) reaches the child unchanged.
+
+### Option parsing
+
+Hack parses options with the resolved command's own options plus the global ones, so each command
+keeps its own short flags and option types. `-p` is `--path` for project commands (`init`, `up`,
+`down`, `ps`, `logs`, `env ...`, `config ...`, `setup ...`) and `--port` for `hack ssh`. Both
+refusals below are `E_USAGE`:
+
+- A long option that only another command declares is refused as
+  `Option(s) not valid for "<command>": --<option>`, for example `hack doctor --follow`.
+- A short spelling the command does not declare is unknown to it, even when another command
+  declares it. `hack doctor -f` refuses as `Unknown option '-f'. To specify a positional argument
+  starting with a '-', ...`, the same refusal as a spelling no command declares, such as `-x`.
+  (`-f` is `--follow` for `logs` and `global logs`.) In a group of short flags, such as `-fd`, the refusal
+  names the first unknown letter without its dash (`Unknown option 'f'`).
+
+An option placed before the command name, as in `hack -p <dir> up`, is read as that command reads
+it. There is one remaining edge: when a spelling placed before the command name is a flag in one
+command and takes a value in another, Hack reads it as a flag, so it never consumes the command
+name. No spelling in the current CLI has this conflict. Put options after the command name to
+avoid it.
+
+Per-command parsing replaced one parse over every command's options. Comparing the old and new
+parsers on edge cases found two differences:
+
+- The intended one: `-p <dir>` on a project command (for example `up -p /x` or
+  `--no-interactive up -p /x`) now sets `--path`. The old parser set `ssh`'s `--port`, which the
+  command then refused.
+- A short spelling only another command declares is still refused, with different text. The old
+  parser read it as that command's long option and refused it as not valid: `doctor -f` and
+  `doctor -d` gave `Option(s) not valid for "doctor": --follow` and `--detach`, `ps -fd` gave
+  `--follow, --detach`, and `doctor -c --json` (`-c` takes a value for `agent init`) gave an
+  "argument is ambiguous" error. Each now gives `Unknown option '<spelling>'`, and `ps -fd` gives
+  `Unknown option 'f'`.
+
+These cases parse the same as before: `--help --all`, `help --all`, `-- up`,
+`--json run web tool --json`, `--path /x up`, `logs --tail`, `up --tail`, `ssh --path /x` and
+`x ext cmd -p 1` (where `-p 1` belongs to the extension command).
+`tests/cli-per-command-options.test.ts` pins the short-spelling refusal for every short spelling
+that `doctor` does not declare.
+
+`session exec` takes the workspace command as one argument, so quote a command that has its own
+arguments or flags: `hack session exec ws "npm --version"`. Hack options go before it, and an
+unquoted `hack session exec ws npm --version` refuses with a hint to quote the command instead
+of printing Hack's version.
 
 Service-scoped runtime changes do not run project-wide lifecycle hooks and do not start Compose
 dependencies implicitly, except declared shared-cache installers needed by the selected services:
@@ -179,27 +297,94 @@ Hack scans `.npmrc`, `.yarnrc.yml`, and `bunfig.toml` for `${VAR}` credential re
 with `E_ENV_KEY_MISSING` when the selected Hack overlay cannot supply them. Values are never
 printed.
 
-Detached Compose startup has a 90-second budget by default. For a slow first
-install or container launch, set the host CLI environment explicitly:
+Detached Compose startup runs in two phases, each with its own budget:
+
+| Phase | Compose invocation | Default | Variable | Range (ms) |
+| --- | --- | --- | --- | --- |
+| Image build/pull and container creation | `up --no-start` | 30 minutes | `HACK_COMPOSE_IMAGE_TIMEOUT_MS` | 1,000–14,400,000 |
+| Start and dependency wait | `up -d --no-build` | 90 seconds | `HACK_COMPOSE_STARTUP_TIMEOUT_MS` | 1,000–3,600,000 |
+
+A first-time build or a large image pull therefore does not consume the start
+budget. Raise the budget for the phase that was hit, on the host CLI invocation
+rather than in a container's environment:
 
 ```sh
+# Slow first build or pull of a large image
+HACK_COMPOSE_IMAGE_TIMEOUT_MS=3600000 hack up --detach
+# Slow container start or a dependency that is slow to become healthy
 HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up --detach
 HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack restart
 ```
 
-The value must be an integer from 1,000 to 3,600,000 milliseconds; detached startup
-and restart reject invalid values before project preparation or teardown. Full and service-scoped
-startup/restart use the same setting. The startup phase notice and
-`E_STARTUP_TIMEOUT` message report the effective budget. It covers each detached
-Compose invocation, including image/container launch and dependency waiting, not
-lifecycle hooks or an end-to-end application readiness deadline. A restart repair
-attempt has its own invocation budget and is reported separately. Foreground
-`up` stays unbounded; `down` retains its separate 90-second limit.
+Detached startup and restart reject invalid values before project preparation or
+teardown. Full and service-scoped startup/restart use the same settings. The
+startup notice reports both effective budgets. On expiry, `E_STARTUP_TIMEOUT`
+names the phase that was hit, its budget, and the variable that raises it; with
+`--json`, `error.detail` carries `composePhase` (`images` or `start`),
+`budgetMs`, and `budgetEnv`. The start budget covers container start and Compose
+`depends_on` waiting, not lifecycle hooks or an end-to-end application readiness
+deadline. A restart repair attempt has its own budgets and is reported
+separately. Foreground `up` stays a single unbounded Compose invocation; `down`
+retains its separate 90-second limit. A native `down` reads that limit from
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS`, and each check that it still owns its containers
+may use that time too, at least 15 and at most 60 seconds. The last check before
+`compose down` must also leave about a fifth of that limit, at most 5 seconds, for the
+stop itself; otherwise `down` refuses before it starts Compose, and `hack down --recover`
+completes the stop.
 
-On timeout, Hack terminates the owned Compose process group. Containers may still
-be running: inspect `hack ps` and `hack logs` before retrying. Raising the budget
-does not fix a failed installer or prove readiness. Set this on the host invocation,
-not merely in a container's environment.
+On timeout, Hack terminates the owned Compose process group of that phase. After an
+image-phase timeout no container was started by that attempt, but containers may
+have been created or recreated. After a start-phase timeout containers may still be
+running. Inspect `hack ps` and `hack logs` before retrying. Raising a budget does not
+fix a failed installer or prove readiness.
+
+Services with `pull_policy: always` still pull again in the start phase because
+Compose applies that policy on every `up`; such pulls count against the start
+budget.
+
+Native authored projects with persistent storage also prove their storage with
+short-lived helper containers. Each helper proof (one storage carrier: dependency
+check, target observation, helper create, policy, start, response and cleanup) has
+its own budget, separate from the start budget:
+
+| Budget | Default | Variable | Range (ms) |
+| --- | --- | --- | --- |
+| One native storage carrier | 90 seconds | `HACK_NATIVE_STORAGE_TIMEOUT_MS` | 1,000–600,000 |
+
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS` neither shortens nor lengthens a storage proof:
+carriers follow only `HACK_NATIVE_STORAGE_TIMEOUT_MS`. Native
+`up` and `restart` image builds use the image budget (`HACK_COMPOSE_IMAGE_TIMEOUT_MS`),
+and the start budget begins only after builds end. Native pulls of `image:` services
+still happen during container start and count against the start budget. Storage
+proofs that run while a native `up` or `restart` builds and starts workloads do not
+consume either budget: their elapsed time extends the current phase's deadline, and
+each proof stays bounded by its own carrier budget. Each Docker command inside a carrier
+is bounded by that carrier's remaining budget (reads at most 60 seconds), so a slow
+helper start on a loaded host can use the budget rather than a fixed 15-second cap.
+Helper cleanup keeps its own 10–60 second bound.
+
+The two variables bound different things:
+
+- Per proof: each storage carrier ends within `HACK_NATIVE_STORAGE_TIMEOUT_MS` (S).
+- Per phase: the storage time excluded from one `up` or `restart` image or start
+  deadline may total at most 16 × S or 1 hour, whichever is smaller (24 minutes at
+  the 90-second default; 1 hour from S = 225,000 up). Each phase has its own cap,
+  and its deadline moves later by at most that cap. A proof that would start after
+  the cap is spent is refused before it runs, and a proof that ends past the cap
+  refuses the phase.
+- Whole phase: the image phase therefore ends within
+  `HACK_COMPOSE_IMAGE_TIMEOUT_MS`, and the start phase within
+  `HACK_COMPOSE_STARTUP_TIMEOUT_MS`, each plus its cap, plus at most one in-flight
+  guard proof. Raising S raises both the per-proof bound and the cap; raising the
+  image or start budget never changes either.
+
+When a carrier budget or the whole-phase cap runs out, the command reports the
+closed effect reason `storage-budget` in `error.detail.native_compose_effect_refusal`,
+and the human summary names `HACK_NATIVE_STORAGE_TIMEOUT_MS`. A refusal with its own
+cause, such as a helper policy refusal, keeps that reason even when it is caught after
+the carrier deadline; raising the storage budget does not address it. Exhaustion leaves the
+same retained, uncertain state as any other storage refusal; inspect saved state
+before retrying.
 
 To share dependency data only across worktrees with the same lockfile/runtime fingerprint, label
 the bootstrap service with a logical top-level Compose volume:
@@ -262,7 +447,8 @@ be mistaken for a ready one. No project lifecycle hook or unrelated dependency i
 A failed installer leaves existing consumer containers untouched; JSON lifecycle commands return
 `E_DEPENDENCY_BOOTSTRAP_FAILED`. Each initializer in detached scoped `up` and targeted `restart` uses the configured
 `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget and reports `E_STARTUP_TIMEOUT` on expiry.
-The subsequent Compose launch has its own equal budget. Consumer `run` and foreground
+That budget also covers any installer image pull or build, because `run` acquires
+the image itself. The subsequent Compose launch has its own phased budgets. Consumer `run` and foreground
 scoped `up` retain a separate ten-minute initializer deadline.
 
 ## Branch instances and linked worktrees
@@ -304,8 +490,10 @@ Linked worktrees read eligible primary-checkout local env overrides and managed
 extra-host aliases at command time. Later primary changes are visible without
 copying files. Tracked project config, generated overrides, runtime state and other
 ignored files stay checkout-local. Set `worktree.inherit_local` to `false` in the
-worktree's `hack.config.json` to disable inheritance. Slim/Codex execution mode and
-CI (`CI=1` or `CI=true`) disable this inheritance automatically.
+worktree's `hack.config.json` to disable inheritance. `HACK_WORKTREE_INHERIT_LOCAL=0`
+does the same for the Compose path; the experimental graph runner follows the config
+setting only. Slim/Codex execution mode and CI (`CI=1` or `CI=true`) disable this
+inheritance automatically.
 
 For Compose aliases, explicit local `internal.extra_hosts` takes precedence over
 inherited dynamic aliases, and local dynamic aliases take precedence over both.
@@ -319,6 +507,19 @@ Missing primary configuration is optional. Invalid inherited alias data or
 redirected inherited files fail explicitly instead of silently changing routing.
 These commands manage the Compose path; the experimental graph runner's direct
 Compose-input handling is a separate qualification boundary.
+
+### Branch registry and usage
+
+Runtime commands never write tracked files. `hack up/down/restart/run/exec` record when a
+branch instance was last used in machine-local `.hack/.internal/branch-usage.json` (ignored by the
+committed `.hack/.gitignore`, one per checkout), so `git status` stays clean in a linked worktree.
+
+`.hack/hack.branches.json` is the optional, committed branch registry. Only `hack branch add` and
+`hack branch remove` create or change it, and they record identity (`name`, `slug`, `note`,
+`created_at`) but no usage timestamp. Existing registries that already carry `last_used_at` are left
+as they are: runtime commands stop rewriting them, and `hack branch list` and `hack projects`
+show the machine-local time when this checkout has one, falling back to the committed value. You
+can delete the old `last_used_at` fields by hand at any time.
 
 ### Disposable cache volumes
 
@@ -418,8 +619,8 @@ container.
 
 With the Compose backend, Hack materializes this contract in generated, machine-local Compose
 overrides. Do not edit or commit `.hack/.internal/compose.runtime.override.yml` or
-`.hack/.branch/compose.<branch>.runtime.override.yml`; runtime commands refresh them and Hack's
-managed `.hack/.gitignore` covers them.
+`.hack/.branch/compose.<branch>.runtime.override.yml`; runtime commands refresh them and keep them
+out of `git status` (see [ignore rules](../env.md#ignore-rules-committed-hackgitignore)).
 
 With the native backend, foreground `hack up` and `hack restart` add the same values to the
 normalized Compose input that native review checks. They are public container environment, not
@@ -490,16 +691,25 @@ materialized `.hack/.env` or `.hack/.env.state.json` is stale and should be rege
 
 ## Project files
 
-Hack owns a committed `.hack/.gitignore` (self-healing on `init`/`up`) that ignores machine-local
-generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`, `hack.env*.local.yaml`). The
-retired `tickets/` path remains ignored only so upgrades cannot recommit legacy machine-local
-caches. Keep `.hack/.gitignore` committed. If generated files ever leak into git, `hack doctor
---fix` untracks them (the files stay on disk). Runtime metadata is written to
+Hack owns a committed `.hack/.gitignore` (created by `init`; for an existing project without it,
+`doctor` warns and `doctor --fix` creates or repairs it; a read-only or symlinked file is reported
+and never replaced) that ignores
+machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`,
+`hack.env*.local.yaml`). The retired `tickets/` path remains ignored only so upgrades cannot
+recommit legacy machine-local caches. Keep `.hack/.gitignore` committed. Runtime commands (`up`,
+`down`, `restart`, `run`, `exec`) do not write it: they add the same patterns to the repository's
+local `info/exclude`, so `git status` stays unchanged. Never commit `.hack/.internal/`. If generated
+files ever leak into git, `hack doctor --fix` untracks them (the files stay on disk). Runtime metadata is written to
 `.internal/compose.runtime.override.yml` for the base instance and
 `.branch/compose.<branch>.runtime.override.yml` for branch instances. See [Architecture](../architecture.md)
 for the full file map.
 
-The global config root defaults to `~/.hack`; override it with `HACK_HOME`.
+The global config root defaults to `~/.hack`; override it with `HACK_HOME` (an absolute path;
+a relative value is refused). An empty or relative `HOME` falls back to the OS home directory.
+A non-default `HACK_HOME` disables hackd launchd management, host-trust launchd
+environment registration, and native DNS launchd inspection/restarts. Set
+`HACK_LAUNCHD_ALLOW_ISOLATED_HOME=1` to opt in to these host-wide effects.
+`HACK_LAUNCHD_DISABLE=1` always disables launchd access, including with that opt-in.
 
 ## Lifecycle
 

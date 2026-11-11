@@ -1,21 +1,34 @@
 # Give an agent an explicit project task
 
-Start with [Install](../install.md) and [Getting started](../getting-started.md). Select the intended executable and runtime before asking an agent to change project configuration. Agent setup is optional; shell-capable clients can use the CLI and [versioned LLM index](/v5/llms.txt) directly.
+Start with [Install](../install.md) and [Getting started](../getting-started.md).
+Decide which executable and backend the agent should use before asking it to change
+project configuration. Agent setup is optional; a shell-capable client can use the
+CLI and the [LLM index](/v5/llms.txt) directly.
 
-A useful task description names the project, execution host, selected version and expected outcome. Ask for inspection of existing configuration before changes and verification of the application's own behavior. Preserve existing credential flows and native approval boundaries.
+A useful task names the project, the host it runs on, the Hack version and the
+expected outcome. Ask the agent to inspect existing configuration before changing
+it and to verify the application's own behavior afterwards.
 
-## Optional onboarding prompt
+## Onboarding prompt
 
-The pinned CLI's `agent onboard` command prints a project onboarding prompt. It does not install skills or client instructions. Review that prompt before handing it to your agent; the request defines the work to perform. It is separate from the historical primer hooks.
+`hack agent onboard` prints an onboarding prompt for an existing repository. It
+inventories the repo and describes what a Hack setup should cover. It installs
+nothing. Review the prompt, then hand it to your agent. `hack init --with
+claude|codex` does the same for a new project and launches the selected agent.
 
-For clients supporting explicitly selected skills, the shipped hack-init skill asks for that CLI prompt. Review the actual skill first: next.6 ships opt-in skills without automatic guidance injection. [Choose an agent interface](../integrations.md) explains the exact shipped contents and the shipped opt-in model.
+The `hack-init` skill in the [hack plugin](../integrations.md) asks the CLI for this
+same prompt, so an agent with the plugin can onboard a project on request.
 
-## Keep policy with its owner
+## Policy stays with its owner
 
-This setup path does not modify AGENTS.md, CLAUDE.md, client rule files or global agent settings. It does not run guidance freshness checks, sync exports or skill updates. Repository policy remains user-owned.
+Hack does not modify `AGENTS.md`, `CLAUDE.md`, client rule files or global agent
+settings, and it does not run guidance checks or skill updates. Repository policy
+is yours. Project environment injection and lifecycle hooks are runtime features;
+follow [Environment and secrets](../../env.md) and [Lifecycle](../../lifecycle.md)
+when they are part of the requested work.
 
-Project environment injection and lifecycle hooks are runtime features, not agent instruction injection. Follow [Environment and secrets](../../env.md) and [Lifecycle](../../lifecycle.md) when they are part of the requested application workflow. Native candidate limits remain separate from retained Compose command contracts.
+## Clients without a shell
 
-## Optional MCP
-
-A no-shell client can use an explicitly configured separate MCP interface; it does not get one merely by selecting the hack skills. See [Integrations](../integrations.md#optional-separate-mcp) and [MCP tools](../../reference/mcp-tools.md). Neither a published manifest nor a printed prompt proves client loading or successful project execution.
+A client without shell access can use the separate MCP server; see
+[Agent integrations](../integrations.md#the-separate-hack-mcp-plugin) and
+[MCP tools](../../reference/mcp-tools.md).

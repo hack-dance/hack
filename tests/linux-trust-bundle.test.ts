@@ -95,17 +95,52 @@ test("Linux trust updates the system store before building the host bundle (rota
       certPath: join(dir, "ca.crt"),
       applySystemTrust: async () => {
         order.push("system");
-        return true;
+        return { ok: true, verifiedPem: "VERIFIED-PEM" };
       },
-      writeBundle: async () => {
-        order.push("bundle");
+      writeBundle: async ({ localCaPem }) => {
+        order.push(`bundle:${localCaPem}`);
         return null;
       },
     });
     expect(ok).toBe(true);
-    expect(order).toEqual(["system", "bundle"]);
+    // The bundle gets the verified bytes, not a re-read of the export.
+    expect(order).toEqual(["system", "bundle:VERIFIED-PEM"]);
   } finally {
     restoreEnv("HACK_HOME", savedHome);
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("a refused CA leaves the host bundle untouched", async () => {
+  const { configureLinuxHostTlsTrust } = await import(
+    "../src/commands/global.ts"
+  );
+  let wrote = false;
+  const ok = await configureLinuxHostTlsTrust({
+    certPath: "/nonexistent/ca.crt",
+    applySystemTrust: async () => ({ ok: false, verifiedPem: null }),
+    writeBundle: async () => {
+      wrote = true;
+      return null;
+    },
+  });
+  expect(ok).toBe(false);
+  expect(wrote).toBe(false);
+});
+
+test("the bundle writer uses verified bytes instead of re-reading the export", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hack-linux-bundle-verified-"));
+  tempDirs.add(dir);
+  const system = join(dir, "system.pem");
+  const exported = join(dir, "export.crt");
+  const bundle = join(dir, "bundle.pem");
+  await writeFile(system, "SYSTEM");
+  await writeFile(exported, "REPLACED-AFTER-PROMPT");
+  await writeLinuxHostTrustBundle({
+    certPath: exported,
+    localCaPem: "VERIFIED",
+    systemBundleCandidates: [system],
+    bundlePath: bundle,
+  });
+  expect(await Bun.file(bundle).text()).toBe("SYSTEM\nVERIFIED\n");
 });

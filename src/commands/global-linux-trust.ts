@@ -111,12 +111,22 @@ function safeCertificate(pem: string): X509Certificate | null {
   }
 }
 
-/** Returns false when the CA was refused or a step Hack attempted failed. */
+/** Outcome of the Linux trust writers. */
+export type LinuxTrustResult = {
+  /** False when the CA was refused or a step Hack attempted failed. */
+  readonly ok: boolean;
+  /**
+   * The exact certificate bytes that were verified and trusted, for any
+   * later writer (the host bundle); `null` when the CA was refused.
+   */
+  readonly verifiedPem: string | null;
+};
+
 export async function configureLinuxSystemAndBrowserTrust(opts: {
   readonly certPath: string;
   readonly composeFile: string;
   readonly deps?: LinuxTrustCommandDeps;
-}): Promise<boolean> {
+}): Promise<LinuxTrustResult> {
   const deps = opts.deps ?? defaultDeps();
   const ca = await loadVerifiedCa({
     certPath: opts.certPath,
@@ -124,7 +134,7 @@ export async function configureLinuxSystemAndBrowserTrust(opts: {
     deps,
   });
   if (!ca) {
-    return false;
+    return { ok: false, verifiedPem: null };
   }
   const staged = await deps.stage(ca.pem);
   try {
@@ -135,7 +145,7 @@ export async function configureLinuxSystemAndBrowserTrust(opts: {
       manualCertPath: opts.certPath,
     });
     const nssOk = await applyNss({ deps, ca, stagedPath: staged.path });
-    return systemOk && nssOk;
+    return { ok: systemOk && nssOk, verifiedPem: ca.pem };
   } finally {
     await staged.cleanup();
   }

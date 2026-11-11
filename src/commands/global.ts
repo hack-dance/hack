@@ -157,7 +157,10 @@ import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
 import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
-import { configureLinuxSystemAndBrowserTrust } from "./global-linux-trust.ts";
+import {
+  configureLinuxSystemAndBrowserTrust,
+  type LinuxTrustResult,
+} from "./global-linux-trust.ts";
 
 /** Regex to split strings on whitespace. */
 const WHITESPACE_PATTERN = /\s+/;
@@ -4166,6 +4169,8 @@ const LINUX_SYSTEM_BUNDLE_CANDIDATES = [
  */
 export async function writeLinuxHostTrustBundle(input: {
   readonly certPath: string;
+  /** Verified CA bytes; when given, `certPath` is not re-read. */
+  readonly localCaPem?: string;
   readonly systemBundleCandidates?: readonly string[];
   readonly bundlePath?: string;
 }): Promise<string | null> {
@@ -4190,7 +4195,11 @@ export async function writeLinuxHostTrustBundle(input: {
     return null;
   }
 
-  const localCaPem = (await readTextFile(input.certPath))?.trim() ?? "";
+  const localCaPem = (
+    input.localCaPem ??
+    (await readTextFile(input.certPath)) ??
+    ""
+  ).trim();
   if (localCaPem.length === 0) {
     logger.warn({
       message: `Unable to read exported Caddy Local CA at ${input.certPath}.`,
@@ -4211,13 +4220,16 @@ export async function writeLinuxHostTrustBundle(input: {
 export async function configureLinuxHostTlsTrust(input: {
   readonly certPath: string;
   /** Test seams; default to the real system/NSS step and bundle writer. */
-  readonly applySystemTrust?: () => Promise<boolean>;
-  readonly writeBundle?: (certPath: string) => Promise<string | null>;
+  readonly applySystemTrust?: () => Promise<LinuxTrustResult>;
+  readonly writeBundle?: (opts: {
+    readonly certPath: string;
+    readonly localCaPem: string;
+  }) => Promise<string | null>;
 }): Promise<boolean> {
   // System trust first: the host bundle copies the system bundle, so after a
   // Caddy root rotation it must be built from the refreshed system bundle,
   // not the one that still holds the superseded root.
-  const trustOk = await (
+  const trust = await (
     input.applySystemTrust ??
     (() =>
       configureLinuxSystemAndBrowserTrust({
@@ -4225,10 +4237,18 @@ export async function configureLinuxHostTlsTrust(input: {
         composeFile: getGlobalPaths().caddyCompose,
       }))
   )();
+  if (trust.verifiedPem === null) {
+    // The CA was refused: leave the host bundle and env as they are rather
+    // than writing an unverified certificate into them.
+    return false;
+  }
+  // Use the verified bytes, not a re-read of the mutable export: a file
+  // replaced during the prompt must not reach the host bundle.
   const bundlePath = await (
     input.writeBundle ??
-    ((certPath: string) => writeLinuxHostTrustBundle({ certPath }))
-  )(input.certPath);
+    ((opts: { readonly certPath: string; readonly localCaPem: string }) =>
+      writeLinuxHostTrustBundle(opts))
+  )({ certPath: input.certPath, localCaPem: trust.verifiedPem });
   const scriptPath = resolveHackHostTrustEnvScriptPath();
   await ensureDir(dirname(scriptPath));
   await writeTextFile(
@@ -4245,7 +4265,7 @@ export async function configureLinuxHostTlsTrust(input: {
       : "Prepared host trust env (NODE_EXTRA_CA_CERTS only; no system bundle found).",
   });
   note(`Current shell: source ${scriptPath}`, "Host TLS");
-  return trustOk;
+  return trust.ok;
 }
 
 async function exportCaddyLocalCaCert(): Promise<string | null> {

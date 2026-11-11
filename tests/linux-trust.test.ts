@@ -933,7 +933,7 @@ describe("configureLinuxSystemAndBrowserTrust (finding 1)", () => {
     const prompts: string[] = [];
     const staged: string[] = [];
     let cleaned = 0;
-    const ok = await configureLinuxSystemAndBrowserTrust({
+    const { ok } = await configureLinuxSystemAndBrowserTrust({
       certPath: exportPath,
       composeFile: `${HOME}/.hack/caddy/docker-compose.yml`,
       deps: {

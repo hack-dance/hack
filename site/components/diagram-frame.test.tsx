@@ -71,12 +71,15 @@ test("the control opens a modal dialog, zoom works, and closing removes it", asy
   expect(full.style.width).toBe("100%");
 
   // Escape on a modal dialog makes the browser close it and fire "close".
+  control.blur();
   act(() => {
     dialog.close();
   });
   expect(document.querySelectorAll("dialog").length).toBe(0);
+  expect(document.activeElement).toBe(control);
 
-  // Reopen and use the close button.
+  // Reopen and use the Close button: it closes through the element, so the
+  // dialog is closed (not just removed) and focus is back on the control.
   act(() => {
     control.click();
   });
@@ -84,6 +87,11 @@ test("the control opens a modal dialog, zoom works, and closing removes it", asy
     "dialog.diagram-dialog"
   ) as HTMLDialogElement;
   expect(again.open).toBe(true);
+  let closeEvents = 0;
+  again.addEventListener("close", () => {
+    closeEvents += 1;
+  });
+  control.blur();
   act(() => {
     (
       again.querySelector(
@@ -91,7 +99,10 @@ test("the control opens a modal dialog, zoom works, and closing removes it", asy
       ) as HTMLButtonElement
     ).click();
   });
+  expect(closeEvents).toBe(1);
+  expect(again.open).toBe(false);
   expect(document.querySelectorAll("dialog").length).toBe(0);
+  expect(document.activeElement).toBe(control);
   act(() => {
     root.unmount();
   });

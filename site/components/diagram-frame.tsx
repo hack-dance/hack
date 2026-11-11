@@ -24,6 +24,14 @@ const zoomSteps = [1, 1.5, 2, 3, 4] as const;
  */
 export function DiagramFrame(props: DiagramProps) {
   const [open, setOpen] = useState(false);
+  const control = useRef<HTMLButtonElement>(null);
+  // The browser returns focus to the control when a modal dialog closes, but
+  // only while the dialog is still in the document. Restoring it here as well
+  // keeps focus on the control however the dialog went away.
+  const close = () => {
+    setOpen(false);
+    control.current?.focus();
+  };
   return (
     <span className={`diagram-frame diagram-frame-${props.variant}`}>
       <Image
@@ -39,21 +47,20 @@ export function DiagramFrame(props: DiagramProps) {
         aria-label={`Open diagram full size: ${props.alt}`}
         className="diagram-expand"
         onClick={() => setOpen(true)}
+        ref={control}
         title="Open full size"
         type="button"
       >
         <Maximize2 aria-hidden="true" size={16} />
       </button>
-      {open ? (
-        <DiagramDialog {...props} onClose={() => setOpen(false)} />
-      ) : null}
+      {open ? <DiagramDialog {...props} onClose={close} /> : null}
     </span>
   );
 }
 
 /**
- * The full-size view: a native modal dialog, so Escape closes it, focus stays
- * inside it and returns to the opening control afterwards. It renders through a
+ * The full-size view: a native modal dialog, so Escape closes it and focus stays
+ * inside it. Every way of closing goes through the element's `close` event. It renders through a
  * portal and only while open, so the page HTML never contains it. Zoom changes
  * the image width and the stage scrolls, which pans with a mouse, the keyboard
  * or touch.
@@ -119,7 +126,9 @@ function DiagramDialog({
           aria-label="Close full size diagram"
           autoFocus
           className="diagram-dialog-close"
-          onClick={onClose}
+          // Close through the element, as Escape does: the dialog's `close`
+          // event then runs `onClose` once, while it is still in the document.
+          onClick={() => dialog.current?.close()}
           type="button"
         >
           <X aria-hidden="true" size={18} />

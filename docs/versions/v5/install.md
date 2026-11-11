@@ -9,7 +9,7 @@ channel, `hack-next`, so you can try v5 without touching your stable setup. When
 
 - A running Docker-compatible engine with Docker Compose for the default backend.
   Check it with `docker info` and `docker compose version`.
-- For the opt-in native backend: an Apple Silicon Mac. See
+- For the native backend (beta): an Apple Silicon Mac. See
   [Try the native backend](../guides/native-candidate.md).
 - Local DNS and certificate trust are set up once per machine by `hack global
   install` and can ask for native approval.

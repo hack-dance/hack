@@ -13,8 +13,8 @@ is the runtime layer underneath and the product boundary around it.
 
 ## What is new
 
-- **An opt-in native backend.** On Apple Silicon macOS, `HACK_RUNTIME_BACKEND=native`
-  runs explicitly prepared projects without Docker. It supports a bounded command
+- **Native backend (beta).** On Apple Silicon macOS, through the `hack-next`
+  channel, `HACK_RUNTIME_BACKEND=native` runs explicitly prepared projects without Docker. It supports a bounded command
   subset and is qualified project by project. See
   [Try the native backend](../guides/native-candidate.md).
 - **A config compiler.** `hack config validate`, `config plan`, `config import

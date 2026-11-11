@@ -9,7 +9,7 @@ hosted. The root `README.md` carries this story in full; the site homepage and t
 v5 documentation index repeat it briefly and link out.
 
 v5 is the same CLI and project model as v4 with a new runtime layer. Docker Compose
-stays the default backend; the native backend is opt-in and experimental. Pages
+stays the default backend; the native backend is beta: opt-in, Apple Silicon macOS, `hack-next` channel only. Pages
 write `hack` for the v5 CLI and tell prerelease users once, on Install, how to map
 that to `hack-next`.
 

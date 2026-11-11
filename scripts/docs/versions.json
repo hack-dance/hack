@@ -1160,7 +1160,7 @@
       {
         "file": "docs/guides/native-candidate.md",
         "slug": "guides/native-candidate",
-        "title": "Native backend (opt-in)",
+        "title": "Native backend (beta)",
         "snapshot": "docs/versions/v5/originals/next12/docs/guides/native-candidate.md",
         "sha256": "4003ad523eb47de2929db84f83590764d19d7c34306a51fc3a49b95f70cde8f6"
       },

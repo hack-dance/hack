@@ -57,8 +57,12 @@ export default function Home() {
               </span>
             </li>
             <li>
-              <Link href="/docs/v5/agent-handoff">Agents</Link>
-              <span>Hand a coding agent the same docs and CLI.</span>
+              <Link href="/docs/v5/sessions">Sessions</Link>
+              <span>Persistent terminal workspaces per project.</span>
+            </li>
+            <li>
+              <Link href="/docs/v5/integrations">Agent integrations</Link>
+              <span>Optional: the plugin, its skills and the MCP server.</span>
             </li>
             <li>
               <Link href="/docs/v5/reference/cli">CLI reference</Link>
@@ -66,7 +70,9 @@ export default function Home() {
             </li>
             <li>
               <Link href="/docs/v5/upgrade">Upgrade from v4</Link>
-              <span>Compose stays the default; native is opt-in.</span>
+              <span>
+                Compose stays the default; the native backend is beta.
+              </span>
             </li>
           </ul>
         </section>

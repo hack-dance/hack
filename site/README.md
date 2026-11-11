@@ -64,12 +64,23 @@ See [content-decisions.md](content-decisions.md) for the editorial rules and
 ## Deploy
 
 The site deploys through Vercel's Git integration from this repository. The Vercel
-project uses root directory `site/`, the Next.js preset and the settings in
-[`vercel.json`](vercel.json): a frozen Bun install and a build that stages the
-corpus from the repository root before `next build`. "Include source files outside
-of the Root Directory" must stay enabled so the build can read `docs/` and
-`scripts/docs/`.
+project is connected to `hack-dance/hack` with these settings, which
+[`vercel.json`](vercel.json) repeats so the repository stays the source of truth:
 
-Pull requests get preview deployments. The production branch is `next` while v5
-docs live there; it moves to `main` after 5.0.0. No custom domain is attached yet.
-A successful local build does not mean the site is deployed.
+| Setting | Value |
+| --- | --- |
+| Root directory | `site` |
+| Framework preset | Next.js |
+| Install command | `bun install --frozen-lockfile` |
+| Build command | `cd .. && bun run docs:prepare && bun run --cwd site build` |
+| Production branch | `next` while v5 docs live there; `main` after 5.0.0 |
+
+The build stages the corpus from the repository root before `next build`, so
+"Include source files outside of the Root Directory" must stay enabled: the build
+reads `docs/` and `scripts/docs/`.
+
+Pushes to the production branch deploy to production, and pull requests get preview
+deployments. Until the `hack.foo` domain is attached, deployment protection requires
+a Vercel login to open the `vercel.app` URLs, so the deployment status on a pull
+request is the public signal that a preview built. A successful local build does
+not mean the site is deployed.

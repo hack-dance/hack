@@ -6,8 +6,8 @@ committed with the repository. One command starts a repo. Projects and branches
 run side by side without colliding. Nothing is hosted.
 
 v5 is the same CLI and project model as v4 with a new runtime layer underneath.
-Docker Compose stays the default backend. A native backend for Apple Silicon
-macOS is opt-in. Read [Upgrade from v4](upgrade.md) for what changed and what
+Docker Compose stays the default backend. The native backend for Apple
+Silicon macOS is beta: opt-in, through the `hack-next` channel. Read [Upgrade from v4](upgrade.md) for what changed and what
 was retired.
 
 Start with [Install](install.md), then [Getting started](getting-started.md).
@@ -27,7 +27,7 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 - [Share environment and secrets](guides/share-environment.md)
 - [Manage helpers and tunnels](guides/project-helpers.md)
 - [Use a cloud agent or another host](guides/cloud-environments.md)
-- [Try the native backend](../guides/native-candidate.md)
+- [Try the native backend (beta)](../guides/native-candidate.md)
 
 ## Work with an agent
 

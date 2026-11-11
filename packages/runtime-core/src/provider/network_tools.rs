@@ -399,4 +399,179 @@ mod tests {
             .collect();
         assert_eq!(rows, expected);
     }
+
+    /// The guest script against a fake guest: a private root, a fake `apk` that refuses any
+    /// call without the empty repositories file (the apk-tools 3 index refresh that timed out
+    /// pools without internet), and `stat` reporting this user as root. Linux only: it needs
+    /// GNU `stat` and `sha256sum`.
+    #[cfg(target_os = "linux")]
+    mod fake_guest {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::{Path, PathBuf};
+        use std::process::{Command, Output};
+
+        const APK: &str = r#"#!/bin/bash
+set -eu
+if test "${1:-}" != --repositories-file || test "${2:-}" != /dev/null; then
+  echo "apk called with repositories: $*" >> "$FAKE_STATE/refused"; exit 99
+fi
+shift 2
+installed="$FAKE_STATE/installed"; touch "$installed"
+case "$1" in
+  --print-arch) echo aarch64 ;;
+  info)
+    case "$2" in
+      -e) grep -qx "$3" "$installed" ;;
+      -L) printf '%s-1.0 contains:\nusr/lib/%s.so\n\n' "$3" "$3" ;;
+      -v) sed 's/$/-1.0/' "$installed" ;;
+      *) exit 98 ;;
+    esac ;;
+  add)
+    if test -e "$FAKE_STATE/fail-add"; then exit 1; fi
+    for file in "$@"; do
+      case "$file" in
+        *.apk) name=$(basename "$file" .apk)
+          mkdir -p "$FAKE_ROOT/usr/lib"; printf '%s' "$name" > "$FAKE_ROOT/usr/lib/$name.so"
+          grep -qx "$name" "$installed" || echo "$name" >> "$installed" ;;
+      esac
+    done ;;
+  *) exit 97 ;;
+esac
+"#;
+        const STAT: &str =
+            "#!/bin/bash\nout=$(/usr/bin/stat \"$@\")\necho \"${out/#$(id -u):/0:}\"\n";
+
+        struct Guest {
+            dir: PathBuf,
+        }
+        impl Drop for Guest {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+        }
+        impl Guest {
+            fn new(name: &str) -> Self {
+                let dir = crate::private_test_root(
+                    &std::env::temp_dir().canonicalize().unwrap(),
+                    &format!("hack-network-guest-{name}"),
+                );
+                for sub in ["bin", "state", "root", "stage", "etc"] {
+                    fs::create_dir(dir.join(sub)).unwrap();
+                }
+                for (name, body) in [
+                    ("apk", APK),
+                    ("stat", STAT),
+                    ("iptables", "#!/bin/sh\nexit 0\n"),
+                ] {
+                    let path = dir.join("bin").join(name);
+                    fs::write(&path, body).unwrap();
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                fs::write(dir.join("etc/alpine-release"), "3.24.4\n").unwrap();
+                for package in ["iptables", "libmnl", "libnftnl", "libxtables"] {
+                    fs::write(dir.join("stage").join(format!("{package}.apk")), b"apk").unwrap();
+                }
+                Self { dir }
+            }
+            fn receipt(&self) -> PathBuf {
+                self.dir.join("etc/hack-local-network-tools")
+            }
+            fn run(&self, owner: &str, mode: &str) -> Output {
+                let script = include_str!("guest-network-tools.sh")
+                    .replace(
+                        "/etc/hack-local-network-tools",
+                        &self.receipt().display().to_string(),
+                    )
+                    .replace(
+                        "/etc/alpine-release",
+                        &self.dir.join("etc/alpine-release").display().to_string(),
+                    )
+                    .replace("\"/$path\"", "\"$FAKE_ROOT/$path\"");
+                let path = format!("{}:/usr/bin:/bin", self.dir.join("bin").display());
+                Command::new("/bin/bash")
+                    .args([
+                        "-c",
+                        &script,
+                        "network-tools",
+                        owner,
+                        "identity-fixture",
+                        mode,
+                    ])
+                    .arg(self.dir.join("stage"))
+                    .env_clear()
+                    .env("PATH", path)
+                    .env("FAKE_STATE", self.dir.join("state"))
+                    .env("FAKE_ROOT", self.dir.join("root"))
+                    .output()
+                    .unwrap()
+            }
+            fn stdout(&self, owner: &str, mode: &str) -> String {
+                let output = self.run(owner, mode);
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout).unwrap()
+            }
+            fn refused_apk_calls(&self) -> bool {
+                Path::new(&self.dir.join("state/refused")).exists()
+            }
+        }
+
+        #[test]
+        fn a_fresh_install_reads_only_the_installed_database_and_is_then_ready() {
+            let guest = Guest::new("fresh");
+            assert_eq!(guest.stdout("owner-a", "check"), "absent\n");
+            guest.stdout("owner-a", "install");
+            assert_eq!(guest.stdout("owner-a", "check"), "ready\n");
+            assert!(
+                !guest.refused_apk_calls(),
+                "every apk call must skip repositories"
+            );
+            // Another pool's owner never reuses this receipt.
+            assert!(!guest.run("owner-b", "check").status.success());
+        }
+
+        #[test]
+        fn a_failed_first_install_resumes_on_retry() {
+            let guest = Guest::new("retry");
+            fs::write(guest.dir.join("state/fail-add"), b"").unwrap();
+            assert!(!guest.run("owner-a", "install").status.success());
+            assert!(guest.receipt().is_dir() && !guest.receipt().join("ready").exists());
+            // The retry sees its own incomplete receipt: absent, then installed and ready.
+            fs::remove_file(guest.dir.join("state/fail-add")).unwrap();
+            assert_eq!(guest.stdout("owner-a", "check"), "absent\n");
+            guest.stdout("owner-a", "install");
+            assert_eq!(guest.stdout("owner-a", "check"), "ready\n");
+            assert!(!guest.refused_apk_calls());
+        }
+
+        #[test]
+        fn an_incomplete_receipt_of_another_pool_or_package_set_is_refused() {
+            let guest = Guest::new("foreign");
+            fs::write(guest.dir.join("state/fail-add"), b"").unwrap();
+            assert!(!guest.run("owner-a", "install").status.success());
+            fs::remove_file(guest.dir.join("state/fail-add")).unwrap();
+            assert!(!guest.run("owner-b", "check").status.success());
+            assert!(!guest.run("owner-b", "install").status.success());
+            // An interruption before the owner was written still resumes.
+            fs::write(guest.receipt().join("owner"), b"").unwrap();
+            guest.stdout("owner-a", "install");
+            assert_eq!(guest.stdout("owner-a", "check"), "ready\n");
+        }
+
+        #[test]
+        fn an_unowned_package_or_a_changed_installed_file_is_refused() {
+            let guest = Guest::new("unowned");
+            fs::write(guest.dir.join("state/installed"), "libmnl\n").unwrap();
+            assert_eq!(guest.run("owner-a", "check").status.code(), Some(81));
+
+            let guest = Guest::new("changed");
+            guest.stdout("owner-a", "install");
+            fs::write(guest.dir.join("root/usr/lib/libmnl.so"), b"changed").unwrap();
+            assert!(!guest.run("owner-a", "check").status.success());
+        }
+    }
 }

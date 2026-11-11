@@ -91,6 +91,16 @@ describe("provider pin qualification", () => {
     expect(
       parseOptions([...required, "--skip-idle", "--run"]).idleMinutes
     ).toEqual([]);
+    expect(parseOptions(required)).toMatchObject({
+      profile: "development",
+      keepGoing: false,
+    });
+    expect(
+      parseOptions([...required, "--profile", "research", "--keep-going"])
+    ).toMatchObject({ profile: "research", keepGoing: true });
+    expect(() => parseOptions([...required, "--profile", "large"])).toThrow(
+      "--profile"
+    );
     for (const [flag, value] of [
       ["--home", "relative/root"],
       ["--web-image", "busybox:latest"],

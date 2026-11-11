@@ -1714,6 +1714,10 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
     // authenticated cleanup by a live owner, or poison read-only discovery.
     let predecessor =
         dead_owner_cleanup::recovery_hint(candidate, &root, &receipt, &owner, publication);
+    // A stopped receipt can precede the intent's completion commit. Only that
+    // exact commit lets a caller skip cleanup and resume partial retirement.
+    let predecessor_complete = predecessor.is_some()
+        && dead_owner_cleanup::current_completion(&root, &receipt).unwrap_or(false);
     Ok(json!({
         "version": 1,
         "run": receipt.run,
@@ -1723,6 +1727,7 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "foreground": publication.word(),
         "live_owner_recovery": resumable,
         "dead_owner_recovery": predecessor,
+        "dead_owner_recovery_complete": predecessor_complete,
     }))
 }
 

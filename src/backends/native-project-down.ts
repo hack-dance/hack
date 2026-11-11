@@ -109,6 +109,8 @@ type ForegroundOwnerSelection = {
   /** Original receipt digest of an interrupted same-boot dead-owner recovery. */
   readonly liveOwnerRecovery: string | null;
   readonly deadOwnerRecovery: string | null;
+  /** Exact runtime completion commit, distinct from a stopped receipt phase. */
+  readonly deadOwnerRecoveryComplete: boolean;
 };
 
 function ownerRecoveryRefused(): Error {
@@ -151,6 +153,11 @@ async function selectForegroundOwner(opts: {
         value.dead_owner_recovery === null ||
         (typeof value.dead_owner_recovery === "string" &&
           RECEIPT_SHA.test(value.dead_owner_recovery))
+      )) ||
+    (value.foreground !== "running" &&
+      !(
+        value.dead_owner_recovery_complete === undefined ||
+        typeof value.dead_owner_recovery_complete === "boolean"
       ))
   ) {
     throw ownerRecoveryRefused();
@@ -169,6 +176,9 @@ async function selectForegroundOwner(opts: {
       typeof value.dead_owner_recovery === "string"
         ? value.dead_owner_recovery
         : null,
+    deadOwnerRecoveryComplete:
+      value.foreground !== "running" &&
+      value.dead_owner_recovery_complete === true,
   };
 }
 
@@ -440,7 +450,7 @@ export async function nativeProjectDown(opts: {
     requireRecoverableOwner(selection);
   }
   if (selection?.deadOwnerRecovery && selection.foreground !== "running") {
-    if (selection.phase !== "stopped-data-retained") {
+    if (!selection.deadOwnerRecoveryComplete) {
       const result = await invokeOwnerRecovery({
         runtime: opts.runtime,
         projectRoot: opts.scope.projectRoot,

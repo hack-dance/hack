@@ -1391,6 +1391,12 @@ model abstracts the audited predecessor-boot proof and does not cover provider-l
 detection, concrete boot identity, host frontend hooks or filesystem power-loss
 durability.
 
+The model collapses the stopped receipt and recovery-intent completion commits.
+It does not check frontend dispatch between them. TypeScript predecessor-recovery
+tests cover stopped receipts with pending, completed and absent completion hints;
+Rust `current_recovery_dispatch_does_not_select_historical_completion` checks the
+exact completion digest rather than treating a stopped receipt as completion.
+
 The publisher model permits reselecting a same-boot intent on the successor boot
 as a permissive safety abstraction. The implementation refuses that unfinished
 cross-boot takeover; the qualified predecessor slice starts from the legacy

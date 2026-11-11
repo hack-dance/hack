@@ -1603,8 +1603,14 @@ mod tests {
         receipt.phase = "stopped-data-retained".into();
         assert!(!current_completion(&fixture.0, &receipt).unwrap());
         let mut proof = intent(&receipt);
-        proof.complete_sha256 = Some(selected(&receipt).unwrap());
         let path = fixture.0.join(FILE);
+        state::write(&path, &proof).unwrap();
+        // Guest cleanup may commit this stopped receipt before the recovery
+        // intent commits completion. Dispatch must resume execute in that gap.
+        let pending = fs::read(&path).unwrap();
+        assert!(!current_completion(&fixture.0, &receipt).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), pending);
+        proof.complete_sha256 = Some(selected(&receipt).unwrap());
         state::write(&path, &proof).unwrap();
         let before = fs::read(&path).unwrap();
         assert!(current_completion(&fixture.0, &receipt).unwrap());

@@ -3365,6 +3365,10 @@ selects `graph recover-cleanup` and then retires the recovered publication. For 
 legacy Ready/Pending enrollment, that path pins the old boot's exact coordinator
 and dead process before any effect. It does not restart the pool, infer an
 arbitrary older boot or treat uncertain publisher exit as absence.
+After interruption, a stopped receipt alone does not complete recovery: `down
+--recover` resumes the selected cleanup until its exact completion digest is
+committed. Once committed, retries resume publication retirement without replaying
+guest cleanup, including an interrupted publication rename.
 
 The relay endpoint may also be absent after the managed owner exited: both relay files
 must be absent under the original held operation lock, and the exact dead

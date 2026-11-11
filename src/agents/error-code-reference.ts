@@ -60,6 +60,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning: "A Compose operation failed or left a stop incomplete.",
     readFirst: "`hack logs --json --no-follow --tail 200`",
   },
+  E_COMPOSE_OUTPUT_INVALID: {
+    meaning:
+      "Compose exited successfully but printed output Hack cannot parse as JSON, usually an unsupported Compose version.",
+    readFirst: "`docker compose version`",
+  },
   E_STARTUP_INCOMPLETE: {
     meaning:
       "After start or restart, a service is neither running nor a successful one-shot.",
@@ -106,6 +111,11 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
     meaning:
       "A path Hack must read or write is the wrong kind of entry: a file where a directory is needed, or a directory or special file where a regular file is needed.",
     readFirst: "`ls -ld <path from the message>`",
+  },
+  E_PROJECT_EXISTS: {
+    meaning:
+      "The project is already initialized, so init wrote nothing; it never overwrites an existing project directory.",
+    readFirst: "`hack doctor --json`",
   },
   E_LOCKED: {
     meaning:

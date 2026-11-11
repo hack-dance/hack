@@ -190,6 +190,11 @@ import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprin
 import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import {
+  composeEnvValuesToRedact,
+  composePsTextFallbackAllowed,
+  readComposePs,
+} from "../lib/compose-ps-result.ts";
+import {
   type ComposeStartupBudgets,
   type ComposeStartupFailure,
   type ComposeStartupPhase,
@@ -235,6 +240,7 @@ import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
+import { initProjectExistsError } from "../lib/init-existing-project.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
@@ -4159,9 +4165,10 @@ async function handleInitAuto({
       });
       return 0;
     }
-    throw new Error(
-      `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Run without --auto to overwrite.`
-    );
+    throw initProjectExistsError({
+      projectDirName: HACK_PROJECT_DIR_PRIMARY,
+      nextCommand: initNextSteps({ backend, devHost }).autoCommand,
+    });
   }
 
   const compose = useDiscovery
@@ -8861,18 +8868,22 @@ async function handlePs({
 
   // Read Compose directly: the daemon cache omits state and exit codes and can
   // lag behind a failed startup. Both formats must observe the same containers.
-  const res = await composeRuntimeBackend.psJson({
-    composeFiles: [project.composeFile],
-    composeProject: composeProjectName,
-    profiles,
-    cwd,
-    all: true,
+  // A failed or unparsable read throws a coded error with the engine's cause
+  // (envelope under --json, one line otherwise); see compose-ps-result.ts.
+  // Text mode keeps the plain `ps` fallback for Compose without JSON output.
+  const read = await readComposePs({
+    run: () =>
+      composeRuntimeBackend.psJson({
+        composeFiles: [project.composeFile],
+        composeProject: composeProjectName,
+        profiles,
+        cwd,
+        all: true,
+      }),
   });
-
-  if (res.exitCode !== 0) {
-    if (json) {
-      process.stderr.write("Failed to read docker compose ps JSON output.\n");
-      return res.exitCode;
+  if (!read.ok) {
+    if (json || !composePsTextFallbackAllowed(read.error)) {
+      throw read.error;
     }
     return await composeRuntimeBackend.ps({
       composeFiles: [project.composeFile],
@@ -8882,8 +8893,7 @@ async function handlePs({
       all: true,
     });
   }
-
-  const entries = parseJsonLines(res.stdout);
+  const entries = read.entries;
   if (json) {
     const payload = {
       project: baseProjectName,
@@ -9412,22 +9422,23 @@ async function resolveExecTargetReady(opts: {
     };
   }
 
-  const psResult = await composeRuntimeBackend.psJson({
-    composeFiles: opts.composeFiles,
-    composeProject: opts.composeProject,
-    profiles: opts.profiles,
-    cwd: dirname(opts.project.composeFile),
-    env: opts.env,
+  const read = await readComposePs({
+    run: () =>
+      composeRuntimeBackend.psJson({
+        composeFiles: opts.composeFiles,
+        composeProject: opts.composeProject,
+        profiles: opts.profiles,
+        cwd: dirname(opts.project.composeFile),
+        env: opts.env,
+      }),
+    redactValues: composeEnvValuesToRedact({ env: opts.env }),
   });
-  if (psResult.exitCode !== 0) {
-    return {
-      ok: false,
-      message:
-        "Unable to inspect running services for this project. Start the stack with `hack up -d` before using `hack exec`.",
-    };
+  if (!read.ok) {
+    // An engine or Compose failure, not a usage problem: keep its code and cause.
+    throw read.error;
   }
 
-  const runningServices = parseJsonLines(psResult.stdout);
+  const runningServices = read.entries;
   const targetIsRunning = runningServices.some((entry) => {
     const service = getString(entry, "Service")?.trim();
     const state = getString(entry, "State")?.trim().toLowerCase();

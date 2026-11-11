@@ -1,5 +1,8 @@
 # Install
 
+For Linux-specific setup, see [Linux setup](../guides/linux-setup.md) and
+[Linux certificate trust](../guides/linux-certificate-trust.md).
+
 v5 is in prerelease. Stable Hack today is the v4 line, installed with Homebrew or
 the release installer. v5 prereleases install beside it through a separate
 channel, `hack-next`, so you can try v5 without touching your stable setup. When

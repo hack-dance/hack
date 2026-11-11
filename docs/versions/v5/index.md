@@ -14,6 +14,9 @@ changed and what was retired.
 Start with [Install](install.md), then [Getting started](getting-started.md).
 [What's new in 5.0](../guides/v5-release-notes.md) summarizes the release.
 
+On Linux, follow [Linux setup](../guides/linux-setup.md) for DNS and
+[Linux certificate trust](../guides/linux-certificate-trust.md) for local HTTPS.
+
 ## Understand the project
 
 - [Core concepts](../core.md): projects, services, instances and local URLs.

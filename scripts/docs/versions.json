@@ -1212,6 +1212,125 @@
         "title": "Side-by-side development",
         "snapshot": "docs/versions/v5/originals/next13/docs/dev.md",
         "sha256": "7f452788b580872ae14a6bcf8e3292bd2d2006271c43c18e181daff506f24289"
+      },
+      {
+        "file": "docs/native/README.md",
+        "slug": "native/overview",
+        "title": "Overview",
+        "snapshot": "docs/versions/v5/originals/next14/docs/native/README.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/native/try-it.md",
+        "slug": "native/try-it",
+        "title": "Try it",
+        "snapshot": "docs/versions/v5/originals/next14/docs/native/try-it.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/native/limits.md",
+        "slug": "native/limits",
+        "title": "What works and known limits",
+        "snapshot": "docs/versions/v5/originals/next14/docs/native/limits.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/native/reference.md",
+        "slug": "native/reference",
+        "title": "Reference map",
+        "snapshot": "docs/versions/v5/originals/next14/docs/native/reference.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/README.md",
+        "slug": "recipes/overview",
+        "title": "Recipes",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/README.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/cli-sign-in.md",
+        "slug": "recipes/cli-sign-in",
+        "title": "Sign in to another CLI at startup",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/cli-sign-in.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/tunnels.md",
+        "slug": "recipes/tunnels",
+        "title": "Expose a local service through a tunnel",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/tunnels.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/remote-database.md",
+        "slug": "recipes/remote-database",
+        "title": "Use a remote database from local services",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/remote-database.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/migrations.md",
+        "slug": "recipes/migrations",
+        "title": "Run database migrations",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/migrations.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/environments.md",
+        "slug": "recipes/environments",
+        "title": "Switch between environments",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/environments.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/deps-service.md",
+        "slug": "recipes/deps-service",
+        "title": "Install dependencies in a deps service",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/deps-service.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/dependency-directories.md",
+        "slug": "recipes/dependency-directories",
+        "title": "Dependency directories and caches",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/dependency-directories.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/cleanup.md",
+        "slug": "recipes/cleanup",
+        "title": "Clean up branch instances, worktrees and volumes",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/cleanup.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/config-examples.md",
+        "slug": "recipes/config-examples",
+        "title": "Config examples",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/config-examples.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/recipes/common-pitfalls.md",
+        "slug": "recipes/common-pitfalls",
+        "title": "Common pitfalls",
+        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/common-pitfalls.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/guides/linux-setup.md",
+        "slug": "guides/linux-setup",
+        "title": "Linux setup",
+        "snapshot": "docs/versions/v5/originals/next14/docs/guides/linux-setup.md",
+        "sha256": ""
+      },
+      {
+        "file": "docs/guides/linux-certificate-trust.md",
+        "slug": "guides/linux-certificate-trust",
+        "title": "Linux certificate trust",
+        "snapshot": "docs/versions/v5/originals/next14/docs/guides/linux-certificate-trust.md",
+        "sha256": ""
       }
     ],
     "publicFiles": [

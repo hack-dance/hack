@@ -394,6 +394,13 @@ test("a missing project env key is reported as such, not as invalid Compose", as
     expect(code).toBe("E_CONFIG_INVALID");
     expect(message).toContain("project env key is missing");
     expect(message).toContain("HACK_ENV_SECRET_KEY");
+    // HACK-2069: encrypted values exist, so a new key would not decrypt them;
+    // the hint says to bring the existing key, never to create one.
+    expect(message).toContain("Copy .hack.secret.key from a machine");
+    expect(message).toContain(
+      'Do not create a new key with "hack env add --secret"'
+    );
+    expect(message).not.toContain("to generate it");
     expect(message).not.toContain("unsupported or invalid Compose");
     expect(message).not.toContain("synthetic-ciphertext-canary");
   } finally {

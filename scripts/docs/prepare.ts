@@ -2,6 +2,7 @@ import { mkdir, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { curateCliReference } from "./curate-cli";
 import { embedDiagrams } from "./diagrams";
+import { pinInstallerExamples } from "./installer-pin";
 import versions from "./versions.json";
 
 let activeRevision = versions.v5.revision;
@@ -151,6 +152,24 @@ const nativeSectionOrder = [
   "config-import",
   "full-reference",
 ];
+/** Keep recipes in reading order when snapshot and editorial sources are mixed. */
+const recipeSectionOrder = [
+  "overview",
+  "cli-sign-in",
+  "tunnels",
+  "remote-database",
+  "migrations",
+  "environments",
+  "deps-service",
+  "dependency-directories",
+  "cleanup",
+  "config-examples",
+  "common-pitfalls",
+];
+const sectionOrders: Record<string, readonly string[]> = {
+  native: nativeSectionOrder,
+  recipes: recipeSectionOrder,
+};
 const diagramsOutput = resolve(repositoryRoot, "site/public/diagrams");
 
 /** Rendered diagrams are generated output: the directory holds exactly this run's set. */
@@ -239,10 +258,6 @@ async function readSnapshot(
   return raw;
 }
 
-const installerDownload =
-  /(releases\/download\/v5\.0\.0-next\.)\d+(\/(?:hack-next-install\.sh|hack-next-manager-darwin-arm64|INSTALLER-SHA256SUMS))(?=$|[\s"'`\\])/g;
-const installerVersion = /^(V=5\.0\.0-next\.)\d+\b/gm;
-
 /**
  * A snapshot is taken at the release commit, before that release's tag exists,
  * so its installer artifacts and shell version variable can still name the
@@ -251,9 +266,7 @@ const installerVersion = /^(V=5\.0\.0-next\.)\d+\b/gm;
 export function pinnedBootstrapText(text: string, label: string): string {
   const prerelease = /next\.(\d+)/.exec(label)?.[1];
   return prerelease
-    ? text
-        .replace(installerDownload, `$1${prerelease}$2`)
-        .replace(installerVersion, `$1${prerelease}`)
+    ? pinInstallerExamples({ text, tag: `v5.0.0-next.${prerelease}` })
     : text;
 }
 
@@ -310,8 +323,7 @@ function stageFolderNavigation(
     if (slugs.length === 0) {
       continue;
     }
-    // The native section reads in order: introduction first, reference last.
-    const order = folder === "native" ? nativeSectionOrder : [];
+    const order = sectionOrders[folder] ?? [];
     staged.set(
       `${version}/${folder}/meta.json`,
       JSON.stringify({

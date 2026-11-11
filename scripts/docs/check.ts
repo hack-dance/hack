@@ -395,15 +395,30 @@ if (
   throw new Error("Bootstrap pinning control failed");
 }
 for (const artifact of [
+  "hack-next-install.sh",
   "hack-next-manager-darwin-arm64",
   "INSTALLER-SHA256SUMS",
 ]) {
-  const input = `releases/download/v5.0.0-next.1/${artifact}`;
-  if (
-    pinnedBootstrapText(input, `v5 (next.${prerelease})`) !==
-    `releases/download/v5.0.0-next.${prerelease}/${artifact}`
-  ) {
-    throw new Error(`Installer artifact pinning failed: ${artifact}`);
+  for (const suffix of [
+    "",
+    ")",
+    "?download=1",
+    "#checksum",
+    "<",
+    "&download",
+  ]) {
+    const input = `releases/download/v5.0.0-next.1/${artifact}${suffix}`;
+    const rewritten = pinnedBootstrapText(input, versions.v5.label);
+    if (
+      rewritten !== `releases/download/${installerTag}/${artifact}${suffix}`
+    ) {
+      throw new Error(`Installer artifact pinning failed: ${input}`);
+    }
+    assertPinnedInstallers({
+      text: rewritten,
+      tag: installerTag,
+      source: input,
+    });
   }
 }
 if (
@@ -431,6 +446,29 @@ if (
 const navigation = await Bun.file(resolve(v5Root, "meta.json")).json();
 if (navigation.title !== versions.v5.label) {
   throw new Error("Stale v5 navigation label");
+}
+const recipeNavigation = await Bun.file(
+  resolve(v5Root, "recipes/meta.json")
+).json();
+if (
+  JSON.stringify(recipeNavigation.pages) !==
+  JSON.stringify([
+    "overview",
+    "cli-sign-in",
+    "tunnels",
+    "remote-database",
+    "migrations",
+    "environments",
+    "deps-service",
+    "dependency-directories",
+    "cleanup",
+    "config-examples",
+    "common-pitfalls",
+  ])
+) {
+  throw new Error(
+    "Recipe navigation must keep its reading order across source types"
+  );
 }
 for (const file of ["site/public/llms.txt", "site/public/v5/llms.txt"]) {
   const text = await Bun.file(resolve(repositoryRoot, file)).text();

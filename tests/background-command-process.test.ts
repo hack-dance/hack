@@ -188,6 +188,12 @@ type LaunchConfig = {
   readonly linger?: boolean;
   readonly stdinFile?: string;
   readonly extraEnv?: Record<string, string>;
+  /** Overrides for the command's environment only (not the launcher's). */
+  readonly childEnv?: Record<string, string>;
+  /** Launcher environment keys to drop. */
+  readonly withoutEnv?: readonly string[];
+  /** Store root when it is not the fixture's HACK_HOME. */
+  readonly store?: string;
 };
 
 type Launched = {
@@ -202,14 +208,23 @@ type Launched = {
 
 async function launch(config: LaunchConfig): Promise<Launched> {
   const configFile = join(fixture.root, `launch-${randomUUID()}.json`);
-  const { extraEnv: _extraEnv, ...launcherConfig } = config;
+  const {
+    extraEnv: _extraEnv,
+    withoutEnv: _withoutEnv,
+    store: _store,
+    ...launcherConfig
+  } = config;
   await writeFile(
     configFile,
     JSON.stringify({ ...launcherConfig, cwd: fixture.root })
   );
   const proc = Bun.spawn([process.execPath, LAUNCHER, `@${configFile}`], {
     cwd: fixture.root,
-    env: { ...fixture.env, ...config.extraEnv },
+    env: Object.fromEntries(
+      Object.entries({ ...fixture.env, ...config.extraEnv }).filter(
+        ([key]) => !config.withoutEnv?.includes(key)
+      )
+    ),
     stdin: config.stdinFile ? Bun.file(config.stdinFile) : "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -238,7 +253,7 @@ async function launch(config: LaunchConfig): Promise<Launched> {
   if (envelope.ok && envelope.data) {
     journal = await loadJournal({
       commandId: envelope.data.commandId,
-      root: fixture.store,
+      root: config.store ?? fixture.store,
     });
     const owner = await readOwner(journal.paths);
     if (owner) {
@@ -726,6 +741,52 @@ describe("background command processes", () => {
       const text = stdoutText(read.events);
       expect(text).not.toContain("xxxxxxxxxxxxxxxx");
       expect(text.endsWith("done\n")).toBe(true);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
+    "a burst between two polls cannot grow an output file past the kernel file-size limit",
+    async () => {
+      // 100 MiB in one burst, faster than the 200 ms poll; the file-size
+      // limit (64 MiB) makes the writer's further writes fail instead.
+      const launched = await launch({
+        // Capture stops at 8 MiB, so the writer's own exit status is the
+        // evidence: head fails with EFBIG ("File too large") at the limit.
+        argv: ["sh", "-c", "head -c 104857600 /dev/zero"],
+      });
+      const journal = launched.journal as LoadedJournal;
+      const read = await readUntilEnded({ journal });
+      expect(read.outcome).toBe("failed");
+      expect(read.exitCode).toBe(1);
+      expect((await stat(journal.paths.stdout)).size).toBeLessThanOrEqual(
+        64 * 1024 * 1024
+      );
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
+    "the supervisor finds its journal when the Compose env changes HOME",
+    async () => {
+      // No HACK_HOME: the store is under the launcher's HOME. The project's
+      // env sets another HOME for the command; the supervisor must still use
+      // the launcher's store root.
+      const store = join(fixture.env.HOME as string, ".hack", "commands");
+      const launched = await launch({
+        argv: ["sh", "-c", 'echo "home=$HOME"'],
+        withoutEnv: ["HACK_HOME"],
+        childEnv: { HOME: join(fixture.root, "project-home") },
+        store,
+      });
+      expect(launched.envelope.ok).toBe(true);
+      const read = await readUntilEnded({
+        journal: launched.journal as LoadedJournal,
+      });
+      expect(read.outcome).toBe("succeeded");
+      expect(stdoutText(read.events)).toBe(
+        `home=${join(fixture.root, "project-home")}\n`
+      );
     },
     TEST_TIMEOUT_MS
   );

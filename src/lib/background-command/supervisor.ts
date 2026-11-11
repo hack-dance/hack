@@ -1,5 +1,6 @@
 import { constants, openSync } from "node:fs";
 import { lstat, open, unlink } from "node:fs/promises";
+import { isRecord } from "../guards.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { auditEnd } from "./audit.ts";
 import {
@@ -13,6 +14,7 @@ import {
   journalPaths,
   type LaunchRecord,
   OUTPUT_EVENT_LIMIT,
+  OUTPUT_FILE_LIMIT_BYTES,
   type OutputStream,
   outputPath,
   readLaunch,
@@ -88,9 +90,14 @@ export async function runBackgroundSupervisor(opts: {
     return 2;
   }
   const signals = installSignalHandlers();
-  const root = opts.root ?? commandsRoot();
+  // First, before any child exists: the descriptor must not be inherited.
+  const input = parsePrivateInput(await readPrivateInput());
+  // The store root comes from the launcher, not from this process's HOME:
+  // the environment here is the Compose environment, which a project may
+  // change (for example HOME=/app).
+  const root = opts.root ?? input?.root ?? commandsRoot();
   const paths = journalPaths({ root, commandId: opts.commandId });
-  const prepared = await prepare(paths);
+  const prepared = await prepare(paths, input?.redactValues ?? null);
   if (prepared === "failed" || prepared === "already_ended") {
     return prepared === "failed" ? 1 : 0;
   }
@@ -211,7 +218,10 @@ function installSignalHandlers(): { readonly stopRequested: () => boolean } {
  * and return the writer, or "already_ended" when a canceller that found no
  * supervisor already wrote the final record.
  */
-async function prepare(paths: JournalPaths): Promise<
+async function prepare(
+  paths: JournalPaths,
+  redactValues: readonly string[] | null
+): Promise<
   | "failed"
   | "already_ended"
   | {
@@ -223,8 +233,6 @@ async function prepare(paths: JournalPaths): Promise<
 > {
   const meta = await readMeta(paths);
   const launch = await readLaunch(paths);
-  // First, before any child exists: the descriptor must not be inherited.
-  const redactValues = parseRedactValues(await readPrivateInput());
   const own = await readOwnIdentity();
   // Never run with less redaction than was accepted: a truncated or missing
   // private input fails the start before the owner record exists, so the
@@ -282,7 +290,7 @@ function startChild(opts: {
         })();
   let proc: Bun.Subprocess;
   try {
-    proc = Bun.spawn([...opts.launch.argv], {
+    proc = Bun.spawn(limitOutputFileSize(opts.meta, opts.launch.argv), {
       cwd: opts.launch.cwd,
       env: childEnv(),
       stdin: "ignore",
@@ -298,6 +306,31 @@ function startChild(opts: {
     closeDescriptor(descriptors.stderr);
   }
   return proc;
+}
+
+/**
+ * Each output file may grow to OUTPUT_FILE_LIMIT_BYTES at most. The child
+ * runs under a file-size limit (RLIMIT_FSIZE via `ulimit -f`, inherited by
+ * everything it starts) with SIGXFSZ ignored, so a burst between two polls
+ * cannot fill the disk: past the limit a write fails with EFBIG instead of
+ * landing. Capture itself still stops at CAPTURE_LIMIT_BYTES; the supervisor
+ * then cuts the files back, so ordinary output never reaches the limit.
+ */
+export function limitOutputFileSize(
+  meta: CommandMeta,
+  argv: readonly string[]
+): string[] {
+  if (meta.capture !== "full") {
+    return [...argv];
+  }
+  const blocks = Math.floor(OUTPUT_FILE_LIMIT_BYTES / 512);
+  return [
+    "/bin/sh",
+    "-c",
+    `trap '' XFSZ; ulimit -f ${blocks} 2>/dev/null; exec "$@"`,
+    "hack-background-command",
+    ...argv,
+  ];
 }
 
 /** Record the child's identity (pid, birth, process group) for cancel and recovery. */
@@ -729,17 +762,31 @@ export function endedPayload(opts: {
 }
 
 /** Redaction values from the launcher's private input (a JSON array). */
-/** Null when the input is not a complete JSON array of strings. */
-function parseRedactValues(text: string): string[] | null {
+/**
+ * The launcher's private input: `{ root, redactValues }`. Null when it is
+ * not complete, valid JSON of that shape (for example a timed-out write).
+ */
+function parsePrivateInput(text: string): {
+  readonly root: string;
+  readonly redactValues: string[];
+} | null {
   try {
     const value: unknown = JSON.parse(text);
-    return Array.isArray(value) &&
-      value.every((item): item is string => typeof item === "string")
-      ? value
-      : null;
+    if (
+      isRecord(value) &&
+      typeof value.root === "string" &&
+      value.root.length > 0 &&
+      Array.isArray(value.redactValues) &&
+      value.redactValues.every(
+        (item): item is string => typeof item === "string"
+      )
+    ) {
+      return { root: value.root, redactValues: value.redactValues };
+    }
   } catch {
     return null;
   }
+  return null;
 }
 
 function childEnv(): Record<string, string> {

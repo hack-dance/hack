@@ -40,6 +40,11 @@ export const HACK_VERSION: string = (pkg as { readonly version: string })
 export const RESERVE_BYTES = 64 * 1024;
 /** Capture limit per command, stdout and stderr together. */
 export const CAPTURE_LIMIT_BYTES = 8 * 1024 * 1024;
+/**
+ * Largest size of one output file. Enforced by the kernel (file-size limit on
+ * the child), so a burst between two supervisor polls cannot fill the disk.
+ */
+export const OUTPUT_FILE_LIMIT_BYTES = 64 * 1024 * 1024;
 /** Largest byte range one output event covers. */
 export const OUTPUT_EVENT_MAX_BYTES = 16 * 1024;
 /** Output events per command; past this capture stops as if the byte limit were hit. */

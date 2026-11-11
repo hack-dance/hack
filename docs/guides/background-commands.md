@@ -158,7 +158,11 @@ output, and **the command keeps running** to its normal end, which records
 `truncated: true`. If the disk or quota fills while events are recorded,
 capture also stops and the command keeps running; its final record (written
 from space reserved at start) has `truncated: true` and
-`captureStopped: "no_space"`. This differs from the foreground `hack.project.exec` and
+`captureStopped: "no_space"`. Each output file is also capped at 64 MiB by a
+kernel file-size limit on the command (inherited by everything it starts, with
+SIGXFSZ ignored), so a burst between two supervisor polls cannot fill the
+disk: a command that writes more than that within one poll (200 ms) gets a
+"File too large" (EFBIG) write error instead. This differs from the foreground `hack.project.exec` and
 `hack.project.run` MCP tools, where reaching 8 MiB stops the command.
 
 ## Inspect and cancel

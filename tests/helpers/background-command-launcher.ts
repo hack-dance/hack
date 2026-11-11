@@ -16,6 +16,8 @@ type LauncherConfig = {
   readonly capture?: "full" | "metadata";
   readonly redactValues?: readonly string[];
   readonly linger?: boolean;
+  /** Overrides for the command's (Compose) environment only. */
+  readonly childEnv?: Record<string, string>;
 };
 
 // `@<path>` reads the config from a file (large redaction values would not
@@ -32,6 +34,7 @@ for (const [key, value] of Object.entries(process.env)) {
     env[key] = value;
   }
 }
+Object.assign(env, config.childEnv ?? {});
 try {
   process.exitCode = await startBackgroundCommand({
     request: {

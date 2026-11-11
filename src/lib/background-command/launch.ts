@@ -1,4 +1,5 @@
 import { lstat } from "node:fs/promises";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { emitCliResult, HackCliError, okResult } from "../cli-result.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
@@ -236,9 +237,10 @@ export async function startBackgroundCommand(
       env: opts.child.env,
       // Redaction values go over an inherited pipe: never to disk, never into
       // an environment string.
-      privateInput: JSON.stringify(
-        settings.capture === "full" ? opts.redactValues : []
-      ),
+      privateInput: JSON.stringify({
+        root: dirname(paths.dir),
+        redactValues: settings.capture === "full" ? opts.redactValues : [],
+      }),
     });
     const started = await waitForOwner({
       ownerPath: paths.owner,

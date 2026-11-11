@@ -137,9 +137,14 @@ end-to-end test for both cases). `hack down` does not stop a background `run`:
 `docker compose down` leaves a running one-off container in place (it exits 0
 but reports that the project network is still in use), so the command keeps
 running until it ends or times out. `hack commands cancel` (or the timeout)
-stops the `docker compose run` client and then removes the command's one-off
-container: Hack names it `hack-bg-<random>` at start and removes it only if
-Docker reports it as a one-off container of the expected service. The result
+stops the `docker compose run` client. Whenever a background `run` ends, by a
+stop or because its client exited on its own (for example at the file-size
+cap), the supervisor removes the command's one-off container: Hack names it
+`hack-bg-<random>` at start and removes it only if Docker reports it as a
+one-off container of the expected service. If the supervisor itself is gone
+(a cancel that had to force-stop it, an orphan timeout, a supervisor error),
+the container is not removed and the end says `containerProcess:
+"not_confirmed"`. The result
 says `containerProcess: "stopped"` when that is confirmed. Both are tested end
 to end. Hack does not reclassify these ends.
 

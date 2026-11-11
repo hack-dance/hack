@@ -63,6 +63,7 @@ export const backgroundCommandComposeScenario: Scenario = {
       await stack.cli(["up", "--detach"]);
       const commandId = await checkResume(stack);
       await checkRun(stack);
+      await checkRunClientDeath(stack);
       await checkContainerRestart(stack);
       await checkDownMidRun(stack);
       await checkDownMidBackgroundRun(stack);
@@ -407,6 +408,55 @@ async function checkContainerRestart(stack: Stack): Promise<void> {
     result: restart,
   });
   await expectFailedEnd({ stack, id, label: "container restart mid-run" });
+}
+
+/**
+ * A background `run` whose Compose client dies on its own (here: killed, as
+ * a crash, an OOM kill or the file-size cap would end it) must not leave its
+ * one-off container running.
+ */
+async function checkRunClientDeath(stack: Stack): Promise<void> {
+  const id = await startSleeper(stack, "before-client-death", "run");
+  const shown = extractJsonObject<{ data?: { child?: { pid?: number } } }>({
+    text: (await stack.cli(["commands", "show", id, "--json"])).stdout,
+  });
+  const clientPid = shown?.data?.child?.pid;
+  expect({
+    that: typeof clientPid === "number" && clientPid > 1,
+    message: `show must report the client pid: ${JSON.stringify(shown?.data?.child)}`,
+  });
+  // The client was started by this scenario's CLI call; nothing else is killed.
+  process.kill(clientPid as number, "SIGKILL");
+  const end = parseLines(
+    (
+      await stack.cli([
+        "commands",
+        "read",
+        id,
+        "--follow",
+        "--json",
+        "--wait-ms",
+        "60000",
+      ])
+    ).stdout
+  ).at(-1);
+  stack.ctx.log(`run after client death ended: ${JSON.stringify(end)}`);
+  expect({
+    that: end?.ended === true && end.outcome === "failed",
+    message: `a run whose client died ends failed: ${JSON.stringify(end)}`,
+  });
+  const after = extractJsonObject<{
+    data?: { ended?: { containerProcess?: string } };
+  }>({ text: (await stack.cli(["commands", "show", id, "--json"])).stdout });
+  expect({
+    that: after?.data?.ended?.containerProcess === "stopped",
+    message: `the one-off container must be removed: ${JSON.stringify(after?.data?.ended)}`,
+  });
+  const oneOff = await ownedContainers(stack, "True");
+  expect({
+    that: oneOff.length === 0,
+    message: `no one-off container remains after the client died (saw ${oneOff.length})`,
+  });
 }
 
 /**

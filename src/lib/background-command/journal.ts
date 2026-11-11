@@ -182,6 +182,7 @@ export type JournalPaths = {
   readonly owner: string;
   readonly child: string;
   readonly spawning: string;
+  readonly stopping: string;
   readonly events: string;
   readonly stdout: string;
   readonly stderr: string;
@@ -209,6 +210,7 @@ export function journalPaths(opts: {
     owner: resolve(dir, "owner.json"),
     child: resolve(dir, "child.json"),
     spawning: resolve(dir, "spawning.json"),
+    stopping: resolve(dir, "stopping"),
     events: resolve(dir, "events.jsonl"),
     stdout: resolve(dir, "stdout"),
     stderr: resolve(dir, "stderr"),

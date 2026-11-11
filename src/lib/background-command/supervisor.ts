@@ -1,5 +1,5 @@
 import { constants, openSync } from "node:fs";
-import { lstat, open, unlink } from "node:fs/promises";
+import { lstat, open, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { isRecord } from "../guards.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
@@ -189,12 +189,19 @@ export async function runBackgroundSupervisor(opts: {
     if (running) {
       signalProcessGroup(proc.pid, "SIGKILL");
     }
+    const containerProcess = launch.container
+      ? await removeOneOffContainer({
+          ...launch.container,
+          env: childEnv(),
+        }).catch(() => "not_confirmed" as const)
+      : undefined;
     return await finish({
       ...baseEnded,
       truncated: capture.truncated,
       outcome: "unknown",
       reason: "supervisor_error",
       stoppedBySupervisor: running,
+      ...(containerProcess ? { containerProcess } : {}),
       detail: error instanceof Error ? error.name : "error",
     }).catch(() => 1);
   }
@@ -394,7 +401,7 @@ async function superviseChild(opts: {
     }
   );
   let stopping: StopReason | null = null;
-  const stopper = new GroupStopper(proc);
+  const stopper = new GroupStopper(proc, opts.paths.stopping);
   while (!exited) {
     await Bun.sleep(TICK_MS);
     // A child that finished during the sleep is not stopped or reclassified:
@@ -427,15 +434,15 @@ async function superviseChild(opts: {
   // never stopped, so its descendants are not known to be gone.
   const lateCancel = stopping === "cancelled" && !stopper.signalled;
   await stopper.finish();
-  // A stopped `run`: remove its one-off container too, after checking it is
-  // ours, so a cancel or timeout cannot leave it running.
-  const containerProcess =
-    stopping && opts.launch.container
-      ? await removeOneOffContainer({
-          ...opts.launch.container,
-          env: childEnv(),
-        })
-      : undefined;
+  // Every `run` end removes its one-off container (after checking it is
+  // ours), whether Hack stopped the client or the client died on its own
+  // (for example at the file-size cap): no end may leave it running.
+  const containerProcess = opts.launch.container
+    ? await removeOneOffContainer({
+        ...opts.launch.container,
+        env: childEnv(),
+      })
+    : undefined;
   await capture.poll(true);
   const payload = endedPayload({
     stopping,
@@ -463,6 +470,7 @@ function unreaped(proc: Bun.Subprocess): boolean {
  */
 class GroupStopper {
   private readonly proc: Bun.Subprocess;
+  private readonly marker: string;
   private readonly members = new Map<number, ProcessIdentity>();
   private killTimer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
@@ -472,8 +480,9 @@ class GroupStopper {
     return this.stopped;
   }
 
-  constructor(proc: Bun.Subprocess) {
+  constructor(proc: Bun.Subprocess, marker: string) {
     this.proc = proc;
+    this.marker = marker;
   }
 
   /** False when the child was already reaped: nothing was stopped. */
@@ -483,6 +492,12 @@ class GroupStopper {
       return false;
     }
     this.stopped = true;
+    // Tells a canceller that this supervisor took the stop over and is
+    // making progress (signalling, then container removal): it must not be
+    // force-killed for being slow.
+    await writeFile(this.marker, new Date().toISOString(), {
+      mode: 0o600,
+    }).catch(() => undefined);
     signalProcessGroup(this.proc.pid, "SIGTERM");
     this.killTimer = setTimeout(() => {
       this.remember()
@@ -770,13 +785,15 @@ export function endedPayload(opts: {
     truncated: opts.truncated,
     suppressed: opts.suppressed,
     ...(opts.noSpace ? { captureStopped: "no_space" } : {}),
-    ...(opts.stopping
+    ...(opts.containerProcess
+      ? { containerProcess: opts.containerProcess }
+      : {}),
+    ...(opts.stopping && !opts.containerProcess
       ? {
           // The client process group was stopped; a process started inside a
           // container by `docker compose exec` is not proven stopped.
           containerProcess:
-            opts.containerProcess ??
-            (opts.backend === "compose" ? "not_confirmed" : "not_applicable"),
+            opts.backend === "compose" ? "not_confirmed" : "not_applicable",
         }
       : {}),
   };

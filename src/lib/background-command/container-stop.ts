@@ -1,6 +1,8 @@
 import { exec } from "../shell.ts";
 
-const DOCKER_TIMEOUT_MS = 30_000;
+/** Kept short so the stop path stays well inside a 30 s MCP control call. */
+const INSPECT_TIMEOUT_MS = 5000;
+const REMOVE_TIMEOUT_MS = 10_000;
 const NO_SUCH_CONTAINER = /no such (object|container)/i;
 
 /**
@@ -36,7 +38,11 @@ export async function removeOneOffContainer(opts: {
   if (inspect.stdout.trim() !== `True ${opts.service}`) {
     return "not_confirmed";
   }
-  const removed = await docker(opts, ["rm", "--force", opts.name]);
+  const removed = await docker(
+    opts,
+    ["rm", "--force", opts.name],
+    REMOVE_TIMEOUT_MS
+  );
   if (!removed) {
     return "not_confirmed";
   }
@@ -57,12 +63,13 @@ export async function removeOneOffContainer(opts: {
 
 async function docker(
   opts: { readonly env: Readonly<Record<string, string>> },
-  args: readonly string[]
+  args: readonly string[],
+  timeoutMs = INSPECT_TIMEOUT_MS
 ): Promise<{ exitCode: number; stdout: string; stderr: string } | null> {
   try {
     return await exec(["docker", ...args], {
       stdin: "ignore",
-      timeoutMs: DOCKER_TIMEOUT_MS,
+      timeoutMs,
       env: { ...opts.env },
     });
   } catch {

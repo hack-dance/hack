@@ -146,9 +146,12 @@ export async function cancelCommand(opts: {
     })) === "gone";
   // Without a final record the stop is not confirmed (for example the
   // child's identity is unknown); the command keeps its admission slot.
+  // Without a final record: a supervisor still finishing the stop reports
+  // `cancelling`; otherwise the stop is not confirmed (for example the
+  // child's identity is unknown). Either way the command keeps its slot.
   const outcome = finalEvent
     ? String(finalEvent.payload.outcome)
-    : "unconfirmed";
+    : await pendingOutcome(paths);
   await appendCommandAudit({
     root: opts.root,
     entry: {
@@ -177,6 +180,33 @@ export async function cancelCommand(opts: {
     },
     refused,
   };
+}
+
+/**
+ * A live supervisor that took the stop over (it wrote the marker) is still
+ * working, for example removing a `run` container on a slow Docker: it is
+ * left to finish rather than force-killed.
+ */
+async function supervisorFinishingStop(opts: {
+  readonly paths: { readonly stopping: string };
+  readonly owner: ObservedIdentity | null;
+  readonly observe: ObserveIdentities;
+}): Promise<boolean> {
+  if (!(opts.owner && (await lstat(opts.paths.stopping).catch(() => null)))) {
+    return false;
+  }
+  const alive = await opts.observe([opts.owner.pid]);
+  return (
+    alive !== null && identityMatches({ expected: opts.owner, snapshot: alive })
+  );
+}
+
+async function pendingOutcome(paths: {
+  readonly stopping: string;
+}): Promise<"cancelling" | "unconfirmed"> {
+  return (await lstat(paths.stopping).catch(() => null))
+    ? "cancelling"
+    : "unconfirmed";
 }
 
 /**
@@ -325,6 +355,11 @@ async function finishWithoutSupervisor(opts: {
       return existing;
     }
     const owner = await readOwner(paths);
+    if (
+      await supervisorFinishingStop({ paths, owner, observe: opts.observe })
+    ) {
+      return null;
+    }
     const stopped = await forceStopVerified({ ...opts, owner });
     if (!stopped.supervisorGone) {
       return null;

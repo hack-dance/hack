@@ -9,7 +9,7 @@ branch instance. Hack does not ship a migration tool. Use your framework's tool
 (Prisma, Drizzle, Alembic, Rails, Flyway and so on) inside a container.
 
 The complete project is in
-[`examples/recipes/migrations`](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/examples/recipes/migrations). Its
+[`examples/recipes/migrations`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/migrations). Its
 `scripts/migrate.sh` is a small stand-in tool: it applies each
 `migrations/*.sql` file once and records it in `schema_migrations`.
 

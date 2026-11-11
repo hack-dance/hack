@@ -6,8 +6,8 @@ were not rerun with the pinned binary.
 
 Step-by-step setups for using Hack with other tools and for everyday
 workflows. Each recipe has a complete project under
-[`examples/recipes`](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/examples/recipes) or
-[`examples/configs`](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/examples/configs), and each page says what was
+[`examples/recipes`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes) or
+[`examples/configs`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/configs), and each page says what was
 tested and what was not.
 
 They all use the supported building blocks: lifecycle hooks and processes,

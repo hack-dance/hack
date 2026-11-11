@@ -3,19 +3,13 @@
 The v5 runtime corpus stays pinned to `v5.0.0-next.13`
 (`7151636f975f473581cc18013604c91789a35c41`). The eleven recipe pages are
 editorial copies of `docs/recipes/` at
-`943503b56081f9934fa98c4b80b7eea2a1a41822`. Each has explicit `sourceRevision`,
+`4b400ea4d40acbff4ec00e37a3f288c67da55a03`. Each has explicit `sourceRevision`,
 `sourceLabel` and `sourceFile` metadata. Example-project links name that same
 source commit because those projects are newer than the runtime pin.
 
 All eleven pages fit next.13; none waits for a newer runtime. This is a source
 compatibility audit, not a new execution of their examples. The pages retain
 the original authors' execution evidence and platform limits.
-
-Editorial corrections are also retained in the canonical recipe sources:
-navigation fixes, host-scoped tunnel tokens (`--service host`, available in
-next.13), and read-only shared-cache consumers with an explicit equal-trust
-requirement. The linked source revision and example projects predate these
-corrections; use the instructions on the published page for these details.
 
 ## Command and configuration audit
 
@@ -54,6 +48,24 @@ Compose keys such as `services`, `image`, `command`, `depends_on`, `volumes`,
 proxy configuration, not additions to Hack's project schema. Framework commands,
 database clients and tunnel/login CLIs are external tools; the recipes distinguish
 stand-ins from tools that were not exercised against live accounts.
+
+## Scope and dependency corrections
+
+The recipe source revision above includes read-only dependency mounts for app
+consumers and writable mounts only for installers, including the config examples.
+Shared caches are limited to equally trusted worktrees; an installer can still
+modify a shared volume. The named-tunnel command uses `--service host`, supported
+at next.13, to keep the token out of application containers. Projects using this
+pattern must have no Compose service named `host`, which would select that
+service scope instead.
+
+Focused static checks reject writable dependency consumers and keep source/site
+include blocks aligned. A temporary-project CLI test executes the documented
+secret-input command with a synthetic value, reads it through the host scope,
+and verifies it is absent from the web and global scopes. These checks do not
+start containers or a tunnel. The corrected mount variants were not rerun with
+Docker; the affected pages distinguish that correction from their original
+execution evidence. The runtime pin remains next.13.
 
 ## Publication
 

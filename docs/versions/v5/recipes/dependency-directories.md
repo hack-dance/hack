@@ -35,7 +35,7 @@ services:
   web:
     volumes:
       - ..:/app
-      - node_modules:/app/node_modules
+      - node_modules:/app/node_modules:ro
       - build-cache:/app/.cache
 
 volumes:
@@ -66,13 +66,18 @@ fingerprint of the lockfiles, the runtime files you list in
 build settings. A different fingerprint gets a new volume. Old volumes are kept
 until you remove them.
 
+Only the installer should mount dependency volumes writable; app consumers use
+`:ro`, with tool caches in separate writable volumes. Share a dependency cache
+only across equally trusted worktrees. A worktree's installer can still change
+the shared volume, so use per-instance volumes for untrusted worktrees.
+
 The fingerprint does not see changes inside a mutable image tag. Pin the
 installer image by tag or digest.
 
 Ordinary cache labels do not stop two installers from writing the same volume
 at the same time. If your install output never depends on the instance and
 needs no credentials, you can opt into the stricter
-[locked installer protocol](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/docs/guides/dependency-cache-protocol.md), which adds
+[locked installer protocol](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/docs/guides/dependency-cache-protocol.md), which adds
 a lock, a verifier and a ready marker.
 
 The how-to, with the commands we ran, is in

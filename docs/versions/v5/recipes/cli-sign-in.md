@@ -14,7 +14,7 @@ and only on the [native backend (beta)](../../guides/native-candidate.md). There
 no plugin API for adding another adapter.
 
 The complete project is in
-[`examples/recipes/cli-login`](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/examples/recipes/cli-login). It uses two
+[`examples/recipes/cli-login`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/cli-login). It uses two
 stand-in CLIs, `deployctl` and `edgectl`, in `stand-ins/`. They are shell
 scripts that behave like a real CLI's sign-in, status and token commands.
 

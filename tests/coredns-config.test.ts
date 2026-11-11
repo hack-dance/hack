@@ -59,7 +59,8 @@ test("configured custom domain gets a narrow CoreDNS route without broad externa
     defaultDomain: "project.example.test",
   });
   expect(staticConfig).toContain("(.*)\\.project\\.example\\.test\\.?)$");
-  expect(staticConfig.match(/template IN A/g)).toHaveLength(1);
+  expect(staticConfig.match(/template IN A \{/g)).toHaveLength(1);
+  expect(staticConfig.match(/template IN AAAA \{/g)).toHaveLength(1);
   const dynamicConfig = renderGlobalCoreDnsConfig({
     defaultDomain: "project.example.test",
   });
@@ -67,4 +68,33 @@ test("configured custom domain gets a narrow CoreDNS route without broad externa
     "(.*)\\.project\\.example\\.test\\.?)$ caddy"
   );
   expect(dynamicConfig).toContain("forward . 127.0.0.11");
+});
+
+test("routed names answer AAAA with empty NOERROR instead of falling through to the forwarder (HACK-2064)", () => {
+  const text = renderGlobalCoreDnsConfig({ useStaticCaddyIp: true });
+  const lines = text.split("\n");
+  const start = lines.indexOf("  template IN AAAA {");
+  expect(start).toBeGreaterThan(-1);
+  const end = lines.indexOf("  }", start);
+  const block = lines.slice(start, end + 1);
+  const aBlockMatch = lines.find(
+    (line, index) => index < start && line.trim().startsWith("match ")
+  );
+  // Same suffixes as the A record; no address and no IPv6 answer.
+  expect(block).toContain(aBlockMatch ?? "<missing A match>");
+  expect(block).toContain("    rcode NOERROR");
+  expect(block.some((line) => line.includes("answer"))).toBe(false);
+  // Unrelated AAAA queries still reach the forwarder.
+  expect(block).toContain("    fallthrough");
+  expect(lines.indexOf("  forward . 127.0.0.11")).toBeGreaterThan(end);
+
+  const custom = renderGlobalCoreDnsConfig({
+    useStaticCaddyIp: true,
+    defaultDomain: "project.example.test",
+  });
+  const customLines = custom.split("\n");
+  const customStart = customLines.indexOf("  template IN AAAA {");
+  expect(customLines[customStart + 1]).toContain(
+    "(.*)\\.project\\.example\\.test\\.?)$"
+  );
 });

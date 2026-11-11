@@ -94,6 +94,13 @@ type DarwinLibc = {
     newSize: number
   ) => number;
   readonly procPidPath: (pid: number, out: Uint8Array, size: number) => number;
+  readonly procPidInfo: (
+    pid: number,
+    flavor: number,
+    arg: bigint,
+    out: Uint8Array,
+    size: number
+  ) => number;
 };
 
 let darwinLibc: DarwinLibc | null | undefined;
@@ -120,12 +127,18 @@ function loadDarwinLibc(): DarwinLibc | null {
         args: [FFIType.i32, FFIType.ptr, FFIType.u32],
         returns: FFIType.i32,
       },
+      proc_pidinfo: {
+        args: [FFIType.i32, FFIType.i32, FFIType.u64, FFIType.ptr, FFIType.i32],
+        returns: FFIType.i32,
+      },
     });
     darwinLibc = {
       sysctl: (mib, count, out, size, newValue, newSize) =>
         library.symbols.sysctl(mib, count, out, size, newValue, newSize),
       procPidPath: (pid, out, size) =>
         library.symbols.proc_pidpath(pid, out, size),
+      procPidInfo: (pid, flavor, arg, out, size) =>
+        library.symbols.proc_pidinfo(pid, flavor, arg, out, size),
     };
   } catch {
     darwinLibc = null;
@@ -177,7 +190,48 @@ function readDarwinProcessImage(pid: number): ProcessImage | null {
     return null;
   }
   const argv = parseProcArgs2(buffer.subarray(0, Number(size[0] ?? 0n)));
-  return argv ? { executable, argv } : null;
+  return argv ? { executable, argv, cwd: readDarwinCwd(libc, pid) } : null;
+}
+
+/**
+ * `PROC_PIDVNODEPATHINFO` returns `struct proc_vnodepathinfo`: the current
+ * directory's `struct vnode_info_path` (a 152-byte `vnode_info`, then a
+ * `MAXPATHLEN` path), then the root directory's. Only the cwd path is read.
+ */
+const PROC_PIDVNODEPATHINFO = 9;
+const VNODE_INFO_SIZE = 152;
+const MAXPATHLEN = 1024;
+const VNODE_PATH_INFO_SIZE = 2 * (VNODE_INFO_SIZE + MAXPATHLEN);
+
+/**
+ * The process's working directory, or null when it cannot be read. A wrong
+ * read can only fail to match a relative entry: the result must be an
+ * absolute path, and it is used only to resolve that entry.
+ */
+function readDarwinCwd(libc: DarwinLibc, pid: number): string | null {
+  const buffer = new Uint8Array(VNODE_PATH_INFO_SIZE);
+  const written = libc.procPidInfo(
+    pid,
+    PROC_PIDVNODEPATHINFO,
+    0n,
+    buffer,
+    buffer.length
+  );
+  if (written !== VNODE_PATH_INFO_SIZE) {
+    return null;
+  }
+  return parseDarwinCwd(buffer);
+}
+
+/** Reads the cwd path out of a `proc_vnodepathinfo` buffer. */
+export function parseDarwinCwd(buffer: Uint8Array): string | null {
+  const field = buffer.subarray(VNODE_INFO_SIZE, VNODE_INFO_SIZE + MAXPATHLEN);
+  const end = field.indexOf(0);
+  if (end <= 0) {
+    return null;
+  }
+  const path = new TextDecoder().decode(field.subarray(0, end));
+  return path.startsWith("/") ? path : null;
 }
 
 /**

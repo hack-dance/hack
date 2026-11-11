@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rename,
   rm,
   symlink,
@@ -23,7 +24,11 @@ import {
   removeDaemonFilesIfStale,
   terminateProvenDaemon,
 } from "../src/daemon/process.ts";
-import type { ProcessImage } from "../src/daemon/process-image.ts";
+import {
+  type ProcessImage,
+  parseDarwinCwd,
+  parseProcArgs2,
+} from "../src/daemon/process-image.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { spawnHackdLikeFixture } from "./helpers/hackd-fixture.ts";
 
@@ -840,3 +845,41 @@ test.skipIf(process.platform !== "linux")(
   },
   10_000
 );
+
+test("macOS cwd parsing reads the current directory's path and rejects garbage", () => {
+  const buffer = new Uint8Array(2 * (152 + 1024));
+  const cwd = "/opt/src/hack";
+  buffer.set(new TextEncoder().encode(cwd), 152);
+  expect(parseDarwinCwd(buffer)).toBe(cwd);
+  // Empty or relative: unknown, so a relative entry does not match.
+  expect(parseDarwinCwd(new Uint8Array(2 * (152 + 1024)))).toBeNull();
+  const relative = new Uint8Array(2 * (152 + 1024));
+  relative.set(new TextEncoder().encode("src/hack"), 152);
+  expect(parseDarwinCwd(relative)).toBeNull();
+});
+
+test.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
+  "the process reader returns this process's real working directory",
+  async () => {
+    const { readProcessImage } = await import("../src/daemon/process-image.ts");
+    const image = await readProcessImage(process.pid);
+    expect(image?.cwd).toBe(await realpath(process.cwd()));
+  }
+);
+
+test("parseProcArgs2 reads argc arguments after the padded executable path", () => {
+  const encoder = new TextEncoder();
+  const parts = [
+    new Uint8Array([3, 0, 0, 0]),
+    encoder.encode("/opt/bun\0\0\0\0"),
+    encoder.encode("bun\0index.ts\0daemon\0ENV=1\0"),
+  ];
+  const buffer = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    buffer.set(part, offset);
+    offset += part.length;
+  }
+  expect(parseProcArgs2(buffer)).toEqual(["bun", "index.ts", "daemon"]);
+  expect(parseProcArgs2(new Uint8Array([5, 0, 0, 0, 0]))).toBeNull();
+});

@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pumpStream } from "../src/lib/background-command/output-pump.ts";
 import {
   encodeSecrets,
   findMatches,
@@ -425,5 +429,54 @@ describe("StallTracker", () => {
   test("0 turns detection off", () => {
     const tracker = new StallTracker(0, 0);
     expect(tracker.check(10_000_000)).toBeNull();
+  });
+});
+
+describe("pumpStream", () => {
+  test("the final drain reads past held-back slices until the file is consumed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hack-bg-pump-"));
+    try {
+      const path = join(dir, "stdout");
+      const text = `${"a".repeat(100_000)}c`;
+      await writeFile(path, text, { mode: 0o600 });
+      // 512 values: slices of 32 KiB, shorter than the long value below.
+      const secrets = encodeSecrets({
+        values: [
+          `${"a".repeat(100_000)}b`,
+          ...Array.from({ length: 511 }, (_, index) => `other-${index}-value`),
+        ],
+        minLength: 6,
+      });
+      const emitted: { offset: number; length: number }[] = [];
+      const pump = (opts: {
+        final: boolean;
+        from: number;
+        carry?: Uint8Array;
+      }) =>
+        pumpStream({
+          path,
+          stream: "stdout",
+          ...opts,
+          secrets,
+          captureRemaining: 1 << 23,
+          eventsRemaining: 65_536,
+          redact: true,
+          emit: async (range) => {
+            emitted.push({ offset: range.offset, length: range.length });
+          },
+        });
+      const first = await pump({ final: false, from: 0 });
+      const last = await pump({
+        final: true,
+        from: first.emittedTo,
+        carry: first.carry,
+      });
+      expect(last.emittedTo).toBe(text.length);
+      expect(emitted.reduce((sum, range) => sum + range.length, 0)).toBe(
+        text.length
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

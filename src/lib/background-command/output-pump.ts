@@ -96,7 +96,13 @@ export async function pumpStream(opts: {
       const progressed = await emitRanges({ opts, state, ranges: scan.ranges });
       state.budgetReached ||= scan.budgetReached;
       state.carry = slice.bytes.slice(state.from - sliceStart);
-      if (state.budgetReached || !progressed) {
+      // A pass that emitted nothing because the end is held back (a value
+      // longer than the slice may still be completing) does not mean there
+      // is nothing left to read: on the final drain, keep reading fresh
+      // slices until the file is consumed. An ordinary poll stops and the
+      // next poll continues.
+      const unread = state.from + state.carry.length < state.size;
+      if (state.budgetReached || !(progressed || (opts.final && unread))) {
         break;
       }
     }

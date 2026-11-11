@@ -1,0 +1,18 @@
+flowchart TD
+    event{CI event}
+    event -->|Push next or main| full[Eight unit shards\nFour Docker shards]
+    event -->|Pull request| scope{Suite in scope?}
+    scope -->|Yes| full
+    scope -->|No| focus[Focused tests\nDocker scope skip]
+    full --> aggregates[Aggregate checks]
+    focus --> aggregates
+    aggregates --> status[Success can include\ncancellation or scope skip]
+    full --> exact{Exact source SHA\nPush on release branch?}
+    exact -->|Yes| jobs{Every required job present\nEvery observed job successful?}
+    jobs -->|Yes| proof[CI evidence accepted]
+    jobs -->|No| reject[CI evidence rejected]
+    exact -->|No| reject
+    class full,focus live
+    class status wait
+    class proof ok
+    class reject fail

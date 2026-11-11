@@ -23,15 +23,23 @@ failed (nothing ran) or the launchd canary saw the real hackd plist change.
 
 ## CI tiering
 
-Only the `test` job is a required status check on `next` and `main`. It is the
-fan-in of four `test shard i/4` jobs, which run the unit test files in parallel.
-Shard 1 also runs typecheck, lint and the build. `test` passes only when every
-shard succeeded (`scripts/test-shard-plan.ts`). `docker-e2e`, `Config compiler`, `Candidate core`,
-`Runtime state models`, `secret-scan`, `runtime-images` and
-`linux-process-lifetime` run on every push and pull request but are optional
-checks: a red result is a signal to triage, not a merge block. "Registered in
-Docker CI" below therefore means the optional `docker-e2e` job. Every job has a
-`timeout-minutes` budget so a hung engine or runner cannot hold a slot open.
+The workflow defines `test` as the required branch-check fan-in; repository rules
+control which checks block a merge. Full-suite runs use eight `test shard i/8`
+jobs. Shard 8 also runs typecheck, privacy, quality checks and builds.
+`scripts/test-shard-plan.ts` assigns the test files; the workflow owns job
+conditions and aggregate results.
+
+Pushes to `next`/`main` run the full suite. Pull requests use
+`scripts/ci-change-scope.ts`: docs/site-only and runtime-core-only changes run
+focused tests instead of the eight unit shards and Docker E2E. TypeScript/code
+changes and unknown or unavailable diffs retain the full suite. Other jobs,
+including compiler and candidate-core checks, have their own scope conditions;
+they do not all run on every PR. Every job has a `timeout-minutes` budget.
+
+The `test` aggregate checks the unit shards or the selected focused tests.
+It accepts cancellation as a non-failure, including cancellation of scope
+classification; failures and unexpected skips fail it. A green aggregate alone
+does not prove that the selected tests completed.
 
 `docker-e2e` is a fan-in job. The scenarios run on four parallel
 `docker-e2e shard i/4` runners, each with `bun tests/e2e/run.ts --shard=i/4`.
@@ -42,9 +50,23 @@ duration hints. Every scenario runs in exactly one shard, and
 qualification runs as three parts (`native-config-networks-lifecycle`,
 `-policy`, `-ingress`), each with its own three-checkout startup and cleanup, so
 the parts land on separate shards; `native-config-compose` and `-routing` share
-the fourth. The slowest shard sets the wall time. `docker-e2e` always
-runs and passes only when every shard succeeded. The prerelease exact-head gate
-also requires each shard job by name. To reproduce one CI shard locally, run
+the fourth. The slowest shard sets the wall time. The `docker-e2e` aggregate is
+scheduled with `always()`. It accepts successful shards, an intentional scope
+skip, or cancellation without failure. Failed scope classification, failed shards
+and unexpected skips fail it. The matrix result does not identify why a run was
+cancelled, so an accepted cancellation is not evidence of successful execution.
+
+Release eligibility is stricter than aggregate status.
+`scripts/prerelease-plan.ts` requires a successful exact-source-SHA push CI run
+on `next` for prerelease, and `scripts/release-prepare-gate.ts` applies the same
+check to `main` for stable release preparation. Every required named job,
+including all four Docker shards and all eight unit shards, must have succeeded;
+every observed job in that CI run must also have completed successfully without
+skips. PR runs and green aggregates alone cannot satisfy this contract.
+
+[CI result flow](ci-results.svg) · [Mermaid source](ci-results.mmd)
+
+To reproduce one CI shard locally, run
 `bun tests/e2e/run.ts --list --shard=i/4`, then rerun its names with `--only`.
 `--shard` and `--only` cannot be combined.
 

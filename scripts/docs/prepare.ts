@@ -319,7 +319,8 @@ async function stageVersion(
       : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
     const page = await embedDiagrams(
       text.replace(heading, "").trim(),
-      diagrams
+      diagrams,
+      `${version}/${entry.slug}`
     );
     staged.set(
       `${version}/${entry.slug}.md`,

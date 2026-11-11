@@ -154,7 +154,10 @@ A command is stalled when it is alive and has written no output and changed no
 state for `--stall-after-ms`, measured on a monotonic clock. `command.stalled`
 carries `idleMs` and `lastOutputAt`; `command.resumed` follows when output
 returns. Stalls are advisory only and never stop a command. Quiet builds, lock
-waits and long downloads look exactly like stalls.
+waits and long downloads look exactly like stalls. At most 500 stall periods
+(each with its `command.resumed`) are reported per command; after that
+detection stops, so state events cannot grow a running command's journal
+without bound.
 
 ## Capture limit
 

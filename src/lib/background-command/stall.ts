@@ -5,8 +5,13 @@
  * state change for `stallAfterMs`. One `command.stalled` is reported per quiet
  * period, and `command.resumed` when activity returns. Nothing acts on a
  * stall: it never feeds a decision to stop a command. Quiet builds and lock
- * waits look exactly like stalls.
+ * waits look exactly like stalls. At most `STALL_PERIODS_LIMIT` stall
+ * periods are reported per command (each with its `resumed`), so state
+ * events cannot grow a running command's journal without bound; after that
+ * detection stops.
  */
+export const STALL_PERIODS_LIMIT = 500;
+
 export type StallTransition =
   | {
       readonly type: "command.stalled";
@@ -23,6 +28,7 @@ export class StallTracker {
   private lastActivityMono: number;
   private lastOutputWall: string | null = null;
   private stalled = false;
+  private periods = 0;
 
   /** `stallAfterMs` 0 disables detection. */
   constructor(stallAfterMs: number, nowMono: number) {
@@ -54,7 +60,11 @@ export class StallTracker {
 
   /** Check for a new stall; returns `stalled` once per quiet period. */
   check(nowMono: number): StallTransition | null {
-    if (this.stallAfterMs <= 0 || this.stalled) {
+    if (
+      this.stallAfterMs <= 0 ||
+      this.stalled ||
+      this.periods >= STALL_PERIODS_LIMIT
+    ) {
       return null;
     }
     const idleMs = nowMono - this.lastActivityMono;
@@ -62,6 +72,7 @@ export class StallTracker {
       return null;
     }
     this.stalled = true;
+    this.periods += 1;
     return {
       type: "command.stalled",
       idleMs: Math.floor(idleMs),

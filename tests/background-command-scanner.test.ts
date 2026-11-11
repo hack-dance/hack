@@ -12,7 +12,10 @@ import {
   searchStart,
   utf8SafeCut,
 } from "../src/lib/background-command/output-scanner.ts";
-import { StallTracker } from "../src/lib/background-command/stall.ts";
+import {
+  STALL_PERIODS_LIMIT,
+  StallTracker,
+} from "../src/lib/background-command/stall.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -424,6 +427,28 @@ describe("StallTracker", () => {
     ).toBeNull();
     expect(tracker.check(1500)).toBeNull();
     expect(tracker.check(1900)?.type).toBe("command.stalled");
+  });
+
+  test("at most STALL_PERIODS_LIMIT stall periods are reported, each with its resume", () => {
+    const tracker = new StallTracker(1, 0);
+    let stalled = 0;
+    let resumed = 0;
+    for (let tick = 1; tick <= 4 * STALL_PERIODS_LIMIT; tick += 2) {
+      if (tracker.check(tick * 10)?.type === "command.stalled") {
+        stalled += 1;
+      }
+      const back = tracker.activity({
+        nowMono: tick * 10 + 5,
+        wall: "2026-01-01T00:00:00.000Z",
+        output: true,
+      });
+      if (back?.type === "command.resumed") {
+        resumed += 1;
+      }
+    }
+    expect(stalled).toBe(STALL_PERIODS_LIMIT);
+    expect(resumed).toBe(STALL_PERIODS_LIMIT);
+    expect(tracker.isStalled).toBe(false);
   });
 
   test("0 turns detection off", () => {

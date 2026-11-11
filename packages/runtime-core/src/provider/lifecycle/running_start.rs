@@ -153,34 +153,42 @@ fn verify_trees(
     lease: &state::Lock,
 ) -> Result<(), CandidateError> {
     let process = owner.process.as_ref().ok_or_else(changed)?;
-    // Off a qualified filesystem the witness is never accepted: every tree is proven.
-    let qualified = super::witness_qualified(candidate);
-    let mut proven = BTreeMap::new();
-    let mut reproven = false;
-    for (name, pin) in [
+    let pins = [
         (tree_witness::SMOLVM, &artifact::SMOLVM),
         (tree_witness::ENGINE, &artifact::ENGINE),
-    ] {
-        let anchor = artifact::verify_record(candidate, pin)?.tree_sha256;
-        let metadata = artifact::tree_metadata(candidate, pin)?;
-        let tree =
-            if qualified && tree_witness::matches(candidate, process, name, &metadata, &anchor) {
-                tree_witness::Proven {
-                    metadata,
-                    content: anchor,
-                }
-            } else {
-                reproven = true;
-                artifact::verify_witnessed(candidate, pin)?
-            };
-        proven.insert(name.to_owned(), tree);
-    }
+    ];
+    let metadata = pins
+        .map(|(_, pin)| tree_witness::qualified_digest(&artifact::tree_root(candidate, pin), None));
+    let [smolvm_metadata, engine_metadata] = metadata;
+    let metadata = [smolvm_metadata?, engine_metadata?];
     let rootfs = root(candidate).join("rootfs");
     reject_aliased_state(&rootfs)?;
     let marker = rootfs_marker(owner)?;
+    let rootfs_metadata = tree_witness::qualified_digest(&rootfs, Some(&marker))?;
+    // Qualification shares each tree's metadata walk. If any tree crosses a filesystem
+    // boundary, accept no witness and publish none, while retaining full content proofs.
+    let qualified = rootfs_metadata.is_some() && metadata.iter().all(Option::is_some);
+    let mut proven = BTreeMap::new();
+    let mut reproven = false;
+    for ((name, pin), metadata) in pins.into_iter().zip(metadata) {
+        let anchor = artifact::verify_record(candidate, pin)?.tree_sha256;
+        let tree = if qualified
+            && let Some(metadata) = metadata
+            && tree_witness::matches(candidate, process, name, &metadata, &anchor)
+        {
+            tree_witness::Proven {
+                metadata,
+                content: anchor,
+            }
+        } else {
+            reproven = true;
+            artifact::verify_witnessed(candidate, pin)?
+        };
+        proven.insert(name.to_owned(), tree);
+    }
     let anchor = owner.rootfs_digest.clone().ok_or_else(changed)?;
-    let metadata = tree_witness::metadata_digest(&rootfs, Some(&marker))?;
     let metadata = if qualified
+        && let Some(metadata) = rootfs_metadata
         && tree_witness::matches(candidate, process, tree_witness::ROOTFS, &metadata, &anchor)
     {
         metadata
@@ -195,7 +203,7 @@ fn verify_trees(
             content: anchor,
         },
     );
-    if reproven && qualified {
+    if reproven && qualified && super::witness_qualified(candidate) {
         // Best effort, as at boot: without a witness the next command proves by content.
         let _ = tree_witness::record(candidate, lease, process, proven);
     }

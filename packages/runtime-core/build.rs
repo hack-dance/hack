@@ -74,6 +74,13 @@ fn build_runtime_identity() {
     }
 
     let mut hash = Sha256::new();
+    let compiler = Command::new(env::var_os("RUSTC").expect("Cargo sets RUSTC"))
+        .arg("-vV")
+        .output()
+        .expect("read Rust compiler identity");
+    assert!(compiler.status.success(), "Rust compiler identity failed");
+    hash.update((compiler.stdout.len() as u64).to_le_bytes());
+    hash.update(compiler.stdout);
     for path in [
         "src",
         "guest",

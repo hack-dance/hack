@@ -175,49 +175,29 @@ fn filesystem_type(path: &Path) -> Option<String> {
 /// are not followed, just as in the content proof. An unreadable or bounded-out walk grants
 /// no witness; callers still run the full content proof.
 pub(super) fn qualified(roots: &[&Path]) -> bool {
-    qualified_with(roots, &mut |path, metadata| {
-        Some((metadata.dev(), filesystem_type(path)?))
-    })
+    qualified_with(roots, filesystem_type, |_, metadata| metadata.dev())
 }
 
 fn qualified_with(
     roots: &[&Path],
-    observe: &mut impl FnMut(&Path, &fs::Metadata) -> Option<(u64, String)>,
+    mut filesystem: impl FnMut(&Path) -> Option<String>,
+    mut device: impl FnMut(&Path, &fs::Metadata) -> u64,
 ) -> bool {
-    fn visit(
-        path: &Path,
-        device: u64,
-        count: &mut usize,
-        observe: &mut impl FnMut(&Path, &fs::Metadata) -> Option<(u64, String)>,
-    ) -> Option<()> {
-        *count += 1;
-        if *count > MAX_ENTRIES {
-            return None;
-        }
-        let metadata = fs::symlink_metadata(path).ok()?;
-        if metadata.dev() != device {
-            return None;
-        }
-        if metadata.file_type().is_symlink() {
-            return Some(());
-        }
-        let (observed_device, kind) = observe(path, &metadata)?;
-        if observed_device != device || !QUALIFIED_FILESYSTEMS.contains(&kind.as_str()) {
-            return None;
-        }
-        if metadata.is_dir() {
-            for entry in fs::read_dir(path).ok()? {
-                visit(&entry.ok()?.path(), device, count, observe)?;
-            }
-        }
-        Some(())
-    }
     roots.iter().all(|root| {
-        let Ok(metadata) = fs::symlink_metadata(root) else {
-            return false;
-        };
-        metadata.is_dir() && visit(root, metadata.dev(), &mut 0, observe).is_some()
+        metadata_with(root, None, &mut filesystem, &mut device)
+            .is_ok_and(|(_, qualified)| qualified)
     })
+}
+
+/// Metadata and filesystem qualification share one walk. An unqualified tree still has a
+/// digest for bracketing its full content proof, but never one usable as a witness.
+pub(super) fn qualified_digest(
+    root: &Path,
+    marker: Option<&str>,
+) -> Result<Option<String>, CandidateError> {
+    let (digest, qualified) =
+        metadata_with(root, marker, &mut filesystem_type, &mut |_, m| m.dev())?;
+    Ok(qualified.then_some(digest))
 }
 
 fn invalid(message: &'static str) -> CandidateError {
@@ -232,12 +212,27 @@ fn invalid(message: &'static str) -> CandidateError {
 /// proof applies (`artifact::rootfs_digest`): a small, singly linked regular file owned by
 /// this user. File contents are never read.
 pub(super) fn metadata_digest(root: &Path, marker: Option<&str>) -> Result<String, CandidateError> {
-    fn visit(
+    metadata_with(root, marker, &mut filesystem_type, &mut |_, m| m.dev()).map(|(digest, _)| digest)
+}
+
+fn metadata_with(
+    root: &Path,
+    marker: Option<&str>,
+    filesystem: &mut impl FnMut(&Path) -> Option<String>,
+    device: &mut impl FnMut(&Path, &fs::Metadata) -> u64,
+) -> Result<(String, bool), CandidateError> {
+    struct Walk<'a, D> {
+        count: usize,
+        root_device: u64,
+        qualified: bool,
+        device: &'a mut D,
+    }
+    fn visit<D: FnMut(&Path, &fs::Metadata) -> u64>(
         base: &Path,
         path: &Path,
         hash: &mut Sha256,
         marker: Option<&str>,
-        count: &mut usize,
+        walk: &mut Walk<'_, D>,
     ) -> Result<(), CandidateError> {
         let mut entries = fs::read_dir(path)
             .map_err(state::io)?
@@ -245,8 +240,8 @@ pub(super) fn metadata_digest(root: &Path, marker: Option<&str>) -> Result<Strin
             .map_err(state::io)?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            *count += 1;
-            if *count > MAX_ENTRIES {
+            walk.count += 1;
+            if walk.count > MAX_ENTRIES {
                 return Err(invalid("Prepared tree has too many entries to witness."));
             }
             let path = entry.path();
@@ -254,8 +249,9 @@ pub(super) fn metadata_digest(root: &Path, marker: Option<&str>) -> Result<Strin
             let text = relative
                 .to_str()
                 .ok_or_else(|| invalid("Non-UTF8 prepared tree path."))?;
+            let m = fs::symlink_metadata(&path).map_err(state::io)?;
+            walk.qualified &= (walk.device)(&path, &m) == walk.root_device;
             if marker == Some(text) {
-                let m = fs::symlink_metadata(&path).map_err(state::io)?;
                 if !m.is_file()
                     || m.nlink() != 1
                     || m.len() > 1024
@@ -265,7 +261,6 @@ pub(super) fn metadata_digest(root: &Path, marker: Option<&str>) -> Result<Strin
                 }
                 continue;
             }
-            let m = fs::symlink_metadata(&path).map_err(state::io)?;
             hash.update((text.len() as u64).to_le_bytes());
             hash.update(text.as_bytes());
             for value in [
@@ -280,7 +275,7 @@ pub(super) fn metadata_digest(root: &Path, marker: Option<&str>) -> Result<Strin
             }
             if m.is_dir() {
                 hash.update(b"directory");
-                visit(base, &path, hash, marker, count)?;
+                visit(base, &path, hash, marker, walk)?;
             } else if m.is_file() {
                 hash.update(b"file");
                 hash.update(m.len().to_le_bytes());
@@ -299,9 +294,16 @@ pub(super) fn metadata_digest(root: &Path, marker: Option<&str>) -> Result<Strin
     }
     let mut hash = Sha256::new();
     hash.update(DOMAIN);
-    let mut count = 0;
-    visit(root, root, &mut hash, marker, &mut count)?;
-    Ok(format!("{:x}", hash.finalize()))
+    let metadata = fs::symlink_metadata(root).map_err(state::io)?;
+    let mut walk = Walk {
+        count: 0,
+        root_device: device(root, &metadata),
+        qualified: metadata.is_dir()
+            && filesystem(root).is_some_and(|kind| QUALIFIED_FILESYSTEMS.contains(&kind.as_str())),
+        device,
+    };
+    visit(root, root, &mut hash, marker, &mut walk)?;
+    Ok((format!("{:x}", hash.finalize()), walk.qualified))
 }
 
 /// What the boot of exactly `process` witnessed for `tree`, if anything was recorded.
@@ -361,7 +363,7 @@ pub(super) fn record(
     trees: BTreeMap<String, Proven>,
 ) -> Result<(), CandidateError> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let target = path(candidate);
     let temporary = temporary(candidate);
     let leftovers = [temporary.clone(), target.with_extension("pending")];
@@ -400,6 +402,10 @@ pub(super) fn record(
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&temporary)
+        .map_err(state::io)?;
+    // Creation mode is filtered through umask. Normalize our own new descriptor so an
+    // interrupted write has the exact mode the next writer is allowed to reclaim.
+    file.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(state::io)?;
     file.write_all(&bytes).map_err(state::io)?;
     file.sync_all().map_err(state::io)?;
@@ -620,25 +626,33 @@ mod tests {
         let tree = Tree::new("filesystem-boundary");
         let nested = tree.0.join("lib/empty");
         let roots = [tree.0.as_path()];
-        assert!(qualified_with(&roots, &mut |_, m| Some((
-            m.dev(),
-            "apfs".into()
-        ))));
-        for kind in ["device", "type", "unknown"] {
-            assert!(
-                !qualified_with(&roots, &mut |path, m| {
-                    if path == nested {
-                        match kind {
-                            "device" => Some((m.dev().wrapping_add(1), "apfs".into())),
-                            "type" => Some((m.dev(), "nfs".into())),
-                            _ => None,
-                        }
-                    } else {
-                        Some((m.dev(), "apfs".into()))
-                    }
-                }),
-                "{kind}"
-            );
+        let mut probes = 0;
+        assert!(qualified_with(
+            &roots,
+            |_| {
+                probes += 1;
+                Some("apfs".into())
+            },
+            |_, m| m.dev()
+        ));
+        assert_eq!(probes, 1, "one filesystem type probe per root");
+        assert!(!qualified_with(
+            &roots,
+            |_| Some("apfs".into()),
+            |path, m| {
+                if path == nested {
+                    m.dev().wrapping_add(1)
+                } else {
+                    m.dev()
+                }
+            }
+        ));
+        for kind in [Some("nfs"), None] {
+            assert!(!qualified_with(
+                &roots,
+                |_| kind.map(str::to_owned),
+                |_, m| m.dev()
+            ));
         }
         // The full metadata/content proof remains available when no witness is qualified.
         tree.digest();

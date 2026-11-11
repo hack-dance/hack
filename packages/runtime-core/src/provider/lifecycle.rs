@@ -2040,12 +2040,16 @@ pub(super) fn verify_retained_rootfs(
     // content. Read-only: nothing is recorded here.
     if owner.phase == "running"
         && let Some(process) = &owner.process
-        && witness_qualified(candidate)
+        && super::tree_witness::qualified(&[
+            &artifact::tree_root(candidate, &artifact::SMOLVM),
+            &artifact::tree_root(candidate, &artifact::ENGINE),
+        ])
+        && let Some(metadata) = super::tree_witness::qualified_digest(&destination, Some(&marker))?
         && super::tree_witness::matches(
             candidate,
             process,
             super::tree_witness::ROOTFS,
-            &super::tree_witness::metadata_digest(&destination, Some(&marker))?,
+            &metadata,
             expected,
         )
     {

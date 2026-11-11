@@ -1446,15 +1446,16 @@ Two limits on when the witness is used (decided for HACK-2092; the owner can rev
 
 - **Qualified filesystems only.** The witness is accepted only when all three trees are on a
   filesystem whose change-time behaviour was qualified: APFS today, checked with `statfs`
-  throughout each tree rather than assumed. Any device change within a tree disables the
-  witness, including a mount of another APFS volume. APFS keeps nanosecond ctime that user space cannot
-  set back, and stores through a shared mapping update it (both observed on Apple Silicon
-  with SmolVM 1.34.1). On any other filesystem, or when the type cannot be read, every start
-  proves the trees by content and no witness is written.
+  at each tree root, with device checks in the metadata walk. Any device change within a
+  tree disables the witness, including a mount of another APFS volume. APFS keeps nanosecond
+  ctime that user space cannot set back, and stores through a shared mapping update it
+  (both observed on Apple Silicon with SmolVM 1.34.1). On any other filesystem, or when the
+  type cannot be read, every start proves the trees by content and no witness is written.
 - **Bound to the runtime build.** The witness names the build that recorded it: the runtime
-  version plus a hash of source and build options embedded at compile time, including dirty
-  source inputs. Replacing the executable on disk does not change an already running image's
-  identity. A build with different inputs proves by content once, then records its witness.
+  version plus a hash of source, compiler identity and build options embedded at compile
+  time, including dirty source inputs. Replacing the executable on disk does not change an
+  already running image's identity. A build with different inputs proves by content once,
+  then records its witness.
 
 The witness is read without blocking, so a FIFO or other special file at its path is
 refused like any unsafe receipt and the trees are proven by content. It is written through a

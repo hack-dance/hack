@@ -346,11 +346,22 @@ export function limitOutputFileSize(
   if (meta.capture !== "full" || meta.backend !== "compose") {
     return [...argv];
   }
-  const blocks = Math.floor(OUTPUT_FILE_LIMIT_BYTES / 512);
+  // `ulimit -f` counts 512-byte blocks in POSIX shells (dash, and bash 5.1
+  // or later running as sh), but 1024-byte blocks in older bash, which is
+  // macOS's /bin/sh (bash 3.2). Pick the unit the running shell uses, so the
+  // limit is OUTPUT_FILE_LIMIT_BYTES on both platforms.
+  const posixBlocks = Math.floor(OUTPUT_FILE_LIMIT_BYTES / 512);
+  const kibBlocks = Math.floor(OUTPUT_FILE_LIMIT_BYTES / 1024);
   return [
     "/bin/sh",
     "-c",
-    `trap '' XFSZ; ulimit -f ${blocks} 2>/dev/null; exec "$@"`,
+    [
+      "trap '' XFSZ",
+      `b=${posixBlocks}`,
+      `case "\${BASH_VERSION:-}" in ''|5.[1-9]*|5.[1-9][0-9]*|[6-9].*) ;; *) b=${kibBlocks} ;; esac`,
+      'ulimit -f "$b" 2>/dev/null',
+      'exec "$@"',
+    ].join("; "),
     "hack-background-command",
     ...argv,
   ];

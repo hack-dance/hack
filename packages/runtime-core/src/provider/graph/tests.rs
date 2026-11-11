@@ -305,6 +305,89 @@ fn image_architecture_admission_follows_the_reviewed_emulation_policy() {
     }
 }
 
+/// A Compose file's `logging:` block and its ordinary metadata labels used to
+/// pass review and then stop the start with the generic `graph_subset`. Neither
+/// reaches the engine (graph labels are ownership-only, and native keeps its
+/// own bounded container logs), so they are reviewed as warnings and admitted.
+/// Router, runtime and ownership labels and external log drivers still refuse.
+#[test]
+fn inert_logging_and_metadata_labels_are_admitted_with_review_warnings() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let prepare = |web: &dyn Fn(&mut Value)| {
+        let mut document = compose(&image, "marker", false);
+        web(&mut document["services"]["web"]);
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let codes: Vec<(String, String)> = review
+            .plan
+            .diagnostics
+            .iter()
+            .map(|d| (d.severity.clone(), d.code.clone()))
+            .collect();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        );
+        let admitted = inputs.and_then(|inputs| {
+            config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32), None)
+        });
+        (codes, admitted.map(|_| ()).map_err(|error| error.code))
+    };
+    let warned = |codes: &[(String, String)], code: &str| {
+        codes
+            .iter()
+            .filter(|(severity, found)| severity == "warning" && found == code)
+            .count()
+    };
+
+    let (codes, admitted) = prepare(&|web| {
+        web["logging"] = json!({"driver":"json-file","options":{"max-size":"10m"}});
+        web["labels"] =
+            json!({"com.example.team":"web","org.opencontainers.image.source":"synthetic"});
+    });
+    assert_eq!(admitted, Ok(()), "{codes:?}");
+    assert_eq!(warned(&codes, "logging_not_applied"), 1);
+    // One warning per service, however many labels it carries.
+    assert_eq!(warned(&codes, "labels_not_applied"), 1);
+    assert!(codes.iter().all(|(severity, _)| severity != "error"));
+
+    // Control: without them there is nothing to warn about.
+    let (codes, admitted) = prepare(&|_| {});
+    assert_eq!(admitted, Ok(()));
+    assert_eq!(warned(&codes, "logging_not_applied"), 0);
+    assert_eq!(warned(&codes, "labels_not_applied"), 0);
+
+    // An external log sink is still an error at review and is not admitted.
+    let (codes, admitted) = prepare(&|web| {
+        web["logging"] = json!({"driver":"syslog"});
+    });
+    assert!(codes.contains(&("error".into(), "external_logging_driver".into())));
+    assert!(admitted.is_err());
+
+    // Router, runtime and ownership labels are never treated as inert.
+    for key in [
+        "traefik.enable",
+        "com.docker.compose.project",
+        "hack.custom",
+        "io.hack-local.owner",
+    ] {
+        let (codes, admitted) = prepare(&|web| {
+            web["labels"] = json!({ key: "x" });
+        });
+        assert!(
+            codes.contains(&("error".into(), "external_route_or_owner_label".into())),
+            "{key}: {codes:?}"
+        );
+        assert!(admitted.is_err(), "{key}");
+        assert_eq!(warned(&codes, "labels_not_applied"), 0, "{key}");
+    }
+}
+
 #[test]
 fn declared_amd64_requires_the_explicit_emulation_opt_in() {
     let fixture = Fixture::new();

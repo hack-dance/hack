@@ -247,3 +247,17 @@ pub(super) fn compile(
         execution_gates:vec!["WU04 execution/receipt contract".into(),"WU05 source conformance and sync".into(),"WU07 network/graph/data qualification".into(),"explicit scoped environment delivery and image/build resolution".into()],
     })
 }
+
+/// Prefixes of labels that carry router, runtime or Hack meaning. A label under
+/// one of them is either recognized by a specific feature or refused at review.
+const RESERVED_LABEL_PREFIXES: [&str; 4] = ["caddy", "traefik", "hack", "com.docker.compose"];
+
+/// Whether a service label is plain metadata: outside every Hack ownership
+/// namespace and every reserved prefix. Such a label is never sent to the
+/// engine (graph labels are ownership-only), so it cannot change a run.
+pub(crate) fn inert_metadata_label(key: &str) -> bool {
+    !ownership_labels::is_hack_ownership_label(key)
+        && !RESERVED_LABEL_PREFIXES
+            .iter()
+            .any(|prefix| key == *prefix || key.starts_with(&format!("{prefix}.")))
+}

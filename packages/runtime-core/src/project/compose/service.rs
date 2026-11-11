@@ -873,15 +873,20 @@ pub(super) fn compile(
                         && !(routing.is_some() && super::routing::recognized(key))
                         && !super::one_shot::recognized(key)
                         && !(inert_route_labels && super::routing::recognized_inert(key))
-                        && ["caddy", "traefik", "hack", "com.docker.compose"]
-                            .iter()
-                            .any(|prefix| key == prefix || key.starts_with(&format!("{prefix}."))))
+                        && !super::inert_metadata_label(key))
             })
         {
             diagnostics.push(Diagnostic::error(
                 "external_route_or_owner_label",
                 &format!("{field}.labels"),
                 "Existing router and runtime ownership labels are not adopted by the candidate.",
+            ));
+        }
+        if labels.keys().any(|key| super::inert_metadata_label(key)) {
+            diagnostics.push(Diagnostic::warning(
+                "labels_not_applied",
+                &format!("{field}.labels"),
+                "Metadata labels on this service are not applied to native containers; nothing inside the native runtime reads them.",
             ));
         }
         let logging = if let Some(value) = m.get("logging") {
@@ -902,6 +907,13 @@ pub(super) fn compile(
             }
             if let Some(options) = map.get("options") {
                 object(options)?;
+            }
+            if ["json-file", "local", "none"].contains(&driver) {
+                diagnostics.push(Diagnostic::warning(
+                    "logging_not_applied",
+                    &format!("{field}.logging"),
+                    "This logging configuration is not applied; native keeps its own bounded container logs, read with hack logs.",
+                ));
             }
             Some(LoggingPlan {
                 driver: if ["json-file", "local", "none"].contains(&driver) {

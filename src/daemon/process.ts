@@ -1,7 +1,8 @@
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { readTextFile, writeTextFile } from "../lib/fs.ts";
+import { readObservedProcesses } from "../lib/host-command-observation.ts";
 import { exec, findExecutableInPath } from "../lib/shell.ts";
 
 export async function readDaemonPid({
@@ -14,7 +15,9 @@ export async function readDaemonPid({
     return null;
   }
   const value = Number.parseInt(text.trim(), 10);
-  return Number.isFinite(value) ? value : null;
+  // `kill(0, ...)` targets the caller's process group and a negative pid a
+  // whole group: neither is ever a daemon pid, so both read as absent.
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 export async function writeDaemonPid({
@@ -243,4 +246,267 @@ export async function terminateOrphanDaemonProcesses(opts: {
     }
   }
   return terminated;
+}
+
+export type DaemonProcessRefusal =
+  | "invalid-pid"
+  | "not-running"
+  | "identity-unknown"
+  | "not-hackd"
+  | "foreign-socket"
+  | "identity-changed";
+
+export type DaemonProcessProof =
+  | { readonly kind: "owned"; readonly pid: number; readonly birth: string }
+  | { readonly kind: "refused"; readonly reason: DaemonProcessRefusal };
+
+/** The observations a proof uses; injectable so tests can model each refusal. */
+export interface DaemonProcessProbe {
+  /** Process start time (`ps -o lstart=`), or null when unknown. */
+  readonly birth: (pid: number) => Promise<string | null>;
+  /** Full command line, or null when unknown. */
+  readonly command: (pid: number) => Promise<string | null>;
+  /**
+   * Pids among `pids` holding one of this daemon root's sockets; null when
+   * socket ownership cannot be observed (no `lsof`).
+   */
+  readonly socketOwners: (opts: {
+    readonly daemonRoot: string;
+    readonly pids: readonly number[];
+  }) => Promise<ReadonlySet<number> | null>;
+}
+
+export const defaultDaemonProcessProbe: DaemonProcessProbe = {
+  birth: async (pid) => {
+    const rows = await readObservedProcesses([pid]);
+    return rows?.find((row) => row.pid === pid)?.birth ?? null;
+  },
+  command: async (pid) => {
+    try {
+      const result = await exec(["ps", "-o", "command=", "-p", String(pid)], {
+        stdin: "ignore",
+        timeoutMs: 2000,
+      });
+      const text = result.stdout.trim();
+      return result.exitCode === 0 && text.length > 0 ? text : null;
+    } catch {
+      return null;
+    }
+  },
+  socketOwners: async ({ daemonRoot, pids }) => {
+    if (!findExecutableInPath("lsof")) {
+      return null;
+    }
+    return await findDaemonSocketOwners({
+      daemonRoot,
+      lines: await listOpenUnixSockets({ pids }),
+    });
+  },
+};
+
+/**
+ * Proves that `pid` is this state root's hackd before anything signals it.
+ *
+ * Liveness is not identity: a pid file can name a recycled pid, another
+ * HACK_HOME's daemon, or `0` (the caller's own process group). The proof
+ * requires all of: a positive pid other than this process; a known start
+ * time; a hack daemon command line (`... daemon start --foreground`); and an
+ * open socket in `daemonRoot`. The start time is read again at the end and
+ * must not have changed, so the pid was not reused while it was checked.
+ * Missing evidence refuses; it never authorizes a signal.
+ */
+export async function proveOwnedDaemonProcess(opts: {
+  readonly pid: number;
+  readonly daemonRoot: string;
+  readonly probe?: DaemonProcessProbe;
+}): Promise<DaemonProcessProof> {
+  const probe = opts.probe ?? defaultDaemonProcessProbe;
+  const { pid } = opts;
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) {
+    return { kind: "refused", reason: "invalid-pid" };
+  }
+  if (!isProcessRunning({ pid })) {
+    return { kind: "refused", reason: "not-running" };
+  }
+  const birth = await probe.birth(pid);
+  if (birth === null) {
+    return { kind: "refused", reason: "identity-unknown" };
+  }
+  const command = await probe.command(pid);
+  if (
+    command === null ||
+    !command.includes(DAEMON_COMMAND_MARKER) ||
+    !isHackDaemonCommand({ command })
+  ) {
+    return { kind: "refused", reason: "not-hackd" };
+  }
+  const owners = await probe.socketOwners({
+    daemonRoot: opts.daemonRoot,
+    pids: [pid],
+  });
+  if (owners === null) {
+    return { kind: "refused", reason: "identity-unknown" };
+  }
+  if (!owners.has(pid)) {
+    return { kind: "refused", reason: "foreign-socket" };
+  }
+  if ((await probe.birth(pid)) !== birth) {
+    return { kind: "refused", reason: "identity-changed" };
+  }
+  return { kind: "owned", pid, birth };
+}
+
+/** Plain-language reason for a refused proof, for logs. */
+export function describeDaemonProcessRefusal(
+  reason: DaemonProcessRefusal
+): string {
+  switch (reason) {
+    case "invalid-pid":
+      return "the pid file does not hold a valid daemon pid";
+    case "not-running":
+      return "no process has that pid";
+    case "identity-unknown":
+      return "its process identity could not be read";
+    case "not-hackd":
+      return "that process is not a hack daemon";
+    case "foreign-socket":
+      return "it does not hold this HACK_HOME's daemon socket (another state root's daemon, or a reused pid)";
+    default:
+      return "the process changed while it was checked (pid reused)";
+  }
+}
+
+/**
+ * Stops a proven hackd: SIGTERM, a bounded wait, then SIGKILL only if the
+ * same process (same start time) is still there. Each signal is preceded by
+ * an identity re-check, so a pid reused after the proof is never signalled.
+ * Returns true when the process exited.
+ */
+export async function terminateProvenDaemon(opts: {
+  readonly proof: { readonly pid: number; readonly birth: string };
+  readonly timeoutMs?: number;
+  readonly probe?: DaemonProcessProbe;
+}): Promise<boolean> {
+  const probe = opts.probe ?? defaultDaemonProcessProbe;
+  const { pid, birth } = opts.proof;
+  const same = async () =>
+    isProcessRunning({ pid }) && (await probe.birth(pid)) === birth;
+  if (!(await same())) {
+    return true;
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return true;
+  }
+  if (
+    await waitForProcessExit({
+      pid,
+      timeoutMs: opts.timeoutMs ?? 2000,
+      pollMs: 100,
+    })
+  ) {
+    return true;
+  }
+  if (!(await same())) {
+    return true;
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return true;
+  }
+  return await waitForProcessExit({ pid, timeoutMs: 1000, pollMs: 100 });
+}
+
+/**
+ * Removes hackd's pid and socket files only while they are still stale
+ * (HACK-2052). A concurrent `hack daemon start`, autostart or a service
+ * manager restart can write a new pid file and socket between the caller's
+ * observation and this cleanup; deleting those would leave a live daemon
+ * untracked or unreachable.
+ *
+ * - The pid file is removed only if it still names `observedPid` (null for
+ *   "absent") and that pid is not running.
+ * - The socket is removed only if the pid file is now absent or stale and no
+ *   process accepts connections on the socket.
+ *
+ * Returns what it removed and whether it found a newer owner.
+ */
+export async function removeDaemonFilesIfStale(opts: {
+  readonly pidPath: string;
+  readonly socketPath: string;
+  readonly observedPid: number | null;
+  readonly isAccepting?: (socketPath: string) => Promise<boolean>;
+}): Promise<{
+  readonly removedPid: boolean;
+  readonly removedSocket: boolean;
+  readonly newerOwner: boolean;
+}> {
+  const current = await readDaemonPid({ pidPath: opts.pidPath });
+  if (current !== opts.observedPid) {
+    return { removedPid: false, removedSocket: false, newerOwner: true };
+  }
+  if (current !== null && isProcessRunning({ pid: current })) {
+    return { removedPid: false, removedSocket: false, newerOwner: true };
+  }
+  const isAccepting = opts.isAccepting ?? isUnixSocketAccepting;
+  if (await isAccepting(opts.socketPath)) {
+    return { removedPid: false, removedSocket: false, newerOwner: true };
+  }
+  // Re-read right before removal: the narrowest window this check allows.
+  const removedPid =
+    (await entryExists(opts.pidPath)) &&
+    (await readDaemonPid({ pidPath: opts.pidPath })) === opts.observedPid;
+  if (removedPid) {
+    await removeFileIfExists({ path: opts.pidPath });
+  }
+  const socketExists = await entryExists(opts.socketPath);
+  if (socketExists) {
+    await removeFileIfExists({ path: opts.socketPath });
+  }
+  return { removedPid, removedSocket: socketExists, newerOwner: false };
+}
+
+/** True when something accepts a connection on the Unix socket. */
+export async function isUnixSocketAccepting(
+  socketPath: string,
+  timeoutMs = 500
+): Promise<boolean> {
+  if (!(await entryExists(socketPath))) {
+    return false;
+  }
+  const ignore = () => undefined;
+  const connecting = Bun.connect({
+    unix: socketPath,
+    socket: { data: ignore, error: ignore },
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([connecting, timedOut]);
+    if (result === "timeout") {
+      // Close a connection that completes after the deadline.
+      connecting.then((late) => late.end(), ignore);
+      return false;
+    }
+    result.end();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Any directory entry, including a Unix socket (`Bun.file().exists()` is false for sockets). */
+async function entryExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }

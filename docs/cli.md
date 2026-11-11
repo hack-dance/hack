@@ -22,7 +22,7 @@ terminal).
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
-- `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` keeps it running across logout and reboot (launchd on macOS, a systemd user unit on Linux)
+- `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that
 - `hack agent onboard` — print an onboarding prompt for an existing project
 - Optional agent interfaces — the [`hack` plugin, its skills and the separate MCP server](integrations.md)
 

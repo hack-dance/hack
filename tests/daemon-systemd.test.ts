@@ -10,8 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  describeSystemdIncompatibleOwner,
   installDaemonSystemdService,
   startViaSystemdIfInstalled,
+  stopViaSystemdIfInstalled,
+  uninstallDaemonSystemdService,
 } from "../src/commands/daemon-systemd.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import { summarizeSystemdService } from "../src/daemon/service-summary.ts";
@@ -20,6 +23,7 @@ import {
   buildDaemonStatusReport,
 } from "../src/daemon/status.ts";
 import {
+  assessExecutableDurability,
   extractSystemdExecProgram,
   installSystemdUnit,
   isPidInSystemdUnit,
@@ -28,7 +32,9 @@ import {
   renderSystemdUnit,
   resolveSystemdAccess,
   resolveSystemdUnitPath,
+  retargetSystemdUnitProgram,
   type ServiceCommandResult,
+  SYSTEMD_READ_ONLY_ENV,
   type SystemdDeps,
   type SystemdServiceStatus,
   uninstallSystemdUnit,
@@ -53,6 +59,8 @@ type FakeOptions = {
   readonly linger?: "yes" | "no" | null;
   readonly active?: boolean;
   readonly mainPid?: number;
+  /** Fails every `daemon-reload` with this stderr. */
+  readonly reloadError?: string;
 };
 
 type Fake = {
@@ -61,6 +69,9 @@ type Fake = {
   enabled: boolean;
   active: boolean;
   failed: boolean;
+  /** Overrides ActiveState, e.g. "activating" during a restart delay. */
+  activeState: string | null;
+  needsReload: boolean;
 };
 
 let root: string;
@@ -89,6 +100,8 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     enabled: false,
     active: opts.active ?? false,
     failed: false,
+    activeState: null,
+    needsReload: false,
     deps: undefined as unknown as SystemdDeps,
   };
   const ok = (stdout = ""): ServiceCommandResult => ({
@@ -123,12 +136,23 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
         ok(
           [
             "LoadState=loaded",
-            `ActiveState=${state.failed ? "failed" : state.active ? "active" : "inactive"}`,
+            `ActiveState=${state.activeState ?? (state.failed ? "failed" : state.active ? "active" : "inactive")}`,
             `UnitFileState=${state.enabled ? "enabled" : "disabled"}`,
             `MainPID=${state.active ? (opts.mainPid ?? 4242) : 0}`,
+            `NeedDaemonReload=${state.needsReload ? "yes" : "no"}`,
           ].join("\n")
         )
       );
+    }
+    if (verb === "daemon-reload") {
+      if (opts.reloadError) {
+        return Promise.resolve({
+          exitCode: 1,
+          stdout: "",
+          stderr: opts.reloadError,
+        });
+      }
+      state.needsReload = false;
     }
     if (verb === "enable") {
       state.enabled = true;
@@ -154,6 +178,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     }
     if (verb === "stop") {
       state.active = false;
+      state.activeState = null;
     }
     return Promise.resolve(ok());
   };
@@ -367,6 +392,7 @@ test("uninstall disables --now, removes the unit and reloads", async () => {
     ok: true,
     notInstalled: false,
     managerNotified: true,
+    reloadError: null,
   });
   expect(fake.calls).toEqual([
     "systemctl --user --no-pager show --property=Version",
@@ -395,6 +421,7 @@ test("uninstall without a unit calls nothing; without a bus it still removes the
     ok: true,
     notInstalled: false,
     managerNotified: false,
+    reloadError: null,
   });
   expect(await Bun.file(unitPath).exists()).toBe(false);
 });
@@ -426,6 +453,7 @@ function baseStatus(
     active: true,
     activeState: "active",
     mainPid: 4242,
+    needsReload: false,
     program: "/usr/local/bin/hack",
     drift: "none",
     linger: true,
@@ -593,50 +621,15 @@ function startHooks(fake: Fake, hackBinPath = program) {
     paths: resolveDaemonPaths({ home: root }),
     deps: fake.deps,
     waitForReady: () => Promise.resolve(true),
+    // Fixtures live under the temp dir; treat them as durable unless a test
+    // says otherwise.
+    assessDurability: () => Promise.resolve({ durable: true } as const),
     resolveExpected: () => {
       const text = renderSystemdUnit({ hackBinPath });
       return Promise.resolve(text ? { hackBinPath, unitText: text } : null);
     },
   };
 }
-
-test("start rewrites a unit that runs another existing hack, then starts it", async () => {
-  const fake = fakeSystemd();
-  const old = join(root, "bin", "hack-old");
-  await writeFile(old, "#!/bin/sh\n");
-  await chmod(old, 0o755);
-  await installSystemdUnit({
-    unitPath,
-    unitText: renderSystemdUnit({ hackBinPath: old }) ?? "",
-    deps: fake.deps,
-  });
-  fake.calls.length = 0;
-
-  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
-  expect(await readFile(unitPath, "utf8")).toBe(unitText());
-  const reload = fake.calls.indexOf("systemctl --user daemon-reload");
-  const start = fake.calls.indexOf("systemctl --user start hackd.service");
-  expect(reload).toBeGreaterThanOrEqual(0);
-  expect(start).toBeGreaterThan(reload);
-});
-
-test("a start-time rewrite keeps a disabled unit disabled", async () => {
-  const fake = fakeSystemd();
-  const old = join(root, "bin", "hack-old");
-  await writeFile(old, "#!/bin/sh\n");
-  await chmod(old, 0o755);
-  await installSystemdUnit({
-    unitPath,
-    unitText: renderSystemdUnit({ hackBinPath: old }) ?? "",
-    deps: fake.deps,
-  });
-  fake.enabled = false;
-  fake.calls.length = 0;
-  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
-  expect(await readFile(unitPath, "utf8")).toBe(unitText());
-  expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
-  expect(fake.enabled).toBe(false);
-});
 
 test("start leaves a current unit alone and only starts it", async () => {
   const fake = fakeSystemd();
@@ -704,36 +697,321 @@ test("cgroup membership identifies hackd under a wrapper MainPID", async () => {
   expect(owned.severity).toBe("ok");
 });
 
-test("install leaves a systemd-run hackd under a wrapper MainPID alone", async () => {
-  // The pid file names a live process (this test runner); systemd's MainPID
-  // is a different pid (a wrapper), but the pid runs in the unit's cgroup.
-  const fake = fakeSystemd({ active: true, mainPid: 999_999 });
-  const paths = resolveDaemonPaths({ home: root });
-  await mkdir(paths.root, { recursive: true });
-  await writeFile(paths.pidPath, `${process.pid}\n`);
-  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
-  const stopped: number[] = [];
+async function writeOldUnit(fake: Fake, extraLine?: string): Promise<string> {
+  const old = join(root, "bin", "hack-old");
+  await writeFile(old, "#!/bin/sh\n");
+  await chmod(old, 0o755);
+  let text = renderSystemdUnit({ hackBinPath: old }) ?? "";
+  if (extraLine) {
+    text = text.replace("[Service]\n", `[Service]\n${extraLine}\n`);
+  }
+  await installSystemdUnit({ unitPath, unitText: text, deps: fake.deps });
+  fake.calls.length = 0;
+  return old;
+}
+
+// Finding 4 / owner decision: start never rewrites a unit whose program exists.
+test("start keeps a unit that runs another existing hack and only starts it", async () => {
+  const fake = fakeSystemd();
+  const old = await writeOldUnit(fake, "Nice=5");
+  const before = await readFile(unitPath, "utf8");
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect(await readFile(unitPath, "utf8")).toBe(before);
+  expect(before).toContain(`"${old}"`);
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  expect(fake.calls).toContain("systemctl --user start hackd.service");
+});
+
+test("start retargets only ExecStart when the program is gone and the new one is durable", async () => {
+  const fake = fakeSystemd();
+  const old = await writeOldUnit(fake, "Nice=5");
+  await rm(old);
+  fake.enabled = false;
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  const after = await readFile(unitPath, "utf8");
+  expect(after).toContain(`ExecStart="${program}" daemon start --foreground`);
+  // The user's line is kept, and a disabled unit stays disabled.
+  expect(after).toContain("Nice=5");
+  expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
+  const reload = fake.calls.indexOf("systemctl --user daemon-reload");
+  expect(reload).toBeGreaterThanOrEqual(0);
+  expect(
+    fake.calls.indexOf("systemctl --user start hackd.service")
+  ).toBeGreaterThan(reload);
+});
+
+test("start refuses to retarget a missing program to a non-durable path", async () => {
+  const fake = fakeSystemd();
+  const old = await writeOldUnit(fake);
+  await rm(old);
+  const before = await readFile(unitPath, "utf8");
+  fake.calls.length = 0;
   const hooks = {
     ...startHooks(fake),
-    paths,
+    assessDurability: () =>
+      Promise.resolve({
+        durable: false,
+        reason: "it is in a temporary directory",
+      } as const),
+  };
+  expect(await startViaSystemdIfInstalled(hooks)).toBe(1);
+  expect(await readFile(unitPath, "utf8")).toBe(before);
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+});
+
+test("durability: temp dirs, package caches and checkouts are not durable", async () => {
+  const noGit = (_path: string) => Promise.resolve(false);
+  const tempDirs = ["/scratch-tmp"];
+  const assess = (path: string, exists = noGit) =>
+    assessExecutableDurability({ path, tempDirs, exists });
+  expect((await assess("/usr/local/bin/hack")).durable).toBe(true);
+  expect((await assess("/opt/hack/bin/hack")).durable).toBe(true);
+  expect((await assess("/tmp/x/hack")).durable).toBe(false);
+  expect((await assess("/scratch-tmp/x/hack")).durable).toBe(false);
+  expect((await assess("/srv/app/node_modules/.bin/hack")).durable).toBe(false);
+  expect((await assess("/srv/u/.cache/hack/hack")).durable).toBe(false);
+  const checkout = (path: string) =>
+    Promise.resolve(path === "/srv/src/hack/.git");
+  expect((await assess("/srv/src/hack/dist/hack", checkout)).durable).toBe(
+    false
+  );
+});
+
+test("retargeting keeps every other line of an edited unit", () => {
+  const edited = `${unitText()}# my note\n`.replace(
+    "RestartSec=2",
+    "RestartSec=9"
+  );
+  const out = retargetSystemdUnitProgram({
+    unitText: edited,
+    hackBinPath: "/usr/local/bin/hack",
+  });
+  expect(out).toContain(
+    'ExecStart="/usr/local/bin/hack" daemon start --foreground'
+  );
+  expect(out).toContain("RestartSec=9");
+  expect(out).toContain("# my note");
+});
+
+// Finding 5 / owner decision: doctor --fix without a TTY never writes or reloads.
+test("read-only start neither writes nor reloads the unit", async () => {
+  const fake = fakeSystemd();
+  fake.deps = {
+    ...fake.deps,
+    env: { ...fake.deps.env, [SYSTEMD_READ_ONLY_ENV]: "1" },
+  };
+  const old = await writeOldUnit(fake);
+  await rm(old);
+  const before = await readFile(unitPath, "utf8");
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect(await readFile(unitPath, "utf8")).toBe(before);
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+
+  // With the program present but a reload pending, it starts without reloading.
+  await writeFile(old, "#!/bin/sh\n");
+  fake.needsReload = true;
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  expect(fake.calls).toContain("systemctl --user start hackd.service");
+});
+
+// Finding 6: a reload left pending by a failed daemon-reload is completed on retry.
+test("start completes a pending reload before starting", async () => {
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  fake.needsReload = true;
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  const reload = fake.calls.indexOf("systemctl --user daemon-reload");
+  expect(reload).toBeGreaterThanOrEqual(0);
+  expect(
+    fake.calls.indexOf("systemctl --user start hackd.service")
+  ).toBeGreaterThan(reload);
+  expect(fake.needsReload).toBe(false);
+});
+
+test("a failed reload after a rewrite is recovered by the next install", async () => {
+  const failing = fakeSystemd({
+    reloadError: "Failed to reload daemon: timeout",
+  });
+  const first = await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: failing.deps,
+  });
+  expect(first.ok).toBe(false);
+  // The file is written, systemd still has the old copy loaded.
+  const fake = fakeSystemd();
+  fake.needsReload = true;
+  const status = await readSystemdServiceStatus({ unitPath, deps: fake.deps });
+  expect(status?.needsReload).toBe(true);
+  fake.calls.length = 0;
+  const second = await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+    forceReload: status?.needsReload === true,
+  });
+  expect(second).toEqual({ ok: true, changed: false });
+  expect(fake.calls).toContain("systemctl --user daemon-reload");
+});
+
+// Finding 7: uninstall reports a failed final reload.
+test("uninstall reports a failed final reload and what it already did", async () => {
+  const fake = fakeSystemd({ reloadError: "Failed to reload daemon: timeout" });
+  await writeFile(unitPath, unitText()).catch(async () => {
+    await mkdir(join(root, "config", "systemd", "user"), { recursive: true });
+    await writeFile(unitPath, unitText());
+  });
+  const result = await uninstallSystemdUnit({ unitPath, deps: fake.deps });
+  expect(result).toEqual({
+    ok: true,
+    notInstalled: false,
+    managerNotified: true,
+    reloadError: "Failed to reload daemon: timeout",
+  });
+  expect(await Bun.file(unitPath).exists()).toBe(false);
+
+  await mkdir(join(root, "config", "systemd", "user"), { recursive: true });
+  await writeFile(unitPath, unitText());
+  expect(await uninstallDaemonSystemdService({ deps: fake.deps })).toBe(1);
+});
+
+// Finding 2: stop goes through the manager even without a live pid.
+test("stop cancels a pending restart through systemd without a live pid", async () => {
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  fake.activeState = "activating";
+  fake.calls.length = 0;
+  expect(
+    await stopViaSystemdIfInstalled({ pid: null, deps: fake.deps })
+  ).toEqual({
+    handled: true,
+    ownedPid: false,
+  });
+  expect(fake.calls).toContain("systemctl --user stop hackd.service");
+
+  fake.calls.length = 0;
+  expect(
+    await stopViaSystemdIfInstalled({ pid: null, deps: fake.deps })
+  ).toEqual({
+    handled: false,
+    ownedPid: false,
+  });
+  expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+});
+
+test("an incompatible hackd that systemd runs from another hack is not replaced", async () => {
+  const fake = fakeSystemd({ active: true, mainPid: 4242 });
+  await writeOldUnit(fake);
+  const message = await describeSystemdIncompatibleOwner({
+    pid: 4242,
+    deps: fake.deps,
+    resolveExpected: startHooks(fake).resolveExpected,
+  });
+  expect(message).toContain("hack daemon install");
+  expect(
+    await describeSystemdIncompatibleOwner({
+      pid: 777,
+      deps: fake.deps,
+      resolveExpected: startHooks(fake).resolveExpected,
+      isPidInUnit: () => Promise.resolve(false),
+    })
+  ).toBeNull();
+});
+
+function installHooks(fake: Fake, stopped: number[]) {
+  return {
+    ...startHooks(fake),
+    paths: resolveDaemonPaths({ home: root }),
     ignoredOptions: [],
     startDetached: () => Promise.resolve(0),
-    stopDirect: (pid: number) => {
-      stopped.push(pid);
+    stopDirect: (proof: { readonly pid: number }) => {
+      stopped.push(proof.pid);
       return Promise.resolve();
     },
   };
+}
 
+async function writePidFile(pid: number | string): Promise<void> {
+  const paths = resolveDaemonPaths({ home: root });
+  await mkdir(paths.root, { recursive: true });
+  await writeFile(paths.pidPath, `${pid}\n`);
+}
+
+// Finding 1: install signals only a proven hackd of this HACK_HOME.
+test("install leaves an unrelated live process named by the pid file alone", async () => {
+  const fake = fakeSystemd();
+  // A recycled pid: a live process that is not hackd.
+  const other = Bun.spawn(["sleep", "30"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    await writePidFile(other.pid);
+    const stopped: number[] = [];
+    // Real proof (no injection): it must refuse on identity alone.
+    await installDaemonSystemdService(installHooks(fake, stopped));
+    expect(stopped).toEqual([]);
+    expect(other.exitCode).toBeNull();
+    expect(process.kill(other.pid, 0)).toBe(true);
+  } finally {
+    other.kill("SIGKILL");
+    await other.exited;
+  }
+});
+
+test("install treats a pid of 0 as no daemon and signals nothing", async () => {
+  const fake = fakeSystemd();
+  await writePidFile(0);
+  const stopped: number[] = [];
+  let proved = 0;
   await installDaemonSystemdService({
-    ...hooks,
+    ...installHooks(fake, stopped),
+    proveDaemon: () => {
+      proved += 1;
+      return Promise.resolve({
+        kind: "refused",
+        reason: "invalid-pid",
+      } as const);
+    },
+  });
+  expect(proved).toBe(0);
+  expect(stopped).toEqual([]);
+});
+
+test("install hands over only a proven hackd and leaves a systemd-run one alone", async () => {
+  const fake = fakeSystemd({ active: true, mainPid: 999_999 });
+  // The pid file names a live process (this runner); proof is injected.
+  await writePidFile(process.pid);
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const stopped: number[] = [];
+  const owned = () =>
+    Promise.resolve({ kind: "owned", pid: process.pid, birth: "b" } as const);
+  // Under a wrapper MainPID, the pid runs in the unit's cgroup: not stopped.
+  await installDaemonSystemdService({
+    ...installHooks(fake, stopped),
     isPidInUnit: () => Promise.resolve(true),
+    proveDaemon: owned,
   });
   expect(stopped).toEqual([]);
-
-  // Outside the unit's cgroup it is a directly started hackd and is handed over.
+  // Another state root's daemon (refused proof): not stopped.
   await installDaemonSystemdService({
-    ...hooks,
+    ...installHooks(fake, stopped),
     isPidInUnit: () => Promise.resolve(false),
+    proveDaemon: () =>
+      Promise.resolve({ kind: "refused", reason: "foreign-socket" } as const),
+  });
+  expect(stopped).toEqual([]);
+  // A proven direct hackd outside the unit: handed over.
+  await installDaemonSystemdService({
+    ...installHooks(fake, stopped),
+    isPidInUnit: () => Promise.resolve(false),
+    proveDaemon: owned,
   });
   expect(stopped).toEqual([process.pid]);
 });

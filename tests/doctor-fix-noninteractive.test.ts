@@ -47,6 +47,7 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
  */
 
 const runCalls: string[][] = [];
+const runEnvs: (Record<string, string> | undefined)[] = [];
 const execCalls: string[][] = [];
 const noteCalls: string[] = [];
 /**
@@ -124,8 +125,12 @@ const shellMock = await registerScopedModuleMock({
       return { exitCode: 1, stdout: "", stderr: "" };
     },
     execOrThrow: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-    run: async (cmd: readonly string[]) => {
+    run: async (
+      cmd: readonly string[],
+      opts?: { readonly env?: Record<string, string> }
+    ) => {
       runCalls.push([...cmd]);
+      runEnvs.push(opts?.env);
       return 0;
     },
     findExecutableInPath: (name?: string) => {
@@ -174,6 +179,7 @@ beforeEach(async () => {
   process.env.HACK_MUTAGEN_PATH = "/usr/local/bin/mutagen";
   process.env.HACK_LOGGER = "console";
   runCalls.length = 0;
+  runEnvs.length = 0;
   execCalls.length = 0;
   noteCalls.length = 0;
   trackedGeneratedPaths = [];
@@ -249,6 +255,15 @@ test("doctor --fix under HACK_NO_INTERACTIVE clears a stale daemon pid without p
   expect(runCalls).toEqual(
     expect.arrayContaining([expect.arrayContaining(["daemon", "clear"])])
   );
+  // HACK-2052 owner decision: without a TTY the hackd repair may start the
+  // daemon but never writes or reloads the systemd unit.
+  const daemonEnvs = runCalls.flatMap((cmd, index) =>
+    cmd.includes("daemon") ? [runEnvs[index]] : []
+  );
+  expect(daemonEnvs.length).toBeGreaterThan(0);
+  for (const env of daemonEnvs) {
+    expect(env?.HACK_DAEMON_SERVICE_READ_ONLY).toBe("1");
+  }
 }, 30_000);
 
 test("doctor --fix under HACK_NO_INTERACTIVE skips macOS keychain repair and reports it", async () => {

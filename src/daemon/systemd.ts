@@ -1,5 +1,5 @@
 import { rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 import { GLOBAL_HACK_DIR_NAME } from "../constants.ts";
@@ -208,6 +208,110 @@ export function resolveSystemdUnitPath(
   return resolve(configHome, "systemd", "user", SYSTEMD_UNIT_NAME);
 }
 
+/**
+ * Set to `1` by `hack doctor --fix` when it may not change the service
+ * (no TTY, or the install was declined): `hack daemon start` then never
+ * writes the unit or runs `daemon-reload`; it reports what it would need.
+ */
+export const SYSTEMD_READ_ONLY_ENV = "HACK_DAEMON_SERVICE_READ_ONLY";
+
+export function isSystemdReadOnly(env: Env = process.env): boolean {
+  return (env[SYSTEMD_READ_ONLY_ENV] ?? "").trim() === "1";
+}
+
+const QUOTED_PREFIX = /^"[^"]*"/;
+const TEMP_ROOTS = ["/tmp", "/var/tmp", "/dev/shm", "/run/user"];
+const EPHEMERAL_SEGMENTS = [
+  "node_modules",
+  ".cache",
+  "_npx",
+  ".npm",
+  ".bun/install",
+  ".pnpm-store",
+  ".yarn",
+];
+
+export type ExecutableDurability =
+  | { readonly durable: true }
+  | { readonly durable: false; readonly reason: string };
+
+/**
+ * Whether a program path is fit to be written into a login service by an
+ * automatic repair. Temporary directories, package caches and a checkout's
+ * build output are not: cleaning them later would break login startup.
+ * Explicit `hack daemon install` may still write such a path, with a warning.
+ */
+export async function assessExecutableDurability(opts: {
+  readonly path: string;
+  readonly tempDirs?: readonly string[];
+  readonly exists?: (path: string) => Promise<boolean>;
+}): Promise<ExecutableDurability> {
+  const exists = opts.exists ?? pathExists;
+  const path = resolve(opts.path);
+  const temps = [
+    ...TEMP_ROOTS,
+    ...(opts.tempDirs ?? [process.env.TMPDIR ?? "", tmpdir()]),
+  ]
+    .map((dir) => dir.trim())
+    .filter((dir) => dir.length > 0 && isAbsolute(dir))
+    .map((dir) => resolve(dir));
+  if (temps.some((dir) => path === dir || path.startsWith(`${dir}/`))) {
+    return { durable: false, reason: "it is in a temporary directory" };
+  }
+  const segment = EPHEMERAL_SEGMENTS.find((name) => path.includes(`/${name}/`));
+  if (segment) {
+    return {
+      durable: false,
+      reason: `it is in a package cache or dependency directory (${segment})`,
+    };
+  }
+  for (let dir = dirname(path); dir !== dirname(dir); dir = dirname(dir)) {
+    if (await exists(resolve(dir, ".git"))) {
+      return {
+        durable: false,
+        reason: "it is inside a source checkout (build output)",
+      };
+    }
+  }
+  return { durable: true };
+}
+
+/**
+ * Replaces only the program (first word) of `ExecStart=`, keeping every
+ * other line of the unit, including a user's edits. Null when the unit has
+ * no ExecStart or the program cannot be represented.
+ */
+export function retargetSystemdUnitProgram(opts: {
+  readonly unitText: string;
+  readonly hackBinPath: string;
+}): string | null {
+  const rendered = renderSystemdUnit({ hackBinPath: opts.hackBinPath });
+  const renderedLine = rendered?.match(EXEC_START_PATTERN)?.[0];
+  const current = opts.unitText.match(EXEC_START_PATTERN);
+  if (!(renderedLine && current)) {
+    return null;
+  }
+  const line = current[1]?.trim() ?? "";
+  let rest: string;
+  if (line.startsWith('"')) {
+    const close = line.indexOf('"', 1);
+    rest = close < 0 ? "" : line.slice(close + 1);
+  } else {
+    const space = line.search(WHITESPACE);
+    rest = space < 0 ? "" : line.slice(space);
+  }
+  const program = renderedLine
+    .slice("ExecStart=".length)
+    .match(QUOTED_PREFIX)?.[0];
+  if (!program) {
+    return null;
+  }
+  return opts.unitText.replace(
+    EXEC_START_PATTERN,
+    `ExecStart=${program}${rest}`
+  );
+}
+
 /** Doubles `%` so systemd does not expand it as a unit specifier. */
 function escapeSpecifiers(value: string): string {
   return value.replace(/%/g, "%%");
@@ -404,6 +508,12 @@ export interface SystemdServiceStatus {
   readonly active: boolean;
   readonly activeState: string | null;
   readonly mainPid: number | null;
+  /**
+   * systemd's loaded copy of the unit is older than the file
+   * (`NeedDaemonReload=yes`), for example after a rewrite whose
+   * `daemon-reload` failed. A retry must reload before it starts.
+   */
+  readonly needsReload: boolean;
   readonly program: string | null;
   /** Only meaningful when installed; "none" otherwise. */
   readonly drift: SystemdUnitDrift;
@@ -447,6 +557,7 @@ export async function readSystemdServiceStatus(opts: {
       active: false,
       activeState: null,
       mainPid: null,
+      needsReload: false,
       program,
       drift,
       linger,
@@ -458,7 +569,7 @@ export async function readSystemdServiceStatus(opts: {
     "--no-pager",
     "show",
     SYSTEMD_UNIT_NAME,
-    "--property=LoadState,ActiveState,UnitFileState,MainPID",
+    "--property=LoadState,ActiveState,UnitFileState,MainPID,NeedDaemonReload",
   ]);
   const props = show.exitCode === 0 ? parseSystemdProperties(show.stdout) : {};
   const mainPidRaw = Number.parseInt(props.MainPID ?? "", 10);
@@ -471,6 +582,7 @@ export async function readSystemdServiceStatus(opts: {
     active: props.ActiveState === "active",
     activeState: props.ActiveState ?? null,
     mainPid: Number.isFinite(mainPidRaw) && mainPidRaw > 0 ? mainPidRaw : null,
+    needsReload: props.NeedDaemonReload === "yes",
     program,
     drift,
     linger,
@@ -598,6 +710,11 @@ export async function installSystemdUnit(opts: {
    * the unit's current state, so a unit the user disabled stays disabled.
    */
   readonly enable?: boolean;
+  /**
+   * Reload even when the file is unchanged: systemd reported
+   * `NeedDaemonReload=yes`, so an earlier reload after a write failed.
+   */
+  readonly forceReload?: boolean;
 }): Promise<SystemdInstallResult> {
   const access = resolveSystemdAccess({ env: opts.deps.env });
   if (!access.allowed) {
@@ -618,7 +735,7 @@ export async function installSystemdUnit(opts: {
     opts.unitText,
     { createMode: 0o644 }
   );
-  if (changed) {
+  if (changed || opts.forceReload === true) {
     const reload = await opts.deps.run("systemctl", [
       "--user",
       "daemon-reload",
@@ -645,6 +762,22 @@ export async function installSystemdUnit(opts: {
     };
   }
   return { ok: true, changed };
+}
+
+/** Runs `systemctl --user daemon-reload`. */
+export async function systemdDaemonReload(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  const result = await opts.deps.run("systemctl", ["--user", "daemon-reload"]);
+  if (result.exitCode === 0) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    error: firstLine(result.stderr) || `exit code ${result.exitCode}`,
+  };
 }
 
 /** Runs `systemctl --user <action> hackd.service`. */
@@ -674,6 +807,11 @@ export type SystemdUninstallResult =
       readonly notInstalled: boolean;
       /** False when the unit file was removed but systemctl was unavailable. */
       readonly managerNotified: boolean;
+      /**
+       * The service was stopped and disabled and the file removed, but the
+       * final `daemon-reload` failed: systemd still has the unit loaded.
+       */
+      readonly reloadError: string | null;
     }
   | { readonly ok: false; readonly error: string };
 
@@ -691,7 +829,12 @@ export async function uninstallSystemdUnit(opts: {
     return { ok: false, error: access.message };
   }
   if (!(await pathExists(opts.unitPath))) {
-    return { ok: true, notInstalled: true, managerNotified: false };
+    return {
+      ok: true,
+      notInstalled: true,
+      managerNotified: false,
+      reloadError: null,
+    };
   }
   const availability = await probeSystemdUserManager(opts.deps);
   if (availability.available) {
@@ -717,13 +860,21 @@ export async function uninstallSystemdUnit(opts: {
       error: `Failed to remove ${opts.unitPath}: ${message}`,
     };
   }
+  let reloadError: string | null = null;
   if (availability.available) {
-    await opts.deps.run("systemctl", ["--user", "daemon-reload"]);
+    const reload = await opts.deps.run("systemctl", [
+      "--user",
+      "daemon-reload",
+    ]);
+    if (reload.exitCode !== 0) {
+      reloadError = firstLine(reload.stderr) || `exit code ${reload.exitCode}`;
+    }
   }
   return {
     ok: true,
     notInstalled: false,
     managerNotified: availability.available,
+    reloadError,
   };
 }
 

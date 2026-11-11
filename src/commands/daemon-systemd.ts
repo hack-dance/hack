@@ -1,14 +1,21 @@
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
+  type DaemonProcessProof,
+  describeDaemonProcessRefusal,
+  proveOwnedDaemonProcess,
+} from "../daemon/process.ts";
+import {
   type DaemonServiceSummary,
   summarizeSystemdService,
 } from "../daemon/service-summary.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
 import {
+  assessExecutableDurability,
   defaultSystemdDeps,
   describeSystemdUnavailable,
   installSystemdUnit,
   isPidInSystemdUnit,
+  isSystemdReadOnly,
   LINGER_ENABLE_COMMAND,
   probeSystemdUserManager,
   readLingerStatus,
@@ -16,14 +23,16 @@ import {
   resolveExpectedSystemdUnit,
   resolveSystemdAccess,
   resolveSystemdUnitPath,
+  retargetSystemdUnitProgram,
   SYSTEMD_UNIT_NAME,
   type SystemdDeps,
   type SystemdServiceStatus,
+  systemdDaemonReload,
   systemdServiceAction,
   uninstallSystemdUnit,
 } from "../daemon/systemd.ts";
 import { HackCliError } from "../lib/cli-result.ts";
-import { pathExists } from "../lib/fs.ts";
+import { pathExists, readTextFile } from "../lib/fs.ts";
 import { logger } from "../ui/logger.ts";
 
 /**
@@ -41,8 +50,17 @@ export interface SystemdCommandHooks {
   readonly deps?: SystemdDeps;
   /** Starts hackd directly in its own session (the non-service path). */
   readonly startDetached: () => Promise<number>;
-  /** Stops a directly started hackd by pid and removes its pid/socket files. */
-  readonly stopDirect: (pid: number) => Promise<void>;
+  /**
+   * Stops a directly started hackd that {@link proveDaemon} proved is this
+   * HACK_HOME's daemon, and removes its pid/socket files if still stale.
+   */
+  readonly stopDirect: (
+    proof: Extract<DaemonProcessProof, { kind: "owned" }>
+  ) => Promise<void>;
+  /** Defaults to {@link proveOwnedDaemonProcess}; tests pin the observations. */
+  readonly proveDaemon?: (pid: number) => Promise<DaemonProcessProof>;
+  /** Defaults to {@link assessExecutableDurability}. */
+  readonly assessDurability?: typeof assessExecutableDurability;
   readonly waitForReady: (timeoutMs: number) => Promise<boolean>;
   /** Defaults to {@link isPidInSystemdUnit}; tests pin cgroup membership. */
   readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
@@ -100,8 +118,8 @@ export async function resolveSystemdSummary(opts: {
  * `hack daemon start` when hackd.service is installed: start through systemd
  * so one manager owns the socket and pid file. Returns null when the unit is
  * not installed or systemd is unavailable; the caller then starts hackd
- * directly. A unit whose program no longer exists (an upgrade moved the
- * binary) is rewritten first.
+ * directly. See {@link prepareSystemdUnitForStart} for what start may change
+ * in the unit (almost nothing).
  */
 export async function startViaSystemdIfInstalled(
   hooks: Omit<SystemdCommandHooks, "startDetached" | "stopDirect">
@@ -127,44 +145,14 @@ export async function startViaSystemdIfInstalled(
     });
     return null;
   }
-  // Rewrite the unit before starting when its program is gone, or when the
-  // `hack` this CLI resolves is a different program: otherwise systemd would
-  // start an old, incompatible hackd that `hack daemon start` then replaces,
-  // on every start (the loop `repairLaunchdProgramIfInvalid` prevents on
-  // macOS). This runs only when hackd is about to start, never against a
-  // running daemon; status and doctor stay independent of PATH.
-  const expected = await (
-    hooks.resolveExpected ?? resolveExpectedSystemdUnit
-  )();
-  const programChanged =
-    expected !== null &&
-    status.drift !== "program-missing" &&
-    expected.hackBinPath !== status.program;
-  if (status.drift === "program-missing" || programChanged) {
-    if (!expected) {
-      logger.error({
-        message: `${SYSTEMD_UNIT_NAME} runs a program that no longer exists (${status.program ?? "unreadable ExecStart"}) and no installed hack was found to replace it | Put hack on PATH, then run: hack daemon install`,
-      });
-      return 1;
-    }
-    const repaired = await installSystemdUnit({
-      unitPath,
-      unitText: expected.unitText,
-      deps,
-      // Keep the user's choice: a disabled unit is repaired, not re-enabled.
-      enable: status.enabled,
-    });
-    if (!repaired.ok) {
-      logger.error({
-        message: `Failed to repair ${SYSTEMD_UNIT_NAME}: ${repaired.error}`,
-      });
-      return 1;
-    }
-    logger.warn({
-      message: programChanged
-        ? `Updated ${SYSTEMD_UNIT_NAME} to run ${expected.hackBinPath} (it ran ${status.program ?? "another program"})`
-        : `Repaired ${SYSTEMD_UNIT_NAME}: its program no longer existed; it now runs ${expected.hackBinPath}`,
-    });
+  const prepared = await prepareSystemdUnitForStart({
+    status,
+    unitPath,
+    deps,
+    hooks,
+  });
+  if (prepared !== null) {
+    return prepared;
   }
   // After a crash loop systemd refuses `start` ("start request repeated too
   // quickly") until the failed state is cleared. Clearing is harmless when
@@ -190,37 +178,228 @@ export async function startViaSystemdIfInstalled(
 }
 
 /**
- * `hack daemon stop` when systemd runs the tracked hackd: stop it through
- * systemctl so the manager records a clean stop (no restart, unit inactive).
- * Returns false when systemd does not own `pid`; the caller signals it.
+ * What `hack daemon start` (and autostart, which runs it) may do to an
+ * installed unit before starting it. Returns an exit code to stop with, or
+ * null to go on and start.
+ *
+ * Owner decision (HACK-2052): start never rewrites a unit whose program
+ * still exists, even when this CLI resolves a different `hack`; it reports
+ * the difference and `hack daemon install` switches it. That keeps a user's
+ * whole-file edits and never points a login service at a temporary binary.
+ * Only when the program is gone may start retarget it, and only to a
+ * durable location ({@link assessExecutableDurability}), replacing just the
+ * ExecStart program so every other line is kept. Under
+ * {@link isSystemdReadOnly} (`hack doctor --fix` without a TTY) it neither
+ * writes nor reloads. A pending reload (`NeedDaemonReload=yes`, left by a
+ * failed reload after a write) is completed first, so a retry recovers.
  */
-export async function stopViaSystemdIfOwned(opts: {
-  readonly pid: number;
+async function prepareSystemdUnitForStart(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  readonly hooks: Pick<
+    SystemdCommandHooks,
+    "resolveExpected" | "assessDurability"
+  >;
+}): Promise<number | null> {
+  const { status, unitPath, deps, hooks } = opts;
+  const readOnly = isSystemdReadOnly(deps.env);
+  const expected = await (
+    hooks.resolveExpected ?? resolveExpectedSystemdUnit
+  )();
+
+  if (status.drift !== "program-missing") {
+    return await completePendingReload({ status, deps, expected, readOnly });
+  }
+
+  const missing = `${SYSTEMD_UNIT_NAME} runs a program that no longer exists (${status.program ?? "unreadable ExecStart"})`;
+  if (readOnly) {
+    logger.error({
+      message: `${missing}; not changing the service here | Run: hack daemon install`,
+    });
+    return 1;
+  }
+  if (!expected) {
+    logger.error({
+      message: `${missing} and no installed hack was found to replace it | Put hack on PATH, then run: hack daemon install`,
+    });
+    return 1;
+  }
+  const durability = await (
+    hooks.assessDurability ?? assessExecutableDurability
+  )({ path: expected.hackBinPath });
+  if (!durability.durable) {
+    logger.error({
+      message: `${missing}. This CLI (${expected.hackBinPath}) is not a stable location for a login service: ${durability.reason} | Install hack to a stable location, then run: hack daemon install`,
+    });
+    return 1;
+  }
+  const unitText = await readTextFile(unitPath);
+  const retargeted =
+    unitText === null
+      ? null
+      : retargetSystemdUnitProgram({
+          unitText,
+          hackBinPath: expected.hackBinPath,
+        });
+  if (retargeted === null) {
+    logger.error({
+      message: `${missing} and its ExecStart could not be updated | Run: hack daemon install`,
+    });
+    return 1;
+  }
+  const repaired = await installSystemdUnit({
+    unitPath,
+    unitText: retargeted,
+    deps,
+    // Keep the user's choice: a disabled unit is repaired, not re-enabled.
+    enable: status.enabled,
+    forceReload: status.needsReload,
+  });
+  if (!repaired.ok) {
+    logger.error({
+      message: `Failed to repair ${SYSTEMD_UNIT_NAME}: ${repaired.error}`,
+    });
+    return 1;
+  }
+  logger.warn({
+    message: `Repaired ${SYSTEMD_UNIT_NAME}: its program no longer existed; it now runs ${expected.hackBinPath} (other lines kept)`,
+  });
+  return null;
+}
+
+/**
+ * Start with an existing program: never rewrite the unit, only note a
+ * different `hack` and finish a reload that an earlier write left pending.
+ */
+async function completePendingReload(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly deps: SystemdDeps;
+  readonly expected: { readonly hackBinPath: string } | null;
+  readonly readOnly: boolean;
+}): Promise<number | null> {
+  const { status, expected } = opts;
+  if (expected && status.program && expected.hackBinPath !== status.program) {
+    logger.info({
+      message: `${SYSTEMD_UNIT_NAME} runs ${status.program}; this CLI is ${expected.hackBinPath}. To switch the service to it, run: hack daemon install`,
+    });
+  }
+  if (!status.needsReload) {
+    return null;
+  }
+  if (opts.readOnly) {
+    logger.warn({
+      message: `systemd has an older copy of ${SYSTEMD_UNIT_NAME} loaded; not reloading it here | Run: hack daemon install`,
+    });
+    return null;
+  }
+  const reload = await systemdDaemonReload({ deps: opts.deps });
+  if (!reload.ok) {
+    logger.error({
+      message: `systemctl --user daemon-reload failed: ${reload.error}`,
+    });
+    return 1;
+  }
+  return null;
+}
+
+/** systemd states in which the unit runs or will run hackd (a pending restart). */
+const MANAGER_STOPPABLE_STATES = new Set([
+  "active",
+  "activating",
+  "reloading",
+  "deactivating",
+]);
+
+/**
+ * `hack daemon stop` when hackd.service is installed: stop through systemctl
+ * whenever the unit is running or about to run hackd, even with a dead or
+ * missing pid file. That cancels a pending `Restart=on-failure` restart
+ * (`activating`/`auto-restart`), which signalling a pid cannot.
+ *
+ * `handled` says systemctl stop ran; `ownedPid` says systemd ran `pid`
+ * (otherwise the caller still stops a directly started hackd itself).
+ */
+export async function stopViaSystemdIfInstalled(opts: {
+  readonly pid: number | null;
   readonly deps?: SystemdDeps;
-}): Promise<boolean> {
+  readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
+}): Promise<{ readonly handled: boolean; readonly ownedPid: boolean }> {
+  const none = { handled: false, ownedPid: false };
   const deps = opts.deps ?? defaultSystemdDeps();
   if (!resolveSystemdAccess({ env: deps.env }).allowed) {
-    return false;
+    return none;
   }
   const unitPath = resolveSystemdUnitPath({ env: deps.env });
   if (!(await pathExists(unitPath))) {
-    return false;
+    return none;
   }
-  const status = await readSystemdServiceStatus({
-    unitPath,
-    deps,
-  });
-  if (!(status && (await systemdRunsPid({ status, pid: opts.pid })))) {
-    return false;
+  const status = await readSystemdServiceStatus({ unitPath, deps });
+  if (
+    !(
+      status?.availability.available &&
+      status.activeState !== null &&
+      MANAGER_STOPPABLE_STATES.has(status.activeState)
+    )
+  ) {
+    return none;
   }
+  const ownedPid =
+    opts.pid !== null &&
+    (await systemdRunsPid({
+      status,
+      pid: opts.pid,
+      isPidInUnit: opts.isPidInUnit,
+    }));
   const stopped = await systemdServiceAction({ action: "stop", deps });
   if (!stopped.ok) {
     logger.warn({
-      message: `systemctl --user stop ${SYSTEMD_UNIT_NAME} failed (${stopped.error}); signalling hackd directly`,
+      message: `systemctl --user stop ${SYSTEMD_UNIT_NAME} failed (${stopped.error})`,
     });
-    return false;
+    return { handled: false, ownedPid };
   }
-  return true;
+  return { handled: true, ownedPid };
+}
+
+/**
+ * When systemd runs an incompatible hackd from a unit that points at a
+ * different, still existing `hack`, replacing the daemon would only make
+ * systemd start the same old binary again (start does not rewrite such a
+ * unit). Returns the message to show instead, or null when this does not
+ * apply and the caller may replace the daemon.
+ */
+export async function describeSystemdIncompatibleOwner(opts: {
+  readonly pid: number;
+  readonly deps?: SystemdDeps;
+  readonly resolveExpected?: typeof resolveExpectedSystemdUnit;
+  readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
+}): Promise<string | null> {
+  const deps = opts.deps ?? defaultSystemdDeps();
+  if (!resolveSystemdAccess({ env: deps.env }).allowed) {
+    return null;
+  }
+  const unitPath = resolveSystemdUnitPath({ env: deps.env });
+  if (!(await pathExists(unitPath))) {
+    return null;
+  }
+  const status = await readSystemdServiceStatus({ unitPath, deps });
+  if (
+    !status?.availability.available ||
+    status.drift === "program-missing" ||
+    status.program === null ||
+    !(await systemdRunsPid({
+      status,
+      pid: opts.pid,
+      isPidInUnit: opts.isPidInUnit,
+    }))
+  ) {
+    return null;
+  }
+  const expected = await (opts.resolveExpected ?? resolveExpectedSystemdUnit)();
+  if (!expected || expected.hackBinPath === status.program) {
+    return null;
+  }
+  return `hackd (pid ${opts.pid}) is incompatible with this CLI, and ${SYSTEMD_UNIT_NAME} runs ${status.program}, so restarting it would start the same version again | Run: hack daemon install (switches the service to ${expected.hackBinPath})`;
 }
 
 /**
@@ -309,6 +488,7 @@ export async function installDaemonSystemdService(
     unitPath,
     unitText: expected.unitText,
     deps,
+    forceReload: before?.needsReload === true,
   });
   if (!installed.ok) {
     logger.error({
@@ -331,27 +511,16 @@ export async function installDaemonSystemdService(
   logger.info({
     message: `  Runs: ${expected.hackBinPath} daemon start --foreground`,
   });
-
-  // A directly started hackd holds the socket and pid file; systemd's copy
-  // would exit at once. Stop it so the service owns the daemon.
-  const daemon = await readDaemonStatus({ paths: hooks.paths });
-  if (
-    daemon.running &&
-    daemon.pid !== null &&
-    !(
-      before &&
-      (await systemdRunsPid({
-        status: before,
-        pid: daemon.pid,
-        isPidInUnit: hooks.isPidInUnit,
-      }))
-    )
-  ) {
-    logger.info({
-      message: `Stopping directly started hackd (pid ${daemon.pid}) so systemd can manage it`,
+  const durability = await (
+    hooks.assessDurability ?? assessExecutableDurability
+  )({ path: expected.hackBinPath });
+  if (!durability.durable) {
+    logger.warn({
+      message: `The service runs ${expected.hackBinPath}, which may not last: ${durability.reason}. Install hack to a stable location and run \`hack daemon install\` from there.`,
     });
-    await hooks.stopDirect(daemon.pid);
   }
+
+  await handOverDirectDaemon({ hooks, before });
 
   const action =
     installed.changed && before?.active
@@ -380,6 +549,50 @@ export async function installDaemonSystemdService(
     linger: await readLingerStatus(deps),
   });
   return ready ? 0 : 1;
+}
+
+/**
+ * A directly started hackd holds the socket and pid file, so systemd's copy
+ * would exit at once: stop it so the service owns the daemon. Only a pid
+ * proven to be this HACK_HOME's hackd is signalled; anything else is left
+ * running and reported.
+ */
+async function handOverDirectDaemon(opts: {
+  readonly hooks: SystemdCommandHooks;
+  readonly before: SystemdServiceStatus | null;
+}): Promise<void> {
+  // A directly started hackd holds the socket and pid file; systemd's copy
+  // would exit at once. Stop it so the service owns the daemon.
+  const { hooks, before } = opts;
+  const daemon = await readDaemonStatus({ paths: hooks.paths });
+  if (
+    daemon.running &&
+    daemon.pid !== null &&
+    !(
+      before &&
+      (await systemdRunsPid({
+        status: before,
+        pid: daemon.pid,
+        isPidInUnit: hooks.isPidInUnit,
+      }))
+    )
+  ) {
+    const proof = await (
+      hooks.proveDaemon ??
+      ((pid: number) =>
+        proveOwnedDaemonProcess({ pid, daemonRoot: hooks.paths.root }))
+    )(daemon.pid);
+    if (proof.kind === "owned") {
+      logger.info({
+        message: `Stopping directly started hackd (pid ${proof.pid}) so systemd can manage it`,
+      });
+      await hooks.stopDirect(proof);
+    } else {
+      logger.warn({
+        message: `Left pid ${daemon.pid} from the hackd pid file running: ${describeDaemonProcessRefusal(proof.reason)}. If it is this HACK_HOME's hackd, run \`hack daemon stop\`, then \`hack daemon install\` again.`,
+      });
+    }
+  }
 }
 
 function reportLinger(opts: { readonly linger: boolean | null }): void {
@@ -425,6 +638,12 @@ export async function uninstallDaemonSystemdService(opts: {
       message: `Removed ${unitPath}, but systemctl --user is unavailable, so a running service was not stopped`,
     });
     return 0;
+  }
+  if (result.reloadError !== null) {
+    logger.warn({
+      message: `${SYSTEMD_UNIT_NAME} was stopped and disabled and ${unitPath} was removed, but systemctl --user daemon-reload failed (${result.reloadError}), so systemd still has the unit loaded | Run: systemctl --user daemon-reload`,
+    });
+    return 1;
   }
   logger.success({
     message: `${SYSTEMD_UNIT_NAME} stopped, disabled and removed`,

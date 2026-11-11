@@ -61,7 +61,10 @@ import {
 } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
-import { resolveSystemdUnitPath } from "../daemon/systemd.ts";
+import {
+  resolveSystemdUnitPath,
+  SYSTEMD_READ_ONLY_ENV,
+} from "../daemon/systemd.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
 import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import {
@@ -3921,8 +3924,8 @@ async function runDoctorFix(opts: {
     await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
-  await maybeInstallDaemonService();
-  await maybeRepairHackd();
+  const serviceWrites = await maybeInstallDaemonService();
+  await maybeRepairHackd({ serviceWrites });
   // Env migration changes project files only, so it runs before the Docker
   // gate: an unreachable Docker never skips a requested migration.
   if (opts.migrateEnvConfig) {
@@ -5026,7 +5029,10 @@ async function dockerInfoOk(): Promise<boolean> {
  * non-interactive mode alike, before it prompts or runs anything. It notes the
  * skip with the reason and the command to run instead.
  */
-async function maybeRepairHackd(): Promise<void> {
+async function maybeRepairHackd(opts: {
+  readonly serviceWrites: DaemonServiceWrites;
+}): Promise<void> {
+  const env = daemonRepairEnv(opts.serviceWrites);
   const report = await resolveDaemonReportForDoctorFix();
   if (report.status === "running") {
     return;
@@ -5050,7 +5056,7 @@ async function maybeRepairHackd(): Promise<void> {
       initialValue: true,
     });
     if (okRestart) {
-      await runHackSubcommand({ args: ["daemon", "restart"] });
+      await runHackSubcommand({ args: ["daemon", "restart"], env });
     }
     return;
   }
@@ -5061,7 +5067,7 @@ async function maybeRepairHackd(): Promise<void> {
       initialValue: true,
     });
     if (okClear) {
-      await runHackSubcommand({ args: ["daemon", "clear"] });
+      await runHackSubcommand({ args: ["daemon", "clear"], env });
     }
   }
 
@@ -5070,7 +5076,7 @@ async function maybeRepairHackd(): Promise<void> {
     initialValue: true,
   });
   if (okStart) {
-    await runHackSubcommand({ args: ["daemon", "start"] });
+    await runHackSubcommand({ args: ["daemon", "start"], env });
   }
 }
 
@@ -5081,16 +5087,20 @@ async function maybeRepairHackd(): Promise<void> {
  * destructive step: confirmed interactively, skipped and listed without a
  * TTY. Linger is reported by the check but never changed.
  */
-async function maybeInstallDaemonService(): Promise<void> {
+async function maybeInstallDaemonService(): Promise<DaemonServiceWrites> {
+  // Owner decision (HACK-2052): without a TTY, doctor --fix may start hackd
+  // but never writes or reloads the unit; an interactive run that declines
+  // the install carries the same refusal into the hackd repair below.
+  const interactive = canPrompt();
   if (!isLinux()) {
-    return;
+    return interactive ? "allowed" : "refused";
   }
   const decision = decideDaemonServiceFix({
     summary: await resolveSystemdSummary({ paths: resolveDaemonPaths({}) }),
     autostart: resolveDaemonAutostartAccess(),
   });
   if (decision.kind === "none") {
-    return;
+    return interactive ? "allowed" : "refused";
   }
   if (decision.kind === "skip") {
     note(
@@ -5100,16 +5110,32 @@ async function maybeInstallDaemonService(): Promise<void> {
       ].join("\n"),
       "doctor fix"
     );
-    return;
+    return "refused";
   }
   const ok = await doctorConfirm({
     message: `Install hackd as a systemd user service (hack daemon install)?\nIt writes ${resolveSystemdUnitPath()} and starts hackd at login.`,
     initialValue: true,
     destructive: true,
   });
-  if (ok) {
-    await runHackSubcommand({ args: ["daemon", "install"] });
+  if (!ok) {
+    return "refused";
   }
+  await runHackSubcommand({ args: ["daemon", "install"] });
+  return "allowed";
+}
+
+/**
+ * Whether the hackd repair that follows may change the systemd unit.
+ * "refused" runs its `hack daemon` steps with
+ * {@link SYSTEMD_READ_ONLY_ENV}=1, so `hack daemon start` neither writes nor
+ * reloads the unit.
+ */
+type DaemonServiceWrites = "allowed" | "refused";
+
+function daemonRepairEnv(
+  writes: DaemonServiceWrites
+): Record<string, string> | undefined {
+  return writes === "refused" ? { [SYSTEMD_READ_ONLY_ENV]: "1" } : undefined;
 }
 
 /** The explicit commands that perform the {@link maybeRepairHackd} steps. */
@@ -5249,10 +5275,12 @@ async function resolveDaemonReportForDoctorFix(): Promise<
 
 async function runHackSubcommand(opts: {
   readonly args: readonly string[];
+  readonly env?: Record<string, string>;
 }): Promise<void> {
   const invocation = await resolveHackInvocation();
   await run([invocation.bin, ...invocation.args, ...opts.args], {
     stdin: "inherit",
+    ...(opts.env ? { env: opts.env } : {}),
   });
 }
 

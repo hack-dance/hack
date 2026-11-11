@@ -384,8 +384,14 @@ not survive logout or reboot. For that, install it as a login service with
 
 On Linux, once the unit is installed, `hack daemon start` and `hack daemon stop`
 go through `systemctl --user`, so a single manager owns the socket and pid file.
-`install` stops a hackd that was started directly and lets systemd start it. The
-unit:
+`stop` goes through systemd even when the pid file is missing or stale, which also
+cancels a restart systemd has scheduled after a crash. `start` removes stale pid
+and socket files only while they are still stale, so it never deletes the files of
+a daemon that another start or a systemd restart just wrote. `install` stops a
+hackd that was started directly and lets systemd start it. It signals that
+process only after proving it is this `HACK_HOME`'s hackd (a hack daemon command
+line, a socket in this daemon directory, and an unchanged start time); any other
+process named by the pid file is left running and reported. The unit:
 
 - runs `<hack> daemon start --foreground`, where `<hack>` is the absolute path of
   the `hack` found on `PATH` at install time. Symlinks are kept as they are, so a
@@ -399,15 +405,23 @@ unit:
 - sends stderr to the journal (`journalctl --user -u hackd.service`); hackd's own
   log stays in `~/.hack/daemon/hackd.log`.
 
-Hack owns the whole unit file. Put local settings, such as `DOCKER_HOST` for
-rootless Docker, in a drop-in (`systemctl --user edit hackd`). Before it starts
-hackd, `hack daemon start` rewrites the unit when the recorded program no longer
-exists, or when the `hack` found on the current `PATH` is a different program, so
-systemd never keeps starting an old, incompatible hackd after an upgrade. It does
-this only when hackd is not running. Any other edit to the file shows up as drift
-in `hack daemon status` and `hack doctor`, and `hack daemon install` fixes it. A
-unit that runs a different `hack` that still exists is not reported as drift, so
-shells with different `PATH`s do not each rewrite the unit.
+`hack daemon install` writes the whole unit file. Put local settings, such as
+`DOCKER_HOST` for rootless Docker, in a drop-in (`systemctl --user edit hackd`).
+`install` writes the `hack` it was run from, and warns when that path is in a
+temporary directory, a package cache or a source checkout.
+
+`hack daemon start` and autostart never rewrite a unit whose program still exists,
+even when the `hack` on the current `PATH` is a different one: they say so, and
+`hack daemon install` switches the service. If systemd runs an incompatible
+hackd from such a unit, `start` reports it instead of replacing it, because
+systemd would only start the same version again. Only when the unit's program no
+longer exists may `start` repair it, and only to a durable location (not a
+temporary directory, package cache or source checkout). It then replaces just the
+program in `ExecStart` and keeps every other line, including your edits;
+otherwise it reports the problem and asks you to run `hack daemon install`. If an
+earlier `daemon-reload` failed (`NeedDaemonReload=yes`), `start` and `install`
+reload before they start. Other edits to the file show up as drift in
+`hack daemon status` and `hack doctor`, and `hack daemon install` replaces them.
 
 A systemd user manager runs only while you have a login session, unless linger is
 on. `hack daemon install` and `hack daemon status` report linger. When it is off,
@@ -428,7 +442,11 @@ or the running hackd was started directly rather than by systemd (fix:
 `hack daemon restart`); or when linger is off. `hack doctor --fix` offers
 `hack daemon install` only interactively, because it writes outside the project
 and enables a login service. It skips the install without a TTY, and also skips it
-under the same conditions that skip the hackd repair. The unit belongs to the
+under the same conditions that skip the hackd repair. Without a TTY, or when you
+decline the install, its hackd repair may still start hackd, but it never writes
+or reloads the unit (`hack daemon` runs with `HACK_DAEMON_SERVICE_READ_ONLY=1`).
+`hack daemon uninstall` exits 1 and says what it already did when the final
+`daemon-reload` fails. The unit belongs to the
 default `~/.hack` root: an isolated `HACK_HOME` or `HACK_SYSTEMD_DISABLE=1` turns
 systemd management off (`HACK_SYSTEMD_ALLOW_ISOLATED_HOME=1` opts in).
 

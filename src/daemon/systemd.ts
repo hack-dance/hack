@@ -1089,8 +1089,12 @@ export async function checkSystemdUnitDropIns(opts: {
   const unitDir = dirname(opts.unitPath);
   for (const name of [`${SYSTEMD_UNIT_NAME}.d`, "service.d"]) {
     const dir = resolve(unitDir, name);
-    if (!(await pathExists(dir))) {
-      continue;
+    const dangling = await checkDanglingDropInDirectory({ dir, uid });
+    if (dangling !== "present") {
+      if (dangling === null) {
+        continue;
+      }
+      return `Not using ${SYSTEMD_UNIT_NAME}: its drop-in ${dangling}`;
     }
     const error =
       (await checkOwnerWritableOnlyDirectory({ dir, uid })) ??
@@ -1100,6 +1104,40 @@ export async function checkSystemdUnitDropIns(opts: {
     }
   }
   return null;
+}
+
+/**
+ * A drop-in directory entry that is absent, or a symlink whose target does
+ * not exist (yet). `"present"` means the target exists and the caller runs
+ * its full checks. For a dangling link the target is walked in filesystem
+ * order (every link and directory on the way checked) and the deepest
+ * existing directory must not let others create the rest: systemd follows
+ * the link once someone creates the target (HACK-2052). Null when there is
+ * nothing to check (no entry at all), else the refusal.
+ */
+async function checkDanglingDropInDirectory(opts: {
+  readonly dir: string;
+  readonly uid: number;
+}): Promise<string | null | "present"> {
+  if (await pathExists(opts.dir)) {
+    return "present";
+  }
+  if (!(await entryExists(opts.dir))) {
+    return null;
+  }
+  const walk = await walkReplaceableChain({
+    path: opts.dir,
+    uid: opts.uid,
+    hackHome: null,
+    allowMissing: true,
+  });
+  if ("error" in walk) {
+    return walk.error;
+  }
+  const creatable = await lettingOthersCreate(walk.existing);
+  return creatable === null
+    ? null
+    : `directory ${opts.dir} is a link to a path that does not exist yet, and ${walk.existing} lets other users create it (${creatable}); run: chmod go-w ${walk.existing}, or remove the link`;
 }
 
 async function checkDropInEntries(opts: {
@@ -1611,8 +1649,15 @@ async function checkUnitLoadDirectory(opts: {
   }
   for (const name of [`${SYSTEMD_UNIT_NAME}.d`, "service.d"]) {
     const dir = resolve(existing, name);
-    if (!(await pathExists(dir))) {
-      continue;
+    const dangling = await checkDanglingDropInDirectory({
+      dir,
+      uid: opts.uid,
+    });
+    if (dangling !== "present") {
+      if (dangling === null) {
+        continue;
+      }
+      return dangling;
     }
     const writable = await lettingOthersCreate(dir);
     const error =

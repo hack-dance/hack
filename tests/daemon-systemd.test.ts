@@ -2100,3 +2100,25 @@ test("a dangling symlink load directory is followed to where it points", async (
   await chmod(shared, 0o755);
   expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toBeNull();
 });
+
+test("a dangling drop-in directory link is followed, not treated as absent", async () => {
+  // Codex review: hackd.service.d -> <shared>/missing passed both checks;
+  // another account could create the target and plant an override.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const userDir = join(root, "config", "systemd", "user");
+  const shared = join(root, "shared-dropins-target");
+  await mkdir(shared);
+  await chmod(shared, 0o1777);
+  await symlink(join(shared, "missing"), join(userDir, "hackd.service.d"));
+  expect(await checkSystemdUnitDropIns({ unitPath })).toContain(
+    "does not exist yet"
+  );
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toContain(
+    "does not exist yet"
+  );
+  // Pointing into a protected directory: nothing can appear there.
+  await chmod(shared, 0o755);
+  expect(await checkSystemdUnitDropIns({ unitPath })).toBeNull();
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toBeNull();
+});

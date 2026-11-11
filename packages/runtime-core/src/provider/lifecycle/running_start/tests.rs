@@ -1,5 +1,5 @@
 use super::*;
-use crate::provider::Profile;
+use crate::provider::{NetworkIntent, Profile};
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -113,7 +113,14 @@ impl Home {
         verify_trees(&self.candidate, &self.owner, &lease)
     }
 
-    fn witness(&self) -> Option<String> {
+    /// Content proofs the check ran: zero means the cheap witness path was taken.
+    fn proofs(&self) -> Result<usize, CandidateError> {
+        let before = tree_witness::content_proofs();
+        self.check()?;
+        Ok(tree_witness::content_proofs() - before)
+    }
+
+    fn witness(&self) -> Option<tree_witness::Proven> {
         tree_witness::witnessed(
             &self.candidate,
             self.owner.process.as_ref().unwrap(),
@@ -121,9 +128,8 @@ impl Home {
         )
     }
 
-    /// A tree record whose digest no content proof can match: a check that passes with it
-    /// took the cheap witness path and hashed nothing.
-    fn poison_smolvm_record(&self) {
+    /// Rewrite the SmolVM record's content anchor, as drift or a stale record would.
+    fn rewrite_smolvm_anchor(&self) {
         let path = self.candidate.state_root.join("providers/smolvm.json");
         let mut artifact: artifact::Artifact = state::read(&path).unwrap();
         artifact.tree_sha256 = "0".repeat(64);
@@ -136,23 +142,36 @@ impl Home {
 fn a_running_pool_without_a_witness_proves_its_trees_by_content_and_records_one() {
     let home = Home::new("first");
     assert!(home.witness().is_none());
-    home.check().unwrap();
+    // SmolVM, engine and rootfs are each proven by content once.
+    assert_eq!(home.proofs().unwrap(), 3);
     assert_eq!(
-        home.witness(),
-        Some(artifact::tree_metadata(&home.candidate, &artifact::SMOLVM).unwrap())
+        home.witness().unwrap().metadata,
+        artifact::tree_metadata(&home.candidate, &artifact::SMOLVM).unwrap()
     );
-    // Later commands of the same provider hash nothing: a poisoned record still passes.
-    home.poison_smolvm_record();
-    home.check().unwrap();
+    // Later commands of the same provider hash nothing.
+    assert_eq!(home.proofs().unwrap(), 0);
+    assert_eq!(home.proofs().unwrap(), 0);
 }
 
 #[test]
 fn a_witness_of_another_provider_process_is_never_trusted() {
     let mut home = Home::new("other-process");
     home.check().unwrap();
-    home.poison_smolvm_record();
-    // A new boot has another provider identity: its trees are proven by content.
+    // A new boot has another provider identity: every tree is proven by content again.
     home.owner.process = Some(process(4343));
+    assert_eq!(home.proofs().unwrap(), 3);
+}
+
+#[test]
+fn a_rewritten_content_anchor_sends_the_tree_back_to_a_content_proof() {
+    let home = Home::new("anchor");
+    home.check().unwrap();
+    home.rewrite_smolvm_anchor();
+    assert_eq!(home.check().unwrap_err().code, "artifact_digest_mismatch");
+
+    let mut home = Home::new("rootfs-anchor");
+    home.check().unwrap();
+    home.owner.rootfs_digest = Some("0".repeat(64));
     assert_eq!(home.check().unwrap_err().code, "artifact_digest_mismatch");
 }
 
@@ -169,6 +188,7 @@ fn a_changed_tree_file_is_caught_by_the_cheap_check_and_proven_by_content() {
         } else {
             artifact::engine_root(&home.candidate)
         };
+        std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(root.join(&path), b"tampered").unwrap();
         assert_eq!(
             home.check().unwrap_err().code,
@@ -178,6 +198,7 @@ fn a_changed_tree_file_is_caught_by_the_cheap_check_and_proven_by_content() {
     }
     let home = Home::new("rootfs-changed");
     home.check().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
     fs::write(
         root(&home.candidate).join("rootfs/usr/local/bin/smolvm-agent"),
         b"tampered",
@@ -197,16 +218,12 @@ fn a_metadata_only_change_is_proven_again_and_refreshes_the_witness() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&binary, mode).unwrap();
-    // Same bytes and mode, new ctime: the content proof passes and the witness is renewed.
-    home.check().unwrap();
+    // Same bytes and mode, new ctime: only the SmolVM tree is proven again, and passes.
+    assert_eq!(home.proofs().unwrap(), 1);
     let after = home.witness().unwrap();
-    assert_ne!(after, before);
-    assert_eq!(
-        after,
-        artifact::tree_metadata(&home.candidate, &artifact::SMOLVM).unwrap()
-    );
-    home.poison_smolvm_record();
-    home.check().unwrap();
+    assert_ne!(after.metadata, before.metadata);
+    assert_eq!(after.content, before.content);
+    assert_eq!(home.proofs().unwrap(), 0);
 }
 
 #[test]
@@ -221,6 +238,39 @@ fn a_record_for_another_pin_is_refused_even_with_a_witness() {
         &artifact::root(&home.candidate),
     );
     assert_eq!(home.check().unwrap_err().code, "provider_pin_changed");
+}
+
+#[test]
+fn the_request_is_checked_against_the_receipt_the_fast_path_holds() {
+    let home = Home::new("request");
+    let none = StartRequest {
+        bridges: super::super::super::bridge::Request::Exact(None),
+        network: None,
+        dependencies: super::super::super::dependency_socket::Request::Exact(None),
+        project_share: None,
+        amd64_emulation: false,
+    };
+    none.check(&home.owner).unwrap();
+    // A pool that runs without x86_64 translation refuses a translation request, as the
+    // general path does; a pool that runs with it accepts one.
+    let translated = StartRequest {
+        amd64_emulation: true,
+        ..none
+    };
+    assert_eq!(
+        translated.check(&home.owner).unwrap_err().code,
+        "amd64_emulation_restart_required"
+    );
+    let mut owner = home.owner.clone();
+    owner.amd64_emulation = true;
+    translated.check(&owner).unwrap();
+    // A network intent other than the pool's is refused, never applied.
+    let internet = NetworkIntent::Internet;
+    let other_network = StartRequest {
+        network: Some(&internet),
+        ..none
+    };
+    assert!(other_network.check(&home.owner).is_err());
 }
 
 #[test]
@@ -268,7 +318,6 @@ fn only_a_running_created_pool_of_the_requested_profile_takes_the_fast_path() {
 #[cfg(target_os = "macos")]
 mod live {
     use super::*;
-    use crate::provider::NetworkIntent;
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom, Write};
     use std::os::unix::fs::OpenOptionsExt;
@@ -389,10 +438,38 @@ mod live {
         owner.guest_boot_id = Some("22222222-2222-2222-2222-222222222222".into());
         owner.save(&live.home.candidate).unwrap();
         assert_eq!(
-            resume(&live.home.candidate, selected, || Ok(()))
+            resume(&live.home.candidate, selected, &no_request(), || Ok(()))
                 .unwrap_err()
                 .code,
             "runtime_changed"
+        );
+    }
+
+    fn no_request() -> StartRequest<'static> {
+        StartRequest {
+            bridges: super::super::super::super::bridge::Request::Exact(None),
+            network: None,
+            dependencies: super::super::super::super::dependency_socket::Request::Exact(None),
+            project_share: None,
+            amd64_emulation: false,
+        }
+    }
+
+    #[test]
+    fn a_request_the_running_pool_cannot_serve_is_refused_under_the_lease() {
+        let live = running("request");
+        let selected = select(&live.home.candidate, Profile::Development)
+            .unwrap()
+            .unwrap();
+        let request = StartRequest {
+            amd64_emulation: true,
+            ..no_request()
+        };
+        assert_eq!(
+            resume(&live.home.candidate, selected, &request, || Ok(()))
+                .unwrap_err()
+                .code,
+            "amd64_emulation_restart_required"
         );
     }
 }

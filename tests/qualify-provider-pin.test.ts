@@ -20,6 +20,7 @@ import {
   INERT_RECORD_FIELDS,
   INERT_RUNNING_RESOURCES,
   inertField,
+  isExecutor,
   main,
   parseCpuTime,
   parseFootprint,
@@ -277,9 +278,27 @@ describe("provider pin qualification", () => {
       runtime_up_s: 5.9,
       serve_to_ready_s: 3.8,
       total_s: 11.1,
+      sample_period_s: 0.55,
+      upper_bounds: [],
     });
-    // A phase never observed is unknown, not zero.
+    // A phase never observed is unknown, not zero; one seen once is an upper bound.
     expect(warmPhases([sample(0.1)], 2).runtime_up_s).toBeNull();
+    const brief = warmPhases(
+      [
+        sample(0.0),
+        sample(0.08, "graph retained-preflight --run-id x"),
+        sample(0.16, "runtime up --json"),
+        sample(0.24, "runtime up --json"),
+      ],
+      0.3
+    );
+    expect(brief.retained_preflight_s).toBe(0.08);
+    expect(brief.upper_bounds).toEqual(["retained_preflight_s"]);
+    expect(
+      isExecutor("/bundle/hack-native --candidate-root /h runtime up")
+    ).toBe(true);
+    expect(isExecutor("hack-native runtime up")).toBe(true);
+    expect(isExecutor("/usr/bin/other /bundle/hack-native")).toBe(false);
     expect(
       parseOptions([...required, "--warm-runs", "3", "--warm-only"])
     ).toMatchObject({

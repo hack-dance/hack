@@ -2,13 +2,14 @@
 //!
 //! Every frontend `up` and `restart` calls `runtime up` before it serves the project, and on
 //! a warm machine the pool is usually already running. The general start path samples host
-//! admission before it acquires the startup lease and again after it: two windows of three
-//! samples one second apart (Research: fifteen), four seconds of sleep per call. Each window
-//! guards an allocation: free memory and memory pressure for the guest's memory, swapout
-//! stability across the window, thermal state, and disk headroom for disks a fresh pool
-//! would create or a stopped pool would reuse. A running pool allocates none of these. Its
-//! VM memory and disks are already held; this start only re-verifies and reports it. The
-//! general path also proved the SmolVM and engine trees by content, about 1.25 s, on every
+//! admission before anything else: for Development one probe, a window of three samples one
+//! second apart, the startup lease, then a second three-sample window (four one-second
+//! pauses); for Research one window of three samples fifteen seconds apart (thirty seconds).
+//! Each sample guards an allocation: free memory and memory pressure for the guest's memory,
+//! swapout stability across the window, thermal state, and disk headroom for disks a fresh
+//! pool would create or a stopped pool would reuse. A running pool allocates none of these:
+//! its VM memory and disks are already held, and this start only re-verifies and reports it.
+//! The general path also proved the SmolVM and engine trees by content (about 1.25 s) on every
 //! call.
 //!
 //! This path keeps every check that still matters for a running pool and skips the rest:
@@ -16,19 +17,23 @@
 //! - Ownership and identity: the receipt names this home's machine, its recorded provider is
 //!   alive with the receipt's PID, start time, executable and user, and both disks keep their
 //!   recorded identities and declared sizes ([`select`], again under the lease).
-//! - The request: the bridge, dependency socket, network, project share, profile and
-//!   translation checks in `start_pool` run before this path and are bound to the receipt,
-//!   which must be unchanged under the lease.
+//! - The request ([`StartRequest`]): bridges, dependency sockets, network, project share
+//!   (including its live directory) and translation, checked before selection by `start_pool`
+//!   and again under the lease against the receipt this path holds.
 //! - Pending owner updates, the owner registry and dependency sockets, as before.
 //! - The provider configuration audit (`audit_boot`), as before.
-//! - Provider trees: the record must name this executor's pin, and each tree must match the
-//!   metadata digest its boot witnessed by content, or it is proven by content again
-//!   (`tree_witness`). The guest rootfs copy is checked the same way.
+//! - Provider trees: each record must name this executor's pin, and each tree (SmolVM, engine
+//!   and, newly, the guest rootfs copy) must match what its boot witnessed by content, or be
+//!   proven by content again (`tree_witness`). A drifted rootfs is now refused here; the
+//!   general path's running branch never checked it.
 //!
-//! It skips the admission windows and writes no admission record. A pool that is not
+//! It skips the admission windows and writes no admission record. That changes behaviour in
+//! one visible way: a running Research pool was sampled on the fresh-pool budget, which counts
+//! the pool's own memory against the floor, so a busy host could refuse `runtime up` on a pool
+//! that was already running. It is now reported like any running pool. A pool that is not
 //! running, not of the requested profile, or missing its creation or disks takes the general
-//! path, which is unchanged; a running pool whose provider identity does not verify is
-//! refused here exactly as the general path refuses it.
+//! path, which is unchanged; a running pool whose provider identity does not verify is refused
+//! here exactly as the general path refuses it.
 use super::*;
 use crate::provider::tree_witness;
 use std::collections::BTreeMap;
@@ -37,6 +42,36 @@ use std::collections::BTreeMap;
 /// [`select`] issues it.
 pub(super) struct Running {
     owner: Owner,
+}
+
+/// What a `runtime up` asks of an existing pool. Checked against the receipt by both start
+/// paths: before selection, and on this path again under the lease.
+#[derive(Clone, Copy)]
+pub(super) struct StartRequest<'a> {
+    pub(super) bridges: super::super::bridge::Request,
+    pub(super) network: Option<&'a super::super::NetworkIntent>,
+    pub(super) dependencies: super::super::dependency_socket::Request,
+    pub(super) project_share: Option<&'a super::super::ProjectShareIntent>,
+    pub(super) amd64_emulation: bool,
+}
+
+impl StartRequest<'_> {
+    /// The request fits the existing pool `owner` records; nothing is resized or replaced.
+    pub(super) fn check(&self, owner: &Owner) -> Result<(), CandidateError> {
+        check_amd64_emulation_request(owner, self.amd64_emulation)?;
+        super::super::project_share::check_request(&owner.project_shares(), self.project_share)?;
+        self.bridges.check(owner.application_bridge)?;
+        super::super::network_intent::check_request(&owner.network, self.network)?;
+        self.dependencies.check(owner.dependency_sockets)
+    }
+
+    /// The requested project share is still its exact approved directory.
+    fn validate(&self) -> Result<(), CandidateError> {
+        if let Some(share) = self.project_share {
+            share.validate()?;
+        }
+        Ok(())
+    }
 }
 
 fn changed() -> CandidateError {
@@ -93,6 +128,7 @@ fn verify_running(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateE
 pub(super) fn resume(
     candidate: &Candidate,
     running: Running,
+    request: &StartRequest<'_>,
     verify_retained: impl Fn() -> Result<(), CandidateError>,
 ) -> Result<RuntimeStatus, CandidateError> {
     let lock = startup_lease(&root(candidate), STARTUP_LEASE_WAIT)?;
@@ -104,6 +140,8 @@ pub(super) fn resume(
     if owner != running.owner {
         return Err(changed());
     }
+    request.validate()?;
+    request.check(&owner)?;
     verify_running(candidate, &owner)?;
     super::super::graph::verify_owner_registry(candidate, &owner)?;
     super::super::dependency_socket::verify(candidate, &owner)?;
@@ -119,7 +157,7 @@ pub(super) fn resume(
 fn verify_trees(
     candidate: &Candidate,
     owner: &Owner,
-    _lease: &state::Lock,
+    lease: &state::Lock,
 ) -> Result<(), CandidateError> {
     let process = owner.process.as_ref().ok_or_else(changed)?;
     let mut proven = BTreeMap::new();
@@ -128,29 +166,41 @@ fn verify_trees(
         (tree_witness::SMOLVM, &artifact::SMOLVM),
         (tree_witness::ENGINE, &artifact::ENGINE),
     ] {
-        artifact::verify_record(candidate, pin)?;
-        let current = artifact::tree_metadata(candidate, pin)?;
-        let digest = if tree_witness::matches(candidate, process, name, &current) {
-            current
+        let anchor = artifact::verify_record(candidate, pin)?.tree_sha256;
+        let metadata = artifact::tree_metadata(candidate, pin)?;
+        let tree = if tree_witness::matches(candidate, process, name, &metadata, &anchor) {
+            tree_witness::Proven {
+                metadata,
+                content: anchor,
+            }
         } else {
             reproven = true;
             artifact::verify_witnessed(candidate, pin)?
         };
-        proven.insert(name.to_owned(), digest);
+        proven.insert(name.to_owned(), tree);
     }
     let rootfs = root(candidate).join("rootfs");
     reject_aliased_state(&rootfs)?;
     let marker = rootfs_marker(owner)?;
-    let current = tree_witness::metadata_digest(&rootfs, Some(&marker))?;
-    let digest = if tree_witness::matches(candidate, process, tree_witness::ROOTFS, &current) {
-        current
-    } else {
-        reproven = true;
-        prove_rootfs(&rootfs, &marker, owner.rootfs_digest.as_deref())?
-    };
-    proven.insert(tree_witness::ROOTFS.to_owned(), digest);
+    let anchor = owner.rootfs_digest.clone().ok_or_else(changed)?;
+    let metadata = tree_witness::metadata_digest(&rootfs, Some(&marker))?;
+    let metadata =
+        if tree_witness::matches(candidate, process, tree_witness::ROOTFS, &metadata, &anchor) {
+            metadata
+        } else {
+            reproven = true;
+            prove_rootfs(&rootfs, &marker, Some(&anchor))?
+        };
+    proven.insert(
+        tree_witness::ROOTFS.to_owned(),
+        tree_witness::Proven {
+            metadata,
+            content: anchor,
+        },
+    );
     if reproven {
-        tree_witness::record(candidate, process, proven)?;
+        // Best effort, as at boot: without a witness the next command proves by content.
+        let _ = tree_witness::record(candidate, lease, process, proven);
     }
     Ok(())
 }

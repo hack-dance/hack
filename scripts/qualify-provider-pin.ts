@@ -331,13 +331,18 @@ export interface WarmPhases {
   runtime_up_s: number | null;
   serve_to_ready_s: number | null;
   total_s: number;
+  /** Median interval between samples: each boundary is accurate to about this much. */
+  sample_period_s: number | null;
+  /** Phases seen in one sample only: their value is the sample period, an upper bound. */
+  upper_bounds: string[];
 }
 
 /**
  * Split a warm `up -d` into phases from samples of the executor's process command lines:
  * the launcher until `graph retained-preflight` appears, that preflight, the gap until
  * `runtime up`, `runtime up` itself, and the rest (plan, serve, health and publish) until
- * the command exits at `total`. Each boundary is accurate to about one sampling period.
+ * the command exits at `total`. Each boundary is accurate to about one sampling period; a
+ * process seen in a single sample is reported as one period and listed in `upper_bounds`.
  */
 export function warmPhases(samples: PhaseSample[], total: number): WarmPhases {
   const seen = (pattern: RegExp) => {
@@ -352,18 +357,42 @@ export function warmPhases(samples: PhaseSample[], total: number): WarmPhases {
   };
   const preflight = seen(/\sgraph retained-preflight(\s|$)/);
   const runtimeUp = seen(/\sruntime up(\s|$)/);
+  const gaps = samples
+    .slice(1)
+    .map((sample, index) => sample.at - (samples[index] as PhaseSample).at)
+    .sort((a, b) => a - b);
+  const period =
+    gaps.length > 0
+      ? (gaps[Math.floor((gaps.length - 1) / 2)] as number)
+      : null;
+  const upperBounds: string[] = [];
   const span = (from: number | undefined, to: number | undefined) =>
     from === undefined || to === undefined
       ? null
       : round(Math.max(0, to - from));
+  const lifetime = (name: string, observed: typeof preflight) => {
+    if (observed && observed.first === observed.last && period !== null) {
+      upperBounds.push(name);
+      return round(period);
+    }
+    return span(observed?.first, observed?.last);
+  };
   return {
     launcher_to_preflight_s: span(0, preflight?.first),
-    retained_preflight_s: span(preflight?.first, preflight?.last),
+    retained_preflight_s: lifetime("retained_preflight_s", preflight),
     preflight_to_runtime_up_s: span(preflight?.last, runtimeUp?.first),
-    runtime_up_s: span(runtimeUp?.first, runtimeUp?.last),
+    runtime_up_s: lifetime("runtime_up_s", runtimeUp),
     serve_to_ready_s: span(runtimeUp?.last, total),
     total_s: round(total),
+    sample_period_s: period === null ? null : round(period),
+    upper_bounds: upperBounds,
   };
+}
+
+/** Whether a `ps` command line runs a `hack-native` executable, however it was launched. */
+export function isExecutor(command: string): boolean {
+  const program = command.split(" ")[0] ?? "";
+  return program === "hack-native" || program.endsWith("/hack-native");
 }
 
 export interface Options {
@@ -1883,7 +1912,8 @@ class Qualification {
         }
       );
       const samples: PhaseSample[] = [];
-      while (child.exitCode === null && performance.now() - started < 600_000) {
+      const deadline = started + 600_000;
+      while (child.exitCode === null && performance.now() < deadline) {
         const at = (performance.now() - started) / 1000;
         const listing = Bun.spawn(["/bin/ps", "-A", "-ww", "-o", "command="], {
           stdout: "pipe",
@@ -1892,11 +1922,13 @@ class Qualification {
         const text = await new Response(listing.stdout).text();
         samples.push({
           at,
-          commands: text
-            .split("\n")
-            .filter((command) => command.startsWith(`${this.options.native} `)),
+          commands: text.split("\n").filter(isExecutor),
         });
         await Bun.sleep(50);
+      }
+      if (child.exitCode === null) {
+        // This run's own child; the pool is left for the failure report.
+        child.kill("SIGTERM");
       }
       const code = await child.exited;
       const total = (performance.now() - started) / 1000;
@@ -1906,6 +1938,11 @@ class Qualification {
         `exit ${code} (see ${label}.stderr)`
       );
       const phases = warmPhases(samples, total);
+      this.check(
+        `warm up -d run ${run}: retained preflight and runtime up were observed`,
+        phases.retained_preflight_s !== null && phases.runtime_up_s !== null,
+        `see ${label}.phases.json`
+      );
       writeFileSync(
         join(this.evidence, `${label}.phases.json`),
         JSON.stringify({ phases, samples }, null, 2)
@@ -1923,7 +1960,15 @@ class Qualification {
           ? null
           : (known[Math.floor((known.length - 1) / 2)] as number);
       };
-      const keys = Object.keys(runs[0] as WarmPhases) as (keyof WarmPhases)[];
+      const keys = [
+        "launcher_to_preflight_s",
+        "retained_preflight_s",
+        "preflight_to_runtime_up_s",
+        "runtime_up_s",
+        "serve_to_ready_s",
+        "total_s",
+        "sample_period_s",
+      ] as const;
       this.measure(
         "warm_up_d_median",
         Object.fromEntries(

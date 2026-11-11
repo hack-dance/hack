@@ -1418,19 +1418,29 @@ explicitly once those numbers are recorded.
 `runtime up` on a pool that is already running and owned by this home (every warm frontend
 `up` and `restart`) takes a named fast path, `lifecycle::running_start`. It allocates
 nothing, so it skips the host admission windows, which guard memory, swapout, thermal and
-disk headroom for a VM allocation (four seconds of sampling pauses per call). It keeps the
-ownership, provider identity, disk identity and size, request, owner registry, dependency
-socket and provider configuration checks, under the startup lease.
+disk headroom for a VM allocation (four one-second sampling pauses for Development, two
+fifteen-second pauses for Research). Under the startup lease it re-checks the receipt, the
+provider identity, disk identity and size, the request (bridges, dependency sockets,
+network, project share and translation), the owner registry, dependency sockets, network
+tools and the provider configuration. One behaviour changes: a running Research pool used to
+be sampled on the fresh-pool budget and could be refused on a busy host; it is now reported
+like any running pool.
 
 Provider trees are proven by content once per boot. A successful boot records a witness
-(`run/smolvm/provider-trees.json`) bound to its provider process: a metadata digest of the
-SmolVM tree, the engine tree and the guest rootfs copy, taken around the content proof.
-Later commands of that running pool, including retained preflight, accept a tree whose
-metadata digest is unchanged (paths, types, modes, owners, inodes, link counts, sizes,
-modification and status-change times, symlink targets) and prove it by content again on any
-difference. A stopped pool, a new boot and `runtime repair-provider-tree` always prove by
-content. `tree_witness` states the threat model: the metadata check gives up only content
-changes that keep all of that metadata, which needs root or silent media corruption.
+(`run/smolvm/provider-trees.json`) bound to its provider process: for the SmolVM tree, the
+engine tree and the guest rootfs copy, a metadata digest taken around the content proof and
+the content digest it was proven against. Later commands of that running pool, including
+retained preflight, accept a tree whose metadata digest and content anchor are unchanged
+(paths, types, modes, owners, inodes, link counts, sizes, modification and status-change
+times, symlink targets) and prove it by content again on any difference. A stopped pool, a
+new boot and `runtime repair-provider-tree` always prove by content. Warm starts now also
+check the guest rootfs copy, which the running path never did.
+
+Both proofs guard against drift (damage, cleanup tools, interrupted writers), not a
+same-user adversary who knows the scheme: the content anchors and the witness are writable
+by the same user. `tree_witness` lists what the metadata check gives up relative to the
+content proof (writes that keep size and ctime, such as raw device writes, clock changes,
+shared-mapping stores not yet reflected in ctime, and filesystems without fine ctime).
 
 ### Extending a stopped pool's approved hosts
 

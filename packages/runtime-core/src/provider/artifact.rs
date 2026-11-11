@@ -198,15 +198,19 @@ pub(super) fn verify_tree(
 }
 
 /// The cheap part of [`verify_tree`]: the preparation record names this executor's pin and
-/// the prepared tree is not an alias. Hashes nothing.
-pub(super) fn verify_record(candidate: &Candidate, pin: &TreePin) -> Result<(), CandidateError> {
+/// the prepared tree is not an alias. Hashes nothing; returns the record, whose
+/// `tree_sha256` is the tree's content anchor.
+pub(super) fn verify_record(
+    candidate: &Candidate,
+    pin: &TreePin,
+) -> Result<Artifact, CandidateError> {
     let providers = candidate.state_root.join("providers");
     reject_aliased_state(&providers.join(pin.directory))?;
     let artifact: Artifact = state::read(&providers.join(pin.record))?;
     if artifact.version != pin.version || artifact.archive_sha256 != pin.archive_sha256 {
         return Err(pin_changed(pin, &artifact));
     }
-    Ok(())
+    Ok(artifact)
 }
 
 /// The metadata digest ([`super::tree_witness::metadata_digest`]) of a prepared tree.
@@ -220,19 +224,23 @@ pub(super) fn tree_metadata(
     )
 }
 
-/// [`verify_tree`]'s content proof, bracketed by the tree's metadata digest. Returns the
-/// digest the proof witnessed; a tree whose metadata changed while it was hashed is refused,
-/// so the witness never names metadata the content proof did not cover.
+/// [`verify_tree`]'s content proof, bracketed by the tree's metadata digest. Returns what the
+/// proof witnessed; a tree whose metadata changed while it was hashed is refused, so the
+/// witness never names metadata the content proof did not cover.
 pub(super) fn verify_witnessed(
     candidate: &Candidate,
     pin: &TreePin,
-) -> Result<String, CandidateError> {
+) -> Result<super::tree_witness::Proven, CandidateError> {
     let before = tree_metadata(candidate, pin)?;
-    verify_tree(candidate, pin)?;
+    super::tree_witness::note_content_proof();
+    let artifact = verify_tree(candidate, pin)?;
     if tree_metadata(candidate, pin)? != before {
         return Err(CandidateError::new("artifact_digest_mismatch", pin.changed));
     }
-    Ok(before)
+    Ok(super::tree_witness::Proven {
+        metadata: before,
+        content: artifact.tree_sha256,
+    })
 }
 
 /// The refusal for a home prepared under another provider pin. A pin bump is not an

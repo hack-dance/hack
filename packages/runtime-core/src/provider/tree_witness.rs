@@ -10,26 +10,35 @@
 //! process it started: for each tree, a SHA-256 over the tree's *metadata* (see
 //! [`metadata_digest`]) observed immediately before and after the content proof. Later
 //! commands of the same running pool recompute only the metadata digest and accept the tree
-//! when it equals the witness recorded for that exact process. Any difference, a missing or
+//! when it, and the content anchor the proof used, equal the witness recorded for that exact
+//! process. Any difference, a missing or
 //! unreadable witness, or a witness for another process takes the full content proof again.
 //! A pool that is not running always takes the full proof.
 //!
-//! Threat model. The full proof catches any byte that differs from the verified tree. The
-//! metadata check catches every change made through the filesystem by an unprivileged
-//! process: writing or truncating a file changes its size or status-change time (ctime),
-//! which a user cannot set; replacing or renaming changes the inode; adding, removing or
-//! re-linking entries changes the entry list, link counts or types; `chmod`/`chown` change
-//! the mode, owner and ctime; a retargeted symlink changes its target. It gives up content
-//! changes that leave all of that metadata intact, which needs privileges this design
-//! already trusts (root writing the block device or changing the clock to forge a ctime)
-//! or silent media corruption. Status-change times come from the kernel's file timestamp
-//! clock, which can be coarse (a few milliseconds on Linux): a rewrite in the same tick as
-//! the previous legitimate write of that file could keep its ctime. Prepared trees are
-//! written at preparation, long before a boot witnesses them, so any later tampering lands on
-//! a later tick. That is acceptable only while the verified boot is still the
-//! running one: its provider and guest were started from the proven bytes, the witness is
-//! bound to that provider's PID, start time, executable and user, and the next boot proves
-//! the trees by content again. It is not a substitute for the content proof before a boot.
+//! Threat model. Both proofs defend against drift: accidental damage, partial or interrupted
+//! writers, cleanup or backup tools, and changes made without knowledge of this scheme. Neither
+//! defends against a same-user adversary who knows it: the content proof's anchors (the
+//! preparation records' `tree_sha256` and the receipt's rootfs pin) are themselves writable by
+//! the same user, and so is this witness. Within that scope:
+//!
+//! - The content proof catches any byte that differs from the proven tree.
+//! - The metadata check catches ordinary filesystem changes: `write`/`truncate` change the size
+//!   or the status-change time (ctime), which user space cannot set directly; a replace or
+//!   rename changes the inode; added, removed or re-linked entries change the entry list or
+//!   link counts; `chmod`/`chown` change mode, owner and ctime; a retargeted symlink changes
+//!   its target; a rewritten anchor no longer matches the content digest the witness names.
+//! - It gives up content changes that keep all of that metadata: writing the block device or
+//!   moving the clock (root), silent media corruption, stores through a shared writable mapping
+//!   that the kernel has not yet reflected in ctime, a filesystem that keeps coarse or no
+//!   ctime (FAT, some network filesystems), and a rewrite within the same kernel timestamp
+//!   tick (milliseconds on Linux) as the file's previous write. Prepared trees are written at
+//!   preparation, long before a boot witnesses them, and candidate homes live on the local
+//!   system volume (APFS on macOS, nanosecond ctime).
+//!
+//! That is acceptable only while the proven boot is still the running one: its provider and
+//! guest were started from the proven bytes, the witness is bound to that provider's PID,
+//! start time, executable and user, and the next boot proves the trees by content again. It is
+//! not a substitute for the content proof before a boot.
 use super::{identity::ProcessIdentity, state};
 use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};
@@ -38,6 +47,23 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+thread_local! {
+    /// Content proofs this thread ran, so tests can tell the cheap path from a proof.
+    static CONTENT_PROOFS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one content proof (tests only).
+pub(super) fn note_content_proof() {
+    #[cfg(test)]
+    CONTENT_PROOFS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(super) fn content_proofs() -> usize {
+    CONTENT_PROOFS.with(std::cell::Cell::get)
+}
 
 /// Names of the witnessed trees.
 pub(super) const SMOLVM: &str = "smolvm";
@@ -49,12 +75,23 @@ const VERSION: u32 = 1;
 /// Bounds a walk so a foreign tree cannot make the cheap check unbounded.
 const MAX_ENTRIES: usize = 200_000;
 
+/// One tree as a content proof saw it: its metadata digest, taken around the proof, and the
+/// content digest (the tree's anchor: the preparation record's `tree_sha256`, or the pool's
+/// rootfs pin) it was proven against. A witness is accepted only while both still hold, so
+/// rewriting the anchor sends the tree back to a content proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Proven {
+    pub(super) metadata: String,
+    pub(super) content: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Witness {
     version: u32,
     process: ProcessIdentity,
-    trees: BTreeMap<String, String>,
+    trees: BTreeMap<String, Proven>,
 }
 
 fn path(candidate: &Candidate) -> PathBuf {
@@ -62,14 +99,16 @@ fn path(candidate: &Candidate) -> PathBuf {
 }
 
 fn invalid(message: &'static str) -> CandidateError {
-    CandidateError::new("artifact_digest_mismatch", message)
+    CandidateError::new("artifact_invalid", message)
 }
 
 /// SHA-256 over the metadata of every entry under `root`, in name order: relative path,
 /// type, permission bits, owner, device, inode and link count; for files also size,
 /// modification and status-change times; for symlinks the target. Directory times are left
 /// out, so creating or removing an excluded entry (the provider's readiness `marker` at the
-/// top level) does not change the digest. File contents are never read.
+/// top level) does not change the digest. A present marker must pass the checks the content
+/// proof applies (`artifact::rootfs_digest`): a small, singly linked regular file owned by
+/// this user. File contents are never read.
 pub(super) fn metadata_digest(root: &Path, marker: Option<&str>) -> Result<String, CandidateError> {
     fn visit(
         base: &Path,
@@ -94,6 +133,14 @@ pub(super) fn metadata_digest(root: &Path, marker: Option<&str>) -> Result<Strin
                 .to_str()
                 .ok_or_else(|| invalid("Non-UTF8 prepared tree path."))?;
             if marker == Some(text) {
+                let m = fs::symlink_metadata(&path).map_err(state::io)?;
+                if !m.is_file()
+                    || m.nlink() != 1
+                    || m.len() > 1024
+                    || m.uid() != unsafe { libc::geteuid() }
+                {
+                    return Err(invalid("Unsafe readiness marker."));
+                }
                 continue;
             }
             let m = fs::symlink_metadata(&path).map_err(state::io)?;
@@ -135,36 +182,55 @@ pub(super) fn metadata_digest(root: &Path, marker: Option<&str>) -> Result<Strin
     Ok(format!("{:x}", hash.finalize()))
 }
 
-/// The digest witnessed for `tree` by the boot of exactly `process`, if one was recorded.
+/// What the boot of exactly `process` witnessed for `tree`, if anything was recorded.
 /// A missing, unreadable or foreign witness is no witness: the caller proves by content.
 pub(super) fn witnessed(
     candidate: &Candidate,
     process: &ProcessIdentity,
     tree: &str,
-) -> Option<String> {
+) -> Option<Proven> {
     let witness: Witness = state::read(&path(candidate)).ok()?;
     (witness.version == VERSION && witness.process == *process)
         .then(|| witness.trees.get(tree).cloned())
         .flatten()
 }
 
-/// Whether `current` is the digest the boot of `process` witnessed for `tree`.
+/// Whether the boot of `process` witnessed `tree` with exactly this metadata digest, proven
+/// against exactly this content anchor.
 pub(super) fn matches(
     candidate: &Candidate,
     process: &ProcessIdentity,
     tree: &str,
-    current: &str,
+    metadata: &str,
+    content: &str,
 ) -> bool {
-    witnessed(candidate, process, tree).as_deref() == Some(current)
+    witnessed(candidate, process, tree)
+        .is_some_and(|proven| proven.metadata == metadata && proven.content == content)
 }
 
-/// Record the digests a content proof just witnessed for the running `process`. Callers hold
-/// the pool's lifecycle lock and call this only after every tree in `trees` was proven by
-/// content for this process's boot, or proven again while it runs.
+/// After a boot under `lease`: record what its content proofs witnessed, only when the boot
+/// succeeded and recorded its provider. Best effort: without a witness the next command
+/// proves the trees by content.
+pub(super) fn record_boot(
+    candidate: &Candidate,
+    lease: &state::Lock,
+    booted: bool,
+    process: Option<&ProcessIdentity>,
+    trees: BTreeMap<String, Proven>,
+) {
+    if booted && let Some(process) = process {
+        let _ = record(candidate, lease, process, trees);
+    }
+}
+
+/// Record what content proofs just witnessed for the running `process`, under the pool's
+/// lifecycle `lease`. Callers record only trees proven by content for this process's boot,
+/// or proven again while it runs.
 pub(super) fn record(
     candidate: &Candidate,
+    _lease: &state::Lock,
     process: &ProcessIdentity,
-    trees: BTreeMap<String, String>,
+    trees: BTreeMap<String, Proven>,
 ) -> Result<(), CandidateError> {
     let target = path(candidate);
     match fs::symlink_metadata(&target) {
@@ -289,37 +355,91 @@ mod tests {
         assert_ne!(tree.digest(), before);
     }
 
-    #[test]
-    fn a_witness_counts_only_for_the_exact_process_that_recorded_it() {
-        let home = Tree::new("witness");
+    fn proven(metadata: char, content: char) -> Proven {
+        Proven {
+            metadata: metadata.to_string().repeat(64),
+            content: content.to_string().repeat(64),
+        }
+    }
+
+    fn home(name: &str) -> (Tree, Candidate, state::Lock) {
+        let home = Tree::new(name);
         let candidate = Candidate::discover(&home.0).unwrap();
         state::private_directory(&candidate.state_root.join("run/smolvm")).unwrap();
+        let lease = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+        (home, candidate, lease)
+    }
+
+    #[test]
+    fn a_witness_counts_only_for_the_exact_process_and_content_anchor_that_recorded_it() {
+        let (_home, candidate, lease) = home("witness");
         let booted = process(41);
+        let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
         assert!(witnessed(&candidate, &booted, SMOLVM).is_none());
         record(
             &candidate,
+            &lease,
             &booted,
-            BTreeMap::from([(SMOLVM.to_owned(), "a".repeat(64))]),
+            BTreeMap::from([(SMOLVM.to_owned(), proven('a', 'c'))]),
         )
         .unwrap();
-        assert!(matches(&candidate, &booted, SMOLVM, &"a".repeat(64)));
-        assert!(!matches(&candidate, &booted, SMOLVM, &"b".repeat(64)));
-        assert!(!matches(&candidate, &booted, ENGINE, &"a".repeat(64)));
-        assert!(!matches(&candidate, &process(42), SMOLVM, &"a".repeat(64)));
+        assert!(matches(&candidate, &booted, SMOLVM, &a, &c));
+        // Other metadata, another content anchor, another tree or another process: no match.
+        assert!(!matches(&candidate, &booted, SMOLVM, &b, &c));
+        assert!(!matches(&candidate, &booted, SMOLVM, &a, &b));
+        assert!(!matches(&candidate, &booted, ENGINE, &a, &c));
+        assert!(!matches(&candidate, &process(42), SMOLVM, &a, &c));
         let mut restarted = booted.clone();
         restarted.start_micros += 1;
-        assert!(!matches(&candidate, &restarted, SMOLVM, &"a".repeat(64)));
+        assert!(!matches(&candidate, &restarted, SMOLVM, &a, &c));
         // A rewrite replaces the witness; a damaged one is no witness.
         record(
             &candidate,
+            &lease,
             &booted,
-            BTreeMap::from([(SMOLVM.to_owned(), "c".repeat(64))]),
+            BTreeMap::from([(SMOLVM.to_owned(), proven('b', 'c'))]),
         )
         .unwrap();
-        assert!(matches(&candidate, &booted, SMOLVM, &"c".repeat(64)));
+        assert!(matches(&candidate, &booted, SMOLVM, &b, &c));
         fs::remove_file(path(&candidate)).unwrap();
         fs::write(path(&candidate), b"{").unwrap();
         fs::set_permissions(path(&candidate), fs::Permissions::from_mode(0o600)).unwrap();
         assert!(witnessed(&candidate, &booted, SMOLVM).is_none());
+    }
+
+    #[test]
+    fn only_a_successful_boot_with_a_recorded_provider_records_a_witness() {
+        let (_home, candidate, lease) = home("boot");
+        let trees = || BTreeMap::from([(SMOLVM.to_owned(), proven('a', 'c'))]);
+        let booted = process(41);
+        record_boot(&candidate, &lease, false, Some(&booted), trees());
+        assert!(witnessed(&candidate, &booted, SMOLVM).is_none());
+        record_boot(&candidate, &lease, true, None, trees());
+        assert!(!path(&candidate).exists());
+        record_boot(&candidate, &lease, true, Some(&booted), trees());
+        assert_eq!(
+            witnessed(&candidate, &booted, SMOLVM),
+            Some(proven('a', 'c'))
+        );
+        // A later failed boot leaves the earlier witness, which names another process.
+        record_boot(&candidate, &lease, false, Some(&process(43)), trees());
+        assert!(witnessed(&candidate, &process(43), SMOLVM).is_none());
+    }
+
+    #[test]
+    fn an_unsafe_readiness_marker_is_refused_as_the_content_proof_refuses_it() {
+        let tree = Tree::new("unsafe-marker");
+        let marker = tree.0.join(".smolvm-ready.fixture");
+        symlink("smolvm-bin", &marker).unwrap();
+        let refused = metadata_digest(&tree.0, Some(".smolvm-ready.fixture")).unwrap_err();
+        assert_eq!(refused.code, "artifact_invalid");
+        fs::remove_file(&marker).unwrap();
+        fs::hard_link(tree.0.join("smolvm-bin"), &marker).unwrap();
+        assert!(metadata_digest(&tree.0, Some(".smolvm-ready.fixture")).is_err());
+        fs::remove_file(&marker).unwrap();
+        fs::write(&marker, vec![b'x'; 2048]).unwrap();
+        assert!(metadata_digest(&tree.0, Some(".smolvm-ready.fixture")).is_err());
+        fs::write(&marker, b"ready").unwrap();
+        metadata_digest(&tree.0, Some(".smolvm-ready.fixture")).unwrap();
     }
 }

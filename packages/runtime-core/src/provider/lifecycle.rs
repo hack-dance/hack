@@ -1207,6 +1207,13 @@ fn start_pool(
     }
     let requested = bridge_request.initial();
     let dependencies = dependency_request.initial();
+    let request = running_start::StartRequest {
+        bridges: bridge_request,
+        network: network.as_ref(),
+        dependencies: dependency_request,
+        project_share: project_share.as_ref(),
+        amd64_emulation: start.amd64_emulation,
+    };
     super::network_update::require_complete(candidate)?;
     super::share_update::require_complete(candidate)?;
     if let Some(share) = &project_share {
@@ -1230,11 +1237,7 @@ fn start_pool(
             .map_err(io)?
         {
             let owner = Owner::load(candidate)?;
-            check_amd64_emulation_request(&owner, start.amd64_emulation)?;
-            super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
-            bridge_request.check(owner.application_bridge)?;
-            super::network_intent::check_request(&owner.network, network.as_ref())?;
-            dependency_request.check(owner.dependency_sockets)?;
+            request.check(&owner)?;
             (
                 owner.application_bridge,
                 owner.network.clone(),
@@ -1245,7 +1248,7 @@ fn start_pool(
         } else {
             (
                 requested,
-                network.unwrap_or_default(),
+                network.clone().unwrap_or_default(),
                 dependencies,
                 project_share.clone(),
                 Vec::new(),
@@ -1273,7 +1276,7 @@ fn start_pool(
     // A pool that is already running and owned by this home allocates nothing, so it takes
     // the named fast path instead of the admission windows below (`running_start`).
     if let Some(running) = running_start::select(candidate, profile)? {
-        return running_start::resume(candidate, running, || {
+        return running_start::resume(candidate, running, &request, || {
             #[cfg(target_os = "macos")]
             if let Some(guard) = &retained_guard {
                 guard.verify(candidate)?;
@@ -1394,6 +1397,9 @@ fn start_pool(
     }
     super::dependency_socket::verify(candidate, &owner)?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
+    // A pool running at this point became running after `running_start::select` (a concurrent
+    // start won the lease first); every other running pool took the fast path. Keep the full
+    // re-verification for that race.
     if owner.phase == "running" {
         if let Some(selected) = settled.selected() {
             selected.reverify(candidate)?;
@@ -1440,9 +1446,13 @@ fn start_pool(
         &mut restart,
         &lock,
     )?;
+    let rootfs_metadata = prepare_rootfs(candidate, &mut owner)?;
     proven_trees.insert(
         super::tree_witness::ROOTFS.to_owned(),
-        prepare_rootfs(candidate, &mut owner)?,
+        super::tree_witness::Proven {
+            metadata: rootfs_metadata,
+            content: owner.rootfs_digest.clone().unwrap_or_default(),
+        },
     );
     if !owner.created {
         // A reserve-qualified start never reaches `machine create`.
@@ -1560,12 +1570,13 @@ fn start_pool(
     owner.process = Some(observed);
     owner.save(candidate)?;
     let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
-    if result.is_ok()
-        && let Some(process) = &owner.process
-    {
-        // Best effort: without a witness the next command proves the trees by content.
-        let _ = super::tree_witness::record(candidate, process, proven_trees);
-    }
+    super::tree_witness::record_boot(
+        candidate,
+        &lock,
+        result.is_ok(),
+        owner.process.as_ref(),
+        proven_trees,
+    );
     if let Err(error) = &result {
         // Disk rejection must not keep an allocation alive. Process authority is
         // independent of disk adoption; this is an unclean stop, never reconciliation.
@@ -1968,6 +1979,7 @@ pub(super) fn prove_rootfs(
         )
     };
     let before = super::tree_witness::metadata_digest(destination, Some(marker))?;
+    super::tree_witness::note_content_proof();
     if Some(artifact::rootfs_digest(destination, Some(marker))?.as_str()) != expected {
         return Err(changed());
     }
@@ -2009,8 +2021,9 @@ pub(super) fn verify_retained_rootfs(
     let destination = root(candidate).join("rootfs");
     reject_aliased_state(&destination)?;
     let marker = rootfs_marker(owner)?;
-    // A running pool whose boot witnessed this rootfs by content accepts an unchanged
-    // metadata digest (`tree_witness`); a stopped pool, or any difference, proves by content.
+    // A running pool whose boot witnessed this rootfs by content against this pin accepts an
+    // unchanged metadata digest (`tree_witness`); a stopped pool, or any difference, proves by
+    // content. Read-only: nothing is recorded here.
     if owner.phase == "running"
         && let Some(process) = &owner.process
         && super::tree_witness::matches(
@@ -2018,10 +2031,12 @@ pub(super) fn verify_retained_rootfs(
             process,
             super::tree_witness::ROOTFS,
             &super::tree_witness::metadata_digest(&destination, Some(&marker))?,
+            expected,
         )
     {
         return Ok(());
     }
+    super::tree_witness::note_content_proof();
     if artifact::rootfs_digest(&destination, Some(&marker))? != expected {
         return Err(CandidateError::new(
             "artifact_digest_mismatch",

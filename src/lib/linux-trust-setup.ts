@@ -202,6 +202,15 @@ export async function findNssDatabases(
     join(host.configHome, "mozilla", "firefox"),
     join(home, "snap", "firefox", "common", ".mozilla", "firefox"),
     join(home, ".var", "app", "org.mozilla.firefox", ".mozilla", "firefox"),
+    join(
+      home,
+      ".var",
+      "app",
+      "org.mozilla.firefox",
+      "config",
+      "mozilla",
+      "firefox"
+    ),
   ];
   for (const root of firefoxRoots) {
     for (const name of [...(await host.listDir(root))].sort()) {

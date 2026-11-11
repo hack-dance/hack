@@ -27,7 +27,7 @@ updates three places:
    every Firefox profile with a `cert9.db` under `~/.mozilla/firefox/`,
    `$XDG_CONFIG_HOME/mozilla/firefox/` (default `~/.config/mozilla/firefox/`),
    `~/snap/firefox/common/.mozilla/firefox/` or
-   `~/.var/app/org.mozilla.firefox/.mozilla/firefox/`. An older CA under the same
+   `~/.var/app/org.mozilla.firefox/{.mozilla,config/mozilla}/firefox/`. An older CA under the same
    nickname is replaced. Restart the browser afterwards.
    Without `certutil`, Hack says so and names the package (`libnss3-tools`,
    `nss-tools`, `mozilla-nss-tools` or `nss`).

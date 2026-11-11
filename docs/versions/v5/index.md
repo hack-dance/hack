@@ -40,8 +40,8 @@ On Linux, follow [Linux setup](../guides/linux-setup.md) for DNS and
 [Recipes](recipes/overview.md) has complete Compose projects for
 [common app configurations](recipes/config-examples.md),
 [environment overlays](recipes/environments.md), dependencies, migrations,
-tunnels and cleanup. These recipes use the pinned next.13 command and config
-surface; their footers identify the newer example source revision.
+tunnels and cleanup. Their footers identify the example source revision, and
+each page distinguishes the compatibility audit from its original execution notes.
 
 ## Native backend (beta)
 

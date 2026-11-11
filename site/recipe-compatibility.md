@@ -53,5 +53,9 @@ stand-ins from tools that were not exercised against live accounts.
 
 The allowlist remains explicit. `docs:prepare` renders existing Mermaid blocks
 through the pinned Pele renderer. `docs:smoke` checks every published route and
-the light/dark SVG responses. Snapshot hashes, public-link boundaries, retired
+the light/dark SVG responses. It also checks rendered links and anchors on the
+recipes and their index, environment and configuration entry points. Environment
+recipe links are appended during site preparation, keeping the hashed release
+snapshot and its provenance instead of a separate editorial copy.
+Snapshot hashes, public-link boundaries, retired
 surface checks and the next.13 installer pin remain enforced.

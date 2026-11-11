@@ -4337,10 +4337,6 @@
         "sourceRevision": "943503b56081f9934fa98c4b80b7eea2a1a41822",
         "sourceLabel": "Recipe source (next.13 compatible)",
         "sourceFile": "docs/recipes/common-pitfalls.md"
-      },
-      {
-        "slug": "env",
-        "title": "Environment and secrets"
       }
     ]
   }

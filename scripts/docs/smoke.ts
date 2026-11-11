@@ -189,11 +189,19 @@ console.log(
 // Recipe pages contain copy-paste examples, so check their rendered links too:
 // a multiline Markdown link can escape the preparation step's line-based rewrite.
 const recipeLinks = new Map<string, string>();
-for (const { slug } of versions.v5.editorial) {
-  if (!slug.startsWith("recipes/")) {
+const recipeEntryPoints = new Set([
+  "index",
+  "env",
+  "reference/configuration-fields",
+]);
+const v5Slugs = new Set(
+  [...versions.v5.entries, ...versions.v5.editorial].map((page) => page.slug)
+);
+for (const slug of v5Slugs) {
+  if (!(slug.startsWith("recipes/") || recipeEntryPoints.has(slug))) {
     continue;
   }
-  const route = `/docs/v5/${slug}`;
+  const route = `/docs/v5${slug === "index" ? "" : `/${slug}`}`;
   const html = await read(route);
   if (html.includes("language-mermaid")) {
     throw new Error(`Unrendered Mermaid source: ${route}`);

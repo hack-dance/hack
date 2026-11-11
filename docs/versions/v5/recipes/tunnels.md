@@ -1,7 +1,8 @@
 # Expose a local service through a tunnel
 
-These Compose recipes use commands and configuration available in `v5.0.0-next.13`.
-The linked example projects come from the recipe source revision below.
+The commands and configuration on this page were audited against `v5.0.0-next.13`.
+The execution notes below come from the newer recipe source revision; the examples
+were not rerun with the pinned binary.
 
 Use this when something outside your machine must reach a local service: a
 webhook sender, a phone, or a teammate. The tunnel runs as a Hack lifecycle
@@ -106,7 +107,8 @@ that you register in advance, so they need a hostname that stays the same:
   tunnel, because it needs an account.
 - **A local OAuth alias.** When the provider only needs a callback that your
   browser can reach (not a public one), Hack's `.hack.gy` alias may be enough.
-  See `oauth` in [Initialize a project](../guides/init-project.md).
+  See `--oauth` and `--oauth-tld` under `hack init` in the
+  [Command reference](../../reference/cli.md#hack-init).
 
 Point your app's public URL setting (for example `PUBLIC_URL`) at the stable
 hostname, in the overlay you use for tunnel work. See

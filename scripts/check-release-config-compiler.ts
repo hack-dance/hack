@@ -118,7 +118,7 @@ try {
     });
   }
   process.stdout.write(
-    `Release compiler acceptance (${process.platform}/${process.arch}): independent checksums, generated schemas, actual normal/slim download installs, installed and relocated validate/plan, network denial, missing/mismatch refusal, no PATH fallback and legacy config passed\n`
+    `Release compiler acceptance (${process.platform}/${process.arch}): independent checksums, generated schemas, actual normal/slim download installs, installed version, installed and relocated validate/plan, network denial, missing/mismatch refusal, no PATH fallback and legacy config passed\n`
   );
 } finally {
   await rm(directory, { recursive: true, force: true });
@@ -237,6 +237,16 @@ async function checkInstallation(opts: {
   await Bun.write(join(legacy, ".hack/hack.config.json"), legacyConfig);
   await Bun.write(join(legacy, ".hack/docker-compose.yml"), "services: {}\n");
   await validatedAndPlanned({ binary: join(bin, "hack"), project, env });
+  // The archive name, the release tag and the compiled CLI must agree (HACK-1978):
+  // an archive labeled with one version that installs another is a broken release.
+  const reported = await run({
+    command: [join(bin, "hack"), "--version"],
+    cwd: project,
+    env,
+    offline: true,
+  });
+  require(reported.stdout ===
+    `hack v${opts.version}\n`, `installed hack --version reports the archive version ${opts.version}, got ${JSON.stringify(reported.stdout.slice(0, 80))}`);
   for (const [from, to] of [
     [join(bin, executable), join(relocated, "hack")],
     [

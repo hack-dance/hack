@@ -695,6 +695,15 @@ compiled executables with no Bun/Rust/VM tools on the CLI's PATH. macOS uses a n
 sandbox; Linux requires noninteractive sudo for an isolated network namespace and
 drops back to the invoking user before running the fixture. A live loopback canary
 checks network denial. Validation, metadata planning, missing/mismatch refusal,
-ignored PATH compilers and legacy config reads are separate assertions. CI runs
-this gate on all four release host architectures. Hosted CI and published artifact
+ignored PATH compilers and legacy config reads are separate assertions. It also
+requires the installed `hack --version` to report the version in the archive name.
+
+CI runs this gate on all four release host architectures: the
+`Config compiler (<host>)` jobs of every push to `next` and `main` build the stable
+archive with `bun run build:release --skip-tests` and accept it on Linux x64,
+Linux arm64, macOS arm64 and macOS Intel. Those four jobs on the exact commit are
+the stable build smoke; no release, tag or upload is involved, and their token is
+read-only. `release.yml` runs the same acceptance on its own build hosts before it
+uploads an archive. `tests/release-host-smoke.test.ts` fails when the release build
+hosts, the pins or these commands stop matching CI. Hosted CI and published artifact
 results still need their own evidence; unit tests alone do not establish them.

@@ -27,6 +27,7 @@ import {
 } from "../src/daemon/status.ts";
 import {
   assessExecutableDurability,
+  checkSystemdUnitDropIns,
   ensureOwnerWritableOnlyDirectories,
   extractSystemdExecProgram,
   installSystemdUnit,
@@ -1463,4 +1464,51 @@ test("the unit directory check refuses a directory owned by another user", async
   await writeFile(file, "");
   const notDir = await ensureOwnerWritableOnlyDirectories({ dirs: [file] });
   expect(notDir.ok).toBe(false);
+});
+
+test("drop-ins another account could have written are refused before use", async () => {
+  // Codex security review: a pre-created hackd.service.d/override.conf
+  // would replace ExecStart and run as this user.
+  const userDir = join(root, "config", "systemd", "user");
+  const dropInDir = join(userDir, "hackd.service.d");
+  await mkdir(dropInDir, { recursive: true });
+  const override = join(dropInDir, "override.conf");
+  await writeFile(override, "[Service]\nExecStart=\nExecStart=/bin/true\n");
+  const own = process.getuid?.() ?? 0;
+  // Owned by another user (modelled with the uid the check compares to).
+  const foreign = await checkSystemdUnitDropIns({ unitPath, uid: own + 1 });
+  expect(foreign).toContain("owned by another user");
+  // This user's drop-in that others could write: write access removed.
+  await chmod(override, 0o666);
+  expect(await checkSystemdUnitDropIns({ unitPath })).toBeNull();
+  expect((await stat(override)).mode & 0o777).toBe(0o644);
+  // The generic service.d is checked too.
+  const generic = join(userDir, "service.d");
+  await mkdir(generic);
+  await writeFile(join(generic, "x.conf"), "");
+  expect(await checkSystemdUnitDropIns({ unitPath, uid: own + 1 })).toContain(
+    "owned by another user"
+  );
+});
+
+test("install and start refuse a drop-in they cannot vouch for", async () => {
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  // Not a regular file: refused like a foreign one.
+  await mkdir(
+    join(root, "config", "systemd", "user", "hackd.service.d", "odd"),
+    {
+      recursive: true,
+    }
+  );
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+  const install = await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+  });
+  expect(install.ok).toBe(false);
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
 });

@@ -1,4 +1,4 @@
-import { chmod, mkdir, realpath, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readdir, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 
@@ -906,6 +906,10 @@ export async function installSystemdUnit(opts: {
   if (!secured.ok) {
     return { ok: false, error: secured.error };
   }
+  const dropIns = await checkSystemdUnitDropIns({ unitPath: opts.unitPath });
+  if (dropIns !== null) {
+    return { ok: false, error: dropIns };
+  }
   const { changed } = await writeTextFileAtomicIfChanged(
     opts.unitPath,
     opts.unitText,
@@ -989,20 +993,37 @@ async function checkOwnerWritableOnlyDirectory(opts: {
   readonly dir: string;
   readonly uid: number;
 }): Promise<string | null> {
+  return await checkOwnerControlledPath({
+    path: opts.dir,
+    uid: opts.uid,
+    directory: true,
+  });
+}
+
+/**
+ * Null when `path` (resolved) is owned by `uid` and not writable by group or
+ * others; group/other write is removed when this user owns it. `directory`
+ * says which kind it must be.
+ */
+async function checkOwnerControlledPath(opts: {
+  readonly path: string;
+  readonly uid: number;
+  readonly directory: boolean;
+}): Promise<string | null> {
   let real: string;
   let info: Awaited<ReturnType<typeof stat>>;
   try {
-    real = await realpath(opts.dir);
+    real = await realpath(opts.path);
     info = await stat(real);
   } catch (error: unknown) {
-    return `Could not inspect ${opts.dir}: ${errorMessage(error)}`;
+    return `Could not inspect ${opts.path}: ${errorMessage(error)}`;
   }
-  const shown = real === opts.dir ? opts.dir : `${opts.dir} (${real})`;
-  if (!info.isDirectory()) {
-    return `${shown} is not a directory`;
+  const shown = real === opts.path ? opts.path : `${opts.path} (${real})`;
+  if (opts.directory ? !info.isDirectory() : !info.isFile()) {
+    return `${shown} is not a ${opts.directory ? "directory" : "regular file"}`;
   }
   if (opts.uid >= 0 && info.uid !== opts.uid) {
-    return `${shown} is owned by another user (uid ${info.uid}); the unit is not written there`;
+    return `${shown} is owned by another user (uid ${info.uid})`;
   }
   if ((info.mode & 0o022) === 0) {
     return null;
@@ -1016,6 +1037,60 @@ async function checkOwnerWritableOnlyDirectory(opts: {
   return (after & 0o022) === 0
     ? null
     : `${shown} is writable by other users (mode ${after.toString(8)}); run: chmod go-w ${real}`;
+}
+
+/**
+ * systemd applies drop-ins from `hackd.service.d/` and the `service.d/`
+ * that covers every user service. One that another account wrote (for
+ * example while the directory was group-writable) would replace
+ * `ExecStart` and run as this user, so before the unit is written,
+ * reloaded or started, each drop-in directory that exists and every entry
+ * in it must be this user's and not writable by others (HACK-2052).
+ * Returns null, or the reason it refuses.
+ */
+export async function checkSystemdUnitDropIns(opts: {
+  readonly unitPath: string;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const unitDir = dirname(opts.unitPath);
+  for (const name of [`${SYSTEMD_UNIT_NAME}.d`, "service.d"]) {
+    const dir = resolve(unitDir, name);
+    if (!(await pathExists(dir))) {
+      continue;
+    }
+    const error =
+      (await checkOwnerWritableOnlyDirectory({ dir, uid })) ??
+      (await checkDropInEntries({ dir, uid }));
+    if (error !== null) {
+      return `Not using ${SYSTEMD_UNIT_NAME}: its drop-in ${error}. Review and remove it, then run: hack daemon install`;
+    }
+  }
+  return null;
+}
+
+async function checkDropInEntries(opts: {
+  readonly dir: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  let entries: string[];
+  try {
+    entries = await readdir(opts.dir);
+  } catch (error: unknown) {
+    return `directory ${opts.dir} could not be read: ${errorMessage(error)}`;
+  }
+  for (const entry of entries) {
+    const error = await checkOwnerControlledPath({
+      path: resolve(opts.dir, entry),
+      uid: opts.uid,
+      directory: false,
+    });
+    if (error !== null) {
+      return error;
+    }
+  }
+  return null;
 }
 
 function errorMessage(error: unknown): string {

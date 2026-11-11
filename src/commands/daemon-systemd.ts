@@ -14,6 +14,7 @@ import {
 import { readDaemonStatus } from "../daemon/status.ts";
 import {
   assessExecutableDurability,
+  checkSystemdUnitDropIns,
   defaultSystemdDeps,
   describeSystemdUnavailable,
   installSystemdUnit,
@@ -150,6 +151,11 @@ export async function startViaSystemdIfInstalled(
       message: `${SYSTEMD_UNIT_NAME} is installed but ${describeSystemdUnavailable(status.availability)}; starting hackd directly`,
     });
     return null;
+  }
+  const dropIns = await checkSystemdUnitDropIns({ unitPath });
+  if (dropIns !== null) {
+    logger.error({ message: dropIns });
+    return 1;
   }
   const prepared = await prepareSystemdUnitForStart({
     status,

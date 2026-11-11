@@ -766,7 +766,6 @@ export function endedPayload(opts: {
   };
 }
 
-/** Redaction values from the launcher's private input (a JSON array). */
 /**
  * The launcher's private input: `{ root, redactValues }`. Null when it is
  * not complete, valid JSON of that shape (for example a timed-out write).

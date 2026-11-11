@@ -137,6 +137,28 @@ hack init [options]
 | `--version, -v` | Show version |
 
 
+## `hack dev`
+
+Run the project's side-by-side development build
+
+### Usage
+
+```bash
+hack dev [options]
+```
+
+Runs the command array in .hack/dev.json from its repository root. The runner owns isolation, reload and cleanup. Ctrl-C stops the foreground runner.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
 ## `hack up [services...]`
 
 Start project services (docker compose up)
@@ -2852,10 +2874,10 @@ hack the planet [options]
 
 These commands are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.
 
-- `hack dispatch` — Beta: run branch-scoped jobs on remote nodes
-- `hack gateway` — Beta: manage the remote control plane entrypoint
-- `hack node` — Beta: manage remote execution nodes
-- `hack remote` — Beta: guided remote access and gateway helpers
+- `hack dispatch` — Unsupported: run branch-scoped jobs on remote nodes
+- `hack gateway` — Unsupported: manage the remote control plane entrypoint
+- `hack node` — Unsupported: manage remote execution nodes
+- `hack remote` — Unsupported: guided remote access and gateway helpers
 
 ## Internal
 

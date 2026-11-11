@@ -401,54 +401,70 @@ test("a ready graph of completed one-shots is a successful no-op", async () => {
   });
 });
 
-test("explicit env/profile flags must match the retained selection, including legacy unknown selections", async () => {
-  const {
-    effectiveEnvName: _env,
-    profiles: _profiles,
-    aws: _aws,
-    ...legacy
-  } = run;
-  const cases = [
-    { record: run, args: ["--profile", "worker"], accepted: false },
-    {
-      record: { ...run, effectiveEnvName: "qa" },
-      args: ["--env", "staging"],
-      accepted: false,
-    },
-    { record: legacy, args: ["--profile", "worker"], accepted: false },
-    { record: legacy, args: ["--env", "staging"], accepted: false },
-    {
-      record: {
-        ...run,
-        profiles: ["api", "worker"],
-        effectiveEnvName: "staging",
+test(
+  "explicit env/profile flags must match the retained selection, including legacy unknown selections",
+  async () => {
+    const {
+      effectiveEnvName: _env,
+      profiles: _profiles,
+      aws: _aws,
+      ...legacy
+    } = run;
+    const cases = [
+      ...["base", "default", "BASE", "", "DEFAULT"].map((env) => ({
+        record: run,
+        args: ["--env", env],
+        accepted: true,
+      })),
+      {
+        record: { ...run, effectiveEnvName: "staging" },
+        args: ["--env", " staging "],
+        accepted: true,
       },
-      args: ["--env", "staging", "--profile", "worker,api"],
-      accepted: true,
-    },
-  ];
-  for (const item of cases) {
-    const f = await fixture({
-      phase: "ready-observed",
-      services: { web: { state: "running" } },
-      owner: LIVE_OWNER,
-      record: item.record,
-    });
-    const result = await up(f, ["-d", "--json", ...item.args]);
-    expect(result.code).toBe(item.accepted ? 0 : 1);
-    if (item.accepted) {
-      expect(JSON.parse(result.stdout).data.alreadyRunning).toBe(true);
-    } else {
-      expect(result.output).toContain(
-        "different or unknown environment/profile selection"
-      );
-      expect(result.output).not.toContain('"alreadyRunning": true');
+      { record: run, args: ["--profile", "worker"], accepted: false },
+      {
+        record: { ...run, effectiveEnvName: "qa" },
+        args: ["--env", "staging"],
+        accepted: false,
+      },
+      { record: legacy, args: ["--profile", "worker"], accepted: false },
+      { record: legacy, args: ["--env", "staging"], accepted: false },
+      {
+        record: {
+          ...run,
+          profiles: ["api", "worker"],
+          effectiveEnvName: "staging",
+        },
+        args: ["--env", "staging", "--profile", "worker,api"],
+        accepted: true,
+      },
+    ];
+    for (const item of cases) {
+      const f = await fixture({
+        phase: "ready-observed",
+        services: { web: { state: "running" } },
+        owner: LIVE_OWNER,
+        record: item.record,
+      });
+      const result = await up(f, ["-d", "--json", ...item.args], {
+        timeoutMs: 5000,
+      });
+      expect(result.code).toBe(item.accepted ? 0 : 1);
+      if (item.accepted) {
+        expect(JSON.parse(result.stdout).data.alreadyRunning).toBe(true);
+      } else {
+        expect(result.output).toContain(
+          "different or unknown environment/profile selection"
+        );
+        expect(result.output).not.toContain('"alreadyRunning": true');
+      }
+      for (const call of await f.calls()) {
+        expect(["graph inspect", "graph owner-status"]).toContain(call);
+      }
     }
-    for (const call of await f.calls()) {
-      expect(["graph inspect", "graph owner-status"]).toContain(call);
-    }
-  }
-});
+  },
+  SPAWN_TIMEOUT_MS
+);
 
 test("project and branch selection are preserved in the one working recovery command", async () => {
   const f = await fixture({

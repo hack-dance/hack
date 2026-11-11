@@ -147,7 +147,7 @@ export type NativeUpSelection = {
   readonly path?: string;
   readonly project?: string;
   readonly branch?: string;
-  readonly env?: string;
+  readonly env?: string | null;
   readonly profiles?: readonly string[];
 };
 

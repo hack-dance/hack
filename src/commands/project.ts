@@ -6344,7 +6344,7 @@ async function handleUp({
         path: args.options.path,
         project: args.options.project,
         branch: args.options.branch,
-        env: args.options.env,
+        env: resolveRequestedEnvName({ envOption: args.options.env }),
         profiles:
           args.options.profile === undefined
             ? undefined

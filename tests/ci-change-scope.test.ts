@@ -10,6 +10,7 @@ import {
   planScope,
   pullRequestPaths,
   scopeOutputs,
+  touchesDocsSite,
 } from "../scripts/ci-change-scope.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
@@ -144,6 +145,44 @@ describe("change scope classification", () => {
     expect(scopeOutputs("docs").runtime_core).toBe(false);
   });
 
+  test("the docs site job follows its own inputs, whatever the scope", () => {
+    for (const [path, expected] of [
+      ["docs/guides/prereleases.md", true],
+      ["docs/versions/v5/install.md", true],
+      ["site/app/page.tsx", true],
+      ["scripts/docs/prepare.ts", true],
+      [".github/workflows/ci.yml", true],
+      // Root documents are not published by the site.
+      ["README.md", false],
+      ["scripts/docs-other.ts", false],
+      [".github/workflows/release.yml", false],
+      ["src/commands/project.ts", false],
+      ["docs", false],
+    ] as const) {
+      expect(touchesDocsSite(path), path).toBe(expected);
+    }
+    // Pushes and an unavailable diff are `full` and always build the site.
+    expect(scopeOutputs("full").docs_site).toBe(true);
+    expect(planScope([]).docs_site).toBe(true);
+    expect(planScope(["docs/a.md"])).toMatchObject({
+      scope: "docs",
+      docs_site: true,
+    });
+    expect(planScope(["README.md"])).toMatchObject({
+      scope: "docs",
+      docs_site: false,
+    });
+    expect(planScope(["src/a.ts", "site/app/page.tsx"])).toMatchObject({
+      scope: "typescript",
+      docs_site: true,
+    });
+    expect(
+      planScope(["packages/runtime-core/src/a.rs", "docs/a.md"])
+    ).toMatchObject({ test_focus: "docs,runtime-core", docs_site: true });
+    expect(planScope(["src/a.ts"]).docs_site).toBe(false);
+    expect(planScope(["packages/runtime-core/src/a.rs"]).docs_site).toBe(false);
+  });
+
   test("a runtime-core change with docs focuses on both sets of tests", () => {
     expect(planScope(["packages/runtime-core/src/a.rs"]).test_focus).toBe(
       "runtime-core"
@@ -261,6 +300,10 @@ describe("CI workflow wiring", () => {
         "${{ needs.changes.outputs.suite == 'true' }}"
       );
     }
+    expect(jobs["docs-site"]?.needs).toBe("changes");
+    expect(jobs["docs-site"]?.if).toBe(
+      "${{ needs.changes.outputs.docs_site == 'true' }}"
+    );
     // Jobs that do not depend on the scope keep running on every event.
     for (const name of ["state-models", "secret-scan"]) {
       expect(jobs[name]?.needs, name).toBeUndefined();

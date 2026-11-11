@@ -53,8 +53,8 @@ export function curateCliReference(
     const child = /^\| `hack ([^`]+)` \|/.exec(line)?.[1];
     if (
       options.version === "v5" &&
-      ((child !== undefined && agentCompatibilityCommands.has(child)) ||
-        line.startsWith("| `--with "))
+      child !== undefined &&
+      agentCompatibilityCommands.has(child)
     ) {
       continue;
     }
@@ -65,7 +65,7 @@ export function curateCliReference(
       result.push(
         options.version === "v5" &&
           line === "Install integrations for coding agents"
-          ? "Optional workspace setup; retiring agent exports are excluded from this selection"
+          ? "Retired automatic agent setup; the remaining subcommands are opt-in MCP and skill setup"
           : line
       );
     }

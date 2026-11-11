@@ -16,6 +16,9 @@
  * | `typescript`   | no path is Rust, toolchain or workflow            |
  * | `code`         | anything else                                     |
  *
+ * Separately from the scope, `docs_site` is true when any path feeds the
+ * documentation site (`docs/`, `site/`, `scripts/docs/` or this workflow).
+ *
  * The outputs written to `$GITHUB_OUTPUT` are the job switches in
  * `.github/workflows/ci.yml`. Only `full` runs every job and every config
  * compiler host; pushes to `next`/`main` are always `full`, so the prerelease
@@ -84,6 +87,22 @@ export function pathKind(path: string): PathKind {
   return "typescript";
 }
 
+/**
+ * Inputs of the documentation site job: the docs corpus and its pins, the site,
+ * the scripts that stage and check them, and the workflow that defines the job.
+ */
+const DOCS_SITE_PATHS = [
+  /^docs\//,
+  /^site\//,
+  /^scripts\/docs\//,
+  /^\.github\/workflows\/ci\.yml$/,
+] as const;
+
+/** Whether a changed path can change the docs checks or the site build. */
+export function touchesDocsSite(path: string): boolean {
+  return DOCS_SITE_PATHS.some((pattern) => pattern.test(path));
+}
+
 /** The scope of a pull request that changes `paths`; empty means `full`. */
 export function changeScope(paths: readonly string[]): ChangeScope {
   if (paths.length === 0) {
@@ -136,11 +155,16 @@ export type ScopeOutputs = {
    * `docs` and `runtime-core`, or empty when the suite runs.
    */
   readonly test_focus: string;
+  /** Docs corpus checks, the site build and its HTTP smoke. */
+  readonly docs_site: boolean;
 };
 
 /** The job switches for a pull request that changes `paths`. */
 export function planScope(paths: readonly string[]): ScopeOutputs {
-  const outputs = scopeOutputs(changeScope(paths));
+  const outputs = {
+    ...scopeOutputs(changeScope(paths)),
+    docs_site: paths.length === 0 || paths.some(touchesDocsSite),
+  };
   if (
     outputs.scope === "runtime-core" &&
     paths.some((path) => pathKind(path) === "docs")
@@ -164,6 +188,7 @@ export function scopeOutputs(scope: ChangeScope): ScopeOutputs {
         suite: true,
         test_layout: "pooled",
         test_focus: "",
+        docs_site: true,
       };
     case "code":
       return {
@@ -174,6 +199,7 @@ export function scopeOutputs(scope: ChangeScope): ScopeOutputs {
         suite: true,
         test_layout: "pooled",
         test_focus: "",
+        docs_site: false,
       };
     case "typescript":
       return {
@@ -184,6 +210,7 @@ export function scopeOutputs(scope: ChangeScope): ScopeOutputs {
         suite: true,
         test_layout: "pooled",
         test_focus: "",
+        docs_site: false,
       };
     case "runtime-core":
       return {
@@ -194,6 +221,7 @@ export function scopeOutputs(scope: ChangeScope): ScopeOutputs {
         suite: false,
         test_layout: "pooled",
         test_focus: "runtime-core",
+        docs_site: false,
       };
     case "docs":
       return {
@@ -204,6 +232,7 @@ export function scopeOutputs(scope: ChangeScope): ScopeOutputs {
         suite: false,
         test_layout: "pooled",
         test_focus: "docs",
+        docs_site: false,
       };
     default:
       throw new Error(`Unknown change scope: ${String(scope satisfies never)}`);

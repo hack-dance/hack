@@ -1,6 +1,6 @@
 # Opt-in native candidate bundle
 
-`hack-native` is an experimental Apple Silicon macOS executor installed alongside
+The native backend is beta. `hack-native` is an opt-in Apple Silicon macOS executor installed alongside
 Hack's supported CLI. It does not replace `hack`, select a Docker context, migrate
 projects, or install DNS or trust automatically. Its graph commands support a
 bounded subset;
@@ -1448,9 +1448,17 @@ native graphs are not routed, so they have no alias or service URLs); a partial 
 work. `exec` observes the values stored in the running container, and one-off
 `run` uses the admitted environment.
 
+Under explicit native selection, `hack up`, `hack status` and `hack doctor` print one
+line naming the native backend as a beta for Apple Silicon macOS, delivered by the
+`hack-next` channel, with a link to
+[the install guide](candidate-install.md). The line is omitted with `--json`.
+
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
-`HACK_NATIVE_HOME` selects native observations for normal `hack ps` and bounded
-`hack logs SERVICE --no-follow`. They verify the project/branch run mapping
+`HACK_NATIVE_HOME` selects native observations for normal `hack ps`, for
+`hack status` and for bounded `hack logs SERVICE --no-follow`. `hack status`
+observes one project, the cwd project or `--project <name>`, with the same
+output and `--json` envelope as native `hack ps`; outside a project it refuses
+instead of listing Compose state, which cannot see native graphs (HACK-1988). They verify the project/branch run mapping
 against the current native graph. Logs do not support following or Loki options.
 A project with no admitted mapping reports not started. `hack ps` keeps container
 observations separate from the last graph receipt; an exited container's state

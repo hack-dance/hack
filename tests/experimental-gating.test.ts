@@ -34,7 +34,7 @@ test("default `hack --help` hides experimental commands behind one line", async 
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("experimental command");
   expect(result.stdout).toContain("hack help --all");
-  expect(result.stdout).not.toMatch(/hack remote\s+Beta:/);
+  expect(result.stdout).not.toMatch(/hack remote\s+Unsupported:/);
   expect(result.stdout).not.toMatch(/hack gateway\s+/);
 });
 
@@ -54,7 +54,7 @@ test("`hack help <experimental-cmd>` still renders command help", async () => {
 });
 
 test("pure renderers keep experimental commands visible by default", () => {
-  expect(renderHelpForPath(CLI_SPEC, [])).toMatch(/hack remote\s+Beta:/);
+  expect(renderHelpForPath(CLI_SPEC, [])).toMatch(/hack remote\s+Unsupported:/);
   expect(renderHelpMarkdownForPath(CLI_SPEC, [])).toContain("`hack remote`");
 });
 

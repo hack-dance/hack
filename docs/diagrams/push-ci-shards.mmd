@@ -1,0 +1,8 @@
+flowchart TD
+  P["Push to next or main"] --> F["Full job scope"]
+  F --> M["Shards 1-3: macOS<br/>Platform-sensitive tests"]
+  F --> L["Shards 4-8: Linux<br/>Remaining tests"]
+  M --> T["Required test fan-in"]
+  L --> T
+  F --> C["Candidate core and Config compiler<br/>Existing platform matrices"]
+  R["Release / prerelease"] --> B["macOS builds"]

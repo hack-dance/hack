@@ -1,10 +1,22 @@
 name: Release Prepare
 
+# Stable releases are prepared from `main` only after CI succeeded in every
+# job on the exact head (HACK-1424). The sharded CI run is the test gate; this
+# workflow never runs the suite itself. A manual dispatch defaults to a dry
+# run that reports what semantic-release would publish without tagging,
+# committing or pushing.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report the next release without tagging, committing or pushing
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -15,13 +27,20 @@ concurrency:
 
 jobs:
   semantic-release:
+    # A failed, cancelled or pull-request CI run never prepares a release.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PAT }}
 
@@ -36,7 +55,17 @@ jobs:
           bun-version: "1.4.4"
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Require a fully successful CI push run on the exact main head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PREPARE_EVENT: ${{ github.event_name }}
+          RELEASE_PREPARE_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          RELEASE_PREPARE_CI_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_PREPARE_CI_EVENT: ${{ github.event.workflow_run.event }}
+          RELEASE_PREPARE_CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: bun scripts/release-prepare-gate.ts
 
       - name: Typecheck (Turbo)
         run: bun run turbo:typecheck
@@ -47,10 +76,14 @@ jobs:
       - name: Quality checks (Turbo)
         run: bun run turbo:check
 
-      - name: Tests (Turbo)
-        run: bun run turbo:test
+      - name: Run semantic-release (dry run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: bunx semantic-release --dry-run
 
       - name: Run semantic-release
+        if: ${{ github.event_name == 'workflow_run' || !inputs.dry_run }}
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
         run: bunx semantic-release

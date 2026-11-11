@@ -133,7 +133,7 @@ fn retain_ownership(
 fn unsupported() -> CandidateError {
     error(
         "graph_subset",
-        "Graph driver requires pinned images, explicit managed environment delivery, internal networks and named volumes; build, unbound/writable source, port, label and logging overrides remain gated.",
+        "Graph driver requires pinned images, explicit managed environment delivery, internal networks and named volumes; build, unbound/writable source, port, router or ownership label and external logging overrides remain gated.",
     )
 }
 pub(super) fn prepare(
@@ -336,6 +336,8 @@ pub(super) fn prepare_delivery(
                     && !(service.inert_route_labels
                         && service.routing.is_none()
                         && matches!(key.as_str(), "caddy" | "caddy.tls"))
+                    // Plain metadata is reviewed with a warning and dropped here.
+                    && !crate::project::inert_metadata_label(key)
                     && !(service.dependency_cache.is_some()
                         && matches!(
                             key.as_str(),
@@ -345,7 +347,12 @@ pub(super) fn prepare_delivery(
                                 | "hack.dependencies.bootstrap"
                         ))
             })
-            || service.logging.is_some()
+            // A local driver is reviewed with a warning and not applied; an
+            // external sink was already an error at review.
+            || service
+                .logging
+                .as_ref()
+                .is_some_and(|logging| logging.driver == "[unsupported]")
             || service.image.as_deref().is_none_or(|v| !image_id(v))
             || service.platform.as_deref().is_some_and(|p| {
                 !(["linux/arm64", "linux/arm64/v8"].contains(&p)

@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   findProxyPortConflicts,
@@ -10,8 +13,12 @@ import {
   readProxyBindFromCompose,
   renderProxyPortConflictMessage,
 } from "../src/lib/proxy-bind.ts";
-import { diagnoseProxyPortConflict } from "../src/lib/proxy-port-listeners.ts";
+import {
+  diagnoseProxyPortConflict,
+  listHostTcpListeners,
+} from "../src/lib/proxy-port-listeners.ts";
 import { renderGlobalCaddyCompose } from "../src/templates.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 describe("proxy bind address", () => {
   test("accepts IPv4 and IPv6 literals and rejects everything else", () => {
@@ -134,6 +141,21 @@ describe("port conflicts", () => {
     expect(message).toContain(
       `hack config set --global ${PROXY_BIND_CONFIG_KEY} 127.0.0.1`
     );
+  });
+
+  test("a missing ss/lsof (spawn failure) yields null, not a throw", async () => {
+    const savedPath = process.env.PATH;
+    const dir = await mkdtemp(join(tmpdir(), "hack-proxy-bind-path-"));
+    process.env.PATH = dir;
+    try {
+      expect(await listHostTcpListeners()).toBeNull();
+      expect(await diagnoseProxyPortConflict({ bindAddress: null })).toContain(
+        PROXY_BIND_CONFIG_KEY
+      );
+    } finally {
+      restoreEnv("PATH", savedPath);
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("diagnosis uses the injected listener source", async () => {

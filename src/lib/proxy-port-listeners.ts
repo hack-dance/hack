@@ -18,7 +18,14 @@ export async function listHostTcpListeners(): Promise<
   const cmd = isMac()
     ? ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"]
     : ["ss", "-Hltnp"];
-  const res = await exec(cmd, { stdin: "ignore", timeoutMs: LIST_TIMEOUT_MS });
+  let res: Awaited<ReturnType<typeof exec>>;
+  try {
+    res = await exec(cmd, { stdin: "ignore", timeoutMs: LIST_TIMEOUT_MS });
+  } catch {
+    // ss/lsof missing: Bun.spawn throws. Diagnosis is best-effort, so the
+    // caller still prints the proxy.bind_address hint and its exit code.
+    return null;
+  }
   // lsof exits 1 when nothing matches; that means "no listeners".
   const noMatches = isMac() && res.exitCode === 1;
   if (res.exitCode !== 0 && !noMatches) {

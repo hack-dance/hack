@@ -40,7 +40,7 @@ repair touches before `hack doctor --fix`.
 ## Native backend (beta)
 
 The native backend (beta, Apple Silicon macOS) is a second way to run the same
-project: Hack starts its own small Linux virtual machine instead of using a Docker
+project: Hack starts its own Linux virtual machine instead of using a Docker
 app. It is opt-in and ships only through the `hack-next` channel, not in stable
 Hack. Compose stays the default.
 

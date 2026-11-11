@@ -736,8 +736,16 @@ Provider setup is separate and explicit. Obtain the exact archives identified in
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare --archive /absolute/smolvm-archive.tar.gz
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-engine --archive /absolute/docker-archive.tgz
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-network-tools --directory /absolute/private/pinned-apks
-./hack-native --candidate-root /absolute/private/candidate-home runtime probe --json
+./hack-native --candidate-root /absolute/private/candidate-home runtime probe --profile development --json
 ```
+
+For a `hack-next` install, `hack-native` is
+`~/.hack-next/versions/<version>/bundle/hack-native` and its home is
+`~/.hack-next/versions/<version>/native-home`. `runtime probe` checks the research
+profile unless you pass `--profile development`; the research profile can report
+"not admitted" on a Mac that the development profile admits. The Alpine package
+hashes are listed under [network tool packages](#network-tool-packages), not in
+`provider-pins.json`.
 
 Preparation keeps each archive it extracted (`providers/smolvm-installing/release.tar.gz`
 and `providers/docker-installing/release.tgz`). If something outside Hack changes a
@@ -835,6 +843,8 @@ engine refuses those), and every image whose ownership labels are not exactly th
 runtime's. Each removal deletes that one image only, never its untagged parent
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
+
+### Network tool packages
 
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with

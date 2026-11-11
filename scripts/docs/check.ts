@@ -330,6 +330,27 @@ for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedV5 })) {
     }
   }
 }
+// The live install examples must name the same prerelease, so the repository
+// docs and the site never tell a reader to install different versions.
+// The `V=5.0.0-next.N` shell variable used by install and setup examples.
+const exampleVersion = /^V=5\.0\.0-next\.(\d+)\b/gm;
+const liveDocs = resolve(repositoryRoot, "docs");
+for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: liveDocs })) {
+  if (file.startsWith("versions/")) {
+    continue;
+  }
+  const live = await Bun.file(resolve(liveDocs, file)).text();
+  for (const match of [
+    ...live.matchAll(anyBootstrap),
+    ...live.matchAll(exampleVersion),
+  ]) {
+    if (match[1] !== prerelease) {
+      throw new Error(
+        `docs/${file} installs next.${match[1]}, not the pinned next.${prerelease}`
+      );
+    }
+  }
+}
 if (
   pinnedBootstrapText(
     "releases/download/v5.0.0-next.1/hack-next-install.sh",

@@ -18,11 +18,11 @@ concurrency:
 jobs:
   changes:
     # Pull-request change scope (scripts/ci-change-scope.ts, HACK-1960). Pushes
-    # to next/main and an unavailable diff are always `full`: the whole matrix,
-    # every bun test shard on macOS. Pull requests run the config compiler on
-    # Linux only, split the bun shards into macOS and Linux pools, and skip the
-    # jobs that cannot see their change (docs-only, TypeScript-only and
-    # runtime-core-only scopes). The `test` and `docker-e2e` fan-ins still
+    # to next/main and an unavailable diff are always `full`: every job and every
+    # config compiler host. Pull requests run the config compiler on Linux only
+    # and skip the jobs that cannot see their change (docs-only, TypeScript-only
+    # and runtime-core-only scopes). Every run splits the bun shards into macOS
+    # and Linux pools (HACK-2028). The `test` and `docker-e2e` fan-ins still
     # report on every run.
     name: Change scope
     runs-on: ubuntu-latest
@@ -271,31 +271,62 @@ jobs:
 
   docs-site:
     # The documentation corpus checks, the site build Vercel runs, and an HTTP
-    # smoke of that build. Pull requests run it only when they change docs/,
-    # site/, scripts/docs/ or this workflow; pushes always run it.
+    # smoke of that build. `docs site` is a required check, so the job always
+    # runs and reports: its work happens when the change touches docs/, site/,
+    # scripts/docs/ or this workflow (and on every push), and it passes as a
+    # no-op otherwise, instead of leaving a skipped required check.
     name: docs site
     needs: changes
-    if: ${{ needs.changes.outputs.docs_site == 'true' }}
+    # Like `test`: report even when the scope job did not succeed, so a failed
+    # scope fails this check instead of leaving it skipped.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
+      - name: Report scope
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DOCS_SITE: ${{ needs.changes.outputs.docs_site }}
+        run: |
+          if [ "$CHANGES_RESULT" = "cancelled" ]; then
+            echo "change scope was cancelled without failure; nothing to build"
+            exit 0
+          fi
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "change scope did not succeed (result: $CHANGES_RESULT)"
+            exit 1
+          fi
+          if [ "$DOCS_SITE" = "true" ]; then
+            echo "docs or site inputs changed: checking the corpus and building the site"
+          else
+            echo "no docs or site inputs changed: nothing to build"
+          fi
       - uses: actions/checkout@v4
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v1
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
         with:
           bun-version: "1.4.4"
       - run: bun install --frozen-lockfile
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
       - run: bun install --frozen-lockfile
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
         working-directory: site
       - run: bun run docs:prepare
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
       - run: bun run docs:check
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
       - run: bun run docs:typecheck
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
       # The Vercel build command (site/vercel.json) after docs:prepare.
       - run: bun run --cwd site build
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
       - name: HTTP smoke of the production build
+        if: ${{ needs.changes.outputs.docs_site == 'true' }}
         run: |
           bun run --cwd site start --port 3411 >"$RUNNER_TEMP/docs-site.log" 2>&1 &
           for _ in $(seq 1 60); do
@@ -405,7 +436,7 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Create isolated Hack network
         run: docker network create --subnet 172.30.0.0/16 hack-dev
-      # The Linux pool may lack tmux; full-layout pushes run on macOS and skip.
+      # The Linux test pool may lack tmux and skip this file.
       # Require one real pass here, where tmux is explicitly installed.
       - name: Verify private tmux input on Linux
         if: matrix.shard == 4
@@ -530,10 +561,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    # `full` (pushes): every shard on macOS. `pooled` (pull requests): shards
-    # 1-3 run the platform-sensitive files on macOS and shards 4-8 the rest on
-    # Linux (POOLED_MACOS_SHARDS in scripts/test-shard-plan.ts; the runner
-    # refuses a shard on the wrong host).
+    # `pooled` (pushes and pull requests, HACK-2028): shards 1-3 run the
+    # platform-sensitive files on macOS and shards 4-8 the rest on Linux
+    # (POOLED_MACOS_SHARDS in scripts/test-shard-plan.ts; the runner refuses a
+    # shard on the wrong host). Release and prerelease build hosts are unchanged.
     runs-on: ${{ (needs.changes.outputs.test_layout == 'pooled' && matrix.shard > 3) && 'ubuntu-latest' || 'macos-15' }}
     # Eight shards keep the slower GitHub-hosted macOS jobs below the existing
     # 30 min file-runner deadline; the 40 min job limit bounds a hung runner.

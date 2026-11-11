@@ -23,4 +23,4 @@ checkout and branch, assign service and file ownership, and keep one owner for
 lifecycle operations against an instance.
 
 On the native backend, branch selection is explicit (`--branch`) and needs the
-prepared source share described in [Try the native backend](../../guides/native-candidate.md).
+prepared source share described in [the native reference](../../guides/native-candidate.md#explicit-writable-development-source).

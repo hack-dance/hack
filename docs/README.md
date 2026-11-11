@@ -1,14 +1,17 @@
 # Hack documentation
 
-Hack runs a project's services, environment, secrets, local HTTPS and logs from
-configuration kept in the repository. Teammates, agents and parallel worktrees all
-use the same project definition. The public site is [hack.foo](https://hack.foo).
+Hack is a command-line tool that runs your whole project on your own machine. One
+command starts the project's services, loads its settings and secrets, and gives it
+a local web address with working HTTPS. The project's setup lives in a `.hack/`
+folder committed with the code, so teammates, agents and other worktrees all run it
+the same way. The public site is [hack.foo](https://hack.foo).
 
 ## Run your first project
 
-Start with [Getting started](guides/getting-started.md): install the CLI, set up
-local routing once, initialize a repository and run it with `hack up --detach`.
-The default runtime is Docker Compose. No account is required.
+Start with [Getting started](guides/getting-started.md). You install Hack, set up
+local addresses once per machine, add Hack to a repository, and start it with
+`hack up --detach`. Hack runs services with Docker Compose by default. You do not
+need an account.
 
 Already have a project? Follow [Project setup](guides/init-project.md), or use
 [Agent setup](guides/agent-first-setup.md) to let an agent configure it.
@@ -34,18 +37,26 @@ Already have a project? Follow [Project setup](guides/init-project.md), or use
 If something is wrong, run `hack doctor` and follow the diagnosis. Review what a
 repair touches before `hack doctor --fix`.
 
+## Native backend (beta)
+
+The native backend (beta, Apple Silicon macOS) is a second way to run the same
+project: Hack starts its own small Linux virtual machine instead of using a Docker
+app. It is opt-in and ships only through the `hack-next` channel, not in stable
+Hack. Compose stays the default.
+
+- [Overview](native/README.md) — what it is, what it is not, and why to try it.
+- [Try it](native/try-it.md) — install, run one project on native, switch back.
+- [What works and known limits](native/limits.md)
+- [Reference](native/reference.md) — the detailed pages, by topic.
+
 ## v5
 
 v5 keeps the v4 project model and commands, and Compose stays the default backend.
-The native backend (beta, Apple Silicon macOS) is opt-in and ships only through the
-`hack-next` channel, not in stable Hack.
 
 - [What's new in v5](guides/v5-release-notes.md) — the 5.0.0 release notes.
 - [Upgrade to v5](guides/upgrade-to-v5.md) — what changed, what was retired, how to try it.
 - [Prerelease channel](guides/prereleases.md) — versions, platforms and publication.
 - [Install a prerelease](guides/candidate-install.md) — `hack-next` beside stable Hack.
-- [Native backend (beta)](guides/native-candidate.md) — preparation, limits and verification.
-- [Native config import](reference/native-config-import.md) — preview and adopt existing configuration.
 - [Qualify a project on v5](guides/v5-dogfooding.md) — a staged, reversible rollout.
 
 ## Contribute

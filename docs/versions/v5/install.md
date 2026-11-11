@@ -10,7 +10,7 @@ channel, `hack-next`, so you can try v5 without touching your stable setup. When
 - A running Docker-compatible engine with Docker Compose for the default backend.
   Check it with `docker info` and `docker compose version`.
 - For the native backend (beta): an Apple Silicon Mac. See
-  [Try the native backend](../guides/native-candidate.md).
+  [Native backend (beta)](native/overview.md).
 - Local DNS and certificate trust are set up once per machine by `hack global
   install` and can ask for native approval.
 
@@ -60,7 +60,7 @@ next command without it runs native again. Unset the variable before native test
 
 On Compose, the prerelease shares project state with stable v4. Do not run both
 against the same home at the same time, including their daemons. The
-[candidate install guide](../guides/candidate-install.md#test-both-backends) gives
+[prerelease install page](native/install.md#backends-and-homes) gives
 the exact order: stop the stable daemon first, then run the prerelease.
 
 The rest of these docs write `hack` for the v5 CLI. During the prerelease, in the

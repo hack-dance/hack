@@ -5,7 +5,7 @@
  * `release-prepare.yml` used to run the whole CLI suite serially on one Linux
  * runner before semantic-release. On the v5 tree that step cannot pass: the
  * suite preflight needs a built config compiler the workflow never prepares,
- * and the full suite is sharded eight ways on macOS in CI for a reason. This
+ * and CI shards the full suite eight ways across macOS and Linux. This
  * gate replaces the serial suite with the same contract the candidate publish
  * gate already uses: the exact `main` head being released must have a
  * completed, fully successful CI push run. Nothing here mutates anything; a

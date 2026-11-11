@@ -315,7 +315,110 @@ fn verify_record(
             return Err(invalid());
         }
     }
+    for field in INERT_RECORD_FIELDS {
+        if !inert(field, record.get(field)) {
+            return Err(invalid());
+        }
+    }
+    // A pool's disks must reach the host disk before a guest flush returns: clean stop,
+    // exact disk identity and recovery assume it. Absent means the provider default, full.
+    if !matches!(record.get("disk_durability"), None | Some(Value::Null))
+        && record["disk_durability"] != "full"
+    {
+        return Err(invalid());
+    }
     Ok(())
+}
+
+/// Machine-record fields SmolVM added after 1.14.3 (in 1.34.1's `VmRecord`) that grant a
+/// capability, change egress, or mark a machine as paused, restored, branched or credentialed.
+/// A pool never requests any of them, so each must be absent or at its inert default; any
+/// other value means something outside this runtime changed the machine. Bookkeeping the
+/// provider writes at every start (`engine_build`, `agent_rootfs_digest`,
+/// `agent_rootfs_path`) grants nothing and is not audited.
+const INERT_RECORD_FIELDS: [&str; 27] = [
+    "pause_reason",
+    "paused_checkpoint",
+    "disks",
+    "cache_disk",
+    "disk_volumes",
+    "block_private",
+    "staged_mounts_detached_from",
+    "udp_ports",
+    "nested_virt",
+    "egress_rules",
+    "dns_options",
+    "shm_size",
+    "guest_subnet",
+    "detached",
+    "keep_identity",
+    "stop_on_exit",
+    "credential_policy",
+    "external_interceptor_required",
+    "mediated_egress_required",
+    "credential_placeholders",
+    "credentials_supplied_by_api",
+    "packed_image_on_storage",
+    "source_registry_ref",
+    "image_origin",
+    "image_origin_digest",
+    "checkpoint_head",
+    "host_uid_owner",
+];
+
+/// Running-configuration resource fields SmolVM added after 1.14.3 (1.34.1's `VmResources`).
+/// As with [`INERT_RECORD_FIELDS`], a pool requests none of them.
+const INERT_RUNNING_RESOURCES: [&str; 9] = [
+    "nested_virt",
+    "disks",
+    "cache_disk",
+    "disk_volumes",
+    "block_private",
+    "egress_rules",
+    "dns_options",
+    "shm_size",
+    "guest_subnet",
+];
+
+/// Refuse a running configuration (`agent.config.json` `resources`) that boots with any
+/// capability added since 1.14.3, or without full disk durability.
+pub(super) fn verify_running_resources(resources: &Value) -> Result<(), CandidateError> {
+    let refused = || {
+        CandidateError::new(
+            "unaudited_provider_config",
+            "Mounts, limits or capabilities differ from the candidate contract.",
+        )
+    };
+    if !resources.is_object() {
+        return Err(refused());
+    }
+    if INERT_RUNNING_RESOURCES
+        .iter()
+        .any(|field| !inert(field, resources.get(*field)))
+    {
+        return Err(refused());
+    }
+    if !matches!(resources.get("disk_durability"), None | Some(Value::Null))
+        && resources["disk_durability"] != "full"
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Absent, null, false, or an empty list or map. `block_private` is the exception: an
+/// empty list there turns on `--block-private` with no re-opened range, so only absent or
+/// null is inert.
+fn inert(field: &str, value: Option<&Value>) -> bool {
+    if field == "block_private" {
+        return matches!(value, None | Some(Value::Null));
+    }
+    match value {
+        None | Some(Value::Null | Value::Bool(false)) => true,
+        Some(Value::Array(items)) => items.is_empty(),
+        Some(Value::Object(fields)) => fields.is_empty(),
+        Some(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -565,6 +668,96 @@ mod tests {
             assert!(verify_isolated_record(&record, "owned", "token", None).is_err());
         }
     }
+    #[test]
+    fn capabilities_added_since_the_previous_pin_must_stay_inert() {
+        // The fields SmolVM 1.34.1 writes for a plain create, plus start bookkeeping.
+        let mut plain = fixture();
+        for (field, value) in [
+            ("disk_durability", json!("full")),
+            ("nested_virt", Value::Null),
+            ("staged_mounts_detached_from", Value::Null),
+            ("engine_build", json!("synthetic-build")),
+            (
+                "agent_rootfs_digest",
+                json!(format!("sha256:{}", "0".repeat(64))),
+            ),
+            ("agent_rootfs_path", json!("/synthetic/rootfs")),
+        ] {
+            plain[field] = value;
+        }
+        verify_isolated_record(&plain, "owned", "token", None).unwrap();
+        for inert_value in [json!(false), json!([]), json!({}), Value::Null] {
+            let mut record = plain.clone();
+            for field in INERT_RECORD_FIELDS {
+                if field != "block_private" {
+                    record[field] = inert_value.clone();
+                }
+            }
+            verify_isolated_record(&record, "owned", "token", None).unwrap();
+        }
+        // An empty block_private list enables blocking; it is not the inert default.
+        let mut blocking = plain.clone();
+        blocking["block_private"] = json!([]);
+        assert!(verify_isolated_record(&blocking, "owned", "token", None).is_err());
+        for field in INERT_RECORD_FIELDS {
+            for value in [
+                json!(true),
+                json!("private-sentinel"),
+                json!(["private-sentinel"]),
+                json!({"private": "sentinel"}),
+            ] {
+                let mut record = plain.clone();
+                record[field] = value;
+                let error = verify_isolated_record(&record, "owned", "token", None).unwrap_err();
+                assert_eq!(error.code, "unaudited_provider_config", "{field}");
+                assert!(!error.message.contains("private-sentinel"));
+            }
+        }
+        for durability in [json!("deferred"), json!(false), json!(["full"])] {
+            let mut record = plain.clone();
+            record["disk_durability"] = durability;
+            assert!(verify_isolated_record(&record, "owned", "token", None).is_err());
+        }
+        plain.as_object_mut().unwrap().remove("disk_durability");
+        verify_isolated_record(&plain, "owned", "token", None).unwrap();
+    }
+
+    #[test]
+    fn a_running_configuration_with_a_newer_capability_is_refused() {
+        let plain = json!({"cpus":2, "memory_mib":2048, "network":false, "gpu":false,
+            "gpu_vram_mib":null, "cuda":false, "nested_virt":false, "rosetta":false,
+            "storage_gib":4, "overlay_gib":4, "block_io":"sync", "disk_durability":"full",
+            "allowed_cidrs":null, "dns":null, "dns_options":[], "shm_size":null});
+        verify_running_resources(&plain).unwrap();
+        let mut older = plain.clone();
+        for field in ["nested_virt", "disk_durability", "dns_options", "shm_size"] {
+            older.as_object_mut().unwrap().remove(field);
+        }
+        verify_running_resources(&older).unwrap();
+        for (field, value) in [
+            ("nested_virt", json!(true)),
+            ("disks", json!([{"path": "/dev/disk9"}])),
+            ("cache_disk", json!({"base": "/synthetic"})),
+            ("disk_volumes", json!(["/data"])),
+            ("block_private", json!([])),
+            ("block_private", json!(["10.0.0.0/8"])),
+            ("egress_rules", json!([{"cidr": "0.0.0.0/0"}])),
+            ("dns_options", json!(["use-vc"])),
+            ("shm_size", json!("2g")),
+            ("guest_subnet", json!("10.200.0.0/30")),
+            ("disk_durability", json!("deferred")),
+        ] {
+            let mut changed = plain.clone();
+            changed[field] = value;
+            assert_eq!(
+                verify_running_resources(&changed).unwrap_err().code,
+                "unaudited_provider_config",
+                "{field}"
+            );
+        }
+        assert!(verify_running_resources(&Value::Null).is_err());
+    }
+
     #[test]
     fn stored_rosetta_setting_is_a_closed_boolean_with_a_disabled_default() {
         // The pinned default record stores `rosetta: null`; `machine update --rosetta` stores true.

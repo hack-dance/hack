@@ -760,7 +760,7 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
     if let Some(bridge) = owner.application_bridge {
         super::bridge::verify_sockets(&owner.real_data_dir(candidate)?, bridge)?;
     }
-    // 1.14.3 consumes and removes boot-config.json. Its retained running config plus
+    // The pinned SmolVM consumes and removes boot-config.json. Its retained running config plus
     // independently observed disk descriptors form the host audit boundary.
     // Guest mount mode and executable digests are verified before engine startup.
     let config: Value =
@@ -798,6 +798,7 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
             "Mounts, limits or capabilities differ from the candidate contract.",
         ));
     }
+    super::config_audit::verify_running_resources(&config["resources"])?;
     let process = owner
         .process
         .as_ref()
@@ -1608,7 +1609,7 @@ fn stop_verified_provider(
 
 /// Verify the expanded disk templates around a start that can format this pool's disks.
 ///
-/// Pinned SmolVM 1.14.3 formats a machine's disks from the templates during its first start
+/// The pinned SmolVM formats a machine's disks from the templates during its first start
 /// (`prepare_for_launch`); `machine create` makes no disks, so nothing is expanded until then.
 /// Until the pool adopts its disk identities, a start may clone templates: verify the ones it
 /// would reuse before the start, and the ones it cloned after it, before adoption. Adopted disks
@@ -3086,11 +3087,7 @@ mod tests {
             );
             assert_eq!(
                 env[std::ffi::OsStr::new("SMOLVM_IDLE_RECLAIM")],
-                Some(std::ffi::OsStr::new(if policy.enabled {
-                    "10"
-                } else {
-                    "0"
-                }))
+                Some(std::ffi::OsStr::new(if policy.enabled { "2" } else { "0" }))
             );
         }
     }

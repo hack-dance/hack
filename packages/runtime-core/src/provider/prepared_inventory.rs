@@ -49,7 +49,9 @@ const DOCKER_TOP: [&str; 9] = [
 const VOLUME_BOOKKEEPING: [&str; 2] = ["metadata.db", "backingFsBlockDev"];
 
 /// Files the network-tools installation writes besides the package files its receipt lists
-/// (the receipt itself and the apk database, including its empty lock file).
+/// (the receipt itself and the apk database, including its empty lock file). apk-tools 3 in
+/// the pinned guest (Alpine 3.24) writes `scripts.tar.gz` where apk-tools 2 wrote
+/// `scripts.tar`; `--no-logfile` keeps it from adding `var/log/apk.log`.
 const TOOLS_UPPER_FILES: [&str; 10] = [
     "etc/hack-local-network-tools/owner",
     "etc/hack-local-network-tools/identity",
@@ -59,7 +61,7 @@ const TOOLS_UPPER_FILES: [&str; 10] = [
     "etc/apk/world",
     "lib/apk/db/installed",
     "lib/apk/db/triggers",
-    "lib/apk/db/scripts.tar",
+    "lib/apk/db/scripts.tar.gz",
     "lib/apk/db/lock",
 ];
 

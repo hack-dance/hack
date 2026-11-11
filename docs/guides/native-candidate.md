@@ -739,6 +739,19 @@ Provider setup is separate and explicit. Obtain the exact archives identified in
 ./hack-native --candidate-root /absolute/private/candidate-home runtime probe --json
 ```
 
+The current SmolVM pin is 1.34.1 (`smolvm-1.34.1-darwin-arm64.tar.gz`, SHA-256
+`8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9`, the value
+upstream publishes in the release's `checksums.sha256`). `provider-pins.json` is the
+source of truth; the executor refuses any other archive.
+
+**Provider pin changes need a fresh candidate home.** A home's guest rootfs copy,
+disks and provider database are made by the SmolVM release it was prepared with. When
+an executor pins a different release, every start and `runtime prepare` in that home
+refuses with `provider_pin_changed` and names both versions. Nothing in the home is
+changed: its volumes and prepared tree stay in place, and a build that pins the
+recorded release still runs it. Prepare a new candidate home with the pinned
+archives instead; there is no in-place provider upgrade.
+
 Preparation keeps each archive it extracted (`providers/smolvm-installing/release.tar.gz`
 and `providers/docker-installing/release.tgz`). If something outside Hack changes a
 prepared tree, for example a cleanup or backup tool that prunes empty directories,
@@ -841,17 +854,19 @@ Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), wit
 regular, singly linked mode-`0600` files. Acquire the matching public package bytes;
 the command never downloads packages or accepts substitute versions.
 
-The pinned files come from the Alpine **v3.19** `main` repository for `aarch64`
-(`https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/`). Other Alpine
-releases, such as v3.20, publish packages with the same file names but different
-bytes; those fail the hash check below.
+The pinned files come from the Alpine **v3.24** `main` repository for `aarch64`
+(`https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/`), matching the Alpine
+3.24 guest in the pinned SmolVM release. Other Alpine releases publish packages with
+the same file names but different bytes; those fail the hash check below. A home
+prepared with the earlier v3.19 files is refused by the new provider pin (see the
+provider pin note above), so prepare the new files in a fresh candidate home.
 
 | File | SHA-256 |
 | --- | --- |
-| `iptables-1.8.10-r3.apk` | `31ab6343f1f3d0fbbf290c4dcf0430b2d08e8073e516e13530dfab25b097d467` |
-| `libmnl-1.0.5-r2.apk` | `d15e6313880bdd14959f42c1556b4a810ef4894992ae9f73b148126f0cc6021d` |
-| `libnftnl-1.2.6-r0.apk` | `ec1c2b02869fc65bcf7a1105e3a7ac5df1bd9a8bd8b399cb6cf650dd3112c021` |
-| `libxtables-1.8.10-r3.apk` | `f0accefde240ece6722479b46cb014d7d2f745af7d796e8eec3ced53571e1088` |
+| `iptables-1.8.13-r0.apk` | `9d22aef2e74346e9d537f6dc964786ab14b35580e3ccc0e4001dc3a725e8fe77` |
+| `libmnl-1.0.5-r2.apk` | `0ca382c70f78affef3a4a28016aab25ad8c3ccf1bcdad59f3968d4536a7b2478` |
+| `libnftnl-1.3.1-r0.apk` | `8b31395671e910c294d7f0e29d3ac3c7efe9d89264db255f39aa9944dd4b6cac` |
+| `libxtables-1.8.13-r0.apk` | `7535f18d9c7229178bc5e3809e5fea171033e33dfa054d88846512e1f25eefa8` |
 
 All APKs are validated before candidate state is changed. Installation publishes a
 complete private directory atomically; an existing installation is revalidated and

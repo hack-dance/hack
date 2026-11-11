@@ -10,22 +10,25 @@ use std::{
     path::Path,
 };
 
+/// Alpine v3.24 `main`/`aarch64` packages, matching the pinned SmolVM agent rootfs
+/// (Alpine 3.24.4, apk-tools 3). Re-pin these with the rootfs whenever the SmolVM pin
+/// moves the guest to another Alpine release; `guest-network-tools.sh` checks the release.
 const PACKAGES: [(&str, &str); 4] = [
     (
-        "iptables-1.8.10-r3.apk",
-        "31ab6343f1f3d0fbbf290c4dcf0430b2d08e8073e516e13530dfab25b097d467",
+        "iptables-1.8.13-r0.apk",
+        "9d22aef2e74346e9d537f6dc964786ab14b35580e3ccc0e4001dc3a725e8fe77",
     ),
     (
         "libmnl-1.0.5-r2.apk",
-        "d15e6313880bdd14959f42c1556b4a810ef4894992ae9f73b148126f0cc6021d",
+        "0ca382c70f78affef3a4a28016aab25ad8c3ccf1bcdad59f3968d4536a7b2478",
     ),
     (
-        "libnftnl-1.2.6-r0.apk",
-        "ec1c2b02869fc65bcf7a1105e3a7ac5df1bd9a8bd8b399cb6cf650dd3112c021",
+        "libnftnl-1.3.1-r0.apk",
+        "8b31395671e910c294d7f0e29d3ac3c7efe9d89264db255f39aa9944dd4b6cac",
     ),
     (
-        "libxtables-1.8.10-r3.apk",
-        "f0accefde240ece6722479b46cb014d7d2f745af7d796e8eec3ced53571e1088",
+        "libxtables-1.8.13-r0.apk",
+        "7535f18d9c7229178bc5e3809e5fea171033e33dfa054d88846512e1f25eefa8",
     ),
 ];
 fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
@@ -372,5 +375,28 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(read_archive(&path, &hash).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pins_match_the_guest_release_and_the_published_table() {
+        // The guest script refuses any other Alpine release; the packages must be built for it.
+        let script = include_str!("guest-network-tools.sh");
+        assert!(script.contains("test \"$(cat /etc/alpine-release)\" = 3.24.4\n"));
+        assert!(script.contains("--no-logfile"));
+        let guide = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/guides/native-candidate.md"),
+        )
+        .unwrap();
+        assert!(guide.contains("https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/"));
+        let rows: Vec<String> = guide
+            .lines()
+            .filter(|line| line.starts_with("| `") && line.contains(".apk` |"))
+            .map(str::to_owned)
+            .collect();
+        let expected: Vec<String> = PACKAGES
+            .iter()
+            .map(|(name, hash)| format!("| `{name}` | `{hash}` |"))
+            .collect();
+        assert_eq!(rows, expected);
     }
 }

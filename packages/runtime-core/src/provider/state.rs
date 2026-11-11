@@ -232,6 +232,18 @@ pub fn write(path: &Path, value: &impl Serialize) -> Result<(), CandidateError> 
     Ok(())
 }
 
+/// Minutes of VMM CPU idleness before SmolVM pulses the balloon to return an idle guest's
+/// page cache to the host (`SMOLVM_IDLE_RECLAIM`). Passed explicitly on every provider
+/// invocation, so a pin bump never changes it silently. 2 matches the provider default
+/// since SmolVM 1.34.1 (upstream PR 2094, which measured idle footprint falling below
+/// 2 GB within 80-100 s); the pulse re-arms only after renewed activity, so a pool that
+/// stays idle is pulsed once. The provider qualification script measures idle footprint
+/// at 0, 2 and 10 minutes to confirm the value on this runtime.
+pub const IDLE_RECLAIM_MINUTES: u64 = 2;
+
+/// Memory reclamation for one boot. Recorded in the receipt and re-derived at every boot.
+/// `idle_minutes: None` disables the idle pulse (`SMOLVM_IDLE_RECLAIM=0`); it never means
+/// "provider default".
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReclamationPolicy {
@@ -242,7 +254,7 @@ impl Default for ReclamationPolicy {
     fn default() -> Self {
         Self {
             enabled: true,
-            idle_minutes: Some(10),
+            idle_minutes: Some(IDLE_RECLAIM_MINUTES),
         }
     }
 }

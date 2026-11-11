@@ -4,7 +4,7 @@ export LC_ALL=C
 umask 077
 root=/etc/hack-local-network-tools
 packages='iptables libmnl libnftnl libxtables'
-test "$(cat /etc/alpine-release)" = 3.19.0
+test "$(cat /etc/alpine-release)" = 3.24.4
 test "$(apk --print-arch)" = aarch64
 if test -e "$root" || test -L "$root"; then
  test ! -L "$root"; test -d "$root"; test "$(stat -c %u:%a "$root")" = 0:700
@@ -32,7 +32,7 @@ test "$3" = install
 mkdir "$root"
 printf '%s' "$1" > "$root/owner"
 printf '%s' "$2" > "$root/identity"
-apk add --no-network --no-cache --no-scripts --repositories-file /dev/null "$4"/*.apk >/dev/null
+apk add --no-network --no-cache --no-scripts --no-logfile --repositories-file /dev/null "$4"/*.apk >/dev/null
 for package in $packages; do
  apk info -L "$package" | sed '1d' | while IFS= read -r path; do
   if test -n "$path" && test -f "/$path"; then sha256sum "/$path"; fi

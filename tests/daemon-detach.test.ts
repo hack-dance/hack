@@ -6,6 +6,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -226,6 +227,10 @@ test.skipIf(process.platform === "win32")(
       return (await probeDaemonApi({ socketPath, timeoutMs: 500 })).reachable;
     }, 20_000);
     expect(ready).toBe(true);
+    // The unauthenticated API stays private to its owner (Codex security
+    // review): the daemon directory is 0700 and the socket 0600.
+    expect((await stat(daemonDir(f))).mode & 0o777).toBe(0o700);
+    expect((await stat(socketPath)).mode & 0o777).toBe(0o600);
     if (pid === null) {
       throw new Error("hackd pid file missing");
     }

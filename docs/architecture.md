@@ -371,7 +371,10 @@ command to run yourself. On macOS the launchd service belongs to the default
 ### Keeping hackd running
 
 `hack daemon start` runs hackd in its own session and process group, with its
-output going only to `~/.hack/daemon/hackd.log`. Closing the terminal, or an agent
+output going only to `~/.hack/daemon/hackd.log`. hackd's local API has no
+authentication, so before it binds its sockets hackd makes `~/.hack/daemon`
+owner-only (`0700`), and it sets each socket to `0600`. It refuses to start when
+the directory cannot be made private. Closing the terminal, or an agent
 harness killing the process group that ran the command, does not stop it. It does
 not survive logout or reboot. For that, install it as a login service with
 `hack daemon install`:

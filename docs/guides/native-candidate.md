@@ -1417,6 +1417,12 @@ source revision. Cache initializer services read that immutable publication thro
 read-only source mounts; their named cache volumes remain writable. This prevents
 concurrent host edits from changing the inputs halfway through installation.
 Other services use the direct host mount with their declared read/write mode.
+A mount may also carry Docker's host-only hints: `cached`, `delegated` or
+`consistent` (for example `./src:/app:cached`, or `consistency:` in the long form)
+and the SELinux flags `z` or `Z`. Native accepts them, ignores them and reports the
+warning `mount_host_hint_ignored`; they tune host file sharing and change nothing
+inside the container. Other mount options, such as `nocopy` or a propagation mode,
+still refuse with `unsupported_mount_option`.
 Because virtiofs preserves host ownership, those services keep `DAC_OVERRIDE`
 (part of the default capability set) even when `cap_drop` removes it. This allows
 root processes to access the explicitly shared tree; it does not bypass a read-only

@@ -1102,6 +1102,23 @@ class Qualification {
     return this.foreground;
   }
 
+  /**
+   * `hack down` stops the project but leaves the pool's VM running. Stop the main pool too,
+   * so the second home's pool never boots beside it.
+   */
+  stopMainPool(before: string): void {
+    this.runtime(
+      this.main,
+      `runtime-down-before-${before}`,
+      ["runtime", "down", "--json"],
+      300
+    );
+    this.check(
+      `the main pool is stopped before the ${before} pool boots`,
+      this.status(this.main).process_alive !== true
+    );
+  }
+
   observedReady(): boolean {
     const ps = this.exec(
       "ps-after-recover",
@@ -1339,6 +1356,7 @@ class Qualification {
       // admission never has to fit both pools.
       this.step = "6 network modes";
       await this.down("down-before-network");
+      this.stopMainPool("network");
       this.networkModes();
 
       this.step = "7 mount-socket";
@@ -1353,6 +1371,7 @@ class Qualification {
 
       this.step = "8 rosetta";
       await this.down("down-before-rosetta");
+      this.stopMainPool("rosetta");
       this.rosetta();
 
       this.step = "9 web+db";

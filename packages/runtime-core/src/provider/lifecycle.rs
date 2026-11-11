@@ -1959,6 +1959,17 @@ fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<String, Ca
 
 /// The provider's per-machine readiness marker in the shared guest rootfs, which every
 /// rootfs proof excludes.
+/// Whether the witnessed trees (the SmolVM tree, the engine tree and the pool's rootfs copy)
+/// are all on a filesystem qualified for the metadata check. A witness is accepted only when
+/// they are; otherwise every start proves them by content.
+pub(super) fn witness_qualified(candidate: &Candidate) -> bool {
+    super::tree_witness::qualified(&[
+        &artifact::tree_root(candidate, &artifact::SMOLVM),
+        &artifact::tree_root(candidate, &artifact::ENGINE),
+        &root(candidate).join("rootfs"),
+    ])
+}
+
 pub(super) fn rootfs_marker(owner: &Owner) -> Result<String, CandidateError> {
     let data = owner.data_dir();
     let hash = data.file_name().and_then(|v| v.to_str()).ok_or_else(|| {
@@ -2028,6 +2039,7 @@ pub(super) fn verify_retained_rootfs(
     // content. Read-only: nothing is recorded here.
     if owner.phase == "running"
         && let Some(process) = &owner.process
+        && witness_qualified(candidate)
         && super::tree_witness::matches(
             candidate,
             process,

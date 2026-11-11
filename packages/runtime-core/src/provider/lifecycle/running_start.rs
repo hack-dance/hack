@@ -153,6 +153,8 @@ fn verify_trees(
     lease: &state::Lock,
 ) -> Result<(), CandidateError> {
     let process = owner.process.as_ref().ok_or_else(changed)?;
+    // Off a qualified filesystem the witness is never accepted: every tree is proven.
+    let qualified = super::witness_qualified(candidate);
     let mut proven = BTreeMap::new();
     let mut reproven = false;
     for (name, pin) in [
@@ -161,15 +163,16 @@ fn verify_trees(
     ] {
         let anchor = artifact::verify_record(candidate, pin)?.tree_sha256;
         let metadata = artifact::tree_metadata(candidate, pin)?;
-        let tree = if tree_witness::matches(candidate, process, name, &metadata, &anchor) {
-            tree_witness::Proven {
-                metadata,
-                content: anchor,
-            }
-        } else {
-            reproven = true;
-            artifact::verify_witnessed(candidate, pin)?
-        };
+        let tree =
+            if qualified && tree_witness::matches(candidate, process, name, &metadata, &anchor) {
+                tree_witness::Proven {
+                    metadata,
+                    content: anchor,
+                }
+            } else {
+                reproven = true;
+                artifact::verify_witnessed(candidate, pin)?
+            };
         proven.insert(name.to_owned(), tree);
     }
     let rootfs = root(candidate).join("rootfs");
@@ -177,13 +180,14 @@ fn verify_trees(
     let marker = rootfs_marker(owner)?;
     let anchor = owner.rootfs_digest.clone().ok_or_else(changed)?;
     let metadata = tree_witness::metadata_digest(&rootfs, Some(&marker))?;
-    let metadata =
-        if tree_witness::matches(candidate, process, tree_witness::ROOTFS, &metadata, &anchor) {
-            metadata
-        } else {
-            reproven = true;
-            prove_rootfs(&rootfs, &marker, Some(&anchor))?
-        };
+    let metadata = if qualified
+        && tree_witness::matches(candidate, process, tree_witness::ROOTFS, &metadata, &anchor)
+    {
+        metadata
+    } else {
+        reproven = true;
+        prove_rootfs(&rootfs, &marker, Some(&anchor))?
+    };
     proven.insert(
         tree_witness::ROOTFS.to_owned(),
         tree_witness::Proven {
@@ -191,7 +195,7 @@ fn verify_trees(
             content: anchor,
         },
     );
-    if reproven {
+    if reproven && qualified {
         // Best effort, as at boot: without a witness the next command proves by content.
         let _ = tree_witness::record(candidate, lease, process, proven);
     }

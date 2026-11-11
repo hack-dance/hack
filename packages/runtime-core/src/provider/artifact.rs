@@ -213,15 +213,17 @@ pub(super) fn verify_record(
     Ok(artifact)
 }
 
+/// Where a prepared tree lives in this home.
+pub(super) fn tree_root(candidate: &Candidate, pin: &TreePin) -> std::path::PathBuf {
+    candidate.state_root.join("providers").join(pin.directory)
+}
+
 /// The metadata digest ([`super::tree_witness::metadata_digest`]) of a prepared tree.
 pub(super) fn tree_metadata(
     candidate: &Candidate,
     pin: &TreePin,
 ) -> Result<String, CandidateError> {
-    super::tree_witness::metadata_digest(
-        &candidate.state_root.join("providers").join(pin.directory),
-        None,
-    )
+    super::tree_witness::metadata_digest(&tree_root(candidate, pin), None)
 }
 
 /// [`verify_tree`]'s content proof, bracketed by the tree's metadata digest. Returns what the

@@ -104,7 +104,7 @@ impl Lock {
         check_private_directory(root)?;
         let file = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(root.join("operation.lock"))
             .map_err(io)?;
         Self::from_file(file)
@@ -176,9 +176,12 @@ pub fn read_bounded<T: serde::de::DeserializeOwned>(
     path: &Path,
     limit: u64,
 ) -> Result<T, CandidateError> {
+    // Non-blocking open, so a FIFO (or other special file) at a receipt path is refused by
+    // the regular-file check below instead of waiting for a writer. It has no effect on reads
+    // of a regular file.
     let mut f = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .map_err(io)?;
     let m = f.metadata().map_err(io)?;

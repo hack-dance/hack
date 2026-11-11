@@ -35,6 +35,11 @@
 //!   preparation, long before a boot witnesses them, and candidate homes live on the local
 //!   system volume (APFS on macOS, nanosecond ctime).
 //!
+//! The witness is accepted only when every witnessed tree is on a filesystem whose change-time
+//! behaviour was qualified (APFS, checked with `statfs`; see [`qualified`]), and only for the
+//! runtime build that recorded it ([`runtime_build`]). Anywhere else, and after an in-place
+//! upgrade, every start proves by content.
+//!
 //! That is acceptable only while the proven boot is still the running one: its provider and
 //! guest were started from the proven bytes, the witness is bound to that provider's PID,
 //! start time, executable and user, and the next boot proves the trees by content again. It is
@@ -71,7 +76,12 @@ pub(super) const ENGINE: &str = "engine";
 pub(super) const ROOTFS: &str = "rootfs";
 
 const DOMAIN: &[u8] = b"hack.provider-tree.metadata.v1\0";
-const VERSION: u32 = 1;
+/// 2: bound to the runtime build that recorded it.
+const VERSION: u32 = 2;
+/// Filesystems whose change-time behaviour was qualified for the metadata check: APFS keeps
+/// nanosecond ctime that user space cannot set back (observed on Apple Silicon with SmolVM
+/// 1.34.1). On any other filesystem every start proves the trees by content.
+const QUALIFIED_FILESYSTEMS: [&str; 1] = ["apfs"];
 /// Bounds a walk so a foreign tree cannot make the cheap check unbounded.
 const MAX_ENTRIES: usize = 200_000;
 
@@ -90,12 +100,90 @@ pub(super) struct Proven {
 #[serde(deny_unknown_fields)]
 struct Witness {
     version: u32,
+    /// The runtime build that recorded it ([`runtime_build`]): an in-place upgrade of the
+    /// bundle proves by content once.
+    build: String,
     process: ProcessIdentity,
     trees: BTreeMap<String, Proven>,
 }
 
 fn path(candidate: &Candidate) -> PathBuf {
     candidate.state_root.join("run/smolvm/provider-trees.json")
+}
+
+/// The witness's temporary, under the lifecycle lease only. A leftover from an interrupted
+/// write is removed by the next record under the lease.
+fn temporary(candidate: &Candidate) -> PathBuf {
+    candidate
+        .state_root
+        .join("run/smolvm/provider-trees.json.tmp")
+}
+
+/// The running runtime build: its version and its executable's file identity (device, inode,
+/// size, modification and change times). Replacing the executable in place changes it.
+fn runtime_build(candidate: &Candidate) -> Result<String, CandidateError> {
+    let m = fs::metadata(&candidate.executable).map_err(state::io)?;
+    Ok(format!(
+        "{}+{}:{}:{}:{}:{}.{}:{}.{}",
+        crate::CANDIDATE_VERSION,
+        env!("CARGO_PKG_VERSION"),
+        m.dev(),
+        m.ino(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec()
+    ))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A filesystem type this thread's tests report for every path, at the statfs boundary.
+    static FILESYSTEM_TYPE: std::cell::RefCell<Option<&'static str>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Make this test thread report `name` as every path's filesystem type.
+#[cfg(test)]
+pub(super) fn fake_filesystem_type(name: Option<&'static str>) {
+    FILESYSTEM_TYPE.with(|fake| *fake.borrow_mut() = name);
+}
+
+/// The filesystem type of `path` as the kernel names it, or None when unknown.
+fn filesystem_type(path: &Path) -> Option<String> {
+    #[cfg(test)]
+    if let Some(name) = FILESYSTEM_TYPE.with(|fake| *fake.borrow()) {
+        return Some(name.to_owned());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        // SAFETY: a NUL-terminated path and a properly sized out-pointer.
+        if unsafe { libc::statfs(path.as_ptr(), info.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: statfs succeeded and filled the struct.
+        let info = unsafe { info.assume_init() };
+        // SAFETY: f_fstypename is a NUL-terminated array the kernel filled.
+        let name = unsafe { std::ffi::CStr::from_ptr(info.f_fstypename.as_ptr()) };
+        Some(name.to_string_lossy().into_owned())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Whether every one of `roots` is on a filesystem qualified for the metadata check. Callers
+/// accept a witness only when this holds for all the trees they witness.
+pub(super) fn qualified(roots: &[&Path]) -> bool {
+    roots.iter().all(|root| {
+        filesystem_type(root).is_some_and(|name| QUALIFIED_FILESYSTEMS.contains(&name.as_str()))
+    })
 }
 
 fn invalid(message: &'static str) -> CandidateError {
@@ -190,7 +278,8 @@ pub(super) fn witnessed(
     tree: &str,
 ) -> Option<Proven> {
     let witness: Witness = state::read(&path(candidate)).ok()?;
-    (witness.version == VERSION && witness.process == *process)
+    let build = runtime_build(candidate).ok()?;
+    (witness.version == VERSION && witness.build == build && witness.process == *process)
         .then(|| witness.trees.get(tree).cloned())
         .flatten()
 }
@@ -226,26 +315,50 @@ pub(super) fn record_boot(
 /// Record what content proofs just witnessed for the running `process`, under the pool's
 /// lifecycle `lease`. Callers record only trees proven by content for this process's boot,
 /// or proven again while it runs.
+///
+/// The committed witness stays in place until the new one replaces it by rename. The
+/// temporary has a fixed name and is written only under the lease, so a temporary left by an
+/// interrupted write (or an older build's `provider-trees.pending`) belongs to no live writer
+/// and is removed first.
 pub(super) fn record(
     candidate: &Candidate,
     _lease: &state::Lock,
     process: &ProcessIdentity,
     trees: BTreeMap<String, Proven>,
 ) -> Result<(), CandidateError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let target = path(candidate);
-    match fs::symlink_metadata(&target) {
-        Ok(_) => fs::remove_file(&target).map_err(state::io)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(state::io(error)),
+    let temporary = temporary(candidate);
+    for leftover in [temporary.clone(), target.with_extension("pending")] {
+        match fs::remove_file(&leftover) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(state::io(error)),
+        }
     }
-    state::write(
-        &target,
-        &Witness {
-            version: VERSION,
-            process: process.clone(),
-            trees,
-        },
-    )
+    let bytes = serde_json::to_vec_pretty(&Witness {
+        version: VERSION,
+        build: runtime_build(candidate)?,
+        process: process.clone(),
+        trees,
+    })
+    .map_err(|error| CandidateError::new("invalid_receipt", error.to_string()))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(state::io)?;
+    file.write_all(&bytes).map_err(state::io)?;
+    file.sync_all().map_err(state::io)?;
+    drop(file);
+    fs::rename(&temporary, &target).map_err(state::io)?;
+    fs::File::open(target.parent().expect("witness parent"))
+        .map_err(state::io)?
+        .sync_all()
+        .map_err(state::io)
 }
 
 #[cfg(test)]

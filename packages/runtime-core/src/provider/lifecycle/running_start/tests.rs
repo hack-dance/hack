@@ -53,6 +53,9 @@ fn process(pid: i32) -> identity::ProcessIdentity {
 
 impl Home {
     fn new(name: &str) -> Self {
+        // The witness is accepted only on a qualified filesystem: this thread's tests report
+        // APFS at the statfs boundary (set per thread, so tests do not interfere).
+        tree_witness::fake_filesystem_type(Some("apfs"));
         let directory = crate::private_test_root(
             &std::env::temp_dir().canonicalize().unwrap(),
             &format!("hack-running-start-{name}"),
@@ -118,6 +121,21 @@ impl Home {
         let before = tree_witness::content_proofs();
         self.check()?;
         Ok(tree_witness::content_proofs() - before)
+    }
+
+    fn witness_path(&self) -> PathBuf {
+        self.candidate
+            .state_root
+            .join("run/smolvm/provider-trees.json")
+    }
+
+    /// Change an ordinary file's ctime without changing its bytes or mode.
+    fn touch_smolvm(&self) {
+        let binary = artifact::root(&self.candidate).join("smolvm-bin");
+        let mode = fs::metadata(&binary).unwrap().permissions();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&binary, mode).unwrap();
     }
 
     fn witness(&self) -> Option<tree_witness::Proven> {
@@ -472,4 +490,87 @@ mod live {
             "amd64_emulation_restart_required"
         );
     }
+}
+
+#[test]
+fn off_a_qualified_filesystem_every_start_proves_by_content() {
+    let home = Home::new("unqualified");
+    for name in ["hfs", "msdos", "nfs"] {
+        tree_witness::fake_filesystem_type(Some(name));
+        assert_eq!(home.proofs().unwrap(), 3, "{name}");
+        assert_eq!(home.proofs().unwrap(), 3, "{name}");
+    }
+    // Nothing is recorded where it would never be read.
+    assert!(!home.witness_path().exists());
+    // An unknown filesystem type counts as unqualified too.
+    tree_witness::fake_filesystem_type(None);
+    if !cfg!(target_os = "macos") {
+        assert_eq!(home.proofs().unwrap(), 3);
+    }
+}
+
+#[test]
+fn a_witness_from_another_runtime_build_is_proven_again_once() {
+    let home = Home::new("build");
+    home.check().unwrap();
+    let path = home.witness_path();
+    let mut witness: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    witness["build"] = json!("5.0.0-previous+0.1.0:1:2:3:4.5:6.7");
+    fs::remove_file(&path).unwrap();
+    state::write(&path, &witness).unwrap();
+    assert!(home.witness().is_none());
+    assert_eq!(home.proofs().unwrap(), 3);
+    assert_eq!(home.proofs().unwrap(), 0);
+}
+
+#[test]
+fn a_fifo_at_the_witness_path_is_refused_without_blocking() {
+    let home = Home::new("fifo");
+    let path = home.witness_path();
+    state::private_directory(path.parent().unwrap()).unwrap();
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let directory = home.directory.clone();
+    let owner = home.owner.clone();
+    std::thread::spawn(move || {
+        tree_witness::fake_filesystem_type(Some("apfs"));
+        let candidate = Candidate::discover(&directory).unwrap();
+        let lease = state::Lock::acquire(&root(&candidate)).unwrap();
+        let before = tree_witness::content_proofs();
+        let result = verify_trees(&candidate, &owner, &lease);
+        let _ = sender.send((result, tree_witness::content_proofs() - before));
+    });
+    let (result, proofs) = receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("a FIFO at the witness path must not block the start");
+    result.unwrap();
+    // No usable witness: proven by content, and a regular witness replaces the FIFO.
+    assert_eq!(proofs, 3);
+    assert!(fs::symlink_metadata(&path).unwrap().is_file());
+    assert_eq!(home.proofs().unwrap(), 0);
+}
+
+#[test]
+fn an_interrupted_witness_write_keeps_the_committed_witness_and_is_recovered() {
+    let home = Home::new("interrupted");
+    home.check().unwrap();
+    let committed = fs::read(home.witness_path()).unwrap();
+    // A write interrupted before its rename leaves the temporary (and an older build's
+    // fixed `.pending` name) behind; the committed witness is untouched.
+    let directory = home.witness_path().parent().unwrap().to_path_buf();
+    for leftover in ["provider-trees.json.tmp", "provider-trees.pending"] {
+        fs::write(directory.join(leftover), b"{\"partial\":").unwrap();
+    }
+    assert_eq!(fs::read(home.witness_path()).unwrap(), committed);
+    assert_eq!(home.proofs().unwrap(), 0);
+    // The next record under the lease removes the leftovers and publishes a new witness.
+    home.touch_smolvm();
+    assert_eq!(home.proofs().unwrap(), 1);
+    assert_ne!(fs::read(home.witness_path()).unwrap(), committed);
+    for leftover in ["provider-trees.json.tmp", "provider-trees.pending"] {
+        assert!(!directory.join(leftover).exists(), "{leftover}");
+    }
+    assert_eq!(home.proofs().unwrap(), 0);
 }

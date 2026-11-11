@@ -318,6 +318,8 @@ pub(in crate::provider::graph) mod tests {
     #[test]
     fn a_running_pools_rootfs_witness_skips_the_content_proof_only_while_it_holds() {
         use crate::provider::tree_witness;
+        // Qualified filesystem at the statfs boundary (the runner's temp volume may not be).
+        tree_witness::fake_filesystem_type(Some("apfs"));
         let fixture = Fixture::new();
         let candidate = &fixture.candidate;
         let mut owner = Owner::load(candidate).unwrap();

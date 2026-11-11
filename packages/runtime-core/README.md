@@ -1442,6 +1442,24 @@ times, symlink targets) and prove it by content again on any difference. A stopp
 new boot and `runtime repair-provider-tree` always prove by content. Warm starts now also
 check the guest rootfs copy, which the running path never did.
 
+Two limits on when the witness is used (decided for HACK-2092; the owner can revisit them):
+
+- **Qualified filesystems only.** The witness is accepted only when all three trees are on a
+  filesystem whose change-time behaviour was qualified: APFS today, checked with `statfs`
+  on each tree root rather than assumed. APFS keeps nanosecond ctime that user space cannot
+  set back, and stores through a shared mapping update it (both observed on Apple Silicon
+  with SmolVM 1.34.1). On any other filesystem, or when the type cannot be read, every start
+  proves the trees by content and no witness is written.
+- **Bound to the runtime build.** The witness names the build that recorded it: the runtime
+  version plus its executable's file identity (device, inode, size, modification and change
+  times). An in-place upgrade of the bundle therefore proves by content once, then records a
+  witness for the new build.
+
+The witness is read without blocking, so a FIFO or other special file at its path is
+refused like any unsafe receipt and the trees are proven by content. It is written through a
+temporary under the lifecycle lease and replaces the committed witness only by rename; a
+temporary left by an interrupted write is removed by the next write under the lease.
+
 Both proofs guard against drift (damage, cleanup tools, interrupted writers), not a
 same-user adversary who knows the scheme: the content anchors and the witness are writable
 by the same user. `tree_witness` lists what the metadata check gives up relative to the

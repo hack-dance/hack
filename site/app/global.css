@@ -138,16 +138,15 @@ a:focus-visible {
   margin: 0;
   max-width: 100%;
 }
-.diagram-dark {
+.diagram .diagram-dark {
   display: none;
 }
-.dark .diagram-dark {
+.dark .diagram .diagram-dark {
   display: block;
 }
-.dark .diagram-light {
+.dark .diagram .diagram-light {
   display: none;
 }
-details:has(> summary + .fd-codeblock, > summary ~ figure) > summary,
 details > summary {
   cursor: pointer;
 }

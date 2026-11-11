@@ -358,9 +358,9 @@ describe("provider pin watch", () => {
       security: false,
     });
     expect(plan(unreadable, open, "2026-11-11").action).toBe("close");
-    expect(renderBody(unreadable, "2026-11-11")).toContain(
-      "range not understood; read it"
-    );
+    const unreadBody = renderBody(unreadable, "2026-11-11");
+    expect(unreadBody).toContain("range not understood; read it");
+    expect(unreadBody).toMatch(/\| 0 \(\+1 to read\) \|$/m);
     expect(plan(behind, closed, "2026-11-11").action).toBe("update");
     expect(plan(behind, notPlanned, "2026-11-11").action).toBe("none");
     expect(plan(advised, notPlanned, "2026-11-11").action).toBe("update");

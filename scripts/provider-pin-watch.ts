@@ -550,8 +550,11 @@ export function renderBody(deltas: Delta[], checkedAt: string): string {
       entry.releases.at(-1)?.tag ??
       `${entry.component.tagPrefix}${entry.pinned}`;
     const behind = `${entry.releases.length}${entry.truncated ? "+" : ""}`;
+    const certain = entry.advisories.filter((advisory) => advisory.certain);
+    const unread = entry.advisories.length - certain.length;
+    const advised = `${certain.length}${unread > 0 ? ` (+${unread} to read)` : ""}`;
     lines.push(
-      `| ${entry.component.label} | ${entry.pinned} | ${latest} | ${behind} | ${entry.advisories.length} |`
+      `| ${entry.component.label} | ${entry.pinned} | ${latest} | ${behind} | ${advised} |`
     );
   }
   for (const entry of deltas) {

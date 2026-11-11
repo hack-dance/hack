@@ -989,6 +989,81 @@ async function listenerIntentFixture() {
   return { directory, path, selection, calls, options };
 }
 
+test.each([
+  "SIGINT",
+  "SIGTERM",
+] as const)("HACK-2035: preflight wrappers preserve %s before frontend abort", async (stopSignal) => {
+  const listener = await listenerIntentFixture();
+  try {
+    for (const request of [
+      "inspect",
+      "dependency-plan",
+      "dependency-discover",
+    ] as const) {
+      const failure = new NativeRuntimeRequestError({
+        message: "request interrupted",
+        stopSignal,
+      });
+      const calls: string[] = [];
+      const prepared: NativeRestartIntent = {
+        run,
+        finalization: token,
+        phase: "prepared",
+      };
+      const f = stopFixture("never", request === "inspect" ? prepared : null);
+      const result = await restartNativeProject({
+        ...f.options,
+        preflight: async (selected, { preparedRetry }) => {
+          await preflightNativeRestart({
+            ...listener.options,
+            run: selected,
+            preparedRetry,
+            dependencies: {
+              ...listener.options.dependencies,
+              activeImages: async () => activeImageFixture(),
+              ...(request === "dependency-plan"
+                ? {
+                    dependencies: async () => [
+                      {
+                        service: "app",
+                        binding: "qa",
+                        slot: 0,
+                        guest_port: 8444,
+                        aliases: ["qa.example.com"],
+                        host_pid: 12_345,
+                        host_port: 8444,
+                      },
+                    ],
+                  }
+                : {}),
+              invoke: async ({ args }) => {
+                calls.push(args[1] ?? "unknown");
+                if (args[1] === request) {
+                  throw failure;
+                }
+                if (args[1] === "status") {
+                  return { network: "internet" };
+                }
+                if (args[1] === "probe") {
+                  return { admitted: true };
+                }
+                throw new Error("Unexpected request");
+              },
+            },
+          });
+        },
+      });
+      expect(result).toBe(stopSignal === "SIGTERM" ? 143 : 130);
+      expect(calls.at(-1)).toBe(request);
+      expect(f.events).toEqual(["stopped"]);
+      expect(f.pending()).toEqual(request === "inspect" ? prepared : null);
+      f.interrupt();
+    }
+  } finally {
+    await rm(listener.directory, { recursive: true, force: true });
+  }
+});
+
 test("cleaned retry with absent listeners reaches startup hooks before actual identity capture", async () => {
   const listener = await listenerIntentFixture();
   try {
@@ -2167,7 +2242,10 @@ test("active restart preserves admitted images despite moved tags and refuses ch
   }
 });
 
-function stopFixture(abortAt: "preflight" | "down" | "start" | "never") {
+function stopFixture(
+  abortAt: "preflight" | "down" | "start" | "never",
+  initialPending: NativeRestartIntent | null = null
+) {
   const events: string[] = [];
   const controller = new AbortController();
   let exit = 130;
@@ -2183,7 +2261,7 @@ function stopFixture(abortAt: "preflight" | "down" | "start" | "never") {
     exit = code;
     controller.abort();
   };
-  let pending: NativeRestartIntent | null = null;
+  let pending: NativeRestartIntent | null = initialPending;
   const options: Parameters<typeof restartNativeProject>[0] = {
     scope,
     preflight: async () => {

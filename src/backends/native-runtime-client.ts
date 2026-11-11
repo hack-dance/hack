@@ -123,6 +123,26 @@ export class NativeRuntimeRequestError extends ClosedCliError {
   }
 }
 
+/** Preserve owned-child stop evidence through wrappers that replace other runtime failures. */
+export function isNativeRuntimeStopError(
+  error: unknown
+): error is NativeRuntimeRequestError {
+  return (
+    error instanceof NativeRuntimeRequestError && error.stopSignal !== undefined
+  );
+}
+
+/** Classify a child stop independently of when the frontend's signal handler is scheduled. */
+function throwIfNativeRuntimeStopped(signal: NodeJS.Signals | null): void {
+  if (signal === "SIGINT" || signal === "SIGTERM") {
+    throw new NativeRuntimeRequestError({
+      message:
+        "Native runtime request was interrupted; its outcome may be uncertain. No request was replayed.",
+      stopSignal: signal,
+    });
+  }
+}
+
 /**
  * Native inspection code for a run whose journal is exactly absent and whose
  * foreground owner is not published: no runtime state was ever reserved. It is
@@ -349,13 +369,7 @@ export async function invokeNativeRuntime(opts: {
           "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
       });
     }
-    if (child.signalCode === "SIGINT" || child.signalCode === "SIGTERM") {
-      throw new NativeRuntimeRequestError({
-        message:
-          "Native runtime request was interrupted; its outcome may be uncertain. No request was replayed.",
-        stopSignal: child.signalCode,
-      });
-    }
+    throwIfNativeRuntimeStopped(child.signalCode);
     if (outputBound(bound) && drain?.signal.aborted) {
       throw new NativeRuntimeRequestError({
         message:

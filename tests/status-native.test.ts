@@ -6,6 +6,7 @@ import type { NativeProjectPsResult } from "../src/backends/native-project-obser
 import { resolveNativeRuntimeSelection } from "../src/backends/native-runtime-client.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { __testOnlyProjectsCommand } from "../src/commands/projects.ts";
+import { ProjectInputSelectionError } from "../src/lib/project-input-selection.ts";
 
 const { runNativeStatus } = __testOnlyProjectsCommand;
 const roots: string[] = [];
@@ -73,6 +74,7 @@ test("hack status under native selection observes the cwd project like native ps
       native,
       projectOpt: undefined,
       json: true,
+      authored: async () => null,
       ps: async (opts) => {
         scopes.push({ runtime: opts.runtime, scope: opts.scope });
         return observed;
@@ -114,6 +116,7 @@ test("hack status under native selection refuses outside a project instead of li
       native: { binary: "/opt/candidate/hack-native", home: root },
       projectOpt: undefined,
       json: false,
+      authored: async () => null,
       ps: async () => {
         observations++;
         return observed;
@@ -126,6 +129,7 @@ test("hack status under native selection refuses outside a project instead of li
       native: { binary: "/opt/candidate/hack-native", home: root },
       projectOpt: undefined,
       json: false,
+      authored: async () => null,
       ps: async () => observed,
     })
   ).rejects.toThrow("Run it inside a project or pass --project <name>.");
@@ -137,4 +141,48 @@ test("without HACK_RUNTIME_BACKEND=native, status keeps the Compose listing path
   expect(
     resolveNativeRuntimeSelection({ HACK_RUNTIME_BACKEND: "compose" })
   ).toBeNull();
+});
+
+test("hack status under native selection dispatches a native-authored project like hack ps", async () => {
+  const { root, nativeHome } = await projectFixture();
+  // Authored inputs: legacy discovery refuses this checkout.
+  await rm(join(root, ".hack", "docker-compose.yml"));
+  await Bun.write(
+    join(root, ".hack", "hack.project.json"),
+    JSON.stringify({ schema_version: 1, name: "status-authored" })
+  );
+  const native = { binary: "/opt/candidate/hack-native", home: nativeHome };
+  const dispatched: unknown[] = [];
+  let observations = 0;
+  const code = await runNativeStatus({
+    cwd: root,
+    native,
+    projectOpt: undefined,
+    json: true,
+    authored: async (input) => {
+      dispatched.push(input);
+      return 7;
+    },
+    ps: async () => {
+      observations++;
+      return observed;
+    },
+  });
+  // The authored observer's exit code is the result; the legacy path never runs.
+  expect(code).toBe(7);
+  expect(observations).toBe(0);
+  expect(dispatched).toEqual([
+    { cwd: root, project: undefined, operation: "ps", json: true },
+  ]);
+  // Control: without the authored dispatch this checkout is refused before any observation.
+  await expect(
+    runNativeStatus({
+      cwd: root,
+      native,
+      projectOpt: undefined,
+      json: true,
+      authored: async () => null,
+      ps: async () => observed,
+    })
+  ).rejects.toBeInstanceOf(ProjectInputSelectionError);
 });

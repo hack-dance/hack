@@ -27,6 +27,7 @@ import {
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
+import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import {
   createOperationTimings,
   type OperationTimings,
@@ -494,7 +495,20 @@ async function runNativeStatus(opts: {
   readonly projectOpt: string | undefined;
   readonly json: boolean;
   readonly ps?: typeof nativeProjectPs;
+  readonly authored?: typeof tryNativeComposeCommand;
 }): Promise<number> {
+  // A native-authored project (`.hack/hack.project.json`) has its own observer,
+  // and legacy project discovery below refuses its inputs. Dispatch it first,
+  // exactly as `hack ps` does.
+  const authored = await (opts.authored ?? tryNativeComposeCommand)({
+    cwd: opts.cwd,
+    project: opts.projectOpt,
+    operation: "ps",
+    json: opts.json,
+  });
+  if (authored !== null) {
+    return authored;
+  }
   const project =
     opts.projectOpt === undefined
       ? await findProjectContext(opts.cwd)

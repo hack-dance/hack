@@ -12,7 +12,7 @@ projects, and many branches of one project, at the same time. They do not get in
 each other's way.
 
 ```bash
-cd any-repo && hack up
+cd myapp && hack up        # a repository that has a .hack/ folder
 # → https://myapp.hack.local is live, TLS trusted, env injected
 ```
 
@@ -34,7 +34,7 @@ only its ports. A project has one identity. Hack uses it to route
 label its logs, and keep its branch instances apart. Under the hood it uses Docker
 Compose for services and Caddy for local DNS and trusted TLS.
 
-| The job | Without Hack | With Hack |
+| The job | A common workaround | With Hack |
 | --- | --- | --- |
 | Local addresses with trusted HTTPS | mkcert, `/etc/hosts` edits, a list of ports | `https://myapp.hack.local`, certificate authority trusted once |
 | Two branches at once | a second clone and changed ports | branch instances; git worktrees are separated automatically |
@@ -51,13 +51,13 @@ Hack makes three promises.
 **1. Run many projects and branches side by side, each at a real HTTPS hostname.**
 
 - Every project gets an address such as `https://myapp.hack.local`. Each service
-  gets its own, such as `api.myapp.hack.local`. Your browser trusts the
-  certificates.
+  gets its own, such as `api.myapp.hack.local`. The certificates are trusted on
+  your machine once `hack global install` has run.
 - `hack up --branch review` starts a second copy of the same project with its own
   addresses. In a linked git worktree, `hack up` does this automatically, so you
   can review a pull request while your main checkout keeps running.
-- `hack dev` runs a repository's own development build beside the installed one,
-  from a committed `.hack/dev.json`.
+- `hack dev` runs a development build of the repository's own app beside the copy
+  of that app you have installed, from a committed `.hack/dev.json`.
 - Existing `.hack` names and custom domains keep working. `.hack.gy` alias hosts
   cover OAuth providers that reject local domains.
 
@@ -71,7 +71,7 @@ See [core concepts](docs/core.md) and [side-by-side development](docs/dev.md).
   it as `HACK_ENV_SECRET_KEY`.
 - `hack env` reads and writes values without printing secrets.
 - `hack host exec` runs a command on your machine with the project's settings
-  loaded, so scripts do not read `.env` files.
+  loaded, so scripts do not need `.env` files.
 
 See [env and secrets](docs/env.md).
 

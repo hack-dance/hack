@@ -18,6 +18,8 @@ import {
 
 export type LinuxTrustHost = {
   readonly homeDir: string;
+  /** `$XDG_CONFIG_HOME` when absolute, else `~/.config`. */
+  readonly configHome: string;
   /** File text, or `null` when absent or unreadable. */
   readonly readFile: (path: string) => Promise<string | null>;
   /** Entry names in a directory, or `[]` when absent. */
@@ -152,6 +154,8 @@ export async function applyLinuxSystemTrust(opts: {
     : { status: "applied_unverified", family, bundlePath };
 }
 
+const MAX_NICKNAME_DELETES = 8;
+
 export type NssDbOutcome = {
   readonly dbDir: string;
   readonly status: "trusted" | "added" | "replaced" | "failed";
@@ -176,15 +180,33 @@ const CERTUTIL_PACKAGE: Readonly<Record<LinuxDistroFamily, string>> = {
 export async function findNssDatabases(
   host: LinuxTrustHost
 ): Promise<readonly string[]> {
-  const dirs = [join(host.homeDir, ".pki", "nssdb")];
+  const home = host.homeDir;
+  const dirs = [join(home, ".pki", "nssdb")];
+  const hasDb = async (dir: string) =>
+    (await host.listDir(dir)).includes("cert9.db");
+  // Sandboxed Chromium keeps its own user db; use it only when it exists.
+  const sandboxedUserDbs = [
+    join(home, "snap", "chromium", "current", ".pki", "nssdb"),
+    ...[...(await host.listDir(join(home, ".var", "app")))]
+      .sort()
+      .map((app) => join(home, ".var", "app", app, ".pki", "nssdb")),
+  ];
+  for (const dir of sandboxedUserDbs) {
+    if (await hasDb(dir)) {
+      dirs.push(dir);
+    }
+  }
   const firefoxRoots = [
-    join(host.homeDir, ".mozilla", "firefox"),
-    join(host.homeDir, "snap", "firefox", "common", ".mozilla", "firefox"),
+    join(home, ".mozilla", "firefox"),
+    // Newer Firefox releases create profiles under the XDG config dir.
+    join(host.configHome, "mozilla", "firefox"),
+    join(home, "snap", "firefox", "common", ".mozilla", "firefox"),
+    join(home, ".var", "app", "org.mozilla.firefox", ".mozilla", "firefox"),
   ];
   for (const root of firefoxRoots) {
     for (const name of [...(await host.listDir(root))].sort()) {
       const profile = join(root, name);
-      if ((await host.listDir(profile)).includes("cert9.db")) {
+      if (await hasDb(profile)) {
         dirs.push(profile);
       }
     }
@@ -257,7 +279,17 @@ async function trustOneNssDb(opts: {
     return "trusted";
   }
   if (present) {
-    await host.exec(nssDeleteArgv(dbDir));
+    // `certutil -D -n` removes one entry per call; clear every entry under
+    // Hack's nickname (bounded) before adding the current CA.
+    for (let attempt = 0; attempt < MAX_NICKNAME_DELETES; attempt += 1) {
+      const deleted = await host.exec(nssDeleteArgv(dbDir));
+      if (deleted.exitCode !== 0) {
+        break;
+      }
+      if ((await host.exec(nssListArgv(dbDir))).exitCode !== 0) {
+        break;
+      }
+    }
   }
   const added = await host.exec(nssAddArgv({ dbDir, certPath: opts.certPath }));
   if (added.exitCode !== 0) {

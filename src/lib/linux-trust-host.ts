@@ -1,5 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { readTextFile } from "./fs.ts";
 import type { LinuxTrustHost } from "./linux-trust-setup.ts";
 import { exec, findExecutableInPath, run } from "./shell.ts";
@@ -14,8 +15,12 @@ const PATH_SBIN = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"] as const;
 export function createLinuxTrustHost(opts?: {
   readonly homeDir?: string;
 }): LinuxTrustHost {
+  const homeDir = opts?.homeDir ?? homedir();
+  const xdgConfig = process.env.XDG_CONFIG_HOME;
   return {
-    homeDir: opts?.homeDir ?? homedir(),
+    homeDir,
+    configHome:
+      xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(homeDir, ".config"),
     readFile: async (path) => await readTextFile(path),
     listDir: async (path) => {
       try {

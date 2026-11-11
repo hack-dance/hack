@@ -74,6 +74,7 @@ function createFakeHost(init: {
   };
   const host: LinuxTrustHost = {
     homeDir: HOME,
+    configHome: `${HOME}/.config`,
     readFile: async (path) => state.files.get(path) ?? null,
     listDir: async (path) => state.dirs.get(path) ?? [],
     hasCommand: async (name) => state.commands.has(name),
@@ -373,6 +374,35 @@ describe("applyLinuxNssTrust", () => {
     expect(
       state.execs.filter((argv) => argv[3] === "-A").map((argv) => argv[7])
     ).toEqual([NSS_CA_NICKNAME, NSS_CA_NICKNAME]);
+  });
+
+  test("finds XDG, snap and Flatpak Firefox profiles and sandboxed Chromium dbs", async () => {
+    const xdgRoot = `${HOME}/.config/mozilla/firefox`;
+    const flatpakRoot = `${HOME}/.var/app/org.mozilla.firefox/.mozilla/firefox`;
+    const snapChromium = `${HOME}/snap/chromium/current/.pki/nssdb`;
+    const { host } = createFakeHost({
+      osRelease: OS_RELEASE.ubuntu,
+      commands: ["certutil"],
+      dirs: {
+        [userDb]: ["cert9.db"],
+        [snapChromium]: ["cert9.db"],
+        [`${HOME}/.var/app`]: ["org.mozilla.firefox", "org.example.NoDb"],
+        [xdgRoot]: ["x.default"],
+        [`${xdgRoot}/x.default`]: ["cert9.db"],
+        [flatpakRoot]: ["f.default"],
+        [`${flatpakRoot}/f.default`]: ["cert9.db"],
+      },
+    });
+    const outcome = await applyLinuxNssTrust({ host, certPath: CERT_PATH });
+    expect(outcome.status).toBe("done");
+    if (outcome.status === "done") {
+      expect(outcome.databases.map((db) => db.dbDir)).toEqual([
+        userDb,
+        snapChromium,
+        `${xdgRoot}/x.default`,
+        `${flatpakRoot}/f.default`,
+      ]);
+    }
   });
 
   test("already present is left alone; an old CA under the nickname is replaced", async () => {

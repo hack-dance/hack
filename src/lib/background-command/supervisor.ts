@@ -311,7 +311,7 @@ function startChild(opts: {
               ...childEnv(),
               [NATIVE_EXIT_CONFIRMED_ENV]: opts.paths.exitConfirmed,
             }
-          : childEnv(),
+          : withoutInheritedBashVersion(childEnv()),
       stdin: "ignore",
       stdout: descriptors.stdout,
       stderr: descriptors.stderr,
@@ -365,6 +365,19 @@ export function limitOutputFileSize(
     "hack-background-command",
     ...argv,
   ];
+}
+
+/**
+ * The file-size wrapper picks its `ulimit -f` unit from `BASH_VERSION`. Bash
+ * sets that itself at startup, but other shells (dash, ash, ksh) would read an
+ * inherited one, so a project env setting it could double the cap. Bash
+ * resets it for anything bash runs; nothing else is expected to read it.
+ */
+export function withoutInheritedBashVersion(
+  env: Record<string, string>
+): Record<string, string> {
+  const { BASH_VERSION: _ignored, ...rest } = env;
+  return rest;
 }
 
 /** Record the child's identity (pid, birth, process group) for cancel and recovery. */

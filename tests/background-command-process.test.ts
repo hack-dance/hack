@@ -50,7 +50,10 @@ import {
   readCommandEvents,
 } from "../src/lib/background-command/reader.ts";
 import { acceptCommand } from "../src/lib/background-command/store.ts";
-import { limitOutputFileSize } from "../src/lib/background-command/supervisor.ts";
+import {
+  limitOutputFileSize,
+  withoutInheritedBashVersion,
+} from "../src/lib/background-command/supervisor.ts";
 
 // ---------------------------------------------------------------------------
 // HACK-2085: real detached supervisors and children, on this host's kernel.
@@ -981,6 +984,12 @@ describe("background command processes", () => {
           stdin: "ignore",
           stdout: fd,
           stderr: "ignore",
+          // An inherited BASH_VERSION must not change the unit a non-bash
+          // sh uses: the supervisor drops it from the wrapper's env.
+          env: withoutInheritedBashVersion({
+            ...fixture.env,
+            BASH_VERSION: "4.4.0(1)-release",
+          }),
         });
         // head reports EFBIG ("File too large") and fails.
         expect(await proc.exited).not.toBe(0);

@@ -38,6 +38,7 @@ import {
   installSystemdUnit,
   isPidInSystemdUnit,
   parseSystemdExecProgram,
+  parseSystemdPathList,
   probeSystemdUserManager,
   readSystemdServiceStatus,
   renderSystemdUnit,
@@ -2026,4 +2027,32 @@ test("a drop-in masked with a link to /dev/null is accepted", async () => {
   expect(await checkSystemdUnitDropIns({ unitPath })).toContain(
     "contents cannot be trusted"
   );
+});
+
+test("a unit path list split by a space in a path is refused, not half-checked", async () => {
+  // Codex security review: `.../data share/systemd/user` was read as a
+  // fake prefix plus a dropped relative suffix.
+  const spaced = join(root, "data share", "systemd", "user");
+  await mkdir(spaced, { recursive: true });
+  await chmod(spaced, 0o777);
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  fake.unitSearchPath = `${join(root, "config", "systemd", "user")} ${spaced}`;
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toContain(
+    "cannot be read unambiguously"
+  );
+  // Both forms of ambiguity, directly.
+  expect(await parseSystemdPathList("/a b/c")).toHaveProperty("error");
+  expect(
+    await parseSystemdPathList(`${join(root, "x")} /y`, (path) =>
+      Promise.resolve(path === `${join(root, "x")} /y`)
+    )
+  ).toHaveProperty("error");
+  expect(await parseSystemdPathList("/a /b")).toEqual({ paths: ["/a", "/b"] });
+  // Loaded drop-in paths use the same parser.
+  fake.unitSearchPath = null;
+  fake.dropInPaths = `${join(root, "data")} share/x.conf`;
+  expect(
+    await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
+  ).toContain("cannot be read unambiguously");
 });

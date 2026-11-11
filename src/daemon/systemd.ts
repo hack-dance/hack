@@ -1283,10 +1283,11 @@ export async function checkSystemdLoadedUnitPaths(opts: {
   if (resolve(fragment) !== resolve(opts.unitPath)) {
     return `Not starting ${SYSTEMD_UNIT_NAME}: systemd loads it from ${fragment || "an unknown file"}, not ${opts.unitPath}. Review that file, then run: hack daemon install`;
   }
-  for (const path of (props.DropInPaths ?? "").split(WHITESPACE)) {
-    if (path.length === 0) {
-      continue;
-    }
+  const dropIns = await parseSystemdPathList(props.DropInPaths ?? "");
+  if ("error" in dropIns) {
+    return `Not starting ${SYSTEMD_UNIT_NAME}: ${dropIns.error}`;
+  }
+  for (const path of dropIns.paths) {
     // The file, every directory above it up to `/`, and every symlink hop.
     const error = await checkDropInFile({ path, uid, allowRoot: true });
     if (error !== null) {
@@ -1479,12 +1480,16 @@ export async function checkSystemdUnitLoadPaths(opts: {
     "show",
     "--property=UnitPath",
   ]);
-  const paths =
+  const parsed =
     show.exitCode === 0
-      ? (parseSystemdProperties(show.stdout).UnitPath ?? "")
-          .split(WHITESPACE)
-          .filter((path) => isAbsolute(path))
-      : [];
+      ? await parseSystemdPathList(
+          parseSystemdProperties(show.stdout).UnitPath ?? ""
+        )
+      : { paths: [] };
+  if ("error" in parsed) {
+    return `Not using ${SYSTEMD_UNIT_NAME}: ${parsed.error}`;
+  }
+  const paths = parsed.paths;
   if (paths.length === 0) {
     return `Not using ${SYSTEMD_UNIT_NAME}: systemd did not report where it loads user units from (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`;
   }
@@ -1570,6 +1575,33 @@ async function isUnitFileReplaceable(opts: {
   } catch {
     return false;
   }
+}
+
+/**
+ * Splits a path list as `systemctl show` prints it: separated by spaces,
+ * with no quoting, so a path that contains a space cannot be told apart
+ * from two paths (HACK-2052). Rather than guess, the list is refused when
+ * it is ambiguous: a piece that is not absolute (the tail of a split path),
+ * or two neighbours that, joined by a space, name a path that exists.
+ */
+export async function parseSystemdPathList(
+  value: string,
+  exists: (path: string) => Promise<boolean> = pathExists
+): Promise<{ readonly paths: readonly string[] } | { readonly error: string }> {
+  const pieces = value.split(" ").filter((piece) => piece.length > 0);
+  const ambiguous = (detail: string) => ({
+    error: `systemd reported a path list that cannot be read unambiguously (${detail}); a path with a space is not supported`,
+  });
+  for (const [index, piece] of pieces.entries()) {
+    if (!isAbsolute(piece)) {
+      return ambiguous(`"${piece}" is not an absolute path`);
+    }
+    const next = pieces[index + 1];
+    if (next !== undefined && (await exists(`${piece} ${next}`))) {
+      return ambiguous(`"${piece} ${next}" exists`);
+    }
+  }
+  return { paths: pieces };
 }
 
 function errorMessage(error: unknown): string {

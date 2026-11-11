@@ -138,7 +138,7 @@ const setupOptions = [optPath, optProject, optQr, optNoQr, optYes] as const;
 
 const remoteSpec = defineCommand({
   name: "remote",
-  summary: "Beta: guided remote access and gateway helpers",
+  summary: "Unsupported: guided remote access and gateway helpers",
   group: "Beta",
   options: remoteOptions,
   positionals: [],

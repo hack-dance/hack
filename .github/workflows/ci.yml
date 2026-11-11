@@ -38,6 +38,7 @@ jobs:
       suite: ${{ steps.scope.outputs.suite }}
       test_layout: ${{ steps.scope.outputs.test_layout }}
       test_focus: ${{ steps.scope.outputs.test_focus }}
+      docs_site: ${{ steps.scope.outputs.docs_site }}
     steps:
       # A pull-request checkout is GitHub's merge commit; its first parent is
       # the base tip, so HEAD^1..HEAD is exactly the pull request's change.
@@ -266,6 +267,46 @@ jobs:
           LC_ALL=C grep -q -a "$marker" .hack-local/target/debug/hack-runtime-candidate
           if LC_ALL=C grep -q -a "$marker" .hack-local/target/release/hack-runtime-candidate; then
             echo "release hack-runtime-candidate contains the test-only kill harness" >&2
+            exit 1
+          fi
+
+  docs-site:
+    # The documentation corpus checks, the site build Vercel runs, and an HTTP
+    # smoke of that build. Pull requests run it only when they change docs/,
+    # site/, scripts/docs/ or this workflow; pushes always run it.
+    name: docs site
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_site == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
+        working-directory: site
+      - run: bun run docs:prepare
+      - run: bun run docs:check
+      - run: bun run docs:typecheck
+      # The Vercel build command (site/vercel.json) after docs:prepare.
+      - run: bun run --cwd site build
+      - name: HTTP smoke of the production build
+        run: |
+          bun run --cwd site start --port 3411 >"$RUNNER_TEMP/docs-site.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl --fail --silent --output /dev/null http://127.0.0.1:3411/docs; then
+              break
+            fi
+            sleep 1
+          done
+          if ! bun run docs:smoke http://127.0.0.1:3411; then
+            cat "$RUNNER_TEMP/docs-site.log"
             exit 1
           fi
 

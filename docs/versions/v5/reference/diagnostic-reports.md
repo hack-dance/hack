@@ -1,10 +1,10 @@
 # Diagnostic reports
 
-Historical next.5 field audit. For released next.6 changes and current command sources, see [next.6 release contracts](next6-contracts.md). These field inventories have not been requalified against next.6; they do not override its current generated command reference.
+This field inventory was audited against the `5.0.0-next.5` source and has not been requalified against later prereleases. The [generated command reference](../../reference/cli.md) and the pinned runtime guides take precedence where they differ.
 
 Pinned source: `28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc`. Consumer-visible JSON projections only. R = required; optional means omitted, never implicitly null. A listed null union is emitted as null. Arrays may be empty unless stated otherwise. Source admission is not runtime/provider qualification. All examples are synthetic; paths and values are placeholders.
 
-The retiring setup-sync report is intentionally excluded from this recommended v5 reference. Its [historical availability](agent-compatibility.md) remains documented against next.5; this is not a shipped runtime removal.
+The retired setup-sync report is excluded from this reference; `hack setup sync` refuses in v5. See [Agent integrations](../integrations.md).
 
 ## Report and exit rules
 

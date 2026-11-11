@@ -1,21 +1,27 @@
 # Choose where a command runs
 
-Use the explicit candidate launcher for this version. Installing it does not
-replace the stable `hack` executable. Its native `exec` command runs a
-noninteractive command in an existing selected service:
+Use `exec` when the target service is already running. Use `run` for a one-off
+command in a fresh service container. Use `host exec` for a command that must run
+on the current host with the project's resolved environment.
 
 ```sh
-"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project exec web -- node --version < /dev/null
+hack exec web -- node --version
+hack run web node --version
+hack host exec --scope web -- node --version
 ```
 
-This assumes a prepared native project, a running `web` service and Node installed
-in that workload. It reports the workload's Node version; it does not install
-anything. Closed stdin and no TTY are required by the native contract.
+Replace `web` and the command with your project's actual service and tool. The
+three examples report the installed Node version in three execution contexts; they
+install nothing. The host path needs Node on the host.
 
-For one-off containers, Compose host commands or interactive sessions, choose v4
-and follow its separate execution-context guide. Do not substitute bare `hack`
-into a candidate recipe: it can select a different version and home.
+Hack options go before the command tail. After the service name or `--`, everything
+is passed through unchanged, so a child's `--json` or `--help` is never read as a
+Hack flag.
 
-An agent should identify the version, host, project and native generation before
-executing a command. Data-changing commands such as migrations need their own
-project-specific authorization and checks. See [native command support](../../reference/native-authored-commands.md).
+An agent uses the same model. Ask it to read project instructions, select the
+intended host and instance, and inspect state before running data-changing
+commands such as migrations, which need their own project-specific checks.
+
+On the native backend, `exec` requires a noninteractive command with closed stdin,
+and one-off `run` is bounded. See
+[Native authored commands](../../reference/native-authored-commands.md).

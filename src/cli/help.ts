@@ -137,7 +137,7 @@ function renderRootHelp(
       lines.push("");
       continue;
     }
-    lines.push(`${groupLabel(group)}:`);
+    lines.push(groupHeading(group));
     lines.push(...renderEntryLines(entries));
     lines.push("");
   }
@@ -199,6 +199,11 @@ function renderRootHelpMarkdown(
     }
     lines.push(`### ${groupLabel(group)}`);
     lines.push("");
+    const summary = groupSummary(group);
+    if (summary) {
+      lines.push(mdEscape(`${capitalize(summary)}.`));
+      lines.push("");
+    }
     lines.push(...renderEntriesTableMarkdown(entries));
     lines.push("");
   }
@@ -545,16 +550,43 @@ function groupLabel(group: CliGroup): string {
     {
       Global: "Global commands",
       Project: "Core workflows",
-      Integrations: "Local helpers",
+      Integrations: "Env and host commands",
       Beta: "Unsupported experimental",
       Extensions: "Extension commands",
-      Agents: "Agent integrations",
+      Agents: "Agent integrations (optional)",
       Diagnostics: "Diagnostics",
       Secrets: "Secrets",
       Fun: "Fun",
       Internal: "Internal",
     } satisfies Record<CliGroup, string>
   )[group];
+}
+
+/**
+ * One line saying what a root help group is for, so a reader can tell the core
+ * product from optional surfaces without opening each command.
+ */
+function groupSummary(group: CliGroup): string | undefined {
+  const summaries: Partial<Record<CliGroup, string>> = {
+    Global: "machine-wide setup, and status across projects",
+    Project:
+      "start, stop and inspect a project, its branch instances and sessions",
+    Integrations:
+      "project env and secrets, and host commands that receive them",
+    Agents: "opt-in skills and MCP for coding agents; Hack works without them",
+    Diagnostics: "check, repair and update the local setup",
+  };
+  return summaries[group];
+}
+
+/** Plain-text group heading: `Label:` or `Label: summary`. */
+function groupHeading(group: CliGroup): string {
+  const summary = groupSummary(group);
+  return summary ? `${groupLabel(group)}: ${summary}` : `${groupLabel(group)}:`;
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function mdCode(text: string): string {

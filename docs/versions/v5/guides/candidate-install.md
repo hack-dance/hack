@@ -1,26 +1,39 @@
-# Candidate installation history
+# Install a native prerelease beside stable Hack
 
-Use [Install](../install.md) for released next.6. Its shell bootstrap and standalone
-manager replace the Python installation path in earlier candidate documentation.
-The next.1 Python example in the [preserved next.5 guide](https://github.com/hack-dance/hack/blob/28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc/docs/guides/candidate-install.md)
-is historical, not the next.6 installation recipe. The release source's copy of
-that guide also retains obsolete Python procedures; it is not current installer
-instructions. Do not apply Python manager commands to the standalone channel root.
+v5 prereleases ship for Apple Silicon macOS as immutable `5.0.0-next.N` bundles.
+The shell bootstrap on each release installs a standalone manager and the selected
+bundle into a private `~/.hack-next` channel. It does not replace Homebrew `hack`,
+edit your PATH or shell profile, convert projects, move volumes, enable DNS or
+trust, or start a VM. [Install](../install.md) has the download and run steps.
 
-Installer PR525 shipped in next.6. The [standalone manager entry point](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/scripts/install-prerelease.ts)
-and [channel implementation](https://github.com/hack-dance/hack/blob/44aaf5156426dfcbb1c8a189b8e20531e5b95613/scripts/installer/channel.ts)
-are the source contracts for explicit selection and separate native/Compose homes.
-Old or foreign roots refuse; do not delete or rewrite one to bypass ownership checks.
+Run the candidate explicitly:
 
-Cross-version upgrade and rollback and initialized-data preservation remain open
-acceptance work. Fresh installation and manager status do not qualify those paths.
-Native provider preparation and installed-client acceptance are separate too.
+```sh
+"$HOME/.hack-next/bin/hack-next" --version
+"$HOME/.hack-next/bin/hack-next" ps --path /absolute/project
+```
 
-## Upgrade and return to a retained candidate
+## Backends and homes
 
-The standalone manager has explicit version selection and retained-candidate
-operations; consult its source entry point above for current parsing and refusal
-boundaries. Historical Python manager syntax does not apply. Cross-version
-upgrade/rollback and initialized-data acceptance remain open. Stop and verify
-ownership of active workloads before any separately authorized version change;
-installation status alone is not proof that a transition is safe.
+`hack-next` selects the native backend by default, with version-private native and
+CLI homes, so candidate state never mixes with stable state. Set
+`HACK_RUNTIME_BACKEND=compose` to run the same verified bundle on Compose against
+your ordinary Hack home. Any other value refuses before the candidate starts.
+
+On Compose, stable `hack` and the candidate share project and configuration state.
+Never run both at once against the same home, including their daemons. Before a
+Compose run: `hack global up`, any stable `hack doctor` or `hack doctor --fix`, then
+`hack daemon stop`, and confirm `pgrep -fl "hack daemon start"` prints nothing.
+
+## Upgrade and roll back
+
+Each release is a new immutable version directory with its own homes. Selecting a
+different retained bundle switches software, not data: an older candidate that
+refuses state written by a newer one is not a successful rollback. Stop and verify
+ownership of active workloads before changing versions, and keep stable v4
+available until each project's own workflow passes on the candidate.
+
+Every invocation re-verifies the retained bundle bytes, receipts and macOS code
+signatures and refuses on any mismatch. The
+[prerelease channel guide](../../guides/prereleases.md) covers versioning,
+platform support and publication gates in full.

@@ -25,7 +25,9 @@ continued past the bound. `data.cutoff` is `{ "bound": ..., "limit": ... }`:
 - `bytes`: stdout plus stderr reached the 8 MiB capture limit.
   `outputTruncated` is `true`, and `data` still carries every event parsed
   before the cut. The cut never splits a UTF-8 code point. A trailing partial
-  line can be present in `stdout`, but it is never parsed as an event.
+  line can be present in `stdout`, but it is never parsed as an event. `stderr`
+  ends with a fixed line suggesting a narrower request (`tail`, `since`, `until`
+  or `service`) or the CLI.
 
 After a cutoff, the server stopped the child process, so `exitCode` is often
 non-zero. Use `ok` and `data.cutoff` to read the result, not `exitCode`.
@@ -37,7 +39,8 @@ connection above 10 MiB. See [Result size limit](mcp-tools.md#result-size-limit)
 Over that limit, `content` becomes a smaller view (below), and `stdout` in
 `structuredContent` is cut before any event. Events go next, from the end, always
 as whole events. `outputTruncated` is `true` whenever `structuredContent` was
-cut. When events were removed from a successful collection:
+cut, and `stderr` then ends with the same narrowing hint. When events were
+removed from a successful collection:
 
 - `data.cutoff` is `{ "bound": "bytes", "limit": 9961472 }`, replacing a `null`
   or an earlier cutoff. A collection that completed is reported as cut, because

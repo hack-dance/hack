@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { agentCompatibilityCommands, curateCliReference } from "./curate-cli";
 import {
+  pinnedBootstrapText,
   prepare,
   repositoryRoot,
   resolveEditorialSource,
@@ -314,6 +315,53 @@ if (!prerelease) {
   throw new Error(
     "v5 label must name the pinned prerelease, e.g. v5 (next.12)"
   );
+}
+// No published v5 page may send a reader to another prerelease's bootstrap.
+const stagedV5 = resolve(repositoryRoot, "site/content/docs/v5");
+const anyBootstrap =
+  /releases\/download\/v5\.0\.0-next\.(\d+)\/hack-next-install\.sh/g;
+for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedV5 })) {
+  const staged = await Bun.file(resolve(stagedV5, file)).text();
+  for (const match of staged.matchAll(anyBootstrap)) {
+    if (match[1] !== prerelease) {
+      throw new Error(
+        `Published v5 page installs next.${match[1]}, not the pinned next.${prerelease}: ${file}`
+      );
+    }
+  }
+}
+// The live install examples must name the same prerelease, so the repository
+// docs and the site never tell a reader to install different versions.
+// The `V=5.0.0-next.N` shell variable used by install and setup examples.
+const exampleVersion = /^V=5\.0\.0-next\.(\d+)\b/gm;
+const liveDocs = resolve(repositoryRoot, "docs");
+for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: liveDocs })) {
+  if (file.startsWith("versions/")) {
+    continue;
+  }
+  const live = await Bun.file(resolve(liveDocs, file)).text();
+  for (const match of [
+    ...live.matchAll(anyBootstrap),
+    ...live.matchAll(exampleVersion),
+  ]) {
+    if (match[1] !== prerelease) {
+      throw new Error(
+        `docs/${file} installs next.${match[1]}, not the pinned next.${prerelease}`
+      );
+    }
+  }
+}
+if (
+  pinnedBootstrapText(
+    "releases/download/v5.0.0-next.1/hack-next-install.sh",
+    `v5 (next.${prerelease})`
+  ) !== `releases/download/v5.0.0-next.${prerelease}/hack-next-install.sh` ||
+  pinnedBootstrapText(
+    "releases/download/v5.0.0-next.1/other.sh",
+    "v5 (next.9)"
+  ) !== "releases/download/v5.0.0-next.1/other.sh"
+) {
+  throw new Error("Bootstrap pinning control failed");
 }
 const install = await Bun.file(resolve(v5Root, "install.md")).text();
 const bootstrapUrl = `https://github.com/hack-dance/hack/releases/download/v5.0.0-next.${prerelease}/hack-next-install.sh`;

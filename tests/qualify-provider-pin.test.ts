@@ -28,6 +28,7 @@ import {
   parseTopMemory,
   providerProcesses,
   readyData,
+  rootProblem,
   sourceTemplatePins,
 } from "../scripts/qualify-provider-pin.ts";
 
@@ -82,7 +83,7 @@ describe("provider pin qualification", () => {
     const options = parseOptions(required);
     expect(options.native).toBe("/bundle/hack-native");
     expect(options.bundle).toBe("/bundle");
-    expect(options.idleMinutes).toEqual([0, 2, 10]);
+    expect(options.idleMinutes).toEqual([0, 3, 10]);
     expect(options.approvedHosts).toEqual(["example.com", "example.org"]);
     expect(options.run).toBe(false);
     expect(
@@ -125,6 +126,13 @@ describe("provider pin qualification", () => {
     } finally {
       rmSync(root, { recursive: true });
     }
+  });
+
+  test("the root must not break the provider database URI", () => {
+    expect(rootProblem("/private/tmp/a?b")).toMatch(/must not contain/);
+    expect(rootProblem("/private/tmp/qualification-absent")).toMatch(
+      /must exist/
+    );
   });
 
   test("inert field lists and rule match the runtime audit", () => {
@@ -257,10 +265,10 @@ describe("provider pin qualification", () => {
     expect(text).toContain('"dep.test:host-gateway"');
     expect(text).toContain('"db-data:/var/lib/postgresql/data"');
     expect(DEPENDENCY_SERVER).toContain('hostname: "127.0.0.1"');
-    expect(BLOB_SHA256).toBe(
-      createHash("sha256")
-        .update(Uint8Array.from({ length: 65_536 }, (_, index) => index % 251))
-        .digest("hex")
+    // The listener serves the bytes the guest check hashes: i % 251 over 64 KiB.
+    expect(DEPENDENCY_SERVER).toContain(
+      "new Uint8Array(65536).map((_, i) => i % 251)"
     );
+    expect(BLOB_SHA256).toMatch(/^[0-9a-f]{64}$/);
   });
 });

@@ -238,7 +238,7 @@ pub fn write(path: &Path, value: &impl Serialize) -> Result<(), CandidateError> 
 /// since SmolVM 1.34.1 (upstream PR 2094, which measured idle footprint falling below
 /// 2 GB within 80-100 s); the pulse re-arms only after renewed activity, so a pool that
 /// stays idle is pulsed once. The provider qualification script measures idle footprint
-/// at 0, 2 and 10 minutes to confirm the value on this runtime.
+/// at 0, 3 and 10 minutes to confirm the value on this runtime.
 pub const IDLE_RECLAIM_MINUTES: u64 = 2;
 
 /// Memory reclamation for one boot. Recorded in the receipt and re-derived at every boot.

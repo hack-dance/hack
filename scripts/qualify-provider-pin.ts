@@ -9,7 +9,9 @@
  *   1. archive: the SmolVM archive SHA-256 matches the bundle's pin (and upstream's
  *      `checksums.sha256` when given), the archive's own `checksums.txt` matches its files,
  *      and `smolvm-bin` passes `codesign --verify --strict`.
- *   2. prepare: `runtime prepare`, `prepare-engine`, `prepare-network-tools` and `probe`.
+ *   2. prepare: `runtime prepare`, `prepare-engine`, `prepare-network-tools` and `probe`,
+ *      plus a prepared base built and verified in the second home (network tools and the
+ *      overlay inventory under the pinned guest).
  *   3. templates: the first start expands both disk templates at their logical sizes; their
  *      content digests (the runtime's own definition) are printed and compared with the
  *      repository pins when this checkout pins the same archive.
@@ -25,7 +27,8 @@
  *   9. web plus database: service DNS, a database write that survives down, up, restart and
  *      an unclean stop.
  *  10. measurements: prepare time, cold and warm `up` to ready, `restart`, `down`, VM plus
- *      helper physical footprint at idle after 0, 2 and 10 minutes, and idle CPU.
+ *      helper physical footprint at idle after 0, 3 and 10 minutes (3 is past the 2-minute
+ *      reclaim pulse), and idle CPU.
  *
  * Preview-first: without --run it prints the plan and changes nothing. It never uses
  * sudo, never reads or writes the real home (every child gets a HOME, XDG directories,
@@ -93,6 +96,8 @@ export const INERT_RECORD_FIELDS = [
   "detached",
   "keep_identity",
   "stop_on_exit",
+  "stop_signal",
+  "stop_timeout_secs",
   "credential_policy",
   "external_interceptor_required",
   "mediated_egress_required",
@@ -173,15 +178,21 @@ export function contentDigest(path: string): {
     const zero = Buffer.alloc(BLOCK);
     let offset = 0;
     while (offset < length) {
-      const read = readSync(
-        descriptor,
-        chunk,
-        0,
-        Math.min(chunk.length, length - offset),
-        offset
-      );
-      if (read <= 0) {
-        throw new Error(`short read at ${offset} in ${path}`);
+      // Fill the chunk completely so block indices stay aligned across short reads.
+      const wanted = Math.min(chunk.length, length - offset);
+      let read = 0;
+      while (read < wanted) {
+        const got = readSync(
+          descriptor,
+          chunk,
+          read,
+          wanted - read,
+          offset + read
+        );
+        if (got <= 0) {
+          throw new Error(`short read at ${offset + read} in ${path}`);
+        }
+        read += got;
       }
       for (let start = 0; start < read; start += BLOCK) {
         const end = Math.min(start + BLOCK, read);
@@ -326,7 +337,7 @@ const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hac
   --provider-archive /abs/smolvm-<v>-darwin-arm64.tar.gz --engine-archive /abs/docker-<v>.tgz \\
   --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
   [--upstream-checksums /abs/checksums.sha256] [--approved-host example.com --approved-host example.org] \\
-  [--amd64-image repo@sha256:...] [--idle-minutes 0,2,10 | --skip-idle] \\
+  [--amd64-image repo@sha256:...] [--idle-minutes 0,3,10 | --skip-idle] \\
   [--caddy /abs/caddy --https-port 8443] [--run]`;
 
 /** Parse and validate arguments; throws with a usage line on any problem. */
@@ -383,7 +394,7 @@ export function parseOptions(argv: string[]): Options {
       "--approved-host must be given twice (or not at all) as DNS names."
     );
   }
-  const idle = (one("--idle-minutes", false) ?? "0,2,10")
+  const idle = (one("--idle-minutes", false) ?? "0,3,10")
     .split(",")
     .map(Number);
   if (
@@ -662,7 +673,11 @@ class Qualification {
     return join(String(owner.short_home), "Library/Caches/smolvm/vms", hash);
   }
 
-  /** The stored machine record, read without locks or sidecar files. */
+  /**
+   * The stored machine record through a read-only connection, as the runtime reads it. Not
+   * `immutable`: the provider keeps the database in WAL mode, and an immutable open would
+   * ignore committed changes still in the WAL. A read-only connection never checkpoints.
+   */
   record(home: string): Record<string, unknown> {
     const database = join(
       home,
@@ -672,7 +687,7 @@ class Qualification {
       "/usr/bin/sqlite3",
       "-readonly",
       "-json",
-      `file:${encodeURI(database)}?mode=ro&immutable=1`,
+      `file:${encodeURI(database)}?mode=ro`,
       "SELECT name, CAST(data AS TEXT) AS data FROM vms",
     ]);
     const rows = JSON.parse(result.stdout || "[]") as {
@@ -849,6 +864,63 @@ class Qualification {
       "runtime probe answers for the development profile",
       typeof probe === "object"
     );
+    // A prepared base boots a verifier pool, installs the network tools and checks the
+    // overlay's upper-layer inventory, so it exercises the apk-tools 3 file set of the
+    // pinned guest. It runs in the second home before that home's own pool exists.
+    const store = join(this.options.root, "prepared-bases");
+    mkdirSync(store, { mode: 0o700 });
+    const buildStarted = performance.now();
+    const built = this.runtime(
+      this.aux,
+      "prepared-base-build",
+      [
+        "runtime",
+        "prepared-base",
+        "build",
+        "--profile",
+        "research",
+        "--store",
+        store,
+        "--json",
+      ],
+      900
+    );
+    const base = String(
+      (built.receipt as Record<string, unknown> | undefined)?.base_id ?? ""
+    );
+    this.measure(
+      "prepared_base_build_seconds",
+      round((performance.now() - buildStarted) / 1000)
+    );
+    this.runtime(
+      this.aux,
+      "prepared-base-verify",
+      [
+        "runtime",
+        "prepared-base",
+        "verify",
+        "--base-id",
+        base,
+        "--store",
+        store,
+        "--json",
+      ],
+      900
+    );
+    this.check(
+      "a prepared base builds and verifies its upper-layer inventory",
+      base.length > 0
+    );
+    this.runtime(this.aux, "prepared-base-remove", [
+      "runtime",
+      "prepared-base",
+      "remove",
+      "--base-id",
+      base,
+      "--store",
+      store,
+      "--json",
+    ]);
     const templates = join(this.main, ".hack-local/run/smolvm/home/.smolvm");
     this.check(
       "no expanded template exists before the first start",
@@ -1113,7 +1185,9 @@ class Qualification {
   }
 
   // 4. Exact-size disk identity with trim off.
-  diskChecks(): Record<string, { size: number; ino: number; dev: number }> {
+  async diskChecks(): Promise<
+    Record<string, { size: number; ino: number; dev: number }>
+  > {
     this.step = "4 disk identity";
     const identity = this.diskIdentity();
     const expected = PROFILE_DISKS.development;
@@ -1147,7 +1221,7 @@ class Qualification {
       );
     } else {
       this.note(
-        "INFO provider environment not readable through ps; trim is checked by disk size below"
+        "INFO provider environment not readable through ps; trim is checked by disk size after the guest trim interval"
       );
     }
     this.inContainer(
@@ -1156,9 +1230,12 @@ class Qualification {
       "dd if=/dev/zero of=/var/lib/postgresql/data/qualification.fill bs=1M count=512 2>/dev/null && sync && rm /var/lib/postgresql/data/qualification.fill && sync",
       300
     );
+    // The guest trim thread polls every 30 s and acts after 256 MiB of freed space; wait past
+    // three polls so an enabled trim would have shortened the disk before the comparison.
+    await Bun.sleep(100_000);
     const after = this.diskIdentity();
     this.check(
-      "disk identity and size survive a 512 MiB write and delete",
+      "disk identity and size survive a 512 MiB write, delete and the trim interval",
       JSON.stringify(after) === JSON.stringify(identity),
       JSON.stringify(after)
     );
@@ -1251,7 +1328,7 @@ class Qualification {
         "db-write",
         `CREATE TABLE qualification(v text); INSERT INTO qualification VALUES ('${marker}')`
       );
-      const identity = this.diskChecks();
+      const identity = await this.diskChecks();
       await this.lifecycle(first, marker, identity);
 
       // The second home boots only while the project pool is stopped, so host memory
@@ -1310,6 +1387,10 @@ class Qualification {
 
       this.step = "10 measurements";
       await this.idle();
+      this.check(
+        "disk identity is unchanged after the idle period",
+        JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
+      );
       this.measure("final_down_seconds", round(await this.down("down-final")));
       this.runtime(
         this.main,
@@ -1402,6 +1483,25 @@ class Qualification {
         executable.startsWith(`${providers}/smolvm-`) &&
         listed !== undefined,
       `${pid} ${executable}`
+    );
+    // Immediately before the signal: the live process still has the receipt's user and
+    // start time, so a reused PID is never signalled.
+    const live = this.exec("provider-identity", [
+      "/bin/ps",
+      "-o",
+      "uid=,lstart=",
+      "-p",
+      String(pid),
+    ]).stdout.trim();
+    const [uid, ...started] = live.split(/\s+/);
+    const startedMs = Date.parse(started.join(" "));
+    const recordedMs = Number(recorded?.start_micros) / 1000;
+    this.check(
+      "the live provider matches the receipt's user and start time",
+      Number(uid) === Number(recorded?.uid) &&
+        Number.isFinite(startedMs) &&
+        Math.abs(startedMs - recordedMs) < 2000,
+      `${live} vs uid ${String(recorded?.uid)} start ${recordedMs}`
     );
     process.kill(pid, "SIGKILL");
     for (
@@ -1750,6 +1850,9 @@ function hostFacts(): Record<string, string> {
 
 /** Root checks: an existing, empty, private, canonical directory owned by this user. */
 export function rootProblem(root: string): string | null {
+  if (/[?#%]/.test(root)) {
+    return "--home must not contain ?, # or % (it is used in an SQLite URI)";
+  }
   if (!existsSync(root)) {
     return "--home must exist";
   }

@@ -205,7 +205,7 @@ fn pin_changed(pin: &TreePin, recorded: &Artifact) -> CandidateError {
     CandidateError::new(
         "provider_pin_changed",
         format!(
-            "This candidate home was prepared with {} {}; this executor pins {} {}. A provider pin change needs a fresh candidate home: prepare one with the pinned archive (runtime prepare). This home, its volumes and its prepared tree are unchanged, and a build that pins {} still runs it.",
+            "This candidate home was prepared with {} {}; this executor pins {} {}. A provider pin change needs a fresh candidate home: prepare one with the pinned archive (runtime prepare). This home, its volumes and its prepared tree are unchanged; a build that pins {} still runs it, and a pool it left running must be stopped with that build (runtime down).",
             pin.label, recorded.version, pin.label, pin.version, recorded.version
         ),
     )
@@ -426,10 +426,7 @@ pub(super) fn repair_tree(
     state::check_private_directory(&providers)?;
     let recorded: Artifact = state::read(&record)?;
     if recorded.version != pin.version || recorded.archive_sha256 != pin.archive_sha256 {
-        return Err(repair_refused(
-            "artifact_digest_mismatch",
-            "Provider preparation record does not match this executor's pin; repair refused.",
-        ));
+        return Err(pin_changed(pin, &recorded));
     }
     let prepared = providers.join(pin.directory);
     let present = match fs::symlink_metadata(&prepared) {
@@ -973,14 +970,14 @@ mod tests {
         assert_eq!(tree_digest(&prepared).unwrap(), changed);
         assert_eq!(repair_staging(&candidate).len(), 1);
 
-        // A record for another version is refused before any extraction.
+        // A record for another version is refused by name before any extraction.
         recorded.tree_sha256 = original;
         recorded.version = "1.0.1".into();
         fs::remove_file(&record).unwrap();
         state::write(&record, &recorded).unwrap();
         assert_eq!(
             repair_tree(&candidate, &pin, &lease).unwrap_err().code,
-            "artifact_digest_mismatch"
+            "provider_pin_changed"
         );
         assert_eq!(repair_staging(&candidate).len(), 1);
         assert_eq!(tree_digest(&prepared).unwrap(), changed);

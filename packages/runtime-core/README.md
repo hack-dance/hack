@@ -1407,8 +1407,11 @@ the minutes of provider CPU idleness before SmolVM pulses the balloon to hand an
 idle guest's page cache back to the host. The value is explicit so a provider pin
 bump cannot change it silently; 2 matches the SmolVM default since 1.34.1. A
 disabled policy passes `0`. The guest agent's own page-cache trim
-(`SMOLVM_MEMORY_TRIM`, new in 1.34.1) is left at the provider default; the provider
-pin qualification script measures idle footprint at 0, 2 and 10 minutes.
+(`SMOLVM_MEMORY_TRIM`, new in 1.34.1) is a deliberate exception: it is left at the
+provider default (one quiet minute) because it has not been measured on this runtime
+yet, and pinning an unmeasured value could do worse than upstream's. The provider pin
+qualification script measures idle footprint at 0, 3 and 10 minutes; pin it
+explicitly once those numbers are recorded.
 
 ### Extending a stopped pool's approved hosts
 

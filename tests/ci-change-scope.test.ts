@@ -55,6 +55,12 @@ describe("change scope classification", () => {
     for (const [path, kind] of [
       ["docs/guides/prereleases.md", "docs"],
       ["site/app/page.tsx", "docs"],
+      ["site/package.json", "docs"],
+      // The docs site tooling is read only by the docs site job.
+      ["scripts/docs/prepare.ts", "docs"],
+      ["scripts/docs/versions.json", "docs"],
+      ["scripts/docs.ts", "typescript"],
+      ["scripts/build-release.ts", "typescript"],
       ["README.md", "docs"],
       ["LICENSE", "docs"],
       ["packages/runtime-core/src/main.rs", "runtime-core"],
@@ -88,6 +94,8 @@ describe("change scope classification", () => {
     for (const [paths, scope] of [
       [[], "full"],
       [["docs/a.md", "README.md"], "docs"],
+      [["scripts/docs/smoke.ts", "site/app/global.css", "docs/a.md"], "docs"],
+      [["scripts/docs/smoke.ts", "scripts/test-shard.ts"], "typescript"],
       [["packages/runtime-core/src/a.rs"], "runtime-core"],
       [["packages/runtime-core/src/a.rs", "docs/a.md"], "runtime-core"],
       [["src/a.ts", "tests/a.test.ts", "docs/a.md"], "typescript"],

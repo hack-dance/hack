@@ -9,8 +9,6 @@ The detailed material, by topic. Start with the [overview](overview.md) and
   running both backends, upgrade and rollback.
 - [Prerelease channel](../../guides/prereleases.md): versions, platforms and what a
   release contains.
-- [Qualify a project on v5](../../guides/v5-dogfooding.md): a staged plan for moving
-  one project at a time.
 
 ## Commands and configuration
 

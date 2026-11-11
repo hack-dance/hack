@@ -195,6 +195,8 @@ export type JournalPaths = {
   readonly child: string;
   readonly spawning: string;
   readonly stopping: string;
+  /** Native only: created by the `hack` child once the guest exit code is known. */
+  readonly exitConfirmed: string;
   readonly events: string;
   readonly stdout: string;
   readonly stderr: string;
@@ -223,6 +225,7 @@ export function journalPaths(opts: {
     child: resolve(dir, "child.json"),
     spawning: resolve(dir, "spawning.json"),
     stopping: resolve(dir, "stopping"),
+    exitConfirmed: resolve(dir, "exit-confirmed"),
     events: resolve(dir, "events.jsonl"),
     stdout: resolve(dir, "stdout"),
     stderr: resolve(dir, "stderr"),

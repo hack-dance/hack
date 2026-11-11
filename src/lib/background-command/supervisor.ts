@@ -23,6 +23,7 @@ import {
   readMeta,
   reconcileTail,
 } from "./journal.ts";
+import { NATIVE_EXIT_CONFIRMED_ENV } from "./native-exit.ts";
 import { pumpStream } from "./output-pump.ts";
 import { encodeSecrets } from "./output-scanner.ts";
 import {
@@ -302,7 +303,13 @@ function startChild(opts: {
   try {
     proc = Bun.spawn(limitOutputFileSize(opts.meta, opts.launch.argv), {
       cwd: opts.launch.cwd,
-      env: childEnv(),
+      env:
+        opts.meta.backend === "native"
+          ? {
+              ...childEnv(),
+              [NATIVE_EXIT_CONFIRMED_ENV]: opts.paths.exitConfirmed,
+            }
+          : childEnv(),
       stdin: "ignore",
       stdout: descriptors.stdout,
       stderr: descriptors.stderr,
@@ -452,6 +459,8 @@ async function superviseChild(opts: {
     backend: opts.meta.backend,
     noSpace: capture.noSpace,
     containerProcess,
+    nativeExitConfirmed:
+      (await lstat(opts.paths.exitConfirmed).catch(() => null)) !== null,
   });
   return lateCancel ? { ...payload, descendants: "not_confirmed" } : payload;
 }
@@ -803,6 +812,8 @@ export function endedPayload(opts: {
   readonly noSpace?: boolean;
   /** Confirmed result of removing a `run`'s container, when attempted. */
   readonly containerProcess?: "stopped" | "not_confirmed";
+  /** Native: the `hack` child recorded that the guest exit code is known. */
+  readonly nativeExitConfirmed?: boolean;
 }): Record<string, unknown> {
   let outcome: string;
   if (opts.stopping) {
@@ -821,18 +832,30 @@ export function endedPayload(opts: {
       ? { containerProcess: opts.containerProcess }
       : {}),
     ...(!opts.containerProcess &&
-    (opts.stopping || (opts.backend === "native" && opts.signal))
+    (opts.stopping || (opts.backend === "native" && nativeUnconfirmed(opts)))
       ? {
-          // The client was stopped (cancel, timeout) or, on native, killed:
-          // stopping the host client does not stop the command in the
-          // container or native guest, and nothing here confirms it ended.
-          // The end then holds its admission slot. A native client that
-          // exits by itself passes on the guest command's exit code, so a
-          // nonzero exit is the command's own end and holds nothing.
+          // The client was stopped (cancel, timeout) or, on native, ended
+          // without a confirmed guest exit code (killed, or the engine
+          // reported the exec uncertain): stopping or losing the host client
+          // does not stop the command in the container or native guest. The
+          // end then holds its admission slot. A native nonzero exit whose
+          // guest exit code was confirmed is the command's own end.
           containerProcess: "not_confirmed",
         }
       : {}),
   };
+}
+
+/** A native end other than `succeeded` whose guest exit was not confirmed. */
+function nativeUnconfirmed(opts: {
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  readonly nativeExitConfirmed?: boolean;
+}): boolean {
+  const succeeded = opts.exitCode === 0 && !opts.signal;
+  return (
+    opts.signal !== null || !(succeeded || opts.nativeExitConfirmed === true)
+  );
 }
 
 /**

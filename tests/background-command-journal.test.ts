@@ -29,6 +29,10 @@ import {
 } from "../src/lib/background-command/journal.ts";
 import { requestIdentity } from "../src/lib/background-command/launch.ts";
 import {
+  NATIVE_EXIT_CONFIRMED_ENV,
+  noteNativeExitConfirmed,
+} from "../src/lib/background-command/native-exit.ts";
+import {
   type ObservedIdentity,
   observeIdentities,
 } from "../src/lib/background-command/platform.ts";
@@ -1265,7 +1269,16 @@ describe("request keys before runtime checks", () => {
 });
 
 describe("unconfirmed container stops hold admission", () => {
-  test("a native end that was stopped or killed is not_confirmed; a native nonzero exit is the guest command's own end", () => {
+  test("the native hack child records a confirmed guest exit only where the supervisor asked", async () => {
+    const path = join(root, "exit-confirmed");
+    await noteNativeExitConfirmed({});
+    await noteNativeExitConfirmed({ [NATIVE_EXIT_CONFIRMED_ENV]: "relative" });
+    expect(await lstat(path).catch(() => null)).toBeNull();
+    await noteNativeExitConfirmed({ [NATIVE_EXIT_CONFIRMED_ENV]: path });
+    expect((await lstat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  test("a native end that was stopped, killed or not confirmed by the engine is not_confirmed; a confirmed nonzero exit is the guest command's own end", () => {
     const base = {
       truncated: false,
       suppressed: false,
@@ -1287,10 +1300,22 @@ describe("unconfirmed container stops hold admission", () => {
         signal: "SIGKILL",
       }).containerProcess
     ).toBe("not_confirmed");
+    // A nonzero exit whose guest exit code the engine returned is the
+    // command's own end; without that confirmation (the engine reported the
+    // exec uncertain, or the client failed) it holds.
+    expect(
+      endedPayload({
+        ...base,
+        stopping: null,
+        exitCode: 1,
+        signal: null,
+        nativeExitConfirmed: true,
+      }).containerProcess
+    ).toBeUndefined();
     expect(
       endedPayload({ ...base, stopping: null, exitCode: 1, signal: null })
         .containerProcess
-    ).toBeUndefined();
+    ).toBe("not_confirmed");
     expect(
       endedPayload({ ...base, stopping: null, exitCode: 0, signal: null })
         .containerProcess

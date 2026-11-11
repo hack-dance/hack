@@ -333,12 +333,13 @@ there, so nothing is redacted. Cancelling or timing out stops the host-side
 when its client goes away, and nothing confirms that it ended. A native end
 that Hack stopped (cancel, timeout) or whose client was killed by a signal
 therefore records `containerProcess: "not_confirmed"` and keeps its admission
-slot until the command's timeout window closes. A native client that exits by
-itself passes on the guest command's exit code, so a nonzero exit is the
-command's own end and holds nothing. The remaining gap: if the `hack` client
-itself fails (for example it loses the engine connection) while the guest
-command still runs, that end is reported as the command failing and frees
-its slot.
+slot until the command's timeout window closes. A native nonzero exit holds
+nothing only when the `hack` client received the guest command's exit code
+from the engine (it records that privately in the journal). Otherwise (the
+engine reported the exec uncertain, for example after its 30-second
+observation limit, or the client lost the engine) the end is `not_confirmed`
+and holds its slot too. Native `exec` therefore suits commands that finish
+within that limit.
 
 ## Errors
 

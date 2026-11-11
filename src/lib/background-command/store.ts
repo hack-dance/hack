@@ -732,6 +732,7 @@ async function removeJournalPayload(paths: JournalPaths): Promise<void> {
     paths.child,
     paths.spawning,
     paths.stopping,
+    paths.exitConfirmed,
   ]) {
     await unlink(path).catch(() => undefined);
   }

@@ -1,6 +1,6 @@
 # Opt-in native candidate bundle
 
-`hack-native` is an experimental Apple Silicon macOS executor installed alongside
+The native backend is beta. `hack-native` is an opt-in Apple Silicon macOS executor installed alongside
 Hack's supported CLI. It does not replace `hack`, select a Docker context, migrate
 projects, or install DNS or trust automatically. Its graph commands support a
 bounded subset;
@@ -383,10 +383,24 @@ commands and pipelines. The command keeps the pane's terminal stdin. Failed send
 remove their staged payload; if the pane never executes a successfully sent command,
 the private payload remains until it is consumed or explicitly cleaned up.
 
-Native `up` and `restart` also stay in the foreground in every project:
-`--detach` refuses with one `E_USAGE` line. Run `hack up` in its own terminal and
-keep it open, use `hack ps` and `hack logs` from another terminal, and press
-Ctrl-C to stop it. For detached startup, use the Compose backend.
+Native `hack up -d` (also `--detach`, `--json`, or both) starts the existing
+frontend and Rust foreground owners in a background session, returning after
+readiness and up-after hooks. The frontend keeps host lifecycle processes and
+down hooks alive. From any terminal, use `hack ps`, `hack logs`, `hack exec`,
+`hack restart` or `hack down` through the existing authenticated controls.
+Restart starts a new foreground generation; `restart --detach` remains unsupported.
+Without these flags, `hack up` stays attached and Ctrl-C requests ordinary stop.
+Detached startup has no terminal stdin and suppresses hook/owner output rather
+than persisting potentially private values. Service logs remain available through
+`hack logs`. Its JSON result uses the v4 lifecycle envelope.
+
+A private IPC readiness/acceptance exchange transfers only launcher responsibility;
+it creates no new runtime authority. Launcher loss before acceptance requests
+ordinary graceful stop. After acceptance, terminal exit does not stop the owner.
+An unconfirmed startup keeps the original recovery evidence: inspect `hack ps`
+before retrying. Owner death uses the existing explicit recovery path, with its
+same incarnation checks and retained-uncertainty limits. No daemon adoption,
+automatic replay, or separate graph supervision tick is introduced.
 
 Foreground image-project `up` prints each startup step (input, runtime, images,
 services) and one ready line, `Project is ready (SERVICES; run RUN)`, after the
@@ -520,6 +534,19 @@ then validates socket absence and flushes the disks before recording
 data, and requires inspection before retry. No guest is started by alias recovery.
 Interrupted starts without a recorded process or both identified disks remain
 outside this repair path.
+
+`runtime down` first quiesces the guest engine, which leaves the pool in phase
+`quiescing` until the engine exits. A guest agent that answers no ping lets `down`
+or `recover` stop the provider. A guest that still answers pings but whose engine
+did not finish quiescing is reported on the first attempt and stays `quiescing`.
+The next `runtime down`, or `runtime recover`, resumes the quiesce once; if the
+engine again does not exit, it stops this home's verified provider and records
+`recovered-unclean`, so the pool never needs a manual signal. As after any unclean
+stop, the next start checks the retained disks. A guest whose owner, boot or engine
+identity does not match the receipt is never stopped this way: `down` and `recover`
+report `guest_identity_mismatch` on every attempt and leave the provider running.
+Once that provider has exited or its guest stops answering, `runtime recover` records
+the stop.
 
 A physical macOS reboot may also renumber the mounted filesystem device. Strict
 disk and source checks still refuse a changed device number; missing-HOME recovery
@@ -893,6 +920,9 @@ recorded container's ownership, runs no probes and grants no authority; foregrou
 report that contains an error diagnostic. With `--json` it exits 0 and the report is
 the result: `diagnostics` and `enrollment_compatible` carry the outcome, because Hack
 plans original input that its normalization adapts afterwards.
+JSON exit 0 means a report was produced, not that execution is admitted. Automation
+must check `plan.enrollment_compatible` and `plan.diagnostics` before proceeding;
+parse, input and transport failures still exit non-zero in JSON mode.
 Exec requires a running service and returns Base64 stdout/stderr to preserve arbitrary
 bytes, an exit code, and a truncation flag. The CLI also exits with the command's exit
 code. Retained exec output is limited to 1 MiB per stream.
@@ -1418,9 +1448,17 @@ native graphs are not routed, so they have no alias or service URLs); a partial 
 work. `exec` observes the values stored in the running container, and one-off
 `run` uses the admitted environment.
 
+Under explicit native selection, `hack up`, `hack status` and `hack doctor` print one
+line naming the native backend as a beta for Apple Silicon macOS, delivered by the
+`hack-next` channel, with a link to
+[the install guide](candidate-install.md). The line is omitted with `--json`.
+
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
-`HACK_NATIVE_HOME` selects native observations for normal `hack ps` and bounded
-`hack logs SERVICE --no-follow`. They verify the project/branch run mapping
+`HACK_NATIVE_HOME` selects native observations for normal `hack ps`, for
+`hack status` and for bounded `hack logs SERVICE --no-follow`. `hack status`
+observes one project, the cwd project or `--project <name>`, with the same
+output and `--json` envelope as native `hack ps`; outside a project it refuses
+instead of listing Compose state, which cannot see native graphs (HACK-1988). They verify the project/branch run mapping
 against the current native graph. Logs do not support following or Loki options.
 A project with no admitted mapping reports not started. `hack ps` keeps container
 observations separate from the last graph receipt; an exited container's state
@@ -1434,9 +1472,14 @@ A provider lease held for the whole bounded read, for example by a starting
 foreground `up`, is also an ordinary state: `ps` exits 0 and reports
 `runtime_busy` (no phase, no service rows). Reads retry brief lease contention.
 `hack ps --json` prints the standard `{ok: true, data}` envelope; `data` holds
-`backend: "native"`, `status` (`not_started`, `runtime_not_running`,
+`backend: "native"`, `status` (`not_started`, `pending`, `runtime_not_running`,
 `runtime_busy`, `observed`, `owner_unconfirmed` or `runtime_degraded`), `run`,
-`phase` and `items`. Bounded
+`phase` and `items`. Before a mapping exists, `pending` means a frontend start's
+advisory marker still has a possibly present owner; run and phase are null and
+items is empty. It proves neither process liveness nor service readiness. A crashed
+owner proven absent no longer counts as pending; PID reuse or inaccessible owners
+remain uncertain. Reading `ps` never retires runtime resources or deletes markers.
+Bounded
 logs refuse a stopped runtime with `E_DOCKER_UNAVAILABLE` and exit 1. Native `exec` and `run` refresh admitted host dependencies once before
 command selection and managed environment preparation. They proceed only with
 fresh ownership and runtime proof, even if containers still appear running.
@@ -1639,7 +1682,17 @@ cleanup. Retry still reviews the public dependency intent and all source, plan,
 environment, network and admission checks. It captures
 listener identities after the startup hooks recreate them, rather than requiring
 already stopped listeners before those hooks run. An interrupted operation lock
-requires ownership inspection rather than automatic removal. Restart does not
+requires ownership inspection rather than automatic removal.
+Ctrl-C while restart stops the previous run lets that stop finish: the stop's
+runtime requests run in their own process group, so the terminal's interrupt
+reaches only the restart. It then exits 130 as a stopped project with data
+retained, and a plain `up` resumes it. If the stop cannot be confirmed (for
+example the restart itself was killed, or a down hook failed), the saved intent
+stays and `up` refuses with `use hack restart`. Run `hack restart` then: it
+resumes the exact saved run, owner and plan, stopping the previous run if it is
+still active or confirming from fresh native observations that its own owner
+already stopped it, and it waits for that owner's frontend to finish before
+starting the replacement. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
 When an interrupted frontend cannot write that final acknowledgement, an explicit
 `restart --recover-frontend --expect-finalization-attempt <32-hex>` can resume
@@ -1943,6 +1996,13 @@ before reporting success. A sibling graph's reservations and listeners remain ow
 by that sibling. Low-level callers without this flag keep exact slot semantics and
 must also respect existing reservations.
 
+Before starting the VM, foreground startup checks explicit `host_pid`/`host_port`
+selections with read-only `graph dependency-check --host-pid PID --host-port PORT`.
+A refusal names the service, binding, aliases and ports without exposing process
+values. This observation grants no durable authority; dependency planning and
+execution still capture and verify the exact listener again. Malformed dependency
+selection files report invalid UTF-8 JSON without including parser excerpts.
+
 `graph dependency-reservations --json` inspects the durable claims. A dead owner
 that never enrolled a graph can release a coherent claim with
 `graph recover-dependency-reservation --run-id RUN --expect-reservation SHA256`.
@@ -2053,17 +2113,59 @@ and the frontend never persists the resolved PIDs. Restart preflight resolves th
 same owners against the running instance; a cleaned retry validates the intent
 only and resolves owners after its hooks.
 
-Startup allows up to 60 seconds total for persistent hooks to create all selected
-listeners, with cancellable waits and bounded read-only discovery requests. It
-retries only native endpoint-identity refusals; malformed selections and other
-failures stop immediately. A refusal is one `E_CONFIG_INVALID` line that names the
+Startup waits for persistent hooks to create each discovered listener
+(`host_executable`, `host_lifecycle` or `host_shared_helper`), with cancellable
+waits and bounded read-only discovery requests. Each binding may wait up to its
+`host_wait_seconds`, an integer from 1 through 900 that defaults to 60. Every
+binding's wait is measured from the moment the `up.before` hooks return, and
+independent listeners are discovered at the same time, so a slow binding never
+shortens another one, whatever their order in the selection. When several entries
+share one listener, it is discovered once and the longest wait among them applies. A fixed `host_pid` entry is never
+waited for and refuses `host_wait_seconds`. For example, a hook that opens
+tunnels taking about three minutes needs:
+
+```json
+{
+  "version": 2,
+  "dependencies": [{
+    "binding": "search",
+    "guest_port": 443,
+    "aliases": ["search.example.com"],
+    "host_executable": "/usr/local/bin/tunnel",
+    "host_port": 8443,
+    "host_wait_seconds": 240
+  }]
+}
+```
+
+While a listener is still missing, foreground `up` prints `Waiting for host
+listener BINDING (service SERVICE, host port PORT): N s of LIMIT s…` on the first
+retry and then every ten seconds.
+
+Discovery retries only native endpoint-identity refusals; malformed selections and
+other failures stop immediately, and stop the discoveries still waiting. A refusal is one `E_CONFIG_INVALID` line that names the
 reason and the affected entry by position, service, binding, aliases, guest port and
 host port, each shown only after it validates. For example, a listener that never
 appears on the selected port reports `no listener owned by host_executable answered
-on host_port before the discovery deadline`. Host PIDs, executable paths and the
-contents of unrecognized fields are never printed. A listener must pass the complete ownership checks
-before any VM or graph effects. Restart preflight does not wait or stop the graph
-when its current selection cannot be verified.
+on host_port before the discovery deadline`, followed by how long it waited, the
+names of the persistent `up.before` hooks and lifecycle processes that ran, and the
+`host_wait_seconds` default and maximum. A missing listener does not stop the
+other bindings: startup keeps resolving them, each against its own wait, and when
+more than one is still missing the single refusal lists every one of them with its
+wait, in selection order. Host PIDs, executable paths, hook commands and the contents of
+unrecognized fields are never printed.
+
+A `host_executable` listener needs a running parent process: native review pins
+at least one supervisor link and refuses a parent at PID 1. A listener started
+with `nohup … &`, `ssh -f` or another daemonizing fork from a shell that then exits
+is adopted by launchd, so discovery refuses it at once, without retrying or
+starting the VM: `the listener on host_port has no supervising parent process (its
+parent is PID 1, …)`. Start it under a parent that stays running, for example a
+persistent `up.before` hook that `exec`s or `wait`s for it.
+
+A listener must pass the complete ownership checks before any VM or graph effects.
+Restart preflight does not wait or stop the graph when its current selection cannot
+be verified.
 
 For an already ready foreground graph, `graph refresh-dependencies --run-id RUN
 --json` asks its authenticated live owner to refresh stale admitted listeners.
@@ -2182,6 +2284,24 @@ volume provenance rechecked at effect and completion boundaries.
 An uncertain stop is never sent again merely because the container still appears
 running. A crash between stop intent and request can therefore require later
 terminal evidence before recovery can advance.
+
+The same controls select a failed start whose foreground owner had already stopped
+every container and committed that stop (its `shutdown.json` terminal records match
+the current container generations), and then exited before its removals finished.
+This happens when the engine cannot remove a container and leaves it `dead`, for
+example a failed dependency initializer whose writable layer could not be deleted.
+The receipt's recorded startup failure names the failed container; containers the
+owner already removed are accepted as absent, and a `dead` container is terminal.
+Removing a `dead` container of that exact generation is the one deletion recovery
+may ask for again after a failed attempt; nothing is stopped or started. `hack down`
+selects this recovery on the same guest boot, and `hack doctor --native-cleanup
+inspect` reports such a run as `interrupted_startup_candidate` with a `dead` count.
+If the engine still cannot remove the container, `hack down` refuses and keeps the
+run. Once the graph is stopped with data retained, `hack down` names the
+`hack restart --recover-frontend --expect-finalization-attempt` command that
+finishes the failed `hack up`'s own finalization. A run restored from that
+retained data that fails again treats the earlier, finished recovery journal as
+history (`interrupted-start-cleanup-retired-<selection>.json`).
 Likewise, a pending guest helper, probe or environment deletion advances only
 after complete absence is independently verified. An interruption partway through
 a guest cleanup script can remain fenced; this control does not replay that
@@ -2588,9 +2708,69 @@ the machine settings path with your home shown as `~`. With `--json`, the check'
 | `aws_region_without_profile` | `HACK_NATIVE_AWS_REGION` is set without `HACK_NATIVE_AWS_PROFILE` and is ignored. |
 | `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |
 
+When a host dependency selection is configured (`HACK_NATIVE_DEPENDENCIES` or the
+machine `dependencies` or `dependenciesByEnv` setting) and the project has persistent `up.before` hooks or
+`lifecycle.processes`, the check also notes the listener wait: native `up` waits
+for each discovered binding up to its `host_wait_seconds` (default 60 s, at most
+900 s) after the hooks. `nativeSettings.dependencyWait` holds `persistentHooks`,
+`defaultSeconds` and `maxSeconds`. The note does not change the check's status, and
+the selection file is not read.
+
 An invalid settings file makes the check an error with the same closed line native
 `up` prints. Each adaptation file (the base and every `adaptation.<env>.json`) is
 checked against the Compose file with the validator native `up` uses. The check runs no runtime request, credential export or network call.
+
+### Source size limit
+
+Native `up` reads the selected project source into memory to bind a source
+revision when an active service bind-mounts project source or declares a
+dependency cache (`hack.dependencies.*` labels). An image-only graph (no active
+bind mount and no dependency cache) never reads source content, so the limit
+does not apply to it and `up` and `restart` do not measure it. The selection
+is every file the project's `.gitignore` and `.ignore` files do not exclude,
+minus the fixed credential, generated and dependency exclusions (`.git`,
+`node_modules`, `.env*` and similar). Its total size is limited to **128 MiB**
+by default.
+
+To raise the limit for a project, set `native.sourceLimitMiB` in the committed
+`.hack/hack.config.json`:
+
+```json
+{
+  "native": { "sourceLimitMiB": 256 }
+}
+```
+
+The value is a whole number of MiB from 1 to **512**, the safe maximum. Capture
+holds the selected content and its archive at once, so peak runtime memory is
+about twice the limit. Another value refuses with `source_limit_config`. The
+runtime reads only a regular `.hack/hack.config.json` (not a symlink); a missing,
+aliased or malformed file keeps the default. The limit is an admission threshold
+only. Changing it does not change the reviewed plan, so `restart` keeps the
+retained run.
+
+For a graph that captures source, native `up` and `restart` measure the selection
+from file metadata first, before hooks, the runtime, image pulls or builds (and,
+for `restart`, before the current graph is stopped). Over the limit, they refuse with
+`E_NATIVE_PROJECT_UNSUPPORTED`. The message gives the total size, the limit, the
+largest directories (first two levels) and the largest files. To get under the
+limit, add paths the containers do not need to the project's `.gitignore` or
+`.ignore` file (for example `assets/video/`), or raise `native.sourceLimitMiB`.
+Note that `.ignore` also hides files from tools such as ripgrep. The capture
+checks the same limit again, so a project that grows between the check and the
+capture still refuses before any content is read.
+
+`hack doctor` on the native backend adds a `native source size` check. It reports
+the selected size and the limit, and warns when the project is over the limit.
+Doctor does not review the Compose graph, so it reports the size for image-only
+projects too; their `up` is not limited. The
+warning names the same largest paths and remedies. With `--json`, the check's
+`nativeSource` holds `totalBytes`, `fileCount`, `limitBytes`, `limitOrigin`
+(`default` or `project`), `maximumLimitBytes`, `withinLimit`, `largestFiles` and
+`largestDirectories` (project-relative paths). The check reads metadata only,
+through the runtime's `project source-size --project <root> --json`. Declared
+`env_file` inputs are not known to that request, so the doctor total can include
+them; the default `.env*` names are always excluded.
 
 ### Optional prepared base for a fresh pool
 
@@ -3089,8 +3269,23 @@ same-boot `graph recover-live-owner` described below, retaining data and
 retiring the stale publication. If the frontend that owned the run also exited
 before confirming its cleanup, `hack down --recover` prints the exact
 `hack restart --recover-frontend --expect-finalization-attempt ATTEMPT` step.
-An owner that exited before its restore was admitted is reported, with data
-retained, but no command retires that attempt yet.
+
+An owner of a retained run that exited before the runtime admitted its restore
+is also retired by `hack down --recover`. The admission's first durable write
+replaces the acknowledged `stopped-data-retained` receipt, so an unchanged
+receipt proves the attempt never reached the guest. That command calls
+`graph retire-unadmitted-owner --run-id RUN --expect-receipt SHA --json` with
+the receipt it selected. The runtime holds the publication gate, the provider
+lease and the dead owner's publication lock, requires the full retained-start
+eligibility of that exact receipt, and releases only the relay publication and
+dependency reservation that name the same dead process before it retires the
+foreground publication. It records the selected relay publication durably
+before it unlinks either relay path, so a retry after an interrupted relay
+retirement resumes from that exact selection and refuses any other. Nothing in
+the guest is stopped, created or removed,
+and data is retained. Then `hack up` restores the run. An owner that exited
+after its restore was admitted is still reported without a supported
+retirement.
 
 Read-only `hack ps` and `hack logs` hold the provider lease only briefly. Native
 startup, retained-start eligibility, restore admission, inspections inside
@@ -3374,3 +3569,68 @@ never triggers a retry: transport loss still leaves the outcome unconfirmed.
 For example, an observed `graph-verification: provider_busy` would locate the
 refusal without exposing native stderr; it would not prove cleanup completed or
 permit another owner to start. Preserve the original records while investigating.
+
+### Shutdown evidence after Compose reconciliation
+
+Restoring a stopped graph recreates compute, including when a service keeps its
+logical name. After verifying all old containers and networks absent, restore
+retains the stopped receipt and resets `shutdown.json` before admitting the new
+compute generation. Removed services cannot poison the next retaining stop.
+`shutdown-history.json` keeps the last eight distinct superseded observations,
+including exit codes and stop-request evidence; it never authorizes cleanup.
+This applies to unchanged restores too. Interrupted publication retains pending
+bytes; normal stop still refuses unknown resource keys or uncertain observations.
+
+For an older graph already stuck in `cleanup-intent` with
+`graph_shutdown_uncertain`, first run `hack doctor --native-cleanup inspect --json` and
+inspect the mapped run. Use the candidate executable belonging to that same native
+home; do not create another home or edit its files. The following private runtime
+commands repair only historical shutdown observations:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-shutdown-rebase --run-id RUN --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-shutdown-rebase --run-id RUN --expect-selection SELECTION --json
+```
+
+Copy `selection` from the inspection. Repair rechecks the receipt and shutdown
+selection under the provider lease. Each removed observation must match an exact
+immutable container ID in retained stopped restore history, and that ID must be
+freshly absent from the engine. An old container still present (even exited), an
+unknown ID, missing/truncated-away history, foreign identity, pending graph-state journal or
+failed inspection refuses repair. For an enrolled foreground run on the same pool boot, use the existing explicit
+interrupted-cleanup engine after repair (the command name also covers this narrow
+repaired-shutdown case):
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-interrupted-start-cleanup --run-id RUN --json
+./hack-native --candidate-root /absolute/private/candidate-home graph recover-interrupted-start-cleanup --run-id RUN --expect-selection CLEANUP_SELECTION --retain-data --json
+```
+
+Copy `selection_sha256` from that second inspection. Recovery checks the dead
+foreground owner, holds its publication locks, verifies the pending coordinator
+operation and exact bridge/environment inventories, and journals each new stop
+request. It never replays the old coordinator effect or retries a stop with an
+unknown outcome. The rebase proof admits this path only for an unchanged
+`cleanup-intent` receipt with fully started container records and no remaining
+current shutdown observations. It does not admit arbitrary partial shutdowns.
+Inspect again to confirm `stopped-data-retained` and no containers; `hack down`
+can then finish the frontend mapping. A graph without foreground enrollment can
+use ordinary retaining `graph cleanup --run-id RUN --json` instead. Do not stop
+or restart a shared pool to perform this recovery: the foreground repair path
+requires the original boot. Previous-boot owner/coordinator failures retain their
+existing dedicated recovery gates and may still require operator investigation.
+
+Inspection reports `pending_evidence` when an interrupted shutdown/history/proof
+replacement exists. Explicit repair retains those bounded private bytes unchanged
+before retrying publication; it never decodes them as authority. A pending
+`state.json` replacement still refuses because graph ownership is uncertain.
+Stopped upgrade receipts can also contain older stop IDs under a surviving
+service key. Restore requires stopped history for that exact old ID and a fresh
+engine absence observation before resetting it, even when the current service
+was never created or had a different container ID.
+
+Repair itself never stops containers, deletes volumes, clears owner or relay
+acknowledgements, or turns an uncertain stop into success. It archives the old
+shutdown observations before replacing only the proven retired entries. If repair
+refuses, preserve the native home and follow the existing owned recovery process;
+do not delete `shutdown.json` or drop current container evidence.

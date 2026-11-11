@@ -2,7 +2,7 @@
 
 An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
-current command slice supports whole-project foreground `up` and `restart`,
+current command slice supports whole-project foreground or detached `up` and foreground `restart`,
 owner-mediated `down` and explicit stored-generation `down --recover`, saved-run
 `ps`, finite service `logs --no-follow`, noninteractive service `exec` and one-off
 service `run` on macOS with an absolute `HACK_NATIVE_BINARY` and private canonical
@@ -50,8 +50,8 @@ source/storage intersections. Finite typed host lifecycle hooks use the supervis
 frontend owner described below. Unsupported intent must
 refuse before managed value resolution and provider work. Early typed input
 capability refusals retain `E_NATIVE_PROJECT_UNSUPPORTED` without exposing
-compiler diagnostics or creating native source/start/run authority. `--detach`,
-`--json` for `up` and `restart`, service subsets and unsupported lifecycle operations except
+compiler diagnostics or creating native source/start/run authority. `--detach` and
+`--json` for `restart`, service subsets and unsupported lifecycle operations except
 owner-mediated `down` refuse before input acquisition. `--branch` supplies an explicit native namespace; its omission uses
 the canonical project namespace without inferring a Git branch. Profile and env
 selection keep their compiler contracts. `--env base` bypasses inherited overlays
@@ -70,7 +70,7 @@ provider contact. A refusal names no option value, path or project detail.
 
 | Command | Supported form | Refuses before input acquisition |
 | --- | --- | --- |
-| `up` | Whole-project foreground; `--branch`, `--profile` and `--env` (including `--env base`) keep their compiler contracts | `--detach`, `--json`, `--recover`, service subsets, single-service, command, workdir, follow, tail and format options, other unsupported options |
+| `up` | Whole-project foreground or detached (`-d`, `--detach`, or `--json`); `--branch`, `--profile` and `--env` (including `--env base`) keep their compiler contracts | `--recover`, service subsets, single-service, command, workdir, follow, tail and format options, other unsupported options |
 | `down` | Whole-project owner-mediated stop of a ready generation through its live foreground owner or private no-host endpoint | `--json`, `--detach`, `--profile` and `--env` overrides, service subsets including an empty selection, single-service, command, workdir, follow, tail and format options |
 | `down --recover` | Explicit retirement of a complete stored generation whose owners are dead, or of a pending startup intent that never reserved runtime state; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
 | `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
@@ -132,10 +132,16 @@ Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
 native run and startup intent. Unknown, changed or live cleanup retains the attempt
 and refuses replay; a missing ready mapping does not authorize a fresh start.
 
-On macOS, `up --detach` and `restart --detach` refuse with `E_USAGE` and the same
-one-line message as an image project: native `up` runs in the foreground only, so run
-it without `--detach` in its own terminal, use `ps` and `logs` from another terminal,
-and press Ctrl-C to stop it.
+On macOS, `up -d` and `up --detach --json` keep the existing frontend and
+Rust graph owners in a background session after readiness and up-after hooks.
+The JSON result uses the v4 lifecycle envelope. The frontend retains lifecycle
+processes, down hooks and existing stop/recovery protocols; the launcher does not
+become a resource owner. Launcher loss before IPC acceptance requests ordinary
+stop; loss afterwards leaves the owner running. Detached mode closes stdin and
+suppresses hook output to avoid retaining private values. Service logs remain
+available through the supported `logs SERVICE --no-follow` form.
+`restart --detach` remains unsupported. See the
+[native candidate guide](../guides/native-candidate.md) for ownership and recovery limits.
 
 After native review and before it reserves the startup intent, `up` asks the runtime
 for its read-only status. A stopped runtime (any phase other than `running`, or a dead

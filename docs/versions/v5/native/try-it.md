@@ -15,7 +15,7 @@ run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.12/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -25,7 +25,7 @@ sh hack-next-install.sh
 Everything goes into `~/.hack-next`. The installer does not edit your PATH, start a
 virtual machine, or change DNS or certificate trust. Newer prereleases are on the
 [releases page](https://github.com/hack-dance/hack/releases). For details, see
-[Install](../install.md) and [Install the prerelease](install.md).
+[Install](../install.md) and [Install the prerelease](../../guides/candidate-install.md).
 
 ## 2. Prepare the runtime
 
@@ -52,8 +52,8 @@ refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and change nothing. See
 "$HOME/.hack-next/bin/hack-next" up --path /absolute/project
 ```
 
-Native `up` runs in the foreground and holds the project until you stop it. From a
-second terminal:
+Native `up` runs in the foreground and holds the project until you stop it. Add
+`-d` to run it in the background instead. From a second terminal, or after `up -d`:
 
 ```sh
 "$HOME/.hack-next/bin/hack-next" ps --path /absolute/project
@@ -80,7 +80,7 @@ HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --path /absolut
 
 On Compose the prerelease uses your normal Hack home, the same one stable Hack
 uses. Do not run both against it at once. Stop the stable daemon first; the order is
-in [Stop stable hackd before a Compose run](../install.md#choose-a-backend).
+in [Stop stable hackd before a Compose run](../../guides/candidate-install.md#stop-stable-hackd-before-a-compose-run).
 
 Data does not move between backends. A database you filled on native is not in your
 Compose volumes, and the other way round.
@@ -89,4 +89,4 @@ Compose volumes, and the other way round.
 
 Stable Hack never depended on the candidate. To upgrade, roll back or stop using
 `hack-next`, see
-[Upgrade, roll back and return to stable](install.md#upgrade-and-roll-back).
+[Upgrade, roll back and return to stable](../../guides/candidate-install.md#upgrade-roll-back-and-return-to-stable).

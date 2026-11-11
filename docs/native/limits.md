@@ -17,8 +17,8 @@ does not fall back to Docker without telling you.
 
 | You want to | Native today |
 | --- | --- |
-| Start the whole project | `hack up` in the foreground. Prereleases after next.12 also accept `hack up -d` to run it in the background. |
-| Restart the whole project | `hack restart` |
+| Start the whole project | `hack up` in the foreground, or `hack up -d` in the background |
+| Restart the whole project | `hack restart`, in the foreground only |
 | Stop the project | `hack down`, and `hack down --recover` after a crash |
 | See what is running | `hack ps` |
 | Read logs | `hack logs <service> --no-follow` |

@@ -10,6 +10,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
   writeSync,
@@ -383,7 +384,7 @@ describe("provider pin qualification", () => {
 // ready container named after the latest start. No pool, VM or real `hack` is involved.
 describe("keep-going cleanup and bounded waits (fake hack)", () => {
   function fixture() {
-    const root = mkdtempSync(join(tmpdir(), "qualify-cleanup-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "qualify-cleanup-")));
     for (const directory of ["evidence", "project", "tmp", "bin"]) {
       mkdirSync(join(root, directory), { mode: 0o700 });
     }

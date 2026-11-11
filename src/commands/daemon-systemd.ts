@@ -681,9 +681,9 @@ function handoverRefusalAdvice(reason: DaemonProcessRefusal): string {
     case "not-hackd":
     case "not-running":
     case "invalid-pid":
-      return "The pid file is stale; `hack daemon restart` starts hackd under systemd.";
+      return "The pid file is stale; `hack daemon restart` replaces it and starts hackd under systemd.";
     default:
-      return "Check `hack daemon status`; if it is this HACK_HOME's hackd, stop it and run `hack daemon install` again.";
+      return "Check `hack daemon status` and `hack daemon logs`.";
   }
 }
 

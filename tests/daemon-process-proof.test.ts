@@ -352,7 +352,7 @@ test("a live pid that is not hackd is not treated as a running daemon", async ()
   expect(sleeper.exitCode).toBeNull();
 });
 
-test("hack daemon stop does not signal a pid it cannot prove is hackd", async () => {
+test("hack daemon stop leaves a non-hackd pid alone and removes the stale pid file", async () => {
   const sleeper = spawnSleeper();
   const home = join(root, "home");
   const daemonDir = join(home, ".hack", "daemon");
@@ -366,7 +366,8 @@ test("hack daemon stop does not signal a pid it cannot prove is hackd", async ()
   process.env.HACK_LOGGER = "console";
   try {
     const { runCli } = await import("../src/cli/run.ts");
-    expect(await runCli(["daemon", "stop"])).toBe(1);
+    expect(await runCli(["daemon", "stop"])).toBe(0);
+    expect(await Bun.file(join(daemonDir, "hackd.pid")).exists()).toBe(false);
   } finally {
     restoreEnv("HOME", saved.HOME);
     restoreEnv("HACK_LOGGER", saved.HACK_LOGGER);
@@ -449,14 +450,14 @@ test("the proof waits briefly for a hackd that has not bound its socket yet", as
   ).toEqual({ kind: "refused", reason: "foreign-socket" });
 });
 
-test("hack daemon restart fails when stop refuses an unproven pid", async () => {
+test("hack daemon restart replaces a stale pid file without signalling its pid", async () => {
   const sleeper = spawnSleeper();
   const home = join(root, "home");
   const daemonDir = join(home, ".hack", "daemon");
   await mkdir(daemonDir, { recursive: true });
-  // The pid is not hackd, so stop refuses it. If restart ignored that, start
-  // would spawn a daemon: HACK_MCP_COMMAND points that spawn at /bin/false
-  // so a regression cannot start a real hackd.
+  // The pid is not hackd: stop leaves it alone and drops the stale pid
+  // file, then start spawns a daemon. HACK_MCP_COMMAND points that spawn at
+  // /bin/false, so no real hackd starts (and start reports not ready).
   await writeFile(join(daemonDir, "hackd.pid"), `${sleeper.pid}\n`);
   const saved = {
     HOME: process.env.HOME,
@@ -471,6 +472,7 @@ test("hack daemon restart fails when stop refuses an unproven pid", async () => 
   try {
     const { runCli } = await import("../src/cli/run.ts");
     expect(await runCli(["daemon", "restart"])).toBe(1);
+    expect(await Bun.file(join(daemonDir, "hackd.pid")).exists()).toBe(false);
   } finally {
     restoreEnv("HOME", saved.HOME);
     restoreEnv("HACK_LOGGER", saved.HACK_LOGGER);

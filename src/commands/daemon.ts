@@ -20,6 +20,7 @@ import {
 } from "../daemon/launchd.ts";
 import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import {
+  type DaemonProcessRefusal,
   describeDaemonProcessRefusal,
   findOrphanDaemonProcesses,
   isHackDaemonProcess,
@@ -352,6 +353,36 @@ async function startViaLaunchdIfLoaded(opts: {
 }
 
 /**
+ * `hack daemon stop` could not prove the pid-file pid is this HACK_HOME's
+ * hackd. A pid that is not hackd at all (reused after an unclean shutdown)
+ * means the pid file is stale: like `start`, stop leaves that process alone,
+ * removes the file and succeeds, so `hack daemon restart` works. Anything
+ * else (another root's daemon, unknown identity) is left alone and fails.
+ */
+async function reportUnprovenStop(opts: {
+  readonly pid: number;
+  readonly reason: DaemonProcessRefusal;
+  readonly paths: DaemonPaths;
+}): Promise<number> {
+  if (opts.reason === "not-hackd" || opts.reason === "not-running") {
+    await removeDaemonFilesIfStale({
+      pidPath: opts.paths.pidPath,
+      socketPath: opts.paths.socketPath,
+      observedPid: opts.pid,
+      observedPidIsDaemon: false,
+    });
+    logger.info({
+      message: `Removed a stale hackd pid file (pid ${opts.pid} is not hackd); that process was left running`,
+    });
+    return 0;
+  }
+  logger.warn({
+    message: `Did not stop pid ${opts.pid} from the hackd pid file: ${describeDaemonProcessRefusal(opts.reason)} | Check: hack daemon status`,
+  });
+  return 1;
+}
+
+/**
  * Daemons that outlived their pid file (e.g. a launchd-managed instance
  * surviving a manual clear/restart) hold the API socket invisibly and make
  * every freshly spawned daemon exit cleanly. Sweep them first.
@@ -553,10 +584,11 @@ async function handleDaemonStop({
     daemonRoot: paths.root,
   });
   if (proof.kind !== "owned") {
-    logger.warn({
-      message: `Did not stop pid ${status.pid} from the hackd pid file: ${describeDaemonProcessRefusal(proof.reason)} | Check: hack daemon status`,
+    return await reportUnprovenStop({
+      pid: status.pid,
+      reason: proof.reason,
+      paths,
     });
-    return 1;
   }
   await terminateProvenDaemon({ proof });
 

@@ -9,8 +9,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { prepareNativeProjectInput } from "../src/backends/native-project-input.ts";
+import {
+  mergeNativeShellEnvironment,
+  prepareNativeProjectInput,
+} from "../src/backends/native-project-input.ts";
 import { nativeEnvironmentDelivery } from "../src/backends/native-project-start.ts";
+import { resolveShellEnvironment } from "../src/backends/native-shell-environment.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -165,11 +169,20 @@ test("shell values travel only in the private stdin payload, never in the public
     env: { FIXTURE_API_KEY: PRIVATE, PASSED: `${PRIVATE}-passed` },
   });
   expect(input.normalizedComposeJson).not.toContain(PRIVATE);
-  const delivery = nativeEnvironmentDelivery({
-    input,
+  const selection = {
     planId: "f".repeat(64),
     reviewedPlan: { services: { web: { active: true } } },
     run: "a".repeat(32),
+  };
+  // Until native start or restart merges them, shell values are delivered to
+  // nothing: a command that only prepares input (exec, the stale-env check)
+  // sends no private payload for them.
+  expect(nativeEnvironmentDelivery({ input, ...selection })).toEqual({
+    flags: [],
+  });
+  const delivery = nativeEnvironmentDelivery({
+    input: mergeNativeShellEnvironment(input),
+    ...selection,
   });
   expect(delivery.flags).toEqual(["--environment-stdin"]);
   const payload = JSON.parse(delivery.payload?.toString("utf8") ?? "{}") as {
@@ -183,4 +196,28 @@ test("shell values travel only in the private stdin payload, never in the public
       PASSED: `${PRIVATE}-passed`,
     },
   });
+});
+
+test("a variable named like an Object.prototype property is an ordinary variable", () => {
+  const resolution = resolveShellEnvironment({
+    service: "web",
+    environment: Object.fromEntries([
+      ["__proto__", reference("FIXTURE_SET")],
+      ["constructor", null],
+      ["PLAIN", reference("toString")],
+    ]),
+    env: { FIXTURE_SET: PRIVATE },
+    managed: new Set(),
+  });
+  expect(Object.entries(resolution?.delivered ?? {})).toEqual([
+    ["__proto__", PRIVATE],
+    // Not set in this shell; never the inherited function.
+    ["constructor", ""],
+    ["PLAIN", ""],
+  ]);
+  expect(Object.keys(resolution?.environment ?? {})).toEqual([
+    "__proto__",
+    "constructor",
+    "PLAIN",
+  ]);
 });

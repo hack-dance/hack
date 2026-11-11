@@ -27,7 +27,10 @@ import {
   provisionalNativeHostDependencies,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
-import { prepareNativeProjectInput } from "./native-project-input.ts";
+import {
+  mergeNativeShellEnvironment,
+  prepareNativeProjectInput,
+} from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
   applyNativeInternalHostAliases,
@@ -441,11 +444,15 @@ export async function preflightNativeRestart(opts: {
       "Native restart admission failed before cleanup; inspect runtime probe --profile development. The current graph was not stopped."
     );
   }
-  let input = await deps.prepare({
-    ...opts.scope,
-    composeFile: opts.composeFile,
-    envName: selected.envName,
-  });
+  let input = mergeNativeShellEnvironment(
+    await deps.prepare({
+      ...opts.scope,
+      composeFile: opts.composeFile,
+      envName: selected.envName,
+      // As native start: `environment` references read the caller's shell.
+      env: process.env,
+    })
+  );
   const environmentChange = nativeRunEnvironmentChange({
     run: opts.run,
     environmentFiles: input.environmentFiles,

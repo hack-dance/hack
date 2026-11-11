@@ -1,3 +1,5 @@
+import { COMPOSE_PROJECT_NAME_VARIABLE } from "./native-compose-project-name.ts";
+
 /**
  * Shell references in a service's `environment`, resolved the way Compose
  * resolves them, for the native backend.
@@ -5,113 +7,118 @@
  * Compose reads a variable reference and a bare `NAME` entry from the shell
  * that runs it. The native runtime deliberately consults no ambient
  * environment, so such an entry used to fail the start. This module resolves
- * the common whole-value forms in the CLI and hands each value to the private
- * delivery that Hack managed env already uses.
+ * the two forms that could never start, in the CLI, and hands each value to
+ * the private delivery that Hack managed env already uses.
  *
  * Invariants:
  * - A value read from the shell is never written to the normalized Compose
- *   document, a plan, a receipt or a log. The entry becomes a bare reference
- *   (`null`) and the value travels only in the private delivery map.
- * - Only variables an entry references are read. Nothing else of the caller's
- *   environment is touched.
+ *   document, a plan, a receipt, an env fingerprint or a log. The entry
+ *   becomes a bare reference (`null`) and the value travels only in the
+ *   private delivery.
+ * - The reviewed document does not depend on the shell: a resolved entry is
+ *   always a bare reference, whether or not the variable is set. So a start
+ *   from another shell reviews the same plan.
+ * - Only variables an entry references are read, and only own string
+ *   properties of the environment.
+ * - Nothing that starts today changes. A reference with a default, an
+ *   alternative or an error operator is left to the runtime, as before.
  * - A key Hack manages for the service is never taken from the shell, and a
  *   reference to a managed variable is left for the runtime, which refuses it.
- * - A service with no shell reference keeps its `environment` exactly as
- *   authored, list form included.
+ * - A name the runtime supplies itself, and the cloud credential names the
+ *   scoped credential adapters own, are never read from the shell.
  *
- * Scope: an entry whose whole value is one reference. A reference inside a
- * longer string, or in any field other than `environment`, is not resolved
- * here; the runtime resolves its default or refuses it, as before.
+ * Scope: an entry whose whole value is one plain reference, or a bare name.
+ * A reference inside a longer string, or in any field other than
+ * `environment`, is not resolved here.
  */
 
 /** A valid environment variable name. */
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const NAME_PATTERN = "[A-Za-z_][A-Za-z0-9_]*";
 /** The whole value is one braced reference with no operator. */
-const BRACED = new RegExp(`^\\$\\{(${NAME_PATTERN})\\}$`);
+const BRACED = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 /** The whole value is one unbraced reference. */
-const UNBRACED = new RegExp(`^\\$(${NAME_PATTERN})$`);
-/**
- * The whole value is one reference with a literal default: the variable, the
- * `:-` operator and a word with no reference of its own.
- */
-const DEFAULTED = new RegExp(`^\\$\\{(${NAME_PATTERN}):-[^$}]*\\}$`);
-/**
- * One value can never exceed the runtime's whole private payload for a service
- * (`MAX_ENVIRONMENT_PAYLOAD`, 32 KiB). Refusing here names the variable; the
- * runtime's own refusal could not.
- */
-export const MAX_SHELL_VALUE_BYTES = 32 * 1024;
-
-export type ShellEnvironmentEntry =
-  /** Deliver this value privately; the entry becomes a bare reference. */
-  | {
-      readonly kind: "deliver";
-      readonly value: string;
-      readonly unset?: string;
-    }
-  /** Leave the entry out, as Compose leaves a bare unset name unset. */
-  | { readonly kind: "omit" }
-  /** Not a shell reference this module resolves. */
-  | { readonly kind: "keep" };
+const UNBRACED = /^\$([A-Za-z_][A-Za-z0-9_]*)$/;
 
 /**
- * How one `environment` entry resolves against the caller's shell.
- * `managed` holds the names Hack delivers for this service.
+ * Names the native runtime binds itself during review. Taking one from the
+ * shell would give a service another instance's value and remove the
+ * reference the runtime looks for.
  */
-export function resolveShellEnvironmentEntry(opts: {
-  readonly value: unknown;
+const RUNTIME_SUPPLIED_NAMES: ReadonlySet<string> = new Set([
+  COMPOSE_PROJECT_NAME_VARIABLE,
+]);
+
+/**
+ * Cloud credential and selector names. Long-lived shell credentials are not
+ * copied into containers; the AWS and gcloud adapters deliver scoped ones
+ * (see the native guide). Such an entry is left as written.
+ */
+const CREDENTIAL_NAME_PREFIXES = ["AWS_", "GOOGLE_", "CLOUDSDK_"] as const;
+
+/** Whether `name` may be read from the caller's shell. */
+export function shellVariableReadable(name: string): boolean {
+  return !(
+    RUNTIME_SUPPLIED_NAMES.has(name) ||
+    CREDENTIAL_NAME_PREFIXES.some((prefix) => name.startsWith(prefix))
+  );
+}
+
+/** The shell's own string value for `name`, never an inherited property. */
+function shellValue(
+  env: Readonly<Record<string, string | undefined>>,
+  name: string
+): string | undefined {
+  if (!Object.hasOwn(env, name)) {
+    return;
+  }
+  const value = env[name];
+  return typeof value === "string" ? value : undefined;
+}
+
+/** The variable an entry reads from the shell, or nothing when it reads none. */
+export function shellReference(opts: {
   readonly key: string;
-  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly value: unknown;
+  /** Names Hack delivers for this service. */
   readonly managed: ReadonlySet<string>;
-}): ShellEnvironmentEntry {
-  const { value, env } = opts;
-  if (value === null) {
-    // A bare `NAME`: pass the shell's value through, or leave it unset.
-    const passed = env[opts.key];
-    return passed === undefined
-      ? { kind: "omit" }
-      : { kind: "deliver", value: passed };
+}): string | undefined {
+  if (opts.managed.has(opts.key) || !NAME.test(opts.key)) {
+    return;
   }
-  if (typeof value !== "string") {
-    return { kind: "keep" };
+  let name: string | undefined;
+  if (opts.value === null) {
+    // A bare `NAME`: pass the shell's value through.
+    name = opts.key;
+  } else if (typeof opts.value === "string") {
+    name = BRACED.exec(opts.value)?.[1] ?? UNBRACED.exec(opts.value)?.[1];
   }
-  const plain = BRACED.exec(value)?.[1] ?? UNBRACED.exec(value)?.[1];
-  if (plain !== undefined) {
-    if (opts.managed.has(plain)) {
-      return { kind: "keep" };
-    }
-    const found = env[plain];
-    // Compose substitutes an empty string for a variable that is not set.
-    return found === undefined
-      ? { kind: "deliver", value: "", unset: plain }
-      : { kind: "deliver", value: found };
+  if (name === undefined || opts.managed.has(name)) {
+    return;
   }
-  const defaulted = DEFAULTED.exec(value)?.[1];
-  if (defaulted !== undefined && !opts.managed.has(defaulted)) {
-    const found = env[defaulted];
-    // Unset or empty selects the default, which the runtime resolves itself.
-    if (found !== undefined && found !== "") {
-      return { kind: "deliver", value: found };
-    }
-  }
-  return { kind: "keep" };
+  // The entry's own key is checked too: it is the name that gets delivered.
+  return shellVariableReadable(name) && shellVariableReadable(opts.key)
+    ? name
+    : undefined;
 }
 
 export type ShellEnvironmentResolution = {
-  /** The service's environment as a mapping, with delivered entries set to `null`. */
+  /** The service's environment as a mapping, with resolved entries set to `null`. */
   readonly environment: Record<string, unknown>;
   /** Values to deliver privately, by variable name. Never log this map. */
   readonly delivered: Record<string, string>;
   /** Value-free notes for the user: names only. */
   readonly notices: string[];
-  /** The variable whose shell value cannot be delivered, when one cannot. */
-  readonly refused?: string;
 };
 
 /**
  * Resolves every shell reference of one service. Returns `null` when the
  * service has none, so the caller leaves its `environment` untouched.
+ *
+ * A referenced variable the shell does not set is delivered as an empty
+ * value, with a notice that names it. Compose substitutes an empty string for
+ * an unset reference; for a bare name Compose leaves the variable unset in the
+ * container, and native delivers it empty instead so the reviewed document
+ * stays the same from one shell to the next.
  */
 export function resolveShellEnvironment(opts: {
   readonly service: string;
@@ -120,54 +127,65 @@ export function resolveShellEnvironment(opts: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly managed: ReadonlySet<string>;
 }): ShellEnvironmentResolution | null {
-  const environment: Record<string, unknown> = {};
-  const delivered: Record<string, string> = {};
+  // Null-prototype maps: `__proto__` is a valid variable name.
+  const environment: Record<string, unknown> = Object.create(null);
+  const delivered: Record<string, string> = Object.create(null);
   const notices: string[] = [];
   let changed = false;
   for (const [key, value] of Object.entries(opts.environment)) {
-    // A key Hack manages is delivered from managed env; the shell never overrides it.
-    const entry: ShellEnvironmentEntry =
-      opts.managed.has(key) || !NAME.test(key)
-        ? { kind: "keep" }
-        : resolveShellEnvironmentEntry({ ...opts, value, key });
-    if (entry.kind === "keep") {
+    const name = shellReference({ key, value, managed: opts.managed });
+    if (name === undefined) {
       environment[key] = value;
       continue;
     }
     changed = true;
-    if (entry.kind === "omit") {
-      continue;
-    }
-    if (
-      entry.value.includes("\0") ||
-      Buffer.byteLength(entry.value) > MAX_SHELL_VALUE_BYTES
-    ) {
-      return {
-        environment,
-        delivered,
-        notices,
-        refused: value === null ? key : (shellVariable(value) ?? key),
-      };
-    }
+    const found = shellValue(opts.env, name);
     environment[key] = null;
-    delivered[key] = entry.value;
-    if (entry.unset !== undefined) {
+    delivered[key] = found ?? "";
+    if (found === undefined) {
       notices.push(
-        `Service ${opts.service}: ${key} is empty because ${entry.unset} is not set in your shell.`
+        name === key
+          ? `Service ${opts.service}: ${key} is empty because it is not set in your shell.`
+          : `Service ${opts.service}: ${key} is empty because ${name} is not set in your shell.`
       );
     }
   }
   return changed ? { environment, delivered, notices } : null;
 }
 
-/** The variable a whole-value reference names, for a refusal that names it. */
-function shellVariable(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return;
+/** The runtime's limits on one service's private delivery (`provider/environment.rs`). */
+const MAX_SERVICE_PAYLOAD_BYTES = 32 * 1024;
+const MAX_SERVICE_KEYS = 256;
+const MAX_PRIVATE_SERVICES = 32;
+
+/**
+ * Why the runtime would refuse this private delivery, checked here so the
+ * refusal can name the service; the runtime's own refusal cannot. `null`
+ * when it fits. Values are measured as the runtime receives them, JSON-escaped.
+ */
+export function shellDeliveryProblem(opts: {
+  /** The merged private values of each service that has any. */
+  readonly services: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** Services that received a value from the shell; only these are reported. */
+  readonly fromShell: ReadonlySet<string>;
+}):
+  | { readonly kind: "value" | "size" | "keys"; readonly service: string }
+  | { readonly kind: "services" }
+  | null {
+  for (const service of [...opts.fromShell].sort()) {
+    const values = opts.services[service] ?? {};
+    if (Object.values(values).some((value) => value.includes("\0"))) {
+      return { kind: "value", service };
+    }
+    if (Object.keys(values).length > MAX_SERVICE_KEYS) {
+      return { kind: "keys", service };
+    }
+    if (Buffer.byteLength(JSON.stringify(values)) > MAX_SERVICE_PAYLOAD_BYTES) {
+      return { kind: "size", service };
+    }
   }
-  return (
-    BRACED.exec(value)?.[1] ??
-    UNBRACED.exec(value)?.[1] ??
-    DEFAULTED.exec(value)?.[1]
-  );
+  return opts.fromShell.size > 0 &&
+    Object.keys(opts.services).length > MAX_PRIVATE_SERVICES
+    ? { kind: "services" }
+    : null;
 }

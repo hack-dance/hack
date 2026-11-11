@@ -78,6 +78,7 @@ import {
 import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
+  mergeNativeShellEnvironment,
   type NativeProjectInput,
   nativeReviewedActiveServices,
   prepareNativeProjectInput,
@@ -1850,6 +1851,8 @@ async function startNativeProjectAttempt(
     ...opts.scope,
     composeFile: opts.composeFile,
     envName: selection.envName,
+    // Service `environment` references are resolved from the caller's shell.
+    env: process.env,
   });
   reportNativeEnvironmentNotices(input, deps.warn);
   // Digest the selection now: later steps adapt the delivered values.
@@ -1860,6 +1863,8 @@ async function startNativeProjectAttempt(
         envByService: input.managedEnvironment,
       })
     : undefined;
+  // After the fingerprints: shell values are delivered, never digested to disk.
+  input = mergeNativeShellEnvironment(input);
   const environmentMarkers = requireRetainedEnvironment({
     retainedSelection:
       retained && !opts.restore ? selection.envName : undefined,

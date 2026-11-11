@@ -12,7 +12,10 @@ import {
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
 import type { NativeEmulationPolicy } from "./native-project-platform.ts";
-import { resolveShellEnvironment } from "./native-shell-environment.ts";
+import {
+  resolveShellEnvironment,
+  shellDeliveryProblem,
+} from "./native-shell-environment.ts";
 
 const LIMIT = 256 * 1024;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -52,6 +55,15 @@ export type NativeProjectInput = {
   readonly effectiveEnvName: string | null;
   readonly environmentFiles: readonly string[];
   readonly serviceNames: readonly string[];
+  /**
+   * Private in-memory transport only: values read from the caller's shell for
+   * service `environment` references, by service. Kept apart from
+   * `managedEnvironment` so they are never fingerprinted or treated as values
+   * Hack stores; see {@link mergeNativeShellEnvironment}. Never log this map.
+   */
+  readonly shellEnvironment?: Readonly<
+    Record<string, Readonly<Record<string, string>>>
+  >;
   /**
    * Value-free notes about shell references in service `environment`, such as
    * a referenced variable that is not set. Names only.
@@ -220,44 +232,100 @@ function normalizeManagedEnvironment(
 }
 
 /**
- * Resolves the shell references in each service's `environment` and adds the
- * values to the private delivery map (see `native-shell-environment.ts`). The
- * public document keeps only bare references. Returns the value-free notices.
+ * Resolves the shell references in each service's `environment` (see
+ * `native-shell-environment.ts`). The public document keeps only bare
+ * references; the values are returned separately and are not part of
+ * `managedEnvironment` until {@link mergeNativeShellEnvironment}.
  */
-function deliverShellEnvironment(opts: {
+function resolveServiceShellEnvironment(opts: {
   readonly services: Record<string, unknown>;
   readonly managedEnvironment: Record<string, Record<string, string>>;
   readonly env: Readonly<Record<string, string | undefined>>;
-}): string[] {
+}): {
+  readonly shellEnvironment: Record<string, Record<string, string>>;
+  readonly notices: string[];
+} {
+  const shellEnvironment: Record<string, Record<string, string>> = {};
   const notices: string[] = [];
   for (const [name, service] of Object.entries(opts.services)) {
-    if (!isRecord(service) || service.environment === undefined) {
+    // An `environment:` key with every entry commented out is YAML null.
+    if (
+      !isRecord(service) ||
+      service.environment === undefined ||
+      service.environment === null
+    ) {
       continue;
     }
-    const managed = opts.managedEnvironment[name] ?? {};
     const resolution = resolveShellEnvironment({
       service: name,
       environment: environment(service.environment, name),
       env: opts.env,
-      managed: new Set(Object.keys(managed)),
+      managed: new Set(Object.keys(opts.managedEnvironment[name] ?? {})),
     });
     if (resolution === null) {
       continue;
     }
-    if (resolution.refused !== undefined) {
-      throw refused(
-        `${serviceLabel(name)} field environment: the shell value of ${resolution.refused} contains a NUL byte or is over 32 KiB`
-      );
-    }
     service.environment = resolution.environment;
-    if (Object.keys(resolution.delivered).length > 0) {
-      opts.managedEnvironment[name] = { ...managed, ...resolution.delivered };
-    }
+    shellEnvironment[name] = resolution.delivered;
     if (SERVICE_NAME.test(name)) {
       notices.push(...resolution.notices);
     }
   }
-  return notices;
+  return { shellEnvironment, notices };
+}
+
+/**
+ * Adds the values read from the caller's shell to the private delivery. Native
+ * start and restart call this once, after the env fingerprints are taken, so a
+ * shell value is delivered to its service and never digested to disk. Commands
+ * that prepare input without calling it (exec, stale-env checks) deliver no
+ * shell value.
+ *
+ * Refuses, naming the service, when the merged delivery of a service that got
+ * a shell value would exceed what the runtime accepts.
+ */
+export function mergeNativeShellEnvironment(
+  input: NativeProjectInput
+): NativeProjectInput {
+  const shell = input.shellEnvironment ?? {};
+  const fromShell = Object.keys(shell).filter(
+    (name) => Object.keys(shell[name] ?? {}).length > 0
+  );
+  if (fromShell.length === 0) {
+    return input;
+  }
+  const managedEnvironment: Record<string, Readonly<Record<string, string>>> = {
+    ...input.managedEnvironment,
+  };
+  for (const name of fromShell) {
+    managedEnvironment[name] = {
+      ...(input.managedEnvironment[name] ?? {}),
+      ...shell[name],
+    };
+  }
+  const problem = shellDeliveryProblem({
+    services: managedEnvironment,
+    fromShell: new Set(fromShell),
+  });
+  if (problem !== null) {
+    throw refused(shellDeliveryRefusal(problem));
+  }
+  return { ...input, managedEnvironment, shellEnvironment: {} };
+}
+
+function shellDeliveryRefusal(
+  problem: NonNullable<ReturnType<typeof shellDeliveryProblem>>
+): string {
+  if (problem.kind === "services") {
+    return "more than 32 services receive private environment values, counting those read from your shell";
+  }
+  const label = serviceLabel(problem.service);
+  if (problem.kind === "value") {
+    return `${label} field environment: a value read from your shell contains a NUL byte`;
+  }
+  return problem.kind === "keys"
+    ? `${label} field environment: more than 256 variables are delivered privately, counting those read from your shell`
+    : `${label} field environment: the values delivered privately, counting those read from your shell, are over 32 KiB together`;
 }
 
 /** Every value the resolved project env stores as a secret, for any scope or target. */
@@ -346,7 +414,9 @@ export async function prepareNativeProjectInput(opts: {
   readonly envName?: string | null;
   /**
    * The caller's environment, read only for the variables that service
-   * `environment` entries reference. Defaults to the process environment.
+   * `environment` entries reference. Omitted, nothing is read and a shell
+   * reference resolves as unset: only native start and restart pass the
+   * process environment.
    */
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<NativeProjectInput> {
@@ -394,10 +464,10 @@ export async function prepareNativeProjectInput(opts: {
       compose.services,
       resolved
     );
-    const environmentNotices = deliverShellEnvironment({
+    const shell = resolveServiceShellEnvironment({
       services: compose.services,
       managedEnvironment,
-      env: opts.env ?? process.env,
+      env: opts.env ?? {},
     });
     const normalizedComposeJson = JSON.stringify(compose);
     if (Buffer.byteLength(normalizedComposeJson) > LIMIT) {
@@ -427,7 +497,8 @@ export async function prepareNativeProjectInput(opts: {
       effectiveEnvName: selection.effectiveEnv,
       environmentFiles: resolved?.files ?? [],
       serviceNames,
-      environmentNotices,
+      shellEnvironment: shell.shellEnvironment,
+      environmentNotices: shell.notices,
     };
   } catch (error: unknown) {
     // Only this module's closed refusals carry a cause; anything else stays generic.

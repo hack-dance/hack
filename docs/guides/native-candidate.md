@@ -1239,33 +1239,57 @@ by an older bundle, so clean up such a graph with the bundle that started it.
 
 ### Shell variables in service environment
 
-Compose reads a variable reference from the shell that runs it. Native `hack up`
-and `hack restart` do the same for a service's `environment`, for an entry whose
-whole value is one reference:
+Compose reads a variable reference from the shell that runs it. The native runtime
+reads no ambient environment, so two forms of a service `environment` entry could
+never start on native. `hack up` and `hack restart` now resolve them from your shell:
 
 | Entry | Shell has the variable | Shell does not |
 | --- | --- | --- |
-| `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose, and `hack up` prints which variable is not set. |
-| `REGION: ${REGION:-us-east-1}` | The service gets the shell's value when it is not empty. | The default applies. |
-| `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The variable is left unset in the container, as with Compose. |
+| `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose, and the command prints which variable is not set. |
+| `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The service gets an empty value, and the command prints which variable is not set. Compose would leave it unset instead. |
 
 A value read from the shell is never written to the reviewed Compose document, a
-plan, a receipt or a log. The entry stays a reference and the value travels in the
-same private delivery as Hack managed env. Only the variables these entries name
-are read; nothing else of your environment is. One value may be at most 32 KiB and
-may not contain a NUL byte.
+plan, a receipt, an env fingerprint or a log. The entry stays a reference and the
+value travels in the same private delivery as Hack managed env. Only the variables
+these entries name are read; nothing else of your environment is. The reviewed
+document is the same whether or not the variable is set, so a start from another
+shell resumes the same plan.
 
-A variable Hack manages for the service keeps coming from managed env, never from
-the shell, and an entry that references a managed variable is still refused by the
-runtime (`execution_environment_owner`).
+What stays as it was:
 
-Not resolved from the shell: a reference inside a longer string
-(`http://${HOST}:3000`), and a reference in any other field (`image`, `ports`,
-`command`, `volumes`, labels). There, as before, `${NAME:-word}` selects `word`,
-and a reference with no default fails the start with
-`execution_environment_missing`. A shell that sets the variable differently on a
-later `hack up` or `hack restart` changes what the service receives; the running
-containers keep the value they started with.
+- **A reference with a default or another operator** (`${PORT:-3000}`, `${X:+alt}`,
+  `${X-d}`, `${X:?err}`). The runtime resolves it without your shell, so
+  `${PORT:-3000}` is `3000` even when your shell sets `PORT`. Compose would use the
+  shell's value. Write `PORT: ${PORT}` to take the value from the shell.
+- **A reference inside a longer string** (`http://${HOST}:3000`), and a reference in
+  any other field (`image`, `ports`, `command`, `volumes`, labels). A reference with
+  no default there still fails the start with `execution_environment_missing`.
+- **A variable Hack manages for the service.** It comes from managed env, never from
+  the shell, and an entry that references a managed variable is still refused by the
+  runtime (`execution_environment_owner`).
+- **`COMPOSE_PROJECT_NAME`.** The runtime supplies it; it is not read from the shell.
+- **Cloud credential names** (`AWS_*`, `GOOGLE_*`, `CLOUDSDK_*`). Long-lived shell
+  credentials are not copied into containers; use the scoped AWS and gcloud
+  delivery described below. Such an entry is left as written.
+- **A project `.env` file.** Compose also reads it for these references; native does
+  not, so "not set in your shell" can be printed for a variable your `.env` defines.
+
+Three consequences of the private delivery:
+
+- A service that receives a value this way runs under the native process launcher,
+  like a service with managed env. The launcher refuses a non-numeric `user`, an
+  empty entrypoint and a few other settings; `hack up` names the service.
+- The name of a delivered variable may not be referenced by another field of the
+  same service. `PORT: ${PORT}` with `command: ... --port ${PORT:-3000}` is refused
+  with `execution_environment_owner`, whose text says "Hack-managed"; here it means
+  the value came from your shell.
+- All private values of one service, counting managed env, must fit in 32 KiB as
+  JSON, in at most 256 variables, for at most 32 services. `hack up` refuses a
+  project over these limits and names the service.
+
+`hack exec` does not read your shell for these entries, so a command started with
+it does not receive these values. The containers keep the values they started with
+until the next `hack up` or `hack restart`.
 
 ## Registry image acquisition without Docker
 

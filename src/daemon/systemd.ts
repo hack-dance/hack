@@ -1114,22 +1114,62 @@ async function checkDropInEntries(opts: {
     return `directory ${opts.dir} could not be read: ${errorMessage(error)}`;
   }
   for (const entry of entries) {
-    const path = resolve(opts.dir, entry);
-    // The file itself, then everything on the way to it (a symlinked
-    // drop-in can route through a directory others can replace).
-    const error =
-      (await checkOwnerControlledPath({
-        path,
-        uid: opts.uid,
-        directory: false,
-        allowRoot: opts.allowRoot,
-      })) ??
-      (await checkReplaceableChain({ path, uid: opts.uid, hackHome: null }));
+    const error = await checkDropInFile({
+      path: resolve(opts.dir, entry),
+      uid: opts.uid,
+      allowRoot: opts.allowRoot,
+    });
     if (error !== null) {
       return error;
     }
   }
   return null;
+}
+
+/**
+ * One drop-in: a regular file owned by this user (or root) that others
+ * cannot write, with nothing replaceable on the way to it (a symlinked
+ * drop-in can route through a directory others can replace). A link to
+ * exactly `/dev/null` is systemd's way to mask a drop-in: the link and the
+ * directories above it are checked, and `/dev/null` itself is not.
+ */
+async function checkDropInFile(opts: {
+  readonly path: string;
+  readonly uid: number;
+  readonly allowRoot?: boolean;
+}): Promise<string | null> {
+  if (await isDevNullMask(opts.path)) {
+    return await checkReplaceableChain({
+      path: opts.path,
+      uid: opts.uid,
+      hackHome: null,
+      stopAtLink: true,
+    });
+  }
+  return (
+    (await checkOwnerControlledPath({
+      path: opts.path,
+      uid: opts.uid,
+      directory: false,
+      allowRoot: opts.allowRoot,
+    })) ??
+    (await checkReplaceableChain({
+      path: opts.path,
+      uid: opts.uid,
+      hackHome: null,
+    }))
+  );
+}
+
+async function isDevNullMask(path: string): Promise<boolean> {
+  try {
+    return (
+      (await lstat(path)).isSymbolicLink() &&
+      (await readlink(path)) === "/dev/null"
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1248,13 +1288,7 @@ export async function checkSystemdLoadedUnitPaths(opts: {
       continue;
     }
     // The file, every directory above it up to `/`, and every symlink hop.
-    const error =
-      (await checkOwnerControlledPath({
-        path,
-        uid,
-        directory: false,
-        allowRoot: true,
-      })) ?? (await checkReplaceableChain({ path, uid, hackHome: null }));
+    const error = await checkDropInFile({ path, uid, allowRoot: true });
     if (error !== null) {
       return `Not starting ${SYSTEMD_UNIT_NAME}: its drop-in ${error}. Review and remove it, then run: systemctl --user daemon-reload`;
     }
@@ -1306,6 +1340,8 @@ async function checkReplaceableChain(opts: {
   readonly path: string;
   readonly uid: number;
   readonly hackHome: string | null;
+  /** Check the last component itself but do not follow it when it is a link. */
+  readonly stopAtLink?: boolean;
 }): Promise<string | null> {
   if (!isAbsolute(opts.path)) {
     return `${opts.path} is not an absolute path`;
@@ -1349,7 +1385,7 @@ async function checkReplaceableChain(opts: {
       return error;
     }
     const link = await readSymlinkTarget(next);
-    if (link === null) {
+    if (link === null || (opts.stopAtLink === true && queue.length === 0)) {
       cur = next;
       continue;
     }

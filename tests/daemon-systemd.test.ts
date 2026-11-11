@@ -1998,3 +1998,32 @@ test("a symlinked drop-in routed through a writable directory stops install befo
   expect(fake.calls).not.toContain("systemctl --user daemon-reload");
   expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
 });
+
+test("a drop-in masked with a link to /dev/null is accepted", async () => {
+  // Codex review: systemd masks a drop-in with a symlink to /dev/null.
+  const dropInDir = join(root, "config", "systemd", "user", "hackd.service.d");
+  await mkdir(dropInDir, { recursive: true });
+  for (const dir of [
+    "config",
+    "config/systemd",
+    "config/systemd/user",
+    "config/systemd/user/hackd.service.d",
+  ]) {
+    await chmod(join(root, dir), 0o755);
+  }
+  await symlink("/dev/null", join(dropInDir, "override.conf"));
+  expect(await checkSystemdUnitDropIns({ unitPath })).toBeNull();
+  // The mask's own directory is still checked (this one is the user's, so
+  // group/other write is removed).
+  await chmod(dropInDir, 0o777);
+  expect(await checkSystemdUnitDropIns({ unitPath })).toBeNull();
+  expect((await stat(dropInDir)).mode & 0o777).toBe(0o755);
+  // A link elsewhere is not a mask: its target must be a trusted file.
+  const other = join(root, "elsewhere.conf");
+  await writeFile(other, "");
+  await chmod(other, 0o666);
+  await symlink(other, join(dropInDir, "other.conf"));
+  expect(await checkSystemdUnitDropIns({ unitPath })).toContain(
+    "contents cannot be trusted"
+  );
+});

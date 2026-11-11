@@ -28,6 +28,7 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 - [Share environment and secrets](guides/share-environment.md)
 - [Manage helpers and tunnels](guides/project-helpers.md)
 - [Use a cloud agent or another host](guides/cloud-environments.md)
+- [Try the native backend (beta)](../guides/native-candidate.md)
 
 ## Native backend (beta)
 

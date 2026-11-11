@@ -1,7 +1,12 @@
 import { resolve } from "node:path";
-import type { CommandHandlerFor } from "../cli/command.ts";
+import { nativeProjectPs } from "../backends/native-project-observe.ts";
+import {
+  type NativeRuntimeSelection,
+  resolveNativeRuntimeSelection,
+} from "../backends/native-runtime-client.ts";
 import {
   CliUsageError,
+  type CommandHandlerFor,
   defineCommand,
   defineOption,
   withHandler,
@@ -10,9 +15,11 @@ import { optJson, optProject } from "../cli/options.ts";
 import {
   type ProjectSelector,
   parseProjectSelectorOption,
+  resolveRegisteredProjectOption,
 } from "../cli/project-selector.ts";
 import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
+import { resolveEffectiveBranch } from "../lib/branches.ts";
 import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
@@ -20,11 +27,16 @@ import {
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
 import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
+import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import {
   createOperationTimings,
   type OperationTimings,
 } from "../lib/operation-timings.ts";
-import { findProjectContext } from "../lib/project.ts";
+import {
+  findProjectContext,
+  readProjectConfig,
+  resolveWorktreeAutoBranch,
+} from "../lib/project.ts";
 import { ProjectInputSelectionError } from "../lib/project-input-selection.ts";
 import { type ProjectMeta, resolveProjectMeta } from "../lib/project-meta.ts";
 import {
@@ -63,6 +75,7 @@ import {
 } from "../lib/runtime-projects.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
+import { displayNativePs } from "./native-ps-display.ts";
 
 const optDetails = defineOption({
   name: "details",
@@ -444,6 +457,15 @@ const handleStatus: CommandHandlerFor<typeof statusSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  const native = resolveNativeRuntimeSelection();
+  if (native) {
+    return await runNativeStatus({
+      cwd: ctx.cwd,
+      native,
+      projectOpt: args.options.project,
+      json: args.options.json === true,
+    });
+  }
   const selector = parseProjectFilter(args.options.project);
   await touchCwdProjectRegistration({ cwd: ctx.cwd });
   return await runProjects({
@@ -457,6 +479,68 @@ const handleStatus: CommandHandlerFor<typeof statusSpec> = async ({
 };
 
 export const statusCommand = withHandler(statusSpec, handleStatus);
+
+/**
+ * `hack status` under explicit native selection (HACK-1988). The Compose
+ * listing derives "running" from Docker containers, so a native graph always
+ * looked stopped. Native status is the same bounded observation as `hack ps`
+ * for one project: the cwd project, or `--project <name>`. The native runtime
+ * has no cross-project listing, so a cwd outside a project refuses instead of
+ * printing Compose state as if it covered native graphs.
+ */
+async function runNativeStatus(opts: {
+  readonly cwd: string;
+  readonly native: NativeRuntimeSelection;
+  readonly projectOpt: string | undefined;
+  readonly json: boolean;
+  readonly ps?: typeof nativeProjectPs;
+  readonly authored?: typeof tryNativeComposeCommand;
+}): Promise<number> {
+  // A native-authored project (`.hack/hack.project.json`) has its own observer,
+  // and legacy project discovery below refuses its inputs. Dispatch it first,
+  // exactly as `hack ps` does.
+  const authored = await (opts.authored ?? tryNativeComposeCommand)({
+    cwd: opts.cwd,
+    project: opts.projectOpt,
+    operation: "ps",
+    json: opts.json,
+  });
+  if (authored !== null) {
+    return authored;
+  }
+  const project =
+    opts.projectOpt === undefined
+      ? await findProjectContext(opts.cwd)
+      : await resolveRegisteredProjectOption({ projectOpt: opts.projectOpt });
+  if (!project) {
+    throw new CliUsageError(
+      "Native backend is selected: hack status observes one native project. Run it inside a project or pass --project <name>."
+    );
+  }
+  const cfg = await readProjectConfig(project);
+  const resolved = await resolveEffectiveBranch({
+    explicitBranch: null,
+    projectRoot: project.projectRoot,
+    autoBranchEnabled: resolveWorktreeAutoBranch(cfg),
+  });
+  if (resolved.source === "detached-worktree") {
+    throw new CliUsageError(
+      "Detached linked worktree cannot auto-select an isolated instance; use hack ps --branch <name> for native status."
+    );
+  }
+  const branch = resolved.source === "worktree" ? resolved.branch : null;
+  const result = await (opts.ps ?? nativeProjectPs)({
+    runtime: opts.native,
+    scope: {
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      nativeHome: opts.native.home,
+      branch,
+    },
+  });
+  await displayNativePs(result, opts.json);
+  return 0;
+}
 
 async function runProjects(opts: {
   /**
@@ -1435,6 +1519,7 @@ function readRepairOutcomeField(opts: {
 
 export const __testOnlyProjectsCommand = {
   buildRuntimeRecoveryNotice,
+  runNativeStatus,
   filterPruneRegistryProjects,
   filterPruneRuntimeProjects,
   parseDaemonRuntimeRecoveryMeta,

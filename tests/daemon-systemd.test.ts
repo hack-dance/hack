@@ -903,6 +903,7 @@ test("stop cancels a pending restart through systemd without a live pid", async 
   ).toEqual({
     handled: true,
     ownedPid: false,
+    failed: null,
   });
   expect(fake.calls).toContain("systemctl --user stop hackd.service");
 
@@ -912,6 +913,7 @@ test("stop cancels a pending restart through systemd without a live pid", async 
   ).toEqual({
     handled: false,
     ownedPid: false,
+    failed: null,
   });
   expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
 });

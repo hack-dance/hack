@@ -56,7 +56,9 @@ case "$1" in
     "$prog" daemon start --foreground </dev/null >/dev/null 2>&1 &
     echo $! > "$main"
     exit 0 ;;
-  stop) alive && kill "$(cat "$main")"; exit 0 ;;
+  stop)
+    if [ -f "$state/stop-fails" ]; then echo "Job for hackd.service canceled." >&2; exit 1; fi
+    alive && kill "$(cat "$main")"; exit 0 ;;
   disable)
     rm -f "$state/enabled"
     if [ "$2" = "--now" ] && alive; then kill "$(cat "$main")"; fi
@@ -388,6 +390,30 @@ test.skipIf(process.platform !== "linux")(
     ) as Record<string, unknown>;
     expect(status.managed_by).toBe("systemd");
     expect(status.pid).toBe(managed);
+  },
+  90_000
+);
+
+test.skipIf(process.platform !== "linux")(
+  "stop fails, without signalling hackd, when systemctl stop fails",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+    expect((await hack(f, ["daemon", "install"])).code).toBe(0);
+    const pid = await readOwnedPid(f);
+    expect(pid).not.toBeNull();
+
+    await writeFile(join(f.state, "stop-fails"), "");
+    const stop = await hack(f, ["daemon", "stop"]);
+    expect(stop.code).toBe(1);
+    expect(`${stop.stdout}${stop.stderr}`).toContain(
+      "systemctl --user stop hackd.service failed"
+    );
+    expect(isAlive(pid as number)).toBe(true);
+
+    // Clean up through the manager once stop works again.
+    await rm(join(f.state, "stop-fails"));
+    expect((await hack(f, ["daemon", "uninstall"])).code).toBe(0);
   },
   90_000
 );

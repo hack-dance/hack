@@ -328,8 +328,13 @@ export async function stopViaSystemdIfInstalled(opts: {
   readonly pid: number | null;
   readonly deps?: SystemdDeps;
   readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
-}): Promise<{ readonly handled: boolean; readonly ownedPid: boolean }> {
-  const none = { handled: false, ownedPid: false };
+}): Promise<{
+  readonly handled: boolean;
+  readonly ownedPid: boolean;
+  /** systemctl stop failed: the manager may still (re)start hackd. */
+  readonly failed: string | null;
+}> {
+  const none = { handled: false, ownedPid: false, failed: null };
   const deps = opts.deps ?? defaultSystemdDeps();
   if (!resolveSystemdAccess({ env: deps.env }).allowed) {
     return none;
@@ -357,12 +362,9 @@ export async function stopViaSystemdIfInstalled(opts: {
     }));
   const stopped = await systemdServiceAction({ action: "stop", deps });
   if (!stopped.ok) {
-    logger.warn({
-      message: `systemctl --user stop ${SYSTEMD_UNIT_NAME} failed (${stopped.error})`,
-    });
-    return { handled: false, ownedPid };
+    return { handled: false, ownedPid, failed: stopped.error };
   }
-  return { handled: true, ownedPid };
+  return { handled: true, ownedPid, failed: null };
 }
 
 /**

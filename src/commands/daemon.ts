@@ -541,7 +541,15 @@ async function handleDaemonStop({
       ? await stopViaSystemdIfInstalled({
           pid: initial.running ? initial.pid : null,
         })
-      : { handled: false, ownedPid: false };
+      : { handled: false, ownedPid: false, failed: null };
+  if (viaSystemd.failed !== null) {
+    // Signalling hackd would not stop the manager, which can start it again
+    // (a pending Restart=on-failure). Report the failure instead.
+    logger.error({
+      message: `systemctl --user stop hackd.service failed: ${viaSystemd.failed}; hackd was not stopped | Check: systemctl --user status hackd.service`,
+    });
+    return 1;
+  }
   if (viaSystemd.ownedPid && initial.pid !== null) {
     await waitForProcessExit({
       pid: initial.pid,

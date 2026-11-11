@@ -104,3 +104,26 @@ for (const [old, target] of [
     throw new Error(`Legacy redirect failed: ${old}`);
   }
 }
+
+// v5 pages that moved into the native section keep their old routes, with and
+// without the version prefix.
+for (const [old, target] of [
+  ["guides/native-candidate", "native/full-reference"],
+  ["guides/candidate-install", "native/install"],
+  ["reference/native-authored-commands", "native/authored-commands"],
+  ["reference/native-config-import", "native/config-import"],
+]) {
+  for (const prefix of ["/docs/v5/", "/docs/"]) {
+    const response = await fetch(new URL(`${prefix}${old}`, base), {
+      redirect: "manual",
+    });
+    if (
+      !(
+        [307, 308].includes(response.status) &&
+        response.headers.get("location")?.endsWith(`/docs/v5/${target}`)
+      )
+    ) {
+      throw new Error(`Moved-page redirect failed: ${prefix}${old}`);
+    }
+  }
+}

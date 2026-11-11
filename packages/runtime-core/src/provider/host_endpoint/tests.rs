@@ -98,6 +98,72 @@ fn exclusive_discovery_child() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn discovery_refuses_a_listener_reparented_to_launchd() {
+    isolated_endpoint_fixture("provider::host_endpoint::tests::reparented_discovery_child");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "isolated discovery fixture launched by discovery_refuses_a_listener_reparented_to_launchd"]
+fn reparented_discovery_child() {
+    use std::process::{Command, Stdio};
+    /// Kills only the orphan this fixture started, after rechecking its executable.
+    struct Orphan {
+        pid: i32,
+        executable: std::path::PathBuf,
+    }
+    impl Drop for Orphan {
+        fn drop(&mut self) {
+            if super::super::identity::observe(self.pid)
+                .is_ok_and(|process| process.executable == self.executable)
+            {
+                // SAFETY: plain signal to the fixture's own verified listener child.
+                unsafe { libc::kill(self.pid, libc::SIGKILL) };
+            }
+        }
+    }
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let port = crate::provider::test_socket::unallocated_tcp_port();
+    // The shell starts the listener in the background and exits at once, so
+    // launchd adopts it (parent PID 1), as `nohup … &` from a finished hook does.
+    let output = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#""$0" --ignored --exact provider::host_endpoint::tests::discovery_listener_child --test-threads=1 </dev/null >/dev/null 2>&1 & echo $!"#,
+        ])
+        .arg(&executable)
+        .env("HACK_DISCOVERY_LISTENER_PORT", port.to_string())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let _orphan = Orphan {
+        pid: String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+        executable: executable.clone(),
+    };
+    // The orphan is a whole test binary starting on a possibly loaded host.
+    let deadline = Instant::now() + LOADED_EVENT_HANG_GUARD;
+    loop {
+        match HostEndpoint::discover(&executable, port) {
+            Err(error) if error.code == "host_endpoint_unsupervised" => return,
+            Err(error) => assert_eq!(error.code, "host_endpoint_identity"),
+            Ok(found) => panic!("a listener reparented to launchd was discovered: {found:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the reparented listener was not observed"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn executable_pinned_discovery_follows_a_new_listener_process() {
     // Discovery scans every process running this executable, and the listener child must
     // rebind a port this process reserved and released; keep both away from parallel forks.

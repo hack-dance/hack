@@ -195,6 +195,18 @@ The command-line tool is the supported product. The remote, gateway, node and
 dispatch commands and the macOS app in this repository are unsupported. Setup does
 not use them.
 
+## Provider pin qualification (contributors)
+
+[`scripts/qualify-provider-pin.ts`](scripts/qualify-provider-pin.ts) qualifies a
+provider pin on an Apple Silicon Mac using an empty, private, canonical root.
+It previews without `--run`. Foreground startup waits for its own console-ready
+signal before a single `ps --json` confirmation, so qualification does not poll
+the provider lock during startup. A startup `provider_busy` failure stays a failed
+run and is labelled `KNOWN_PRODUCT_BUG provider_busy`, separately from pin failures.
+With `--keep-going`, recorded and thrown step failures both settle owned processes
+before advancing; unconfirmed cleanup skips later steps. Restart keeps the previous
+foreground tracked through replacement failure and its bounded exit wait.
+
 ## Documentation
 
 Start with [Getting started](docs/guides/getting-started.md) or the

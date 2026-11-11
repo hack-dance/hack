@@ -23,6 +23,7 @@ import {
   compose,
   contentDigest,
   DEPENDENCY_SERVER,
+  foregroundReadyRun,
   INERT_RECORD_FIELDS,
   INERT_RUNNING_RESOURCES,
   inertField,
@@ -42,6 +43,7 @@ import {
   sourceTemplatePins,
   warmPhases,
 } from "../scripts/qualify-provider-pin.ts";
+import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
 const repository = resolve(import.meta.dir, "..");
 const digest = `sha256:${"a".repeat(64)}`;
@@ -384,6 +386,8 @@ describe("provider pin qualification", () => {
 // ready container named after the latest start. No pool, VM or real `hack` is involved.
 describe("keep-going cleanup and bounded waits (fake hack)", () => {
   function fixture() {
+    // Match rootProblem's production precondition: macOS tmpdir may be an alias,
+    // but the process scanner compares argv against the canonical .work path.
     const root = realpathSync(mkdtempSync(join(tmpdir(), "qualify-cleanup-")));
     for (const directory of ["evidence", "project", "tmp", "bin"]) {
       mkdirSync(join(root, directory), { mode: 0o700 });
@@ -394,13 +398,22 @@ describe("keep-going cleanup and bounded waits (fake hack)", () => {
       `#!/bin/sh
 echo "$*" >> '${root}/hack.log'
 case "$1" in
-  ps) printf '{"ok":true,"data":{"status":"observed","phase":"ready-observed","items":[{"service":"web","container":"c-%s"}]}}' "$(cat '${root}/gen' 2>/dev/null)" ;;
+  ps)
+    n=$(cat '${root}/gen' 2>/dev/null || echo 0)
+    if [ ! -e '${root}/ready-'"$n" ]; then touch '${root}/early-ps'; exit 79; fi
+    printf '{"ok":true,"data":{"status":"observed","phase":"ready-observed","run":"%032x","items":[{"service":"web","container":"c-%s"}]}}' "$n" "$n" ;;
   up|restart)
     if [ "$2" = -d ]; then exit 0; fi
+    if [ "$1" = restart ] && [ -e '${root}/restart-fails' ]; then exit 23; fi
+    if [ -e '${root}/provider-busy' ]; then echo '[provider_busy] Another candidate operation holds the provider lock' >&2; exit 23; fi
     n=$(( $(cat '${root}/gen' 2>/dev/null || echo 0) + 1 )); echo "$n" > '${root}/gen'
+    if [ "$1" = restart ]; then touch '${root}/stop-'"$((n-1))"; fi
+    sleep 0.1
+    touch '${root}/ready-'"$n"
+    printf 'SUCCESS: Project is ready (web; run %032x). Use hack ps and hack logs from another terminal; press Ctrl-C to stop.\n' "$n" >&2
     if [ -e '${root}/stubborn' ]; then exec sleep 20; fi
-    while [ ! -e '${root}/stop' ]; do sleep 0.05; done; rm -f '${root}/stop' ;;
-  down) touch '${root}/stop' ;;
+    while [ ! -e '${root}/stop-'"$n" ]; do sleep 0.05; done ;;
+  down) touch '${root}/stop-'"$(cat '${root}/gen' 2>/dev/null || echo 0)" ;;
 esac
 `,
       { mode: 0o700 }
@@ -426,6 +439,139 @@ esac
     };
     return { root, run, done };
   }
+
+  test("foreground ready parsing requires the complete console signal and run", () => {
+    const line = `SUCCESS: Project is ready (web, db; run ${"a".repeat(32)}). Use hack ps and hack logs from another terminal; press Ctrl-C to stop.`;
+    expect(foregroundReadyRun(`${line}\n`)).toBe("a".repeat(32));
+    expect(foregroundReadyRun(line.slice(0, -1))).toBeNull();
+    expect(foregroundReadyRun(line.replace("SUCCESS:", "INFO:"))).toBeNull();
+    expect(
+      foregroundReadyRun(line.replace("a".repeat(32), "unknown"))
+    ).toBeNull();
+  });
+
+  test("the qualification fixture selects the legacy Compose frontend for up and restart", async () => {
+    const { root, run, done } = fixture();
+    try {
+      mkdirSync(join(run.project, ".hack"));
+      writeFileSync(
+        join(run.project, ".hack", "hack.config.json"),
+        JSON.stringify({ name: "qualification" })
+      );
+      writeFileSync(
+        join(run.project, ".hack", "docker-compose.yml"),
+        compose(
+          `web@${digest}`,
+          `db@${digest}`,
+          "dependency.qualification.test"
+        )
+      );
+      // Both commands first call this selector. Null leaves handleNativeUp's
+      // console-ready signal (including run id) in charge, rather than authored startup.
+      expect(
+        await selectNativeComposeProject({ cwd: root, path: run.project })
+      ).toBeNull();
+    } finally {
+      done();
+    }
+  });
+
+  test("startup makes no ps request before the foreground ready signal", async () => {
+    const { root, run, done } = fixture();
+    try {
+      const ready = await run.upForeground("up", "up");
+      expect(ready.ps.run).toBe("1".padStart(32, "0"));
+      expect(() => readFileSync(join(root, "early-ps"))).toThrow();
+      const requests = readFileSync(join(root, "hack.log"), "utf8")
+        .split("\n")
+        .filter((line) => line.startsWith("ps "));
+      expect(requests).toHaveLength(1);
+    } finally {
+      done();
+    }
+  });
+
+  test("provider_busy startup failure is labelled as a known product bug and still fails", async () => {
+    const { root, run, done } = fixture();
+    try {
+      writeFileSync(join(root, "provider-busy"), "");
+      await expect(run.upForeground("up", "up")).rejects.toThrow(
+        "KNOWN_PRODUCT_BUG provider_busy"
+      );
+      expect(
+        Object.keys(run.recorded).some((key) =>
+          key.startsWith("known_product_bug_provider_busy_")
+        )
+      ).toBe(true);
+      expect(readFileSync(join(root, "hack.log"), "utf8")).not.toContain("ps ");
+    } finally {
+      done();
+    }
+  });
+
+  test("the post-ready confirmation must name the foreground's own run", async () => {
+    const { run, done } = fixture();
+    const execute = run.exec.bind(run);
+    run.exec = (name, argv, options) => {
+      const result = execute(name, argv, options);
+      return argv[1] === "ps"
+        ? {
+            ...result,
+            stdout: result.stdout.replace(
+              "1".padStart(32, "0"),
+              "f".repeat(32)
+            ),
+          }
+        : result;
+    };
+    try {
+      await expect(run.upForeground("up", "up")).rejects.toThrow(
+        "its run was not confirmed by ps"
+      );
+    } finally {
+      done();
+    }
+  });
+
+  test("startup classifies final stderr after exit even when the live snapshot was stale", async () => {
+    const { root, run, done } = fixture();
+    const read = run.readStartupOutput;
+    let staleSnapshot = false;
+    run.readStartupOutput = (path) => {
+      const text = read(path);
+      if (
+        !staleSnapshot &&
+        run.foreground?.exitCode !== null &&
+        text.includes("provider_busy")
+      ) {
+        staleSnapshot = true;
+        return "";
+      }
+      return text;
+    };
+    try {
+      writeFileSync(join(root, "provider-busy"), "");
+      await expect(run.upForeground("up", "up")).rejects.toThrow(
+        "KNOWN_PRODUCT_BUG provider_busy"
+      );
+      expect(staleSnapshot).toBe(true);
+    } finally {
+      done();
+    }
+  });
+
+  test("a successful restart releases the exited previous handle from cleanup tracking", async () => {
+    const { run, done } = fixture();
+    try {
+      await run.upForeground("up", "up");
+      const previous = run.foreground;
+      await run.upForeground("restart", "restart", "c-1");
+      expect(previous?.exitCode).toBe(0);
+      expect(run.strays).toHaveLength(0);
+    } finally {
+      done();
+    }
+  });
 
   test("a failed step's foreground is stopped and shown gone before the next step", async () => {
     const { root, run, done } = fixture();
@@ -492,6 +638,116 @@ esac
       expect(run.failed.at(-1)).toStartWith("next: skipped:");
       expect(run.strays).toHaveLength(1);
       expect(run.strays[0]?.exitCode).toBeNull();
+    } finally {
+      done();
+    }
+  });
+
+  test("a recorded failure settles before the next step even without a throw", async () => {
+    const { run, done } = fixture();
+    try {
+      let next = false;
+      const code = await run.runSteps([
+        [
+          "recorded failure",
+          false,
+          async () => {
+            await run.upForeground("up", "up");
+            run.check("synthetic recorded failure", false);
+          },
+        ],
+        [
+          "next",
+          false,
+          () => {
+            expect(run.recorded.stopped_after_recorded_failure).toEqual({
+              foregrounds_running: [],
+              providers_running: [],
+            });
+            expect(run.foreground).toBeNull();
+            expect(run.strays).toHaveLength(0);
+            next = true;
+          },
+        ],
+      ]);
+      expect(code).toBeNull();
+      expect(next).toBe(true);
+      expect(run.failed).toContain(
+        "recorded failure: synthetic recorded failure"
+      );
+    } finally {
+      done();
+    }
+  });
+
+  test("a recorded failure with a lingering child blocks the next step", async () => {
+    const { root, run, done } = fixture();
+    try {
+      writeFileSync(join(root, "stubborn"), "");
+      let next = false;
+      await run.runSteps([
+        [
+          "recorded failure",
+          false,
+          async () => {
+            await run.upForeground("up", "up");
+            run.check("synthetic recorded failure", false);
+          },
+        ],
+        [
+          "next",
+          false,
+          () => {
+            next = true;
+          },
+        ],
+      ]);
+      expect(next).toBe(false);
+      expect(run.blocked).toContain("left processes running");
+      expect(run.strays).toHaveLength(1);
+    } finally {
+      done();
+    }
+  });
+
+  test("a failed main-pool stop cannot boot an auxiliary pool in the same step", async () => {
+    const { run, done } = fixture();
+    try {
+      run.runtime = () => ({});
+      run.status = () => ({ process_alive: true });
+      let auxiliaryBooted = false;
+      await run.runSteps([
+        [
+          "network",
+          false,
+          () => {
+            run.stopMainPool("network");
+            auxiliaryBooted = true;
+          },
+        ],
+      ]);
+      expect(auxiliaryBooted).toBe(false);
+      expect(run.recorded.stopped_after_network).toBeDefined();
+    } finally {
+      done();
+    }
+  });
+
+  test("restart retains the previous foreground when its replacement fails before readiness", async () => {
+    const { root, run, done } = fixture();
+    try {
+      writeFileSync(join(root, "stubborn"), "");
+      await run.upForeground("up", "up");
+      const previous = run.foreground;
+      writeFileSync(join(root, "restart-fails"), "");
+      await expect(
+        run.upForeground("restart", "restart", "c-1")
+      ).rejects.toThrow(/before readiness/);
+      expect(previous?.exitCode).toBeNull();
+      expect(run.strays).toEqual([previous as NonNullable<typeof previous>]);
+      await run.settle("restart");
+      expect(run.blocked).toContain("left processes running");
+      expect(run.strays).toContain(previous as NonNullable<typeof previous>);
     } finally {
       done();
     }

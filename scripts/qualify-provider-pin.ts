@@ -1975,7 +1975,7 @@ class Qualification {
       );
       if (phases.retained_preflight_s === null) {
         this.note(
-          `INFO warm up -d run ${run}: retained preflight not sampled (shorter than one ${phases.sample_period_s ?? "?"} s period)`
+          `INFO warm up -d run ${run}: retained preflight not sampled (shorter than one ${phases.sample_period_s ?? "?"} s period, or not run)`
         );
       }
       writeFileSync(

@@ -76,9 +76,13 @@ export async function bootstrapLinuxGlobalDns(opts: {
           initialValue: true,
           nonInteractive: "decline",
         });
-      } catch {
-        // Ctrl-C at the prompt: treat as "no" so install still finishes.
-        return false;
+      } catch (error) {
+        // Ctrl-C at the prompt (confirmSafe throws "Canceled"): treat as
+        // "no" so install still finishes. Any other error propagates.
+        if (error instanceof Error && error.message === "Canceled") {
+          return false;
+        }
+        throw error;
       }
     },
   });

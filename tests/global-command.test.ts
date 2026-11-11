@@ -83,6 +83,9 @@ const osMock = await registerScopedModuleMock({
 // HACK-2053: Linux runs of global install/down/status go through this fake
 // DNS host, never the real /etc, resolvectl or sudo.
 const linuxDnsPrivileged: string[][] = [];
+// Default: resolved inactive, so Linux installs take the manual (no prompt)
+// path even in a terminal. Only the sudo test opts into the apply path.
+let fakeLinuxResolvedActive = false;
 const linuxDnsHostMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/lib/linux-dns-host.ts",
@@ -91,7 +94,7 @@ const linuxDnsHostMock = await registerScopedModuleMock({
       readFile: async (path: string) =>
         path === "/etc/resolv.conf" ? "nameserver 127.0.0.53\n" : null,
       listDir: async () => [],
-      isResolvedActive: async () => true,
+      isResolvedActive: async () => fakeLinuxResolvedActive,
       systemdVersion: async () => 255,
       findLinkWithAddress: async () => "br-0123456789ab",
       readLinkRoute: async () => ({ dns: [], domains: [], defaultRoute: null }),
@@ -124,6 +127,7 @@ beforeEach(async () => {
   execCalls.length = 0;
   runCalls.length = 0;
   linuxDnsPrivileged.length = 0;
+  fakeLinuxResolvedActive = false;
   execMockResponder = null;
 });
 
@@ -688,6 +692,7 @@ test(
     );
     await mkdir(dirname(bundle), { recursive: true });
     await writeFile(bundle, "stub");
+    fakeLinuxResolvedActive = true;
     const saved = process.env.HACK_NO_INTERACTIVE;
     process.env.HACK_NO_INTERACTIVE = "1";
     try {

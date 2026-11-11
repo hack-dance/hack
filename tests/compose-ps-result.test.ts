@@ -69,6 +69,16 @@ describe("readComposePsResult", () => {
     expect(error.message).toEndWith(`Engine said: ${cause}`);
   });
 
+  test("stdout is not read while stderr has lines, even if they are warnings", () => {
+    const error = failure(
+      "WARN[0000] only a warning",
+      3,
+      '{"Service":"web","Command":"sample-command"}'
+    );
+    expect(error.message).toEndWith("Engine said: WARN[0000] only a warning");
+    expect(error.message).not.toContain("sample-command");
+  });
+
   test("only warnings: the first warning is still shown", () => {
     expect(failure("WARN[0000] only a warning", 3).message).toEndWith(
       "Engine said: WARN[0000] only a warning"

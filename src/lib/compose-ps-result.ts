@@ -248,17 +248,18 @@ function composePsFailureError(opts: {
 }
 
 /**
- * First non-warning line of stderr (else stdout), without ANSI escapes, with
+ * First non-warning line of stderr (stdout only when stderr is empty), without ANSI escapes, with
  * URL credentials and `redactValues` replaced, cut to a bounded length.
  */
 export function firstEngineLine(opts: {
   readonly result: ComposePsProcessResult;
   readonly redactValues?: Iterable<string>;
 }): string | null {
-  const lines = [
-    ...cleanLines(opts.result.stderr),
-    ...cleanLines(opts.result.stdout),
-  ];
+  // stdout is read only when stderr is empty: on a failed ps it may hold
+  // partial container JSON (commands, labels).
+  const stderrLines = cleanLines(opts.result.stderr);
+  const lines =
+    stderrLines.length > 0 ? stderrLines : cleanLines(opts.result.stdout);
   // Compose prints warnings (an obsolete `version`, an unset variable) before
   // the error; they must not take the cause's place.
   const source = lines.find((line) => !isWarningLine(line)) ?? lines[0];

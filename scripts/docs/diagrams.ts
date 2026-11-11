@@ -1,8 +1,8 @@
 /**
  * Render fenced ```mermaid blocks with the pinned Pele renderer (site devDependency,
  * exactly 1.9.0) and the Hack Dance house theme. Each diagram becomes a light and a
- * dark SVG under site/public/diagrams, and the staged page shows the image with the
- * Mermaid source kept underneath in a collapsed block. Links and images are always
+ * dark SVG under site/public/diagrams, and the staged page shows the two images in
+ * place of the Mermaid block; the site displays the one that matches the theme. Links and images are always
  * disabled: diagram text comes from Markdown and is treated as untrusted.
  *
  * The LLM exports keep the raw Mermaid blocks; only the staged pages are rewritten.
@@ -114,19 +114,13 @@ export async function embedDiagrams(
     }
     assets.set(`${id}.light.svg`, rendered.light);
     assets.set(`${id}.dark.svg`, rendered.dark);
-    const alt = diagramTitle(source).replaceAll('"', "&quot;");
+    // Staged pages are plain Markdown (`.md`), where raw HTML and JSX are
+    // dropped, so the images use Markdown syntax. The site's `img` component
+    // (site/components/diagram-image.tsx) gives each variant its theme class.
+    const alt = diagramTitle(source).replace(/[[\]\\]/g, "");
     const replacement = [
-      `<figure className="diagram">`,
-      `  <img alt="${alt}" className="diagram-light" src="${diagramsRoute}/${id}.light.svg" />`,
-      `  <img alt="${alt}" className="diagram-dark" src="${diagramsRoute}/${id}.dark.svg" />`,
-      "</figure>",
-      "",
-      "<details>",
-      "<summary>Diagram source</summary>",
-      "",
-      match[0],
-      "",
-      "</details>",
+      `![${alt}](${diagramsRoute}/${id}.light.svg)`,
+      `![${alt}](${diagramsRoute}/${id}.dark.svg)`,
     ].join("\n");
     parts.push(markdown.slice(cursor, match.index), replacement);
     cursor = (match.index ?? 0) + match[0].length;

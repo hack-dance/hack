@@ -1113,7 +1113,10 @@ async function checkDropInEntries(opts: {
   } catch (error: unknown) {
     return `directory ${opts.dir} could not be read: ${errorMessage(error)}`;
   }
-  for (const entry of entries) {
+  // systemd loads only `*.conf` from a drop-in directory; backups and
+  // subdirectories are ignored there, so they are here too (the directory
+  // itself is still checked by the caller).
+  for (const entry of entries.filter((name) => name.endsWith(".conf"))) {
     const error = await checkDropInFile({
       path: resolve(opts.dir, entry),
       uid: opts.uid,

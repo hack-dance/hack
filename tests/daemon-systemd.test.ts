@@ -1537,12 +1537,10 @@ test("drop-ins another account could have written are refused before use", async
 test("install and start refuse a drop-in they cannot vouch for", async () => {
   const fake = fakeSystemd();
   await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
-  // Not a regular file: refused like a foreign one.
+  // A `.conf` entry that is not a regular file: refused like a foreign one.
   await mkdir(
-    join(root, "config", "systemd", "user", "hackd.service.d", "odd"),
-    {
-      recursive: true,
-    }
+    join(root, "config", "systemd", "user", "hackd.service.d", "odd.conf"),
+    { recursive: true }
   );
   fake.calls.length = 0;
   expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
@@ -2055,4 +2053,26 @@ test("a unit path list split by a space in a path is refused, not half-checked",
   expect(
     await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
   ).toContain("cannot be read unambiguously");
+});
+
+test("drop-in checks skip entries systemd does not load", async () => {
+  // Codex review: systemd loads only *.conf; a backup directory or a .bak
+  // file must not block install or start.
+  const dropInDir = join(root, "config", "systemd", "user", "hackd.service.d");
+  await mkdir(join(dropInDir, "backup"), { recursive: true });
+  for (const dir of [
+    "config",
+    "config/systemd",
+    "config/systemd/user",
+    "config/systemd/user/hackd.service.d",
+  ]) {
+    await chmod(join(root, dir), 0o755);
+  }
+  await writeFile(join(dropInDir, "override.conf.bak"), "");
+  await chmod(join(dropInDir, "override.conf.bak"), 0o666);
+  expect(await checkSystemdUnitDropIns({ unitPath })).toBeNull();
+  // A .conf that others can write is still refused.
+  await writeFile(join(dropInDir, "real.conf"), "");
+  await chmod(join(dropInDir, "real.conf"), 0o666);
+  expect(await checkSystemdUnitDropIns({ unitPath })).toContain("real.conf");
 });

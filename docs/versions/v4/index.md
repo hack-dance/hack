@@ -3,6 +3,9 @@
 Hack keeps the parts needed to run a project together: services, environment,
 secrets, local URLs, startup helpers and logs. The setup lives with your repository.
 
+v4 is the current stable line. v5, the next major version, is in prerelease. Choose
+v5 in the version selector for its docs and the upgrade guide.
+
 Start with [Install](install.md), then [Getting started](getting-started.md).
 
 ## Understand the project

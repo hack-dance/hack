@@ -6,6 +6,7 @@ import {
   readNativeProcessRefusals,
 } from "../lib/native-process-wrappers.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
+import { nativeBetaCandidatePointer } from "./native-beta.ts";
 import {
   type NativePlanChange,
   nativePlanChangeGuidance,
@@ -201,7 +202,7 @@ export function resolveNativeRuntimeSelection(
   const home = env.HACK_NATIVE_HOME;
   if (!(binary && home && isAbsolute(binary) && isAbsolute(home))) {
     throw new ClosedCliError(
-      "Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths."
+      `Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths. ${nativeBetaCandidatePointer()}`
     );
   }
   return { binary, home };

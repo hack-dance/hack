@@ -409,7 +409,7 @@ const optTailscaleTags = defineOption({
 
 const nodeSpec = defineCommand({
   name: "node",
-  summary: "Beta: manage remote execution nodes",
+  summary: "Unsupported: manage remote execution nodes",
   group: "Beta",
   options: [],
   positionals: [],

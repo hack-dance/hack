@@ -129,7 +129,7 @@ test("Compose ps shows failed and completed services after failed up", async () 
       error: {
         code: "E_COMPOSE_FAILED",
         message:
-          "docker compose ps failed (exit 2). It printed no error output.",
+          "docker compose ps failed (exit 2). Its output is omitted because Compose can expand project values into it; run `docker compose ps` in the project (or `hack ps` without --json) to see it.",
       },
     });
     const calls = (await readFile(join(root, "ps-args"), "utf8"))

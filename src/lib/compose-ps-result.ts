@@ -15,11 +15,12 @@
  *   not JSON lines or a JSON array of objects.
  * - `E_COMPOSE_FAILED`: any other non-zero exit.
  *
- * Messages carry at most one line of the engine's error output (the first
- * that is not a Compose warning), with
- * URL credentials and caller-named values (for example the project env
- * values passed to Compose) replaced by `[REDACTED]`. Unparsable stdout is
- * never echoed: container listings can carry commands and labels.
+ * Only a recognized Docker client connection error (denied socket, engine
+ * unreachable) is quoted, as one stderr line with URL credentials, the env
+ * values Hack passed to Compose and secret-looking inherited values replaced
+ * by `[REDACTED]`. Other Compose output is omitted: Compose can expand
+ * project `${VAR}` references, including inherited secrets, into its errors.
+ * Stdout is never quoted: container listings can carry commands and labels.
  */
 
 import { HackCliError } from "./cli-result.ts";
@@ -47,6 +48,10 @@ const WARNING_LINE = /^warn(ing)?\b|^warn\[|\blevel=warn(ing)?\b/i;
 const ANSI_ESCAPE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 /** Greedy within the authority, so a password containing `@` is covered. */
 const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi;
+
+const SENSITIVE_ENV_NAME = /^HACK_ENV_|SECRET|TOKEN|PASSW|CREDENTIAL|AUTH|KEY/i;
+const OUTPUT_OMITTED =
+  "Its output is omitted because Compose can expand project values into it; run `docker compose ps` in the project (or `hack ps` without --json) to see it.";
 
 const ENGINE_PERMISSION_MARKERS = [
   "docker.sock",
@@ -77,6 +82,8 @@ const ENGINE_UNREACHABLE_MARKERS = [
 export function readComposePsResult(opts: {
   readonly result: ComposePsProcessResult;
   readonly redactValues?: Iterable<string>;
+  /** Defaults to `process.env`; see {@link sensitiveInheritedValues}. */
+  readonly inheritedEnv?: Readonly<Record<string, string | undefined>>;
 }): ComposePsRead {
   const { result } = opts;
   if (result.exitCode !== 0) {
@@ -85,6 +92,7 @@ export function readComposePsResult(opts: {
       error: composePsFailureError({
         result,
         redactValues: opts.redactValues,
+        inheritedEnv: opts.inheritedEnv,
       }),
     };
   }
@@ -212,57 +220,90 @@ export function parseComposePsJson(
 function composePsFailureError(opts: {
   readonly result: ComposePsProcessResult;
   readonly redactValues?: Iterable<string>;
+  readonly inheritedEnv?: Readonly<Record<string, string | undefined>>;
 }): HackCliError {
-  const line = firstEngineLine({
-    result: opts.result,
-    redactValues: opts.redactValues,
-  });
-  const said = line === null ? "" : ` Engine said: ${line}`;
-  const lower = `${opts.result.stderr}\n${opts.result.stdout}`.toLowerCase();
+  const { result } = opts;
+  const lower = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  const redactValues = [
+    ...(opts.redactValues ?? []),
+    ...sensitiveInheritedValues({ env: opts.inheritedEnv ?? process.env }),
+  ];
+  // Quote only a recognized Docker client connection error. Any other line
+  // can come from Compose, which may expand project `${VAR}` references
+  // (inherited secrets included) into it.
+  const said = (matches: (lowerLine: string) => boolean): string => {
+    const line = engineErrorLine({
+      stderr: result.stderr,
+      matches,
+      redactValues,
+    });
+    return line === null ? "" : ` Engine said: ${line}`;
+  };
 
   if (lower.includes("permission denied")) {
-    const engine = ENGINE_PERMISSION_MARKERS.some((m) => lower.includes(m));
+    const isEnginePermission = (line: string) =>
+      line.includes("permission denied") &&
+      ENGINE_PERMISSION_MARKERS.some((m) => line.includes(m));
+    if (ENGINE_PERMISSION_MARKERS.some((m) => lower.includes(m))) {
+      return new HackCliError({
+        code: "E_PERMISSION",
+        message: `Permission denied connecting to the Docker engine: your user cannot open its socket. Add your user to the docker group and start a new login session, or select an engine you can use with \`docker context use\`, then retry.${said(isEnginePermission)}`,
+      });
+    }
     return new HackCliError({
       code: "E_PERMISSION",
-      message: engine
-        ? `Permission denied connecting to the Docker engine: your user cannot open its socket. Add your user to the docker group and start a new login session, or select an engine you can use with \`docker context use\`, then retry.${said}`
-        : `docker compose ps was denied access to a file or socket it needs. Fix the permission named below and retry.${said}`,
+      message: `docker compose ps was denied access to a file or socket it needs. ${OUTPUT_OMITTED}`,
     });
   }
-  if (opts.result.exitCode === TIMEOUT_EXIT_CODE) {
+  if (result.exitCode === TIMEOUT_EXIT_CODE) {
     return new HackCliError({
       code: "E_DOCKER_UNAVAILABLE",
-      message: `docker compose ps did not finish within Hack's inspection time limit, so it was stopped. The Docker engine may be hung or heavily loaded; check \`docker info\` and retry.${said}`,
+      message:
+        "docker compose ps did not finish within Hack's inspection time limit, so it was stopped. The Docker engine may be hung or heavily loaded; check `docker info` and retry.",
     });
   }
   if (ENGINE_UNREACHABLE_MARKERS.some((m) => lower.includes(m))) {
     return new HackCliError({
       code: "E_DOCKER_UNAVAILABLE",
-      message: `The Docker engine is not reachable. Start Docker, or check \`docker context ls\` and DOCKER_HOST point at a running engine, then retry.${said}`,
+      message: `The Docker engine is not reachable. Start Docker, or check \`docker context ls\` and DOCKER_HOST point at a running engine, then retry.${said((line) => ENGINE_UNREACHABLE_MARKERS.some((m) => line.includes(m)))}`,
     });
   }
   return new HackCliError({
     code: "E_COMPOSE_FAILED",
-    message: `docker compose ps failed (exit ${opts.result.exitCode}).${said === "" ? " It printed no error output." : said}`,
+    message: `docker compose ps failed (exit ${result.exitCode}). ${OUTPUT_OMITTED}`,
   });
 }
 
 /**
- * First non-warning line of stderr (stdout only when stderr is empty), without ANSI escapes, with
- * URL credentials and `redactValues` replaced, cut to a bounded length.
+ * Inherited environment values that look secret, by name: `HACK_ENV_*` and
+ * names containing SECRET, TOKEN, PASSWORD/PASSWD, CREDENTIAL, AUTH or KEY.
+ * They are redacted even from recognized engine lines.
  */
-export function firstEngineLine(opts: {
-  readonly result: ComposePsProcessResult;
+export function sensitiveInheritedValues(opts: {
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): string[] {
+  return Object.entries(opts.env)
+    .filter(
+      (entry): entry is [string, string] =>
+        typeof entry[1] === "string" && SENSITIVE_ENV_NAME.test(entry[0])
+    )
+    .map(([, value]) => value);
+}
+
+/**
+ * First non-warning stderr line that `matches` (given the lowercased line),
+ * without ANSI escapes, with URL credentials and `redactValues` replaced, cut
+ * to a bounded length. Null when no line matches. Stdout is never read: on a
+ * failed ps it may hold partial container JSON (commands, labels).
+ */
+export function engineErrorLine(opts: {
+  readonly stderr: string;
+  readonly matches: (lowerLine: string) => boolean;
   readonly redactValues?: Iterable<string>;
 }): string | null {
-  // stdout is read only when stderr is empty: on a failed ps it may hold
-  // partial container JSON (commands, labels).
-  const stderrLines = cleanLines(opts.result.stderr);
-  const lines =
-    stderrLines.length > 0 ? stderrLines : cleanLines(opts.result.stdout);
-  // Compose prints warnings (an obsolete `version`, an unset variable) before
-  // the error; they must not take the cause's place.
-  const source = lines.find((line) => !isWarningLine(line)) ?? lines[0];
+  const source = cleanLines(opts.stderr).find(
+    (line) => !isWarningLine(line) && opts.matches(line.toLowerCase())
+  );
   if (source === undefined) {
     return null;
   }

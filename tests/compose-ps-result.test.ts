@@ -2,14 +2,23 @@ import { describe, expect, test } from "bun:test";
 import {
   composeEnvValuesToRedact,
   composePsTextFallbackAllowed,
-  firstEngineLine,
+  engineErrorLine,
   parseComposePsJson,
   readComposePs,
   readComposePsResult,
+  sensitiveInheritedValues,
 } from "../src/lib/compose-ps-result.ts";
 
-function failure(stderr: string, exitCode = 1, stdout = "") {
-  const read = readComposePsResult({ result: { exitCode, stdout, stderr } });
+function failure(
+  stderr: string,
+  exitCode = 1,
+  stdout = "",
+  inheritedEnv: Record<string, string> = {}
+) {
+  const read = readComposePsResult({
+    result: { exitCode, stdout, stderr },
+    inheritedEnv,
+  });
   if (read.ok) {
     throw new Error("expected a failure");
   }
@@ -29,11 +38,12 @@ describe("readComposePsResult", () => {
     expect(composePsTextFallbackAllowed(error)).toBe(false);
   });
 
-  test("a denied Compose input is E_PERMISSION without the socket advice", () => {
+  test("a denied Compose input is E_PERMISSION without the socket advice or its text", () => {
     const error = failure("open /tmp/x/compose.yml: permission denied");
     expect(error.code).toBe("E_PERMISSION");
     expect(error.message).not.toContain("docker group");
-    expect(error.message).toContain("compose.yml: permission denied");
+    expect(error.message).not.toContain("compose.yml");
+    expect(error.message).toContain("output is omitted");
   });
 
   test.each([
@@ -69,31 +79,39 @@ describe("readComposePsResult", () => {
     expect(error.message).toEndWith(`Engine said: ${cause}`);
   });
 
-  test("stdout is not read while stderr has lines, even if they are warnings", () => {
+  test("Compose text is never quoted: an interpolated value cannot leak (Codex security review)", () => {
+    // A repository `${VAR}` expanded by Compose into a validation error.
     const error = failure(
-      "WARN[0000] only a warning",
-      3,
+      'services.web.ports contains an invalid type: "sample-inherited-secret"',
+      15,
       '{"Service":"web","Command":"sample-command"}'
     );
-    expect(error.message).toEndWith("Engine said: WARN[0000] only a warning");
+    expect(error.code).toBe("E_COMPOSE_FAILED");
+    expect(error.message).not.toContain("sample-inherited-secret");
     expect(error.message).not.toContain("sample-command");
+    expect(error.message).not.toContain("Engine said");
   });
 
-  test("only warnings: the first warning is still shown", () => {
-    expect(failure("WARN[0000] only a warning", 3).message).toEndWith(
-      "Engine said: WARN[0000] only a warning"
+  test("secret-looking inherited values are redacted even from a recognized engine line", () => {
+    const error = failure(
+      "Cannot connect to the Docker daemon at tcp://sample-key-material:2376. Is the docker daemon running?",
+      1,
+      "",
+      { HACK_ENV_SECRET_KEY: "sample-key-material", HOME: "<home>" }
     );
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).toContain("tcp://[REDACTED]:2376");
+    expect(error.message).not.toContain("sample-key-material");
   });
 
-  test("any other failure is E_COMPOSE_FAILED and allows the text fallback", () => {
+  test("any other failure is E_COMPOSE_FAILED, omits the text and allows the text fallback", () => {
     const error = failure(
       "\u001b[31mno configuration file provided\u001b[0m",
       14
     );
     expect(error.code).toBe("E_COMPOSE_FAILED");
-    expect(error.message).toBe(
-      "docker compose ps failed (exit 14). Engine said: no configuration file provided"
-    );
+    expect(error.message).toStartWith("docker compose ps failed (exit 14). ");
+    expect(error.message).not.toContain("no configuration file provided");
     expect(composePsTextFallbackAllowed(error)).toBe(true);
   });
 
@@ -137,14 +155,13 @@ describe("parseComposePsJson", () => {
   });
 });
 
-describe("firstEngineLine", () => {
+describe("engineErrorLine", () => {
+  const any = () => true;
+
   test("redacts URL credentials and named values, then bounds the length", () => {
-    const line = firstEngineLine({
-      result: {
-        exitCode: 1,
-        stdout: "",
-        stderr: `error during connect: tcp://user:pa@55@host:2376 token=sample-env-value ${"x".repeat(400)}`,
-      },
+    const line = engineErrorLine({
+      stderr: `error during connect: tcp://user:pa@55@host:2376 token=sample-env-value ${"x".repeat(400)}`,
+      matches: any,
       redactValues: ["sample-env-value", "abc"],
     });
     expect(line).toStartWith(
@@ -157,16 +174,34 @@ describe("firstEngineLine", () => {
     expect(line).toEndWith("…");
   });
 
-  test("falls back to stdout and returns null when both are empty", () => {
+  test("picks the first matching non-warning stderr line, else null", () => {
     expect(
-      firstEngineLine({
-        result: { exitCode: 1, stdout: "\n  from stdout\n", stderr: " \n" },
+      engineErrorLine({
+        stderr: "WARN[0000] connection refused\nother\nconnection refused here",
+        matches: (line) => line.includes("connection refused"),
       })
-    ).toBe("from stdout");
+    ).toBe("connection refused here");
     expect(
-      firstEngineLine({ result: { exitCode: 1, stdout: "", stderr: "" } })
+      engineErrorLine({ stderr: "unrelated", matches: (l) => l === "x" })
     ).toBeNull();
+    expect(engineErrorLine({ stderr: " \n", matches: any })).toBeNull();
   });
+});
+
+test("sensitiveInheritedValues selects secret-looking names only", () => {
+  expect(
+    sensitiveInheritedValues({
+      env: {
+        HACK_ENV_DB: "a",
+        HACK_ENV_SECRET_KEY: "b",
+        GITHUB_TOKEN: "c",
+        DB_PASSWORD: "d",
+        HOME: "<home>",
+        DOCKER_HOST: "unix:///tmp/docker.sock",
+        UNSET: undefined,
+      },
+    }).sort()
+  ).toEqual(["a", "b", "c", "d"]);
 });
 
 test("composeEnvValuesToRedact keeps only values Hack added or changed", () => {

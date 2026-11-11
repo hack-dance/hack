@@ -9375,6 +9375,9 @@ async function startNativeBackgroundIfRequested(opts: {
   if (!opts.background) {
     return await opts.otherwise();
   }
+  // Background start prints only the command id (or `--json` envelope) on
+  // stdout; Hack's own notices go to stderr.
+  setLoggerBackendOverride({ backend: "console" });
   const { args } = opts;
   if (process.env.HACK_RUNTIME_BACKEND !== "native") {
     await refuseDetachForAuthoredProject({

@@ -317,8 +317,9 @@ describe("argv contracts", () => {
     const parsedStart = parseCliArgv(CLI_SPEC, start);
     // The child's `--json` stays in the command; hack's own flags parse.
     expect(parsedStart.values.detach).toBe(true);
-    expect(parsedStart.values.requestKey).toBe("k");
-    expect(parsedStart.values.timeoutMs).toBe(5000);
+    // Raw parser values are keyed by flag spelling.
+    expect(parsedStart.values["request-key"]).toBe("k");
+    expect(parsedStart.values["timeout-ms"]).toBe("5000");
     const resolved = resolveCommand(CLI_SPEC, parsedStart.positionals);
     expect(resolved.command?.name).toBe("exec");
     expect(resolved.remainingPositionals).toEqual(["api", "--json"]);

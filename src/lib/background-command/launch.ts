@@ -86,6 +86,19 @@ export function parseBackgroundRequest(options: {
         "--request-key must be 1-128 characters: letters, digits, '_', '.', ':' or '-', starting with a letter or digit.",
     });
   }
+  // Bounds are checked here, before any project or runtime work.
+  resolveBackgroundSettings({
+    request: {
+      ...(options.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: options.timeoutMs }),
+      ...(options.stallAfterMs === undefined
+        ? {}
+        : { stallAfterMs: options.stallAfterMs }),
+    },
+    project: {},
+    global: {},
+  });
   return {
     requestKey: options.requestKey ?? null,
     json: options.json === true,

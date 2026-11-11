@@ -62,6 +62,39 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
   open: { kind: "envelope", argv: ["open", "-p", "DIR", "--json"] },
   run: { kind: "line", argv: ["run", "-p", "DIR", "web", "true"] },
   exec: { kind: "line", argv: ["exec", "-p", "DIR", "web", "true"] },
+  "commands read": {
+    kind: "envelope",
+    argv: [
+      "commands",
+      "read",
+      "-p",
+      "DIR",
+      "--json",
+      "cmd_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ],
+  },
+  "commands show": {
+    kind: "envelope",
+    argv: [
+      "commands",
+      "show",
+      "-p",
+      "DIR",
+      "--json",
+      "cmd_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ],
+  },
+  "commands cancel": {
+    kind: "envelope",
+    argv: [
+      "commands",
+      "cancel",
+      "-p",
+      "DIR",
+      "--json",
+      "cmd_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ],
+  },
   // Without a TTY, tui refuses before it looks for a project; with one it
   // reports E_PROJECT_NOT_FOUND (tests/cli-renderer-loading.test.ts).
   tui: {

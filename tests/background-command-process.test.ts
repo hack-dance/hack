@@ -73,10 +73,15 @@ async function countSupervisors(): Promise<number> {
   const result = Bun.spawnSync(["ps", "-eo", "args="], {
     env: { LC_ALL: "C", PATH: process.env.PATH ?? "" },
   });
-  return result.stdout
-    .toString()
-    .split("\n")
-    .filter((line) => line.includes(SUPERVISOR_MARKER)).length;
+  return (
+    result.stdout
+      .toString()
+      .split("\n")
+      // argv[1] of `bun index.ts <marker>` or argv[1] of a compiled `hack <marker>`.
+      .filter((line) =>
+        line.trim().split(" ").slice(1, 3).includes(SUPERVISOR_MARKER)
+      ).length
+  );
 }
 
 beforeAll(async () => {
@@ -119,7 +124,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  const records = owned.splice(0);
+  const records = [...owned.splice(0), ...(await journalIdentities())];
   const snapshot = await observeIdentities(
     records.map((record) => record.identity.pid)
   );
@@ -210,22 +215,24 @@ async function launch(config: LaunchConfig): Promise<Launched> {
     }
   );
   await track(proc.pid, config.linger === true);
+  // The launcher prints one pretty-printed envelope; read until it parses.
   const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
   let text = "";
-  while (!text.includes("\n")) {
+  let envelope: Launched["envelope"] | null = null;
+  while (!envelope) {
     const chunk = await reader.read();
     if (chunk.done) {
       break;
     }
-    text += new TextDecoder().decode(chunk.value);
+    text += decoder.decode(chunk.value, { stream: true });
+    envelope = tryParseEnvelope(text);
   }
   reader.releaseLock();
   if (!config.linger) {
     await proc.exited;
   }
-  const envelope = JSON.parse(
-    text.split("\n")[0] ?? "{}"
-  ) as Launched["envelope"];
+  envelope ??= { ok: false, error: { code: "E_NO_ENVELOPE" } };
   let journal: LoadedJournal | null = null;
   if (envelope.ok && envelope.data) {
     journal = await loadJournal({
@@ -254,6 +261,40 @@ async function launch(config: LaunchConfig): Promise<Launched> {
     }
   }
   return { envelope, launcherPid: proc.pid, journal };
+}
+
+function tryParseEnvelope(text: string): Launched["envelope"] | null {
+  try {
+    return JSON.parse(text) as Launched["envelope"];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every supervisor and child any test in this fixture started, read from the
+ * journals themselves: cleanup does not depend on the test reaching the point
+ * where it recorded them.
+ */
+async function journalIdentities(): Promise<
+  { identity: ProcessIdentity; group: boolean }[]
+> {
+  const found: { identity: ProcessIdentity; group: boolean }[] = [];
+  const ids = await Array.fromAsync(
+    new Bun.Glob("cmd_*").scan({ cwd: fixture.store, onlyFiles: false })
+  ).catch(() => [] as string[]);
+  for (const commandId of ids) {
+    const paths = journalPaths({ root: fixture.store, commandId });
+    const owner = await readOwner(paths).catch(() => null);
+    const child = await readChild(paths).catch(() => null);
+    if (owner) {
+      found.push({ identity: owner, group: false });
+    }
+    if (child) {
+      found.push({ identity: child, group: true });
+    }
+  }
+  return found;
 }
 
 async function readUntilEnded(opts: {

@@ -8,7 +8,9 @@ available to MCP clients as `hack.project.command.start|read|inspect|cancel`
 (see the [MCP tool contract](../reference/mcp-tools.md#background-commands)).
 Both use one implementation and one journal.
 
-This is phase 1: `exec` and `run` only. `up`, `restart` and `down`, a
+This is phase 1: `exec` and `run` only, for projects with Compose
+configuration (`.hack/docker-compose.yml`). Projects with native or adopted
+configuration refuse `--detach` on the Compose backend. `up`, `restart` and `down`, a
 project-wide event feed and service events are not part of it.
 
 ## Start
@@ -127,7 +129,10 @@ waits and long downloads look exactly like stalls.
 Capture stops at 8 MiB per command (stdout and stderr together), or 65,536
 output events. Hack then records `command.output_truncated`, stops storing
 output, and **the command keeps running** to its normal end, which records
-`truncated: true`. This differs from the foreground `hack.project.exec` and
+`truncated: true`. If the disk or quota fills while events are recorded,
+capture also stops and the command keeps running; its final record (written
+from space reserved at start) has `truncated: true` and
+`captureStopped: "no_space"`. This differs from the foreground `hack.project.exec` and
 `hack.project.run` MCP tools, where reaching 8 MiB stops the command.
 
 ## Inspect and cancel
@@ -159,8 +164,10 @@ supervisor. If the supervisor dies, the command keeps running and writing, and
 the next read takes over: it announces the output that landed (marked
 `unsupervised: true`) and, once the command is gone, writes the single final
 record with outcome `unknown`. If the command is still running past its timeout
-with no supervisor, the next read stops its process group (only after checking
-its pid, start time and group) and records `timed_out`. A sandbox that kills by
+with no supervisor, the next background start in the same Hack home stops its
+process group (only after checking its pid, start time and group), records
+`timed_out` with reason `orphan_timeout`, and writes an audit line. Reads never
+signal processes. A sandbox that kills by
 cgroup kills both; that also ends as `unknown`.
 
 ## Stored output, retention and redaction

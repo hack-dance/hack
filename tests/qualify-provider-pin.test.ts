@@ -40,6 +40,7 @@ import {
   rootProblem,
   sourceTemplatePins,
 } from "../scripts/qualify-provider-pin.ts";
+import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
 const repository = resolve(import.meta.dir, "..");
 const digest = `sha256:${"a".repeat(64)}`;
@@ -364,6 +365,32 @@ esac
     expect(
       foregroundReadyRun(line.replace("a".repeat(32), "unknown"))
     ).toBeNull();
+  });
+
+  test("the qualification fixture selects the legacy Compose frontend for up and restart", async () => {
+    const { root, run, done } = fixture();
+    try {
+      mkdirSync(join(run.project, ".hack"));
+      writeFileSync(
+        join(run.project, ".hack", "hack.config.json"),
+        JSON.stringify({ name: "qualification" })
+      );
+      writeFileSync(
+        join(run.project, ".hack", "docker-compose.yml"),
+        compose(
+          `web@${digest}`,
+          `db@${digest}`,
+          "dependency.qualification.test"
+        )
+      );
+      // Both commands first call this selector. Null leaves handleNativeUp's
+      // console-ready signal (including run id) in charge, rather than authored startup.
+      expect(
+        await selectNativeComposeProject({ cwd: root, path: run.project })
+      ).toBeNull();
+    } finally {
+      done();
+    }
   });
 
   test("startup makes no ps request before the foreground ready signal", async () => {

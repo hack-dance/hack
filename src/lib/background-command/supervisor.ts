@@ -350,12 +350,14 @@ async function superviseChild(opts: {
   const stopper = new GroupStopper(proc);
   while (!exited) {
     await Bun.sleep(TICK_MS);
-    const reason: StopReason | null = stopping
-      ? null
-      : await stopReason({ ...opts, now: performance.now() });
-    if (reason) {
+    // A child that finished during the sleep is not stopped or reclassified:
+    // its own exit wins over a timeout or cancel noticed afterwards.
+    const reason: StopReason | null =
+      stopping || exited || !unreaped(proc)
+        ? null
+        : await stopReason({ ...opts, now: performance.now() });
+    if (reason && (await stopper.stop())) {
       stopping = reason;
-      await stopper.stop();
     }
     await capture.poll(false);
     if (!(stopping || exited)) {
@@ -408,12 +410,14 @@ class GroupStopper {
     this.proc = proc;
   }
 
-  async stop(): Promise<void> {
-    this.stopped = true;
+  /** False when the child was already reaped: nothing was stopped. */
+  async stop(): Promise<boolean> {
     await this.remember();
-    if (unreaped(this.proc)) {
-      signalProcessGroup(this.proc.pid, "SIGTERM");
+    if (!unreaped(this.proc)) {
+      return false;
     }
+    this.stopped = true;
+    signalProcessGroup(this.proc.pid, "SIGTERM");
     this.killTimer = setTimeout(() => {
       this.remember()
         .then(() => {
@@ -423,6 +427,7 @@ class GroupStopper {
         })
         .catch(() => undefined);
     }, STOP_GRACE_MS);
+    return true;
   }
 
   /** After exit: descendants must not outlive a forced stop. */

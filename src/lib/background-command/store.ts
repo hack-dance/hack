@@ -548,10 +548,21 @@ export async function enforceRetainedQuota(opts: {
     });
     count -= 1;
     bytes -= item.bytes;
-    tombstones.push({ paths: item.paths, expiredAt: opts.now });
+    tombstones.push({
+      paths: item.paths,
+      expiredAt: opts.now,
+      holdUntil: holdsSlot({ ...item, now: opts.now })
+        ? Date.parse(item.meta.acceptedAt) + item.meta.timeoutMs
+        : null,
+    });
   }
-  tombstones.sort((a, b) => a.expiredAt - b.expiredAt);
-  for (const item of tombstones.slice(
+  // A tombstone that still holds an admission slot is never removed: there
+  // are at most `HOME_ACTIVE_LIMIT` of them (each counts against admission),
+  // so the cap still bounds the store.
+  const removable = tombstones
+    .filter((item) => !(item.holdUntil && opts.now < item.holdUntil))
+    .sort((a, b) => a.expiredAt - b.expiredAt);
+  for (const item of removable.slice(
     0,
     Math.max(0, tombstones.length - limits.tombstones)
   )) {
@@ -559,6 +570,12 @@ export async function enforceRetainedQuota(opts: {
     await rm(item.paths.dir, { recursive: true, force: true });
   }
 }
+
+type TombstoneEntry = {
+  readonly paths: JournalPaths;
+  readonly expiredAt: number;
+  readonly holdUntil?: number | null;
+};
 
 type RetainedResult = {
   readonly paths: JournalPaths;
@@ -570,15 +587,19 @@ type RetainedResult = {
 
 async function surveyStore(root: string): Promise<{
   retained: RetainedResult[];
-  tombstones: { paths: JournalPaths; expiredAt: number }[];
+  tombstones: TombstoneEntry[];
 }> {
   const retained: RetainedResult[] = [];
-  const tombstones: { paths: JournalPaths; expiredAt: number }[] = [];
+  const tombstones: TombstoneEntry[] = [];
   for (const commandId of await listCommandIds(root)) {
     const paths = journalPaths({ root, commandId });
     const tombstone = await readTombstone(paths);
     if (tombstone) {
-      tombstones.push({ paths, expiredAt: tombstone.expiredAt ?? 0 });
+      tombstones.push({
+        paths,
+        expiredAt: tombstone.expiredAt ?? 0,
+        holdUntil: tombstone.holdUntil,
+      });
       continue;
     }
     const meta = await readMeta(paths).catch(() => null);

@@ -627,6 +627,57 @@ describe("retention", () => {
     expect(await isGone(running.meta)).toBe(false);
   });
 
+  test("the tombstone cap never removes a tombstone that still holds an admission slot", async () => {
+    const start = Date.now();
+    const accept = async (outcome: string, containerProcess: string) => {
+      const { meta, paths } = await acceptCommand({
+        input: input({ retentionMs: 0 }),
+        root,
+        now: new Date(start),
+      });
+      await new JournalWriter(paths, meta, 1).write("command.ended", {
+        outcome,
+        reason: "test",
+        exitCode: null,
+        signal: null,
+        durationMs: 1,
+        truncated: false,
+        suppressed: false,
+        containerProcess,
+      });
+      return meta;
+    };
+    const held = await accept("cancelled", "not_confirmed");
+    await Bun.sleep(5);
+    const plain = await accept("succeeded", "stopped");
+    await pruneExpired({ root, now: Date.now() + 1000 });
+    await enforceRetainedQuota({
+      root,
+      now: Date.now() + 1000,
+      limits: { results: 100, bytes: 1_000_000, tombstones: 0 },
+    });
+    const left = await listCommandIds(root);
+    expect(left).toContain(held.commandId);
+    expect(left).not.toContain(plain.commandId);
+    // The hold still counts against admission: one slot fewer is left.
+    // (New commands count as active during their start grace period.)
+    for (let index = 1; index < CALLER_ACTIVE_LIMIT; index += 1) {
+      await acceptCommand({
+        input: input({ caller: held.caller }),
+        root,
+        now: new Date(start + 2000),
+      });
+    }
+    await expectCode(
+      acceptCommand({
+        input: input({ caller: held.caller }),
+        root,
+        now: new Date(start + 2000),
+      }),
+      "E_ADMISSION_LIMIT"
+    );
+  });
+
   test("a request key for an expired command is never run again", async () => {
     const first = await acceptCommand({
       input: input({ requestKey: "k", retentionMs: 0 }),

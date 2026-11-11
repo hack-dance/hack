@@ -199,7 +199,9 @@ the final record then also says `descendants: "not_confirmed"`. A command that a
 exited 0 stays `succeeded` even if a cancel raced its end. The result says what
 was confirmed: `supervisorSignalled`, `childGroupSignalled`, `childExited`, and
 `containerProcess`: `"stopped"` when what ran in the container is confirmed
-gone, otherwise `"not_confirmed"`. Stopping a `docker compose` client alone
+gone (for a `run`, the one-off container is removed; for an `exec`, no process
+carrying the marker is left, which is best effort, see below), otherwise
+`"not_confirmed"`. Stopping a `docker compose` client alone
 does not stop what runs in the container, so:
 
 - a background `run`'s one-off container is removed at every end (see
@@ -277,7 +279,8 @@ user that can select the project can read it, and backups can copy it.
   output. Each start checks this first: past either ceiling, the oldest ended
   results expire early, exactly as at their retention time. Running commands
   are never touched. At most 4096 tombstones are kept; past that the oldest
-  are removed with their request keys, so a request key is remembered for 7
+  are removed with their request keys (never one that still holds an
+  admission slot), so a request key is remembered for 7
   days or until 4096 newer results have expired, whichever comes first.
 - Metadata never contains environment values.
 

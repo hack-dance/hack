@@ -840,7 +840,8 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   if (isLinux()) {
     results.push(
       await runCheck(s, LINUX_DNS_ROUTE_CHECK, () => checkLinuxDnsRoute(), {
-        timeoutMs: 8000,
+        // Up to four sequential probes with 3s timeouts each.
+        timeoutMs: 13_000,
       })
     );
   }

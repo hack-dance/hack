@@ -80,9 +80,35 @@ const osMock = await registerScopedModuleMock({
   },
 });
 
+// HACK-2053: Linux runs of global install/down/status go through this fake
+// DNS host, never the real /etc, resolvectl or sudo.
+const linuxDnsPrivileged: string[][] = [];
+const linuxDnsHostMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/linux-dns-host.ts",
+  overrides: {
+    createLinuxDnsHost: () => ({
+      readFile: async (path: string) =>
+        path === "/etc/resolv.conf" ? "nameserver 127.0.0.53\n" : null,
+      listDir: async () => [],
+      isResolvedActive: async () => true,
+      systemdVersion: async () => 255,
+      findLinkWithAddress: async () => "br-0123456789ab",
+      readLinkRoute: async () => ({ dns: [], domains: [], defaultRoute: null }),
+      stageFile: async ({ name }: { readonly name: string }) =>
+        join(tempDir ?? tmpdir(), name),
+      runPrivileged: async (argv: readonly string[]) => {
+        linuxDnsPrivileged.push([...argv]);
+        return 0;
+      },
+    }),
+  },
+});
+
 beforeAll(() => {
   shellMock.activate();
   osMock.activate();
+  linuxDnsHostMock.activate();
 });
 
 beforeEach(async () => {
@@ -97,6 +123,7 @@ beforeEach(async () => {
   }
   execCalls.length = 0;
   runCalls.length = 0;
+  linuxDnsPrivileged.length = 0;
   execMockResponder = null;
 });
 
@@ -116,6 +143,7 @@ afterEach(async () => {
 afterAll(() => {
   shellMock.deactivate();
   osMock.deactivate();
+  linuxDnsHostMock.deactivate();
 });
 
 async function writeComposeFile(path: string): Promise<void> {
@@ -641,3 +669,35 @@ test("global status --json returns summary payload", async () => {
   expect(parsed.summary.logging_ok).toBe(true);
   expect(parsed.summary.networks_ok).toBe(true);
 });
+
+test(
+  "non-interactive global install on Linux never runs sudo for DNS (HACK-2053)",
+  async () => {
+    if (process.platform !== "linux") {
+      return;
+    }
+    await writeExecutable(join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "gum"));
+    await writeExecutable(
+      join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "mutagen")
+    );
+    const bundle = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      "libexec",
+      "mutagen-agents.tar.gz"
+    );
+    await mkdir(dirname(bundle), { recursive: true });
+    await writeFile(bundle, "stub");
+    const saved = process.env.HACK_NO_INTERACTIVE;
+    process.env.HACK_NO_INTERACTIVE = "1";
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      expect(await runCli(["global", "install"])).toBe(0);
+    } finally {
+      restoreEnv("HACK_NO_INTERACTIVE", saved);
+    }
+    expect(linuxDnsPrivileged).toEqual([]);
+    expect(runCalls.some((call) => call[0] === "sudo")).toBe(false);
+  },
+  { timeout: 20_000 }
+);

@@ -35,6 +35,7 @@ async function resolveRoutedDomains(): Promise<readonly string[]> {
 
 function renderPlanLines(plan: LinuxDnsPlan): string[] {
   return [
+    ...(plan.notes ?? []),
     ...plan.files.flatMap((file) => [
       `Write ${file.path}:`,
       ...file.content
@@ -68,12 +69,18 @@ export async function bootstrapLinuxGlobalDns(opts: {
     domains,
     canPrompt: canPrompt(),
     show: (plan) => note(renderPlanLines(plan).join("\n"), "Linux DNS"),
-    confirm: async () =>
-      await confirmSafe({
-        message: "Apply these DNS changes now? (requires sudo)",
-        initialValue: true,
-        nonInteractive: "decline",
-      }),
+    confirm: async () => {
+      try {
+        return await confirmSafe({
+          message: "Apply these DNS changes now? (requires sudo)",
+          initialValue: true,
+          nonInteractive: "decline",
+        });
+      } catch {
+        // Ctrl-C at the prompt: treat as "no" so install still finishes.
+        return false;
+      }
+    },
   });
   switch (outcome.status) {
     case "configured":
@@ -86,6 +93,7 @@ export async function bootstrapLinuxGlobalDns(opts: {
       logger.warn({
         message: [
           `Linux DNS not applied (code=${outcome.code}). Run these commands, then check with hack doctor:`,
+          ...(outcome.plan.notes ?? []),
           ...outcome.plan.commands.map(
             (command) => `  ${renderPrivilegedCommand(command)}`
           ),
@@ -150,7 +158,6 @@ export async function offerLinuxGlobalDnsRemoval(opts?: {
 }): Promise<void> {
   const outcome = await removeLinuxDns({
     host: opts?.host ?? defaultHost(),
-    domains: await resolveRoutedDomains(),
     confirm: async (plan) =>
       await confirmSafe({
         message: [

@@ -6,11 +6,12 @@
  * `sudo`) only after an interactive confirmation. A run that cannot prompt
  * gets the same list back with a stable code and changes nothing.
  */
-import { DEFAULT_INGRESS_GATEWAY } from "../constants.ts";
+import { DEFAULT_COREDNS_IP, DEFAULT_INGRESS_GATEWAY } from "../constants.ts";
 import {
   detectLinuxResolver,
   dnsmasqRoutesDomains,
   isResolvedKind,
+  LINUX_DNS_MIN_SYSTEMD,
   LINUX_DNS_UDEV_RULE_PATH,
   LINUX_DNS_UNIT_PATH,
   type LinuxDnsCode,
@@ -21,6 +22,7 @@ import {
   renderLinuxDnsUdevRule,
   renderLinuxDnsUnit,
   renderLinuxManualDnsSteps,
+  renderNetworkManagerDnsmasqConf,
 } from "./linux-dns.ts";
 
 /** Host boundary. Implementations must not write outside the staging dir. */
@@ -30,6 +32,8 @@ export type LinuxDnsHost = {
   /** Entry names in a directory, or `[]` when absent. */
   readonly listDir: (path: string) => Promise<readonly string[]>;
   readonly isResolvedActive: () => Promise<boolean>;
+  /** Major systemd version (`systemctl --version`), or `null` when unknown. */
+  readonly systemdVersion: () => Promise<number | null>;
   /** The interface carrying `address`, or `null`. */
   readonly findLinkWithAddress: (address: string) => Promise<string | null>;
   /** systemd-resolved's per-link state, or `null` when unreadable. */
@@ -64,7 +68,12 @@ export type LinuxDnsInspection = {
 };
 
 const NM_CONF = "/etc/NetworkManager/NetworkManager.conf";
-const NM_CONF_DIR = "/etc/NetworkManager/conf.d";
+/** NetworkManager merges these by file name; a later directory wins a tie. */
+const NM_CONF_DIRS = [
+  "/usr/lib/NetworkManager/conf.d",
+  "/run/NetworkManager/conf.d",
+  "/etc/NetworkManager/conf.d",
+] as const;
 
 async function readNetworkManagerConf(
   host: LinuxDnsHost
@@ -74,11 +83,16 @@ async function readNetworkManagerConf(
   if (main !== null) {
     parts.push(main);
   }
-  const entries = [...(await host.listDir(NM_CONF_DIR))]
-    .filter((name) => name.endsWith(".conf"))
-    .sort();
-  for (const name of entries) {
-    const text = await host.readFile(`${NM_CONF_DIR}/${name}`);
+  const byName = new Map<string, string>();
+  for (const dir of NM_CONF_DIRS) {
+    for (const name of await host.listDir(dir)) {
+      if (name.endsWith(".conf")) {
+        byName.set(name, `${dir}/${name}`);
+      }
+    }
+  }
+  for (const name of [...byName.keys()].sort()) {
+    const text = await host.readFile(byName.get(name) ?? "");
     if (text !== null) {
       parts.push(text);
     }
@@ -152,12 +166,50 @@ export async function inspectLinuxDns(opts: {
       fix: renderLinuxManualDnsSteps({ kind: resolver.kind, domains }),
     };
   }
+  return await inspectResolvedRoute({ host, domains, resolver, link });
+}
 
+async function inspectResolvedRoute(opts: {
+  readonly host: LinuxDnsHost;
+  readonly domains: readonly string[];
+  readonly resolver: LinuxResolverDetection;
+  readonly link: string | null;
+}): Promise<LinuxDnsInspection> {
+  const { host, domains, resolver, link } = opts;
+  const base = { resolver, link } as const;
+  const version = await host.systemdVersion();
+  if (version !== null && version < LINUX_DNS_MIN_SYSTEMD) {
+    return {
+      ...base,
+      state: "manual",
+      code: "linux_dns_systemd_too_old",
+      message: `systemd ${version} is older than ${LINUX_DNS_MIN_SYSTEMD}; its resolvectl cannot set a routing-only link`,
+      fix: [
+        "Upgrade systemd, or route the suffixes another way, for example a local dnsmasq with:",
+        ...renderNetworkManagerDnsmasqConf({ domains })
+          .trimEnd()
+          .split("\n")
+          .map((line) => `  ${line}`),
+      ],
+    };
+  }
   const [unit, rule] = await Promise.all([
     host.readFile(LINUX_DNS_UNIT_PATH),
     host.readFile(LINUX_DNS_UDEV_RULE_PATH),
   ]);
-  const base = { resolver, link } as const;
+  if (link === null && unit === null && rule === null) {
+    // Nothing installed yet and no host bridge to route to (network down,
+    // Docker Desktop, rootless Docker): writing root files cannot help.
+    return {
+      ...base,
+      state: "bridge_missing",
+      code: "linux_dns_bridge_missing",
+      message: BRIDGE_MISSING_MESSAGE,
+      fix: [
+        "hack global up, then hack global install (Docker Desktop and rootless Docker cannot use this route)",
+      ],
+    };
+  }
   if (unit === null && rule === null) {
     return {
       ...base,
@@ -184,7 +236,7 @@ export async function inspectLinuxDns(opts: {
       ...base,
       state: "bridge_missing",
       code: "linux_dns_bridge_missing",
-      message: `No host interface carries ${DEFAULT_INGRESS_GATEWAY}: the hack-dev network is down, or Docker runs in a VM (Docker Desktop) whose bridge the host cannot route to`,
+      message: BRIDGE_MISSING_MESSAGE,
       fix: ["hack global up"],
     };
   }
@@ -216,6 +268,8 @@ export async function inspectLinuxDns(opts: {
   };
 }
 
+const BRIDGE_MISSING_MESSAGE = `No host interface carries ${DEFAULT_INGRESS_GATEWAY}: the hack-dev network is down, or Docker runs in a VM (Docker Desktop) or rootless, where the host cannot route to its bridge`;
+
 function describeDomains(domains: readonly string[]): string {
   return domains.map((domain) => `*.${domain}`).join(", ");
 }
@@ -228,6 +282,8 @@ export type LinuxDnsPlan = {
     readonly content: string;
   }[];
   readonly commands: readonly (readonly string[])[];
+  /** Caveats shown with the plan, before any prompt. */
+  readonly notes?: readonly string[];
 };
 
 export function renderPrivilegedCommand(argv: readonly string[]): string {
@@ -351,9 +407,24 @@ export async function applyLinuxDns(opts: {
   ) {
     return { status: "manual", inspection };
   }
-  const plan = await buildApplyPlan({ host, domains, inspection });
+  const built = await buildApplyPlan({ host, domains, inspection });
+  const plan: LinuxDnsPlan = inspection.resolver.lookupsBypassResolved
+    ? {
+        ...built,
+        notes: [
+          "Lookups on this host bypass systemd-resolved, so the route has no effect until /etc/resolv.conf points at its stub:",
+          ...renderLinuxManualDnsSteps({
+            kind: inspection.resolver.kind,
+            domains,
+          }),
+        ],
+      }
+    : built;
+  if (!opts.canPrompt) {
+    return { status: "pending", code: inspection.code, plan, inspection };
+  }
   opts.show(plan);
-  if (!(opts.canPrompt && (await opts.confirm()))) {
+  if (!(await opts.confirm())) {
     return { status: "pending", code: inspection.code, plan, inspection };
   }
   for (const command of plan.commands) {
@@ -387,17 +458,18 @@ export type LinuxDnsRemoveOutcome =
 /** Undo {@link applyLinuxDns}: revert the link and delete both files. */
 export async function removeLinuxDns(opts: {
   readonly host: LinuxDnsHost;
-  readonly domains: readonly string[];
   readonly confirm: (plan: LinuxDnsPlan) => Promise<boolean>;
 }): Promise<LinuxDnsRemoveOutcome> {
-  const { host, domains } = opts;
+  const { host } = opts;
   const [unit, rule, link] = await Promise.all([
     host.readFile(LINUX_DNS_UNIT_PATH),
     host.readFile(LINUX_DNS_UDEV_RULE_PATH),
     host.findLinkWithAddress(DEFAULT_INGRESS_GATEWAY),
   ]);
   const route = link === null ? null : await host.readLinkRoute(link);
-  const routeActive = linkRouteMatches({ route, domains });
+  // Any CoreDNS server on the link is Hack's, whatever domains it carries
+  // (default_domain may have changed since install, or apply was partial).
+  const routeActive = route?.dns.includes(DEFAULT_COREDNS_IP) === true;
   if (unit === null && rule === null && !routeActive) {
     return { status: "absent" };
   }

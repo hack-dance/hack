@@ -5,6 +5,7 @@ import {
   type LinuxLinkRoute,
   parseLinkForAddress,
   parseResolvectlLinkValues,
+  parseSystemdVersion,
 } from "./linux-dns.ts";
 import type { LinuxDnsHost } from "./linux-dns-setup.ts";
 import { exec, run } from "./shell.ts";
@@ -40,6 +41,13 @@ export function createLinuxDnsHost(opts: {
         timeoutMs: PROBE_TIMEOUT_MS,
       });
       return res.exitCode === 0 && res.stdout.trim() === "active";
+    },
+    systemdVersion: async () => {
+      const res = await exec(["systemctl", "--version"], {
+        stdin: "ignore",
+        timeoutMs: PROBE_TIMEOUT_MS,
+      });
+      return res.exitCode === 0 ? parseSystemdVersion(res.stdout) : null;
     },
     findLinkWithAddress: async (address) => {
       const res = await exec(["ip", "-o", "-4", "addr", "show"], {

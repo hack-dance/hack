@@ -45,7 +45,8 @@ export type LinuxDnsCode =
   | "linux_dns_route_not_applied"
   | "linux_dns_bridge_missing"
   | "linux_dns_resolver_manual"
-  | "linux_dns_resolved_bypassed";
+  | "linux_dns_resolved_bypassed"
+  | "linux_dns_systemd_too_old";
 
 export type LinuxResolverKind =
   | "systemd-resolved-stub"
@@ -175,15 +176,24 @@ export function isResolvedKind(kind: LinuxResolverKind): boolean {
   return kind === "systemd-resolved-stub" || kind === "systemd-resolved";
 }
 
-function routingDomains(domains: readonly string[]): string {
-  return domains.map((domain) => `~${domain}`).join(" ");
+/** Routing-only domains as shell words, double-quoted against tilde expansion. */
+function quotedRoutingDomains(domains: readonly string[]): string {
+  return domains.map((domain) => `"~${domain}"`).join(" ");
 }
+
+/** Oldest systemd with every `resolvectl` verb the unit uses (`default-route`). */
+export const LINUX_DNS_MIN_SYSTEMD = 240;
 
 /**
  * Render the template unit. `%i` is the bridge interface name passed by the
  * udev rule; `$$` is a literal `$` for the shell after systemd's expansion.
- * `ExecCondition` exits 1 (unit skipped, not failed) for every bridge that
- * does not carry the gateway address within about ten seconds.
+ *
+ * One `ExecStart` shell step waits up to about ten seconds for the gateway
+ * address on the interface and exits 0 without touching any other bridge.
+ * The check lives in the same step as the `resolvectl` calls, not in
+ * `ExecCondition=` (which systemd before 243 ignores), so no systemd version
+ * applies the route to the wrong bridge. Domains are validated suffixes
+ * (`[a-z0-9.-]`); each `~domain` is double-quoted only to stop tilde expansion.
  */
 export function renderLinuxDnsUnit(opts: {
   readonly domains: readonly string[];
@@ -192,13 +202,19 @@ export function renderLinuxDnsUnit(opts: {
 }): string {
   const gatewayIp = opts.gatewayIp ?? DEFAULT_INGRESS_GATEWAY;
   const dnsIp = opts.dnsIp ?? DEFAULT_COREDNS_IP;
-  const condition = [
+  const script = [
     "n=0",
-    `while [ "$$n" -lt 40 ]; do ip -o -4 addr show dev "$$1" 2>/dev/null | grep -q " inet ${gatewayIp}/" && exit 0`,
+    "found=0",
+    `while [ "$$n" -lt 40 ]; do if ip -o -4 addr show dev "$$1" 2>/dev/null | grep -qF " inet ${gatewayIp}/"; then found=1; break; fi`,
     "n=$$((n+1))",
     "sleep 0.25",
     "done",
-    "exit 1",
+    '[ "$$found" = 1 ] || exit 0',
+    `resolvectl dns "$$1" ${dnsIp}`,
+    // Quoted: an unquoted `~hack` is tilde-expanded to user hack's home.
+    `resolvectl domain "$$1" ${quotedRoutingDomains(opts.domains)}`,
+    'resolvectl default-route "$$1" no',
+    'resolvectl dnssec "$$1" no',
   ].join("; ");
   return [
     "# Managed by hack (hack global install). Remove with: hack global down",
@@ -210,11 +226,7 @@ export function renderLinuxDnsUnit(opts: {
     "",
     "[Service]",
     "Type=oneshot",
-    `ExecCondition=/bin/sh -c '${condition}' hack-dns %i`,
-    `ExecStart=resolvectl dns %i ${dnsIp}`,
-    `ExecStart=resolvectl domain %i ${routingDomains(opts.domains)}`,
-    "ExecStart=resolvectl default-route %i no",
-    "ExecStart=resolvectl dnssec %i no",
+    `ExecStart=/bin/sh -ec '${script}' hack-dns %i`,
     "",
   ].join("\n");
 }
@@ -274,6 +286,14 @@ export function parseResolvectlLinkValues(output: string): readonly string[] {
     .trim()
     .split(WHITESPACE)
     .filter((value) => value.length > 0);
+}
+
+const SYSTEMD_VERSION_LINE = /^systemd (\d+)/;
+
+/** Major version from `systemctl --version` ("systemd 255 (255.4-1)"). */
+export function parseSystemdVersion(output: string): number | null {
+  const match = SYSTEMD_VERSION_LINE.exec(output.trim());
+  return match?.[1] ? Number(match[1]) : null;
 }
 
 /** Per-link resolver state read back from systemd-resolved. */

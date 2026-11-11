@@ -39,14 +39,16 @@ network is recreated. Hack therefore installs two files that never name it:
 - `/etc/udev/rules.d/90-hack-dns.rules` starts `hack-dns@<interface>.service`
   whenever a bridge interface appears;
 - `/etc/systemd/system/hack-dns@.service` waits up to about ten seconds for the
-  gateway address on that interface, skips every other bridge, and runs
-  `resolvectl dns`, `resolvectl domain`, `resolvectl default-route no` and
-  `resolvectl dnssec no` for Hack's bridge.
+  gateway address on that interface and exits without changes on every other
+  bridge. On Hack's bridge it runs `resolvectl dns`, `resolvectl domain`,
+  `resolvectl default-route no` and `resolvectl dnssec no`.
 
-The route comes back after a reboot (Docker recreates the bridge, udev starts the
-unit) and after the network is removed and recreated. Hack also starts the unit
-once for the current bridge. The unit needs systemd 243 or later
-(`ExecCondition=`), `resolvectl` and `ip`.
+The design re-applies the route whenever Docker creates the bridge: after a
+reboot, and after the network is removed and recreated. Hack also starts the
+unit once for the current bridge. It needs systemd 240 or later, `resolvectl`
+and `ip`; on older systemd Hack reports `linux_dns_systemd_too_old` and prints
+a dnsmasq alternative. Docker Desktop and rootless Docker keep the bridge out of
+the host's reach, so Hack reports `linux_dns_bridge_missing` and writes nothing.
 
 If `hack global install` could not prompt, it printed the commands; run them, then
 check with `hack doctor`. A later `default_domain` change makes the installed unit
@@ -62,13 +64,15 @@ shows it under **Host DNS** (`host_dns` in `--json`). The codes are:
 | `linux_dns_route_missing` | Neither file is installed | `hack global install` |
 | `linux_dns_route_stale` | A file is missing or differs (for example after a `default_domain` change) | `hack global install` |
 | `linux_dns_route_not_applied` | Files are current, the bridge has no route yet | `sudo systemctl start hack-dns@<interface>.service` |
-| `linux_dns_bridge_missing` | No host interface carries `172.30.0.1`: the network is down, or Docker runs in a VM (Docker Desktop) | `hack global up` |
+| `linux_dns_bridge_missing` | No host interface carries `172.30.0.1`: the network is down, or Docker runs in a VM (Docker Desktop) or rootless | `hack global up`; not supported on Docker Desktop or rootless Docker |
+| `linux_dns_systemd_too_old` | systemd is older than 240 | Upgrade systemd, or use the printed dnsmasq lines |
 | `linux_dns_resolved_bypassed` | The route exists, but lookups skip systemd-resolved | Point `/etc/resolv.conf` at the stub |
 | `linux_dns_resolver_manual` | The host does not use systemd-resolved | Follow the printed steps |
 
 `hack global down` offers to remove the route (the Linux counterpart of stopping
 dnsmasq on macOS). It defaults to no. Yes reverts the bridge's resolver settings
-and deletes both files.
+(whenever they point at CoreDNS, even after a `default_domain` change) and
+deletes both files.
 
 ### Why a per-link route
 

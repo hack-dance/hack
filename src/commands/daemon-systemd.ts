@@ -1,5 +1,5 @@
 import { rm, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessProof,
@@ -14,10 +14,12 @@ import {
 import { readDaemonStatus } from "../daemon/status.ts";
 import {
   assessExecutableDurability,
+  checkServiceExecutableTrusted,
   checkSystemdLoadedUnitPaths,
   checkSystemdUnitTrusted,
   defaultSystemdDeps,
   describeSystemdUnavailable,
+  extractSystemdExecProgram,
   installSystemdUnit,
   isPidInSystemdUnit,
   isSystemdReadOnly,
@@ -174,7 +176,12 @@ export async function startViaSystemdIfInstalled(
   if (status.activeState === "failed") {
     await systemdServiceAction({ action: "reset-failed", deps });
   }
-  const loaded = await checkSystemdLoadedUnitPaths({ unitPath, deps });
+  const loaded =
+    (await checkSystemdLoadedUnitPaths({ unitPath, deps })) ??
+    (await checkUnitProgramTrusted({
+      unitPath,
+      hackHome: dirname(hooks.paths.root),
+    }));
   if (loaded !== null) {
     logger.error({ message: loaded });
     return 1;
@@ -326,6 +333,26 @@ async function completePendingReload(opts: {
     return 1;
   }
   return null;
+}
+
+/**
+ * The program the unit file runs right now (after any repair), checked by
+ * {@link checkServiceExecutableTrusted}. An ExecStart the parser does not
+ * read (a prefix or specifier) has no path to check; the unit file itself
+ * was already checked to be this user's.
+ */
+async function checkUnitProgramTrusted(opts: {
+  readonly unitPath: string;
+  readonly hackHome: string;
+}): Promise<string | null> {
+  const unitText = await readTextFile(opts.unitPath);
+  const program = unitText ? extractSystemdExecProgram({ unitText }) : null;
+  return program === null
+    ? null
+    : await checkServiceExecutableTrusted({
+        path: program,
+        hackHome: opts.hackHome,
+      });
 }
 
 /** systemd states in which the unit runs or will run hackd (a pending restart). */
@@ -568,6 +595,14 @@ export async function installDaemonSystemdService(
   }
 
   const unitPath = resolveSystemdUnitPath({ env: deps.env });
+  const program = await checkServiceExecutableTrusted({
+    path: expected.hackBinPath,
+    hackHome: dirname(hooks.paths.root),
+  });
+  if (program !== null) {
+    logger.error({ message: program });
+    return 1;
+  }
   const before = await readSystemdServiceStatus({
     unitPath,
     deps,
@@ -633,16 +668,7 @@ export async function installDaemonSystemdService(
   if (before?.activeState === "failed") {
     await systemdServiceAction({ action: "reset-failed", deps });
   }
-  const loaded = await checkSystemdLoadedUnitPaths({ unitPath, deps });
-  if (loaded !== null) {
-    logger.error({ message: loaded });
-    return 1;
-  }
-  const started = await systemdServiceAction({ action, deps });
-  if (!started.ok) {
-    logger.error({
-      message: `systemctl --user ${action} ${SYSTEMD_UNIT_NAME} failed: ${started.error} | Check: ${JOURNAL_HINT}`,
-    });
+  if (!(await runInstalledUnit({ action, unitPath, deps }))) {
     return 1;
   }
   // The running service now has the new config (restarted, or started
@@ -653,6 +679,36 @@ export async function installDaemonSystemdService(
     linger: await readLingerStatus(deps),
   });
   return ready ? 0 : 1;
+}
+
+/**
+ * Starts or restarts the installed unit once the files systemd loads for it
+ * pass {@link checkSystemdLoadedUnitPaths}. False (reported) otherwise.
+ */
+async function runInstalledUnit(opts: {
+  readonly action: "start" | "restart";
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+}): Promise<boolean> {
+  const loaded = await checkSystemdLoadedUnitPaths({
+    unitPath: opts.unitPath,
+    deps: opts.deps,
+  });
+  if (loaded !== null) {
+    logger.error({ message: loaded });
+    return false;
+  }
+  const started = await systemdServiceAction({
+    action: opts.action,
+    deps: opts.deps,
+  });
+  if (!started.ok) {
+    logger.error({
+      message: `systemctl --user ${opts.action} ${SYSTEMD_UNIT_NAME} failed: ${started.error} | Check: ${JOURNAL_HINT}`,
+    });
+    return false;
+  }
+  return true;
 }
 
 /**

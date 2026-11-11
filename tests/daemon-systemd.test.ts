@@ -27,6 +27,7 @@ import {
 } from "../src/daemon/status.ts";
 import {
   assessExecutableDurability,
+  checkServiceExecutableTrusted,
   checkSystemdLoadedUnitPaths,
   checkSystemdUnitDropIns,
   checkSystemdUnitFile,
@@ -105,6 +106,9 @@ beforeEach(async () => {
   });
   program = join(root, "bin", "hack");
   await mkdir(join(root, "bin"), { recursive: true });
+  // The service program's directory must not be group-writable, whatever
+  // the runner's umask.
+  await chmod(join(root, "bin"), 0o755);
   await writeFile(program, "#!/bin/sh\n");
   await chmod(program, 0o755);
 });
@@ -869,6 +873,7 @@ test("read-only start neither writes nor reloads the unit", async () => {
 
   // With the program present but a reload pending, it starts without reloading.
   await writeFile(old, "#!/bin/sh\n");
+  await chmod(old, 0o755);
   fake.needsReload = true;
   fake.calls.length = 0;
   expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
@@ -1595,4 +1600,69 @@ test("start checks the files systemd actually loads, in every load path", async 
   expect(
     await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
   ).toContain("did not report");
+});
+
+test("the service program and every directory above it must be this user's or root's", async () => {
+  // Codex security review: a group member who can replace `hack` gets the
+  // enabled unit to run their program as this user.
+  const hackHome = join(root, ".hack");
+  const check = (path: string, uid?: number) =>
+    checkServiceExecutableTrusted({ path, hackHome, uid });
+  expect(await check(program)).toBeNull();
+
+  // Outside the Hack home a group-writable directory is refused, unchanged.
+  const shared = join(root, "shared-bin");
+  await mkdir(shared);
+  await chmod(shared, 0o775);
+  const sharedHack = join(shared, "hack");
+  await writeFile(sharedHack, "#!/bin/sh\n");
+  await chmod(sharedHack, 0o755);
+  expect(await check(sharedHack)).toContain("chmod go-w");
+  expect((await stat(shared)).mode & 0o777).toBe(0o775);
+
+  // A stable symlink into that directory is refused too.
+  const stable = join(root, "stable");
+  await mkdir(stable);
+  await symlink(sharedHack, join(stable, "hack"));
+  expect(await check(join(stable, "hack"))).toContain("chmod go-w");
+
+  // A program file others can write is refused.
+  await chmod(shared, 0o755);
+  await chmod(sharedHack, 0o777);
+  expect(await check(sharedHack)).toContain("writable by other users");
+  await chmod(sharedHack, 0o755);
+
+  // Inside the Hack home (an installer under umask 0002): fixed.
+  const hackBin = join(hackHome, "bin");
+  await mkdir(hackBin, { recursive: true });
+  await chmod(hackBin, 0o775);
+  const installed = join(hackBin, "hack");
+  await writeFile(installed, "#!/bin/sh\n");
+  await chmod(installed, 0o755);
+  expect(await check(installed)).toBeNull();
+  expect((await stat(hackBin)).mode & 0o777).toBe(0o755);
+
+  // Another account's program (modelled with the uid the check compares to).
+  const own = process.getuid?.() ?? 0;
+  expect(await check(installed, own + 1)).toContain("owned by another user");
+});
+
+test("install refuses a program in a directory others can write and writes no unit", async () => {
+  const fake = fakeSystemd();
+  const shared = join(root, "shared-bin");
+  await mkdir(shared);
+  await chmod(shared, 0o777);
+  const sharedHack = join(shared, "hack");
+  await writeFile(sharedHack, "#!/bin/sh\n");
+  await chmod(sharedHack, 0o755);
+  const code = await installDaemonSystemdService({
+    ...installHooks(fake, []),
+    ...startHooks(fake, sharedHack),
+    ignoredOptions: [],
+    startDetached: () => Promise.resolve(0),
+    stopDirect: () => Promise.resolve(true),
+  });
+  expect(code).toBe(1);
+  expect(await Bun.file(unitPath).exists()).toBe(false);
+  expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
 });

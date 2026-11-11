@@ -1216,6 +1216,90 @@ export async function checkSystemdLoadedUnitPaths(opts: {
   return null;
 }
 
+/**
+ * The program a login service runs must be replaceable only by this user
+ * or root (HACK-2052): the binary, its resolved target, and every directory
+ * above each of them up to `/`. Sticky world-writable directories such as
+ * `/tmp` are allowed (others cannot replace entries they do not own). Group
+ * or other write is removed inside `hackHome`, which Hack owns (an
+ * installer under umask `0002` leaves `~/.hack/bin` at `0775`); anywhere
+ * else Hack does not change your directories and refuses with the `chmod`
+ * to run. Returns null, or the reason it refuses.
+ */
+export async function checkServiceExecutableTrusted(opts: {
+  readonly path: string;
+  readonly hackHome: string;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  let target: string;
+  try {
+    target = await realpath(opts.path);
+  } catch (error: unknown) {
+    return `${opts.path} could not be resolved: ${errorMessage(error)}`;
+  }
+  const paths = [...new Set([resolve(opts.path), target])];
+  for (const path of paths) {
+    const chain = [path];
+    for (let dir = dirname(path); ; dir = dirname(dir)) {
+      chain.push(dir);
+      if (dir === dirname(dir)) {
+        break;
+      }
+    }
+    for (const entry of chain) {
+      const error = await checkServicePathEntry({
+        path: entry,
+        uid,
+        hackHome: resolve(opts.hackHome),
+      });
+      if (error !== null) {
+        return `${SYSTEMD_UNIT_NAME} would run ${opts.path}, but ${error}`;
+      }
+    }
+  }
+  return null;
+}
+
+async function checkServicePathEntry(opts: {
+  readonly path: string;
+  readonly uid: number;
+  readonly hackHome: string;
+}): Promise<string | null> {
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(opts.path);
+  } catch (error: unknown) {
+    return `${opts.path} could not be inspected: ${errorMessage(error)}`;
+  }
+  if (info.isSymbolicLink()) {
+    // The link itself cannot be rewritten in place; its directory is
+    // checked, and the target is checked separately.
+    return null;
+  }
+  if (opts.uid >= 0 && info.uid !== opts.uid && info.uid !== 0) {
+    return `${opts.path} is owned by another user (uid ${info.uid})`;
+  }
+  const sticky = info.isDirectory() && (info.mode & 0o1000) !== 0;
+  if ((info.mode & 0o022) === 0 || sticky) {
+    return null;
+  }
+  const insideHackHome =
+    opts.path === opts.hackHome || opts.path.startsWith(`${opts.hackHome}/`);
+  if (insideHackHome && info.uid === opts.uid) {
+    try {
+      await chmod(opts.path, info.mode & 0o7755);
+      if (((await lstat(opts.path)).mode & 0o022) === 0) {
+        return null;
+      }
+    } catch {
+      // Reported below.
+    }
+  }
+  return `${opts.path} is writable by other users (mode ${(info.mode & 0o777).toString(8)}); run: chmod go-w ${opts.path}`;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

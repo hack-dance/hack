@@ -109,6 +109,9 @@ async function createFixture(): Promise<Fixture> {
     mkdir(bin, { recursive: true }),
     mkdir(state, { recursive: true }),
   ]);
+  // The unit's program directory must not be group-writable, whatever the
+  // runner's umask.
+  await chmod(bin, 0o755);
   const hackBin = join(bin, "hack");
   await writeExecutable(
     hackBin,

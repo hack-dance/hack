@@ -246,13 +246,19 @@ export async function startBackgroundCommand(
         BACKGROUND_SUPERVISOR_ARGUMENT,
         meta.commandId,
       ],
-      cwd: opts.child.cwd,
-      env: opts.child.env,
-      // Redaction values go over an inherited pipe: never to disk, never into
-      // an environment string.
+      // The supervisor is this Bun-compiled binary: it starts in its private
+      // journal directory with the launcher's own environment, so a project's
+      // directory (bunfig.toml) or environment (BUN_OPTIONS) cannot configure
+      // the runtime that runs it. The command's cwd and env are applied only
+      // to the command.
+      cwd: paths.dir,
+      env: launcherEnv(),
+      // Redaction values and the command's environment go over an inherited
+      // pipe: never to disk, never into this process's environment.
       privateInput: JSON.stringify({
         root: dirname(paths.dir),
         redactValues: settings.capture === "full" ? opts.redactValues : [],
+        env: opts.child.env,
       }),
     });
     const started = await waitForOwner({
@@ -439,4 +445,15 @@ async function waitForOwner(opts: {
     await Bun.sleep(25);
   }
   return false;
+}
+
+/** The launcher's own environment (the user's), without unset values. */
+function launcherEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") {
+      env[key] = value;
+    }
+  }
+  return env;
 }

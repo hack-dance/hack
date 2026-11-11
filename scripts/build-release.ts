@@ -82,7 +82,17 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
   await buildConfigCompiler();
   const binaryPath = resolve(distRoot, "hack");
   const buildExit = await run({
-    cmd: ["bun", "build", "index.ts", "--compile", "--outfile", binaryPath],
+    cmd: [
+      "bun",
+      "build",
+      "index.ts",
+      "--compile",
+      // A compiled hack must not load a bunfig.toml (preloads) from the
+      // directory it runs in: that directory may be an untrusted project.
+      "--no-compile-autoload-bunfig",
+      "--outfile",
+      binaryPath,
+    ],
     cwd: repoRoot,
   });
   if (buildExit !== 0) {

@@ -237,7 +237,11 @@ unknown, see below), no final record is written and `outcome` is
 
 Each background command has its own supervisor process: a hidden entrypoint of
 the same `hack` binary, started in a new session, so it survives the shell or
-sandbox session that started it. No daemon is needed. The command's stdout and
+sandbox session that started it. No daemon is needed. The supervisor starts
+in its private journal directory with your own environment; the project's
+directory and environment apply only to the command, so a project's
+`bunfig.toml` or `BUN_OPTIONS` cannot configure the runtime that supervises
+it. The command's stdout and
 stderr are appended by the kernel to files; they do not pass through the
 supervisor. If the supervisor dies, the command keeps running and writing, and
 the next read takes over: it announces the output that landed (marked

@@ -94,9 +94,11 @@ export async function runBackgroundSupervisor(opts: {
   const signals = installSignalHandlers();
   // First, before any child exists: the descriptor must not be inherited.
   const input = parsePrivateInput(await readPrivateInput());
-  // The store root comes from the launcher, not from this process's HOME:
-  // the environment here is the Compose environment, which a project may
-  // change (for example HOME=/app).
+  // The command's environment (which a project may change, for example
+  // HOME=/app or BUN_OPTIONS) also comes over the private input: this process
+  // runs with the launcher's own environment, from its journal directory, so
+  // nothing a project controls can configure the Bun runtime that runs it.
+  commandEnv = input?.env ?? {};
   const root = opts.root ?? input?.root ?? commandsRoot();
   const paths = journalPaths({ root, commandId: opts.commandId });
   const prepared = await prepare(paths, input?.redactValues ?? null);
@@ -834,12 +836,13 @@ export function endedPayload(opts: {
 }
 
 /**
- * The launcher's private input: `{ root, redactValues }`. Null when it is
+ * The launcher's private input: `{ root, redactValues, env }`. Null when it is
  * not complete, valid JSON of that shape (for example a timed-out write).
  */
 function parsePrivateInput(text: string): {
   readonly root: string;
   readonly redactValues: string[];
+  readonly env: Record<string, string>;
 } | null {
   try {
     const value: unknown = JSON.parse(text);
@@ -850,9 +853,15 @@ function parsePrivateInput(text: string): {
       Array.isArray(value.redactValues) &&
       value.redactValues.every(
         (item): item is string => typeof item === "string"
-      )
+      ) &&
+      isRecord(value.env) &&
+      Object.values(value.env).every((item) => typeof item === "string")
     ) {
-      return { root: value.root, redactValues: value.redactValues };
+      return {
+        root: value.root,
+        redactValues: value.redactValues,
+        env: value.env as Record<string, string>,
+      };
     }
   } catch {
     return null;
@@ -860,14 +869,12 @@ function parsePrivateInput(text: string): {
   return null;
 }
 
+/** The command's environment, from the private input (set once at start). */
+let commandEnv: Readonly<Record<string, string>> = {};
+
+/** Environment for the command and the Docker calls made on its behalf. */
 function childEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") {
-      env[key] = value;
-    }
-  }
-  return env;
+  return { ...commandEnv };
 }
 
 async function cancelRequested(paths: JournalPaths): Promise<boolean> {

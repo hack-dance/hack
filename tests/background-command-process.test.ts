@@ -722,6 +722,37 @@ describe("background command processes", () => {
   );
 
   test(
+    "the supervisor never loads the project's bunfig.toml or BUN_OPTIONS; the command still gets its cwd and env",
+    async () => {
+      // A preload that records only when the supervisor loads it (the test's
+      // own launcher runs in the same directory and may load it too).
+      const marker = join(fixture.root, "supervisor-preloaded");
+      const preload = join(fixture.root, "preload.js");
+      await writeFile(
+        preload,
+        `if (process.argv.includes(${JSON.stringify(SUPERVISOR_MARKER)})) require("node:fs").writeFileSync(${JSON.stringify(marker)}, "x");\n`
+      );
+      await writeFile(
+        join(fixture.root, "bunfig.toml"),
+        `preload = [${JSON.stringify(preload)}]\n`
+      );
+      const launched = await launch({
+        argv: ["sh", "-c", 'pwd; echo "opts=$BUN_OPTIONS"'],
+        childEnv: { BUN_OPTIONS: `--preload ${preload}` },
+      });
+      const read = await readUntilEnded({
+        journal: launched.journal as LoadedJournal,
+      });
+      expect(read.outcome).toBe("succeeded");
+      expect(stdoutText(read.events)).toBe(
+        `${fixture.root}\nopts=--preload ${preload}\n`
+      );
+      expect(await lstat(marker).catch(() => null)).toBeNull();
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
     "stdin is closed: a command that reads it ends at once; input from a file is refused before anything starts",
     async () => {
       const launched = await launch({

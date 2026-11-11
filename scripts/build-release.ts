@@ -341,7 +341,34 @@ async function chmodExecutable({
   await proc.exited;
 }
 
-function renderInstallScript(): string {
+/**
+ * Shell helper shared by both bundled installers. An upgrade runs while the
+ * previous `hack` may still be executing as `hackd`; writing over a running
+ * executable fails with "Text file busy" on Linux and can invalidate the code
+ * signature of the running copy on macOS. Stage each executable next to its
+ * destination and rename it into place: the running process keeps its old
+ * file, and the path never holds a partial binary. A function, not a constant:
+ * the build's `main` runs at the top of this module, before later constants exist.
+ */
+function installExecutableFunction(): readonly string[] {
+  return [
+    "install_executable() {",
+    '  local source="$1"',
+    '  local dest="$2"',
+    "  local staged",
+    '  staged="$(mktemp "$dest.XXXXXX")"',
+    '  if cp "$source" "$staged" && chmod 755 "$staged" && mv -f "$staged" "$dest"; then',
+    "    return 0",
+    "  fi",
+    '  rm -f "$staged"',
+    '  echo "Failed to install $dest" >&2',
+    "  return 1",
+    "}",
+    "",
+  ];
+}
+
+export function renderInstallScript(): string {
   return [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
@@ -352,11 +379,10 @@ function renderInstallScript(): string {
     'ASSETS_DIR="$ROOT/assets"',
     'BINARIES_DIR="$ROOT/binaries"',
     "",
+    ...installExecutableFunction(),
     'mkdir -p "$INSTALL_BIN" "$INSTALL_ASSETS"',
-    'cp "$ROOT/hack-config-compiler" "$INSTALL_BIN/hack-config-compiler"',
-    'chmod +x "$INSTALL_BIN/hack-config-compiler"',
-    'cp "$ROOT/hack" "$INSTALL_BIN/hack"',
-    'chmod +x "$INSTALL_BIN/hack"',
+    'install_executable "$ROOT/hack-config-compiler" "$INSTALL_BIN/hack-config-compiler"',
+    'install_executable "$ROOT/hack" "$INSTALL_BIN/hack"',
     "",
     'if [ -d "$ASSETS_DIR" ]; then',
     '  mkdir -p "$INSTALL_ASSETS"',
@@ -466,7 +492,7 @@ function renderInstallScript(): string {
   ].join("\n");
 }
 
-function renderCodexSlimInstallScript(): string {
+export function renderCodexSlimInstallScript(): string {
   return [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
@@ -479,11 +505,10 @@ function renderCodexSlimInstallScript(): string {
     'REAL_BIN="$INSTALL_BIN/hack-real"',
     'WRAPPER_BIN="$INSTALL_BIN/hack"',
     "",
+    ...installExecutableFunction(),
     'mkdir -p "$INSTALL_BIN" "$INSTALL_ASSETS"',
-    'cp "$ROOT/hack-config-compiler" "$INSTALL_BIN/hack-config-compiler"',
-    'chmod +x "$INSTALL_BIN/hack-config-compiler"',
-    'cp "$ROOT/hack" "$REAL_BIN"',
-    'chmod +x "$REAL_BIN"',
+    'install_executable "$ROOT/hack-config-compiler" "$INSTALL_BIN/hack-config-compiler"',
+    'install_executable "$ROOT/hack" "$REAL_BIN"',
     "",
     'if [ -d "$ASSETS_DIR" ]; then',
     '  mkdir -p "$INSTALL_ASSETS"',
@@ -495,14 +520,17 @@ function renderCodexSlimInstallScript(): string {
     '  cp -R "$BINARIES_DIR/." "$INSTALL_ASSETS/binaries"',
     "fi",
     "",
+    // The wrapper path may hold a running standard `hack` from an earlier install.
+    'WRAPPER_STAGED="$(mktemp "$WRAPPER_BIN.XXXXXX")"',
     "{",
     `  printf '%s\\n' '#!/usr/bin/env bash' 'set -euo pipefail'`,
     `  printf '%s\\n' 'export HACK_EXECUTION_MODE="\${HACK_EXECUTION_MODE:-codex}"'`,
     `  printf '%s\\n' 'export HACK_DAEMON_DISABLE_DOCKER_EVENTS="\${HACK_DAEMON_DISABLE_DOCKER_EVENTS:-1}"'`,
     `  printf 'export HACK_ASSETS_DIR="\${HACK_ASSETS_DIR:-%s}"\\n' "$INSTALL_ASSETS"`,
     `  printf 'exec "%s" "$@"\\n' "$REAL_BIN"`,
-    '} > "$WRAPPER_BIN"',
-    'chmod +x "$WRAPPER_BIN"',
+    '} > "$WRAPPER_STAGED"',
+    'install_executable "$WRAPPER_STAGED" "$WRAPPER_BIN"',
+    'rm -f "$WRAPPER_STAGED"',
     "",
     'echo "Installed slim hack wrapper to $WRAPPER_BIN"',
     'echo "Installed real hack binary to $REAL_BIN"',

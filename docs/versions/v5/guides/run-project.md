@@ -1,28 +1,46 @@
 # Run and inspect a project
 
-Complete [Getting started](../getting-started.md). The published next.6 launcher
-selects native execution. Choose v4 in Docs version for Compose recipes.
+Use this after [Getting started](../getting-started.md). The examples use the
+default Compose backend.
+
+## Start or restart
 
 ```sh
-"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project up
+hack up --detach
+hack ps
+hack open
+hack restart web
 ```
 
-Keep the foreground owner running. In another terminal:
+Replace `web` with a declared service. Restarting one service skips the project
+lifecycle; read the [command reference](../../reference/cli.md) before relying on
+hooks or implicit dependencies. Check the app after a restart.
+
+## Read logs
 
 ```sh
-"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project ps --json
-"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project logs web --no-follow --tail 100
+hack logs web --no-follow --tail 100
+hack logs web
+hack logs --loki --since 2h --pretty
 ```
 
-Replace `web` with a service from the saved project. Logs are finite and
-service-specific; following output, Loki queries and pretty formatting are not
-part of this native slice. Current service state and the app's health check are
-separate observations.
+The first command is a finite snapshot. The second follows live output until
+Ctrl-C. Loki history needs the global logging stack running on that host and is
+unavailable in slim environments.
+
+## Stop
 
 ```sh
-"$HOME/.hack-next/bin/hack-next" --path /absolute/prepared-project down
+hack down
 ```
 
-Use [the authored command matrix](../../reference/native-authored-commands.md)
-for exact admitted options. Do not infer detached startup, `run` or `restart`
-parity from an overview or a v4 flag list.
+Use ordinary shutdown after review. Inspect reported failures rather than issuing
+broad cleanup commands. `hack projects prune --project <name>` scopes stale
+registry and container cleanup to one project family.
+
+## Native backend
+
+On the native backend, startup is foreground, logs are finite snapshots, and
+`--detach`, following logs and some service subsets are not available. See
+[Native authored commands](../../reference/native-authored-commands.md) for the
+exact supported forms.

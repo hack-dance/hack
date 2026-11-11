@@ -231,7 +231,7 @@ route for it.
 - Browser/host URL: use `hack open <service> --json`; OAuth aliases are preferred when enabled.
 - Container-to-container traffic: use Compose DNS rather than routing back through Caddy.
 
-For `run`, `exec`, `host exec`, `env exec`, `x` and the Beta `dispatch run`, Hack options go before
+For `run`, `exec`, `host exec`, `env exec`, `x` and the unsupported `dispatch run`, Hack options go before
 the child command.
 From the child command's first word on, every argument belongs to the child, including flags
 that Hack also defines: `hack run web bun --version` runs `bun --version` in the container

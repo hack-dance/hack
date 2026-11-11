@@ -1449,8 +1449,11 @@ work. `exec` observes the values stored in the running container, and one-off
 `run` uses the admitted environment.
 
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
-`HACK_NATIVE_HOME` selects native observations for normal `hack ps` and bounded
-`hack logs SERVICE --no-follow`. They verify the project/branch run mapping
+`HACK_NATIVE_HOME` selects native observations for normal `hack ps`, for
+`hack status` and for bounded `hack logs SERVICE --no-follow`. `hack status`
+observes one project, the cwd project or `--project <name>`, with the same
+output and `--json` envelope as native `hack ps`; outside a project it refuses
+instead of listing Compose state, which cannot see native graphs (HACK-1988). They verify the project/branch run mapping
 against the current native graph. Logs do not support following or Loki options.
 A project with no admitted mapping reports not started. `hack ps` keeps container
 observations separate from the last graph receipt; an exited container's state

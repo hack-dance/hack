@@ -1,67 +1,85 @@
 # Install
 
+v5 is in prerelease. Stable Hack today is the v4 line, installed with Homebrew or
+the release installer. v5 prereleases install beside it through a separate
+channel, `hack-next`, so you can try v5 without touching your stable setup. When
+5.0.0 ships, the Homebrew formula and release installer move to v5.
+
 ## Prerequisites
 
-The next.6 native prerelease supports Apple Silicon macOS only. The shell bootstrap
-uses system tools including curl, shasum and codesign. The installer and standalone
-manager need neither Python nor a separately installed Bun. The native DNS helper
-is separate; this is not a claim that every native helper is Python-free.
+- A running Docker-compatible engine with Docker Compose for the default backend.
+  Check it with `docker info` and `docker compose version`.
+- For the native backend (beta): an Apple Silicon Mac. See
+  [Try the native backend](../guides/native-candidate.md).
+- Local DNS and certificate trust are set up once per machine by `hack global
+  install` and can ask for native approval.
 
-## Install next.6
+v5 prerelease bundles are published for Apple Silicon macOS only. Other platforms
+stay on stable v4 until 5.0.0.
 
-Run the pinned public bootstrap:
+## Install the current prerelease
 
-```sh
-curl --fail --location --proto '=https' --tlsv1.2 https://github.com/hack-dance/hack/releases/download/v5.0.0-next.6/hack-next-install.sh | sh
-```
-
-### Advanced: download and inspect
-
-To inspect the same shell asset before running it:
+Each prerelease has an immutable tag, `v5.0.0-next.N`. Download the bootstrap
+from the release you want and run it:
 
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.6/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.12/hack-next-install.sh \
   --output hack-next-install.sh
-# Inspect the downloaded script before executing it.
+less hack-next-install.sh
 sh hack-next-install.sh
-```
-
-The bootstrap pins its standalone manager checksum and release version; it does
-not discover a mutable latest release. Its default installation root is
-`~/.hack-next`. It installs the explicit launcher below without replacing an
-existing stable install or PATH entry:
-
-```sh
 "$HOME/.hack-next/bin/hack-next" --version
 ```
 
-Installation does not install the native provider, boot a VM, enroll a project,
-migrate data, activate DNS or trust, or load an agent client integration. Complete
-[Native preparation](../guides/native-candidate.md) before native application work.
+The bootstrap pins its manager checksum and release version. It installs into
+`~/.hack-next`, does not edit your PATH or shell profile, and leaves the stable
+`hack` executable and `~/.hack` untouched. Installing does not migrate projects,
+start a VM, or change DNS or trust.
 
-## Choose the backend explicitly
+Newer prereleases are listed on the [releases page](https://github.com/hack-dance/hack/releases).
+Replace the tag in the URL to install a different one. The
+[prerelease channel guide](../guides/prereleases.md) explains versioning, platform
+support and the installer in detail.
 
-The released launcher defaults to native execution with version-private CLI and
-native homes. Unlike next.5, next.6 also accepts an explicit Compose selection:
+## Choose a backend
+
+The `hack` CLI runs on Docker Compose unless you select native with
+`HACK_RUNTIME_BACKEND=native`. The `hack-next` launcher is the exception: it
+exists to test the native candidate, so it selects native by default and
+version-private homes. To run the prerelease CLI on Compose against your
+ordinary Hack home:
 
 ```sh
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" --version
+export HACK_RUNTIME_BACKEND=compose
+"$HOME/.hack-next/bin/hack-next" --version
 ```
 
-This selects the bundle's CLI on Compose, clears native binary/home selections,
-and retains the caller's `HACK_HOME` and global configuration (default `~/.hack`).
-Compose requires an existing Docker-compatible engine, Compose and separately
-prepared routing. It shares stable project/configuration state: do not run stable
-v4 and the candidate concurrently against the same home, including their daemons.
-The [candidate guide](../guides/candidate-install.md) links the exact source contract.
-Choose v4 in Docs version for the stable Compose workflow; its examples do not
-establish native command support.
+The export applies to every later `hack-next` command in that shell. A one-off
+`HACK_RUNTIME_BACKEND=compose` prefix selects Compose for that command only; the
+next command without it runs native again. Unset the variable before native testing.
 
-## Evidence and open acceptance
+On Compose, the prerelease shares project state with stable v4. Do not run both
+against the same home at the same time, including their daemons. The
+[candidate install guide](../guides/candidate-install.md#test-both-backends) gives
+the exact order: stop the stable daemon first, then run the prerelease.
 
-The fresh public next.6 bootstrap and local manager status were verified in an
-isolated installation. That check did not execute the native payload or MCP backend.
-Cross-version upgrade and rollback, initialized-data preservation, native application
-acceptance and installed-client loading remain open. Manager operations existing in
-source do not close those acceptance gates. See [release contracts](reference/next6-contracts.md).
+The rest of these docs write `hack` for the v5 CLI. During the prerelease, in the
+shell where you exported the backend, run the examples through the launcher:
+
+```sh
+hack() { "$HOME/.hack-next/bin/hack-next" "$@"; }
+```
+
+This shell function lasts for the session and does not touch your PATH or the
+stable `hack` executable in other shells.
+
+## Set up local routing
+
+Once per machine:
+
+```sh
+hack global install
+```
+
+This configures shared local routing, DNS and certificate trust. Read its prompts.
+Continue with [Getting started](getting-started.md).

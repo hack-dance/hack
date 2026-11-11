@@ -124,116 +124,54 @@ console.log(
   "Version-isolated exports, entry points and default version passed."
 );
 
-/** Keep retiring instruction management out of the recommended v5 corpus. */
-const branchRevision = "44aaf5156426dfcbb1c8a189b8e20531e5b95613";
-const branchSlug = "guides/agent-setup-v5-branch";
-const branchLabel = "Released next.6";
-const branchCommands = [
-  '"$V5_CLI" setup codex --path /absolute/project',
-  '"$V5_CLI" mcp install --codex --scope project --path /absolute/project',
-];
+/** Retired agent automation must never be published as a runnable v5 recipe. */
+const retiredAutomation =
+  /(?:^|[\s`"'|])(?:[^\s`"'|]*\/)?hack(?:-cli|-next|-v5)?["']?\s+(?:agent prime|setup (?:cursor|claude|codex|agents|sync))(?=[\s`]|$)/m;
 
-function isBranchSource(
-  slug: string,
-  revision: string,
-  label: string
-): boolean {
-  return (
-    slug === branchSlug && revision === branchRevision && label === branchLabel
+function fencedBlocks(text: string): string[] {
+  return [...text.matchAll(/^(```|~~~)[^\n]*\n([\s\S]*?)\n\1/gm)].map(
+    (match) => match[2] ?? ""
   );
 }
 
-function assertExplicitAgentContent(input: string, branch = false): void {
-  let text = input;
-  if (branch) {
-    text = text
-      .split("\n")
-      .filter((line) => !branchCommands.includes(line))
-      .join("\n");
-  }
-  text = text.replace(/\$\{?V5_CLI\}?/g, "hack");
-  if (/--(?:docs|agents-md|claude-md|install-missing)(?:[\s=]|$)/m.test(text)) {
+function assertExplicitAgentContent(text: string): void {
+  if (
+    /--(?:docs|agents-md|claude-md|install-missing)(?:[\s=`]|$)/m.test(text)
+  ) {
     throw new Error("Instruction-write flag promoted");
   }
-  if (
-    /(?:^|[\s`"'|])(?:[^\s`"'|]*\/)?hack(?:-cli|-next|-v5)?["']?\s+(?:agent prime|setup (?:cursor|claude|codex|agents|sync|mcp)|mcp install)(?=[\s`]|$)/m.test(
-      text
-    ) ||
-    /hack init[^\n]*--with/.test(text) ||
-    /^\| `--(?:docs|agents-md|claude-md|install-missing|with)(?:[\s`])/m.test(
-      text
-    ) ||
-    /### SetupSync|^\| `SetupSync/m.test(text)
-  ) {
-    throw new Error("Retiring agent setup promoted in the v5 publication");
+  if (/### SetupSync|^\| `SetupSync/m.test(text)) {
+    throw new Error("Retired setup-sync report promoted");
+  }
+  for (const block of fencedBlocks(text)) {
+    if (retiredAutomation.test(block)) {
+      throw new Error("Retired agent automation published as a recipe");
+    }
   }
 }
 
 const v5Root = resolve(repositoryRoot, "site/content/docs/v5");
-const branchMetadata = versions.v5.editorial.find(
-  (page) => page.slug === branchSlug
-);
-if (
-  !(
-    branchMetadata &&
-    "sourceRevision" in branchMetadata &&
-    "sourceLabel" in branchMetadata &&
-    isBranchSource(
-      branchMetadata.slug,
-      branchMetadata.sourceRevision ?? "",
-      branchMetadata.sourceLabel ?? ""
-    )
-  )
-) {
-  throw new Error("Branch guide manifest must identify the reviewed source");
-}
 for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: v5Root })) {
-  const text = await Bun.file(resolve(v5Root, file)).text();
-  assertExplicitAgentContent(
-    text,
-    file === `${branchSlug}.md` &&
-      text.includes(
-        `blob/${branchRevision}/docs/reference/agent-client-capabilities.md`
-      ) &&
-      text.includes(branchLabel)
-  );
-  if (
-    file === "reference/agent-compatibility.md" &&
-    (text.includes("```") || text.includes("~~~"))
-  ) {
-    throw new Error("Agent compatibility must not become a runnable tutorial");
-  }
+  assertExplicitAgentContent(await Bun.file(resolve(v5Root, file)).text());
 }
 for (const file of [
   "site/public/v5/llms-full.txt",
   "site/public/llms-full.txt",
 ]) {
-  const corpus = await Bun.file(resolve(repositoryRoot, file)).text();
-  for (const segment of corpus.split(
-    /(?=<!-- (?:Editorial source:|Original:))/
-  )) {
-    const header = segment.split("\n")[0] ?? "";
-    const branch = header.includes(
-      `docs/versions/v5/${branchSlug}.md; based on ${branchRevision}; source label: ${branchLabel}; URL: https://hack.foo/docs/v5/${branchSlug} -->`
-    );
-    assertExplicitAgentContent(segment, branch);
-  }
+  assertExplicitAgentContent(
+    await Bun.file(resolve(repositoryRoot, file)).text()
+  );
 }
 const integrations = await Bun.file(resolve(v5Root, "integrations.md")).text();
 for (const fact of [
-  "codex plugin marketplace add /absolute/path/to/reviewed-checkout",
-  "Registration does not install or load the plugin",
-  "no longer require automatic guidance maintenance",
-  "Shipped in next.6",
+  "codex plugin marketplace add hack-dance/hack",
+  "claude plugin install hack@hack-dance",
   "hack-mcp",
-  "--bundle",
-  "--cli",
-  "--runtime-directory",
-  "actual preview host",
-  "/tree/44aaf5156426dfcbb1c8a189b8e20531e5b95613/plugins/hack/skills",
+  "hack mcp serve",
+  "retired automatic instruction injection",
 ]) {
   if (!integrations.includes(fact)) {
-    throw new Error(`Agent interface source boundary lost: ${fact}`);
+    throw new Error(`Agent interface fact lost: ${fact}`);
   }
 }
 for (const skill of [
@@ -244,32 +182,54 @@ for (const skill of [
   "hack-init",
   "hack-install",
   "hack-remote",
+  "hack-feedback",
 ]) {
   if (!integrations.includes(`| ${skill} |`)) {
     throw new Error(`Shipped skill missing: ${skill}`);
   }
 }
 
-// Positive controls preserve unrelated runtime contracts and factual archaeology.
-const sourceDefaults = { revision: branchRevision, label: branchLabel };
-resolveEditorialSource(
-  {
-    sourceRevision: branchRevision,
-    sourceLabel: branchLabel,
-    sourceFile: "docs/reference/agent-client-capabilities.md",
-  },
-  sourceDefaults
+// Positive and negative controls for the guard and editorial provenance.
+assertExplicitAgentContent(
+  "In v5, `hack setup sync` and `hack agent prime` refuse with a retirement notice."
 );
+assertExplicitAgentContent(
+  "```sh\nhack init --with codex\nhack agent onboard\n```"
+);
+for (const bad of [
+  "```sh\nhack setup sync --all-scopes\n```",
+  "```sh\nhack agent prime --check\n```",
+  '~~~sh\n"$HOME/.hack-next/bin/hack-next" setup codex\n~~~',
+  "| `--agents-md` | Write repository guidance |",
+  "### SetupSyncTargetResult",
+]) {
+  let rejected = false;
+  try {
+    assertExplicitAgentContent(bad);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error(`Agent curation accepted a retired fixture: ${bad}`);
+  }
+}
+const sampleSource = versions.v5.editorial.find(
+  (page) => "sourceRevision" in page
+);
+if (!(sampleSource && "sourceRevision" in sampleSource)) {
+  throw new Error("Expected at least one explicitly sourced editorial page");
+}
+const sourceDefaults = {
+  revision: versions.v5.revision,
+  label: versions.v5.label,
+};
+resolveEditorialSource(sampleSource, sourceDefaults);
 for (const invalid of [
+  { sourceRevision: "bad", sourceLabel: "x", sourceFile: "docs/core.md" },
+  { sourceRevision: versions.v5.revision },
   {
-    sourceRevision: "bad",
-    sourceLabel: branchLabel,
-    sourceFile: "docs/core.md",
-  },
-  { sourceRevision: branchRevision },
-  {
-    sourceRevision: branchRevision,
-    sourceLabel: branchLabel,
+    sourceRevision: versions.v5.revision,
+    sourceLabel: "x",
     sourceFile: "docs/../private.md",
   },
 ]) {
@@ -283,123 +243,24 @@ for (const invalid of [
     throw new Error("Invalid editorial provenance accepted");
   }
 }
-for (const command of branchCommands) {
-  assertExplicitAgentContent(command, true);
-  let rejected = false;
-  try {
-    assertExplicitAgentContent(command);
-  } catch {
-    rejected = true;
-  }
-  if (!rejected) {
-    throw new Error("Branch opt-in leaked into released corpus");
-  }
-}
-for (const source of [
-  [branchSlug, "28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc", branchLabel],
-  ["integrations", branchRevision, branchLabel],
-  [branchSlug, branchRevision, "Released next.5"],
-]) {
-  if (isBranchSource(source[0] ?? "", source[1] ?? "", source[2] ?? "")) {
-    throw new Error("Mismatched branch source accepted");
-  }
-}
-for (const bad of [
-  '"$V5_CLI" setup sync',
-  '"$V5_CLI" mcp install --codex',
-  '"$V5_CLI" mcp install --codex --scope project --path /absolute/project --docs',
-  "$V5_CLI setup sync",
-  "${V5_CLI} setup agents",
-  "/absolute/bundle/hack-cli mcp install --codex --scope project --path /absolute/project",
-]) {
-  let rejected = false;
-  try {
-    assertExplicitAgentContent(bad, true);
-  } catch {
-    rejected = true;
-  }
-  if (!rejected) {
-    throw new Error("Branch guard accepted retired or unscoped setup");
-  }
-}
-const branchPage = await Bun.file(resolve(v5Root, `${branchSlug}.md`)).text();
-const branchIndex = await Bun.file(
-  resolve(repositoryRoot, "site/public/v5/llms.txt")
-).text();
-if (
-  !(
-    branchPage.includes(branchRevision) &&
-    branchPage.includes(branchLabel) &&
-    branchIndex.includes(`— ${branchLabel}; source ${branchRevision}`)
-  )
-) {
-  throw new Error("Released opt-in guide provenance missing from publication");
-}
 
-assertExplicitAgentContent(
-  "Env injection; lifecycle definition freshness; hooks for application startup."
-);
-assertExplicitAgentContent(
-  "The pinned source still declares `setup sync`; it is not the onboarding path."
-);
-for (const bad of [
-  "Run `hack setup sync --all-scopes` after upgrading.",
-  "```sh\nhack agent prime --check\n```",
-  "| `--agents-md` | Write repository guidance |",
-  "### SetupSyncTargetResult",
-  "hack init --with codex",
-  "/absolute/bundle/hack-cli mcp install --claude --scope user",
-  '"$HOME/.hack-next/bin/hack-next" mcp install --codex',
-  "/absolute/bundle/hack-v5 setup sync",
-]) {
-  let rejected = false;
-  try {
-    assertExplicitAgentContent(bad);
-  } catch {
-    rejected = true;
-  }
-  if (!rejected) {
-    throw new Error(`Agent curation accepted a promotional fixture: ${bad}`);
-  }
-}
-
-/** The v5 entry pages must not inherit the stable Compose quick-start recipe. */
-function assertNativeOnboarding(text: string): void {
-  if (
-    /(?:up[^\n]*--detach|logs[^\n]*--pretty|(?:up|down|restart)[^\n]*--json)/.test(
-      text
-    ) ||
-    /defaults to a branch instance/.test(text)
-  ) {
-    throw new Error("Compose defaults promoted as native onboarding");
-  }
-}
-for (const file of ["core.md", "guides/init-project.md"]) {
+/** v5 leads with the default Compose backend and names native as opt-in. */
+for (const [file, facts] of [
+  ["getting-started.md", ["hack up --detach", "Compose", "native"]],
+  [
+    "core.md",
+    ["Compose backend", "native backend", "HACK_RUNTIME_BACKEND=native"],
+  ],
+  ["upgrade.md", ["Compose", "native", "Retired", "Hack Tickets", "dashboard"]],
+  ["install.md", ["HACK_RUNTIME_BACKEND=compose", "hack global install"]],
+] as const) {
   const text = await Bun.file(resolve(v5Root, file)).text();
-  assertNativeOnboarding(text);
-  for (const boundary of ["Native preparation", "Getting started", "v4"]) {
-    if (!text.includes(boundary)) {
-      throw new Error(`Native entry boundary missing: ${file}/${boundary}`);
+  for (const fact of facts) {
+    if (!text.includes(fact)) {
+      throw new Error(`v5 framing fact missing: ${file}/${fact}`);
     }
   }
 }
-for (const bad of [
-  "hack up --detach",
-  "hack logs --pretty",
-  "hack restart --json",
-  "hack up defaults to a branch instance",
-]) {
-  let rejected = false;
-  try {
-    assertNativeOnboarding(bad);
-  } catch {
-    rejected = true;
-  }
-  if (!rejected) {
-    throw new Error(`Native onboarding accepted a Compose fixture: ${bad}`);
-  }
-}
-assertNativeOnboarding("Env delivery and lifecycle definition freshness.");
 // Exercise both publication branches against identical synthetic source sections.
 for (const command of agentCompatibilityCommands) {
   const fixture = `## \`hack ${command}\`\n\nPinned compatibility body\n\n## \`hack logs [service]\`\n\nRuntime logs\n`;
@@ -413,7 +274,7 @@ for (const command of agentCompatibilityCommands) {
     );
   }
 }
-console.log("Explicit-agent publication and legacy/runtime controls passed.");
+console.log("Explicit-agent publication and v5 framing controls passed.");
 
 for (const version of ["v4", "v5"] as const) {
   const other = version === "v4" ? "v5" : "v4";
@@ -447,83 +308,40 @@ console.log(
   "Search index/anchor acceptance and cross-version negative controls passed."
 );
 
-// A release bump must update the install contract, navigation and both exports.
-const releasedRevision = "44aaf5156426dfcbb1c8a189b8e20531e5b95613";
-if (
-  versions.v5.revision !== releasedRevision ||
-  versions.v5.label !== "v5 (next.6)"
-) {
-  throw new Error("Current v5 must identify released next.6");
-}
-const install = await Bun.file(resolve(v5Root, "install.md")).text();
-const bootstrapUrl =
-  "https://github.com/hack-dance/hack/releases/download/v5.0.0-next.6/hack-next-install.sh";
-const quickInstall = `curl --fail --location --proto '=https' --tlsv1.2 ${bootstrapUrl} | sh`;
-const firstInstallCommand = /```sh\n([\s\S]*?)\n```/.exec(install)?.[1];
-if (
-  firstInstallCommand !== quickInstall ||
-  !install.includes("### Advanced: download and inspect") ||
-  !install.includes(`  ${bootstrapUrl} \\\n  --output hack-next-install.sh`)
-) {
+// The install page must point at the pinned prerelease's shell bootstrap.
+const prerelease = /next\.(\d+)/.exec(versions.v5.label)?.[1];
+if (!prerelease) {
   throw new Error(
-    "Install must lead with the pinned HTTPS one-liner and retain advanced inspection"
+    "v5 label must name the pinned prerelease, e.g. v5 (next.12)"
   );
 }
-for (const fact of [
-  "releases/download/v5.0.0-next.6/hack-next-install.sh",
-  "sh hack-next-install.sh",
-  "Apple Silicon macOS only",
-  "native DNS helper",
-  "Cross-version upgrade and rollback",
-  "initialized-data preservation",
-  "installed-client loading remain open",
-]) {
+const install = await Bun.file(resolve(v5Root, "install.md")).text();
+const bootstrapUrl = `https://github.com/hack-dance/hack/releases/download/v5.0.0-next.${prerelease}/hack-next-install.sh`;
+for (const fact of [bootstrapUrl, "sh hack-next-install.sh", "Apple Silicon"]) {
   if (!install.includes(fact)) {
-    throw new Error(`next.6 installation boundary missing: ${fact}`);
+    throw new Error(`Installation boundary missing: ${fact}`);
   }
 }
-if (/python3 .*install|install-prerelease\.py/.test(install)) {
-  throw new Error("Historical Python installer promoted as current");
-}
-for (const file of [
-  "site/public/llms.txt",
-  "site/public/v5/llms.txt",
-  "site/public/llms-full.txt",
-  "site/public/v5/llms-full.txt",
-]) {
-  const text = await Bun.file(resolve(repositoryRoot, file)).text();
-  if (
-    !text.includes(releasedRevision) ||
-    /Unreleased PR531|reviewed-af71-build/.test(text)
-  ) {
-    throw new Error(`Stale next.6 release provenance: ${file}`);
-  }
+if (
+  new RegExp(`releases/download/v5\\.0\\.0-next\\.(?!${prerelease}/)`).test(
+    install
+  )
+) {
+  throw new Error("Install page names a different prerelease than the pin");
 }
 const navigation = await Bun.file(resolve(v5Root, "meta.json")).json();
 if (navigation.title !== versions.v5.label) {
   throw new Error("Stale v5 navigation label");
 }
-console.log(
-  "next.6 installer, navigation and release-export contracts passed."
-);
-
-// The released source guide still contains Python-era procedures: never endorse
-// it as a current recipe through a prose link from the curated installation path.
-for (const page of [
-  "guides/candidate-install.md",
-  "guides/native-candidate.md",
-]) {
-  const text = await Bun.file(resolve(v5Root, page)).text();
-  if (
-    text.includes(`blob/${releasedRevision}/docs/guides/candidate-install.md`)
-  ) {
-    throw new Error(`Obsolete source installation recipe endorsed: ${page}`);
-  }
-  if (!text.includes("/docs/v5/install")) {
-    throw new Error(`Current installer route missing: ${page}`);
+for (const file of ["site/public/llms.txt", "site/public/v5/llms.txt"]) {
+  const text = await Bun.file(resolve(repositoryRoot, file)).text();
+  if (!text.includes(versions.v5.revision)) {
+    throw new Error(`Stale v5 release provenance: ${file}`);
   }
 }
-console.log("Current installer links avoid obsolete source procedures.");
+console.log(
+  "Pinned installer, navigation and release-export contracts passed."
+);
 
 function assertNoObsoleteInstallRecipe(text: string): void {
   if (
@@ -550,7 +368,7 @@ for (const text of [
   }
 }
 assertNoObsoleteInstallRecipe(
-  "The next.1 Python recipe is historical; use the next.6 shell bootstrap."
+  "The next.1 Python recipe is historical; use the shell bootstrap."
 );
 for (const file of [
   "site/public/v5/llms-full.txt",

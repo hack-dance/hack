@@ -1302,57 +1302,73 @@ async function checkReplaceableChain(opts: {
   readonly uid: number;
   readonly hackHome: string | null;
 }): Promise<string | null> {
-  const { uid } = opts;
-  const hackHome = opts.hackHome;
-  // Every symlink hop, on the path or on any directory above it, adds
-  // its target's chain: whoever can write a directory holding any hop can
-  // redirect it.
-  const pending = [resolve(opts.path)];
-  const seen = new Set<string>();
-  while (pending.length > 0) {
-    const path = pending.pop() as string;
-    if (seen.has(path)) {
+  if (!isAbsolute(opts.path)) {
+    return `${opts.path} is not an absolute path`;
+  }
+  // Walk the path the way the kernel does: one component at a time from
+  // `/`, following each symlink where it is met and applying `..` to the
+  // physical directory reached so far (never collapsing `..` lexically
+  // first, which can name a different file). Every entry visited, links
+  // included, is checked; `cur` is always a symlink-free directory.
+  const checked = new Set<string>();
+  const check = async (entry: string): Promise<string | null> => {
+    if (checked.has(entry)) {
+      return null;
+    }
+    checked.add(entry);
+    return await checkServicePathEntry({
+      path: entry,
+      uid: opts.uid,
+      hackHome: opts.hackHome,
+    });
+  };
+  const rootError = await check("/");
+  if (rootError !== null) {
+    return rootError;
+  }
+  const queue = opts.path.split("/");
+  let cur = "/";
+  let hops = 0;
+  while (queue.length > 0) {
+    const component = queue.shift() as string;
+    if (component === "" || component === ".") {
       continue;
     }
-    seen.add(path);
-    if (seen.size > MAX_SERVICE_PATH_HOPS) {
+    if (component === "..") {
+      cur = dirname(cur);
+      continue;
+    }
+    const next = cur === "/" ? `/${component}` : `${cur}/${component}`;
+    const error = await check(next);
+    if (error !== null) {
+      return error;
+    }
+    const link = await readSymlinkTarget(next);
+    if (link === null) {
+      cur = next;
+      continue;
+    }
+    hops += 1;
+    if (hops > MAX_SERVICE_PATH_HOPS) {
       return `${opts.path} has too many symlink hops to check`;
     }
-    for (const entry of pathChain(path)) {
-      const hop = await readSymlinkHop(entry);
-      if (hop !== null) {
-        pending.push(hop);
-      }
-      const error = await checkServicePathEntry({ path: entry, uid, hackHome });
-      if (error !== null) {
-        return error;
-      }
+    if (link.startsWith("/")) {
+      cur = "/";
     }
+    queue.unshift(...link.split("/"));
   }
   return null;
 }
 
 const MAX_SERVICE_PATH_HOPS = 64;
 
-/** `path` and each directory above it, up to `/`. */
-function pathChain(path: string): string[] {
-  const chain = [path];
-  for (let dir = dirname(path); ; dir = dirname(dir)) {
-    chain.push(dir);
-    if (dir === dirname(dir)) {
-      return chain;
-    }
-  }
-}
-
-/** The absolute target of a symlink (one hop), or null when not a link. */
-async function readSymlinkHop(path: string): Promise<string | null> {
+/** A symlink's raw target, or null when `path` is not a link. */
+async function readSymlinkTarget(path: string): Promise<string | null> {
   try {
-    const info = await lstat(path);
-    if (!info.isSymbolicLink()) {
+    if (!(await lstat(path)).isSymbolicLink()) {
       return null;
     }
-    return resolve(dirname(path), await readlink(path));
+    return await readlink(path);
   } catch {
     return null;
   }
@@ -1456,20 +1472,29 @@ async function checkUnitLoadDirectory(opts: {
   if (chain !== null) {
     return chain;
   }
+  // The sticky bit stops others replacing existing entries, not creating
+  // new ones: neither a missing load directory's parent, nor a load or
+  // drop-in directory (where a new drop-in would be picked up), may be
+  // writable by group or others.
+  const creatable = await lettingOthersCreate(existing);
   if (existing !== resolve(opts.path)) {
-    // The sticky bit stops others replacing existing entries, not creating
-    // the missing directory (and planting a drop-in in it).
-    const mode = (await stat(existing)).mode;
-    return (mode & 0o022) === 0
+    return creatable === null
       ? null
-      : `${existing} lets other users create ${resolve(opts.path)} (mode ${(mode & 0o7777).toString(8)}); run: chmod go-w ${existing}, or create ${resolve(opts.path)} yourself`;
+      : `${existing} lets other users create ${resolve(opts.path)} (${creatable}); run: chmod go-w ${existing}, or create ${resolve(opts.path)} yourself`;
+  }
+  if (creatable !== null) {
+    return `${existing} lets other users add drop-ins (${creatable}); run: chmod go-w ${existing}`;
   }
   for (const name of [`${SYSTEMD_UNIT_NAME}.d`, "service.d"]) {
     const dir = resolve(existing, name);
     if (!(await pathExists(dir))) {
       continue;
     }
+    const writable = await lettingOthersCreate(dir);
     const error =
+      (writable === null
+        ? null
+        : `${dir} lets other users add drop-ins (${writable}); run: chmod go-w ${dir}`) ??
       (await checkReplaceableChain({
         path: dir,
         uid: opts.uid,
@@ -1481,6 +1506,12 @@ async function checkUnitLoadDirectory(opts: {
     }
   }
   return null;
+}
+
+/** "mode NNNN" when others may create entries in `dir` (sticky or not). */
+async function lettingOthersCreate(dir: string): Promise<string | null> {
+  const mode = (await stat(dir)).mode;
+  return (mode & 0o022) === 0 ? null : `mode ${(mode & 0o7777).toString(8)}`;
 }
 
 /** True when an existing unit file is a link, another user's, or writable by others. */

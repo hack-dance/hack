@@ -1909,3 +1909,53 @@ test("a missing load directory under a sticky shared parent is refused", async (
   fake.unitSearchPath = `${join(root, "config", "systemd", "user")} ${present}`;
   expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toBeNull();
 });
+
+test("an existing sticky shared load directory is refused", async () => {
+  // Codex review: sticky stops replacing existing entries, not adding a new
+  // hackd.service.d/override.conf.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const shared = join(root, "shared-units");
+  await mkdir(shared);
+  await chmod(shared, 0o1777);
+  fake.unitSearchPath = `${join(root, "config", "systemd", "user")} ${shared}`;
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toContain(
+    "lets other users add drop-ins"
+  );
+  // A sticky shared drop-in directory inside a protected load directory too.
+  await chmod(shared, 0o755);
+  await mkdir(join(shared, "service.d"));
+  await chmod(join(shared, "service.d"), 0o1777);
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toContain(
+    "service.d lets other users add drop-ins"
+  );
+  await chmod(join(shared, "service.d"), 0o755);
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toBeNull();
+});
+
+test("symlink hops are followed in filesystem order, not normalized first", async () => {
+  // Codex review: hack -> safe/link/../hack with safe/link -> shared/subdir
+  // runs shared/hack; lexical normalization checked safe/hack instead.
+  const hackHome = join(root, ".hack");
+  const safe = join(root, "safe");
+  const shared = join(root, "shared");
+  await mkdir(join(shared, "subdir"), { recursive: true });
+  await mkdir(safe);
+  await chmod(safe, 0o755);
+  await chmod(join(shared, "subdir"), 0o755);
+  await writeFile(join(safe, "hack"), "#!/bin/sh\n");
+  await chmod(join(safe, "hack"), 0o755);
+  await writeFile(join(shared, "hack"), "#!/bin/sh\n");
+  await chmod(join(shared, "hack"), 0o755);
+  await chmod(shared, 0o777);
+  await symlink(join(shared, "subdir"), join(safe, "link"));
+  const entry = join(root, "entry-hack");
+  await symlink("safe/link/../hack", entry);
+  expect(
+    await checkServiceExecutableTrusted({ path: entry, hackHome })
+  ).toContain(shared);
+  await chmod(shared, 0o755);
+  expect(
+    await checkServiceExecutableTrusted({ path: entry, hackHome })
+  ).toBeNull();
+});

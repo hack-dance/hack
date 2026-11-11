@@ -13,6 +13,11 @@ its SHA-256 and a footer linking the original file at the pinned revision. GitHu
 links use the pinned SHA. The public-file inventory in the manifest lets link
 validation run without fetching historical Git objects.
 
+Links to tracked files use pinned GitHub `blob` URLs; directory links use `tree`
+URLs only when the inventory contains a file below that exact directory. Unknown
+paths and partial directory-name prefixes are rejected. Editorial links to a site
+slug keep resolving when a release snapshot replaces the editorial page.
+
 Editorial pages state their own provenance: the pinned revision by default, or an
 explicit `sourceRevision` and `sourceLabel` when a page was written against a
 different source, as the next.5 field audits were.

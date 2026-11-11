@@ -258,6 +258,38 @@ function editorialProvenanceLabel(source: {
   return source.explicit ? `; source label: ${source.label}` : "";
 }
 
+/** Write the sidebar order of each folder that has pages in this version. */
+function stageFolderNavigation(
+  version: string,
+  pageSlugs: readonly string[],
+  staged: Map<string, string>
+): void {
+  for (const [folder, title] of [
+    ["guides", "Guides"],
+    ["reference", "Reference"],
+    ["native", "Native backend (beta)"],
+  ] as const) {
+    const slugs = pageSlugs
+      .filter((slug) => slug.startsWith(`${folder}/`))
+      .map((slug) => slug.slice(folder.length + 1));
+    if (slugs.length === 0) {
+      continue;
+    }
+    // The native section reads in order: introduction first, reference last.
+    const order = folder === "native" ? nativeSectionOrder : [];
+    staged.set(
+      `${version}/${folder}/meta.json`,
+      JSON.stringify({
+        title,
+        pages: [
+          ...order.filter((slug) => slugs.includes(slug)),
+          ...slugs.filter((slug) => !order.includes(slug)),
+        ],
+      })
+    );
+  }
+}
+
 async function stageVersion(
   version: "v4" | "v5",
   staged: Map<string, string>,
@@ -367,30 +399,11 @@ async function stageVersion(
       ],
     })
   );
-  for (const [folder, title] of [
-    ["guides", "Guides"],
-    ["reference", "Reference"],
-    ["native", "Native backend (beta)"],
-  ] as const) {
-    const slugs = pages
-      .filter((entry) => entry.slug.startsWith(`${folder}/`))
-      .map((entry) => entry.slug.slice(folder.length + 1));
-    if (slugs.length === 0) {
-      continue;
-    }
-    // The native section reads in order: introduction first, reference last.
-    const order = folder === "native" ? nativeSectionOrder : [];
-    staged.set(
-      `${version}/${folder}/meta.json`,
-      JSON.stringify({
-        title,
-        pages: [
-          ...order.filter((slug) => slugs.includes(slug)),
-          ...slugs.filter((slug) => !order.includes(slug)),
-        ],
-      })
-    );
-  }
+  stageFolderNavigation(
+    version,
+    pages.map((entry) => entry.slug),
+    staged
+  );
   exports.set(`${version}/llms.txt`, `${index.join("\n")}\n`);
   exports.set(`${version}/llms-full.txt`, `${corpus.join("\n\n---\n\n")}\n`);
 }

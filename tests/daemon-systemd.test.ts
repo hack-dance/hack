@@ -72,6 +72,8 @@ type Fake = {
   failed: boolean;
   /** Fails `enable` with this stderr while set. */
   enableError: string | null;
+  /** Fails the unit-specific `show` while set. */
+  showFails: boolean;
   /** Overrides ActiveState, e.g. "activating" during a restart delay. */
   activeState: string | null;
   needsReload: boolean;
@@ -104,6 +106,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     active: opts.active ?? false,
     failed: false,
     enableError: null,
+    showFails: false,
     activeState: null,
     needsReload: false,
     deps: undefined as unknown as SystemdDeps,
@@ -134,6 +137,13 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
             }
           : ok("Version=255\n")
       );
+    }
+    if (verb === "show" && state.showFails) {
+      return Promise.resolve({
+        exitCode: 1,
+        stdout: "",
+        stderr: "Failed to get properties: Connection timed out",
+      });
     }
     if (verb === "show") {
       return Promise.resolve(
@@ -1166,4 +1176,16 @@ test("uninstall clears a leftover restart-pending marker", async () => {
     await uninstallDaemonSystemdService({ deps: fake.deps, daemonRoot })
   ).toBe(0);
   expect(await Bun.file(marker).exists()).toBe(false);
+});
+
+test("stop still asks systemd to stop when the unit state cannot be read", async () => {
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  fake.activeState = "activating";
+  fake.showFails = true;
+  fake.calls.length = 0;
+  expect(
+    await stopViaSystemdIfInstalled({ pid: null, deps: fake.deps })
+  ).toEqual({ handled: true, ownedPid: false, failed: null });
+  expect(fake.calls).toContain("systemctl --user stop hackd.service");
 });

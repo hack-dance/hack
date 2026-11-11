@@ -344,12 +344,15 @@ export async function stopViaSystemdIfInstalled(opts: {
     return none;
   }
   const status = await readSystemdServiceStatus({ unitPath, deps });
+  if (!status?.availability.available) {
+    return none;
+  }
+  // An unknown state (the unit-specific `systemctl show` failed) does not
+  // prove the unit is stopped: stop it anyway, which is harmless when it is
+  // already inactive.
   if (
-    !(
-      status?.availability.available &&
-      status.activeState !== null &&
-      MANAGER_STOPPABLE_STATES.has(status.activeState)
-    )
+    status.activeState !== null &&
+    !MANAGER_STOPPABLE_STATES.has(status.activeState)
   ) {
     return none;
   }

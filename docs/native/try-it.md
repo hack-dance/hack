@@ -42,15 +42,17 @@ NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 ```
 
 Download the exact archives named in `provider-pins.json`, which sits beside
-`hack-native` in the bundle. Then download these four packages from the Alpine
-v3.19 `main` repository for `aarch64`, with exactly these names:
+`hack-native` in the bundle. Then download four packages from the Alpine `main`
+repository for `aarch64`, with exactly these names. Which Alpine release depends on the
+SmolVM version in that `provider-pins.json`:
 
-- `iptables-1.8.10-r3.apk`
-- `libmnl-1.0.5-r2.apk`
-- `libnftnl-1.2.6-r0.apk`
-- `libxtables-1.8.10-r3.apk`
+- SmolVM 1.34.1 or later: Alpine **v3.24**, `iptables-1.8.13-r0.apk`,
+  `libmnl-1.0.5-r2.apk`, `libnftnl-1.3.1-r0.apk` and `libxtables-1.8.13-r0.apk`.
+- SmolVM 1.14.3 (5.0.0-next.13 and earlier): Alpine **v3.19**, `iptables-1.8.10-r3.apk`,
+  `libmnl-1.0.5-r2.apk`, `libnftnl-1.2.6-r0.apk` and `libxtables-1.8.10-r3.apk`.
 
-Their hashes are in the table under [network tool packages](../guides/native-candidate.md#network-tool-packages), not in `provider-pins.json`.
+The same file name in another Alpine release has different bytes and is refused. The
+current hashes are in the table under [network tool packages](../guides/native-candidate.md#network-tool-packages), not in `provider-pins.json`.
 
 Put them in a folder under your home folder, not under `/tmp`: Hack refuses a path
 that passes through a symbolic link, and `/tmp` is one on macOS. Hack also refuses

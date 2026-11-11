@@ -614,12 +614,22 @@ describe("background command processes", () => {
           },
         });
       const standIn = async () => {
-        const proc = Bun.spawn(["sh", "-c", 'trap "" TERM; sleep 30'], {
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-          detached: true,
-        });
+        const proc = Bun.spawn(
+          ["sh", "-c", 'trap "" TERM; echo ready; sleep 30'],
+          {
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "ignore",
+            detached: true,
+          }
+        );
+        // Wait until the trap is installed: a SIGTERM that arrives first
+        // (likely on a busy host) would end the stand-in, and cancel would
+        // then rightly find the supervisor gone.
+        const reader = proc.stdout.getReader();
+        const first = await reader.read();
+        reader.releaseLock();
+        expect(new TextDecoder().decode(first.value)).toContain("ready");
         const identity = await track(proc.pid, true);
         expect(identity).not.toBeNull();
         return { proc, identity: identity as ProcessIdentity };

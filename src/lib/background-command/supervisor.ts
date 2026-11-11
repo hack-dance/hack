@@ -134,11 +134,19 @@ export async function runBackgroundSupervisor(opts: {
   // Everything after the spawn is guarded: a failure here (for example a
   // full disk while recording the child) must not abandon a running child.
   try {
+    // Without a child record nobody could cancel or verify the child later,
+    // so a failure here stops it. A full disk on `command.started` only
+    // stops capture, like any other event.
     await recordChild({ paths, proc });
-    await writer.write("command.started", {
-      pid: proc.pid,
-      processGroupId: proc.pid,
-    });
+    await writer
+      .write("command.started", { pid: proc.pid, processGroupId: proc.pid })
+      .catch((error: unknown) => {
+        if (!isNoSpaceError(error)) {
+          throw error;
+        }
+        capture.noSpace = true;
+        capture.truncated = true;
+      });
     return await finish(
       await superviseChild({
         proc,

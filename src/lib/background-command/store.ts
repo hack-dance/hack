@@ -444,7 +444,13 @@ export async function pruneStore(root = commandsRoot()): Promise<void> {
     if (!(await lstat(root).catch(() => null))?.isDirectory()) {
       return;
     }
-    await withStoreLock(root, () => pruneExpired({ root, now: Date.now() }));
+    // Never wait behind a start: retention is enforced per journal on access.
+    await withProjectsRegistryLock({
+      lockPath: resolve(root, "store.lock"),
+      run: () => pruneExpired({ root, now: Date.now() }),
+      waitForLock: false,
+      label: "background command store",
+    });
   } catch {
     // Retention is also enforced on access; a busy store never fails a read.
   }

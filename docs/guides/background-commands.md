@@ -190,7 +190,7 @@ Settings, in the global `~/.hack/hack.config.json` or the project's
 | Key | Values | Scope |
 | --- | --- | --- |
 | `capture` | `full` or `metadata`; the global file also accepts `off`, which stores no output for any background command and refuses an explicit `--capture full` with `E_CAPTURE_DISABLED` | global, project |
-| `retentionHours` | 0 to 24; the global value is a ceiling for the project value | global, project |
+| `retentionHours` | 0 to 24; the global value is a ceiling for the project value. With 0, the first read after the end removes the output and the outcome, so a caller may only ever see `E_RESULT_EXPIRED` | global, project |
 | `stallAfterMs` | 0 to 21,600,000 | global, project |
 
 A per-call flag wins over the project default, which wins over the global one.

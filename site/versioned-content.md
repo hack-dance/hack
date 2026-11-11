@@ -21,7 +21,14 @@ slug keep resolving when a release snapshot replaces the editorial page.
 Snapshots are taken before their release tag exists, so installation examples can
 name the previous prerelease. Staging aligns the bootstrap, manager and checksum
 artifact URLs and the `V=5.0.0-next.N` shell variable with the corpus pin. The
-original snapshot bytes and hashes remain unchanged.
+original snapshot bytes and hashes remain unchanged. Both `docs:check` and the
+HTTP smoke reject installer artifact URLs for any other release tag.
+
+The next.14 pin adds Global settings (including `proxy.bind_address`) and the
+Dependency installer protocol to Guides. The eleven recipes and four native
+overview pages have release snapshots; five recipes keep newer, explicitly
+attributed corrections. Linux DNS, certificate trust, daemon and proxy network
+repair guides are absent from this tag and stay outside this corpus.
 
 Editorial pages state their own provenance: the pinned revision by default, or an
 explicit `sourceRevision` and `sourceLabel` when a page was written against a

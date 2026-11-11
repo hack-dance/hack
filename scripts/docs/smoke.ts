@@ -240,8 +240,23 @@ console.log(
   `Recipe smoke passed: ${recipeLinks.size} local links and anchors.`
 );
 
-// v5 pages that moved into the native section keep their old routes, with and
-// without the version prefix.
+// Section roots must reach the overview, including through the legacy redirect.
+for (const prefix of ["/docs/v5/", "/docs/"]) {
+  const response = await fetch(new URL(`${prefix}recipes`, base), {
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (
+    response.status !== 200 ||
+    new URL(response.url).pathname !== "/docs/v5/recipes/overview" ||
+    !(await response.text()).includes(
+      'href="https://hack.foo/docs/v5/recipes/overview"'
+    )
+  ) {
+    throw new Error(`Recipes section root failed: ${prefix}recipes`);
+  }
+}
+
+// v5 aliases keep their old routes, with and without the version prefix.
 for (const [old, target] of [
   ["recipes", "recipes/overview"],
   ["guides/native-candidate", "native/full-reference"],

@@ -1841,6 +1841,10 @@ async function startNativeProjectAttempt(
     composeFile: opts.composeFile,
     envName: selection.envName,
   });
+  // Names only: which referenced shell variables were not set.
+  for (const line of input.environmentNotices ?? []) {
+    deps.warn(line);
+  }
   // Digest the selection now: later steps adapt the delivered values.
   const selectedEnvironment = opts.onEnvironmentReady
     ? withComposeServiceEnvFingerprints({

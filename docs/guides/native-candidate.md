@@ -1237,6 +1237,36 @@ by an older bundle, so clean up such a graph with the bundle that started it.
   default is never used in their place. Declare the key bare (`TOKEN:` or `- TOKEN`)
   to receive the managed value.
 
+### Shell variables in service environment
+
+Compose reads a variable reference from the shell that runs it. Native `hack up`
+and `hack restart` do the same for a service's `environment`, for an entry whose
+whole value is one reference:
+
+| Entry | Shell has the variable | Shell does not |
+| --- | --- | --- |
+| `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose, and `hack up` prints which variable is not set. |
+| `REGION: ${REGION:-us-east-1}` | The service gets the shell's value when it is not empty. | The default applies. |
+| `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The variable is left unset in the container, as with Compose. |
+
+A value read from the shell is never written to the reviewed Compose document, a
+plan, a receipt or a log. The entry stays a reference and the value travels in the
+same private delivery as Hack managed env. Only the variables these entries name
+are read; nothing else of your environment is. One value may be at most 32 KiB and
+may not contain a NUL byte.
+
+A variable Hack manages for the service keeps coming from managed env, never from
+the shell, and an entry that references a managed variable is still refused by the
+runtime (`execution_environment_owner`).
+
+Not resolved from the shell: a reference inside a longer string
+(`http://${HOST}:3000`), and a reference in any other field (`image`, `ports`,
+`command`, `volumes`, labels). There, as before, `${NAME:-word}` selects `word`,
+and a reference with no default fails the start with
+`execution_environment_missing`. A shell that sets the variable differently on a
+later `hack up` or `hack restart` changes what the service receives; the running
+containers keep the value they started with.
+
 ## Registry image acquisition without Docker
 
 The candidate can fetch a **digest-pinned image from any OCI distribution registry**

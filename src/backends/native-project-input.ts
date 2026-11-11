@@ -12,6 +12,7 @@ import {
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
 import type { NativeEmulationPolicy } from "./native-project-platform.ts";
+import { resolveShellEnvironment } from "./native-shell-environment.ts";
 
 const LIMIT = 256 * 1024;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -51,6 +52,11 @@ export type NativeProjectInput = {
   readonly effectiveEnvName: string | null;
   readonly environmentFiles: readonly string[];
   readonly serviceNames: readonly string[];
+  /**
+   * Value-free notes about shell references in service `environment`, such as
+   * a referenced variable that is not set. Names only.
+   */
+  readonly environmentNotices?: readonly string[];
   /**
    * Emulation policy of each service the native adaptation opted in to `linux/amd64`
    * (`amd64Emulation`); absent when none did. See `native-project-platform.ts`.
@@ -213,6 +219,47 @@ function normalizeManagedEnvironment(
   return managedEnvironment;
 }
 
+/**
+ * Resolves the shell references in each service's `environment` and adds the
+ * values to the private delivery map (see `native-shell-environment.ts`). The
+ * public document keeps only bare references. Returns the value-free notices.
+ */
+function deliverShellEnvironment(opts: {
+  readonly services: Record<string, unknown>;
+  readonly managedEnvironment: Record<string, Record<string, string>>;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): string[] {
+  const notices: string[] = [];
+  for (const [name, service] of Object.entries(opts.services)) {
+    if (!isRecord(service) || service.environment === undefined) {
+      continue;
+    }
+    const managed = opts.managedEnvironment[name] ?? {};
+    const resolution = resolveShellEnvironment({
+      service: name,
+      environment: environment(service.environment, name),
+      env: opts.env,
+      managed: new Set(Object.keys(managed)),
+    });
+    if (resolution === null) {
+      continue;
+    }
+    if (resolution.refused !== undefined) {
+      throw refused(
+        `${serviceLabel(name)} field environment: the shell value of ${resolution.refused} contains a NUL byte or is over 32 KiB`
+      );
+    }
+    service.environment = resolution.environment;
+    if (Object.keys(resolution.delivered).length > 0) {
+      opts.managedEnvironment[name] = { ...managed, ...resolution.delivered };
+    }
+    if (SERVICE_NAME.test(name)) {
+      notices.push(...resolution.notices);
+    }
+  }
+  return notices;
+}
+
 /** Every value the resolved project env stores as a secret, for any scope or target. */
 function managedSecretValues(
   resolved: Awaited<ReturnType<typeof resolveProjectEnvConfig>>
@@ -297,6 +344,11 @@ export async function prepareNativeProjectInput(opts: {
   readonly projectDir: string;
   readonly composeFile: string;
   readonly envName?: string | null;
+  /**
+   * The caller's environment, read only for the variables that service
+   * `environment` entries reference. Defaults to the process environment.
+   */
+  readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<NativeProjectInput> {
   try {
     const bytes = await readCompose(opts.composeFile);
@@ -342,6 +394,11 @@ export async function prepareNativeProjectInput(opts: {
       compose.services,
       resolved
     );
+    const environmentNotices = deliverShellEnvironment({
+      services: compose.services,
+      managedEnvironment,
+      env: opts.env ?? process.env,
+    });
     const normalizedComposeJson = JSON.stringify(compose);
     if (Buffer.byteLength(normalizedComposeJson) > LIMIT) {
       throw refused("the normalized Compose project exceeds 256 KiB");
@@ -370,6 +427,7 @@ export async function prepareNativeProjectInput(opts: {
       effectiveEnvName: selection.effectiveEnv,
       environmentFiles: resolved?.files ?? [],
       serviceNames,
+      environmentNotices,
     };
   } catch (error: unknown) {
     // Only this module's closed refusals carry a cause; anything else stays generic.

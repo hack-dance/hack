@@ -400,3 +400,180 @@ test("a missing project env key is reported as such, not as invalid Compose", as
     restoreEnv("HACK_ENV_SECRET_KEY", oldKey);
   }
 });
+
+/** A Compose reference to `name`, built so this file has no template placeholders. */
+function reference(name: string, word?: string): string {
+  return word === undefined ? `$\{${name}}` : `$\{${name}:-${word}}`;
+}
+
+/**
+ * Compose reads a `NAME` reference and a bare `NAME` entry from the caller's
+ * shell. Native does the same for a service's `environment`, without ever
+ * writing the value into the public document: the entry stays a reference and
+ * the value joins the private delivery that managed env already uses.
+ */
+test("environment entries that reference the shell are delivered privately, as Compose would resolve them", async () => {
+  const PRIVATE = "synthetic-shell-value";
+  const opts = await fixture({
+    services: {
+      api: {
+        image: "bun:1",
+        environment: {
+          WHOLE: reference("SHELL_SET"),
+          BARE_FORM: "$SHELL_SET",
+          WITH_DEFAULT: reference("SHELL_SET", "fallback"),
+          DEFAULT_KEPT: reference("SHELL_UNSET", "fallback"),
+          EMPTY_USES_DEFAULT: reference("SHELL_EMPTY", "fallback"),
+          UNSET: reference("SHELL_UNSET"),
+          PASSED: null,
+          NOT_PASSED: null,
+          LITERAL: "plain",
+          PARTIAL: `http://${reference("SHELL_SET")}:80`,
+          ESCAPED: `$${reference("SHELL_SET")}`,
+        },
+      },
+      worker: {
+        image: "bun:1",
+        environment: [
+          "PASSED",
+          "NOT_PASSED",
+          `WHOLE=${reference("SHELL_SET")}`,
+          "KEEP=1",
+        ],
+      },
+      plain: { image: "bun:1" },
+      literal: { image: "bun:1", environment: ["A=1", "B=two"] },
+    },
+  });
+  const result = await prepareNativeProjectInput({
+    ...opts,
+    env: {
+      SHELL_SET: PRIVATE,
+      SHELL_EMPTY: "",
+      PASSED: `${PRIVATE}-passed`,
+      // Never read: no entry references it.
+      UNRELATED: "unrelated-private",
+    },
+  });
+  // Values travel only in the private delivery.
+  expect(result.managedEnvironment).toEqual({
+    api: {
+      WHOLE: PRIVATE,
+      BARE_FORM: PRIVATE,
+      WITH_DEFAULT: PRIVATE,
+      // Compose substitutes an empty string for an unset variable.
+      UNSET: "",
+      PASSED: `${PRIVATE}-passed`,
+    },
+    worker: { PASSED: `${PRIVATE}-passed`, WHOLE: PRIVATE },
+  });
+  expect(result.normalizedComposeJson).not.toContain(PRIVATE);
+  expect(result.normalizedComposeJson).not.toContain("unrelated-private");
+  const normalized = JSON.parse(result.normalizedComposeJson) as {
+    services: Record<string, { environment?: Record<string, unknown> }>;
+  };
+  expect(normalized.services.api?.environment).toEqual({
+    // Delivered privately: the public document keeps only the name.
+    WHOLE: null,
+    BARE_FORM: null,
+    WITH_DEFAULT: null,
+    UNSET: null,
+    PASSED: null,
+    // An unset or empty variable with a default is left for the runtime,
+    // which selects the default without any outside value.
+    DEFAULT_KEPT: reference("SHELL_UNSET", "fallback"),
+    EMPTY_USES_DEFAULT: reference("SHELL_EMPTY", "fallback"),
+    // Not whole-value references: unchanged.
+    LITERAL: "plain",
+    PARTIAL: `http://${reference("SHELL_SET")}:80`,
+    ESCAPED: `$${reference("SHELL_SET")}`,
+    // A bare name the shell does not set is left out, as Compose leaves it unset.
+  });
+  expect(normalized.services.worker?.environment).toEqual({
+    PASSED: null,
+    WHOLE: null,
+    KEEP: "1",
+  });
+  expect(normalized.services.plain?.environment).toBeUndefined();
+  // No reference, no rewrite: the list form is exactly what was authored.
+  expect(normalized.services.literal?.environment as unknown).toEqual([
+    "A=1",
+    "B=two",
+  ]);
+  // Names only, never values.
+  expect(result.environmentNotices).toEqual([
+    "Service api: UNSET is empty because SHELL_UNSET is not set in your shell.",
+  ]);
+  expect(JSON.stringify(result.environmentNotices)).not.toContain(PRIVATE);
+});
+
+test("a key Hack manages is delivered from managed env, never from the shell", async () => {
+  const opts = await fixture({
+    services: {
+      api: {
+        image: "bun:1",
+        environment: [
+          "KEEP=tracked",
+          `TOKEN=${reference("SHELL_TOKEN")}`,
+          "FROM_MANAGED",
+        ],
+      },
+    },
+  });
+  await env(opts.projectDir, "default", {
+    global: { TOKEN: "managed-private", FROM_MANAGED: "managed-too" },
+  });
+  const result = await prepareNativeProjectInput({
+    ...opts,
+    env: { SHELL_TOKEN: "shell-private", FROM_MANAGED: "shell-loses" },
+  });
+  // A key Hack manages is delivered from managed env, not from the shell.
+  expect(result.managedEnvironment.api).toEqual({
+    TOKEN: "managed-private",
+    FROM_MANAGED: "managed-too",
+  });
+  expect(result.normalizedComposeJson).not.toContain("shell-private");
+  expect(result.normalizedComposeJson).not.toContain("shell-loses");
+  expect(result.environmentNotices).toEqual([]);
+});
+
+test("a reference to a variable Hack manages for the service is left for the runtime to refuse", async () => {
+  const opts = await fixture({
+    services: {
+      api: { image: "bun:1", environment: { COPY: reference("TOKEN") } },
+    },
+  });
+  await env(opts.projectDir, "default", {
+    global: { TOKEN: "managed-private" },
+  });
+  const result = await prepareNativeProjectInput({
+    ...opts,
+    env: { TOKEN: "shell-private" },
+  });
+  // The shell value never replaces or copies a managed one.
+  expect(result.managedEnvironment.api).toEqual({ TOKEN: "managed-private" });
+  const normalized = JSON.parse(result.normalizedComposeJson) as {
+    services: Record<string, { environment?: Record<string, unknown> }>;
+  };
+  expect(normalized.services.api?.environment?.COPY).toBe(reference("TOKEN"));
+  expect(result.normalizedComposeJson).not.toContain("shell-private");
+});
+
+test("a shell value with a NUL byte or over the size bound refuses without printing it", async () => {
+  for (const value of ["bad\0value", "x".repeat(32 * 1024 + 1)]) {
+    const opts = await fixture({
+      services: {
+        api: { image: "bun:1", environment: { A: reference("BIG") } },
+      },
+    });
+    const error = await prepareNativeProjectInput({
+      ...opts,
+      env: { BIG: value },
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(HackCliError);
+    expect(String((error as Error).message)).toContain(
+      "service api field environment: the shell value of BIG"
+    );
+    expect(String((error as Error).message)).not.toContain(value.slice(0, 20));
+  }
+});

@@ -1,6 +1,7 @@
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { curateCliReference } from "./curate-cli";
+import { embedDiagrams } from "./diagrams";
 import versions from "./versions.json";
 
 let activeRevision = versions.v5.revision;
@@ -137,6 +138,33 @@ async function writeDocuments(
   }
 }
 
+const diagramsOutput = resolve(repositoryRoot, "site/public/diagrams");
+
+/** Rendered diagrams are generated output: the directory holds exactly this run's set. */
+async function writeDiagrams(
+  diagrams: Map<string, string>,
+  check: boolean
+): Promise<void> {
+  if (check) {
+    const existing = [
+      ...new Bun.Glob("*.svg").scanSync({
+        cwd: diagramsOutput,
+        onlyFiles: true,
+      }),
+    ].sort();
+    if (
+      JSON.stringify(existing) !== JSON.stringify([...diagrams.keys()].sort())
+    ) {
+      throw new Error("Rendered diagrams differ; run bun run docs:prepare");
+    }
+  } else {
+    await rm(diagramsOutput, { recursive: true, force: true });
+  }
+  for (const [name, svg] of diagrams) {
+    await writeOrCheck(resolve(diagramsOutput, name), svg, check);
+  }
+}
+
 function documentRoute(version: string, slug: string): string {
   return `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
 }
@@ -222,7 +250,8 @@ function editorialProvenanceLabel(source: {
 async function stageVersion(
   version: "v4" | "v5",
   staged: Map<string, string>,
-  exports: Map<string, string>
+  exports: Map<string, string>,
+  diagrams: Map<string, string>
 ): Promise<void> {
   const manifest = versions[version];
   activeRevision = manifest.revision;
@@ -288,9 +317,13 @@ async function stageVersion(
     const provenance = entry.editorial
       ? `Editorial source: ${entry.snapshot}; based on ${entry.source.revision}${editorialProvenanceLabel(entry.source)}`
       : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
+    const page = await embedDiagrams(
+      text.replace(heading, "").trim(),
+      diagrams
+    );
     staged.set(
       `${version}/${entry.slug}.md`,
-      `---\ntitle: ${JSON.stringify(entry.title)}\n---\n\n${text.replace(heading, "").trim()}\n\n---\n\nSource: [${entry.source.label} · ${entry.source.explicit ? entry.source.file : entry.file}](https://github.com/hack-dance/hack/blob/${entry.source.revision}/${entry.source.file}).\n`
+      `---\ntitle: ${JSON.stringify(entry.title)}\n---\n\n${page}\n\n---\n\nSource: [${entry.source.label} · ${entry.source.explicit ? entry.source.file : entry.file}](https://github.com/hack-dance/hack/blob/${entry.source.revision}/${entry.source.file}).\n`
     );
     index.push(
       `- [${entry.title}](${url})${entry.source.explicit ? ` — ${entry.source.label}; source ${entry.source.revision}` : ""}`
@@ -337,9 +370,11 @@ async function stageVersion(
 export async function prepare(check = false): Promise<void> {
   const staged = new Map<string, string>();
   const exports = new Map<string, string>();
+  const diagrams = new Map<string, string>();
   for (const version of ["v5", "v4"] as const) {
-    await stageVersion(version, staged, exports);
+    await stageVersion(version, staged, exports, diagrams);
   }
+  await writeDiagrams(diagrams, check);
   staged.set("meta.json", JSON.stringify({ pages: ["v5", "v4"] }));
   await writeDocuments(staged, check);
   for (const [name, text] of exports) {

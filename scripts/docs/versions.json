@@ -4047,6 +4047,10 @@
       {
         "slug": "guides/candidate-install",
         "title": "Native prerelease install"
+      },
+      {
+        "slug": "architecture",
+        "title": "Architecture"
       }
     ]
   }

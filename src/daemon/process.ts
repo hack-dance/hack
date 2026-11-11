@@ -123,10 +123,19 @@ export async function findOrphanDaemonProcesses(opts: {
   if (orphans.length === 0) {
     return [];
   }
-  const owners = await findDaemonSocketOwners({
-    daemonRoot: opts.daemonRoot,
-    lines: opts.lsofLines ?? (await listOpenUnixSockets({ pids: orphans })),
-  });
+  // Linux reads socket ownership from /proc (no lsof needed); injected
+  // lsof lines (tests) and other platforms use lsof.
+  const owners =
+    opts.lsofLines === undefined && process.platform === "linux"
+      ? ((await findDaemonSocketOwnersFromProc({
+          daemonRoot: opts.daemonRoot,
+          pids: orphans,
+        })) ?? new Set<number>())
+      : await findDaemonSocketOwners({
+          daemonRoot: opts.daemonRoot,
+          lines:
+            opts.lsofLines ?? (await listOpenUnixSockets({ pids: orphans })),
+        });
   return orphans.filter((orphan) => owners.has(orphan));
 }
 

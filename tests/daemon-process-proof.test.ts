@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   type DaemonProcessProbe,
   findDaemonSocketOwnersFromProc,
+  findOrphanDaemonProcesses,
   isHackDaemonCommandLine,
   isHackDaemonProcess,
   proveOwnedDaemonProcess,
@@ -529,3 +530,25 @@ test("an unreadable command line is unknown identity, not 'not hackd'", async ()
     })
   ).toEqual({ kind: "refused", reason: "identity-unknown" });
 });
+
+test.skipIf(process.platform !== "linux")(
+  "the orphan sweep finds a socket-holding hackd through /proc",
+  async () => {
+    const ownRoot = join(root, "own-orphan");
+    const otherRoot = join(root, "other-orphan");
+    await mkdir(ownRoot);
+    await mkdir(otherRoot);
+    const child = await startForeignFixture(ownRoot);
+    expect(
+      await findOrphanDaemonProcesses({ trackedPid: null, daemonRoot: ownRoot })
+    ).toContain(child.pid);
+    expect(
+      await findOrphanDaemonProcesses({
+        trackedPid: null,
+        daemonRoot: otherRoot,
+      })
+    ).not.toContain(child.pid);
+    expect(child.exitCode).toBeNull();
+  },
+  10_000
+);

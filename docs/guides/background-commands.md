@@ -273,6 +273,12 @@ user that can select the project can read it, and backups can copy it.
   deletion within 24 hours. An expired result keeps a value-free tombstone
   (no argv or output) for 7 days, and its request key is remembered for those
   7 days, so a retry is refused rather than re-run.
+- A Hack home keeps at most 64 ended results and 256 MiB of their events and
+  output. Each start checks this first: past either ceiling, the oldest ended
+  results expire early, exactly as at their retention time. Running commands
+  are never touched. At most 4096 tombstones are kept; past that the oldest
+  are removed with their request keys, so a request key is remembered for 7
+  days or until 4096 newer results have expired, whichever comes first.
 - Metadata never contains environment values.
 
 Settings, in the global `~/.hack/hack.config.json` or the project's

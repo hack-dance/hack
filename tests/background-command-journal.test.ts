@@ -50,8 +50,10 @@ import {
   type AcceptInput,
   acceptCommand,
   CALLER_ACTIVE_LIMIT,
+  enforceRetainedQuota,
   HOME_ACTIVE_LIMIT,
   holdsSlot,
+  listCommandIds,
   lookupRequest,
   pruneExpired,
 } from "../src/lib/background-command/store.ts";
@@ -552,6 +554,77 @@ describe("retention", () => {
       loadJournal({ commandId: "cmd_aaaaaaaaaaaaaaaaaaaaaaaaaa", root }),
       "E_COMMAND_NOT_FOUND"
     );
+  });
+
+  test("past the per-home ceilings the oldest ended results expire early; running commands are kept", async () => {
+    const ended: CommandMeta[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const { meta, paths } = await acceptCommand({
+        input: input({ caller: `s${index}` }),
+        root,
+      });
+      await writeFile(paths.stdout, "x".repeat(1000), { mode: 0o600 });
+      await new JournalWriter(paths, meta, 1).write("command.ended", {
+        outcome: "succeeded",
+        reason: "exited",
+        exitCode: 0,
+        signal: null,
+        durationMs: 1,
+        truncated: false,
+        suppressed: false,
+      });
+      ended.push(meta);
+      await Bun.sleep(5);
+    }
+    const running = await acceptCommand({ input: input(), root });
+    const isGone = async (meta: CommandMeta) =>
+      await lstat(journalPaths({ root, commandId: meta.commandId }).expired)
+        .then(() => true)
+        .catch(() => false);
+    // Count ceiling: 4 retained, limit 4 -> the oldest expires, leaving room
+    // for the command being started.
+    await enforceRetainedQuota({
+      root,
+      now: Date.now(),
+      limits: { results: 4, bytes: 1_000_000, tombstones: 100 },
+    });
+    expect(await Promise.all(ended.map(isGone))).toEqual([
+      true,
+      false,
+      false,
+      false,
+    ]);
+    // Byte ceiling: under 2.5 KiB each with events, limit 2.5 KiB -> only
+    // the newest stays.
+    await enforceRetainedQuota({
+      root,
+      now: Date.now(),
+      limits: { results: 100, bytes: 2500, tombstones: 100 },
+    });
+    expect(await Promise.all(ended.map(isGone))).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+    // Tombstone ceiling: the oldest tombstones are removed entirely.
+    await enforceRetainedQuota({
+      root,
+      now: Date.now(),
+      limits: { results: 100, bytes: 1_000_000, tombstones: 1 },
+    });
+    const left = await listCommandIds(root);
+    // Two of the three tombstones go, the oldest first; results 1 and 2
+    // expired in the same sweep, so either may be the one kept.
+    expect(left).not.toContain(ended[0]?.commandId);
+    expect(
+      [ended[1], ended[2]].filter((meta) =>
+        left.includes(meta?.commandId as string)
+      )
+    ).toHaveLength(1);
+    expect(left).toContain(ended[3]?.commandId as string);
+    expect(left).toContain(running.meta.commandId);
+    expect(await isGone(running.meta)).toBe(false);
   });
 
   test("a request key for an expired command is never run again", async () => {

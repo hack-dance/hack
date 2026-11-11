@@ -50,6 +50,16 @@ export const CALLER_ACTIVE_LIMIT = 4;
 export const HOME_ACTIVE_LIMIT = 16;
 /** How long an expired command's tombstone (and its request key) is kept. */
 export const TOMBSTONE_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * Per-Hack-home ceilings on what ended commands keep on disk. Active
+ * commands are bounded by admission; without these, many short commands
+ * could fill the disk within one retention window. Past either ceiling the
+ * oldest ended results expire early (running commands are never touched).
+ */
+export const RETAINED_RESULTS_LIMIT = 64;
+export const RETAINED_BYTES_LIMIT = 256 * 1024 * 1024;
+/** Past this, the oldest tombstones (and their request keys) are removed. */
+export const TOMBSTONE_LIMIT = 4096;
 
 export type AcceptInput = Omit<
   CommandMeta,
@@ -306,6 +316,7 @@ export async function acceptCommand(opts: {
         message: `This Hack home already has ${HOME_ACTIVE_LIMIT} active background commands. Wait for one to end or cancel one, then retry.`,
       });
     }
+    await enforceRetainedQuota({ root, now: now.getTime() });
     const meta: CommandMeta = {
       formatVersion: JOURNAL_FORMAT_VERSION,
       writerVersion: HACK_VERSION,
@@ -499,6 +510,95 @@ export async function pruneExpired(opts: {
     }
     await expireJournal({ paths, meta, ended, now: opts.now });
   }
+}
+
+/**
+ * Keep what ended commands store under the per-home ceilings, leaving room
+ * for the command being started: the oldest ended results expire early (tombstone, then payload removal, as at their
+ * retention time) and, past `TOMBSTONE_LIMIT`, the oldest tombstones and
+ * their request keys are removed. Runs under the store lock, before a new
+ * command is accepted. Running commands are never touched.
+ */
+export async function enforceRetainedQuota(opts: {
+  readonly root: string;
+  readonly now: number;
+  readonly limits?: {
+    readonly results: number;
+    readonly bytes: number;
+    readonly tombstones: number;
+  };
+}): Promise<void> {
+  const limits = opts.limits ?? {
+    results: RETAINED_RESULTS_LIMIT,
+    bytes: RETAINED_BYTES_LIMIT,
+    tombstones: TOMBSTONE_LIMIT,
+  };
+  const { retained, tombstones } = await surveyStore(opts.root);
+  retained.sort((a, b) => a.endedAt - b.endedAt);
+  let count = retained.length;
+  let bytes = retained.reduce((sum, item) => sum + item.bytes, 0);
+  for (const item of retained) {
+    if (count < limits.results && bytes <= limits.bytes) {
+      break;
+    }
+    await withJournalLock(item.paths, async () => {
+      if (!(await lstat(item.paths.expired).catch(() => null))) {
+        await expireJournal({ ...item, now: opts.now });
+      }
+    });
+    count -= 1;
+    bytes -= item.bytes;
+    tombstones.push({ paths: item.paths, expiredAt: opts.now });
+  }
+  tombstones.sort((a, b) => a.expiredAt - b.expiredAt);
+  for (const item of tombstones.slice(
+    0,
+    Math.max(0, tombstones.length - limits.tombstones)
+  )) {
+    await removeRequestKey({ root: opts.root, paths: item.paths });
+    await rm(item.paths.dir, { recursive: true, force: true });
+  }
+}
+
+type RetainedResult = {
+  readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+  readonly ended: { readonly payload: Record<string, unknown> };
+  readonly endedAt: number;
+  readonly bytes: number;
+};
+
+async function surveyStore(root: string): Promise<{
+  retained: RetainedResult[];
+  tombstones: { paths: JournalPaths; expiredAt: number }[];
+}> {
+  const retained: RetainedResult[] = [];
+  const tombstones: { paths: JournalPaths; expiredAt: number }[] = [];
+  for (const commandId of await listCommandIds(root)) {
+    const paths = journalPaths({ root, commandId });
+    const tombstone = await readTombstone(paths);
+    if (tombstone) {
+      tombstones.push({ paths, expiredAt: tombstone.expiredAt ?? 0 });
+      continue;
+    }
+    const meta = await readMeta(paths).catch(() => null);
+    const ended = meta ? endedEvent(await readEvents(paths)) : null;
+    if (!(meta && ended)) {
+      continue;
+    }
+    let bytes = 0;
+    for (const path of [paths.events, paths.stdout, paths.stderr]) {
+      bytes += (await lstat(path).catch(() => null))?.size ?? 0;
+    }
+    retained.push({
+      paths,
+      meta,
+      ended,
+      endedAt: Date.parse(ended.time),
+      bytes,
+    });
+  }
+  return { retained, tombstones };
 }
 
 /**

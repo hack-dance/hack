@@ -359,7 +359,7 @@ export async function lookupRequest(opts: {
   if (!(await lstat(resolve(root, "keys")).catch(() => null))?.isDirectory()) {
     return null;
   }
-  return await findExistingRequest({
+  const found = await findExistingRequest({
     root,
     keyPath: requestKeyPath({
       root,
@@ -368,6 +368,22 @@ export async function lookupRequest(opts: {
     }),
     fingerprint: fingerprintOf(opts.fingerprintInputs),
   });
+  // Retention applies here too: a result past its time is not handed back.
+  if (
+    found &&
+    (await expireIfDue({
+      paths: found.paths,
+      meta: found.meta,
+      now: Date.now(),
+    }))
+  ) {
+    throw new HackCliError({
+      code: "E_RESULT_EXPIRED",
+      message:
+        "This requestKey belongs to a command whose result has expired. It is not run again; use a new requestKey.",
+    });
+  }
+  return found;
 }
 
 /** Preallocate bytes that are released only to write `command.ended`. */

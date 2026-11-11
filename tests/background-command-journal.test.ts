@@ -936,7 +936,7 @@ describe("second-review blockers", () => {
       paths,
       meta,
       observe: fakeObserve(),
-      readBootTime: async () => Date.now() + 1000,
+      readBootTime: async () => Date.now() + 120_000,
     });
     expect(
       after.filter((event) => event.type === "command.ended")
@@ -993,6 +993,7 @@ describe("second-review blockers", () => {
     const noSpace = () =>
       Object.assign(new Error("disk full"), { code: "ENOSPC" });
     let lockAttempts = 0;
+    let budget = 700;
     const events = await recoverLostOwner({
       paths,
       meta,
@@ -1006,12 +1007,15 @@ describe("second-review blockers", () => {
         }
         return await withJournalLock(lockPaths, run);
       },
-      // Then every append fails except the final record's, which the
-      // released reserve makes room for.
+      // A real full disk: appends succeed until a byte budget is spent. The
+      // budget fits the final record only, so any output event written
+      // first would take the space the final record needs.
       append: async (path, line) => {
-        if (!line.includes('"command.ended"')) {
+        const bytes = Buffer.byteLength(line);
+        if (bytes > budget) {
           throw noSpace();
         }
+        budget -= bytes;
         await writeFile(path, line, { flag: "a" });
       },
     });
@@ -1023,6 +1027,7 @@ describe("second-review blockers", () => {
       outcome: "unknown",
       truncated: true,
     });
+    expect(events.some((event) => event.type === "command.output")).toBe(false);
   });
 });
 

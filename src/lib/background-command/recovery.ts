@@ -64,6 +64,8 @@ export type ObserveIdentities = (
 /** Seam for tests: last boot time in ms, or null when unknown. */
 export type ReadBootTime = () => Promise<number | null>;
 
+const BOOT_EVIDENCE_MARGIN_MS = 60_000;
+
 /** Child birth values that are not a `ps` start time. */
 export const CHILD_BIRTH_UNOBSERVED = "unobserved";
 export const CHILD_BIRTH_EXITED = "exited-before-observation";
@@ -91,7 +93,10 @@ export async function childState(opts: {
     return "gone";
   }
   const booted = await (opts.readBootTime ?? readBootTimeMs)();
-  return booted !== null && booted > Date.parse(opts.meta.acceptedAt)
+  // Boot time is wall clock minus uptime and moves when the clock is
+  // stepped; a margin keeps an early-boot correction from misreading it.
+  return booted !== null &&
+    booted > Date.parse(opts.meta.acceptedAt) + BOOT_EVIDENCE_MARGIN_MS
     ? "gone"
     : "unknown";
 }
@@ -154,17 +159,19 @@ export function withJournalLock<T>(
  */
 export async function withJournalLockOrReserve<T>(
   paths: JournalPaths,
-  run: () => Promise<T>,
+  run: (context: { readonly reserveReleased: boolean }) => Promise<T>,
   lock: typeof withJournalLock = withJournalLock
 ): Promise<T> {
   try {
-    return await lock(paths, run);
+    return await lock(paths, () => run({ reserveReleased: false }));
   } catch (error: unknown) {
     if (!isNoSpaceError(error)) {
       throw error;
     }
     await unlink(paths.reserve).catch(() => undefined);
-    return await lock(paths, run);
+    // The freed bytes are for the final record only: callers must not spend
+    // them on anything else.
+    return await lock(paths, () => run({ reserveReleased: true }));
   }
 }
 
@@ -207,7 +214,7 @@ export async function recoverLostOwner(opts: {
   const now = opts.now ?? Date.now;
   return await withJournalLockOrReserve(
     opts.paths,
-    async () => {
+    async ({ reserveReleased }) => {
       // Read only until the supervisor is proven gone: it may be mid-write.
       const observed = await readEvents(opts.paths);
       const assessment = await assessOwner({
@@ -228,13 +235,17 @@ export async function recoverLostOwner(opts: {
         events.at(-1)?.seq ?? 0,
         opts.append
       );
-      const truncated = await announceUnsupervisedOutput({
-        paths: opts.paths,
-        meta: opts.meta,
-        events,
-        writer,
-        final: assessment.child === "gone",
-      });
+      // On a full disk (the reserve was released to take the lock) nothing
+      // but the final record may be written: skip announcing output.
+      const truncated = reserveReleased
+        ? true
+        : await announceUnsupervisedOutput({
+            paths: opts.paths,
+            meta: opts.meta,
+            events,
+            writer,
+            final: assessment.child === "gone",
+          });
       const overdue =
         opts.enforceTimeout === true &&
         assessment.child === "alive" &&
@@ -250,15 +261,16 @@ export async function recoverLostOwner(opts: {
       if (!childGone) {
         return await readEvents(opts.paths);
       }
-      const finalTruncated = overdue
-        ? (await announceUnsupervisedOutput({
-            paths: opts.paths,
-            meta: opts.meta,
-            events: await readEvents(opts.paths),
-            writer,
-            final: true,
-          })) || truncated
-        : truncated;
+      const finalTruncated =
+        overdue && !reserveReleased
+          ? (await announceUnsupervisedOutput({
+              paths: opts.paths,
+              meta: opts.meta,
+              events: await readEvents(opts.paths),
+              writer,
+              final: true,
+            })) || truncated
+          : truncated;
       const ended = await writer.write("command.ended", {
         outcome: overdue ? "timed_out" : "unknown",
         reason: overdue ? "orphan_timeout" : assessment.reason,

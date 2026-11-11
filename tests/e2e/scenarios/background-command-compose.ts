@@ -417,7 +417,10 @@ async function checkContainerRestart(stack: Stack): Promise<void> {
 async function checkDownMidBackgroundRun(stack: Stack): Promise<void> {
   await stack.cli(["up", "--detach"]);
   const id = await startSleeper(stack, "before-down-run", "run");
-  await stack.cli(["down"]);
+  const firstDown = await stack.cli(["down"]);
+  stack.ctx.log(
+    `hack down with a background run: exit ${firstDown.exitCode}; stderr tail: ${firstDown.stderr.trim().split("\n").slice(-2).join(" | ")}`
+  );
   const after = parseLines(
     (await stack.cli(["commands", "read", id, "--json", "--wait-ms", "5000"]))
       .stdout
@@ -435,6 +438,35 @@ async function checkDownMidBackgroundRun(stack: Stack): Promise<void> {
     that: cancel?.data?.outcome === "cancelled",
     message: `cancel must stop the background run: ${JSON.stringify(cancel)}`,
   });
+  // Stopping the `docker compose run` client does not stop its one-off
+  // container: the result says `containerProcess: "not_confirmed"`, and the
+  // container is still there (the fixture cleanup removes it by ownership).
+  const oneOff = await ownedContainers(stack, "True");
+  stack.ctx.log(`one-off containers after cancel: ${oneOff.length}`);
+  expect({
+    that: oneOff.length === 1,
+    message: `the documented gap: one one-off container remains after cancel (saw ${oneOff.length})`,
+  });
+}
+
+async function ownedContainers(
+  stack: Stack,
+  oneoff: "True" | null
+): Promise<string[]> {
+  return (
+    await stack.docker([
+      "ps",
+      "-aq",
+      "--no-trunc",
+      "--filter",
+      `label=${OWNER}=${stack.name}`,
+      ...(oneoff
+        ? ["--filter", `label=com.docker.compose.oneoff=${oneoff}`]
+        : []),
+    ])
+  ).stdout
+    .split(WHITESPACE)
+    .filter(Boolean);
 }
 
 /** 3. hack down while a background exec runs. */

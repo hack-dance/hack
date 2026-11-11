@@ -100,17 +100,31 @@ export async function spawnInNewSession(opts: {
   }
   const input = child.stdio[3];
   if (input && "write" in input) {
+    // Bounded: a supervisor that never reads must not hang the launcher
+    // (values larger than the pipe buffer block until read). The launcher's
+    // owner wait then reports the failed start.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     await new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        input.destroy();
+        resolve();
+      }, PRIVATE_INPUT_TIMEOUT_MS);
       input.once("error", () => resolve());
       input.end(opts.privateInput, () => resolve());
     });
+    clearTimeout(timer);
   }
   child.unref();
   return { pid: child.pid, exited };
 }
 
-/** Descriptor on which the supervisor receives its private input. */
+/**
+ * Descriptor on which the supervisor receives its private input. Only the
+ * background launcher starts the supervisor, and it always passes a pipe
+ * here; the supervisor reads whatever fd 3 is, so nothing else may start it.
+ */
 export const PRIVATE_INPUT_FD = 3;
+const PRIVATE_INPUT_TIMEOUT_MS = 5000;
 
 /**
  * Read and close the private input descriptor. Empty when it was not given.

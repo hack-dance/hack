@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile } from "node:fs/promises";
+import { appendFile, chmod } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -2732,6 +2732,8 @@ async function appendAuditLog(opts: {
     };
     // Created 0600: audit lines can describe what ran.
     await appendFile(logPath, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
+    // A log created before this rule keeps its old mode until tightened.
+    await chmod(logPath, 0o600).catch(() => undefined);
   } catch {
     return;
   }

@@ -134,9 +134,13 @@ ever re-run automatically.
 container under the `docker compose exec` client. The client then exits with
 Docker's status, and the command ends `failed` with that exit code (137 in the
 end-to-end test for both cases). `hack down` does not stop a background `run`:
-`docker compose down` leaves a running one-off container in place, so the
-command keeps running until it ends, times out or is cancelled with
-`hack commands cancel` (tested end to end). Hack does not reclassify these ends.
+`docker compose down` leaves a running one-off container in place (it exits 0
+but reports that the project network is still in use), so the command keeps
+running until it ends or times out. `hack commands cancel` stops the
+`docker compose run` client and records `cancelled`, but the one-off container
+and the process in it keep running (`containerProcess: "not_confirmed"`)
+until they end; remove it with `docker rm -f` if needed. Both are tested end
+to end. Hack does not reclassify these ends.
 
 ## Stalls
 

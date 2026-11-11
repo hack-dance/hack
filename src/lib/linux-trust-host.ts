@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { readTextFile } from "./fs.ts";
@@ -22,6 +22,14 @@ export function createLinuxTrustHost(opts?: {
     configHome:
       xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(homeDir, ".config"),
     readFile: async (path) => await readTextFile(path),
+    makeDir: async (path) => {
+      try {
+        await mkdir(path, { recursive: true, mode: 0o700 });
+        return true;
+      } catch {
+        return false;
+      }
+    },
     listDir: async (path) => {
       try {
         return await readdir(path);

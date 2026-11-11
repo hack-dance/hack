@@ -50,6 +50,7 @@ type FakeState = {
   privileged: string[][];
   execs: string[][];
   nss: Map<string, string>;
+  made: string[];
   failPrivileged?: string;
 };
 
@@ -73,6 +74,7 @@ function createFakeHost(init: {
     privileged: [],
     execs: [],
     nss: new Map(Object.entries(init.nss ?? {})),
+    made: [],
     failPrivileged: init.failPrivileged,
   };
   /** Simulated refresh: the family bundle gains every installed anchor. */
@@ -87,12 +89,23 @@ function createFakeHost(init: {
     configHome: `${HOME}/.config`,
     readFile: async (path) => state.files.get(path) ?? null,
     listDir: async (path) => state.dirs.get(path) ?? [],
+    makeDir: async (path) => {
+      state.made.push(path);
+      if (!state.dirs.has(path)) {
+        state.dirs.set(path, []);
+      }
+      return true;
+    },
     hasCommand: async (name) => state.commands.has(name),
     exec: async (argv) => {
       state.execs.push([...argv]);
       const db = (argv[2] ?? "").replace(/^sql:/, "");
       const op = argv[3];
       if (op === "-N") {
+        // Like real certutil: the directory must already exist.
+        if (!state.dirs.has(db)) {
+          return { exitCode: 255, stdout: "" };
+        }
         state.dirs.set(db, ["cert9.db", "key4.db"]);
         return { exitCode: 0, stdout: "" };
       }
@@ -313,6 +326,41 @@ describe("applyLinuxSystemTrust", () => {
     expect(state.privileged).toEqual([]);
   });
 
+  test("an unreadable or non-certificate CA file never reaches sudo", async () => {
+    for (const content of [
+      null,
+      "",
+      "not a certificate",
+      `${CERT}${OLD_CERT}`,
+    ]) {
+      const { host, state } = createFakeHost({
+        osRelease: OS_RELEASE.ubuntu,
+        commands: ["update-ca-certificates"],
+      });
+      if (content === null) {
+        state.files.delete(CERT_PATH);
+      } else {
+        state.files.set(CERT_PATH, content);
+      }
+      const outcome = await applyLinuxSystemTrust({
+        host,
+        certPath: CERT_PATH,
+        canPrompt: true,
+        show: () => {
+          throw new Error("no plan expected");
+        },
+        confirm: async () => {
+          throw new Error("no prompt expected");
+        },
+      });
+      expect(outcome).toMatchObject({
+        status: "manual",
+        code: "linux_trust_ca_invalid",
+      });
+      expect(state.privileged).toEqual([]);
+    }
+  });
+
   test("unknown distro and missing tool give manual steps", async () => {
     const unknown = createFakeHost({ osRelease: OS_RELEASE.alpine });
     const a = await applyLinuxSystemTrust({
@@ -450,6 +498,7 @@ describe("applyLinuxNssTrust", () => {
       ],
     });
     expect(state.privileged).toEqual([]);
+    expect(state.made).toEqual([userDb]);
     expect(state.execs[0]).toEqual([
       "certutil",
       "-d",

@@ -14,6 +14,7 @@ import {
   nssCreateArgv,
   nssDeleteArgv,
   nssListArgv,
+  pemCertificateBodies,
   renderUnknownDistroTrustSteps,
 } from "./linux-trust.ts";
 
@@ -25,6 +26,8 @@ export type LinuxTrustHost = {
   readonly readFile: (path: string) => Promise<string | null>;
   /** Entry names in a directory, or `[]` when absent. */
   readonly listDir: (path: string) => Promise<readonly string[]>;
+  /** Create a directory and its parents (mode 0700); false on failure. */
+  readonly makeDir: (path: string) => Promise<boolean>;
   readonly hasCommand: (name: string) => Promise<boolean>;
   /** Unprivileged command (certutil); output is bounded by the host. */
   readonly exec: (
@@ -38,6 +41,7 @@ export type LinuxTrustCode =
   | "linux_trust_system_pending"
   | "linux_trust_system_failed"
   | "linux_trust_distro_unknown"
+  | "linux_trust_ca_invalid"
   | "linux_trust_tool_missing"
   | "linux_trust_nss_certutil_missing";
 
@@ -108,6 +112,18 @@ export async function applyLinuxSystemTrust(opts: {
     };
   }
   const certPem = (await host.readFile(certPath)) ?? "";
+  if (pemCertificateBodies(certPem).length !== 1) {
+    // Unreadable, empty or not exactly one certificate: nothing to trust,
+    // and no root step may run against that path.
+    return {
+      status: "manual",
+      code: "linux_trust_ca_invalid",
+      family,
+      steps: [
+        `${certPath} is not a single PEM certificate. Rerun hack global trust with the proxy running so Hack exports Caddy's CA again.`,
+      ],
+    };
+  }
   const bundlePath = linuxSystemBundlePath(family);
   const isTrusted = async () =>
     bundleContainsCertificate({
@@ -280,7 +296,11 @@ async function trustOneNssDb(opts: {
   if (
     opts.createIfMissing &&
     !(await host.listDir(dbDir)).includes("cert9.db") &&
-    (await host.exec(nssCreateArgv(dbDir))).exitCode !== 0
+    // certutil -N creates the database files, not their directory.
+    !(
+      (await host.makeDir(dbDir)) &&
+      (await host.exec(nssCreateArgv(dbDir))).exitCode === 0
+    )
   ) {
     return "failed";
   }

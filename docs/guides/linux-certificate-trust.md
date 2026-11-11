@@ -44,6 +44,7 @@ prints the root commands, and reports a stable code:
 | `linux_trust_system_pending` | Root step not run (no prompt possible, or declined); commands printed |
 | `linux_trust_system_failed` | A root command failed; `hack global trust` exits 1 |
 | `linux_trust_distro_unknown` | `/etc/os-release` matched no known family; manual commands printed |
+| `linux_trust_ca_invalid` | The exported CA file is missing, unreadable or not exactly one PEM certificate; nothing runs |
 | `linux_trust_tool_missing` | The family's refresh tool is not installed |
 | `linux_trust_nss_certutil_missing` | `certutil` is missing; browsers were not updated |
 

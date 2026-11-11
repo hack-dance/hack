@@ -1,0 +1,38 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "monorepo",
+    },
+    "apps/api": {
+      "name": "api",
+      "version": "0.0.0",
+      "dependencies": {
+        "@acme/shared": "workspace:*",
+        "hono": "4.10.4",
+      },
+    },
+    "apps/web": {
+      "name": "web",
+      "version": "0.0.0",
+      "dependencies": {
+        "@acme/shared": "workspace:*",
+        "hono": "4.10.4",
+      },
+    },
+    "packages/shared": {
+      "name": "@acme/shared",
+      "version": "0.0.0",
+    },
+  },
+  "packages": {
+    "@acme/shared": ["@acme/shared@workspace:packages/shared"],
+
+    "api": ["api@workspace:apps/api"],
+
+    "hono": ["hono@4.10.4", "", {}, "sha512-YG/fo7zlU3KwrBL5vDpWKisLYiM+nVstBQqfr7gCPbSYURnNEP9BDxEMz8KfsDR9JX0lJWDRNc6nXX31v7ZEyg=="],
+
+    "web": ["web@workspace:apps/web"],
+  }
+}

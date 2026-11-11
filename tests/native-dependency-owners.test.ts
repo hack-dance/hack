@@ -157,6 +157,26 @@ test("an owner that is itself the listener becomes a fixed PID with no replaceme
   expect(entry?.host_ancestor_pid).toBeUndefined();
 });
 
+test.each([
+  "SIGINT",
+  "SIGTERM",
+] as const)("owned discovery preserves %s request evidence through selection wrappers", async (stopSignal) => {
+  const failure = new NativeRuntimeRequestError({
+    message: "request interrupted",
+    stopSignal,
+  });
+  await expect(
+    readNativeHostDependencies({
+      path: await selection([ownedEntry("web")]),
+      services: ["web"],
+      owners: recordingOwners().owners,
+      discoverOwned: async () => {
+        throw failure;
+      },
+    })
+  ).rejects.toBe(failure);
+});
+
 test("owner refusals keep their closed text; other failures stay generic", async () => {
   const path = await selection([ownedEntry("web")]);
   await expectCodedRefusal(

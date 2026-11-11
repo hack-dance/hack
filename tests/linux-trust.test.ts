@@ -230,6 +230,7 @@ function createFakeHost(init: {
   const host: LinuxTrustHost = {
     homeDir: HOME,
     configHome: `${HOME}/.config`,
+    dataHome: `${HOME}/.local/share`,
     uid: UID,
     readFile: async (path) => state.files.get(resolve(path)) ?? null,
     listDir: async (path) => state.dirs.get(resolve(path)) ?? [],
@@ -694,6 +695,32 @@ describe("applyLinuxNssTrust", () => {
     expect(state.nss.get(userDb)).toEqual([
       { pem: CURRENT_CA_PEM, flags: "C,," },
     ]);
+  });
+
+  test("reuses Chromium's modern db when no legacy db exists, and creates nothing", async () => {
+    const modern = `${HOME}/.local/share/pki/nssdb`;
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      dirs: { [modern]: ["cert9.db"] },
+    });
+    expect(await nss(host)).toEqual({
+      status: "done",
+      databases: [{ dbDir: modern, status: "added" }],
+    });
+    expect(state.dirs.has(userDb)).toBe(false);
+  });
+
+  test("an existing legacy db takes precedence over the modern one", async () => {
+    const modern = `${HOME}/.local/share/pki/nssdb`;
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      dirs: { [userDb]: ["cert9.db"], [modern]: ["cert9.db"] },
+    });
+    expect(await nss(host)).toEqual({
+      status: "done",
+      databases: [{ dbDir: userDb, status: "added" }],
+    });
+    expect(state.nss.has(modern)).toBe(false);
   });
 
   test("every certutil call uses the resolved absolute path (finding 6)", async () => {

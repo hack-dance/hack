@@ -48,7 +48,10 @@ certificate's subject and SHA-256 fingerprint.
    installed, Hack runs it by its resolved absolute path and adds the CA as a
    trusted TLS issuer (trust attributes `C,,`), nickname `Hack Caddy Local CA`,
    to:
-   - `~/.pki/nssdb` (Hack creates the directory, mode 0700, then the database);
+   - the shared user database Chromium uses: an existing `~/.pki/nssdb`, else an
+     existing `$XDG_DATA_HOME/pki/nssdb` (default `~/.local/share/pki/nssdb`,
+     Chromium M146 and later), else a new `~/.pki/nssdb` (Hack creates the
+     directory, mode 0700, then the database);
    - existing snap or Flatpak Chromium databases
      (`~/snap/chromium/current/.pki/nssdb`, `~/.var/app/<app>/.pki/nssdb`);
    - every Firefox profile with a `cert9.db` under `~/.mozilla/firefox/`,

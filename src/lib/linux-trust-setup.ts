@@ -38,6 +38,8 @@ export type LinuxTrustHost = {
   readonly homeDir: string;
   /** `$XDG_CONFIG_HOME` when absolute, else `~/.config`. */
   readonly configHome: string;
+  /** `$XDG_DATA_HOME` when absolute, else `~/.local/share`. */
+  readonly dataHome: string;
   /** The current user's uid; NSS writes require databases it owns. */
   readonly uid: number;
   /** File text, or `null` when absent or unreadable. */
@@ -245,12 +247,35 @@ const CERTUTIL_PACKAGE: Readonly<Record<LinuxDistroFamily, string>> = {
   arch: "nss",
 };
 
+function legacyUserNssDb(host: LinuxTrustHost): string {
+  return join(host.homeDir, ".pki", "nssdb");
+}
+
+/**
+ * The shared user db Chromium actually uses. Chromium M146+ defaults to
+ * `$XDG_DATA_HOME/pki/nssdb` but keeps using an existing legacy
+ * `~/.pki/nssdb`. So: an existing legacy db wins, else an existing modern
+ * db, else the legacy path (created later), which every Chromium version
+ * reads once it exists.
+ */
+async function selectUserNssDb(host: LinuxTrustHost): Promise<string> {
+  const legacy = legacyUserNssDb(host);
+  if ((await host.listDir(legacy)).includes("cert9.db")) {
+    return legacy;
+  }
+  const modern = join(host.dataHome, "pki", "nssdb");
+  if ((await host.listDir(modern)).includes("cert9.db")) {
+    return modern;
+  }
+  return legacy;
+}
+
 /** NSS databases: the shared user db plus every browser profile found. */
 export async function findNssDatabases(
   host: LinuxTrustHost
 ): Promise<readonly string[]> {
   const home = host.homeDir;
-  const dirs = [join(home, ".pki", "nssdb")];
+  const dirs = [await selectUserNssDb(host)];
   const hasDb = async (dir: string) =>
     (await host.listDir(dir)).includes("cert9.db");
   // Sandboxed Chromium keeps its own user db; use it only when it exists.
@@ -317,7 +342,9 @@ export async function checkNssDbOwnership(opts: {
   const { host, dbDir } = opts;
   const roots = (
     await Promise.all(
-      [host.homeDir, host.configHome].map((path) => host.inspectPath(path))
+      [host.homeDir, host.configHome, host.dataHome].map((path) =>
+        host.inspectPath(path)
+      )
     )
   )
     .filter((info): info is ResolvedPathInfo => info !== null)
@@ -377,7 +404,7 @@ export async function applyLinuxNssTrust(opts: {
       hint: `certutil is not installed, so browsers that use NSS (Chrome, Chromium, Firefox) were not updated. Install ${pkg}, then rerun hack global trust.`,
     };
   }
-  const userDb = join(host.homeDir, ".pki", "nssdb");
+  const userDb = legacyUserNssDb(host);
   const databases: NssDbOutcome[] = [];
   for (const dbDir of await findNssDatabases(host)) {
     databases.push(

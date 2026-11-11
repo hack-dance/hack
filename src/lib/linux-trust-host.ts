@@ -83,10 +83,15 @@ export function createLinuxTrustHost(opts?: {
 }): LinuxTrustHost {
   const homeDir = opts?.homeDir ?? homedir();
   const xdgConfig = process.env.XDG_CONFIG_HOME;
+  const xdgData = process.env.XDG_DATA_HOME;
   return {
     homeDir,
     configHome:
       xdgConfig && isAbsolute(xdgConfig) ? xdgConfig : join(homeDir, ".config"),
+    dataHome:
+      xdgData && isAbsolute(xdgData)
+        ? xdgData
+        : join(homeDir, ".local", "share"),
     uid: process.getuid?.() ?? -1,
     readFile: async (path) => await readTextFile(path),
     listDir: async (path) => {

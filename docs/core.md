@@ -35,11 +35,13 @@ state and exit-code columns. An exited one-shot with code `0` completed
 successfully; a nonzero code indicates failure. `hack ps --json` reads Compose
 directly and retains each item's `State` and `ExitCode`, including immediately
 after a failed startup. Removed containers are not retained as run history.
-When Compose cannot list containers, `hack ps` reports the first line of the
-engine's error with a stable code (`E_DOCKER_UNAVAILABLE` when the engine is not
-reachable, `E_PERMISSION` when the Docker socket refuses your user,
+When Compose cannot list containers, `hack ps --json` prints the
+`{ok: false, error}` envelope with a stable code and the engine's error line:
+`E_DOCKER_UNAVAILABLE` when the engine is not reachable or does not answer in
+time, `E_PERMISSION` when the Docker socket refuses your user,
 `E_COMPOSE_OUTPUT_INVALID` when the output is not JSON, otherwise
-`E_COMPOSE_FAILED`); with `--json` it prints the `{ok: false, error}` envelope.
+`E_COMPOSE_FAILED`. Without `--json`, the first two print the same coded line;
+for the other two, `hack ps` runs plain `docker compose ps` and shows its output.
 When finished:
 
 ```sh

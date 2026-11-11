@@ -47,8 +47,32 @@ describe("readComposePsResult", () => {
     expect(composePsTextFallbackAllowed(error)).toBe(false);
   });
 
-  test("a timed-out read (exit 124) is E_DOCKER_UNAVAILABLE", () => {
-    expect(failure("", 124).code).toBe("E_DOCKER_UNAVAILABLE");
+  test("a timed-out read (exit 124) is E_DOCKER_UNAVAILABLE and says it timed out", () => {
+    const error = failure("", 124);
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).toContain("did not finish within");
+    expect(error.message).not.toContain("not reachable");
+  });
+
+  test("Compose warnings printed first do not replace the cause", () => {
+    const cause =
+      "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock";
+    const error = failure(
+      [
+        'time="2026-01-01T00:00:00Z" level=warning msg="<project>/.hack/docker-compose.yml: the attribute `version` is obsolete"',
+        'WARN[0000] The "SAMPLE" variable is not set. Defaulting to a blank string.',
+        "warning: sample",
+        cause,
+      ].join("\n")
+    );
+    expect(error.code).toBe("E_PERMISSION");
+    expect(error.message).toEndWith(`Engine said: ${cause}`);
+  });
+
+  test("only warnings: the first warning is still shown", () => {
+    expect(failure("WARN[0000] only a warning", 3).message).toEndWith(
+      "Engine said: WARN[0000] only a warning"
+    );
   });
 
   test("any other failure is E_COMPOSE_FAILED and allows the text fallback", () => {
@@ -109,14 +133,15 @@ describe("firstEngineLine", () => {
       result: {
         exitCode: 1,
         stdout: "",
-        stderr: `error during connect: tcp://user:pa55@host:2376 token=sample-env-value ${"x".repeat(400)}`,
+        stderr: `error during connect: tcp://user:pa@55@host:2376 token=sample-env-value ${"x".repeat(400)}`,
       },
       redactValues: ["sample-env-value", "abc"],
     });
     expect(line).toStartWith(
       "error during connect: tcp://[REDACTED]@host:2376 token=[REDACTED] "
     );
-    expect(line).not.toContain("pa55");
+    expect(line).not.toContain("pa@55");
+    expect(line).not.toContain("55@");
     expect(line).not.toContain("sample-env-value");
     expect(line?.length).toBe(240);
     expect(line).toEndWith("…");
@@ -144,9 +169,31 @@ test("composeEnvValuesToRedact keeps only values Hack added or changed", () => {
   expect(composeEnvValuesToRedact({ env: undefined })).toEqual([]);
 });
 
+function spawnError(code: string): Error {
+  return Object.assign(new Error(`${code}: spawn failed`), { code });
+}
+
+test("readComposePs rethrows a spawn failure when docker is on PATH (for example a missing cwd)", async () => {
+  const error = spawnError("ENOENT");
+  await expect(
+    readComposePs({
+      run: () => Promise.reject(error),
+      dockerOnPath: () => true,
+    })
+  ).rejects.toBe(error);
+  const other = new Error("unrelated");
+  await expect(
+    readComposePs({
+      run: () => Promise.reject(other),
+      dockerOnPath: () => false,
+    })
+  ).rejects.toBe(other);
+});
+
 test("readComposePs reports a missing docker CLI as E_DOCKER_UNAVAILABLE", async () => {
   const read = await readComposePs({
-    run: () => Promise.reject(new Error("ENOENT: docker")),
+    run: () => Promise.reject(spawnError("ENOENT")),
+    dockerOnPath: () => false,
   });
   expect(read.ok).toBe(false);
   if (!read.ok) {

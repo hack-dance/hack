@@ -6,15 +6,17 @@
  * callers get the `{ok:false, error:{code, message}}` envelope and text
  * callers get one closed line without a stack trace:
  *
- * - `E_DOCKER_UNAVAILABLE`: the Docker CLI is missing or the engine cannot be
- *   reached (not running, wrong socket, connection refused).
+ * - `E_DOCKER_UNAVAILABLE`: the Docker CLI is missing, the engine cannot be
+ *   reached (not running, wrong socket, connection refused), or the read
+ *   ran past Hack's inspection timeout.
  * - `E_PERMISSION`: the engine (or a Compose input) refused access, usually
  *   because the user cannot open the Docker socket.
  * - `E_COMPOSE_OUTPUT_INVALID`: Compose exited 0 but printed output that is
  *   not JSON lines or a JSON array of objects.
  * - `E_COMPOSE_FAILED`: any other non-zero exit.
  *
- * Messages carry at most the first line of the engine's error output, with
+ * Messages carry at most one line of the engine's error output (the first
+ * that is not a Compose warning), with
  * URL credentials and caller-named values (for example the project env
  * values passed to Compose) replaced by `[REDACTED]`. Unparsable stdout is
  * never echoed: container listings can carry commands and labels.
@@ -34,10 +36,17 @@ export type ComposePsRead =
   | { readonly ok: true; readonly entries: Record<string, unknown>[] }
   | { readonly ok: false; readonly error: HackCliError };
 
+/** Exit code Hack's subprocess runner reports when its timeout stopped the child. */
+const TIMEOUT_EXIT_CODE = 124;
 /** Longest engine line kept in a message; longer lines are cut with "…". */
 const ENGINE_LINE_MAX_CHARS = 240;
 /** Shorter values are not redacted: they would blank common words. */
 const REDACT_MIN_VALUE_CHARS = 4;
+
+const WARNING_LINE = /^warn(ing)?\b|^warn\[|\blevel=warn(ing)?\b/i;
+const ANSI_ESCAPE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+/** Greedy within the authority, so a password containing `@` is covered. */
+const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi;
 
 const ENGINE_PERMISSION_MARKERS = [
   "docker.sock",
@@ -101,11 +110,20 @@ export function readComposePsResult(opts: {
 export async function readComposePs(opts: {
   readonly run: () => Promise<ComposePsProcessResult>;
   readonly redactValues?: Iterable<string>;
+  /** Whether `docker` resolves on PATH; injectable for tests. */
+  readonly dockerOnPath?: () => boolean;
 }): Promise<ComposePsRead> {
   let result: ComposePsProcessResult;
   try {
     result = await opts.run();
-  } catch {
+  } catch (error: unknown) {
+    const dockerOnPath =
+      opts.dockerOnPath ?? (() => Bun.which("docker") !== null);
+    // Only a spawn failure with no `docker` on PATH is a missing CLI. Any
+    // other failure (a missing cwd, a bug) is not diagnosed as one.
+    if (!(isSpawnNotFound(error) && !dockerOnPath())) {
+      throw error;
+    }
     return {
       ok: false,
       error: new HackCliError({
@@ -116,6 +134,14 @@ export async function readComposePs(opts: {
     };
   }
   return readComposePsResult({ result, redactValues: opts.redactValues });
+}
+
+function isSpawnNotFound(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "ENOENT" || error.code === "EACCES")
+  );
 }
 
 /**
@@ -203,10 +229,13 @@ function composePsFailureError(opts: {
         : `docker compose ps was denied access to a file or socket it needs. Fix the permission named below and retry.${said}`,
     });
   }
-  if (
-    opts.result.exitCode === 124 ||
-    ENGINE_UNREACHABLE_MARKERS.some((m) => lower.includes(m))
-  ) {
+  if (opts.result.exitCode === TIMEOUT_EXIT_CODE) {
+    return new HackCliError({
+      code: "E_DOCKER_UNAVAILABLE",
+      message: `docker compose ps did not finish within Hack's inspection time limit, so it was stopped. The Docker engine may be hung or heavily loaded; check \`docker info\` and retry.${said}`,
+    });
+  }
+  if (ENGINE_UNREACHABLE_MARKERS.some((m) => lower.includes(m))) {
     return new HackCliError({
       code: "E_DOCKER_UNAVAILABLE",
       message: `The Docker engine is not reachable. Start Docker, or check \`docker context ls\` and DOCKER_HOST point at a running engine, then retry.${said}`,
@@ -219,21 +248,25 @@ function composePsFailureError(opts: {
 }
 
 /**
- * First non-empty line of stderr (else stdout), without ANSI escapes, with
+ * First non-warning line of stderr (else stdout), without ANSI escapes, with
  * URL credentials and `redactValues` replaced, cut to a bounded length.
  */
 export function firstEngineLine(opts: {
   readonly result: ComposePsProcessResult;
   readonly redactValues?: Iterable<string>;
 }): string | null {
-  const source =
-    firstNonEmptyLine(opts.result.stderr) ??
-    firstNonEmptyLine(opts.result.stdout);
-  if (source === null) {
+  const lines = [
+    ...cleanLines(opts.result.stderr),
+    ...cleanLines(opts.result.stdout),
+  ];
+  // Compose prints warnings (an obsolete `version`, an unset variable) before
+  // the error; they must not take the cause's place.
+  const source = lines.find((line) => !isWarningLine(line)) ?? lines[0];
+  if (source === undefined) {
     return null;
   }
   let line = source.replace(
-    /([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi,
+    URL_USERINFO,
     (_match, scheme: string) => `${scheme}[REDACTED]@`
   );
   const values = [...(opts.redactValues ?? [])]
@@ -247,12 +280,14 @@ export function firstEngineLine(opts: {
     : line;
 }
 
-function firstNonEmptyLine(text: string): string | null {
-  for (const raw of text.split("\n")) {
-    const line = raw.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "").trim();
-    if (line.length > 0) {
-      return line;
-    }
-  }
-  return null;
+function cleanLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((raw) => raw.replace(ANSI_ESCAPE, "").trim())
+    .filter((line) => line.length > 0);
+}
+
+/** Compose/Docker warning lines: `WARN[0000] …`, `level=warning …`, `warning: …`. */
+function isWarningLine(line: string): boolean {
+  return WARNING_LINE.test(line);
 }

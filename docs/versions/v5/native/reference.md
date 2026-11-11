@@ -5,7 +5,7 @@ The detailed material, by topic. Start with the [overview](overview.md) and
 
 ## Install and versions
 
-- [Install](../install.md) and [Install the prerelease](install.md): the `hack-next` channel,
+- [Install](../install.md) and [Install the prerelease](../../guides/candidate-install.md): the `hack-next` channel,
   running both backends, upgrade and rollback.
 - [Prerelease channel](../../guides/prereleases.md): versions, platforms and what a
   release contains.
@@ -36,6 +36,7 @@ are its main sections:
 | Sharing your source tree | [Explicit writable development source](../../guides/native-candidate.md#explicit-writable-development-source) |
 | What each command supports | [Frontend integration status](../../guides/native-candidate.md#frontend-integration-status) |
 | Intel-only images | [amd64 emulation with Rosetta 2](../../guides/native-candidate.md#amd64-emulation-with-rosetta-2) |
+| Source size | [Source size limit](../../guides/native-candidate.md#source-size-limit) |
 | Local HTTPS | [Optional native HTTPS frontend](../../guides/native-candidate.md#optional-native-https-frontend) |
 | After a crash | [Explicit cleanup after a dead foreground owner](../../guides/native-candidate.md#explicit-cleanup-after-a-dead-foreground-owner) |
 

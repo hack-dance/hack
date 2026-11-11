@@ -54,6 +54,25 @@ const discovery = {
   executable: "/synthetic/tunnel",
   hostPort: 8443,
 };
+test.each([
+  "SIGINT",
+  "SIGTERM",
+] as const)("pinned listener verification preserves %s request evidence", async (stopSignal) => {
+  const failure = new NativeRuntimeRequestError({
+    message: "request interrupted",
+    stopSignal,
+  });
+  await expect(
+    readNativeHostDependencies({
+      path: await selectionFile({ version: 1, dependencies: [binding()] }),
+      services: ["web"],
+      checkPinned: async () => {
+        throw failure;
+      },
+    })
+  ).rejects.toBe(failure);
+});
+
 function unavailableListener() {
   return new NativeRuntimeRequestError({
     message: "Native runtime request failed (host_endpoint_identity)",

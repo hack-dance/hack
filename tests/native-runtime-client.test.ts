@@ -171,6 +171,22 @@ else {
   return { home, binary };
 }
 
+for (const stopSignal of ["SIGINT", "SIGTERM"] as const) {
+  test(`request preserves child termination by ${stopSignal} without a frontend abort`, async () => {
+    const home = await mkdtemp(join(tmpdir(), "hack-native-signal-"));
+    roots.push(home);
+    const binary = join(home, "native");
+    await Bun.write(binary, `#!/bin/sh\nkill -${stopSignal.slice(3)} $$\n`);
+    await chmod(binary, 0o700);
+    const error = await expectClosedRefusal(
+      invokeNativeRuntime({ runtime: { binary, home }, args: [], cwd: home }),
+      "Native runtime request was interrupted"
+    );
+    expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+    expect(error).toHaveProperty("stopSignal", stopSignal);
+  });
+}
+
 test("native selection is explicit and requires an isolated absolute home", () => {
   expect(resolveNativeRuntimeSelection({})).toBeNull();
   expect(() =>

@@ -121,30 +121,27 @@ a:focus-visible {
   background: var(--color-fd-background);
   color: inherit;
 }
-.diagram {
+img.diagram {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
   margin: 1.5rem 0 0.75rem;
-  overflow-x: auto;
   border: 1px solid var(--color-fd-border);
   border-radius: 0.75rem;
   background: #f3efe3;
 }
-.dark .diagram {
+.dark img.diagram {
   background: #11100e;
 }
-.diagram img {
-  display: block;
-  width: 100%;
-  height: auto;
-  margin: 0;
-  max-width: 100%;
-}
-.diagram .diagram-dark {
+/* One Mermaid block renders two images; show the one for the active theme. */
+img.diagram.diagram-dark {
   display: none;
 }
-.dark .diagram .diagram-dark {
+.dark img.diagram.diagram-dark {
   display: block;
 }
-.dark .diagram .diagram-light {
+.dark img.diagram.diagram-light {
   display: none;
 }
 details > summary {

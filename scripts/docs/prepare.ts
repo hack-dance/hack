@@ -373,6 +373,11 @@ async function stageVersion(
       text = publishedCliText(text, version);
     }
     text = pinnedBootstrapText(text, manifest.label);
+    if (version === "v5" && entry.slug === "env") {
+      // Keep the hashed release snapshot as the source; add site-only discovery
+      // links here rather than maintaining a full editorial copy across pins.
+      text += `\n\n## Copy-paste recipes\n\nStart with [Environments](${documentRoute(version, "recipes/environments")}) for overlays,\n[Remote database](${documentRoute(version, "recipes/remote-database")}) for service and host scopes,\nor [Config examples](${documentRoute(version, "recipes/config-examples")}) for complete project files.\n`;
+    }
     const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
     const provenance = entry.editorial
       ? `Editorial source: ${entry.snapshot}; based on ${entry.source.revision}${editorialProvenanceLabel(entry.source)}`

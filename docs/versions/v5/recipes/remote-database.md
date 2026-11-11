@@ -1,7 +1,8 @@
 # Use a remote database from local services
 
-These Compose recipes use commands and configuration available in `v5.0.0-next.13`.
-The linked example projects come from the recipe source revision below.
+The commands and configuration on this page were audited against `v5.0.0-next.13`.
+The execution notes below come from the newer recipe source revision; the examples
+were not rerun with the pinned binary.
 
 Use this when local services must talk to a shared database, such as staging,
 that is reachable only through a proxy or tunnel. You pick the database with an
@@ -217,4 +218,4 @@ firewall drops traffic from containers to the host. It was not tested on
 macOS.
 
 Related: [Environments](environments.md), [Lifecycle](../../lifecycle.md),
-[Env and secrets](../env.md), [Common pitfalls](common-pitfalls.md).
+[Env and secrets](../../env.md), [Common pitfalls](common-pitfalls.md).

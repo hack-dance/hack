@@ -1,7 +1,8 @@
 # Config examples
 
-These Compose recipes use commands and configuration available in `v5.0.0-next.13`.
-The linked example projects come from the recipe source revision below.
+The commands and configuration on this page were audited against `v5.0.0-next.13`.
+The execution notes below come from the newer recipe source revision; the examples
+were not rerun with the pinned binary.
 
 Copy-paste project setups for common shapes. Each one is a complete, working project in
 [`examples/configs`](https://github.com/hack-dance/hack/blob/943503b56081f9934fa98c4b80b7eea2a1a41822/examples/configs): `.hack/hack.config.json`, the env file,

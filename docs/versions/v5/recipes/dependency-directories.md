@@ -1,7 +1,8 @@
 # Dependency directories and caches
 
-These Compose recipes use commands and configuration available in `v5.0.0-next.13`.
-The linked example projects come from the recipe source revision below.
+The commands and configuration on this page were audited against `v5.0.0-next.13`.
+The execution notes below come from the newer recipe source revision; the examples
+were not rerun with the pinned binary.
 
 Use this to decide where `node_modules`, virtual environments, build output and
 tool caches live. The short rule: anything a container installs or generates

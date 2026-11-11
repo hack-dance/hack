@@ -1,7 +1,8 @@
 # Switch between environments
 
-These Compose recipes use commands and configuration available in `v5.0.0-next.13`.
-The linked example projects come from the recipe source revision below.
+The commands and configuration on this page were audited against `v5.0.0-next.13`.
+The execution notes below come from the newer recipe source revision; the examples
+were not rerun with the pinned binary.
 
 Use this to run the same project with different settings: development, QA, or
 a production-like setup. Each environment is an env overlay file. You choose it
@@ -132,7 +133,7 @@ hack restart                                      # running containers keep old 
 ```
 
 Put secrets for an environment there too, with `--secret --value-stdin`. See
-[Env and secrets](../env.md#entering-secret-values).
+[Env and secrets](../../env.md#entering-secret-values).
 
 ## A default overlay
 
@@ -155,5 +156,5 @@ file.
 - Overlay names are lowercase letters and digits joined by hyphens, such as
   `qa` or `qa-2`.
 
-Related: [Env and secrets](../env.md),
+Related: [Env and secrets](../../env.md),
 [Remote database](remote-database.md), [Common pitfalls](common-pitfalls.md).

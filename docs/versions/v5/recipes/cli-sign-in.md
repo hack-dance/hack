@@ -1,7 +1,8 @@
 # Sign in to another CLI at startup
 
-These Compose recipes use commands and configuration available in `v5.0.0-next.13`.
-The linked example projects come from the recipe source revision below.
+The commands and configuration on this page were audited against `v5.0.0-next.13`.
+The execution notes below come from the newer recipe source revision; the examples
+were not rerun with the pinned binary.
 
 Use this when your services need a token from another tool's CLI, such as a
 deploy platform or an edge platform. A lifecycle hook signs in on your machine
@@ -190,5 +191,5 @@ waits for input still waits.
   (`aws sso login`, `gcloud auth login`). The native backend's built-in
   adapters are described in the [native backend guide](../../guides/native-candidate.md).
 
-Related: [Lifecycle](../../lifecycle.md), [Env and secrets](../env.md),
+Related: [Lifecycle](../../lifecycle.md), [Env and secrets](../../env.md),
 [Common pitfalls](common-pitfalls.md).

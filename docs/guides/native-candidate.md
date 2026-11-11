@@ -352,8 +352,16 @@ The bundle's `hack-v5` entrypoint and the `hack-next` launcher accept the same
 selection; see [Test both backends](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends).
 
 Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
-(`hack.dependencies.*`) labels are reviewed as before, and other ordinary labels
-are refused with the general native configuration refusal.
+(`hack.dependencies.*`) labels are reviewed as before. Other ordinary labels, such
+as `com.example.team` or `org.opencontainers.image.*`, are plain metadata: native
+does not apply them to containers and reports the warning `labels_not_applied`.
+Router and runtime labels outside those forms (`traefik.*`, other `caddy.*`,
+`hack.*`) still refuse with `external_route_or_owner_label`.
+
+A `logging:` block with the `json-file`, `local` or `none` driver is accepted and
+not applied (warning `logging_not_applied`): native keeps its own bounded container
+logs, read with `hack logs`. Any other driver still refuses with
+`external_logging_driver`.
 
 Hack's own one-shot marker is not an ownership label. A service labeled exactly
 `hack.service.one-shot: "true"` (or `hack.service.one-shot=true` in list form),

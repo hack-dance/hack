@@ -27,6 +27,7 @@ import {
   type NativeHttpsLeaseIdentity,
   recoverNativeHttpsLease,
 } from "./native-https-owner.ts";
+import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-notices.ts";
 import {
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
   nativeImagePolicyArgs,
@@ -124,6 +125,7 @@ import {
 } from "./native-project-review.ts";
 import {
   hasOnlyNativeSupportedLabels,
+  hasOnlyNativeSupportedLogging,
   nativeBridgeCapacity,
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
@@ -565,7 +567,7 @@ export function nativeServicePreparationProblems(opts: {
   if (value.extra_hosts !== undefined && !opts.hasHostDependencies) {
     problems.push("extra_hosts_without_dependencies");
   }
-  if (value.logging !== undefined) {
+  if (!hasOnlyNativeSupportedLogging(value.logging)) {
     problems.push("unsupported_logging");
   }
   // Restart policies are admitted (or refused with a fixed reason) by the
@@ -2235,6 +2237,7 @@ async function startNativeProjectAttempt(
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
         reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
+        reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,

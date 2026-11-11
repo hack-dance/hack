@@ -172,7 +172,8 @@ const PREPARATION_FINDINGS: Readonly<
   },
   unsupported_logging: {
     field: "logging",
-    message: "The service sets a logging configuration native does not accept.",
+    message:
+      "The service sends logs to a logging driver other than json-file, local or none.",
     fix: "Remove logging. Native keeps its own bounded container logs; read them with hack logs.",
   },
   invalid_restart: {
@@ -183,8 +184,8 @@ const PREPARATION_FINDINGS: Readonly<
   unsupported_label: {
     field: "labels",
     message:
-      "The service has a label native does not accept. Only the reviewed caddy routing labels, dependency cache labels and the one-shot marker are admitted.",
-    fix: "Remove the other labels, or run this project on the Compose backend if a router or tool needs them.",
+      "The service has a router, runtime or Hack label native does not accept. Plain metadata labels are fine; of the caddy, traefik, hack and com.docker.compose families only the reviewed caddy routing labels, dependency cache labels and the one-shot marker are admitted.",
+    fix: "Remove those labels, or run this project on the Compose backend if a router or tool needs them.",
   },
 };
 
@@ -441,8 +442,6 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
       "A mount carries a host-only hint (cached, delegated, consistent, z or Z), which is ignored.",
     fix: "Nothing to do.",
   },
-  // The next two are reported only by a runtime that accepts these settings
-  // with a warning; other runtimes refuse them under the codes above.
   labels_not_applied: {
     message:
       "Metadata labels on the service are not applied to native containers.",

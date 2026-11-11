@@ -401,7 +401,8 @@ test("a detached hackd does not inherit doctor's read-only service flag", async 
 
 test("/proc parsing matches a daemon socket path that contains a space", async () => {
   const proc = join(root, "proc");
-  const daemonRoot = join(root, "a home", ".hack", "daemon");
+  // Runs of spaces must survive: the kernel prints the path verbatim.
+  const daemonRoot = join(root, "a  home", ".hack", "daemon");
   await mkdir(join(proc, "net"), { recursive: true });
   await mkdir(join(proc, "4242", "fd"), { recursive: true });
   await mkdir(daemonRoot, { recursive: true });

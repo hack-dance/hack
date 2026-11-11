@@ -1,3 +1,5 @@
+import { rm, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessProof,
@@ -33,7 +35,7 @@ import {
   uninstallSystemdUnit,
 } from "../daemon/systemd.ts";
 import { HackCliError } from "../lib/cli-result.ts";
-import { pathExists, readTextFile } from "../lib/fs.ts";
+import { ensureDir, pathExists, readTextFile } from "../lib/fs.ts";
 import { logger } from "../ui/logger.ts";
 
 /**
@@ -43,6 +45,7 @@ import { logger } from "../ui/logger.ts";
  * a fake `systemctl`.
  */
 
+const RESTART_PENDING_FILE = "hackd.service.restart-pending";
 const JOURNAL_HINT = `journalctl --user -u ${SYSTEMD_UNIT_NAME} -n 50`;
 const READY_TIMEOUT_MS = 8000;
 
@@ -520,6 +523,12 @@ export async function installDaemonSystemdService(
     unitPath,
     deps,
   });
+  const restartMarker = await noteRestartIfActiveUnitChanges({
+    hooks,
+    before,
+    unitPath,
+    unitText: expected.unitText,
+  });
   const installed = await installSystemdUnit({
     unitPath,
     unitText: expected.unitText,
@@ -559,9 +568,13 @@ export async function installDaemonSystemdService(
   await handOverDirectDaemon({ hooks, before });
 
   // A running service must be restarted when its loaded config changed:
-  // either this install wrote a new unit, or it completed a reload that an
-  // earlier write left pending (`NeedDaemonReload=yes`).
-  const configChanged = installed.changed || before?.needsReload === true;
+  // this install wrote a new unit, it completed a reload that an earlier
+  // write left pending (`NeedDaemonReload=yes`), or an earlier install
+  // changed the unit and failed before its restart (the recorded marker).
+  const configChanged =
+    installed.changed ||
+    before?.needsReload === true ||
+    (await pathExists(restartMarker));
   const action =
     configChanged && before?.active ? ("restart" as const) : ("start" as const);
   if (before?.activeState === "failed") {
@@ -574,6 +587,9 @@ export async function installDaemonSystemdService(
     });
     return 1;
   }
+  // The running service now has the new config (restarted, or started
+  // fresh from it).
+  await rm(restartMarker, { force: true });
   const ready = await reportInstalledDaemonReady({ hooks, unitPath, deps });
   reportLinger({
     linger: await readLingerStatus(deps),
@@ -631,6 +647,30 @@ async function readRunningDaemonOwner(opts: {
       isPidInUnit: opts.hooks.isPidInUnit,
     }));
   return { pid: daemon.pid, bySystemd };
+}
+
+/**
+ * Records, before the unit file changes, that the running service must be
+ * restarted to pick it up. Install clears it only after a successful
+ * restart, so a failure in between (reload, enable, restart) is retried as
+ * a restart, not a no-op `start`. Lives in hackd's own state directory.
+ * Returns the marker path.
+ */
+async function noteRestartIfActiveUnitChanges(opts: {
+  readonly hooks: SystemdCommandHooks;
+  readonly before: SystemdServiceStatus | null;
+  readonly unitPath: string;
+  readonly unitText: string;
+}): Promise<string> {
+  const marker = resolve(opts.hooks.paths.root, RESTART_PENDING_FILE);
+  if (
+    opts.before?.active &&
+    (await readTextFile(opts.unitPath)) !== opts.unitText
+  ) {
+    await ensureDir(opts.hooks.paths.root);
+    await writeFile(marker, "restart hackd.service to load its new unit\n");
+  }
+  return marker;
 }
 
 /** What to do after install could not hand a pid over to systemd. */

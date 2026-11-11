@@ -552,6 +552,7 @@ async function entryExists(path: string): Promise<boolean> {
 }
 
 const PROC_SOCKET_LINK = /^socket:\[(\d+)\]$/;
+const PROC_NET_UNIX_ROW = /^\s*\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+) (.+)$/;
 const DAEMON_SOCKET_NAMES = [
   "hackd.sock",
   "hackd.internal.sock",
@@ -588,10 +589,11 @@ export async function findDaemonSocketOwnersFromProc(opts: {
   );
   const inodes = new Set<string>();
   for (const line of table.split("\n").slice(1)) {
-    const fields = line.trim().split(WHITESPACE_PATTERN);
-    const inode = fields[6];
-    // The path is the rest of the line; it can contain spaces.
-    const path = fields.length > 7 ? fields.slice(7).join(" ") : undefined;
+    // Seven fixed columns, then the path verbatim (it can contain runs of
+    // spaces), separated by exactly one space.
+    const match = PROC_NET_UNIX_ROW.exec(line);
+    const inode = match?.[1];
+    const path = match?.[2];
     if (inode && path && wanted.has(path)) {
       inodes.add(inode);
     }

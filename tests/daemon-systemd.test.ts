@@ -70,6 +70,8 @@ type Fake = {
   enabled: boolean;
   active: boolean;
   failed: boolean;
+  /** Fails `enable` with this stderr while set. */
+  enableError: string | null;
   /** Overrides ActiveState, e.g. "activating" during a restart delay. */
   activeState: string | null;
   needsReload: boolean;
@@ -101,6 +103,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     enabled: false,
     active: opts.active ?? false,
     failed: false,
+    enableError: null,
     activeState: null,
     needsReload: false,
     deps: undefined as unknown as SystemdDeps,
@@ -156,6 +159,13 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
       state.needsReload = false;
     }
     if (verb === "enable") {
+      if (state.enableError) {
+        return Promise.resolve({
+          exitCode: 1,
+          stdout: "",
+          stderr: state.enableError,
+        });
+      }
       state.enabled = true;
     }
     if (verb === "disable") {
@@ -1111,4 +1121,34 @@ test("an install retry after a failed reload restarts the running service", asyn
   expect(reload).toBeGreaterThanOrEqual(0);
   expect(restart).toBeGreaterThan(reload);
   expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+});
+
+test("a restart is kept pending across an enable failure", async () => {
+  // The active unit runs an old program; install writes the new unit,
+  // reloads, then enable fails before any restart.
+  const fake = fakeSystemd({ active: true, mainPid: 4242 });
+  await writeOldUnit(fake);
+  fake.active = true;
+  fake.enableError = "Failed to enable unit: Access denied";
+  const stopped: number[] = [];
+  const hooks = {
+    ...installHooks(fake, stopped),
+    isPidInUnit: () => Promise.resolve(true),
+  };
+  expect(await installDaemonSystemdService(hooks)).toBe(1);
+  expect(await readFile(unitPath, "utf8")).toBe(unitText());
+  expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+
+  // Retry: the file is current and no reload is pending, but the running
+  // service still has the old config, so install must restart it.
+  fake.enableError = null;
+  fake.calls.length = 0;
+  await installDaemonSystemdService(hooks);
+  expect(fake.calls).toContain("systemctl --user restart hackd.service");
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+
+  // Once restarted, a further install is a plain (no-op) start.
+  fake.calls.length = 0;
+  await installDaemonSystemdService(hooks);
+  expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
 });

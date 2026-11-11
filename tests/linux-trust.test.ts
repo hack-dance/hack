@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   bundleContainsCertificate,
@@ -6,7 +10,13 @@ import {
   LINUX_ANCHOR_FILENAME,
   linuxSystemTrustCommands,
   NSS_CA_NICKNAME,
+  VERIFIED_ANCHOR_INSTALL_SCRIPT,
+  VERIFIED_TRUST_ANCHOR_SCRIPT,
 } from "../src/lib/linux-trust.ts";
+
+const sha256 = (text: string) =>
+  createHash("sha256").update(text).digest("hex");
+
 import {
   applyLinuxNssTrust,
   applyLinuxSystemTrust,
@@ -111,7 +121,14 @@ function createFakeHost(init: {
         return 1;
       }
       const [verb] = argv;
-      if (verb === "install") {
+      // Mirror the verified scripts: act only on bytes matching the digest.
+      if (
+        verb === "sh" &&
+        sha256(state.files.get(argv[4] ?? "") ?? "") !== argv[5]
+      ) {
+        return 1;
+      }
+      if (verb === "sh" && argv[3] === "hack-install") {
         // Record the anchor against the bundle its family refresh extracts.
         const target = argv.at(-1) ?? "";
         const bundle = target.startsWith("/usr/local/share")
@@ -125,7 +142,7 @@ function createFakeHost(init: {
         refresh("/var/lib/ca-certificates/ca-bundle.pem");
       } else if (verb === "update-ca-trust") {
         refresh("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem");
-      } else if (verb === "trust") {
+      } else if (verb === "sh" && argv[3] === "hack-trust") {
         state.files.set("anchor:/etc/ssl/certs/ca-certificates.crt", CERT);
         refresh("/etc/ssl/certs/ca-certificates.crt");
       }
@@ -159,29 +176,41 @@ describe("distro detection", () => {
 
 describe("system trust commands", () => {
   test("each family gets its own anchor location and refresh step", () => {
+    const sha = sha256(CERT);
     expect(
-      linuxSystemTrustCommands({ family: "debian", certPath: CERT_PATH })
+      linuxSystemTrustCommands({
+        family: "debian",
+        certPath: CERT_PATH,
+        sha256: sha,
+      })
     ).toEqual([
       [
-        "install",
-        "-D",
-        "-o",
-        "root",
-        "-g",
-        "root",
-        "-m",
-        "0644",
+        "sh",
+        "-c",
+        VERIFIED_ANCHOR_INSTALL_SCRIPT,
+        "hack-install",
         CERT_PATH,
+        sha,
         `/usr/local/share/ca-certificates/${LINUX_ANCHOR_FILENAME}`,
       ],
       ["update-ca-certificates"],
     ]);
     expect(
-      linuxSystemTrustCommands({ family: "fedora", certPath: CERT_PATH }).at(-1)
+      linuxSystemTrustCommands({
+        family: "fedora",
+        certPath: CERT_PATH,
+        sha256: sha,
+      }).at(-1)
     ).toEqual(["update-ca-trust", "extract"]);
     expect(
-      linuxSystemTrustCommands({ family: "arch", certPath: CERT_PATH })
-    ).toEqual([["trust", "anchor", "--store", CERT_PATH]]);
+      linuxSystemTrustCommands({
+        family: "arch",
+        certPath: CERT_PATH,
+        sha256: sha,
+      })
+    ).toEqual([
+      ["sh", "-c", VERIFIED_TRUST_ANCHOR_SCRIPT, "hack-trust", CERT_PATH, sha],
+    ]);
   });
 
   test("bundle matching ignores PEM line wrapping", () => {
@@ -313,11 +342,68 @@ describe("applyLinuxSystemTrust", () => {
     expect(missing.state.privileged).toEqual([]);
   });
 
+  test("a CA file replaced after the prompt is not trusted", async () => {
+    const { host, state } = createFakeHost({
+      osRelease: OS_RELEASE.ubuntu,
+      commands: ["update-ca-certificates"],
+    });
+    const outcome = await applyLinuxSystemTrust({
+      host,
+      certPath: CERT_PATH,
+      canPrompt: true,
+      show: noShow,
+      confirm: async () => {
+        state.files.set(CERT_PATH, OLD_CERT);
+        return true;
+      },
+    });
+    expect(outcome).toMatchObject({ status: "failed", exitCode: 1 });
+    expect(state.privileged).toHaveLength(1);
+  });
+
+  test("the root anchor script installs approved bytes and refuses others", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hack-linux-trust-install-"));
+    try {
+      const bin = join(dir, "bin");
+      await mkdir(bin);
+      await writeFile(
+        join(bin, "install"),
+        '#!/bin/sh\nfor a; do s="$t"; t="$a"; done; cp "$s" "$t"\n',
+        { mode: 0o755 }
+      );
+      const ca = join(dir, "ca.crt");
+      const target = join(dir, "anchor.crt");
+      await writeFile(ca, CERT);
+      const env = { PATH: `${bin}:/usr/bin:/bin`, TMPDIR: dir };
+      const run = () =>
+        Bun.spawn(
+          [
+            "sh",
+            "-c",
+            VERIFIED_ANCHOR_INSTALL_SCRIPT,
+            "hack-install",
+            ca,
+            sha256(CERT),
+            target,
+          ],
+          { env, stderr: "ignore" }
+        ).exited;
+      expect(await run()).toBe(0);
+      expect(await Bun.file(target).text()).toBe(CERT);
+      await rm(target);
+      await writeFile(ca, OLD_CERT);
+      expect(await run()).not.toBe(0);
+      expect(await Bun.file(target).exists()).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a failing root step stops and reports it", async () => {
     const { host, state } = createFakeHost({
       osRelease: OS_RELEASE.ubuntu,
       commands: ["update-ca-certificates"],
-      failPrivileged: "install",
+      failPrivileged: "sh",
     });
     const outcome = await applyLinuxSystemTrust({
       host,

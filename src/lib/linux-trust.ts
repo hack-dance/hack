@@ -109,22 +109,31 @@ export function linuxSystemBundlePath(family: LinuxDistroFamily): string {
   }
 }
 
-/** Root commands that add `certPath` to the family's trust store. */
+/**
+ * Root copies the user-writable CA file into a root-owned temp file, checks
+ * the copy against the sha256 of the bytes Hack read and showed, and acts
+ * only on that copy. A CA file replaced after the prompt fails the step
+ * instead of becoming a trusted root.
+ */
+const VERIFY_COPY =
+  'set -eu; t=$(mktemp); trap \'rm -f "$t"\' EXIT; cat -- "$1" > "$t"; printf "%s  %s\\n" "$2" "$t" | sha256sum -c --status';
+export const VERIFIED_ANCHOR_INSTALL_SCRIPT = `${VERIFY_COPY}; install -D -o root -g root -m 0644 "$t" "$3"`;
+export const VERIFIED_TRUST_ANCHOR_SCRIPT = `${VERIFY_COPY}; trust anchor --store "$t"`;
+
+/** Root commands that add the CA at `certPath` (digest `sha256`) to the trust store. */
 export function linuxSystemTrustCommands(opts: {
   readonly family: LinuxDistroFamily;
   readonly certPath: string;
+  readonly sha256: string;
 }): readonly (readonly string[])[] {
   const anchor = linuxAnchorPath(opts.family);
   const install = (target: string) => [
-    "install",
-    "-D",
-    "-o",
-    "root",
-    "-g",
-    "root",
-    "-m",
-    "0644",
+    "sh",
+    "-c",
+    VERIFIED_ANCHOR_INSTALL_SCRIPT,
+    "hack-install",
     opts.certPath,
+    opts.sha256,
     target,
   ];
   switch (opts.family) {
@@ -135,7 +144,16 @@ export function linuxSystemTrustCommands(opts: {
     case "suse":
       return [install(anchor ?? ""), ["update-ca-certificates"]];
     case "arch":
-      return [["trust", "anchor", "--store", opts.certPath]];
+      return [
+        [
+          "sh",
+          "-c",
+          VERIFIED_TRUST_ANCHOR_SCRIPT,
+          "hack-trust",
+          opts.certPath,
+          opts.sha256,
+        ],
+      ];
     default:
       return [];
   }

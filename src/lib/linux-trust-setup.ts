@@ -2,6 +2,7 @@
  * Apply Caddy's local root CA to the Linux trust stores. All effects go
  * through {@link LinuxTrustHost}; root steps run only after `confirm()`.
  */
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   bundleContainsCertificate,
@@ -127,7 +128,11 @@ export async function applyLinuxSystemTrust(opts: {
       ],
     };
   }
-  const commands = linuxSystemTrustCommands({ family, certPath });
+  const commands = linuxSystemTrustCommands({
+    family,
+    certPath,
+    sha256: createHash("sha256").update(certPem).digest("hex"),
+  });
   opts.show(commands);
   if (!(opts.canPrompt && (await opts.confirm()))) {
     return {

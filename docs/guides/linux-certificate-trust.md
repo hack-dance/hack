@@ -19,6 +19,9 @@ updates three places:
 
    Hack shows the commands first and runs them only after you answer yes in a
    terminal. If the CA is already in the family's extracted bundle, nothing runs.
+   The install and `trust anchor` steps run through a small `sh -c` script: root
+   first copies the CA into a root-owned temp file and checks its sha256 against
+   the certificate Hack showed, so a file replaced after you answer is refused.
 3. **NSS databases** for Chrome, Chromium and Firefox (no root). With `certutil`
    installed, Hack adds the CA as a trusted TLS issuer, nickname
    `Hack Caddy Local CA`, to `~/.pki/nssdb` (it creates the database when

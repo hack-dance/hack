@@ -154,61 +154,38 @@ function prefixFunction(secret: Uint8Array): Uint32Array {
  * Every occurrence of `needle`, overlapping ones included, as merged
  * intervals: a run of overlapping or adjacent occurrences (for example a
  * periodic value in periodic output) is one interval, so memory grows with
- * the number of separate runs, never with the number of occurrences.
- * Exported for tests.
+ * the number of separate runs, never with the number of occurrences. Linear
+ * time (KMP): a byte-by-byte `indexOf` restart would compare nearly the whole
+ * value again at every overlapping position. Exported for tests.
  */
 export function findMatches(
   haystack: Uint8Array,
-  needle: Uint8Array,
-  /**
-   * Sorted, non-overlapping intervals already redacted (by longer values):
-   * an occurrence wholly inside one adds nothing, so the search jumps to
-   * where an occurrence could first reach past it.
-   */
-  covered: readonly { readonly start: number; readonly length: number }[] = []
+  needle: Uint8Array
 ): { readonly start: number; readonly length: number }[] {
   const matches: { start: number; length: number }[] = [];
   if (needle.length === 0 || needle.length > haystack.length) {
     return matches;
   }
-  const buffer = Buffer.from(
-    haystack.buffer,
-    haystack.byteOffset,
-    haystack.byteLength
-  );
-  let from = 0;
-  let k = 0;
-  while (from <= buffer.length - needle.length) {
-    const index = buffer.indexOf(needle, from);
-    if (index < 0) {
-      break;
+  const failure = prefixFunction(needle);
+  let matched = 0;
+  for (let index = 0; index < haystack.length; index += 1) {
+    const byte = haystack[index];
+    while (matched > 0 && needle[matched] !== byte) {
+      matched = failure[matched - 1] ?? 0;
     }
-    while (k < covered.length) {
-      const interval = covered[k] as { start: number; length: number };
-      if (interval.start + interval.length > index) {
-        break;
+    if (needle[matched] === byte) {
+      matched += 1;
+    }
+    if (matched === needle.length) {
+      const start = index + 1 - needle.length;
+      const last = matches.at(-1);
+      if (last && start <= last.start + last.length) {
+        last.length = index + 1 - last.start;
+      } else {
+        matches.push({ start, length: needle.length });
       }
-      k += 1;
+      matched = failure[matched - 1] ?? 0;
     }
-    const inside = covered[k];
-    if (
-      inside &&
-      inside.start <= index &&
-      index + needle.length <= inside.start + inside.length
-    ) {
-      from = Math.max(
-        index + 1,
-        inside.start + inside.length - needle.length + 1
-      );
-      continue;
-    }
-    const last = matches.at(-1);
-    if (last && index <= last.start + last.length) {
-      last.length = index + needle.length - last.start;
-    } else {
-      matches.push({ start: index, length: needle.length });
-    }
-    from = index + 1;
   }
   return matches;
 }
@@ -232,7 +209,7 @@ export function scanOutput(input: ScanInput): ScanResult {
   // rather than values x runs.
   let union: { start: number; length: number }[] = [];
   for (const secret of secrets) {
-    union = mergeSortedIntervals(union, findMatches(scanned, secret, union));
+    union = mergeSortedIntervals(union, findMatches(scanned, secret));
   }
   const redactions = union.map((match) => ({
     offset: input.offset + match.start,

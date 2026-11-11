@@ -250,6 +250,18 @@ describe("scanOutput", () => {
     expect(performance.now() - started).toBeLessThan(2000);
   });
 
+  test("finding a long value in long periodic output is linear, overlaps included", () => {
+    const started = performance.now();
+    expect(
+      findMatches(
+        encoder.encode("a".repeat(262_144)),
+        encoder.encode("a".repeat(100_000))
+      )
+    ).toEqual([{ start: 0, length: 262_144 }]);
+    // Loose bound: the restart-by-one-byte search took seconds here.
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
   test("bytes past the capture budget are not scanned", () => {
     const bytes = encoder.encode(`${"x".repeat(40)}secret!${"y".repeat(10)}`);
     const result = scanOutput({

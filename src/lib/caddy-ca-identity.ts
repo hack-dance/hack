@@ -1,5 +1,6 @@
 import { X509Certificate } from "node:crypto";
 
+import { GLOBAL_CADDY_PROJECT_NAME } from "../constants.ts";
 import { readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import { EXEC_STDOUT_OVERFLOW_EXIT, exec } from "./shell.ts";
@@ -14,7 +15,22 @@ const SINGLE_CERTIFICATE =
   /^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----$/;
 const ROOT_PATH = "/data/caddy/pki/authorities/local/root.crt";
 const INSPECT_FORMAT =
-  '{"id":{{json .Id}},"running":{{json .State.Running}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}';
+  '{"id":{{json .Id}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}';
+/**
+ * Select Hack's Caddy by its Compose labels with the project fixed, never
+ * through the user-writable Compose file: a file whose top-level `name:` was
+ * changed must not be able to point the witness at another project's `caddy`.
+ */
+const SELECT_CADDY = [
+  "docker",
+  "ps",
+  "--quiet",
+  "--no-trunc",
+  "--filter",
+  `label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT_NAME}`,
+  "--filter",
+  "label=com.docker.compose.service=caddy",
+] as const;
 
 export type CaddyCaIdentity = {
   readonly state: "current" | "stale" | "missing" | "unavailable" | "invalid";
@@ -45,6 +61,7 @@ function matchesRunningCaddy(value: unknown, id: string): boolean {
     FULL_CONTAINER_ID.test(value.id) &&
     value.id.startsWith(id) &&
     value.running === true &&
+    value.project === GLOBAL_CADDY_PROJECT_NAME &&
     value.service === "caddy"
   );
 }
@@ -86,7 +103,6 @@ async function copyRuntimeRoot(opts: {
  * equal DER bytes are. Unavailable runtime evidence never confirms an old export.
  */
 export async function inspectCaddyCaIdentity(opts: {
-  readonly composeFile: string;
   readonly certPath: string;
   readonly exec?: typeof exec;
   readonly readTextFile?: typeof readTextFile;
@@ -100,10 +116,10 @@ export async function inspectCaddyCaIdentity(opts: {
   };
   let runtimePem: string;
   try {
-    const selected = await execute(
-      ["docker", "compose", "-f", opts.composeFile, "ps", "-q", "caddy"],
-      { timeoutMs: 5000, stdin: "ignore" }
-    );
+    const selected = await execute(SELECT_CADDY, {
+      timeoutMs: 5000,
+      stdin: "ignore",
+    });
     const id = selected.stdout.trim();
     if (selected.exitCode !== 0 || !CONTAINER_ID.test(id)) {
       return unavailable;

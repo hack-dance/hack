@@ -87,7 +87,6 @@ function fixture(
   let reads = 0;
   const run = () =>
     inspectCaddyCaIdentity({
-      composeFile: "/owned/global/docker-compose.yml",
       certPath: "/owned/export/root.crt",
       now: opts.now ?? now,
       readTextFile: async (path) => {
@@ -130,7 +129,12 @@ function fixture(
           opts.inspectOutput ??
             JSON.stringify(
               opts.metadata === undefined
-                ? { id: ID, running: true, service: "caddy" }
+                ? {
+                    id: ID,
+                    running: true,
+                    project: "hack-dev-proxy",
+                    service: "caddy",
+                  }
                 : opts.metadata
             ),
         ];
@@ -155,15 +159,18 @@ test("unchanged CA uses exact owned running container and bounded public-certifi
   expect(new X509Certificate(result.currentPem ?? "").raw).toEqual(
     certificate.raw
   );
+  // Selected by fixed project and service labels, never via the Compose file.
   expect(f.calls[0]?.cmd).toEqual([
     "docker",
-    "compose",
-    "-f",
-    "/owned/global/docker-compose.yml",
     "ps",
-    "-q",
-    "caddy",
+    "--quiet",
+    "--no-trunc",
+    "--filter",
+    "label=com.docker.compose.project=hack-dev-proxy",
+    "--filter",
+    "label=com.docker.compose.service=caddy",
   ]);
+  expect(f.calls.some((call) => call.cmd.includes("compose"))).toBe(false);
   expect(f.calls[1]?.cmd.slice(0, 5)).toEqual([
     "docker",
     "inspect",
@@ -267,9 +274,17 @@ for (const selected of [
 }
 
 for (const metadata of [
-  { id: ID, running: true, service: "foreign" },
-  { id: ID, running: false, service: "caddy" },
-  { id: "b".repeat(64), running: true, service: "caddy" },
+  { id: ID, running: true, project: "hack-dev-proxy", service: "foreign" },
+  { id: ID, running: false, project: "hack-dev-proxy", service: "caddy" },
+  {
+    id: "b".repeat(64),
+    running: true,
+    project: "hack-dev-proxy",
+    service: "caddy",
+  },
+  // A `caddy` service of another Compose project (a renamed project).
+  { id: ID, running: true, project: "attacker", service: "caddy" },
+  { id: ID, running: true, service: "caddy" },
   {},
   null,
   [],

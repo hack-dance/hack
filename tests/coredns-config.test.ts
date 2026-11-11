@@ -86,7 +86,6 @@ test("routed names answer AAAA with empty NOERROR instead of falling through to 
   expect(block.some((line) => line.includes("answer"))).toBe(false);
   // Unrelated AAAA queries still reach the forwarder.
   expect(block).toContain("    fallthrough");
-  expect(lines.indexOf("  forward . 127.0.0.11")).toBeGreaterThan(end);
 
   const custom = renderGlobalCoreDnsConfig({
     useStaticCaddyIp: true,

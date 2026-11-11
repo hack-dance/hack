@@ -1573,9 +1573,9 @@ export class Qualification {
     }
   }
 
-  observedReady(): boolean {
+  observedReady(label = "ps-after-recover"): boolean {
     const ps = this.exec(
-      "ps-after-recover",
+      label,
       [this.options.hack, "ps", "--path", this.project, "--json"],
       { cwd: this.project, timeout: 30, allowFailure: true }
     );
@@ -2522,7 +2522,7 @@ export class Qualification {
       );
       this.check(
         `warm up -d run ${run}: the project is observed ready`,
-        this.observedReady()
+        this.observedReady(`warm-ready-${run}`)
       );
       const providerAfter = this.providerIdentity();
       this.check(

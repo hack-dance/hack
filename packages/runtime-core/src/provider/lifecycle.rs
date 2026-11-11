@@ -1572,10 +1572,11 @@ fn start_pool(
     owner.process = Some(observed);
     owner.save(candidate)?;
     let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
+    // A witness is recorded only where it can be accepted (a qualified filesystem).
     super::tree_witness::record_boot(
         candidate,
         &lock,
-        result.is_ok(),
+        result.is_ok() && witness_qualified(candidate),
         owner.process.as_ref(),
         proven_trees,
     );

@@ -112,13 +112,15 @@ export function linuxSystemBundlePath(family: LinuxDistroFamily): string {
 }
 
 /**
- * Root copies the user-writable CA file into a root-owned temp file, checks
+ * Root copies the user-writable CA file into a root-owned 0700 directory it
+ * creates under /tmp (named explicitly, never `TMPDIR`, so the copy cannot
+ * sit in a directory the user can write), checks
  * the copy against the sha256 of the bytes Hack read and showed, and acts
  * only on that copy. A CA file replaced after the prompt fails the step
  * instead of becoming a trusted root.
  */
 const VERIFY_COPY =
-  'set -eu; t=$(mktemp); trap \'rm -f "$t"\' EXIT; cat -- "$1" > "$t"; printf "%s  %s\\n" "$2" "$t" | sha256sum -c --status';
+  'set -eu; umask 077; d=$(mktemp -d /tmp/hack-root.XXXXXXXX); trap \'rm -rf "$d"\' EXIT; t="$d/copy"; cat -- "$1" > "$t"; printf "%s  %s\\n" "$2" "$t" | sha256sum -c --status';
 export const VERIFIED_ANCHOR_INSTALL_SCRIPT = `${VERIFY_COPY}; install -D -o root -g root -m 0644 "$t" "$3"`;
 export const VERIFIED_TRUST_ANCHOR_SCRIPT = `${VERIFY_COPY}; trust anchor --store "$t"`;
 

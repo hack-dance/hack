@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
+  copyFileSync,
   ftruncateSync,
   mkdirSync,
   mkdtempSync,
@@ -441,6 +443,29 @@ esac
         cleanup_check_failed: "synthetic ps failure",
       });
     } finally {
+      done();
+    }
+  });
+
+  test("a verifier VM left in the prepared-base store blocks every later step", async () => {
+    const { root, run, done } = fixture();
+    const work = join(root, "prepared-bases", ".work", "fixture");
+    mkdirSync(work, { recursive: true, mode: 0o700 });
+    const binary = join(work, "smolvm");
+    copyFileSync("/bin/sleep", binary);
+    chmodSync(binary, 0o700);
+    const verifier = Bun.spawn([binary, "20"]);
+    try {
+      expect(run.runningProviders()).toEqual([
+        `prepared-bases:${verifier.pid}`,
+      ]);
+      await run.settleProviders("2a prepared base");
+      expect(run.blocked).toContain(`prepared-bases:${verifier.pid}`);
+      verifier.kill("SIGKILL");
+      await verifier.exited;
+      expect(run.runningProviders()).toEqual([]);
+    } finally {
+      verifier.kill("SIGKILL");
       done();
     }
   });

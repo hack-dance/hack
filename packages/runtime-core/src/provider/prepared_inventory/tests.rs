@@ -308,6 +308,7 @@ case "$opts" in
   "") echo "36 25 254:16 / $2 rw,relatime - ext4 $1 rw" > "$FAKE_STATE/mountinfo" ;;
   remount,bind,ro)
     if test -e "$FAKE_STATE/remount-refused"; then echo "remount refused" >&2; exit 32; fi
+    if test -e "$FAKE_STATE/remount-noop"; then exit 0; fi
     sed -i 's/ rw,relatime / ro,relatime /' "$FAKE_STATE/mountinfo" ;;
   *) exit 99 ;;
 esac
@@ -444,6 +445,22 @@ esac
         assert!(!output.status.success());
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(!text.contains("upper_"), "{text}");
+        assert_eq!(
+            guest.log(),
+            "mount ro\nmount \nmount remount,bind,ro\numount\n"
+        );
+    }
+
+    #[test]
+    fn nothing_is_read_when_the_remount_leaves_the_mount_writable() {
+        let guest = Guest::new("remount-noop");
+        guest.flag("ro-refused");
+        guest.flag("remount-noop");
+        let output = guest.run();
+        assert!(!output.status.success());
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(!text.contains("upper_"), "{text}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not mounted read-only"));
         assert_eq!(
             guest.log(),
             "mount ro\nmount \nmount remount,bind,ro\numount\n"

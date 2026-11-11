@@ -938,8 +938,37 @@ export class Qualification {
    * and checks both disks, including the overlay's upper-layer inventory against the pinned
    * guest's file set. Each command is its own check; the base is removed afterwards.
    */
-  preparedBase(): void {
-    const store = join(this.options.root, "prepared-bases");
+  async preparedBase(): Promise<void> {
+    try {
+      this.preparedBaseCommands();
+    } finally {
+      // A verifier VM left running (a failed teardown, or a command killed at its timeout)
+      // must not share the host with the next step's pool: wait, then block later steps.
+      await this.settleProviders("2a prepared base");
+    }
+  }
+
+  /**
+   * Wait for every provider of the run to exit; when one does not, or the check fails,
+   * record it and skip every later step.
+   */
+  async settleProviders(after: string): Promise<void> {
+    const key = `providers_after_${after.replace(/\W+/g, "_")}`;
+    try {
+      const left = await this.lingeringProviders();
+      if (left.length > 0) {
+        this.record(key, left);
+        this.blocked = `step ${after} left provider processes running: ${left.join(", ")}`;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.record(key, { check_failed: message });
+      this.blocked = `the provider check after step ${after} failed: ${message}`;
+    }
+  }
+
+  preparedBaseCommands(): void {
+    const store = this.store();
     mkdirSync(store, { mode: 0o700 });
     const native = (name: string, args: string[]) =>
       this.exec(
@@ -1275,6 +1304,11 @@ export class Qualification {
     return this.processes(home).map((row) => row.pid);
   }
 
+  /** The prepared-base store; its verifier VMs run from work roots below `.work/`. */
+  store(): string {
+    return join(this.options.root, "prepared-bases");
+  }
+
   /** Every pool home of this run. */
   homes(): string[] {
     return [this.main, this.aux, this.isolated];
@@ -1338,11 +1372,30 @@ export class Qualification {
     }
   }
 
-  /** Provider processes of every home of this run, as `home:pid`. */
+  /**
+   * Provider processes of every home of this run, as `home:pid`, and of the prepared-base
+   * store's work roots, as `prepared-bases:pid`.
+   */
   runningProviders(): string[] {
-    return this.homes().flatMap((home) =>
+    const running = this.homes().flatMap((home) =>
       this.providerPids(home).map((pid) => `${basename(home)}:${pid}`)
     );
+    if (existsSync(join(this.store(), ".work"))) {
+      const work = `${realpathSync(join(this.store(), ".work"))}/`;
+      const listing = this.exec("ps", [
+        "/bin/ps",
+        "-A",
+        "-ww",
+        "-o",
+        "pid=,ppid=,rss=,time=,command=",
+      ]);
+      for (const row of parseProcessRows(listing.stdout)) {
+        if (row.command.startsWith(work)) {
+          running.push(`prepared-bases:${row.pid}`);
+        }
+      }
+    }
+    return running;
   }
 
   /**
@@ -2285,7 +2338,6 @@ function readyContainer(status: Record<string, unknown>): string | null {
   );
 }
 
-/** `hack ps --json` data when the run is observed ready. */
 /** A JSON object printed by a command, or null when it printed anything else. */
 export function readJson(stdout: string): Record<string, unknown> | null {
   try {
@@ -2298,6 +2350,7 @@ export function readJson(stdout: string): Record<string, unknown> | null {
   }
 }
 
+/** `hack ps --json` data when the run is observed ready. */
 export function readyData(stdout: string): Record<string, unknown> | null {
   try {
     const value = JSON.parse(stdout) as {

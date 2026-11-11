@@ -21,6 +21,7 @@ import {
   type ReadResult,
   readCommandEvents,
 } from "../lib/background-command/reader.ts";
+import { pruneStore } from "../lib/background-command/store.ts";
 import { emitCliResult, HackCliError, okResult } from "../lib/cli-result.ts";
 import { instanceIdFor } from "./background-command-start.ts";
 import {
@@ -130,6 +131,7 @@ async function loadScopedJournal(opts: {
     branchOption: opts.options.branch,
     noticeToStderr: true,
   });
+  await pruneStore();
   const journal = await loadJournal({
     commandId: opts.commandId,
     inScope: (meta) =>

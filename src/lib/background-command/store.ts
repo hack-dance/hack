@@ -40,6 +40,7 @@ import {
   assessOwner,
   type ObserveIdentities,
   recoverLostOwner,
+  withJournalLock,
 } from "./recovery.ts";
 
 /** Active background commands one caller session may have. */
@@ -412,6 +413,40 @@ export async function pruneExpired(opts: {
       continue;
     }
     await expireJournal({ paths, now: opts.now });
+  }
+}
+
+/**
+ * Enforce retention on access: an ended command whose retention has elapsed
+ * is expired now, under its journal lock, whether or not another command
+ * was started since. True when the journal is (now) expired.
+ */
+export async function expireIfDue(opts: {
+  readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+  readonly now: number;
+}): Promise<boolean> {
+  const ended = endedEvent(await readEvents(opts.paths));
+  if (!ended || opts.now - Date.parse(ended.time) < opts.meta.retentionMs) {
+    return false;
+  }
+  await withJournalLock(opts.paths, async () => {
+    if (!(await lstat(opts.paths.expired).catch(() => null))) {
+      await expireJournal({ paths: opts.paths, now: opts.now });
+    }
+  });
+  return true;
+}
+
+/** Best-effort retention sweep for callers other than a start. */
+export async function pruneStore(root = commandsRoot()): Promise<void> {
+  try {
+    if (!(await lstat(root).catch(() => null))?.isDirectory()) {
+      return;
+    }
+    await withStoreLock(root, () => pruneExpired({ root, now: Date.now() }));
+  } catch {
+    // Retention is also enforced on access; a busy store never fails a read.
   }
 }
 

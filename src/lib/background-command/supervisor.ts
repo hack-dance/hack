@@ -110,7 +110,7 @@ export async function runBackgroundSupervisor(opts: {
       reason: "cancelled_before_start",
     });
   }
-  const proc = await startChild({ paths, meta, launch });
+  const proc = startChild({ paths, meta, launch });
   if (!proc) {
     return await finish({
       ...baseEnded,
@@ -118,10 +118,6 @@ export async function runBackgroundSupervisor(opts: {
       reason: "spawn_failed",
     });
   }
-  await writer.write("command.started", {
-    pid: proc.pid,
-    processGroupId: proc.pid,
-  });
   const capture = new OutputCapture({
     paths,
     writer,
@@ -135,7 +131,14 @@ export async function runBackgroundSupervisor(opts: {
       performance.now()
     ),
   });
+  // Everything after the spawn is guarded: a failure here (for example a
+  // full disk while recording the child) must not abandon a running child.
   try {
+    await recordChild({ paths, proc });
+    await writer.write("command.started", {
+      pid: proc.pid,
+      processGroupId: proc.pid,
+    });
     return await finish(
       await superviseChild({
         proc,
@@ -231,13 +234,13 @@ async function prepare(paths: JournalPaths): Promise<
 /**
  * Start the child in its own session and process group, stdin closed, stdout
  * and stderr appended by the kernel to the journal files (or /dev/null for
- * metadata capture), then record its identity. Null when it cannot start.
+ * metadata capture). Null when it cannot start.
  */
-async function startChild(opts: {
+function startChild(opts: {
   readonly paths: JournalPaths;
   readonly meta: CommandMeta;
   readonly launch: LaunchRecord;
-}): Promise<Bun.Subprocess | null> {
+}): Bun.Subprocess | null {
   const descriptors =
     opts.meta.capture === "full"
       ? {
@@ -265,6 +268,15 @@ async function startChild(opts: {
     closeDescriptor(descriptors.stdout);
     closeDescriptor(descriptors.stderr);
   }
+  return proc;
+}
+
+/** Record the child's identity (pid, birth, process group) for cancel and recovery. */
+async function recordChild(opts: {
+  readonly paths: JournalPaths;
+  readonly proc: Bun.Subprocess;
+}): Promise<void> {
+  const { proc } = opts;
   const snapshot = await observeIdentities([proc.pid]);
   await createPrivateFileExclusive({
     path: opts.paths.child,
@@ -275,7 +287,6 @@ async function startChild(opts: {
       processGroupId: proc.pid,
     }),
   });
-  return proc;
 }
 
 /**

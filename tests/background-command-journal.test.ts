@@ -851,3 +851,22 @@ describe("a full disk while recording events", () => {
     ).toMatchObject({ outcome: "succeeded", captureStopped: "no_space" });
   });
 });
+
+describe("retention on access", () => {
+  test("an ended command past retention expires when read, with no later start", async () => {
+    const { paths, meta } = await acceptCommand({
+      input: input({ retentionMs: 0 }),
+      root,
+    });
+    await writeFile(paths.stdout, "kept output", { mode: 0o600 });
+    await new JournalWriter(paths, meta, 1).write("command.ended", {
+      outcome: "succeeded",
+    });
+    await expectCode(
+      loadJournal({ commandId: meta.commandId, root }),
+      "E_RESULT_EXPIRED"
+    );
+    expect(await lstat(paths.stdout).catch(() => null)).toBeNull();
+    expect(await readFile(paths.meta, "utf8")).not.toContain("echo");
+  });
+});

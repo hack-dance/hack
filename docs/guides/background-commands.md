@@ -179,7 +179,9 @@ user that can select the project can read it, and backups can copy it.
 - Journals live under the Hack home, in `commands/<id>/` (directory mode 0700,
   files mode 0600), never under a project's `.hack/` folder.
 - Output of ended commands is removed after the retention period, at most 24
-  hours. A later read then fails with `E_RESULT_EXPIRED`.
+  hours. Retention is checked whenever a command is read, shown or started, so
+  nothing depends on another command running. A later read fails with
+  `E_RESULT_EXPIRED`.
 - Metadata never contains environment values.
 
 Settings, in the global `~/.hack/hack.config.json` or the project's

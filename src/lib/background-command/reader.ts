@@ -26,7 +26,7 @@ import {
   type ObserveIdentities,
   recoverLostOwner,
 } from "./recovery.ts";
-import { expiresAt } from "./store.ts";
+import { expireIfDue, expiresAt } from "./store.ts";
 
 export const DEFAULT_READ_MAX_BYTES = 32 * 1024;
 export const MAX_READ_MAX_BYTES = 256 * 1024;
@@ -92,7 +92,10 @@ export async function loadJournal(opts: {
   if (!meta || (opts.inScope && !opts.inScope(meta))) {
     throw commandNotFound();
   }
-  if (await isExpired(paths)) {
+  if (
+    (await isExpired(paths)) ||
+    (await expireIfDue({ paths, meta, now: Date.now() }))
+  ) {
     throw new HackCliError({
       code: "E_RESULT_EXPIRED",
       message:

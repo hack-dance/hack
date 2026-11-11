@@ -862,6 +862,30 @@ describe("applyLinuxNssTrust", () => {
   });
 
   test.each([
+    ["cert9.db", "/srv/shared-browser/cert9.db"],
+    ["key4.db", "/srv/shared-browser/key4.db"],
+  ] as const)("a %s link that leaves the database directory is refused", async (name, target) => {
+    const dir = `${firefoxRoot}/p`;
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      links: { [`${dir}/${name}`]: target },
+      dirs: {
+        [userDb]: ["cert9.db"],
+        [firefoxRoot]: ["p"],
+        [dir]: ["cert9.db", "key4.db"],
+        "/srv/shared-browser": ["cert9.db", "key4.db"],
+      },
+    });
+    expect(await nss(host)).toMatchObject({
+      databases: [
+        { dbDir: userDb, status: "added" },
+        { dbDir: dir, status: "refused" },
+      ],
+    });
+    expect(state.nss.has(dir)).toBe(false);
+  });
+
+  test.each([
     ["another user's directory", { uid: 1001, mode: 0o4_0700 }, "dir"],
     ["a group-writable directory", { uid: UID, mode: 0o4_0770 }, "dir"],
     ["another user's cert9.db", { uid: 1001, mode: 0o10_0600 }, "db"],

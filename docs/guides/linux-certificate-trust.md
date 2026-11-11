@@ -77,7 +77,8 @@ certificate's subject and SHA-256 fingerprint.
    you and not group- or world-writable. Symlinks that stay inside your home,
    such as snap's `current` revision link and Flatpak's per-app tree, are
    followed. A database that resolves elsewhere (another user's profile, a
-   shared directory) is skipped and reported.
+   shared directory) is skipped and reported. The `cert9.db` and `key4.db` files
+   themselves must be files in that directory, not links to somewhere else.
 
 A run that cannot prompt (no TTY, `HACK_NO_INTERACTIVE=1` or `--no-interactive`)
 never runs `sudo`. It still prepares the host bundle and the NSS databases,

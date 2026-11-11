@@ -381,15 +381,34 @@ export async function checkNssDbOwnership(opts: {
   if (!opts.requireDb) {
     return { ok: true };
   }
-  const db = await host.inspectPath(join(dir.realPath, "cert9.db"));
-  if (!db || db.isDirectory || !ownedAndPrivate(db, host.uid)) {
-    return {
-      ok: false,
-      reason: "cert9.db is missing, not owned by you, or group/world-writable",
-    };
+  // The database files must live in that directory themselves: a cert9.db
+  // or key4.db link that resolves elsewhere would let a write escape the
+  // containment checked above.
+  for (const name of NSS_DB_FILES) {
+    const expected = join(dir.realPath, name);
+    const file = await host.inspectPath(expected);
+    if (!file) {
+      if (name === "cert9.db") {
+        return { ok: false, reason: "cert9.db is missing" };
+      }
+      continue;
+    }
+    if (
+      file.realPath !== expected ||
+      file.isDirectory ||
+      !ownedAndPrivate(file, host.uid)
+    ) {
+      return {
+        ok: false,
+        reason: `${name} resolves outside the database directory, is not owned by you, or is group/world-writable`,
+      };
+    }
   }
   return { ok: true };
 }
+
+/** NSS sql database files Hack writes through certutil. */
+const NSS_DB_FILES = ["cert9.db", "key4.db"] as const;
 
 /**
  * Add the CA to each owned NSS db (no root). A db that holds another

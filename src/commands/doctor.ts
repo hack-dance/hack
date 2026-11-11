@@ -244,6 +244,7 @@ import {
   scopeRuntimeHygieneToProject,
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
+import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import {
@@ -3944,6 +3945,7 @@ async function runDoctorFix(opts: {
     renderGlobalCaddyCompose({
       useStaticCoreDnsIp: useStaticIps,
       useStaticCaddyIp: useStaticIps,
+      bindAddress: await resolveProxyBindAddress(),
     })
   );
   await writeWithPromptIfDifferent(

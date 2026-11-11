@@ -1,0 +1,11 @@
+{
+  "name": "static-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "watch": "bun build ./src/index.html --outdir /site --watch"
+  },
+  "dependencies": {
+    "nanoid": "5.1.6"
+  }
+}

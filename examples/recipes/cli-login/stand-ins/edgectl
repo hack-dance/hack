@@ -1,0 +1,17 @@
+#!/bin/sh
+# Stand-in for a edge platform CLI. Not a real product.
+set -eu
+dir="${XDG_CONFIG_HOME:-$HOME/.config}/edgectl"
+case "${1:-}" in
+  login)
+    mkdir -p "$dir"
+    umask 077
+    printf 'stand-in-edge-token-%s\n' "$(date +%s)" > "$dir/credentials"
+    echo "edgectl: signed in" >&2 ;;
+  whoami)
+    test -s "$dir/credentials" && echo "dev@example.invalid" ;;
+  token)
+    test -s "$dir/credentials" || { echo "edgectl: not signed in" >&2; exit 1; }
+    cat "$dir/credentials" ;;
+  *) echo "usage: edgectl login|whoami|token" >&2; exit 2 ;;
+esac

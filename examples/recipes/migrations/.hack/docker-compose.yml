@@ -1,0 +1,37 @@
+name: migrations
+services:
+  db:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Runs once per start, after the database is healthy, then exits.
+  migrate:
+    image: postgres:17.6-alpine
+    command: ["sh", "/scripts/migrate.sh"]
+    volumes:
+      - ../migrations:/migrations:ro
+      - ../scripts:/scripts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Starts only after the migrations succeeded.
+  app:
+    image: postgres:17.6-alpine
+    command: ["sleep", "infinity"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  db-data: {}

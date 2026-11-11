@@ -130,6 +130,11 @@ import {
 import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local-route-host.ts";
 import { isLinux, isMac } from "../lib/os.ts";
 import {
+  readProxyBindFromCompose,
+  resolveProxyBindAddress,
+} from "../lib/proxy-bind.ts";
+import { diagnoseProxyPortConflict } from "../lib/proxy-port-listeners.ts";
+import {
   reconcileRemoteCaddyRoutesStack,
   stopRemoteCaddyRoutesStack,
 } from "../lib/remote-caddy-routes.ts";
@@ -1098,6 +1103,7 @@ async function writeGlobalInstallAssets(opts: {
     renderGlobalCaddyCompose({
       useStaticCoreDnsIp: opts.useStaticIps,
       useStaticCaddyIp: opts.useStaticIps,
+      bindAddress: await resolveProxyBindAddress(),
     })
   );
   await writeWithPromptIfDifferent(
@@ -1844,6 +1850,12 @@ export async function globalUp(): Promise<number> {
     { cwd: dirname(paths.caddyCompose) }
   );
   if (caddyExit !== 0) {
+    const conflict = await diagnoseProxyPortConflict({
+      bindAddress: readProxyBindFromCompose(
+        (await readTextFile(paths.caddyCompose)) ?? ""
+      ),
+    });
+    logger.error({ message: conflict });
     return caddyExit;
   }
   const remainingProxyIssues = await inspectProxyNetwork({

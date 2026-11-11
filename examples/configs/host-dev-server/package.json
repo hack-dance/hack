@@ -1,0 +1,11 @@
+{
+  "name": "host-dev-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/server.ts"
+  },
+  "dependencies": {
+    "hono": "4.10.4"
+  }
+}

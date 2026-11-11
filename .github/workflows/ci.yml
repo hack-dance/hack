@@ -533,7 +533,7 @@ jobs:
     # `pooled` (pushes and pull requests, HACK-2028): shards 1-3 run the
     # platform-sensitive files on macOS and shards 4-8 the rest on Linux
     # (POOLED_MACOS_SHARDS in scripts/test-shard-plan.ts; the runner refuses a
-    # shard on the wrong host). Release and prerelease builds stay on macOS.
+    # shard on the wrong host). Release and prerelease build hosts are unchanged.
     runs-on: ${{ (needs.changes.outputs.test_layout == 'pooled' && matrix.shard > 3) && 'ubuntu-latest' || 'macos-15' }}
     # Eight shards keep the slower GitHub-hosted macOS jobs below the existing
     # 30 min file-runner deadline; the 40 min job limit bounds a hung runner.

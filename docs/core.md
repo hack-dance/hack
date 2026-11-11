@@ -70,5 +70,12 @@ Agents can use the same CLI. `--json` returns structured results and
 or hosted account is required for the core workflow.
 
 Use the [CLI overview](cli.md) to choose a command and the
-[command reference](reference/cli.md) to find its flags. The native v5 runtime has
-separate [experimental guidance](guides/v5-dogfooding.md).
+[command reference](reference/cli.md) to find its flags.
+
+## Backends
+
+Docker Compose is the default backend and the one every example on this page uses.
+v5 adds a native backend (beta) for Apple Silicon macOS, available through the
+`hack-next` channel and selected with `HACK_RUNTIME_BACKEND=native`, that runs explicitly prepared projects without Docker
+and supports a bounded command subset. See [Upgrade to v5](guides/upgrade-to-v5.md)
+and [the native backend overview](native/README.md).

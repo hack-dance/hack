@@ -376,7 +376,7 @@ bundle can use it; identity mismatches do not authorize killing sessions or dele
 state. Empty runtime directories and stable lease files remain for safe reuse.
 Client reload/restart behavior remains client-specific.
 
-Ordinary `hack mcp install`, `hack setup mcp`, and `hack setup sync` preserve an
+Ordinary `hack mcp install` and `hack setup mcp` preserve an
 existing Hack entry, including a selected shared adapter and custom client settings.
 Repeating setup does not switch the selected backend back to standard stdio. Pass
 `--bundle` and `--cli` to select another verified bundle, or remove the selected

@@ -29,7 +29,7 @@ runs:
     - name: Create isolated Hack network
       shell: bash
       run: docker network create --subnet 172.30.0.0/16 hack-dev
-    # The Linux pool may lack tmux; full-layout pushes run on macOS and skip.
+    # The Linux test pool may lack tmux and skip this file.
     # Require one real pass here, where tmux is explicitly installed.
     - name: Verify private tmux input on Linux
       if: inputs.shard == inputs.extra-shard

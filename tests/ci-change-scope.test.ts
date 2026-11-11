@@ -100,14 +100,14 @@ describe("change scope classification", () => {
     }
   });
 
-  test("only full scope runs every compiler host and the macOS-only layout", () => {
+  test("only full scope runs every compiler host; every scope pools the shards", () => {
     const full = scopeOutputs("full");
     expect(JSON.parse(full.compiler_hosts)).toEqual(COMPILER_HOSTS);
     expect(full).toMatchObject({
       compiler_rust: true,
       runtime_core: true,
       suite: true,
-      test_layout: "full",
+      test_layout: "pooled",
       test_focus: "",
     });
     expect(COMPILER_HOSTS.map((host) => host.os)).toEqual([
@@ -250,7 +250,7 @@ describe("pull request diff", () => {
     });
     expect(push.exitCode).toBe(0);
     expect(push.stdout.toString()).toContain("scope=full\n");
-    expect(push.stdout.toString()).toContain("test_layout=full\n");
+    expect(push.stdout.toString()).toContain("test_layout=pooled\n");
   });
 });
 

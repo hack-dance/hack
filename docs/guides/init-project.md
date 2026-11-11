@@ -53,7 +53,7 @@ Without that selection, the Compose scaffold and its next steps are unchanged.
 
 Optional:
 - `hack logs --pretty` for log tailing.
-- `hack tui` for the interactive dashboard.
+- `hack tui` for the interactive terminal UI.
 - Configure log retention in `hack.config.json` via `logs.retention_period` (e.g. `7d`) and `logs.clear_on_down`.
 - Add startup hooks/host processes in `.hack/hack.config.json` under `lifecycle` (or `startup` shorthand). See `docs/lifecycle.md`.
 - For fixed-port host helpers such as SSM tunnels, add `singleton.ports` and usually `onConflict: "adopt"` so `hack up` reuses an already-running equivalent helper instead of starting duplicate tunnel stacks.
@@ -77,7 +77,7 @@ select are written into the repository: `.cursor/rules/hack.mdc`,
 `.claude/settings.local.json` plus the `hack-init` skill, `.codex/skills/hack-cli`,
 the managed section of `AGENTS.md`/`CLAUDE.md`, or project MCP config.
 
-`hack doctor` and `hack agent prime --check` treat absent optional integrations as
+`hack doctor` treats absent optional integrations as
 current. They report review needed only for an installed integration that is stale
 or unreadable, or for a retired legacy artifact.
 

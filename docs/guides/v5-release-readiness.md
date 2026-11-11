@@ -8,14 +8,14 @@ Stable Hack remains the default while a candidate is qualified beside it. Reuse
 
 ## Version, channel and exact source
 
-Official release metadata checked on 2026-10-28 reports stable **v4.2.4** and
-prerelease **v5.0.0-next.5**. Protected `next` is
-[`f73fbd56`](https://github.com/hack-dance/hack/commit/f73fbd56340078d66c0046ec5e371cd948173d2f).
-The branch's package.json version is not the latest published stable version.
-Recheck official releases and branch heads immediately before preparing a release.
+Read the current stable and prerelease versions from the
+[releases page](https://github.com/hack-dance/hack/releases) and the protected
+`next` head immediately before preparing a release; the branch's package.json
+version is not the latest published stable version.
 
-The next proposed native release is **5.0.0-next.6**, channel **prerelease**, only
-if that number is still unused. It is not reserved or approved for publication.
+The next proposed prerelease is the next unused `5.0.0-next.N`, channel
+**prerelease**. A number is not reserved or approved for publication until the
+release workflow runs.
 An exact integration candidate/artifact has not been selected: reviewed local
 follow-ups and held draft PRs are not an integrated release. Record the immutable
 source SHA, all included changes, build/tool versions, platform, artifact digests,
@@ -33,6 +33,7 @@ into the stable default or switch active projects to create a readiness claim.
 | Resolve local safety/test gates | Reviewed ownership, settlement, deadline, env/storage and fixture corrections on an exact candidate | Unknown identity/group/data state stays retained. Do not weaken a deadline, bypass a hook or discard failed evidence. |
 | Prepare an integration candidate | Reviewed changes based on protected next, with approved integration actions and an immutable SHA | Held candidates are not authorized to merge merely because they pass local checks. |
 | Run required source/CI gates | Pinned Bun/Rust checks, full sharded CLI tests, native plan/config compiler checks, platform core tests, secrets/privacy, model positive/negative controls | No cache/skip/fixture pass replaces an unavailable required gate. Release preparation must use the required bounded CI contract, not hide a stalled serial suite. |
+| Build smoke on four hosts | The four `Config compiler (<host>)` jobs of a push CI run on `next` build the stable archive, install it through the generated installers and run the installed CLI on Linux x64, Linux arm64, macOS arm64 and macOS Intel | A pull-request run covers Linux x64 only; it is not the four-host evidence. |
 | Build and verify the package | Exact-version artifact, all bundled executable identities/manifests, signature/checksum/provenance validation, official-download equality | A build, install or version string is not application acceptance. |
 | Qualify fresh setup and existing-project upgrade | Fresh private candidate installation; reviewed project adaptation/import; env/secret delivery; supported routing/TLS, services/jobs/logs/exec/run; ownership-safe stop/recovery and retained data | No new credentials, provider/security settings or data migration inferred from software installation. |
 | Qualify agent integration | Fresh supported Codex plugin and MCP sessions, actual client loading, full useful workflows, cancellation and duplicate-server behavior | Documentation or generated plugin files do not prove client integration; measure the actual selected bundle. |

@@ -29,6 +29,7 @@ import {
   assessExecutableDurability,
   checkServiceExecutableTrusted,
   checkSystemdLoadedUnitPaths,
+  checkSystemdUnitDirectoryChain,
   checkSystemdUnitDropIns,
   checkSystemdUnitFile,
   ensureOwnerWritableOnlyDirectories,
@@ -1708,4 +1709,42 @@ test("every symlink hop of the service program is checked, not just the ends", a
       hackHome,
     })
   ).toBeNull();
+});
+
+test("a writable directory above the config home stops install and start", async () => {
+  // Codex review: with a world-writable home, another account can rename
+  // `.config` and plant its own hackd.service.
+  const fake = fakeSystemd();
+  expect(
+    (
+      await installSystemdUnit({
+        unitPath,
+        unitText: unitText(),
+        deps: fake.deps,
+      })
+    ).ok
+  ).toBe(true);
+  // `root` stands in for $HOME (it holds config/ and the fixture bin/).
+  await chmod(root, 0o777);
+  try {
+    fake.calls.length = 0;
+    expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+    expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+    const install = await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    expect(install.ok).toBe(false);
+    if (!install.ok) {
+      expect(install.error).toContain("chmod go-w");
+    }
+    // Hack does not change directories outside its own.
+    expect((await stat(root)).mode & 0o777).toBe(0o777);
+    // The refusal names the writable directory.
+    expect(await checkSystemdUnitDirectoryChain({ unitPath })).toContain(root);
+  } finally {
+    await chmod(root, 0o700);
+  }
+  expect(await checkSystemdUnitDirectoryChain({ unitPath })).toBeNull();
 });

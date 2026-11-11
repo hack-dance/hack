@@ -915,7 +915,9 @@ export async function installSystemdUnit(opts: {
   if (!secured.ok) {
     return { ok: false, error: secured.error };
   }
-  const dropIns = await checkSystemdUnitDropIns({ unitPath: opts.unitPath });
+  const dropIns =
+    (await checkSystemdUnitDirectoryChain({ unitPath: opts.unitPath })) ??
+    (await checkSystemdUnitDropIns({ unitPath: opts.unitPath }));
   if (dropIns !== null) {
     return { ok: false, error: dropIns };
   }
@@ -1146,9 +1148,33 @@ export async function checkSystemdUnitFile(opts: {
     uid,
     directory: false,
   });
-  return error === null
-    ? null
-    : `Not using ${SYSTEMD_UNIT_NAME}: ${error}. Review and remove it, then run: hack daemon install`;
+  if (error !== null) {
+    return `Not using ${SYSTEMD_UNIT_NAME}: ${error}. Review and remove it, then run: hack daemon install`;
+  }
+  return await checkSystemdUnitDirectoryChain({
+    unitPath: opts.unitPath,
+    uid,
+  });
+}
+
+/**
+ * The directories above the unit, past `$XDG_CONFIG_HOME` up to `/` and
+ * through every symlink hop, must not be replaceable by another account: a
+ * writable home lets someone rename `.config` and plant their own unit.
+ * Hack does not change those directories; it refuses with the `chmod` to
+ * run.
+ */
+export async function checkSystemdUnitDirectoryChain(opts: {
+  readonly unitPath: string;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const error = await checkReplaceableChain({
+    path: dirname(opts.unitPath),
+    uid: opts.uid ?? process.getuid?.() ?? -1,
+    hackHome: null,
+  });
+  return error === null ? null : `Not using ${SYSTEMD_UNIT_NAME}: ${error}`;
 }
 
 /** {@link checkSystemdUnitFile}, then {@link checkSystemdUnitDropIns}. */
@@ -1239,10 +1265,34 @@ export async function checkServiceExecutableTrusted(opts: {
   } catch (error: unknown) {
     return `${opts.path} could not be resolved: ${errorMessage(error)}`;
   }
-  const hackHome = resolve(opts.hackHome);
-  // Every symlink hop, on the program or on any directory above it, adds
+  const error = await checkReplaceableChain({
+    path: opts.path,
+    uid,
+    hackHome: resolve(opts.hackHome),
+  });
+  return error === null
+    ? null
+    : `${SYSTEMD_UNIT_NAME} would run ${opts.path}, but ${error}`;
+}
+
+/**
+ * Null when nothing on the way to `path` can be replaced by another account:
+ * `path`, every directory above it up to `/`, and, for every symlink hop on
+ * the path or on any directory above it, the hop target's own chain. Each
+ * entry must be owned by `uid` or root and not writable by group or others
+ * (sticky directories excepted); group/other write is removed inside
+ * `hackHome` (Hack's own directories) and refused elsewhere.
+ */
+async function checkReplaceableChain(opts: {
+  readonly path: string;
+  readonly uid: number;
+  readonly hackHome: string | null;
+}): Promise<string | null> {
+  const { uid } = opts;
+  const hackHome = opts.hackHome;
+  // Every symlink hop, on the path or on any directory above it, adds
   // its target's chain: whoever can write a directory holding any hop can
-  // redirect the program.
+  // redirect it.
   const pending = [resolve(opts.path)];
   const seen = new Set<string>();
   while (pending.length > 0) {
@@ -1252,7 +1302,7 @@ export async function checkServiceExecutableTrusted(opts: {
     }
     seen.add(path);
     if (seen.size > MAX_SERVICE_PATH_HOPS) {
-      return `${SYSTEMD_UNIT_NAME} would run ${opts.path}, but its path has too many symlink hops to check`;
+      return `${opts.path} has too many symlink hops to check`;
     }
     for (const entry of pathChain(path)) {
       const hop = await readSymlinkHop(entry);
@@ -1261,7 +1311,7 @@ export async function checkServiceExecutableTrusted(opts: {
       }
       const error = await checkServicePathEntry({ path: entry, uid, hackHome });
       if (error !== null) {
-        return `${SYSTEMD_UNIT_NAME} would run ${opts.path}, but ${error}`;
+        return error;
       }
     }
   }
@@ -1297,7 +1347,7 @@ async function readSymlinkHop(path: string): Promise<string | null> {
 async function checkServicePathEntry(opts: {
   readonly path: string;
   readonly uid: number;
-  readonly hackHome: string;
+  readonly hackHome: string | null;
 }): Promise<string | null> {
   let info: Awaited<ReturnType<typeof lstat>>;
   try {
@@ -1318,7 +1368,8 @@ async function checkServicePathEntry(opts: {
     return null;
   }
   const insideHackHome =
-    opts.path === opts.hackHome || opts.path.startsWith(`${opts.hackHome}/`);
+    opts.hackHome !== null &&
+    (opts.path === opts.hackHome || opts.path.startsWith(`${opts.hackHome}/`));
   if (insideHackHome && info.uid === opts.uid) {
     try {
       await chmod(opts.path, info.mode & 0o7755);

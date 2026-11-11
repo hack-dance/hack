@@ -19,7 +19,7 @@ export function DiagramImage(props: ComponentProps<"img">) {
     return <DefaultImage {...props} />;
   }
   return (
-    // biome-ignore lint/performance/noImgElement: a static SVG needs no optimisation and must not be rasterised.
+    // A plain <img>: a static SVG needs no optimisation and must not be rasterised.
     <img
       alt={props.alt ?? ""}
       className={`diagram diagram-${variant}`}

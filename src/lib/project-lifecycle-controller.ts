@@ -1302,6 +1302,33 @@ export function resolveLifecycleCommandServiceName(opts: {
   return `hook-${opts.index + 1}`;
 }
 
+/**
+ * Names (`name`, or `hook-N` by position) of the persistent `up.before` hooks
+ * and the `lifecycle.processes` that keep running after the hooks return, such
+ * as those that start host dependency listeners. Config names only; commands
+ * are never included.
+ */
+export function resolvePersistentLifecycleNames(
+  lifecycle:
+    | {
+        readonly up?: {
+          readonly before?: readonly ProjectLifecycleCommand[];
+        };
+        readonly processes?: readonly Pick<ProjectLifecycleProcess, "name">[];
+      }
+    | undefined
+): string[] {
+  return [
+    ...(lifecycle?.up?.before ?? [])
+      .map((command, index) => ({ command, index }))
+      .filter(({ command }) => command.persistent === true)
+      .map(({ command, index }) =>
+        resolveLifecycleCommandServiceName({ command, index })
+      ),
+    ...(lifecycle?.processes ?? []).map((process) => process.name),
+  ];
+}
+
 export function wrapLifecyclePersistentCommand(opts: {
   readonly command: string;
   readonly commandPidPath: string | null;

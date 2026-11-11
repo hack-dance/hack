@@ -46,6 +46,14 @@ let originalHome: string | undefined;
 let originalLogger: string | undefined;
 let originalUser: string | undefined;
 let originalNoInteractive: string | undefined;
+const isolatedEnvKeys = [
+  "HACK_HOME",
+  "HACK_CANDIDATE_ENTRYPOINT",
+  "HACK_DAEMON_AUTOSTART_DISABLE",
+  "HACK_LAUNCHD_DISABLE",
+  "HACK_LAUNCHD_ALLOW_ISOLATED_HOME",
+] as const;
+let originalIsolatedEnv: Record<string, string | undefined> = {};
 let reachabilityByHost: Record<string, boolean> = {};
 let idUser = "mock-user";
 let pathExistsOverrides = new Map<string, boolean>();
@@ -225,20 +233,45 @@ const osMock = await registerScopedModuleMock({
   },
 });
 
+// HOME isolation does not isolate the per-user launchd service. Keep the
+// install offer deterministic without inspecting the contributor's service.
+const launchdMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/daemon/launchd.ts",
+  overrides: {
+    getLaunchdServiceStatus: async () => ({
+      installed: false,
+      loaded: false,
+      running: false,
+      pid: null,
+      exitStatus: null,
+    }),
+  },
+});
+
 beforeAll(() => {
   clackMock.activate();
   netMock.activate();
   fsMock.activate();
   shellMock.activate();
   osMock.activate();
+  launchdMock.activate();
 });
 
 beforeEach(async () => {
+  originalIsolatedEnv = Object.fromEntries(
+    isolatedEnvKeys.map((key) => [key, process.env[key]])
+  );
+  for (const key of isolatedEnvKeys) {
+    restoreEnv(key, undefined);
+  }
   process.env.HACK_MCP_COMMAND = "/usr/local/bin/hack";
   originalHome = process.env.HOME;
   originalLogger = process.env.HACK_LOGGER;
   originalUser = process.env.USER;
   originalNoInteractive = process.env.HACK_NO_INTERACTIVE;
+  restoreEnv("HACK_NO_INTERACTIVE", undefined);
+  resetNoInteractiveFlagForTests();
   tempDir = await mkdtemp(join(tmpdir(), "hack-global-macos-"));
   process.env.HOME = tempDir;
   process.env.USER = "env-user";
@@ -269,6 +302,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const key of isolatedEnvKeys) {
+    restoreEnv(key, originalIsolatedEnv[key]);
+  }
   restoreInteractiveTty?.();
   restoreInteractiveTty = null;
   if (originalMcpCommand === undefined) {
@@ -298,6 +334,7 @@ afterAll(() => {
   fsMock.deactivate();
   shellMock.deactivate();
   osMock.deactivate();
+  launchdMock.deactivate();
 });
 
 async function writeExecutable(path: string): Promise<void> {

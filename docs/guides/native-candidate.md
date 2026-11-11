@@ -1,4 +1,10 @@
-# Opt-in native candidate bundle
+# Native backend reference
+
+This is the detailed reference for the native backend (beta). It is long and
+precise. For a short introduction, read the [overview](../native/README.md),
+[try it](../native/try-it.md) and
+[what works and known limits](../native/limits.md). The
+[reference map](../native/reference.md) lists this page's sections by topic.
 
 The native backend is beta. `hack-native` is an opt-in Apple Silicon macOS executor installed alongside
 Hack's supported CLI. It does not replace `hack`, select a Docker context, migrate
@@ -140,9 +146,11 @@ report their existing refusal rather than falling back to Docker.
 Native `up` accepts an explicit branch or the branch inferred from a linked Git
 worktree when its exact source root can be shared with a fresh or matching pool.
 The runtime checks source compatibility before startup hooks; `restart` repeats
-this check before stopping the existing graph. A different root in an occupied
-pool is refused. This does not dynamically add mounts to a running VM: simultaneous
-worktrees with different source roots still require separate pools.
+this check before stopping the existing graph. A root that a running pool does not
+already share is refused, because a running VM's mounts never change. Stop the pool
+and run `up` again: the root joins at the next boot. One pool can then serve several
+project roots and worktrees at once; see
+[one pool, several project roots](#explicit-writable-development-source).
 
 Unfiltered writable source sharing still requires `HACK_NATIVE_SHARED_SOURCE=1`.
 An exact repository at `$HOME/.codex/worktrees/<id>/<repo>` is allowed only when
@@ -1566,13 +1574,15 @@ journal.
 Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any stop or
 runtime request; set it and run the command again.
 
-This initial foreground path does not support detached/JSON startup, selected
-services, or the Compose features listed in
+This path does not support selected services, `--target`, or the Compose features
+listed in
 [Compose projects that stay on the Compose backend](#compose-projects-that-stay-on-the-compose-backend),
-such as external networks. `--detach`, `--json`, `--target` and service names
-each refuse with a one-line `E_USAGE` message that names the option and the supported
-form: run `hack up` in the foreground in its own terminal and use `hack ps` and
-`hack logs` from another. Routed services and host dependencies require the
+such as external networks. `--target` and service names each refuse with a one-line
+`E_USAGE` message that names the option and the supported form. `hack up --detach`
+and `hack up --json` start the same owners in a background session, as described
+under native `hack up -d` above. `hack restart --detach` still refuses with
+`E_USAGE`: run `hack restart` in the foreground in its own terminal and use
+`hack ps` and `hack logs` from another. Routed services and host dependencies require the
 explicit native selections described below. Unsupported Compose or environment input
 (for example a service `env_file`, or a project `.env` without managed env) and
 unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`. The input

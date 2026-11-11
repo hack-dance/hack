@@ -1,6 +1,7 @@
 import { DocsBody, DocsPage, DocsTitle } from "fumadocs-ui/layouts/docs/page";
 import defaultComponents from "fumadocs-ui/mdx";
 import { notFound, redirect } from "next/navigation";
+import { DiagramImage } from "@/components/diagram-image";
 import { sources } from "@/lib/source";
 
 const versionPattern = /^v\d/;
@@ -48,7 +49,7 @@ export default async function Page({ params }: Props) {
     <DocsPage toc={page.data.toc}>
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsBody>
-        <MDX components={defaultComponents} />
+        <MDX components={{ ...defaultComponents, img: DiagramImage }} />
       </DocsBody>
     </DocsPage>
   );

@@ -66,6 +66,9 @@ fn validate_services(
                 })
             || service.labels.keys().any(|key| {
                 !recognized(key)
+                    // Plain metadata beside the route is reviewed with a warning
+                    // and never reaches the engine or the router.
+                    && !crate::project::inert_metadata_label(key)
                     && !(service.dependency_cache.is_some()
                         && matches!(
                             key.as_str(),

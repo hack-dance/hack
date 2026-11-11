@@ -3,6 +3,7 @@ mod adapter;
 pub mod capabilities;
 pub use adapter::{NormalizedComposeOptions, plan_normalized};
 mod compose;
+pub(crate) use compose::inert_metadata_label;
 mod enrollment;
 pub mod execution;
 mod generated;

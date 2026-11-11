@@ -11,7 +11,7 @@
  * | scope          | when                                              |
  * | -------------- | ------------------------------------------------- |
  * | `full`         | not a pull request, or the diff is unavailable    |
- * | `docs`         | every path is documentation                       |
+ * | `docs`         | every path is documentation or docs site tooling  |
  * | `runtime-core` | every path is documentation or runtime core Rust  |
  * | `typescript`   | no path is Rust, toolchain or workflow            |
  * | `code`         | anything else                                     |
@@ -39,8 +39,13 @@ export type ChangeScope =
   | "runtime-core"
   | "docs";
 
-/** Documentation that no build reads; tests that read it run in `docs` scope. */
-const DOCS_PATHS = [/^docs\//, /^site\//] as const;
+/**
+ * Documentation that no build reads; tests that read it run in `docs` scope.
+ * `scripts/docs/` is the docs site tooling: only the `docs site` job and the
+ * `docs:*` package scripts run it, so a change there needs no bun shards,
+ * Docker e2e or compiler build.
+ */
+const DOCS_PATHS = [/^docs\//, /^site\//, /^scripts\/docs\//] as const;
 const DOCS_FILES = new Set([
   "README.md",
   "CHANGELOG.md",

@@ -9,12 +9,13 @@ terminal).
 
 - `hack init` — generate `.hack/` (compose + config); `--with claude|codex` also hands off to
   agent-assisted onboarding
-- `hack up` / `hack down` / `hack restart`
+- `hack up` / `hack down` / `hack restart` — start, stop and restart the project
+- `hack up --branch <name>` — a parallel branch instance with its own hostnames
+- `hack dev` — the repository's [side-by-side development build](dev.md)
 - `hack open` — open/print the project URL
 - `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
 - `hack ps` / `hack status` — project status
 - `hack projects` — registry + running instances; `hack projects prune --project <name>` safely scopes stale registry/container cleanup to one project family (omit `--project` only for an intentional machine-wide prune)
-  entries and stops orphaned containers
 - `hack env` — env values and local secrets
 - `hack host exec` / `hack host shell` — host commands/shells with Hack-resolved env injected
 - `hack run <service> [cmd...]` — one-off command in a fresh service container
@@ -22,8 +23,8 @@ terminal).
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
 - `hack daemon` — optional local daemon for faster JSON project status
-- `hack agent onboard` — agent-assisted onboarding for existing projects
-- `hack setup` — install/refresh agent integrations (Cursor rules, Claude hooks, Codex skill, MCP)
+- `hack agent onboard` — print an onboarding prompt for an existing project
+- Optional agent interfaces — the [`hack` plugin, its skills and the separate MCP server](integrations.md)
 
 Interactive diagnostics use compact status rows: healthy groups stay on one line, while warnings
 and errors expand with wrapped detail and recovery guidance. `hack doctor --json` remains the stable,
@@ -124,7 +125,7 @@ CLI surface. Use native `git` and `gh` for repository collaboration.
 
 ## Unsupported experimental
 
-These commands remain source-available but are outside the supported v3 product contract. They are
+These commands remain source-available but are outside the supported product. They are
 hidden from default `hack --help` (see `hack help --all`) and print a warning when invoked:
 
 - `hack remote`
@@ -175,21 +176,11 @@ Historical remote guides are excluded from the supported documentation.
   Set `HACK_NO_INTERACTIVE=1` explicitly in scripts anyway so the intent is visible.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
 
-Generated agent docs, Cursor rules, Codex skills, and the shared `~/.ai/skills/hack-cli` skill carry
-the Hack CLI version that generated them. Plain `hack agent prime` prints current guidance without
-an integration scan. Use `hack agent prime --check` for an explicit project/global inventory or a
-targeted `hack setup ... --check` when diagnosing drift. Missing optional integrations do not
-require installation. Repair only affected targets within the authorized scope; use
-`hack setup sync --all-scopes` for an explicitly requested full refresh. Sync refreshes only installed
-Hack-owned integrations; add `--install-missing` to create missing ones (see
-[integration setup](integrations.md#refresh-only-hack-setup-sync)). Read updated guidance after
-repair; restart only if the client cannot reload changed hooks or skills.
-To move from standalone skill and rule files to the `hack` plugin, preview with
-`hack setup migrate`, then run `hack setup migrate --apply` after the plugin loads; apply writes a
-backup manifest that `hack setup migrate --rollback-manifest <manifest>` restores (see
-[migrate standalone files](integrations.md#migrate-standalone-files-to-the-plugin)).
-Ordinary commands, `hack update`, and `hack doctor --fix` never render, repair, remove, or otherwise
-mutate integration files. CLI upgrades do not trigger integration updates.
+Automatic agent instruction management is retired in v5. `hack setup sync`, the standalone
+`hack setup cursor|claude|agents` exports and `hack agent prime` refuse with a retirement notice,
+and ordinary commands, `hack update` and `hack doctor --fix` never write agent files. Guidance
+arrives through the opt-in `hack` plugin; `hack setup codex` and `hack setup mcp` remain as explicit
+opt-ins. See [Agent integrations](integrations.md).
 
 ## First-run path
 
@@ -231,7 +222,7 @@ route for it.
 - Browser/host URL: use `hack open <service> --json`; OAuth aliases are preferred when enabled.
 - Container-to-container traffic: use Compose DNS rather than routing back through Caddy.
 
-For `run`, `exec`, `host exec`, `env exec`, `x` and the Beta `dispatch run`, Hack options go before
+For `run`, `exec`, `host exec`, `env exec`, `x` and the unsupported `dispatch run`, Hack options go before
 the child command.
 From the child command's first word on, every argument belongs to the child, including flags
 that Hack also defines: `hack run web bun --version` runs `bun --version` in the container

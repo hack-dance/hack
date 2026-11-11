@@ -55,6 +55,12 @@ describe("change scope classification", () => {
     for (const [path, kind] of [
       ["docs/guides/prereleases.md", "docs"],
       ["site/app/page.tsx", "docs"],
+      ["site/package.json", "docs"],
+      // The docs site tooling is read only by the docs site job.
+      ["scripts/docs/prepare.ts", "docs"],
+      ["scripts/docs/versions.json", "docs"],
+      ["scripts/docs.ts", "typescript"],
+      ["scripts/build-release.ts", "typescript"],
       ["README.md", "docs"],
       ["LICENSE", "docs"],
       ["packages/runtime-core/src/main.rs", "runtime-core"],
@@ -88,6 +94,8 @@ describe("change scope classification", () => {
     for (const [paths, scope] of [
       [[], "full"],
       [["docs/a.md", "README.md"], "docs"],
+      [["scripts/docs/smoke.ts", "site/app/global.css", "docs/a.md"], "docs"],
+      [["scripts/docs/smoke.ts", "scripts/test-shard.ts"], "typescript"],
       [["packages/runtime-core/src/a.rs"], "runtime-core"],
       [["packages/runtime-core/src/a.rs", "docs/a.md"], "runtime-core"],
       [["src/a.ts", "tests/a.test.ts", "docs/a.md"], "typescript"],
@@ -300,10 +308,24 @@ describe("CI workflow wiring", () => {
         "${{ needs.changes.outputs.suite == 'true' }}"
       );
     }
+    // `docs site` is a required check: the job always runs, and every step
+    // after the scope report is gated, so it passes as a no-op when unneeded.
     expect(jobs["docs-site"]?.needs).toBe("changes");
-    expect(jobs["docs-site"]?.if).toBe(
-      "${{ needs.changes.outputs.docs_site == 'true' }}"
+    expect(jobs["docs-site"]?.if).toBe("${{ always() }}");
+    const docsSteps = jobs["docs-site"]?.steps ?? [];
+    expect(docsSteps[0]?.name).toBe("Report scope");
+    expect(docsSteps[0]?.if).toBeUndefined();
+    // A failed scope fails the check; only a cancelled one is a no-op.
+    expect(docsSteps[0]?.run).toContain(
+      'if [ "$CHANGES_RESULT" != "success" ]; then'
     );
+    expect(docsSteps[0]?.run).toContain("exit 1");
+    expect(docsSteps.length).toBeGreaterThan(5);
+    for (const step of docsSteps.slice(1)) {
+      expect(step.if, step.name ?? step.run).toBe(
+        "${{ needs.changes.outputs.docs_site == 'true' }}"
+      );
+    }
     // Jobs that do not depend on the scope keep running on every event.
     for (const name of ["state-models", "secret-scan"]) {
       expect(jobs[name]?.needs, name).toBeUndefined();

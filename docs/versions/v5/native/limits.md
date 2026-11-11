@@ -17,8 +17,8 @@ does not fall back to Docker without telling you.
 
 | You want to | Native today |
 | --- | --- |
-| Start the whole project | `hack up`, in the foreground |
-| Restart the whole project | `hack restart` |
+| Start the whole project | `hack up` in the foreground, or `hack up -d` in the background |
+| Restart the whole project | `hack restart`, in the foreground only |
 | Stop the project | `hack down`, and `hack down --recover` after a crash |
 | See what is running | `hack ps` |
 | Read logs | `hack logs <service> --no-follow` |
@@ -61,6 +61,14 @@ Details and the exact checks:
 
 - **Shared machine.** All native projects run in one virtual machine. They are
   separated the way Compose projects are, not by a machine each.
+- **Images that declare a volume.** Some images, such as the stock Redis and
+  database images, declare a data folder with `VOLUME`. On native the service must
+  mount a named volume at that path, for example `redis-data:/data`. Without one
+  the project refuses with `graph_image_volume_uncovered`. A bind mount or a
+  read-only mount there does not count.
+- **Stopping with Ctrl-C.** In this prerelease, Ctrl-C may not stop a foreground
+  project cleanly when it publishes ports. Use `hack down` from another terminal,
+  and `hack down --recover` if it reports that the owner is gone.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

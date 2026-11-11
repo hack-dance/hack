@@ -326,13 +326,56 @@ test(
 );
 
 test(
-  "control: ordinary labels and a basic build keep today's native refusal",
+  "plain metadata labels and a local logging block pass the check and reach native start",
+  async () => {
+    // Neither reaches the engine: the native review reports them as warnings.
+    for (const service of [
+      {
+        image: IMAGE,
+        labels: {
+          "com.example.team": "web",
+          "org.opencontainers.image.source": "synthetic",
+        },
+      },
+      { image: IMAGE, labels: ["com.example.team=web"] },
+      { image: IMAGE, logging: { driver: "json-file" } },
+      { image: IMAGE, logging: { options: { "max-size": "10m" } } },
+      { image: IMAGE, logging: { driver: "none" } },
+    ]) {
+      const f = await fixture({ services: { web: service } });
+      const result = await cli(f, ["up"]);
+      expect(result.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+      const calls = await f.calls();
+      expect(calls).toEqual(
+        ["runtime check-project-share", "runtime up"].slice(0, calls.length)
+      );
+      expect(calls.length).toBeGreaterThan(1);
+    }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "control: router and runtime labels, external log drivers and a basic build keep today's native refusal",
   async () => {
     for (const [service, refusal] of [
       [
-        { image: IMAGE, labels: { "com.example.team": "web" } },
+        { image: IMAGE, labels: { "traefik.enable": "true" } },
         NATIVE_CONFIGURATION_REFUSAL,
       ],
+      [
+        { image: IMAGE, labels: { "hack.custom": "x" } },
+        NATIVE_CONFIGURATION_REFUSAL,
+      ],
+      [
+        { image: IMAGE, labels: { "caddy.handle": "x" } },
+        NATIVE_CONFIGURATION_REFUSAL,
+      ],
+      [
+        { image: IMAGE, logging: { driver: "syslog" } },
+        NATIVE_CONFIGURATION_REFUSAL,
+      ],
+      [{ image: IMAGE, logging: "json-file" }, NATIVE_CONFIGURATION_REFUSAL],
       // A basic build stays refused unless native builds are explicitly enabled.
       [{ build: ".." }, nativeBuildsDisabledRefusal("web")],
     ] as const) {
@@ -443,7 +486,12 @@ test(
     });
     const result = await cli(f, ["up"]);
     expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
-    expect(await f.calls()).toEqual(["runtime check-project-share"]);
+    // The metadata label no longer stops native start after the share check.
+    expect(result.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+    const calls = await f.calls();
+    expect(calls).toEqual(
+      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
+    );
   },
   SPAWN_TIMEOUT_MS
 );

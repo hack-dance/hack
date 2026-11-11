@@ -65,6 +65,7 @@ export const backgroundCommandComposeScenario: Scenario = {
       await checkRun(stack);
       await checkRunClientDeath(stack);
       await checkExecCancelStopsGuest(stack);
+      await checkExecSelfExitStopsGuest(stack);
       await checkContainerRestart(stack);
       await checkDownMidRun(stack);
       await checkDownMidBackgroundRun(stack);
@@ -427,6 +428,54 @@ async function checkExecCancelStopsGuest(stack: Stack): Promise<void> {
   expect({
     that: !ps.stdout.includes("sleep 120"),
     message: "the cancelled exec's process must be gone from the container",
+    result: ps,
+  });
+}
+
+/**
+ * A background `exec` whose client ends on its own (here: the command exits
+ * 3, leaving a marked process in the background, as a client that hits the
+ * file-size cap or loses Docker would) must not leave that process running.
+ */
+async function checkExecSelfExitStopsGuest(stack: Stack): Promise<void> {
+  const id = await stack.start([
+    "exec",
+    "--detach",
+    "--json",
+    "api",
+    "--",
+    "sh",
+    "-c",
+    "sleep 117 >/dev/null 2>&1 & echo left-behind; exit 3",
+  ]);
+  const end = parseLines(
+    (
+      await stack.cli([
+        "commands",
+        "read",
+        id,
+        "--follow",
+        "--json",
+        "--wait-ms",
+        "60000",
+      ])
+    ).stdout
+  ).at(-1);
+  expect({
+    that: end?.ended === true && end.outcome === "failed" && end.exitCode === 3,
+    message: `an exec that exits 3 ends failed with exit code 3: ${JSON.stringify(end)}`,
+  });
+  const shown = extractJsonObject<{
+    data?: { ended?: { containerProcess?: string } };
+  }>({ text: (await stack.cli(["commands", "show", id, "--json"])).stdout });
+  expect({
+    that: shown?.data?.ended?.containerProcess === "stopped",
+    message: `the exec's marked processes must be stopped at its end: ${JSON.stringify(shown?.data?.ended)}`,
+  });
+  const ps = await stack.cli(["exec", "api", "--", "ps", "-o", "args"]);
+  expect({
+    that: !ps.stdout.includes("sleep 117"),
+    message: "the process the exec left behind must be gone from the container",
     result: ps,
   });
 }

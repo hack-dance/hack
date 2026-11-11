@@ -8,6 +8,7 @@ import {
   type EventEnvelope,
   emittedOffsets,
   endedEvent,
+  isExpired,
   type JournalPaths,
   JournalWriter,
   OUTPUT_EVENT_LIMIT,
@@ -211,85 +212,98 @@ export async function recoverLostOwner(opts: {
    */
   readonly enforceTimeout?: boolean;
 }): Promise<EventEnvelope[]> {
-  const now = opts.now ?? Date.now;
   return await withJournalLockOrReserve(
     opts.paths,
-    async ({ reserveReleased }) => {
-      // Read only until the supervisor is proven gone: it may be mid-write.
-      const observed = await readEvents(opts.paths);
-      const assessment = await assessOwner({
-        ...opts,
-        events: observed,
-        now: now(),
-      });
-      if (assessment.kind !== "owner_lost") {
-        return observed;
-      }
-      const events = await reconcileTail(opts.paths);
-      if (endedEvent(events)) {
-        return events;
-      }
-      const writer = new JournalWriter(
-        opts.paths,
-        opts.meta,
-        events.at(-1)?.seq ?? 0,
-        opts.append
-      );
-      // On a full disk (the reserve was released to take the lock) nothing
-      // but the final record may be written: skip announcing output.
-      const truncated = reserveReleased
-        ? true
-        : await announceUnsupervisedOutput({
-            paths: opts.paths,
-            meta: opts.meta,
-            events,
-            writer,
-            final: assessment.child === "gone",
-          });
-      const overdue =
-        opts.enforceTimeout === true &&
-        assessment.child === "alive" &&
-        now() - Date.parse(opts.meta.acceptedAt) >= opts.meta.timeoutMs;
-      const childGone =
-        assessment.child === "gone" ||
-        (overdue &&
-          (await stopOverdueChild({
-            paths: opts.paths,
-            observe: opts.observe,
-            signalGroup: opts.signalGroup,
-          })));
-      if (!childGone) {
-        return await readEvents(opts.paths);
-      }
-      const finalTruncated =
-        overdue && !reserveReleased
-          ? (await announceUnsupervisedOutput({
-              paths: opts.paths,
-              meta: opts.meta,
-              events: await readEvents(opts.paths),
-              writer,
-              final: true,
-            })) || truncated
-          : truncated;
-      const ended = await writer.write("command.ended", {
-        outcome: overdue ? "timed_out" : "unknown",
-        reason: overdue ? "orphan_timeout" : assessment.reason,
-        exitCode: null,
-        signal: null,
-        durationMs: Math.max(0, now() - Date.parse(opts.meta.acceptedAt)),
-        truncated: finalTruncated,
-        suppressed: opts.meta.capture === "metadata",
-        containerProcess: await recoveredContainerProcess(opts),
-      });
-      await auditEnd({
-        paths: opts.paths,
-        meta: opts.meta,
-        payload: ended.payload,
-      });
-      return await readEvents(opts.paths);
-    },
+    async ({ reserveReleased }) =>
+      // A journal expired since the caller looked is never finalized again:
+      // its tombstone (and any admission hold in it) is the record.
+      (await isExpired(opts.paths))
+        ? []
+        : await recoverLocked({ ...opts, reserveReleased }),
     opts.lock
   );
+}
+
+/** `recoverLostOwner` under the journal lock. */
+async function recoverLocked(
+  opts: Parameters<typeof recoverLostOwner>[0] & {
+    readonly reserveReleased: boolean;
+  }
+): Promise<EventEnvelope[]> {
+  const now = opts.now ?? Date.now;
+  const { reserveReleased } = opts;
+  // Read only until the supervisor is proven gone: it may be mid-write.
+  const observed = await readEvents(opts.paths);
+  const assessment = await assessOwner({
+    ...opts,
+    events: observed,
+    now: now(),
+  });
+  if (assessment.kind !== "owner_lost") {
+    return observed;
+  }
+  const events = await reconcileTail(opts.paths);
+  if (endedEvent(events)) {
+    return events;
+  }
+  const writer = new JournalWriter(
+    opts.paths,
+    opts.meta,
+    events.at(-1)?.seq ?? 0,
+    opts.append
+  );
+  // On a full disk (the reserve was released to take the lock) nothing
+  // but the final record may be written: skip announcing output.
+  const truncated = reserveReleased
+    ? true
+    : await announceUnsupervisedOutput({
+        paths: opts.paths,
+        meta: opts.meta,
+        events,
+        writer,
+        final: assessment.child === "gone",
+      });
+  const overdue =
+    opts.enforceTimeout === true &&
+    assessment.child === "alive" &&
+    now() - Date.parse(opts.meta.acceptedAt) >= opts.meta.timeoutMs;
+  const childGone =
+    assessment.child === "gone" ||
+    (overdue &&
+      (await stopOverdueChild({
+        paths: opts.paths,
+        observe: opts.observe,
+        signalGroup: opts.signalGroup,
+      })));
+  if (!childGone) {
+    return await readEvents(opts.paths);
+  }
+  const finalTruncated =
+    overdue && !reserveReleased
+      ? (await announceUnsupervisedOutput({
+          paths: opts.paths,
+          meta: opts.meta,
+          events: await readEvents(opts.paths),
+          writer,
+          final: true,
+        })) || truncated
+      : truncated;
+  const ended = await writer.write("command.ended", {
+    outcome: overdue ? "timed_out" : "unknown",
+    reason: overdue ? "orphan_timeout" : assessment.reason,
+    exitCode: null,
+    signal: null,
+    durationMs: Math.max(0, now() - Date.parse(opts.meta.acceptedAt)),
+    truncated: finalTruncated,
+    suppressed: opts.meta.capture === "metadata",
+    containerProcess: await recoveredContainerProcess(opts),
+  });
+  await auditEnd({
+    paths: opts.paths,
+    meta: opts.meta,
+    payload: ended.payload,
+  });
+  return await readEvents(opts.paths);
 }
 
 /**

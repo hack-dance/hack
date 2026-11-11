@@ -169,8 +169,8 @@ also capped at 64 MiB by a kernel file-size limit on the host-side
 `docker compose` client, so a burst between two supervisor polls cannot fill
 the disk. A client that writes more than that within one poll (200 ms) gets a
 "File too large" (EFBIG) error and exits: the command ends `failed`, output
-after that point is lost, and the process inside the container is not
-confirmed stopped. Everything the client starts on the host inherits the same
+after that point is lost, and what ran in the container is then stopped
+like at any other end (see Inspect and cancel). Everything the client starts on the host inherits the same
 64 MiB file limit (with SIGXFSZ ignored). A command whose program does not
 exist ends `failed` with exit code 127. The native backend has no such cap. This differs from the foreground `hack.project.exec` and
 `hack.project.run` MCP tools, where reaching 8 MiB stops the command.
@@ -204,13 +204,18 @@ does not stop what runs in the container, so:
 - a background `run`'s one-off container is removed at every end (see
   Outcomes);
 - a background `exec` runs its process with `HACK_BACKGROUND_COMMAND=<marker>`
-  in its environment; when its client is stopped or killed, the supervisor
-  ends every process in the container that carries the marker (TERM, then
-  KILL) and reports `stopped` once none is left. That needs `sh`, `/proc`
+  in its environment; at every end (a stop, a killed client, a client that
+  exits by itself, a clean exit) the supervisor ends every process in the
+  container that carries the marker, including any the command left running
+  in the background (TERM, then KILL), and reports `stopped` once none is
+  left. That needs `sh`, `/proc`
   and `tr` in the image. The script first checks that it can find a known
   variable in a process's environment, so without them the result is
-  `not_confirmed`, never `stopped`. A process whose environment it cannot
-  read (one that changed to another user) is not seen.
+  `not_confirmed`, never `stopped`. Processes the scan cannot see are not
+  stopped: one started with a cleaned environment (`env -i`, `sudo` with
+  `env_reset`, `su -`, a daemon that clears its environment), and one whose
+  environment the exec user cannot read (another user's, or a setuid
+  program).
 
 An end whose container process is `not_confirmed` keeps its admission slot
 until the command's timeout window closes, so a start/cancel loop cannot run

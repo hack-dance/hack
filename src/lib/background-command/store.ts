@@ -226,8 +226,13 @@ async function holdsAdmission(opts: {
       enforceTimeout: true,
     })
   );
-  return recovered
-    ? holdsSlot({ meta, ended: recovered, now: opts.now })
+  if (recovered) {
+    return holdsSlot({ meta, ended: recovered, now: opts.now });
+  }
+  // Expired while we looked: the tombstone (and any hold in it) decides.
+  const expired = await readTombstone(paths);
+  return expired
+    ? expired.holdUntil !== null && opts.now < expired.holdUntil
     : true;
 }
 

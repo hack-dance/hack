@@ -189,10 +189,9 @@ export async function runBackgroundSupervisor(opts: {
     if (running) {
       signalProcessGroup(proc.pid, "SIGKILL");
     }
-    const containerProcess = await stopInContainer({
-      launch,
-      clientInterrupted: true,
-    }).catch(() => "not_confirmed" as const);
+    const containerProcess = await stopInContainer({ launch }).catch(
+      () => "not_confirmed" as const
+    );
     return await finish({
       ...baseEnded,
       truncated: capture.truncated,
@@ -435,15 +434,11 @@ async function superviseChild(opts: {
   // never stopped, so its descendants are not known to be gone.
   const lateCancel = stopping === "cancelled" && !stopper.signalled;
   await stopper.finish();
-  // Every `run` end removes its one-off container (after checking it is
-  // ours), whether Hack stopped the client or the client died on its own
-  // (for example at the file-size cap): no end may leave it running.
-  const containerProcess = await stopInContainer({
-    launch: opts.launch,
-    // An exec client that ended by a signal (stopped by Hack, or killed)
-    // may have left its process in the container running.
-    clientInterrupted: stopping !== null || proc.signalCode !== null,
-  });
+  // Every end, whether Hack stopped the client or the client ended on its
+  // own (a signal, the file-size cap, a lost Docker connection): a `run`'s
+  // one-off container is removed (after checking it is ours) and an
+  // `exec`'s marked processes are stopped. No end may leave them running.
+  const containerProcess = await stopInContainer({ launch: opts.launch });
   await capture.poll(true);
   const payload = endedPayload({
     stopping,
@@ -459,13 +454,13 @@ async function superviseChild(opts: {
 }
 
 /**
- * What runs in a container must not outlive the command. A `run`'s one-off
- * container is removed at every end; an `exec`'s marked process is stopped
- * when its client was interrupted. Undefined when there is nothing to do.
+ * What runs in a container must not outlive the command. At every end a
+ * `run`'s one-off container is removed and an `exec`'s marked processes
+ * (including any it left in the background) are stopped. Undefined when
+ * there is nothing to do.
  */
 async function stopInContainer(opts: {
   readonly launch: LaunchRecord;
-  readonly clientInterrupted: boolean;
 }): Promise<"stopped" | "not_confirmed" | undefined> {
   if (opts.launch.container) {
     return await removeOneOffContainer({
@@ -473,7 +468,7 @@ async function stopInContainer(opts: {
       env: childEnv(),
     });
   }
-  if (opts.launch.guest && opts.clientInterrupted) {
+  if (opts.launch.guest) {
     return await stopExecGuest({
       ...opts.launch.guest,
       cwd: opts.launch.cwd,

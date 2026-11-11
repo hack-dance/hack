@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -26,6 +27,7 @@ import {
 } from "../src/daemon/status.ts";
 import {
   assessExecutableDurability,
+  ensureOwnerWritableOnlyDirectories,
   extractSystemdExecProgram,
   installSystemdUnit,
   isPidInSystemdUnit,
@@ -1401,4 +1403,64 @@ test("stop refuses a unit whose effective Hack home is another one", async () =>
   fake.active = true;
   fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
   expect((await stop()).handled).toBe(true);
+});
+
+test("install creates the unit directories without group write under a shared umask", async () => {
+  // Codex security review: under umask 0002 the directories were 0775, so a
+  // group member could replace the enabled unit.
+  const fake = fakeSystemd();
+  const previous = process.umask(0o002);
+  try {
+    const result = await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    expect(result.ok).toBe(true);
+  } finally {
+    process.umask(previous);
+  }
+  for (const dir of [
+    join(root, "config"),
+    join(root, "config", "systemd"),
+    join(root, "config", "systemd", "user"),
+  ]) {
+    expect((await stat(dir)).mode & 0o777).toBe(0o755);
+  }
+});
+
+test("install removes group write from an existing unit directory it owns", async () => {
+  const fake = fakeSystemd();
+  const userDir = join(root, "config", "systemd", "user");
+  await mkdir(userDir, { recursive: true });
+  await chmod(userDir, 0o775);
+  expect(
+    (
+      await installSystemdUnit({
+        unitPath,
+        unitText: unitText(),
+        deps: fake.deps,
+      })
+    ).ok
+  ).toBe(true);
+  expect((await stat(userDir)).mode & 0o777).toBe(0o755);
+});
+
+test("the unit directory check refuses a directory owned by another user", async () => {
+  const dir = join(root, "shared");
+  await mkdir(dir);
+  const own = process.getuid?.() ?? 0;
+  const result = await ensureOwnerWritableOnlyDirectories({
+    dirs: [dir],
+    uid: own + 1,
+  });
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.error).toContain("owned by another user");
+  }
+  // A file where a directory belongs is refused too.
+  const file = join(root, "not-a-dir");
+  await writeFile(file, "");
+  const notDir = await ensureOwnerWritableOnlyDirectories({ dirs: [file] });
+  expect(notDir.ok).toBe(false);
 });

@@ -436,7 +436,12 @@ systemd runs an incompatible hackd from a unit that points at another `hack`,
 - sends stderr to the journal (`journalctl --user -u hackd.service`); hackd's own
   log stays in `~/.hack/daemon/hackd.log`.
 
-`hack daemon install` writes the whole unit file. Put local settings, such as
+`hack daemon install` writes the whole unit file. Before writing it, it makes
+sure `$XDG_CONFIG_HOME`, `systemd/` and `systemd/user/` are directories you own
+that your group and other users cannot write: it creates them `0755` whatever
+the umask and removes group or other write from ones you own, and it refuses
+(with the `chmod` to run) when that is not possible, because whoever can replace
+the enabled unit runs code as you at the next login. Put local settings, such as
 `DOCKER_HOST` for rootless Docker, in a drop-in (`systemctl --user edit hackd`).
 `install` writes the `hack` it was run from, and warns when that path is in a
 temporary directory, a package cache or a source checkout.

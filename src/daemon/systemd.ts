@@ -1,10 +1,9 @@
-import { realpath, rm } from "node:fs/promises";
+import { chmod, mkdir, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 import { GLOBAL_HACK_DIR_NAME } from "../constants.ts";
 import {
-  ensureDir,
   pathExists,
   readTextFile,
   writeTextFileAtomicIfChanged,
@@ -899,7 +898,14 @@ export async function installSystemdUnit(opts: {
     };
   }
 
-  await ensureDir(dirname(opts.unitPath));
+  const unitDir = dirname(opts.unitPath);
+  const secured = await ensureOwnerWritableOnlyDirectories({
+    // `$XDG_CONFIG_HOME`, `systemd/` and `systemd/user/`.
+    dirs: [dirname(dirname(unitDir)), dirname(unitDir), unitDir],
+  });
+  if (!secured.ok) {
+    return { ok: false, error: secured.error };
+  }
   const { changed } = await writeTextFileAtomicIfChanged(
     opts.unitPath,
     opts.unitText,
@@ -932,6 +938,88 @@ export async function installSystemdUnit(opts: {
     };
   }
   return { ok: true, changed };
+}
+
+/**
+ * Creates (top-down) and checks the directories that hold the unit. Each
+ * must be a directory owned by this user and not writable by its group or
+ * others: otherwise another account could replace `hackd.service`, and the
+ * enabled unit would run its `ExecStart` as this user at the next login
+ * (HACK-2052). New directories are created `0755` whatever the umask; an
+ * existing one this user owns has group/other write removed; anything else
+ * is refused before the unit is written. A symlinked directory is judged by
+ * its real target.
+ */
+export async function ensureOwnerWritableOnlyDirectories(opts: {
+  readonly dirs: readonly string[];
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<
+  { readonly ok: true } | { readonly ok: false; readonly error: string }
+> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  for (const dir of opts.dirs) {
+    const created = await createDirectoryExactly(dir);
+    const error =
+      created ?? (await checkOwnerWritableOnlyDirectory({ dir, uid }));
+    if (error !== null) {
+      return { ok: false, error };
+    }
+  }
+  return { ok: true };
+}
+
+/** mkdir at `0755` whatever the umask; an existing directory is kept. */
+async function createDirectoryExactly(dir: string): Promise<string | null> {
+  try {
+    await mkdir(dir, { mode: 0o755 });
+    // mkdir applies the umask, which can only remove bits; set it exactly.
+    await chmod(dir, 0o755);
+    return null;
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      return null;
+    }
+    return `Could not create ${dir}: ${errorMessage(error)}`;
+  }
+}
+
+/** Null when `dir` is this user's and not group/other-writable (fixed if possible). */
+async function checkOwnerWritableOnlyDirectory(opts: {
+  readonly dir: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  let real: string;
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    real = await realpath(opts.dir);
+    info = await stat(real);
+  } catch (error: unknown) {
+    return `Could not inspect ${opts.dir}: ${errorMessage(error)}`;
+  }
+  const shown = real === opts.dir ? opts.dir : `${opts.dir} (${real})`;
+  if (!info.isDirectory()) {
+    return `${shown} is not a directory`;
+  }
+  if (opts.uid >= 0 && info.uid !== opts.uid) {
+    return `${shown} is owned by another user (uid ${info.uid}); the unit is not written there`;
+  }
+  if ((info.mode & 0o022) === 0) {
+    return null;
+  }
+  try {
+    await chmod(real, info.mode & 0o7755);
+  } catch {
+    // Checked below.
+  }
+  const after = (await stat(real)).mode & 0o777;
+  return (after & 0o022) === 0
+    ? null
+    : `${shown} is writable by other users (mode ${after.toString(8)}); run: chmod go-w ${real}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Runs `systemctl --user daemon-reload`. */

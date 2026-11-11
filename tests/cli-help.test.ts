@@ -10,13 +10,29 @@ test("root help leads with the local-first offer and new command grouping", () =
 
   expect(help).toContain("Local development without the port-collision tax");
   expect(help).toContain("Core promises:");
-  expect(help).toContain("Core workflows:");
-  expect(help).toContain("Local helpers:");
-  expect(help).toContain("Unsupported experimental:");
-  expect(help).toContain("Extension commands:");
+  expect(help).toContain(
+    "  1. Run many projects and branches side by side, each at a real HTTPS hostname like https://myapp.hack.local."
+  );
+  expect(help).toContain("  2. Manage project env and secrets safely.");
+  expect(help).toContain(
+    "  3. Sessions and lifecycle you can trust: up, down, restart, logs and doctor."
+  );
+  expect(help).toContain(
+    "Core workflows: start, stop and inspect a project, its branch instances and sessions\n"
+  );
+  expect(help).toContain(
+    "Env and host commands: project env and secrets, and host commands that receive them\n"
+  );
+  expect(help).toContain(
+    "Agent integrations (optional): opt-in skills and MCP for coding agents; Hack works without them\n"
+  );
+  expect(help).toContain("Unsupported experimental:\n");
+  expect(help).toContain("Extension commands:\n");
   expect(help).not.toMatch(/hack (?:tickets|auth|org|team|linear)\b/);
-  expect(help).toMatch(
-    /hack remote\s+Beta: guided remote access and gateway helpers/
+  // "Beta" names the native backend only; retained remote commands are unsupported.
+  expect(help).not.toMatch(/\bBeta\b/);
+  expect(renderHelpForPath(CLI_SPEC, [], { showExperimental: true })).toMatch(
+    /hack remote\s+Unsupported: guided remote access and gateway helpers/
   );
   expect(help.indexOf("Core workflows:")).toBeLessThan(
     help.indexOf("Unsupported experimental:")
@@ -27,8 +43,13 @@ test("markdown help preserves the local-first grouping", () => {
   const help = renderHelpMarkdownForPath(CLI_SPEC, []);
 
   expect(help).toContain("### Core promises");
-  expect(help).toContain("### Core workflows");
-  expect(help).toContain("### Local helpers");
+  expect(help).toContain(
+    "### Core workflows\n\nStart, stop and inspect a project, its branch instances and sessions.\n"
+  );
+  expect(help).toContain(
+    "### Env and host commands\n\nProject env and secrets, and host commands that receive them.\n"
+  );
+  expect(help).toContain("### Agent integrations (optional)");
   expect(help).toContain("### Unsupported experimental");
   expect(help).not.toMatch(/`hack (?:tickets|auth|org|team|linear)\b/);
 });

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   type DaemonProcessProbe,
   findDaemonSocketOwnersFromProc,
+  isHackDaemonCommandLine,
   isHackDaemonProcess,
   proveOwnedDaemonProcess,
   readDaemonPid,
@@ -485,3 +486,35 @@ test("hack daemon restart replaces a stale pid file without signalling its pid",
   expect(sleeper.exitCode).toBeNull();
   expect(process.kill(sleeper.pid, 0)).toBe(true);
 }, 20_000);
+
+test("hackd command lines with spaces in the executable path are recognized", () => {
+  const spaced = "/opt/My Tools/bin/hack";
+  // argv (Linux /proc/<pid>/cmdline): exact boundaries.
+  expect(
+    isHackDaemonCommandLine([spaced, "daemon", "start", "--foreground"])
+  ).toBe(true);
+  expect(
+    isHackDaemonCommandLine([
+      "/usr/bin/bun",
+      "/src/hack repo/index.ts",
+      "daemon",
+      "start",
+      "--foreground",
+    ])
+  ).toBe(true);
+  expect(
+    isHackDaemonCommandLine(["/usr/bin/vim", "daemon", "start", "--foreground"])
+  ).toBe(false);
+  expect(isHackDaemonCommandLine(["/usr/bin/sleep", "30"])).toBe(false);
+  // ps output: boundaries lost, the executable is the prefix.
+  expect(isHackDaemonCommandLine(`${spaced} daemon start --foreground`)).toBe(
+    true
+  );
+  expect(
+    isHackDaemonCommandLine("/usr/local/bin/hack daemon start --foreground")
+  ).toBe(true);
+  expect(isHackDaemonCommandLine("/opt/notes daemon start --foreground")).toBe(
+    false
+  );
+  expect(isHackDaemonCommandLine("sleep 30")).toBe(false);
+});

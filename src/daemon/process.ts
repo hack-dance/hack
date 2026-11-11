@@ -265,7 +265,7 @@ export interface DaemonProcessProbe {
   /** Process start time (`ps -o lstart=`), or null when unknown. */
   readonly birth: (pid: number) => Promise<string | null>;
   /** Full command line, or null when unknown. */
-  readonly command: (pid: number) => Promise<string | null>;
+  readonly command: (pid: number) => Promise<DaemonCommandLine | null>;
   /**
    * Pids among `pids` holding one of this daemon root's sockets; null when
    * socket ownership cannot be observed (no `lsof`).
@@ -282,6 +282,18 @@ export const defaultDaemonProcessProbe: DaemonProcessProbe = {
     return rows?.find((row) => row.pid === pid)?.birth ?? null;
   },
   command: async (pid) => {
+    // Linux keeps argument boundaries in /proc/<pid>/cmdline (NUL-separated),
+    // so an executable path with spaces is read correctly.
+    if (process.platform === "linux") {
+      const raw = await readTextFile(`/proc/${pid}/cmdline`);
+      if (raw !== null && raw.length > 0) {
+        return raw
+          .split("\0")
+          .filter((arg, index, all) =>
+            index < all.length - 1 ? true : arg.length > 0
+          );
+      }
+    }
     try {
       const result = await exec(["ps", "-o", "command=", "-p", String(pid)], {
         stdin: "ignore",
@@ -363,11 +375,7 @@ async function proveOwnedDaemonProcessOnce(opts: {
     return { kind: "refused", reason: "identity-unknown" };
   }
   const command = await probe.command(pid);
-  if (
-    command === null ||
-    !command.includes(DAEMON_COMMAND_MARKER) ||
-    !isHackDaemonCommand({ command })
-  ) {
+  if (command === null || !isHackDaemonCommandLine(command)) {
     return { kind: "refused", reason: "not-hackd" };
   }
   const owners = await probe.socketOwners({
@@ -653,7 +661,63 @@ export async function isHackDaemonProcess(opts: {
   if (command === null) {
     return true;
   }
-  return (
-    command.includes(DAEMON_COMMAND_MARKER) && isHackDaemonCommand({ command })
-  );
+  return isHackDaemonCommandLine(command);
+}
+
+/**
+ * A process command line: argv (Linux `/proc/<pid>/cmdline`, exact) or the
+ * single string `ps` prints, where argument boundaries are lost.
+ */
+export type DaemonCommandLine = string | readonly string[];
+
+const DAEMON_ARGS = ["daemon", "start", "--foreground"] as const;
+const DAEMON_ARGS_SUFFIX = ` ${DAEMON_ARGS.join(" ")}`;
+
+function isHackExecutableName(path: string): boolean {
+  const base = path.split("/").pop()?.toLowerCase() ?? "";
+  return base === "hack" || base.startsWith("hack-");
+}
+
+/**
+ * True for `hack[-*] daemon start --foreground` or a dev-tree
+ * `bun <index.ts|hack*> daemon start --foreground`.
+ *
+ * With argv the executable path is exact, spaces included. With a `ps`
+ * string, the executable is everything before the fixed daemon arguments,
+ * so an install path with spaces still matches; the token split remains
+ * only for the bun dev-tree form.
+ */
+export function isHackDaemonCommandLine(command: DaemonCommandLine): boolean {
+  if (typeof command !== "string") {
+    const at = command.findIndex(
+      (_, i) =>
+        command[i] === DAEMON_ARGS[0] &&
+        command[i + 1] === DAEMON_ARGS[1] &&
+        command[i + 2] === DAEMON_ARGS[2]
+    );
+    if (at < 1) {
+      return false;
+    }
+    if (isHackExecutableName(command[0] ?? "")) {
+      return true;
+    }
+    if (at === 2) {
+      const runtime = (command[0] ?? "").split("/").pop()?.toLowerCase();
+      const script = (command[1] ?? "").split("/").pop()?.toLowerCase() ?? "";
+      return (
+        runtime === "bun" &&
+        (script === "index.ts" || script.startsWith("hack"))
+      );
+    }
+    return false;
+  }
+  const trimmed = command.trim();
+  if (!trimmed.endsWith(DAEMON_ARGS_SUFFIX)) {
+    return (
+      command.includes(DAEMON_COMMAND_MARKER) &&
+      isHackDaemonCommand({ command })
+    );
+  }
+  const prefix = trimmed.slice(0, -DAEMON_ARGS_SUFFIX.length);
+  return isHackExecutableName(prefix) || isHackDaemonCommand({ command });
 }

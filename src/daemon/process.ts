@@ -74,7 +74,6 @@ function sleep({ ms }: { readonly ms: number }): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const DAEMON_COMMAND_MARKER = "daemon start --foreground";
 const WHITESPACE_PATTERN = /\s+/;
 
 /**
@@ -194,26 +193,6 @@ async function listOpenUnixSockets(opts: {
   } catch {
     return [];
   }
-}
-
-/**
- * True when the process command line is actually a hack daemon: the
- * executable's basename must be `hack`/`hack-*` (or a `bun .../hack`
- * dev-tree invocation). A bare substring match on the daemon arguments
- * would also kill unrelated processes that merely mention them.
- */
-function isHackDaemonCommand(opts: { readonly command: string }): boolean {
-  const firstToken = opts.command.trim().split(WHITESPACE_PATTERN)[0] ?? "";
-  const base = firstToken.split("/").pop()?.toLowerCase() ?? "";
-  if (base === "hack" || base.startsWith("hack-")) {
-    return true;
-  }
-  if (base === "bun") {
-    const secondToken = opts.command.trim().split(WHITESPACE_PATTERN)[1] ?? "";
-    const secondBase = secondToken.split("/").pop()?.toLowerCase() ?? "";
-    return secondBase === "index.ts" || secondBase.startsWith("hack");
-  }
-  return false;
 }
 
 async function listProcessTable(): Promise<readonly string[]> {
@@ -681,54 +660,72 @@ export async function isHackDaemonProcess(opts: {
  */
 export type DaemonCommandLine = string | readonly string[];
 
-const DAEMON_ARGS = ["daemon", "start", "--foreground"] as const;
-const DAEMON_ARGS_SUFFIX = ` ${DAEMON_ARGS.join(" ")}`;
-
 function isHackExecutableName(path: string): boolean {
   const base = path.split("/").pop()?.toLowerCase() ?? "";
   return base === "hack" || base.startsWith("hack-");
 }
 
+function isBunDevPrefix(tokens: readonly string[]): boolean {
+  if (tokens.length !== 2) {
+    return false;
+  }
+  const runtime = (tokens[0] ?? "").split("/").pop()?.toLowerCase();
+  const script = (tokens[1] ?? "").split("/").pop()?.toLowerCase() ?? "";
+  return (
+    runtime === "bun" && (script === "index.ts" || script.startsWith("hack"))
+  );
+}
+
 /**
- * True for `hack[-*] daemon start --foreground` or a dev-tree
- * `bun <index.ts|hack*> daemon start --foreground`.
+ * True when the arguments after the executable are a foreground daemon start
+ * in any supported option placement: the positionals are exactly
+ * `daemon start`, and `--foreground` appears among the options. The CLI
+ * parser accepts options anywhere (`--no-interactive daemon start
+ * --foreground`, `daemon start --no-interactive --foreground`), and every
+ * option it accepts here is boolean, so no option consumes a positional.
+ */
+function isForegroundDaemonStartArgs(args: readonly string[]): boolean {
+  const positionals = args.filter((arg) => !arg.startsWith("-"));
+  return (
+    positionals.length === 2 &&
+    positionals[0] === "daemon" &&
+    positionals[1] === "start" &&
+    args.includes("--foreground")
+  );
+}
+
+/**
+ * True for `hack[-*] ... daemon start ... --foreground` or a dev-tree
+ * `bun <index.ts|hack*> ... daemon start ... --foreground`, with options in
+ * any supported position.
  *
  * With argv the executable path is exact, spaces included. With a `ps`
- * string, the executable is everything before the fixed daemon arguments,
- * so an install path with spaces still matches; the token split remains
- * only for the bun dev-tree form.
+ * string argument boundaries are lost, so each split point is tried: the
+ * words before it must name the executable (an install path with spaces
+ * still matches) and the words after it must be a foreground daemon start.
  */
 export function isHackDaemonCommandLine(command: DaemonCommandLine): boolean {
   if (typeof command !== "string") {
-    const at = command.findIndex(
-      (_, i) =>
-        command[i] === DAEMON_ARGS[0] &&
-        command[i + 1] === DAEMON_ARGS[1] &&
-        command[i + 2] === DAEMON_ARGS[2]
-    );
-    if (at < 1) {
-      return false;
-    }
-    if (isHackExecutableName(command[0] ?? "")) {
+    if (
+      isHackExecutableName(command[0] ?? "") &&
+      isForegroundDaemonStartArgs(command.slice(1))
+    ) {
       return true;
     }
-    if (at === 2) {
-      const runtime = (command[0] ?? "").split("/").pop()?.toLowerCase();
-      const script = (command[1] ?? "").split("/").pop()?.toLowerCase() ?? "";
-      return (
-        runtime === "bun" &&
-        (script === "index.ts" || script.startsWith("hack"))
-      );
-    }
-    return false;
-  }
-  const trimmed = command.trim();
-  if (!trimmed.endsWith(DAEMON_ARGS_SUFFIX)) {
     return (
-      command.includes(DAEMON_COMMAND_MARKER) &&
-      isHackDaemonCommand({ command })
+      isBunDevPrefix(command.slice(0, 2)) &&
+      isForegroundDaemonStartArgs(command.slice(2))
     );
   }
-  const prefix = trimmed.slice(0, -DAEMON_ARGS_SUFFIX.length);
-  return isHackExecutableName(prefix) || isHackDaemonCommand({ command });
+  const words = command.trim().split(WHITESPACE_PATTERN);
+  for (let at = 1; at < words.length; at += 1) {
+    if (!isForegroundDaemonStartArgs(words.slice(at))) {
+      continue;
+    }
+    const prefix = words.slice(0, at);
+    if (isHackExecutableName(prefix.join(" ")) || isBunDevPrefix(prefix)) {
+      return true;
+    }
+  }
+  return false;
 }

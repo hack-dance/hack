@@ -22,6 +22,7 @@ import {
   terminateProvenDaemon,
 } from "../src/daemon/process.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { spawnHackdLikeFixture } from "./helpers/hackd-fixture.ts";
 
 /**
  * HACK-2052: nothing signals a pid from the hackd pid file on liveness
@@ -173,22 +174,9 @@ test.skipIf(process.platform !== "linux" && !Bun.which("lsof"))(
     const ownRoot = join(root, "own");
     await mkdir(foreignRoot);
     await mkdir(ownRoot);
-    const binary = join(root, "hack-foreign-fixture");
-    await symlink(process.execPath, binary);
     const socket = join(foreignRoot, "hackd.sock");
     const ready = join(foreignRoot, "ready");
-    const child = Bun.spawn(
-      [
-        binary,
-        "-e",
-        `Bun.serve({ unix: ${JSON.stringify(socket)}, fetch() { return new Response("x"); } }); await Bun.write(${JSON.stringify(ready)}, "ready");`,
-        "--",
-        "daemon",
-        "start",
-        "--foreground",
-      ],
-      { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
-    );
+    const child = await spawnHackdLikeFixture({ dir: root, socket, ready });
     children.push(child);
     for (let i = 0; i < 100 && !(await Bun.file(ready).exists()); i++) {
       await Bun.sleep(20);
@@ -297,22 +285,9 @@ test("stale cleanup removes a dead pid and an unanswered socket", async () => {
 async function startForeignFixture(
   socketRoot: string
 ): Promise<ReturnType<typeof Bun.spawn>> {
-  const binary = join(root, "hack-fixture");
-  await symlink(process.execPath, binary).catch(() => undefined);
   const socket = join(socketRoot, "hackd.sock");
   const ready = join(socketRoot, "ready");
-  const child = Bun.spawn(
-    [
-      binary,
-      "-e",
-      `Bun.serve({ unix: ${JSON.stringify(socket)}, fetch() { return new Response("x"); } }); await Bun.write(${JSON.stringify(ready)}, "ready");`,
-      "--",
-      "daemon",
-      "start",
-      "--foreground",
-    ],
-    { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
-  );
+  const child = await spawnHackdLikeFixture({ dir: root, socket, ready });
   children.push(child);
   for (let i = 0; i < 100 && !(await Bun.file(ready).exists()); i++) {
     await Bun.sleep(20);
@@ -522,6 +497,44 @@ test("hackd command lines with spaces in the executable path are recognized", ()
     false
   );
   expect(isHackDaemonCommandLine("sleep 30")).toBe(false);
+});
+
+test("hackd command lines are recognized with options in any supported position", () => {
+  const hack = "/usr/local/bin/hack";
+  // The CLI parser accepts these placements (all options here are boolean).
+  const placements: readonly (readonly string[])[] = [
+    ["daemon", "start", "--no-interactive", "--foreground"],
+    ["daemon", "start", "--foreground", "--no-interactive"],
+    ["--no-interactive", "daemon", "start", "--foreground"],
+    ["daemon", "--foreground", "start"],
+    ["--foreground", "daemon", "start"],
+  ];
+  for (const args of placements) {
+    expect(isHackDaemonCommandLine([hack, ...args])).toBe(true);
+    expect(
+      isHackDaemonCommandLine(["/usr/bin/bun", "/src/hack/index.ts", ...args])
+    ).toBe(true);
+    expect(isHackDaemonCommandLine(`${hack} ${args.join(" ")}`)).toBe(true);
+    expect(
+      isHackDaemonCommandLine(`/opt/My Tools/bin/hack ${args.join(" ")}`)
+    ).toBe(true);
+  }
+  // Not a foreground daemon: no --foreground, other positionals, other program.
+  expect(isHackDaemonCommandLine([hack, "daemon", "start"])).toBe(false);
+  expect(
+    isHackDaemonCommandLine([hack, "daemon", "stop", "--foreground"])
+  ).toBe(false);
+  expect(
+    isHackDaemonCommandLine([hack, "up", "daemon", "start", "--foreground"])
+  ).toBe(false);
+  expect(isHackDaemonCommandLine(`${hack} daemon start --no-interactive`)).toBe(
+    false
+  );
+  expect(
+    isHackDaemonCommandLine(
+      "/usr/bin/vim --no-interactive daemon start --foreground"
+    )
+  ).toBe(false);
 });
 
 test("an unreadable command line is unknown identity, not 'not hackd'", async () => {

@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import { findOrphanDaemonProcesses } from "../src/daemon/process.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { spawnHackdLikeFixture } from "./helpers/hackd-fixture.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -42,22 +43,13 @@ test.skipIf(!Bun.which("lsof"))(
     }
     const foreignRoot = join(tempDir, "foreign-daemon");
     await mkdir(foreignRoot);
-    const binary = join(tempDir, "hack-foreign-fixture");
-    await symlink(process.execPath, binary);
     const socket = join(foreignRoot, "hackd.sock");
     const ready = join(foreignRoot, "ready");
-    foreignDaemon = Bun.spawn(
-      [
-        binary,
-        "-e",
-        `Bun.serve({ unix: ${JSON.stringify(socket)}, fetch() { return new Response("fixture"); } }); await Bun.write(${JSON.stringify(ready)}, "ready");`,
-        "--",
-        "daemon",
-        "start",
-        "--foreground",
-      ],
-      { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
-    );
+    foreignDaemon = await spawnHackdLikeFixture({
+      dir: tempDir,
+      socket,
+      ready,
+    });
     for (let attempt = 0; attempt < 100; attempt++) {
       if (await Bun.file(ready).exists()) {
         break;

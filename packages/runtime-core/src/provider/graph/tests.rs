@@ -391,6 +391,61 @@ fn inert_logging_and_metadata_labels_are_admitted_with_review_warnings() {
     }
 }
 
+/// A routed service has its own label check (`routes::validate_plan`). Plain
+/// metadata beside valid routing labels must not turn into a route refusal.
+#[test]
+fn a_routed_service_may_carry_metadata_labels() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let outcome = |extra: Option<(&str, &str)>| {
+        let mut document = compose(&image, "marker", false);
+        let mut labels = json!({"caddy":"web.example.test",
+            "caddy.reverse_proxy":"{{upstreams 3000}}","caddy.tls":"internal"});
+        if let Some((key, value)) = extra {
+            labels[key] = json!(value);
+        }
+        document["services"]["web"]["labels"] = labels;
+        document["services"]["web"]["healthcheck"] = json!({"x-hack-http":{"port":3000,
+            "path":"/health","interval_ms":100,"timeout_ms":500,"retries":3,"start_period_ms":0}});
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let compatible = review.plan.enrollment_compatible;
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        );
+        let prepared = inputs.and_then(|inputs| {
+            config::prepare_delivery(
+                inputs,
+                &goals(),
+                &"a".repeat(32),
+                &"b".repeat(32),
+                None,
+                config::DeliveryOptions {
+                    routing_enrolled: true,
+                    ..Default::default()
+                },
+            )
+        });
+        (compatible, prepared.map(|_| ()).map_err(|error| error.code))
+    };
+    let plain = outcome(None);
+    assert!(plain.0);
+    // Lowering the route's HTTP probe needs the native-http-probe build, so the
+    // baseline itself may stop later; it never stops at the route check.
+    assert_ne!(plain.1, Err("graph_route_binding"));
+    // Metadata changes nothing: same review verdict, same preparation outcome.
+    assert_eq!(outcome(Some(("com.example.team", "web"))), plain);
+    // Control: another router label beside the route is still refused at review.
+    let extra_router_label = outcome(Some(("caddy.header", "X")));
+    assert!(!extra_router_label.0);
+    assert!(extra_router_label.1.is_err());
+}
+
 #[test]
 fn declared_amd64_requires_the_explicit_emulation_opt_in() {
     let fixture = Fixture::new();

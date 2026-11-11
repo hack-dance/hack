@@ -379,6 +379,7 @@ import { readLinesFromStream } from "../ui/lines.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
 import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
+import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
 import {
   prepareDisposableCachePrune,
@@ -6305,6 +6306,10 @@ async function handleUp({
 }): Promise<number> {
   // Refuse a malformed --target before any project or runtime work.
   parseRequestedTarget({ raw: args.options.target });
+  if (resolveNativeRuntimeSelection()) {
+    // Once per `hack up`, whichever native start path follows (HACK-2026).
+    noteNativeBackendBeta({ json: args.options.json === true });
+  }
   if (
     (args.options.detach || args.options.json) &&
     resolveNativeRuntimeSelection()

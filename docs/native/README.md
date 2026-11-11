@@ -9,7 +9,7 @@ project unless you choose native for it.
 Hack needs something to run your services in. Today that is Docker Compose, which
 needs a Docker app running on your machine.
 
-With the native backend, Hack runs your Compose project in a small Linux virtual
+With the native backend, Hack runs your Compose project in a Linux virtual
 machine that Hack owns. Docker runs inside that machine, so you do not need Docker
 Desktop or OrbStack on the Mac. Hack starts the machine, checks it, and cleans up
 after it.

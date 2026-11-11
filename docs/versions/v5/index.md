@@ -12,6 +12,7 @@ archives or the Homebrew formula. Read [Upgrade from v4](upgrade.md) for what
 changed and what was retired.
 
 Start with [Install](install.md), then [Getting started](getting-started.md).
+[What's new in 5.0](../guides/v5-release-notes.md) summarizes the release.
 
 ## Understand the project
 
@@ -19,6 +20,7 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 - [Environment and secrets](../env.md): committed configuration with encrypted values.
 - [Lifecycle](../lifecycle.md): hooks, tunnels and host helpers that start with the project.
 - [Sessions](../sessions.md): persistent terminal workspaces per project.
+- [Side-by-side development](../dev.md): `hack dev` runs a repository's declared dev command.
 
 ## Do a task
 
@@ -33,7 +35,7 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 ## Native backend (beta)
 
 A second way to run the same project on an Apple Silicon Mac. Hack starts its own
-small Linux virtual machine instead of using a Docker app. It is opt-in, and Compose
+Linux virtual machine instead of using a Docker app. It is opt-in, and Compose
 stays the default.
 
 - [Overview](native/overview.md): what it is, what it is not, and why to try it.

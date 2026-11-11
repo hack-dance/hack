@@ -27,6 +27,7 @@ import {
   type NativeHttpsLeaseIdentity,
   recoverNativeHttpsLease,
 } from "./native-https-owner.ts";
+import { reportNativeIgnoredSettingNotices } from "./native-ignored-setting-notices.ts";
 import {
   NATIVE_IMAGE_ENSURE_TIMEOUT_MS,
   nativeImagePolicyArgs,
@@ -126,6 +127,7 @@ import {
 } from "./native-project-review.ts";
 import {
   hasOnlyNativeSupportedLabels,
+  hasOnlyNativeSupportedLogging,
   nativeBridgeCapacity,
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
@@ -582,7 +584,7 @@ export function prepareNativeProjectServices(
     if (
       !(isRecord(value) && imageOrAdmittedBuild(name, value, builds)) ||
       (value.extra_hosts !== undefined && !hasHostDependencies) ||
-      value.logging !== undefined ||
+      !hasOnlyNativeSupportedLogging(value.logging) ||
       // Restart policies are admitted (or refused with a fixed reason) by the
       // runtime graph, which owns stop/restart interaction; only the type is checked here.
       (value.restart !== undefined && typeof value.restart !== "string") ||
@@ -2224,6 +2226,7 @@ async function startNativeProjectAttempt(
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
         reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
+        reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
         reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({

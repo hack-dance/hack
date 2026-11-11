@@ -18,6 +18,14 @@ fn refused() -> CandidateError {
     )
 }
 
+#[cfg(target_os = "macos")]
+fn unsupervised() -> CandidateError {
+    CandidateError::new(
+        "host_endpoint_unsupervised",
+        "The selected host listener has no supervising parent process (its parent is PID 1).",
+    )
+}
+
 /// An in-memory observation of one explicit same-UID process's exclusive IPv4 listener.
 /// Capture does not adopt a process, signal it, or create durable owner authorization.
 #[derive(Debug, Clone)]
@@ -199,6 +207,11 @@ impl HostEndpoint {
     }
     /// Discover one same-user exclusive loopback listener from an explicitly
     /// selected executable. A port alone is never sufficient authority.
+    ///
+    /// An executable selection is always reviewed with at least one supervisor
+    /// link, and review refuses a parent at PID 1. A listener already
+    /// reparented to launchd therefore refuses here as
+    /// `host_endpoint_unsupervised` (not retried), before any runtime work.
     pub fn discover(executable: &Path, port: u16) -> Result<(i32, String), CandidateError> {
         #[cfg(target_os = "macos")]
         {
@@ -221,9 +234,14 @@ impl HostEndpoint {
                 if found.is_some() {
                     return Err(refused());
                 }
-                found = Some((pid, endpoint.fingerprint()?));
+                found = Some((pid, endpoint.fingerprint()?, process));
             }
-            found.ok_or_else(refused)
+            let (pid, fingerprint, process) = found.ok_or_else(refused)?;
+            // An exited or replaced listener stays a retryable identity refusal.
+            if super::identity::reparented_to_init(&process).map_err(|_| refused())? {
+                return Err(unsupervised());
+            }
+            Ok((pid, fingerprint))
         }
         #[cfg(not(target_os = "macos"))]
         {

@@ -692,3 +692,63 @@ test("doctor validates every adaptation as native up does before counting probes
     ),
   });
 });
+
+test("doctor notes the host listener wait only when a selection and persistent hooks are configured", async () => {
+  const f = await fixture();
+  const composeFile = join(f.projectDir, "docker-compose.yml");
+  await writeFile(
+    composeFile,
+    JSON.stringify({ services: { web: { image: `sha256:${SHA}` } } })
+  );
+  await f.machine({ version: 1, sharedSource: true });
+  const doctor = (opts: {
+    readonly selection: boolean;
+    readonly persistent: boolean;
+  }) =>
+    checkNativeSettings({
+      project: {
+        projectRoot: f.projectRoot,
+        projectDirName: ".hack",
+        projectDir: f.projectDir,
+        composeFile,
+        envFile: join(f.projectDir, ".env"),
+        configFile: join(f.projectDir, "hack.config.json"),
+      },
+      cfg: {
+        name: "settings-fixture",
+        internal: { dns: false, tls: false },
+        ownership: defaultProjectOwnership(),
+        lifecycle: {
+          up: {
+            before: [
+              { command: "synthetic-tunnels", persistent: opts.persistent },
+            ],
+          },
+        },
+      },
+      env: opts.selection
+        ? { ...f.env, HACK_NATIVE_DEPENDENCIES: "/synthetic/selection.json" }
+        : f.env,
+      uid: UID,
+    });
+  const noted = await doctor({ selection: true, persistent: true });
+  expect(noted.status).toBe("ok");
+  expect(noted.nativeSettings?.dependencyWait).toEqual({
+    persistentHooks: 1,
+    defaultSeconds: 60,
+    maxSeconds: 900,
+  });
+  expect(noted.message).toContain(
+    "Host dependency listeners: 1 persistent hook(s) or process(es) may start them; native up waits for each discovered binding up to its host_wait_seconds (default 60 s, at most 900 s) after the up.before hooks."
+  );
+  // The selection path is never printed.
+  expect(noted.message).not.toContain("/synthetic/selection.json");
+  for (const unnoted of [
+    { selection: false, persistent: true },
+    { selection: true, persistent: false },
+  ]) {
+    const result = await doctor(unnoted);
+    expect(result.nativeSettings?.dependencyWait).toBeUndefined();
+    expect(result.message).not.toContain("host_wait_seconds");
+  }
+});

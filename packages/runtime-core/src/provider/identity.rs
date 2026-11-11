@@ -169,6 +169,44 @@ pub fn lineage(
     Ok(first)
 }
 
+/// Whether `recorded`, still the same live process, has been reparented to
+/// launchd (parent PID 0 or 1), as after `nohup … &`, `ssh -f` or a daemonizing
+/// fork. Native review never accepts such a parent as a supervisor, so discovery
+/// uses this to refuse early with a precise reason. Read-only; an exited or
+/// replaced process refuses as an identity mismatch instead of answering.
+#[cfg(target_os = "macos")]
+pub fn reparented_to_init(recorded: &ProcessIdentity) -> Result<bool, CandidateError> {
+    let uid = recorded.uid;
+    verify(recorded, &observe(recorded.pid)?, &recorded.executable, uid)?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: libproc receives correctly sized writable output storage and
+    // retains no pointer after returning.
+    let count = unsafe {
+        libc::proc_pidinfo(
+            recorded.pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+        )
+    };
+    if count as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+        return Err(parent_refused());
+    }
+    // SAFETY: libproc filled the complete output record above.
+    let info = unsafe { info.assume_init() };
+    let start = info
+        .pbi_start_tvsec
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(info.pbi_start_tvusec));
+    if info.pbi_uid != uid || start != Some(recorded.start_micros) {
+        return Err(parent_refused());
+    }
+    // A recycled PID must not answer for the recorded process.
+    verify(recorded, &observe(recorded.pid)?, &recorded.executable, uid)?;
+    Ok(info.pbi_ppid <= 1)
+}
+
 #[cfg(target_os = "macos")]
 fn parent_refused() -> CandidateError {
     CandidateError::new(

@@ -94,6 +94,7 @@ try {
     "head",
     "mkdir",
     "mktemp",
+    "mv",
     "rm",
     "sed",
     "tar",

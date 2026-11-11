@@ -130,20 +130,17 @@ async function loadScopedJournal(opts: {
     branchOption: opts.options.branch,
     noticeToStderr: true,
   });
-  const journal = await loadJournal({ commandId: opts.commandId }).catch(
-    (error: unknown) => {
-      if (error instanceof HackCliError && error.code === "E_USAGE") {
-        throw commandNotFound();
-      }
-      throw error;
+  const journal = await loadJournal({
+    commandId: opts.commandId,
+    inScope: (meta) =>
+      meta.projectRoot === project.projectRoot &&
+      meta.instanceId === instanceIdFor(branch),
+  }).catch((error: unknown) => {
+    if (error instanceof HackCliError && error.code === "E_USAGE") {
+      throw commandNotFound();
     }
-  );
-  if (
-    journal.meta.projectRoot !== project.projectRoot ||
-    journal.meta.instanceId !== instanceIdFor(branch)
-  ) {
-    throw commandNotFound();
-  }
+    throw error;
+  });
   return journal;
 }
 

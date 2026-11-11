@@ -62,6 +62,7 @@ export const backgroundCommandComposeScenario: Scenario = {
       await stack.cli(["up", "--detach"]);
       const commandId = await checkResume(stack);
       await checkRun(stack);
+      await checkContainerRestart(stack);
       await checkDownMidRun(stack);
       await checkScope({ stack, commandId });
     } finally {
@@ -87,6 +88,8 @@ type Stack = {
   ) => Promise<CliResult>;
   readonly start: (args: readonly string[]) => Promise<string>;
   readonly clean: () => Promise<void>;
+  readonly docker: Docker;
+  readonly name: string;
 };
 
 async function prepareStack(ctx: ScenarioContext): Promise<Stack> {
@@ -168,7 +171,7 @@ async function prepareStack(ctx: ScenarioContext): Promise<Stack> {
   };
   const clean = () => removeOwned({ docker, name });
 
-  return { ctx, root: fixture.root, cli, start, clean };
+  return { ctx, root: fixture.root, cli, start, clean, docker, name };
 }
 
 type Docker = (args: readonly string[]) => Promise<CliResult>;
@@ -314,6 +317,90 @@ async function checkRun(stack: Stack): Promise<void> {
       runRead.at(-1)?.outcome === "succeeded",
     message: `background run must succeed: ${JSON.stringify(runRead.at(-1))}`,
   });
+}
+
+/** Start an exec that prints once and sleeps; return its id after the print. */
+async function startSleeper(stack: Stack, marker: string): Promise<string> {
+  const id = await stack.start([
+    "exec",
+    "--detach",
+    "--json",
+    "api",
+    "--",
+    "sh",
+    "-c",
+    `echo ${marker}; sleep 120`,
+  ]);
+  await readUntil({
+    ctx: stack.ctx,
+    cwd: stack.root,
+    args: ["commands", "read", id, "--follow", "--json"],
+    stopWhen: (line) => line.type === "command.output",
+  });
+  return id;
+}
+
+async function expectFailedEnd(opts: {
+  readonly stack: Stack;
+  readonly id: string;
+  readonly label: string;
+}): Promise<void> {
+  const lines = parseLines(
+    (
+      await opts.stack.cli([
+        "commands",
+        "read",
+        opts.id,
+        "--follow",
+        "--json",
+        "--wait-ms",
+        "60000",
+      ])
+    ).stdout
+  );
+  const end = lines.at(-1);
+  opts.stack.ctx.log(`${opts.label} ended: ${JSON.stringify(end)}`);
+  expect({
+    that:
+      end?.ended === true &&
+      end.outcome === "failed" &&
+      typeof end.exitCode === "number" &&
+      end.exitCode !== 0,
+    message: `${opts.label} must end failed with the client's exit code: ${JSON.stringify(end)}`,
+  });
+}
+
+/** A container restart under a background exec ends it failed. */
+async function checkContainerRestart(stack: Stack): Promise<void> {
+  const id = await startSleeper(stack, "before-restart");
+  const containers = (
+    await stack.docker([
+      "ps",
+      "-q",
+      "--no-trunc",
+      "--filter",
+      `label=${OWNER}=${stack.name}`,
+      "--filter",
+      `label=${PROJECT}=${stack.name}`,
+      "--filter",
+      "label=com.docker.compose.service=api",
+      "--filter",
+      "label=com.docker.compose.oneoff=False",
+    ])
+  ).stdout
+    .split(WHITESPACE)
+    .filter(Boolean);
+  expect({
+    that: containers.length === 1,
+    message: `exactly one owned api container expected, saw ${containers.length}`,
+  });
+  const restart = await stack.docker(["restart", containers[0] as string]);
+  expect({
+    that: restart.exitCode === 0,
+    message: "docker restart must succeed",
+    result: restart,
+  });
+  await expectFailedEnd({ stack, id, label: "container restart mid-run" });
 }
 
 /** 3. hack down while a background exec runs. */

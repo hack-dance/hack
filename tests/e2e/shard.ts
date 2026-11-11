@@ -49,6 +49,8 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   "native-config-down-hooks": 155,
   "native-config-process-policy": 122,
   "native-compose-adoption-local-worktrees": 90,
+  // Measured locally (not hosted) on the first run; refresh from CI.
+  "background-command-compose": 76,
   "pattern-p01-dependency-bootstrap": 66,
   "native-compose-adoption-managed-worktrees": 64,
   "native-compose-adoption-network-health-worktrees": 56,
@@ -58,7 +60,6 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   "native-compose-adoption-dependency-worktrees": 49,
   "native-compose-adoption-plural-network-worktrees": 44,
   "dependency-cache": 43,
-  "background-command-compose": 40,
   "native-compose-adoption-branch-worktrees": 38,
   "portable-bootstrap-negatives": 38,
   "dependency-cache-package": 37,

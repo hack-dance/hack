@@ -35,6 +35,7 @@ export const MIN_READ_MAX_BYTES = OUTPUT_EVENT_MAX_BYTES;
 export const DEFAULT_MCP_WAIT_MS = 25_000;
 export const MAX_WAIT_MS = 30_000;
 const POLL_MS = 200;
+const OWNER_CHECK_MS = 2000;
 
 export type CommandState = "accepted" | "running" | "stalled" | "ended";
 
@@ -74,6 +75,11 @@ export type LoadedJournal = {
 export async function loadJournal(opts: {
   readonly commandId: string;
   readonly root?: string;
+  /**
+   * The caller's scope check. It runs before expiry is reported, so neither
+   * "expired" nor "exists" is confirmed for an id outside the caller's scope.
+   */
+  readonly inScope?: (meta: CommandMeta) => boolean;
 }): Promise<LoadedJournal> {
   const paths = journalPaths({
     root: opts.root ?? commandsRoot(),
@@ -82,16 +88,16 @@ export async function loadJournal(opts: {
   if (!(await journalExists(paths))) {
     throw commandNotFound();
   }
+  const meta = await readMeta(paths);
+  if (!meta || (opts.inScope && !opts.inScope(meta))) {
+    throw commandNotFound();
+  }
   if (await isExpired(paths)) {
     throw new HackCliError({
       code: "E_RESULT_EXPIRED",
       message:
         "This background command's result has expired and its output was removed.",
     });
-  }
-  const meta = await readMeta(paths);
-  if (!meta) {
-    throw commandNotFound();
   }
   return { paths, meta };
 }
@@ -237,12 +243,21 @@ export async function readCommandEvents(opts: {
     });
   const start = parseAfter({ meta, after: opts.after });
   const batch: Batch = { events: [], used: 0, afterSeq: start.afterSeq };
+  let lastOwnerCheck = Number.NEGATIVE_INFINITY;
   for (;;) {
-    const events = await readCurrentEvents({
-      journal: opts.journal,
-      observe: opts.observe,
-      now,
-    });
+    // Checking the owner spawns `ps`; do it on the first pass and then at
+    // most every OWNER_CHECK_MS while waiting.
+    const checkOwner = now() - lastOwnerCheck >= OWNER_CHECK_MS;
+    const events = checkOwner
+      ? await readCurrentEvents({
+          journal: opts.journal,
+          observe: opts.observe,
+          now,
+        })
+      : await readEvents(opts.journal.paths);
+    if (checkOwner) {
+      lastOwnerCheck = now();
+    }
     if (start.gap || batch.afterSeq > (events.at(-1)?.seq ?? 0)) {
       return gapResult({ meta, events, cursor });
     }

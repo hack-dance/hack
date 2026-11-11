@@ -150,7 +150,12 @@ export async function runBackgroundSupervisor(opts: {
       })
     );
   } catch (error: unknown) {
-    // An internal failure must not be reported as the command's result.
+    // An internal failure must not be reported as the command's result, and
+    // must not leave the command running with nobody enforcing its timeout.
+    // Until Bun has reaped it, the pid cannot have been reused.
+    if (proc.exitCode === null && proc.signalCode === null) {
+      signalProcessGroup(proc.pid, "SIGKILL");
+    }
     return await finish({
       ...baseEnded,
       truncated: capture.truncated,
@@ -447,9 +452,12 @@ class OutputCapture {
   ): boolean {
     const state = this.streams[stream];
     const pending = state.size - state.emittedTo;
+    // With values to redact, scan every tick: raw bytes then stay on disk for
+    // at most one tick (plus a held-back prefix of a value).
     return (
       pending > 0 &&
       (final ||
+        this.opts.secrets.length > 0 ||
         pending >= EMIT_EAGER_BYTES ||
         now - state.lastEmitMono >= EMIT_INTERVAL_MS)
     );

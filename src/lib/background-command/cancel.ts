@@ -205,16 +205,27 @@ function childGroupMatches(opts: {
   );
 }
 
+function cancelReason(opts: {
+  readonly owner: boolean;
+  readonly childGone: boolean;
+}): string {
+  if (!opts.childGone) {
+    return "cancel_unconfirmed";
+  }
+  return opts.owner ? "supervisor_unresponsive" : "cancelled_before_start";
+}
+
 /**
  * SIGKILL what still verifies and wait briefly for the supervisor to be gone.
- * True only when no supervisor is left that could still write.
+ * `supervisorGone` is true only when no supervisor is left that could still
+ * write; `childGone` only when no process with the child's identity remains.
  */
 async function forceStopVerified(opts: {
   readonly journal: LoadedJournal;
   readonly owner: ObservedIdentity | null;
   readonly observe: ObserveIdentities;
   readonly signaller: Signaller;
-}): Promise<boolean> {
+}): Promise<{ readonly supervisorGone: boolean; readonly childGone: boolean }> {
   const { owner } = opts;
   const child = await readChild(opts.journal.paths);
   const snapshot = await opts.observe([
@@ -222,7 +233,7 @@ async function forceStopVerified(opts: {
     ...(child ? [child.pid] : []),
   ]);
   if (!snapshot) {
-    return false;
+    return { supervisorGone: false, childGone: false };
   }
   if (owner && identityMatches({ expected: owner, snapshot })) {
     opts.signaller.process(owner.pid, "SIGKILL");
@@ -230,17 +241,33 @@ async function forceStopVerified(opts: {
   if (child && childGroupMatches({ child, snapshot })) {
     opts.signaller.group(child.processGroupId, "SIGKILL");
   }
-  if (!owner) {
-    return true;
-  }
+  return await waitUntilGone({ owner, child, observe: opts.observe });
+}
+
+/** Poll up to 2 s until neither identity is alive; report what was confirmed. */
+async function waitUntilGone(opts: {
+  readonly owner: ObservedIdentity | null;
+  readonly child: ObservedIdentity | null;
+  readonly observe: ObserveIdentities;
+}): Promise<{ readonly supervisorGone: boolean; readonly childGone: boolean }> {
+  const { owner, child } = opts;
+  const pids = [...(owner ? [owner.pid] : []), ...(child ? [child.pid] : [])];
   const deadline = Date.now() + 2000;
+  let gone = { supervisorGone: false, childGone: false };
   for (;;) {
-    const recheck = await opts.observe([owner.pid]);
-    if (recheck && !identityMatches({ expected: owner, snapshot: recheck })) {
-      return true;
+    const recheck = await opts.observe(pids);
+    if (recheck) {
+      gone = {
+        supervisorGone: !(
+          owner && identityMatches({ expected: owner, snapshot: recheck })
+        ),
+        childGone: !(
+          child && identityMatches({ expected: child, snapshot: recheck })
+        ),
+      };
     }
-    if (Date.now() >= deadline) {
-      return false;
+    if ((gone.supervisorGone && gone.childGone) || Date.now() >= deadline) {
+      return gone;
     }
     await Bun.sleep(POLL_MS);
   }
@@ -279,13 +306,25 @@ async function finishWithoutSupervisor(opts: {
       return existing;
     }
     const owner = await readOwner(paths);
-    if (!(await forceStopVerified({ ...opts, owner }))) {
+    const stopped = await forceStopVerified({ ...opts, owner });
+    if (!stopped.supervisorGone) {
       return null;
     }
-    const writer = new JournalWriter(paths, meta, events.at(-1)?.seq ?? 0);
+    // The supervisor may have written up to the moment it died: re-read.
+    const current = await readEvents(paths);
+    const late = endedEvent(current);
+    if (late) {
+      return late;
+    }
+    const writer = new JournalWriter(paths, meta, current.at(-1)?.seq ?? 0);
+    // `cancelled` only when the command's process is confirmed gone;
+    // otherwise the outcome is not known.
     return await writer.write("command.ended", {
-      outcome: "cancelled",
-      reason: owner ? "supervisor_unresponsive" : "cancelled_before_start",
+      outcome: stopped.childGone ? "cancelled" : "unknown",
+      reason: cancelReason({
+        owner: owner !== null,
+        childGone: stopped.childGone,
+      }),
       exitCode: null,
       signal: null,
       durationMs: Math.max(0, Date.now() - Date.parse(meta.acceptedAt)),

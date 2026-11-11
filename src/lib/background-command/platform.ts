@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { closeSync, constants, fstatSync, openSync } from "node:fs";
-import { readObservedProcesses } from "../host-command-observation.ts";
+import { parseObservedProcesses } from "../host-command-observation.ts";
 import { exec } from "../shell.ts";
 
 /**
@@ -108,7 +108,7 @@ export async function observeIdentities(
   if (wanted.length === 0) {
     return new Map();
   }
-  const rows = await readObservedProcesses(wanted);
+  const rows = await readIdentityRows(wanted);
   if (rows === null) {
     return null;
   }
@@ -118,6 +118,39 @@ export async function observeIdentities(
       { pid: row.pid, birth: row.birth, processGroupId: row.processGroupId },
     ])
   );
+}
+
+/**
+ * `ps -o lstart=` prints local time, so the time zone must be fixed: a
+ * supervisor that inherits a project's `TZ` and a reader in the user's shell
+ * must format the same start time identically, or a live process looks gone.
+ */
+export const IDENTITY_PS_ENV = Object.freeze({ LC_ALL: "C", TZ: "UTC0" });
+
+async function readIdentityRows(
+  pids: readonly number[]
+): Promise<ReturnType<typeof parseObservedProcesses> | null> {
+  try {
+    const result = await exec(
+      [
+        "ps",
+        "-p",
+        pids.join(","),
+        "-o",
+        "pid=,ppid=,pgid=,etime=,time=,rss=,lstart=",
+      ],
+      { stdin: "ignore", timeoutMs: 2000, env: { ...IDENTITY_PS_ENV } }
+    );
+    // ps exits 1 when none of the pids exist: that is "all gone", not unknown.
+    if (result.exitCode !== 0 && result.stdout.trim().length > 0) {
+      return null;
+    }
+    return result.exitCode === 0 || result.exitCode === 1
+      ? parseObservedProcesses(result.stdout)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** True only when the pid is alive with the same birth: pid reuse is not a match. */
@@ -147,7 +180,7 @@ export async function readSessionId(pid: number): Promise<number | null> {
     const result = await exec(["ps", "-o", "sess=", "-p", String(pid)], {
       stdin: "ignore",
       timeoutMs: 2000,
-      env: { LC_ALL: "C" },
+      env: { ...IDENTITY_PS_ENV },
     });
     const value = Number.parseInt(result.stdout.trim(), 10);
     return result.exitCode === 0 && Number.isSafeInteger(value) && value > 0

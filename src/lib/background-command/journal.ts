@@ -402,18 +402,38 @@ function isNoSpace(error: unknown): boolean {
 /** Seam for tests: the append primitive. */
 export type AppendLine = (path: string, line: string) => Promise<void>;
 
+/**
+ * Append one line with a single O_APPEND write. A short write (a nearly full
+ * disk or quota reports fewer bytes instead of failing) is cut back to the
+ * previous end and reported as ENOSPC, so no torn line stays behind. A line
+ * torn by an earlier crash is closed with a newline first, so it cannot merge
+ * with this one; readers already ignore the fragment.
+ */
 export const appendLine: AppendLine = async (path, line) => {
   const handle = await open(
     path,
-    constants.O_WRONLY |
+    constants.O_RDWR |
       constants.O_APPEND |
       constants.O_CREAT |
       constants.O_NOFOLLOW,
     0o600
   );
   try {
-    // One write per line: concurrent readers see whole lines or none.
-    await handle.write(line);
+    const before = (await handle.stat()).size;
+    let prefix = "";
+    if (before > 0) {
+      const last = Buffer.alloc(1);
+      await handle.read(last, 0, 1, before - 1);
+      prefix = last[0] === 0x0a ? "" : "\n";
+    }
+    const bytes = Buffer.from(`${prefix}${line}`, "utf8");
+    const { bytesWritten } = await handle.write(bytes, 0, bytes.length);
+    if (bytesWritten !== bytes.length) {
+      await handle.truncate(before).catch(() => undefined);
+      throw Object.assign(new Error("Short write to the command journal."), {
+        code: "ENOSPC",
+      });
+    }
   } finally {
     await handle.close();
   }

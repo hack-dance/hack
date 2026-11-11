@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cancelCommand } from "../src/lib/background-command/cancel.ts";
 import {
   type CommandMeta,
   formatCursor,
@@ -20,7 +21,10 @@ import {
   readEvents,
   readMeta,
 } from "../src/lib/background-command/journal.ts";
-import type { ObservedIdentity } from "../src/lib/background-command/platform.ts";
+import {
+  type ObservedIdentity,
+  observeIdentities,
+} from "../src/lib/background-command/platform.ts";
 import {
   loadJournal,
   readCommandEvents,
@@ -41,6 +45,7 @@ import {
   pruneExpired,
 } from "../src/lib/background-command/store.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 let root = "";
 
@@ -619,5 +624,141 @@ describe("settings", () => {
         scope: "project",
       })
     ).toThrow(HackCliError);
+  });
+});
+
+describe("review regressions", () => {
+  test("process identity does not depend on the caller's time zone", async () => {
+    const sleeper = Bun.spawn(["sleep", "5"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const saved = process.env.TZ;
+    try {
+      process.env.TZ = "Asia/Tokyo";
+      const tokyo = (await observeIdentities([sleeper.pid]))?.get(sleeper.pid);
+      process.env.TZ = "America/Los_Angeles";
+      const losAngeles = (await observeIdentities([sleeper.pid]))?.get(
+        sleeper.pid
+      );
+      expect(tokyo?.birth).toBeTruthy();
+      expect(losAngeles?.birth).toBe(tokyo?.birth as string);
+      // Negative control: plain `ps` follows TZ, which is what broke identity.
+      const plain = (tz: string) =>
+        Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(sleeper.pid)], {
+          env: { PATH: process.env.PATH ?? "", LC_ALL: "C", TZ: tz },
+        })
+          .stdout.toString()
+          .trim();
+      expect(plain("Asia/Tokyo")).not.toBe(plain("America/Los_Angeles"));
+    } finally {
+      restoreEnv("TZ", saved);
+      sleeper.kill("SIGKILL");
+      await sleeper.exited;
+    }
+  });
+
+  test("an empty ps answer for dead pids means gone, not unknown", async () => {
+    const done = Bun.spawn(["true"]);
+    await done.exited;
+    const snapshot = await observeIdentities([done.pid]);
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.has(done.pid)).toBe(false);
+  });
+
+  test("a torn line from a crash cannot swallow the next event", async () => {
+    const { paths, meta } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.events, '{"v":1,"torn', { flag: "a" });
+    await new JournalWriter(paths, meta, 1).write("command.started", {
+      pid: 1,
+    });
+    expect((await readEvents(paths)).map((event) => event.type)).toEqual([
+      "command.accepted",
+      "command.started",
+    ]);
+  });
+
+  test("cancel reports unknown, not cancelled, when the child cannot be confirmed gone", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    const child = { pid: 400_002, birth: "c", processGroupId: 400_002 };
+    await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+    const signals: string[] = [];
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    const result = await cancelCommand({
+      journal,
+      root,
+      observe: fakeObserve([child]),
+      signaller: {
+        process: () => false,
+        group: (pgid, signal) => {
+          signals.push(`${pgid}:${signal}`);
+          return true;
+        },
+      },
+    });
+    expect(signals).toEqual(["400002:SIGTERM", "400002:SIGKILL"]);
+    expect(result.outcome).toBe("unknown");
+    const ended = (await readEvents(paths)).filter(
+      (event) => event.type === "command.ended"
+    );
+    expect(ended).toHaveLength(1);
+    expect(ended[0]?.payload.reason).toBe("cancel_unconfirmed");
+  });
+
+  test("a reader stops an overdue orphaned child it can verify, then records timed_out", async () => {
+    const accepted = new Date(Date.now() - 120_000);
+    const { meta, paths } = await acceptCommand({
+      input: input({ timeoutMs: 60_000 }),
+      root,
+      now: accepted,
+    });
+    const owner = {
+      pid: 500_001,
+      birth: "o",
+      processGroupId: 500_001,
+      sessionId: 1,
+      newSession: true,
+    };
+    const child = { pid: 500_002, birth: "c", processGroupId: 500_002 };
+    await writeFile(paths.owner, JSON.stringify(owner), { mode: 0o600 });
+    await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+    const alive: ObservedIdentity[] = [child];
+    const killed: number[] = [];
+    const events = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(alive),
+      signalGroup: (pgid) => {
+        killed.push(pgid);
+        alive.splice(0);
+        return true;
+      },
+    });
+    expect(killed).toEqual([500_002]);
+    expect(events.at(-1)?.payload).toMatchObject({
+      outcome: "timed_out",
+      reason: "supervisor_lost",
+    });
+  });
+
+  test("expiry drops argv from the tombstone, and scope is checked before expiry is reported", async () => {
+    const { paths, meta } = await acceptCommand({
+      input: input({ retentionMs: 0, argv: ["deploy", "--token=literal"] }),
+      root,
+    });
+    await new JournalWriter(paths, meta, 1).write("command.ended", {
+      outcome: "succeeded",
+    });
+    await pruneExpired({ root, now: Date.now() + 10 });
+    expect(await readFile(paths.meta, "utf8")).not.toContain("literal");
+    await expectCode(
+      loadJournal({ commandId: meta.commandId, root, inScope: () => false }),
+      "E_COMMAND_NOT_FOUND"
+    );
+    await expectCode(
+      loadJournal({ commandId: meta.commandId, root, inScope: () => true }),
+      "E_RESULT_EXPIRED"
+    );
   });
 });

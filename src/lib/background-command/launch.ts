@@ -4,8 +4,10 @@ import { emitCliResult, HackCliError, okResult } from "../cli-result.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import {
   type CaptureMode,
+  type CommandMeta,
   type CommandOperation,
   endedEvent,
+  type JournalPaths,
   JournalWriter,
   readEvents,
 } from "./journal.ts";
@@ -142,6 +144,8 @@ export type BackgroundStart = {
   };
   /** Values Hack already resolved for injection into this command. */
   readonly redactValues: readonly string[];
+  /** Selected env overlay; part of "the same request" for a request key. */
+  readonly overlay: string | null;
 };
 
 /**
@@ -205,6 +209,9 @@ export async function startBackgroundCommand(
         timeoutMs: settings.timeoutMs,
         stallAfterMs: settings.stallAfterMs,
         capture: settings.capture,
+        // Compose project, files and profiles, or the foreground CLI argv.
+        childArgv: [...opts.child.argv],
+        overlay: opts.overlay,
       },
     },
   });
@@ -232,25 +239,7 @@ export async function startBackgroundCommand(
       ownerPath: paths.owner,
       exited: supervisor.exited,
     });
-    if (!started) {
-      await withJournalLock(paths, async () => {
-        const events = await readEvents(paths);
-        if (endedEvent(events)) {
-          return;
-        }
-        await new JournalWriter(paths, meta, events.at(-1)?.seq ?? 0).write(
-          "command.ended",
-          {
-            outcome: "unknown",
-            reason: "supervisor_failed_to_start",
-            exitCode: null,
-            signal: null,
-            durationMs: 0,
-            truncated: false,
-            suppressed: meta.capture === "metadata",
-          }
-        );
-      });
+    if (!(started || (await settleFailedStart({ paths, meta })))) {
       throw new HackCliError({
         code: "E_UNEXPECTED",
         message:
@@ -294,6 +283,41 @@ export async function startBackgroundCommand(
     );
   }
   return 0;
+}
+
+/**
+ * The supervisor did not record itself in time. Under the journal lock: if
+ * it has recorded itself by now, it owns the command (true). Otherwise write
+ * the single final record; a supervisor that starts later finds it under the
+ * same lock and exits without running anything (false).
+ */
+async function settleFailedStart(opts: {
+  readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+}): Promise<boolean> {
+  const { paths, meta } = opts;
+  return await withJournalLock(paths, async () => {
+    if (await lstat(paths.owner).catch(() => null)) {
+      return true;
+    }
+    const events = await readEvents(paths);
+    if (endedEvent(events)) {
+      return false;
+    }
+    await new JournalWriter(paths, meta, events.at(-1)?.seq ?? 0).write(
+      "command.ended",
+      {
+        outcome: "unknown",
+        reason: "supervisor_failed_to_start",
+        exitCode: null,
+        signal: null,
+        durationMs: 0,
+        truncated: false,
+        suppressed: meta.capture === "metadata",
+      }
+    );
+    return false;
+  });
 }
 
 async function waitForOwner(opts: {

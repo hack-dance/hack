@@ -130,6 +130,7 @@ export async function startComposeBackgroundCommand(opts: {
     | { readonly operation: "exec"; readonly options: RuntimeExecOptions }
     | { readonly operation: "run"; readonly options: RuntimeRunOptions };
   readonly redactValues: readonly string[];
+  readonly overlay: string | null;
 }): Promise<number> {
   const { options } = opts.compose;
   const argv =
@@ -155,6 +156,7 @@ export async function startComposeBackgroundCommand(opts: {
     workdir: options.workdir ?? null,
     child: { argv, cwd: options.cwd, env: spawnEnv(options.env) },
     redactValues: opts.redactValues,
+    overlay: opts.overlay,
   });
 }
 
@@ -170,6 +172,7 @@ export async function runOrStartComposeCommand(opts: {
     | { readonly operation: "exec"; readonly options: RuntimeExecOptions }
     | { readonly operation: "run"; readonly options: RuntimeRunOptions };
   readonly envOverrides: {
+    readonly effectiveEnvName: string | null;
     readonly env: Readonly<Record<string, string>>;
     readonly preflightEnvByService: Readonly<
       Record<string, Readonly<Record<string, string>>>
@@ -187,6 +190,7 @@ export async function runOrStartComposeCommand(opts: {
     project: opts.project,
     branch: opts.branch,
     compose,
+    overlay: opts.envOverrides.effectiveEnvName,
     redactValues: collectRedactionValues({
       env: opts.envOverrides.env,
       serviceEnv:
@@ -242,6 +246,7 @@ export async function startNativeBackgroundCommand(opts: {
       env: spawnEnv({ HACK_NO_INTERACTIVE: "1" }),
     },
     redactValues: [],
+    overlay: opts.options.env ?? null,
   });
 }
 

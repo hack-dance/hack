@@ -414,6 +414,17 @@ async function expireJournal(opts: {
   readonly paths: JournalPaths;
   readonly now: number;
 }): Promise<void> {
+  // The tombstone keeps scope and request-key identity only: argv and workdir
+  // can hold sensitive literals and must not outlive the retention ceiling.
+  const meta = await readMeta(opts.paths).catch(() => null);
+  if (meta) {
+    await replacePrivateFileAtomic({
+      path: opts.paths.meta,
+      directories: [opts.paths.dir],
+      refusal: storeRefusal,
+      text: JSON.stringify({ ...meta, argv: [], workdir: null }),
+    });
+  }
   await replacePrivateFileAtomic({
     path: opts.paths.expired,
     directories: [opts.paths.dir],
@@ -427,6 +438,8 @@ async function expireJournal(opts: {
     opts.paths.launch,
     opts.paths.reserve,
     opts.paths.cancel,
+    opts.paths.owner,
+    opts.paths.child,
   ]) {
     await unlink(path).catch(() => undefined);
   }

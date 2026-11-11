@@ -84,11 +84,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Host-wide count for the report only: other suites may run supervisors in
+  // parallel. Each test proves its own recorded pids are gone in afterEach.
   const after = await countSupervisors();
   console.info(
-    `[background-command-process] supervisor processes before=${supervisorsBefore} after=${after}`
+    `[background-command-process] supervisor processes on this host before=${supervisorsBefore} after=${after}`
   );
-  expect(after).toBeLessThanOrEqual(supervisorsBefore);
 });
 
 beforeEach(async () => {

@@ -1,22 +1,76 @@
 import { expect, test } from "bun:test";
 import { X509Certificate } from "node:crypto";
-import { access, lstat, mkdir, symlink, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 
 import { inspectCaddyCaIdentity } from "../src/lib/caddy-ca-identity.ts";
-import type { ExecOptions, ExecResult } from "../src/lib/shell.ts";
+import {
+  EXEC_STDOUT_OVERFLOW_EXIT,
+  type ExecOptions,
+  type ExecResult,
+} from "../src/lib/shell.ts";
 import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
+import { asExecStdout, paxRecords, tarArchive } from "./helpers/tar.ts";
 
 const ID = "a".repeat(64);
 const certificate = new X509Certificate(CURRENT_CA_PEM);
 const now = Date.parse(certificate.validFrom) + 1000;
 const secretError = "untrusted raw stderr must never appear";
 
+type CopyKind =
+  | "symlink"
+  | "directory"
+  | "missing"
+  | "two-files"
+  | "wrong-name"
+  | "bad-checksum"
+  | "trailing-data"
+  | "truncated"
+  | "pax-path";
+
+function copiedArchive(opts: {
+  readonly runtime: string;
+  readonly copyKind?: CopyKind;
+}): Uint8Array | null {
+  const file = { name: "root.crt", content: opts.runtime };
+  switch (opts.copyKind) {
+    case "missing":
+      return null;
+    case "symlink":
+      return tarArchive([
+        { name: "root.crt", type: "2", linkName: "/unowned/root.crt" },
+      ]);
+    case "directory":
+      return tarArchive([{ name: "root.crt", type: "5" }]);
+    case "two-files":
+      return tarArchive([file, { name: "root.crt", content: OLD_CA_PEM }]);
+    case "wrong-name":
+      return tarArchive([{ name: "intermediate.crt", content: opts.runtime }]);
+    case "bad-checksum":
+      return tarArchive([{ ...file, badChecksum: true }]);
+    case "trailing-data":
+      return tarArchive([file], {
+        trailer: Buffer.concat([new Uint8Array(1024), Buffer.from("x")]),
+      });
+    case "truncated":
+      return tarArchive([file]).subarray(0, 700);
+    case "pax-path":
+      return tarArchive([
+        {
+          name: "PaxHeaders/root.crt",
+          type: "x",
+          content: paxRecords({ path: "root.crt", mtime: "1.5" }),
+        },
+        { name: "ignored-short-name", content: opts.runtime },
+      ]);
+    default:
+      return tarArchive([file]);
+  }
+}
+
 function fixture(
   opts: {
     readonly exported?: string | null;
     readonly runtime?: string;
-    readonly copyKind?: "symlink" | "directory" | "missing";
+    readonly copyKind?: CopyKind;
     readonly selected?: string;
     readonly metadata?: unknown;
     readonly inspectOutput?: string;
@@ -31,22 +85,13 @@ function fixture(
     readonly options?: ExecOptions;
   }[] = [];
   let reads = 0;
-  let runtimeReads = 0;
-  let copiedPath: string | undefined;
   const run = () =>
     inspectCaddyCaIdentity({
       composeFile: "/owned/global/docker-compose.yml",
       certPath: "/owned/export/root.crt",
       now: opts.now ?? now,
       readTextFile: async (path) => {
-        if (path !== "/owned/export/root.crt") {
-          if (!copiedPath) {
-            throw new Error("Expected a copied certificate path");
-          }
-          runtimeReads += 1;
-          expect(path).toBe(copiedPath);
-          return await Bun.file(path).text();
-        }
+        // The runtime root is never read back from a path.
         expect(path).toBe("/owned/export/root.crt");
         reads += 1;
         if (opts.readFails) {
@@ -56,27 +101,29 @@ function fixture(
       },
       exec: async (cmd, options): Promise<ExecResult> => {
         calls.push({ cmd, options });
-        if (cmd[1] === "cp") {
-          copiedPath = cmd[3];
-          if (!copiedPath) {
-            throw new Error("missing copy destination");
-          }
-          const directory = await lstat(dirname(copiedPath));
-          expect(directory.isDirectory()).toBe(true);
-          expect(directory.mode & 0o077).toBe(0);
-          if (opts.copyKind === "symlink") {
-            await symlink("/unowned/root.crt", copiedPath);
-          } else if (opts.copyKind === "directory") {
-            await mkdir(copiedPath);
-          } else if (opts.copyKind !== "missing") {
-            await writeFile(copiedPath, opts.runtime ?? CURRENT_CA_PEM);
-          }
-        }
         if (calls.length === opts.throwAt) {
           throw new Error(secretError);
         }
         if (calls.length === opts.failureAt) {
           return { exitCode: 124, stdout: "", stderr: secretError };
+        }
+        if (cmd[1] === "cp") {
+          // Mirror `exec`: archives stream to stdout ("-") under the budget.
+          expect(cmd[3]).toBe("-");
+          const archive = copiedArchive({
+            runtime: opts.runtime ?? CURRENT_CA_PEM,
+            copyKind: opts.copyKind,
+          });
+          if (archive === null) {
+            return { exitCode: 1, stdout: "", stderr: secretError };
+          }
+          const limit = options?.maxStdoutBytes;
+          if (limit === undefined) {
+            throw new Error("docker cp must be bounded");
+          }
+          return archive.length > limit
+            ? { exitCode: EXEC_STDOUT_OVERFLOW_EXIT, stdout: "", stderr: "" }
+            : { exitCode: 0, stdout: asExecStdout(archive), stderr: "" };
         }
         const outputs = [
           opts.selected ?? ID,
@@ -86,7 +133,6 @@ function fixture(
                 ? { id: ID, running: true, service: "caddy" }
                 : opts.metadata
             ),
-          opts.runtime ?? CURRENT_CA_PEM,
         ];
         return {
           exitCode: 0,
@@ -99,8 +145,6 @@ function fixture(
     run,
     calls,
     reads: () => reads,
-    runtimeReads: () => runtimeReads,
-    copiedPath: () => copiedPath,
   };
 }
 
@@ -131,17 +175,18 @@ test("unchanged CA uses exact owned running container and bounded public-certifi
     "docker",
     "cp",
     `${ID}:/data/caddy/pki/authorities/local/root.crt`,
-    f.copiedPath() as string,
+    "-",
   ]);
   expect(
     f.calls.some(
       (call) => call.cmd.includes("exec") || call.cmd.includes("head")
     )
   ).toBe(false);
-  await expect(access(dirname(f.copiedPath() as string))).rejects.toThrow();
-  expect(f.calls.map((call) => call.options)).toEqual(
-    new Array(3).fill({ timeoutMs: 5000, stdin: "ignore" })
-  );
+  expect(f.calls.map((call) => call.options)).toEqual([
+    { timeoutMs: 5000, stdin: "ignore" },
+    { timeoutMs: 5000, stdin: "ignore" },
+    { timeoutMs: 5000, stdin: "ignore", maxStdoutBytes: 98_304 },
+  ]);
 });
 
 test("rotation is stale even when both CA subjects are identical", async () => {
@@ -281,31 +326,48 @@ test("a parseable non-CA runtime certificate cannot authorize export", async () 
   expect(result.currentPem).toBeUndefined();
 });
 
-for (const copyKind of ["symlink", "directory", "missing"] as const) {
-  test(`copied ${copyKind} is rejected before read and temporary directory is removed`, async () => {
-    const f = fixture({ copyKind });
+for (const copyKind of [
+  "symlink",
+  "directory",
+  "missing",
+  "two-files",
+  "wrong-name",
+  "bad-checksum",
+  "trailing-data",
+  "truncated",
+] as const) {
+  test(`streamed copy that is not exactly one root.crt file is refused (${copyKind})`, async () => {
+    const f = fixture({ copyKind, exported: null });
     const result = await f.run();
     expect(result.state).toBe(
       copyKind === "missing" ? "unavailable" : "invalid"
     );
     expect(result.currentPem).toBeUndefined();
-    expect(f.runtimeReads()).toBe(0);
-    await expect(access(dirname(f.copiedPath() as string))).rejects.toThrow();
+    expect(f.reads()).toBe(0);
   });
 }
 
-test("oversized copied root is removed before reading any certificate bytes", async () => {
+test("a PAX path record names the streamed entry", async () => {
+  const f = fixture({ copyKind: "pax-path" });
+  expect((await f.run()).state).toBe("current");
+});
+
+test("an oversized streamed root is refused without parsing certificate bytes", async () => {
   const f = fixture({ runtime: CURRENT_CA_PEM.padEnd(65_537, " ") });
   expect((await f.run()).state).toBe("invalid");
-  expect(f.runtimeReads()).toBe(0);
-  await expect(access(dirname(f.copiedPath() as string))).rejects.toThrow();
+  expect(f.reads()).toBe(0);
+});
+
+test("a copy past the stdout budget is refused", async () => {
+  const f = fixture({ runtime: CURRENT_CA_PEM.padEnd(120_000, " ") });
+  expect((await f.run()).state).toBe("invalid");
+  expect(f.reads()).toBe(0);
 });
 
 for (const kind of ["failureAt", "throwAt"] as const) {
-  test(`copy ${kind} cleans up partially copied public certificate`, async () => {
+  test(`copy ${kind} reports the runtime as unavailable`, async () => {
     const f = fixture({ [kind]: 3 });
     expect((await f.run()).state).toBe("unavailable");
-    expect(f.runtimeReads()).toBe(0);
-    await expect(access(dirname(f.copiedPath() as string))).rejects.toThrow();
+    expect(f.reads()).toBe(0);
   });
 }

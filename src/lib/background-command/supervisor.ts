@@ -522,14 +522,16 @@ class GroupStopper {
   /** False when the child was already reaped: nothing was stopped. */
   async stop(): Promise<boolean> {
     await this.remember();
+    // Tells a canceller that this supervisor took the stop over and is
+    // making progress (signalling, then container removal): it must not be
+    // force-killed for being slow. Written before the liveness check: no
+    // await may separate that check from the signal, or Bun could reap the
+    // child in between and the group id could be reused.
+    await markFinishing(this.marker);
     if (!unreaped(this.proc)) {
       return false;
     }
     this.stopped = true;
-    // Tells a canceller that this supervisor took the stop over and is
-    // making progress (signalling, then container removal): it must not be
-    // force-killed for being slow.
-    await markFinishing(this.marker);
     signalProcessGroup(this.proc.pid, "SIGTERM");
     this.killTimer = setTimeout(() => {
       this.remember()

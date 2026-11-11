@@ -2874,10 +2874,10 @@ hack the planet [options]
 
 These commands are source-available but outside the supported v3 product contract. They are hidden from default `hack --help` (see them with `hack help --all`) and print a warning when invoked.
 
-- `hack dispatch` — Beta: run branch-scoped jobs on remote nodes
-- `hack gateway` — Beta: manage the remote control plane entrypoint
-- `hack node` — Beta: manage remote execution nodes
-- `hack remote` — Beta: guided remote access and gateway helpers
+- `hack dispatch` — Unsupported: run branch-scoped jobs on remote nodes
+- `hack gateway` — Unsupported: manage the remote control plane entrypoint
+- `hack node` — Unsupported: manage remote execution nodes
+- `hack remote` — Unsupported: guided remote access and gateway helpers
 
 ## Internal
 

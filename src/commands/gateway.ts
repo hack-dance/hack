@@ -49,7 +49,7 @@ import { isTty } from "../ui/terminal.ts";
 
 const gatewaySpec = defineCommand({
   name: "gateway",
-  summary: "Beta: manage the remote control plane entrypoint",
+  summary: "Unsupported: manage the remote control plane entrypoint",
   group: "Beta",
   options: [],
   positionals: [],

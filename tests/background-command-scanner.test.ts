@@ -203,6 +203,27 @@ describe("scanOutput", () => {
     ]);
   });
 
+  test("many values over many runs keep one interval per run, not values x runs", () => {
+    const run = `${"a".repeat(105)}b`;
+    const bytes = encoder.encode(run.repeat(2000));
+    const values = Array.from({ length: 100 }, (_, index) =>
+      "a".repeat(6 + index)
+    );
+    const started = performance.now();
+    const result = scanOutput({
+      bytes,
+      offset: 0,
+      secrets: encodeSecrets({ values, minLength: 1 }),
+      final: true,
+      captureRemaining: bytes.length,
+      maxRangeBytes: 16_384,
+    });
+    expect(result.redactions).toHaveLength(2000);
+    expect(result.redactions[1]).toEqual({ offset: 106, length: 105 });
+    // Loose bound: catches a regression to quadratic work, not a benchmark.
+    expect(performance.now() - started).toBeLessThan(10_000);
+  });
+
   test("bytes past the capture budget are not scanned", () => {
     const bytes = encoder.encode(`${"x".repeat(40)}secret!${"y".repeat(10)}`);
     const result = scanOutput({

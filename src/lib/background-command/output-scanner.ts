@@ -136,7 +136,13 @@ function suffixMatchesPrefix(
  */
 export function findMatches(
   haystack: Uint8Array,
-  needle: Uint8Array
+  needle: Uint8Array,
+  /**
+   * Sorted, non-overlapping intervals already redacted (by longer values):
+   * an occurrence wholly inside one adds nothing, so the search jumps to
+   * where an occurrence could first reach past it.
+   */
+  covered: readonly { readonly start: number; readonly length: number }[] = []
 ): { readonly start: number; readonly length: number }[] {
   const matches: { start: number; length: number }[] = [];
   if (needle.length === 0 || needle.length > haystack.length) {
@@ -148,10 +154,30 @@ export function findMatches(
     haystack.byteLength
   );
   let from = 0;
+  let k = 0;
   while (from <= buffer.length - needle.length) {
     const index = buffer.indexOf(needle, from);
     if (index < 0) {
       break;
+    }
+    while (k < covered.length) {
+      const interval = covered[k] as { start: number; length: number };
+      if (interval.start + interval.length > index) {
+        break;
+      }
+      k += 1;
+    }
+    const inside = covered[k];
+    if (
+      inside &&
+      inside.start <= index &&
+      index + needle.length <= inside.start + inside.length
+    ) {
+      from = Math.max(
+        index + 1,
+        inside.start + inside.length - needle.length + 1
+      );
+      continue;
     }
     const last = matches.at(-1);
     if (last && index <= last.start + last.length) {
@@ -178,15 +204,17 @@ export function scanOutput(input: ScanInput): ScanResult {
     0,
     Math.min(working.length, Math.max(0, input.captureRemaining) + longest)
   );
-  const redactions: { offset: number; length: number }[] = [];
+  // Each value's (already merged) intervals are merged into one running
+  // sorted list, so memory stays at the number of separate runs in the union
+  // rather than values x runs.
+  let union: { start: number; length: number }[] = [];
   for (const secret of secrets) {
-    for (const match of findMatches(scanned, secret)) {
-      redactions.push({
-        offset: input.offset + match.start,
-        length: match.length,
-      });
-    }
+    union = mergeSortedIntervals(union, findMatches(scanned, secret, union));
   }
+  const redactions = union.map((match) => ({
+    offset: input.offset + match.start,
+    length: match.length,
+  }));
   const holdback = input.final ? 0 : pendingPrefixLength(working, secrets);
   let end = Math.max(0, working.length - holdback);
   if (!input.final) {
@@ -209,22 +237,40 @@ export function scanOutput(input: ScanInput): ScanResult {
     ranges.push({ offset: input.offset + cursor, length: next - cursor });
     cursor = next;
   }
-  return { redactions: mergeRedactions(redactions), ranges, budgetReached };
+  return { redactions, ranges, budgetReached };
 }
 
-function mergeRedactions(
-  regions: readonly { readonly offset: number; readonly length: number }[]
-): { offset: number; length: number }[] {
-  const sorted = [...regions].sort((left, right) => left.offset - right.offset);
-  const merged: { offset: number; length: number }[] = [];
-  for (const region of sorted) {
-    const last = merged.at(-1);
-    if (last && region.offset <= last.offset + last.length) {
-      last.length =
-        Math.max(last.offset + last.length, region.offset + region.length) -
-        last.offset;
+/**
+ * Merge two lists of sorted, non-overlapping intervals into one (linear):
+ * overlapping or adjacent intervals coalesce.
+ */
+function mergeSortedIntervals(
+  left: readonly { readonly start: number; readonly length: number }[],
+  right: readonly { readonly start: number; readonly length: number }[]
+): { start: number; length: number }[] {
+  const merged: { start: number; length: number }[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < left.length || j < right.length) {
+    const a = left[i];
+    const b = right[j];
+    const next =
+      b === undefined || (a !== undefined && a.start <= b.start) ? a : b;
+    if (next === a) {
+      i += 1;
     } else {
-      merged.push({ ...region });
+      j += 1;
+    }
+    if (!next) {
+      break;
+    }
+    const last = merged.at(-1);
+    if (last && next.start <= last.start + last.length) {
+      last.length =
+        Math.max(last.start + last.length, next.start + next.length) -
+        last.start;
+    } else {
+      merged.push({ start: next.start, length: next.length });
     }
   }
   return merged;

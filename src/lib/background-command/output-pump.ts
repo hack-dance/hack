@@ -3,7 +3,8 @@ import { type FileHandle, open } from "node:fs/promises";
 import { OUTPUT_EVENT_MAX_BYTES, type OutputStream } from "./journal.ts";
 import { scanOutput } from "./output-scanner.ts";
 
-const READ_SLICE_BYTES = 1024 * 1024;
+/** Bounds one scan's work (bytes x redaction values) and so cancel latency. */
+const READ_SLICE_BYTES = 256 * 1024;
 
 export type PumpResult = {
   /** File offset up to which output events now exist. */

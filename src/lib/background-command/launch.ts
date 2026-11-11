@@ -6,6 +6,7 @@ import { createPrivateFileExclusive } from "../private-file.ts";
 import { assertComposeSpawnEnvFits } from "../spawn-env-limit.ts";
 import { appendCommandAudit, auditEnd } from "./audit.ts";
 import {
+  boundedRecordText,
   type CaptureMode,
   type CommandMeta,
   type CommandOperation,
@@ -204,6 +205,13 @@ export async function startBackgroundCommand(
   // Refuse before anything is persisted when the supervisor could not start.
   assertComposeSpawnEnvFits({ env: opts.child.env, baseEnv: {} });
   const caller = await resolveCaller();
+  // Refused before anything is accepted if a reader could not load it.
+  const launchText = boundedRecordText({
+    argv: opts.child.argv,
+    cwd: opts.child.cwd,
+    ...(opts.child.container ? { container: opts.child.container } : {}),
+    ...(opts.child.guest ? { guest: opts.child.guest } : {}),
+  });
   const accepted = await acceptCommand({
     input: {
       requestKey: opts.request.requestKey,
@@ -231,15 +239,7 @@ export async function startBackgroundCommand(
   });
   const { meta, paths } = accepted;
   if (!accepted.reused) {
-    await createPrivateFileExclusive({
-      path: paths.launch,
-      text: JSON.stringify({
-        argv: opts.child.argv,
-        cwd: opts.child.cwd,
-        ...(opts.child.container ? { container: opts.child.container } : {}),
-        ...(opts.child.guest ? { guest: opts.child.guest } : {}),
-      }),
-    });
+    await createPrivateFileExclusive({ path: paths.launch, text: launchText });
     const supervisor = await spawnInNewSession({
       argv: [
         ...selfInvocation(),

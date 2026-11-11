@@ -20,6 +20,7 @@ import {
 import { withProjectsRegistryLock } from "../projects-registry-lock.ts";
 import {
   appendLine,
+  boundedRecordText,
   buildEnvelope,
   type CommandMeta,
   commandsRoot,
@@ -326,12 +327,11 @@ export async function acceptCommand(opts: {
       fingerprint,
       ...input,
     };
+    // Checked before the journal exists: nothing is created for a refusal.
+    const metaText = boundedRecordText(meta);
     const paths = journalPaths({ root, commandId: meta.commandId });
     await mkdir(paths.dir, { mode: 0o700 });
-    await createPrivateFileExclusive({
-      path: paths.meta,
-      text: JSON.stringify(meta),
-    });
+    await createPrivateFileExclusive({ path: paths.meta, text: metaText });
     await reserveFinalRecordSpace(paths.reserve);
     const accepted = buildEnvelope({
       meta,

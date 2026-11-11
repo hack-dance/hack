@@ -47,6 +47,8 @@ export const CAPTURE_LIMIT_BYTES = 8 * 1024 * 1024;
 export const OUTPUT_FILE_LIMIT_BYTES = 64 * 1024 * 1024;
 /** Largest byte range one output event covers. */
 export const OUTPUT_EVENT_MAX_BYTES = 16 * 1024;
+/** Largest `meta.json` or `launch.json` a reader accepts (and a start may write). */
+export const JOURNAL_RECORD_MAX_BYTES = 1024 * 1024;
 /** Output events per command; past this capture stops as if the byte limit were hit. */
 export const OUTPUT_EVENT_LIMIT = 65_536;
 
@@ -293,7 +295,7 @@ async function readPrivateJson(opts: {
     path: opts.path,
     directories: [opts.dir],
     refusal: journalRefusal,
-    maxBytes: 1024 * 1024,
+    maxBytes: JOURNAL_RECORD_MAX_BYTES,
   });
   if (!file) {
     return null;
@@ -689,4 +691,21 @@ export function outputRange(event: EventEnvelope): {
     return { stream, offset, length };
   }
   return null;
+}
+
+/**
+ * Serialize a journal record, refusing one larger than its reader accepts:
+ * an unreadable record would hide its journal from admission, retention and
+ * the per-home quota.
+ */
+export function boundedRecordText(value: unknown): string {
+  const text = JSON.stringify(value);
+  if (Buffer.byteLength(text, "utf8") > JOURNAL_RECORD_MAX_BYTES) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message:
+        "This background command is too large to record (its arguments, working directory and target exceed 1 MiB once serialized). Run it in the foreground or shorten its arguments.",
+    });
+  }
+  return text;
 }

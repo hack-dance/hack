@@ -349,6 +349,16 @@ describe("request keys and admission", () => {
     expect(otherProject.reused).toBe(false);
   });
 
+  test("a start whose record a reader could not load is refused before any journal exists", async () => {
+    // Quotes double under JSON escaping: under 1 MiB raw, over 1 MiB recorded.
+    const argv = Array.from({ length: 6 }, () => '"'.repeat(100_000));
+    await expectCode(
+      acceptCommand({ input: input({ argv }), root }),
+      "E_USAGE"
+    );
+    expect(await listCommandIds(root)).toEqual([]);
+  });
+
   test("admission limits are per caller session and per Hack home", async () => {
     const now = new Date();
     // A live supervisor for every journal: the ps stand-in reports the pid alive.

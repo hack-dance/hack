@@ -66,8 +66,19 @@ async function fixture(compose: Record<string, unknown>) {
     binary,
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${stub}/calls'
-if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
-if [ -f '${stub}/'"$3-$4"'.err' ]; then cat '${stub}/'"$3-$4"'.err' >&2; exit 1; fi
+reply="$3-$4"
+# The second review names the adapted document: keep a copy and, when the
+# test scripted one, answer it separately from the review of the original.
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--normalized-file" ]; then
+    cp "$argument" '${stub}/normalized.json'
+    if [ -f '${stub}/'"$reply"'-normalized.out' ]; then reply="$reply-normalized"; fi
+  fi
+  previous="$argument"
+done
+if [ -f '${stub}/'"$reply"'.out' ]; then cat '${stub}/'"$reply"'.out'; exit 0; fi
+if [ -f '${stub}/'"$reply"'.err' ]; then cat '${stub}/'"$reply"'.err' >&2; exit 1; fi
 printf '%s' '{"code":"runtime_not_running"}' >&2
 exit 1
 `,
@@ -84,27 +95,37 @@ exit 1
     /** Script the runtime review's reply. */
     review: async (
       diagnostics: unknown[],
-      plan: Record<string, unknown> = {}
+      plan: Record<string, unknown> = {},
+      /** `"normalized"` scripts only the review of the adapted document. */
+      which: "both" | "normalized" = "both"
     ) =>
-      await write("project-plan.out", {
-        plan_id: "f".repeat(64),
-        plan: {
-          namespace: NAMESPACE,
-          services: {},
-          ...plan,
-          enrollment_compatible: !diagnostics.some(
-            (entry) =>
-              typeof entry === "object" &&
-              entry !== null &&
-              "severity" in entry &&
-              entry.severity === "error"
-          ),
-          diagnostics,
-        },
-      }),
+      await write(
+        which === "both" ? "project-plan.out" : "project-plan-normalized.out",
+        {
+          plan_id: "f".repeat(64),
+          plan: {
+            namespace: NAMESPACE,
+            services: {},
+            ...plan,
+            enrollment_compatible: !diagnostics.some(
+              (entry) =>
+                typeof entry === "object" &&
+                entry !== null &&
+                "severity" in entry &&
+                entry.severity === "error"
+            ),
+            diagnostics,
+          },
+        }
+      ),
     /** Make the runtime review stop with one closed code. */
     reviewStops: async (code: string) =>
       await write("project-plan.err", { code }),
+    /** The adapted document the runtime was last asked to review. */
+    normalized: async () =>
+      JSON.parse(await readFile(join(stub, "normalized.json"), "utf8")) as {
+        networks?: Record<string, Record<string, unknown>>;
+      },
     /** Every stub invocation's full argument line. */
     argv: async () =>
       (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
@@ -402,6 +423,19 @@ test(
     expect(first.report.blockers[0]?.fix).toContain(
       "run the preflight again after fixing it"
     );
+    // Malformed routing label values pass the CLI's key check; the review
+    // stops on them, and that is a project blocker, not a missing runtime.
+    const labels = await fixture({ services: { web: { image: IMAGE } } });
+    await labels.reviewStops("invalid_routing_labels");
+    const routing = await preflight(labels, { ...labels.native, ...GRANT });
+    expect(routing.code).toBe(1);
+    expect(routing.report.runtime_review).toEqual({
+      status: "stopped",
+      code: "invalid_routing_labels",
+    });
+    expect(codes(routing.report, "runtime")).toEqual([
+      "invalid_routing_labels",
+    ]);
     // A failure of the runtime itself is not a verdict on the project. That
     // covers the stub's default "not running" and any code this version does
     // not know as a project problem.
@@ -547,7 +581,28 @@ test(
       join(f.projectDir, "native", "adaptation.json"),
       JSON.stringify({ version: 1, isolatedNetworks: ["shared"] })
     );
-    await f.review([]);
+    // The original file still has the external network; only the adapted
+    // document does not. The findings must come from the second review.
+    await f.review([
+      {
+        severity: "error",
+        code: "external_network",
+        field: "networks.shared",
+        message: "runtime text",
+      },
+    ]);
+    await f.review(
+      [
+        {
+          severity: "warning",
+          code: "isolated_network_replacement",
+          field: "networks.shared",
+          message: "runtime text",
+        },
+      ],
+      {},
+      "normalized"
+    );
     const { report, code } = await preflight(f, { ...f.native, ...GRANT }, [
       "--profile",
       "dev, ops,dev",
@@ -555,6 +610,13 @@ test(
     // The adaptation isolates the network, so it is not a blocker at either gate.
     expect(code).toBe(0);
     expect(report).toMatchObject({ ready: true, blockers: [] });
+    expect(report.warnings.map((found) => found.code)).toEqual([
+      "isolated_network_replacement",
+    ]);
+    // The reviewed document carries the adaptation.
+    expect((await f.normalized()).networks?.shared).toMatchObject({
+      "x-hack-isolated": true,
+    });
     const [original, normalized] = await f.argv();
     expect(original).toContain("project plan --project ");
     expect(original).toContain("--profile dev --profile ops --json");
@@ -584,9 +646,23 @@ test(
       join(adaptation.projectDir, "native", "adaptation.json"),
       JSON.stringify({ version: 1, httpProbes: { missing: {} } })
     );
-    expect(codes((await preflight(adaptation, GRANT)).report, "cli")).toEqual([
+    await adaptation.review([
+      { severity: "error", code: "privileged_service", field: "services.web" },
+    ]);
+    const invalidAdaptation = await preflight(adaptation, {
+      ...adaptation.native,
+      ...GRANT,
+    });
+    expect(codes(invalidAdaptation.report, "cli")).toEqual([
       "native_adaptation_invalid",
     ]);
+    // The unadapted document is not reviewed: its findings would mislead.
+    expect(invalidAdaptation.report.runtime_review).toEqual({
+      status: "skipped",
+      code: "native_adaptation_invalid",
+    });
+    expect(codes(invalidAdaptation.report, "runtime")).toEqual([]);
+    expect(await adaptation.calls()).toEqual([]);
 
     const config = await fixture({ services: { web: { image: IMAGE } } });
     await writeFile(join(config.projectDir, "hack.config.json"), "{ not json");
@@ -642,7 +718,24 @@ test(
     const route = await preflight(routed, { ...routed.native, ...GRANT });
     expect(route.code).toBe(1);
     expect(route.report.ready).toBe(false);
-    expect(codes(route.report, "cli")).toEqual(["route_probe_required"]);
+    expect(codes(route.report, "cli")).toEqual(["route_probe_required:web"]);
+
+    // Routes plus published ports over the pool's bridge limit: native up
+    // refuses before any runtime work, so no review is needed to see it.
+    const crowded = await fixture({
+      services: Object.fromEntries(
+        Array.from({ length: 11 }, (_, index) => [
+          `svc${index}`,
+          {
+            image: IMAGE,
+            ports: [0, 1, 2].map((port) => `${4000 + index * 10 + port}:80`),
+          },
+        ])
+      ),
+    });
+    expect(codes((await preflight(crowded, GRANT)).report, "cli")).toEqual([
+      "too_many_bridges",
+    ]);
 
     // Project-wide extra hosts with no dependency selection.
     const hosts = await fixture({ services: { web: { image: IMAGE } } });
@@ -782,7 +875,7 @@ test(
     const result = await cli(f, ["doctor", "--native-preflight"]);
     expect(result.code).toBe(1);
     expect(result.output).toContain(
-      "Native preflight covers Compose-file projects."
+      "Native preflight covers Compose-file projects. This project has native project inputs"
     );
     expect(result.output).not.toMatch(/^\s+at /m);
     const compose = await fixture({ services: { web: { image: IMAGE } } });

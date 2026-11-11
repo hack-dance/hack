@@ -66,7 +66,7 @@ export async function runNativePreflightCommand(opts: {
       // admission path; this report would judge the wrong one.
       if (error instanceof ProjectInputSelectionError) {
         throw new CliUsageError(
-          "Native preflight covers Compose-file projects. This project has a native project file; check it with hack config validate."
+          "Native preflight covers Compose-file projects. This project has native project inputs (a native project file or an adopted Compose file), which take another admission path; check a native project file with hack config validate."
         );
       }
       throw error;
@@ -94,10 +94,19 @@ export async function runNativePreflightCommand(opts: {
     projectDir: project.projectDir,
   }).then(
     (selection) => selection.effectiveEnv,
-    () => null
+    () => {
+      settings.push({
+        ...SETTINGS_BLOCKER,
+        code: "managed_env_unreadable",
+        message: "The project's Hack managed env selection could not be read.",
+        fix: "Run hack env list to see the problem.",
+      });
+      return null;
+    }
   );
   let sharedSource = false;
   let hasHostDependencies = false;
+  let hasDefaultDependencyFile = false;
   let settingsReadable = true;
   try {
     const host = await resolveNativeHostSettings({
@@ -106,6 +115,7 @@ export async function runNativePreflightCommand(opts: {
       projectRoot: project.projectRoot,
     });
     sharedSource = host.sharedSource;
+    hasDefaultDependencyFile = host.dependencyFile !== undefined;
     hasHostDependencies =
       selectNativeEnvFile({
         selection: {
@@ -168,6 +178,8 @@ export async function runNativePreflightCommand(opts: {
     // Unreadable settings are their own blocker; do not also ask for the grant.
     sharedSource: sharedSource || !settingsReadable,
     hasHostDependencies,
+    hasDefaultDependencyFile,
+    effectiveEnvName: effectiveEnv,
     profiles: opts.profiles,
     runtime: selectedRuntime(env),
   });

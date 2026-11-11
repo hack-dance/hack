@@ -254,9 +254,11 @@ With `--json` the report is the `data` of the standard result envelope:
     an anonymous volume (`invalid_mount`) or a mount outside the project
     (`source_escape`). `code` names it, it is listed as a blocker, and more
     findings can appear once it is fixed.
-  - `skipped`: no native runtime is selected. `code` is
-    `native_selection_incomplete` when `HACK_RUNTIME_BACKEND=native` is set
-    without a candidate.
+  - `skipped`: the review did not run. Without `code`, no native runtime is
+    selected. `code` is `native_selection_incomplete` when
+    `HACK_RUNTIME_BACKEND=native` is set without a candidate, and
+    `native_adaptation_invalid` when the adaptation was refused: the unadapted
+    document is not reviewed, because its findings would mislead.
   - `unavailable`: the selected runtime did not return a review. `code`, when
     present, is the runtime's own failure code. This says nothing about the
     project.
@@ -270,7 +272,7 @@ With `--json` the report is the `data` of the standard result envelope:
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
   `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
   `dotenv_without_managed_env`, `shared_source_grant_required`,
-  `route_probe_required` and `too_many_routes`. Runtime findings use the
+  `route_probe_required` and `too_many_bridges`. Runtime findings use the
   review's own diagnostic codes, for example `privileged_service` or
   `invalid_mount`, and `review_incompatible` when the review does not admit the
   project and gives no finding this version can show. A code this version has
@@ -279,14 +281,21 @@ With `--json` the report is the `data` of the standard result envelope:
 The preflight is a report, not an admission decision: `hack up` still runs its
 own checks, and a clean report starts nothing. It does not cover:
 
-- A project with a native project file (`.hack/hack.project.json`) or one whose
-  Compose file was adopted into generated native inputs. Those take another
-  admission path; the preflight refuses the first and does not detect the
-  second.
-- `--env`. It uses the project's default environment to select the per-env
-  adaptation and dependency files.
+- A project with native project inputs: a native project file
+  (`.hack/hack.project.json`) or a Compose file adopted into generated native
+  inputs. Those take another admission path, and the preflight refuses them
+  with a usage error.
+- `--env`, and a retained run's environment. It uses the project's default
+  environment to select the per-env adaptation and dependency files; `hack up`
+  uses `--env` when given, or the environment of a run it resumes.
 - Checks that need secret values or a resolved managed environment: a build
-  argument that carries a stored secret, and managed env that fails to resolve.
+  argument that carries a stored secret, a managed variable whose name is not
+  a valid environment name, and managed env that fails to resolve. `hack up`
+  also replaces the `environment` entries that managed env supplies before its
+  review, so a malformed authored value under such a key is a blocker here and
+  not there.
+- Image pinning. `hack up` reviews images by content ID after it has admitted
+  and pulled them; the preflight reviews the references as written.
 - What only a start can find: an image that cannot be pulled or admitted, a
   source tree over the size limit, a process wrapper a service cannot run, a
   host dependency without a binding, or a host port that is already in use.

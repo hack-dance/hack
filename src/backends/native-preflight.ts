@@ -25,6 +25,10 @@ import {
   type NativeHostAliasSource,
 } from "./native-project-internal-hosts.ts";
 import {
+  nativeBridgeSocketCount,
+  nativePortPublicationCount,
+} from "./native-project-ports.ts";
+import {
   nativeBridgeCapacity,
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
@@ -103,8 +107,10 @@ export type NativePreflightReport = {
   readonly runtime_review: {
     readonly status: NativePreflightReviewStatus;
     /**
-     * The closed runtime code when the review stopped or failed, or
-     * `native_selection_incomplete` when native is selected without a candidate.
+     * The closed runtime code when the review stopped or failed. For a
+     * skipped review: `native_selection_incomplete` when native is selected
+     * without a candidate, `native_adaptation_invalid` when the adaptation was
+     * refused, and absent when native is not selected.
      */
     readonly code?: string;
   };
@@ -208,6 +214,28 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   unsupported_mount_option: {
     message: "A mount uses an option native does not accept.",
     fix: "Use source:target with an optional :ro or :rw.",
+  },
+  invalid_routing_labels: {
+    message: "The service's caddy routing labels are not in the reviewed form.",
+    fix: "Use caddy with the hostnames, caddy.reverse_proxy with {{upstreams PORT}}, and optionally caddy.tls: internal.",
+  },
+  invalid_capability_list: {
+    message: "cap_add or cap_drop is not a list of capability names.",
+    fix: "Write it as a YAML list.",
+  },
+  unsafe_source: {
+    message:
+      "The shared project source contains links or special files native will not share.",
+    fix: "Remove them from the project or exclude them.",
+  },
+  source_budget: {
+    message:
+      "The project source, or one of its ignore files, is over a size or count limit.",
+    fix: "Exclude generated and vendored directories with an ignore file. hack doctor reports the source size.",
+  },
+  profile_budget: {
+    message: "Too many profiles are selected.",
+    fix: "Select at most 64 profiles.",
   },
   invalid_mount: {
     message:
@@ -411,14 +439,11 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
 };
 
 /**
- * Codes the runtime review stops with because of the project itself: its
- * Compose file, its mounts or its source tree. Only these become a blocker.
- * Any other failure of a review request (a stopped or busy runtime, a budget,
- * a transport or serialization error, an argument an older runtime does not
- * know) says nothing about the project and is reported as an unavailable
- * review.
+ * Codes a review request fails with because of the project itself: its
+ * Compose file, its mounts or its source tree. Only these become a blocker
+ * with a `stopped` review.
  */
-const REVIEW_STOP_CODES = new Set([
+export const REVIEW_STOP_CODES: ReadonlySet<string> = new Set([
   "compose_unavailable",
   "conflicting_environment_owner",
   "duplicate_dependency",
@@ -427,6 +452,7 @@ const REVIEW_STOP_CODES = new Set([
   "duplicate_mount_target",
   "excluded_source",
   "invalid_build",
+  "invalid_capability_list",
   "invalid_command",
   "invalid_compose_field",
   "invalid_compose_file",
@@ -451,18 +477,94 @@ const REVIEW_STOP_CODES = new Set([
   "invalid_mount",
   "invalid_network",
   "invalid_network_replacement",
+  "invalid_port",
   "invalid_restart",
+  "invalid_routing_labels",
   "invalid_stop_signal",
   "invalid_user",
   "missing_services",
   "missing_source",
+  "profile_budget",
   "service_budget",
+  "source_budget",
   "source_escape",
+  "source_generated",
+  "source_limit_config",
+  "source_mountpoint",
   "source_symlink",
+  "unresolved_port_binding",
   "unresolved_source_path",
+  "unsafe_source",
   "unsupported_mount_option",
   "unsupported_platform",
   "unsupported_source_name",
+]);
+
+/**
+ * Codes the runtime's project module can also fail with that are not a
+ * verdict on the project: a file that changed under the review, a budget or
+ * serialization failure, and the enrollment, execution and graph steps a
+ * review never reaches. These, and any code in neither set (a stopped or busy
+ * runtime, a transport error, an argument an older runtime does not know),
+ * are reported as an `unavailable` review, never as a blocker.
+ *
+ * `tests/native-preflight-review-codes.test.ts` requires every code the
+ * runtime's project sources can fail with to be in exactly one of the two
+ * sets, so a new code is classified deliberately.
+ */
+export const REVIEW_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "compose_changed",
+  "enrollment_budget",
+  "enrollment_busy",
+  "enrollment_conflict",
+  "enrollment_unavailable",
+  "execution_argv",
+  "execution_environment",
+  "execution_environment_missing",
+  "execution_environment_owner",
+  "execution_incompatible",
+  "execution_input_budget",
+  "execution_input_unsupported",
+  "execution_interpolation",
+  "execution_plan_changed",
+  "execution_registry_changed",
+  "execution_registry_environment",
+  "execution_services",
+  "execution_user",
+  "foreign_enrollment_state",
+  "graph_budget",
+  "graph_capabilities",
+  "graph_condition",
+  "graph_cycle",
+  "graph_dependency",
+  "graph_incompatible",
+  "graph_readiness",
+  "graph_service",
+  "graph_timeout",
+  "graph_timeout_budget",
+  "incompatible_compose",
+  "incomplete_enrollment",
+  "invalid_enrollment",
+  "invalid_plan_id",
+  "invalid_source_manifest",
+  "live_source_contract",
+  "native_graph_compile",
+  "native_graph_environment",
+  "native_graph_subset",
+  "normalized_compose_input",
+  "plan_budget",
+  "registry_changed",
+  "registry_template_invalid",
+  "registry_template_unsafe",
+  "serialization_failed",
+  "source_archive",
+  "source_changed",
+  "source_metadata_unavailable",
+  "source_registry",
+  "source_revision_mismatch",
+  "source_unavailable",
+  "source_watch",
+  "stale_plan",
 ]);
 
 /** The same service-name rule as native start (`native-project-input.ts`). */
@@ -671,6 +773,8 @@ type AdaptedProject = {
     readonly normalizedComposeJson: string;
     readonly services: Readonly<Record<string, unknown>>;
     readonly emulated: ReadonlySet<string>;
+    /** False when the adaptation was refused and the document is unadapted. */
+    readonly adaptationValid: boolean;
   };
 };
 
@@ -685,7 +789,8 @@ async function adaptForPreflight(opts: {
   readonly adaptationFile: string | undefined;
   readonly internalHosts: Readonly<Record<string, string>> | null;
   readonly internalHostSources: Readonly<Record<string, NativeHostAliasSource>>;
-  readonly hasHostDependencies: boolean;
+  readonly hasDefaultDependencyFile: boolean;
+  readonly effectiveEnvName: string | null;
 }): Promise<AdaptedProject> {
   const blocker = { severity: "blocker", gate: "cli" } as const;
   const compose = await readNativeComposeDocument(opts.composeFile);
@@ -709,17 +814,26 @@ async function adaptForPreflight(opts: {
     };
   }
   const findings: NativePreflightFinding[] = [];
-  // Only the public document is adapted; no private value is involved.
-  let input = {
+  // Only the public document is adapted; no private value is involved. Every
+  // field is named so a helper that starts reading one fails the type check.
+  let input: NativeProjectInput = {
     originalSha256: createHash("sha256").update(bytes).digest("hex"),
     normalizedComposeJson: JSON.stringify(compose),
-  } as NativeProjectInput;
+    managedEnvironment: {},
+    managedSecretValues: [],
+    lifecycleHostEnvironment: {},
+    effectiveEnvName: opts.effectiveEnvName,
+    environmentFiles: [],
+    serviceNames: Object.keys(compose.services),
+  };
+  let adaptationValid = true;
   try {
     input = await prepareNativeProjectAdaptation({
       input,
       path: opts.adaptationFile,
     });
   } catch {
+    adaptationValid = false;
     findings.push(
       finding(
         { ...blocker, code: "native_adaptation_invalid" },
@@ -747,7 +861,7 @@ async function adaptForPreflight(opts: {
         input,
         hosts: opts.internalHosts,
         sources: opts.internalHostSources,
-        hasDependencySelection: opts.hasHostDependencies,
+        hasDependencySelection: opts.hasDefaultDependencyFile,
       });
     } catch {
       findings.push(
@@ -771,6 +885,7 @@ async function adaptForPreflight(opts: {
       services:
         isRecord(adapted) && isRecord(adapted.services) ? adapted.services : {},
       emulated: new Set(Object.keys(input.amd64Emulation ?? {})),
+      adaptationValid,
     },
   };
 }
@@ -967,9 +1082,10 @@ async function collectNativeRuntimeFindings(opts: {
     relative(opts.projectRoot, opts.composeFile),
     ...opts.profiles.flatMap((profile) => ["--profile", profile]),
   ];
-  const directory = await mkdtemp(join(tmpdir(), "hack-native-preflight-"));
+  let directory: string | undefined;
   let reply: unknown;
   try {
+    directory = await mkdtemp(join(tmpdir(), "hack-native-preflight-"));
     const original = await invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
@@ -1007,7 +1123,9 @@ async function collectNativeRuntimeFindings(opts: {
   } catch (error: unknown) {
     return reviewFailure(error);
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    if (directory !== undefined) {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
   if (!(isRecord(reply) && isRecord(reply.plan))) {
     return { review: { status: "unavailable" }, findings: [] };
@@ -1041,51 +1159,93 @@ async function collectNativeRuntimeFindings(opts: {
   return { review: { status: "completed" }, findings, plan: reply.plan };
 }
 
+/** Compose services that are mappings, as native start's `specs`. */
+function serviceSpecs(
+  services: Readonly<Record<string, unknown>>
+): Record<string, Record<string, unknown>> {
+  const specs: Record<string, Record<string, unknown>> = {};
+  for (const [name, service] of Object.entries(services)) {
+    if (isRecord(service)) {
+      specs[name] = service;
+    }
+  }
+  return specs;
+}
+
 /**
- * Route admission, which native start runs on the reviewed plan: a routed
- * service needs a native HTTP probe on its route port, and a pool serves at
- * most 32 routes.
+ * The pool's bridge limit, which native start checks before any hook or
+ * runtime work: at most 32 routes, and at most 32 routes plus published ports.
+ * It needs no review, so it runs even when the review is skipped.
+ */
+function bridgeFindings(
+  services: Readonly<Record<string, unknown>>
+): NativePreflightFinding[] {
+  const specs = serviceSpecs(services);
+  try {
+    nativeBridgeSocketCount({
+      routes: nativeBridgeCapacity(specs),
+      ports: nativePortPublicationCount(specs),
+    });
+    return [];
+  } catch {
+    return [
+      finding(
+        { severity: "blocker", gate: "cli", code: "too_many_bridges" },
+        {
+          message:
+            "The project declares more routed services and published ports than one native pool serves.",
+          fix: "Keep routes plus published ports to 32 or fewer, with at most 32 routed services.",
+        }
+      ),
+    ];
+  }
+}
+
+/**
+ * Route admission, which native start runs on the reviewed plan: each active
+ * routed service needs an enabled native HTTP probe on its route port and no
+ * dependency cache. Checked one service at a time so the report names each.
  */
 function routeFindings(opts: {
   readonly plan: Readonly<Record<string, unknown>>;
   readonly services: Readonly<Record<string, unknown>>;
 }): NativePreflightFinding[] {
-  const specs: Record<string, Record<string, unknown>> = {};
-  for (const [name, service] of Object.entries(opts.services)) {
-    if (isRecord(service)) {
-      specs[name] = service;
+  if (!isRecord(opts.plan.services)) {
+    return [];
+  }
+  const specs = serviceSpecs(opts.services);
+  const found: NativePreflightFinding[] = [];
+  for (const name of Object.keys(opts.plan.services).sort(byCodePoint)) {
+    const reviewed = opts.plan.services[name];
+    if (!(SERVICE.test(name) && isRecord(reviewed))) {
+      continue;
+    }
+    try {
+      reviewedNativeRoutes({
+        plan: { services: { [name]: reviewed } },
+        specs,
+        capacity: 1,
+      });
+    } catch {
+      found.push(
+        finding(
+          {
+            severity: "blocker",
+            gate: "cli",
+            code: "route_probe_required",
+            service: name,
+            field: "healthcheck.x-hack-http",
+          },
+          {
+            message:
+              "The service has caddy routing labels but no enabled native HTTP probe on its route port, or it also declares a dependency cache.",
+            fix: "Give the service a healthcheck with x-hack-http on the port its route proxies to, or add one under httpProbes in the native adaptation.",
+          }
+        )
+      );
     }
   }
-  const blocker = { severity: "blocker", gate: "cli" } as const;
-  let capacity: number;
-  try {
-    capacity = nativeBridgeCapacity(specs);
-  } catch {
-    return [
-      finding(
-        { ...blocker, code: "too_many_routes" },
-        {
-          message: "The project declares more than 32 routed services.",
-          fix: "Route at most 32 services on native.",
-        }
-      ),
-    ];
-  }
-  try {
-    reviewedNativeRoutes({ plan: opts.plan, specs, capacity });
-    return [];
-  } catch {
-    return [
-      finding(
-        { ...blocker, code: "route_probe_required" },
-        {
-          message:
-            "A service with caddy routing labels has no enabled native HTTP probe on its route port, or also declares a dependency cache.",
-          fix: "Give each routed service a healthcheck with x-hack-http on the port its route proxies to, or add one under httpProbes in the native adaptation.",
-        }
-      ),
-    ];
-  }
+  return found;
 }
 
 /** Inputs the command layer resolves; nothing here is a secret value. */
@@ -1107,6 +1267,13 @@ export type NativePreflightOptions = {
   readonly sharedSource: boolean;
   /** Whether a dependency file is selected for the effective env. */
   readonly hasHostDependencies: boolean;
+  /**
+   * Whether the default (not per-env) dependency file is set. Native start
+   * admits project-wide extra hosts on this alone, so the preflight does too.
+   */
+  readonly hasDefaultDependencyFile: boolean;
+  /** The project's default env, or null. */
+  readonly effectiveEnvName: string | null;
   readonly profiles: readonly string[];
   /** The native runtime, `"incomplete"` for a selection without a candidate, or null. */
   readonly runtime: NativeRuntimeSelection | "incomplete" | null;
@@ -1131,9 +1298,17 @@ export async function collectNativePreflight(
       ...(await collectNativeCliFindings({
         ...opts,
         adapted: adapted.document,
-      }))
+      })),
+      ...bridgeFindings(adapted.document.services)
     );
-    if (opts.runtime !== null && opts.runtime !== "incomplete") {
+    if (!adapted.document.adaptationValid) {
+      // Reviewing the unadapted document would only add findings the
+      // adaptation is there to remove.
+      runtime = {
+        review: { status: "skipped", code: "native_adaptation_invalid" },
+        findings: [],
+      };
+    } else if (opts.runtime !== null && opts.runtime !== "incomplete") {
       runtime = await collectNativeRuntimeFindings({
         runtime: opts.runtime,
         projectRoot: opts.projectRoot,
@@ -1204,6 +1379,9 @@ function reviewLine(review: NativePreflightReport["runtime_review"]): string {
   }
   if (review.status === "unavailable") {
     return "Runtime review: unavailable; the selected native runtime did not return a review. Only the CLI's own checks ran.";
+  }
+  if (review.code === "native_adaptation_invalid") {
+    return "Runtime review: skipped, because the native adaptation is not valid. Fix it and run the preflight again.";
   }
   return review.code === "native_selection_incomplete"
     ? "Runtime review: skipped, because native is selected without a candidate (HACK_NATIVE_BINARY and HACK_NATIVE_HOME). Only the CLI's own checks ran. Run this from the hack-next launcher for the full list."

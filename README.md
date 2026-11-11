@@ -145,13 +145,14 @@ See [agent integrations](docs/integrations.md).
 
 Everything above is the supported core. The items below are opt-in.
 
-**Native backend (beta, Apple Silicon macOS).** v5 adds a backend that runs
-explicitly prepared projects without Docker. It ships only through the separate
-`hack-next` channel, not in the stable archives or the Homebrew formula. It supports
-a bounded command subset and is qualified project by project. Docker Compose stays
-the default backend. See [installing it](docs/guides/candidate-install.md), its
-[limits](docs/guides/prereleases.md#candidate-capability-limits) and
-[the native backend guide](docs/guides/native-candidate.md).
+**Native backend (beta, Apple Silicon macOS).** A second way to run the same
+project. Instead of using a Docker app, Hack starts its own small Linux virtual
+machine and runs your services in it. Your `.hack/` folder and your commands stay
+the same. It ships only through the separate `hack-next` channel, not in the stable
+archives or the Homebrew formula, and it supports part of what Compose supports.
+Docker Compose stays the default. Read the [overview](docs/native/README.md),
+[try it](docs/native/try-it.md), or check
+[what works and known limits](docs/native/limits.md).
 
 **v5 prereleases.** v5 keeps the same CLI and project model. `5.0.0-next.N` builds
 install beside stable Hack through `hack-next` and do not touch the stable

@@ -475,11 +475,11 @@ export async function assertSuiteInputs(opts: {
  * How the hosted shards split the suite (HACK-1960).
  *
  * - `full`: every shard runs on macOS and the `n` shards partition the whole
- *   set. Pushes to `next`/`main` use it, so the prerelease exact-head gate
- *   still sees the whole suite pass on macOS.
- * - `pooled`: pull requests run the platform-sensitive files (the `macos`
- *   pool) on the first {@link POOLED_MACOS_SHARDS} shards, on macOS, and every
- *   other file (the `linux` pool) on the remaining shards, on Linux.
+ *   set. CI no longer uses it (HACK-2028); it stays for manual runs.
+ * - `pooled`: CI pushes and pull requests run the platform-sensitive files
+ *   (the `macos` pool) on the first {@link POOLED_MACOS_SHARDS} shards, on
+ *   macOS, and every other file (the `linux` pool) on the remaining shards, on
+ *   Linux.
  */
 export type TestLayout = "full" | "pooled";
 
@@ -492,7 +492,8 @@ export const POOLED_MACOS_SHARDS = 3;
  * A test file whose source, or a `tests/` module it imports, matches this may
  * behave differently off macOS, so the pooled layout keeps it on macOS. The
  * match is deliberately broad: a false positive costs macOS minutes, a false
- * negative moves macOS coverage of that file to the `full` push run.
+ * negative loses CI macOS coverage of that file (pushes are pooled too, since
+ * HACK-2028), so add such a file to {@link MACOS_POOL_FILES}.
  */
 export const PLATFORM_SENSITIVE_SOURCE =
   /process\.platform|\bplatform\(\)|\bdarwin\b|\bmacOS\b|launchctl|osascript|sandbox-exec|keychain|\/private\/(?:tmp|var)|\blsof\b|\bpgrep\b|\bsysctl\b|kqueue|fsevents/i;

@@ -26,9 +26,12 @@ import {
 import { createNativeProcessCensusDiagnostics } from "../src/backends/native-process-census-diagnostics.ts";
 import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
+import { installFixtureProcessCensus } from "./helpers/fixture-process-census.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let activeOriginalCases = 0;
 let originalLifetimeUnknown = false;
+const censusPids = new Set<number>([process.pid]);
 beforeEach(() => {
   if (originalLifetimeUnknown) {
     throw new Error("Original-owner fixture lifetime unknown; retained.");
@@ -37,10 +40,14 @@ beforeEach(() => {
 function originalCase(name: string, body: () => Promise<void>) {
   test(name, async () => {
     activeOriginalCases++;
+    const restoreCensus = installFixtureProcessCensus(() => [...censusPids]);
     try {
       await body();
     } finally {
       activeOriginalCases--;
+      restoreCensus();
+      censusPids.clear();
+      censusPids.add(process.pid);
     }
   }, 30_000);
 }
@@ -160,6 +167,9 @@ async function fixture(bootSession = false, liveStop = false) {
       ? [
           `const {captureNativeAuthoredProcessIncarnation}=await import(${JSON.stringify(join(import.meta.dir, "../src/backends/native-authored-process-incarnation.ts"))});`,
           "phase='spawn';native=Bun.spawn(['/bin/sleep','120'],{detached:true,stdin:'ignore',stdout:'ignore',stderr:'ignore'});",
+          `const {installFixtureProcessCensus}=await import(${JSON.stringify(join(import.meta.dir, "helpers/fixture-process-census.ts"))});`,
+          "installFixtureProcessCensus(()=>[process.pid,native.pid]);",
+          "await Bun.write(scope.projectRoot+'/native-pid',String(native.pid));",
           "phase='capture';const original=await captureNativeAuthoredProcessIncarnation({pid:native.pid,selected:'/bin/sleep'});",
           "phase='endpoint';await admission.publishLiveStop({expectedStart:start,expectedRun:ready,source,original,assertFresh:async()=>undefined,stop:async()=>false});",
           "void (async()=>{while(!(await Bun.file(scope.projectRoot+'/stop-original').exists()))await Bun.sleep(10);if(native.exitCode===null)native.kill('SIGKILL');await native.exited;await Bun.write(scope.projectRoot+'/native-settled','yes');process.exit(77)})();",
@@ -177,7 +187,7 @@ async function fixture(bootSession = false, liveStop = false) {
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
-    env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR },
+    env: privateCliEnv({ root }),
   });
   const finish = liveStop
     ? async () => {
@@ -225,6 +235,10 @@ async function fixture(bootSession = false, liveStop = false) {
       );
     }
     await Bun.sleep(10);
+  }
+  if (liveStop) {
+    censusPids.add(Number(await Bun.file(join(root, "native-pid")).text()));
+    censusPids.add(child.pid);
   }
   const dir = join(scope.projectDir, ".internal", "native-authored-runs");
   const key = createHash("sha256")
@@ -797,7 +811,7 @@ test("fresh recovery release failure retains each exact owner until a dead-owner
 }, 30_000);
 
 originalCase(
-  "new no-host death uses real read-only quiescence facts and retires only its exact bound record",
+  "new no-host death uses fixture-scoped read-only quiescence facts and retires only its exact bound record",
   async () => {
     const current = await fixture(true, true);
     await expect(

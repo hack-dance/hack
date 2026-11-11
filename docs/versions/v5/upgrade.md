@@ -16,7 +16,7 @@ is the runtime layer underneath and the product boundary around it.
 - **Native backend (beta).** On Apple Silicon macOS, through the `hack-next`
   channel, `HACK_RUNTIME_BACKEND=native` runs explicitly prepared projects without Docker. It supports a bounded command
   subset and is qualified project by project. See
-  [Try the native backend](../guides/native-candidate.md).
+  [Native backend (beta)](native/overview.md).
 - **A config compiler.** `hack config validate`, `config plan`, `config import
   --dry-run` and `config adopt --dry-run` inspect and preview native configuration
   without starting workloads. See [Native config import](../reference/native-config-import.md).
@@ -54,7 +54,7 @@ invoked.
 3. Check the application itself: sign-in, data-backed pages, and anything written
    before a restart that must still be there after it.
 4. Only then try the native backend on a disposable project, following
-   [Try the native backend](../guides/native-candidate.md).
+   [Try the native backend](native/try-it.md).
 
 When 5.0.0 ships, `brew upgrade hack` or the release installer moves the stable
 executable to v5. Projects need no changes to keep running on Compose.

@@ -23,7 +23,7 @@ shared local routing. Every command on this site works there.
 
 The **native backend** is beta and opt-in. On Apple Silicon macOS it runs an
 explicitly prepared project without Docker, with a bounded command subset. Select it
-with `HACK_RUNTIME_BACKEND=native`. Read [Try the native backend](../guides/native-candidate.md)
+with `HACK_RUNTIME_BACKEND=native`. Read [the native backend overview](native/overview.md)
 before using it; a Compose example does not imply native support for the same flag.
 
 ## Start, inspect and stop

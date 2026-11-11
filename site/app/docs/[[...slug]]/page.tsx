@@ -1,9 +1,24 @@
 import { DocsBody, DocsPage, DocsTitle } from "fumadocs-ui/layouts/docs/page";
 import defaultComponents from "fumadocs-ui/mdx";
 import { notFound, redirect } from "next/navigation";
+import { DiagramImage } from "@/components/diagram-image";
 import { sources } from "@/lib/source";
 
 const versionPattern = /^v\d/;
+/** Unversioned routes from before the site had versions. */
+const legacyRoutes: Record<string, string> = {
+  "guides/v5-dogfooding": "getting-started",
+  "guides/getting-started": "getting-started",
+  "agent-guidance": "agent-handoff",
+  "guides/global-settings": "reference/overview",
+};
+/** v5 pages that moved into the "Native backend (beta)" section. */
+const movedV5Routes: Record<string, string> = {
+  "guides/native-candidate": "native/full-reference",
+  "guides/candidate-install": "native/install",
+  "reference/native-authored-commands": "native/authored-commands",
+  "reference/native-config-import": "native/config-import",
+};
 interface Props {
   params: Promise<{ slug?: string[] }>;
 }
@@ -17,19 +32,16 @@ export default async function Page({ params }: Props) {
     if (versionPattern.test(version ?? "")) {
       notFound();
     }
-    const legacy =
-      (
-        {
-          "guides/v5-dogfooding": "getting-started",
-          "guides/getting-started": "getting-started",
-          "agent-guidance": "agent-handoff",
-          "guides/global-settings": "reference/overview",
-        } as Record<string, string>
-      )[slug.join("/")] ?? slug.join("/");
-    redirect(`/docs/v5/${legacy}`);
+    const path = slug.join("/");
+    redirect(`/docs/v5/${legacyRoutes[path] ?? movedV5Routes[path] ?? path}`);
   }
   const page = sources[version].getPage(slug.slice(1));
   if (!page) {
+    const moved =
+      version === "v5" ? movedV5Routes[slug.slice(1).join("/")] : undefined;
+    if (moved) {
+      redirect(`/docs/v5/${moved}`);
+    }
     notFound();
   }
   const MDX = page.data.body;
@@ -37,7 +49,7 @@ export default async function Page({ params }: Props) {
     <DocsPage toc={page.data.toc}>
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsBody>
-        <MDX components={defaultComponents} />
+        <MDX components={{ ...defaultComponents, img: DiagramImage }} />
       </DocsBody>
     </DocsPage>
   );
@@ -59,19 +71,16 @@ export async function generateMetadata({ params }: Props) {
     if (versionPattern.test(version ?? "")) {
       notFound();
     }
-    const legacy =
-      (
-        {
-          "guides/v5-dogfooding": "getting-started",
-          "guides/getting-started": "getting-started",
-          "agent-guidance": "agent-handoff",
-          "guides/global-settings": "reference/overview",
-        } as Record<string, string>
-      )[slug.join("/")] ?? slug.join("/");
-    redirect(`/docs/v5/${legacy}`);
+    const path = slug.join("/");
+    redirect(`/docs/v5/${legacyRoutes[path] ?? movedV5Routes[path] ?? path}`);
   }
   const page = sources[version].getPage(slug.slice(1));
   if (!page) {
+    const moved =
+      version === "v5" ? movedV5Routes[slug.slice(1).join("/")] : undefined;
+    if (moved) {
+      redirect(`/docs/v5/${moved}`);
+    }
     notFound();
   }
   return { title: page.data.title, alternates: { canonical: page.url } };

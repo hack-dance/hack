@@ -277,6 +277,9 @@ jobs:
     # no-op otherwise, instead of leaving a skipped required check.
     name: docs site
     needs: changes
+    # Like `test`: report even when the scope job did not succeed, so a failed
+    # scope fails this check instead of leaving it skipped.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -284,8 +287,17 @@ jobs:
     steps:
       - name: Report scope
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           DOCS_SITE: ${{ needs.changes.outputs.docs_site }}
         run: |
+          if [ "$CHANGES_RESULT" = "cancelled" ]; then
+            echo "change scope was cancelled without failure; nothing to build"
+            exit 0
+          fi
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "change scope did not succeed (result: $CHANGES_RESULT)"
+            exit 1
+          fi
           if [ "$DOCS_SITE" = "true" ]; then
             echo "docs or site inputs changed: checking the corpus and building the site"
           else

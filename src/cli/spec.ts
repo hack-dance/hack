@@ -59,9 +59,9 @@ export const CLI_SPEC = defineCli({
       : packageJson.version,
   summary: "Local development without the port-collision tax",
   highlights: [
-    "Run multiple repos or branches at the same time without port conflicts.",
-    "Give every project a stable HTTPS URL like https://myapp.hack.",
-    "Keep env, sessions, and diagnostics close to the repo.",
+    "Run many projects and branches side by side, each at a real HTTPS hostname like https://myapp.hack.local.",
+    "Manage project env and secrets safely.",
+    "Sessions and lifecycle you can trust: up, down, restart, logs and doctor.",
   ] as const,
   globalOptions: [optNoInteractive],
   commands: [

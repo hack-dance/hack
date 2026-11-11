@@ -1967,11 +1967,17 @@ class Qualification {
         `exit ${code} (see ${label}.stderr)`
       );
       const phases = warmPhases(samples, total);
+      // A fast preflight can fall between two samples; only `runtime up` must be seen.
       this.check(
-        `warm up -d run ${run}: retained preflight and runtime up were observed`,
-        phases.retained_preflight_s !== null && phases.runtime_up_s !== null,
+        `warm up -d run ${run}: runtime up was observed`,
+        phases.runtime_up_s !== null,
         `see ${label}.phases.json`
       );
+      if (phases.retained_preflight_s === null) {
+        this.note(
+          `INFO warm up -d run ${run}: retained preflight not sampled (shorter than one ${phases.sample_period_s ?? "?"} s period)`
+        );
+      }
       writeFileSync(
         join(this.evidence, `${label}.phases.json`),
         JSON.stringify({ phases, samples }, null, 2)

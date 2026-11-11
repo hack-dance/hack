@@ -1,0 +1,15 @@
+name: cli-login
+services:
+  app:
+    image: alpine:3.22
+    command: ["sh", "/app/scripts/show-credentials.sh"]
+    environment:
+      EDGE_API_TOKEN_FILE: /run/secrets/edge_token
+    volumes:
+      - ..:/app:ro
+    secrets:
+      - edge_token
+
+secrets:
+  edge_token:
+    file: ../.credentials/edge-token

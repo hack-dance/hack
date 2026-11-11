@@ -1,0 +1,5 @@
+{
+  "$schema": "https://schemas.hack.local/hack.config.schema.json",
+  "name": "environments",
+  "dev_host": "environments.hack.local"
+}

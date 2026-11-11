@@ -3,11 +3,13 @@ import { createPrivateFileExclusive } from "../private-file.ts";
 import { appendCommandAudit, auditEnd } from "./audit.ts";
 import {
   type EventEnvelope,
+  emittedOffsets,
   endedEvent,
   JournalWriter,
   readChild,
   readEvents,
   readOwner,
+  reconcileTail,
 } from "./journal.ts";
 import {
   identityMatches,
@@ -17,7 +19,12 @@ import {
   signalProcessGroup,
 } from "./platform.ts";
 import type { LoadedJournal } from "./reader.ts";
-import { type ObserveIdentities, withJournalLock } from "./recovery.ts";
+import {
+  childState,
+  type ObserveIdentities,
+  type ReadBootTime,
+  withJournalLockOrReserve,
+} from "./recovery.ts";
 
 const SUPERVISOR_WAIT_MS = 6000;
 const POLL_MS = 100;
@@ -73,6 +80,7 @@ export async function cancelCommand(opts: {
   readonly waitMs?: number;
   /** Store root for the audit line (defaults to the Hack home). */
   readonly root?: string;
+  readonly readBootTime?: ReadBootTime;
 }): Promise<CancelResult> {
   const { meta, paths } = opts.journal;
   const observe = opts.observe ?? observeIdentities;
@@ -123,14 +131,22 @@ export async function cancelCommand(opts: {
       observe,
       signaller,
       containerProcess,
+      readBootTime: opts.readBootTime,
     }));
-  const after = child ? await observe([child.pid]) : new Map();
+  const after = await observe(child ? [child.pid] : []);
   const childExited =
-    child === null ||
-    (after !== null && !identityMatches({ expected: child, snapshot: after }));
+    after !== null &&
+    (await childState({
+      paths,
+      meta,
+      snapshot: after,
+      readBootTime: opts.readBootTime,
+    })) === "gone";
+  // Without a final record the stop is not confirmed (for example the
+  // child's identity is unknown); the command keeps its admission slot.
   const outcome = finalEvent
     ? String(finalEvent.payload.outcome)
-    : "cancelling";
+    : "unconfirmed";
   await appendCommandAudit({
     root: opts.root,
     entry: {
@@ -185,9 +201,16 @@ function signalVerified(opts: {
   } else if (owner && snapshot.has(owner.pid)) {
     refused.push("supervisor");
   }
-  if (child && childGroupMatches({ child, snapshot })) {
+  // A live supervisor stops the group itself: it records the group's members
+  // first, so descendants that ignore SIGTERM are still killed after the
+  // leader exits. Signalling the group from here would race that.
+  if (child && !supervisorSignalled && childGroupMatches({ child, snapshot })) {
     childGroupSignalled = opts.signaller.group(child.processGroupId, "SIGTERM");
-  } else if (child && snapshot.has(child.pid)) {
+  } else if (
+    child &&
+    snapshot.has(child.pid) &&
+    !childGroupMatches({ child, snapshot })
+  ) {
     refused.push("child");
   }
   return { supervisorSignalled, childGroupSignalled, refused };
@@ -203,16 +226,6 @@ function childGroupMatches(opts: {
     row.birth === opts.child.birth &&
     row.processGroupId === opts.child.processGroupId
   );
-}
-
-function cancelReason(opts: {
-  readonly owner: boolean;
-  readonly childGone: boolean;
-}): string {
-  if (!opts.childGone) {
-    return "cancel_unconfirmed";
-  }
-  return opts.owner ? "supervisor_unresponsive" : "cancelled_before_start";
 }
 
 /**
@@ -297,11 +310,12 @@ async function finishWithoutSupervisor(opts: {
   readonly observe: ObserveIdentities;
   readonly signaller: Signaller;
   readonly containerProcess: "not_confirmed" | "not_applicable";
+  readonly readBootTime?: ReadBootTime;
 }): Promise<EventEnvelope | null> {
   const { paths, meta } = opts.journal;
-  return await withJournalLock(paths, async () => {
-    const events = await readEvents(paths);
-    const existing = endedEvent(events);
+  return await withJournalLockOrReserve(paths, async () => {
+    // Read only: the supervisor may still be alive and mid-write here.
+    const existing = endedEvent(await readEvents(paths));
     if (existing) {
       return existing;
     }
@@ -310,25 +324,35 @@ async function finishWithoutSupervisor(opts: {
     if (!stopped.supervisorGone) {
       return null;
     }
-    // The supervisor may have written up to the moment it died: re-read.
-    const current = await readEvents(paths);
+    // The supervisor may have written up to the moment it died.
+    const current = await reconcileTail(paths);
     const late = endedEvent(current);
     if (late) {
       return late;
     }
+    const child = await readChild(paths);
+    const snapshot = await opts.observe(child ? [child.pid] : []);
+    const state = snapshot
+      ? await childState({
+          paths,
+          meta,
+          snapshot,
+          readBootTime: opts.readBootTime,
+        })
+      : "unknown";
+    if (state !== "gone") {
+      // Alive or unknown: no final record, so admission and retention keep
+      // treating the command as running.
+      return null;
+    }
     const writer = new JournalWriter(paths, meta, current.at(-1)?.seq ?? 0);
-    // `cancelled` only when the command's process is confirmed gone;
-    // otherwise the outcome is not known.
     const ended = await writer.write("command.ended", {
-      outcome: stopped.childGone ? "cancelled" : "unknown",
-      reason: cancelReason({
-        owner: owner !== null,
-        childGone: stopped.childGone,
-      }),
+      outcome: "cancelled",
+      reason: owner ? "supervisor_unresponsive" : "cancelled_before_start",
       exitCode: null,
       signal: null,
       durationMs: Math.max(0, Date.now() - Date.parse(meta.acceptedAt)),
-      truncated: false,
+      truncated: emittedOffsets(current).truncated,
       suppressed: meta.capture === "metadata",
       containerProcess: opts.containerProcess,
     });

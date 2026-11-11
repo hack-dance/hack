@@ -6,6 +6,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -182,9 +183,12 @@ describe("background command MCP tools", () => {
       "test",
     ]);
     expect(invocation?.caller).toMatch(/^mcp:[0-9a-f-]{36}$/);
-    expect(await readFile(fixture.auditLog, "utf8")).toContain(
-      "hack.project.command.start"
-    );
+    const audit = await readFile(fixture.auditLog, "utf8");
+    expect(audit).toContain("hack.project.command.start");
+    // Value-free: service, argv[0], count and a digest, never the arguments.
+    expect(audit).toContain("argv0=--branch args=4 sha256=");
+    expect(audit).not.toContain("npm");
+    expect((await stat(fixture.auditLog)).mode & 0o777).toBe(0o600);
   });
 
   test("a CLI error envelope keeps its registered code", async () => {

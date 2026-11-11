@@ -1,7 +1,8 @@
-import { lstat } from "node:fs/promises";
+import { lstat, unlink } from "node:fs/promises";
 import { withProjectsRegistryLock } from "../projects-registry-lock.ts";
 import { auditEnd } from "./audit.ts";
 import {
+  type AppendLine,
   CAPTURE_LIMIT_BYTES,
   type CommandMeta,
   type EventEnvelope,
@@ -14,17 +15,32 @@ import {
   readChild,
   readEvents,
   readOwner,
+  reconcileTail,
 } from "./journal.ts";
 import { pumpStream } from "./output-pump.ts";
 import {
   identityMatches,
   type ObservedIdentity,
   observeIdentities,
+  readBootTimeMs,
   signalProcessGroup,
 } from "./platform.ts";
 
 /** How long an accepted command may go without a supervisor record. */
 export const OWNER_START_GRACE_MS = 30_000;
+
+/**
+ * What is known about the command's own process.
+ * - `alive`: a process with the recorded pid and birth exists.
+ * - `gone`: confirmed absent: its recorded identity no longer matches, it
+ *   was never spawned (no spawn marker), it was reaped before it could be
+ *   observed, or the machine booted after the command was accepted.
+ * - `unknown`: it may exist but its identity was never recorded (the
+ *   supervisor died between spawn and record, or `ps` could not observe it).
+ *   Unknown is never treated as absence: no final record frees admission and
+ *   retention does not remove its files.
+ */
+export type ChildState = "alive" | "gone" | "unknown";
 
 export type OwnerAssessment =
   | { readonly kind: "ended" }
@@ -37,7 +53,7 @@ export type OwnerAssessment =
   | {
       readonly kind: "owner_lost";
       readonly reason: "supervisor_lost" | "supervisor_never_started";
-      readonly childAlive: boolean;
+      readonly child: ChildState;
     };
 
 /** Seam for tests: process observation. */
@@ -45,12 +61,48 @@ export type ObserveIdentities = (
   pids: readonly number[]
 ) => Promise<ReadonlyMap<number, ObservedIdentity> | null>;
 
+/** Seam for tests: last boot time in ms, or null when unknown. */
+export type ReadBootTime = () => Promise<number | null>;
+
+/** Child birth values that are not a `ps` start time. */
+export const CHILD_BIRTH_UNOBSERVED = "unobserved";
+export const CHILD_BIRTH_EXITED = "exited-before-observation";
+
+/** Classify the command's process from its records and a `ps` snapshot. */
+export async function childState(opts: {
+  readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+  readonly snapshot: ReadonlyMap<number, ObservedIdentity>;
+  readonly readBootTime?: ReadBootTime;
+}): Promise<ChildState> {
+  const child = await readChild(opts.paths);
+  if (child?.birth === CHILD_BIRTH_EXITED) {
+    return "gone";
+  }
+  if (child && child.birth !== CHILD_BIRTH_UNOBSERVED) {
+    return identityMatches({ expected: child, snapshot: opts.snapshot })
+      ? "alive"
+      : "gone";
+  }
+  const spawned =
+    child !== null ||
+    (await lstat(opts.paths.spawning).catch(() => null)) !== null;
+  if (!spawned) {
+    return "gone";
+  }
+  const booted = await (opts.readBootTime ?? readBootTimeMs)();
+  return booted !== null && booted > Date.parse(opts.meta.acceptedAt)
+    ? "gone"
+    : "unknown";
+}
+
 export async function assessOwner(opts: {
   readonly paths: JournalPaths;
   readonly meta: CommandMeta;
   readonly events: readonly EventEnvelope[];
   readonly now: number;
   readonly observe?: ObserveIdentities;
+  readonly readBootTime?: ReadBootTime;
 }): Promise<OwnerAssessment> {
   if (endedEvent(opts.events)) {
     return { kind: "ended" };
@@ -59,12 +111,14 @@ export async function assessOwner(opts: {
   const owner = await readOwner(opts.paths);
   if (!owner) {
     const accepted = Date.parse(opts.meta.acceptedAt);
+    // The owner record is written before the spawn marker, so without it
+    // nothing was spawned.
     return opts.now - accepted < OWNER_START_GRACE_MS
       ? { kind: "starting" }
       : {
           kind: "owner_lost",
           reason: "supervisor_never_started",
-          childAlive: false,
+          child: "gone",
         };
   }
   const child = await readChild(opts.paths);
@@ -78,7 +132,7 @@ export async function assessOwner(opts: {
   return {
     kind: "owner_lost",
     reason: "supervisor_lost",
-    childAlive: child ? identityMatches({ expected: child, snapshot }) : false,
+    child: await childState({ ...opts, snapshot }),
   };
 }
 
@@ -94,20 +148,56 @@ export function withJournalLock<T>(
 }
 
 /**
+ * The journal lock writes an owner file, which a full disk or quota can
+ * refuse. Then the command's reserved bytes are released (they exist only to
+ * let the final record be written) and the lock is tried once more.
+ */
+export async function withJournalLockOrReserve<T>(
+  paths: JournalPaths,
+  run: () => Promise<T>,
+  lock: typeof withJournalLock = withJournalLock
+): Promise<T> {
+  try {
+    return await lock(paths, run);
+  } catch (error: unknown) {
+    if (!isNoSpaceError(error)) {
+      throw error;
+    }
+    await unlink(paths.reserve).catch(() => undefined);
+    return await lock(paths, run);
+  }
+}
+
+export function isNoSpaceError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error.code === "ENOSPC" || error.code === "EDQUOT")
+  );
+}
+
+/**
  * Take over a journal whose supervisor is gone. Under the journal lock, and
  * only after re-checking that the supervisor is gone and no final record
- * exists: announce output the kernel appended since the last event (marked
- * `unsupervised`, since no redaction values are available here), then, once
- * the child is gone too, write the single `command.ended` with outcome
- * `unknown`. Nothing is ever re-run. Returns the events after the attempt.
+ * exists: make the tail whole, announce output the kernel appended since the
+ * last event (marked `unsupervised`, since no redaction values are available
+ * here), then, once the child is confirmed gone, write the single
+ * `command.ended` with outcome `unknown`. While the child's ownership is
+ * unknown nothing final is written. A full disk stops announcing output
+ * but never the final record. Nothing is ever re-run.
  */
 export async function recoverLostOwner(opts: {
   readonly paths: JournalPaths;
   readonly meta: CommandMeta;
   readonly now?: () => number;
   readonly observe?: ObserveIdentities;
+  readonly readBootTime?: ReadBootTime;
   /** Test seam: group signalling. */
   readonly signalGroup?: (pgid: number, signal: NodeJS.Signals) => boolean;
+  /** Test seams: journal append and lock. */
+  readonly append?: AppendLine;
+  readonly lock?: typeof withJournalLock;
   /**
    * Stop a verified orphan that ran past its timeout. Only the start path
    * (admission) sets this; reads never signal processes.
@@ -115,57 +205,67 @@ export async function recoverLostOwner(opts: {
   readonly enforceTimeout?: boolean;
 }): Promise<EventEnvelope[]> {
   const now = opts.now ?? Date.now;
-  return await withJournalLock(opts.paths, async () => {
-    const events = await readEvents(opts.paths);
-    const assessment = await assessOwner({
-      paths: opts.paths,
-      meta: opts.meta,
-      events,
-      now: now(),
-      observe: opts.observe,
-    });
-    if (assessment.kind !== "owner_lost") {
-      return events;
-    }
-    const last = events.at(-1)?.seq ?? 0;
-    const writer = new JournalWriter(opts.paths, opts.meta, last);
-    const truncated = await announceUnsupervisedOutput({
-      paths: opts.paths,
-      meta: opts.meta,
-      events,
-      writer,
-      final: !assessment.childAlive,
-    });
-    const overdue =
-      opts.enforceTimeout === true &&
-      assessment.childAlive &&
-      now() - Date.parse(opts.meta.acceptedAt) >= opts.meta.timeoutMs;
-    const childGone =
-      !assessment.childAlive ||
-      (overdue &&
-        (await stopOverdueChild({
-          paths: opts.paths,
-          observe: opts.observe,
-          signalGroup: opts.signalGroup,
-        })));
-    if (overdue && childGone) {
-      // Output that landed before the stop.
-      await announceUnsupervisedOutput({
+  return await withJournalLockOrReserve(
+    opts.paths,
+    async () => {
+      // Read only until the supervisor is proven gone: it may be mid-write.
+      const observed = await readEvents(opts.paths);
+      const assessment = await assessOwner({
+        ...opts,
+        events: observed,
+        now: now(),
+      });
+      if (assessment.kind !== "owner_lost") {
+        return observed;
+      }
+      const events = await reconcileTail(opts.paths);
+      if (endedEvent(events)) {
+        return events;
+      }
+      const writer = new JournalWriter(
+        opts.paths,
+        opts.meta,
+        events.at(-1)?.seq ?? 0,
+        opts.append
+      );
+      const truncated = await announceUnsupervisedOutput({
         paths: opts.paths,
         meta: opts.meta,
-        events: await readEvents(opts.paths),
+        events,
         writer,
-        final: true,
+        final: assessment.child === "gone",
       });
-    }
-    if (childGone) {
+      const overdue =
+        opts.enforceTimeout === true &&
+        assessment.child === "alive" &&
+        now() - Date.parse(opts.meta.acceptedAt) >= opts.meta.timeoutMs;
+      const childGone =
+        assessment.child === "gone" ||
+        (overdue &&
+          (await stopOverdueChild({
+            paths: opts.paths,
+            observe: opts.observe,
+            signalGroup: opts.signalGroup,
+          })));
+      if (!childGone) {
+        return await readEvents(opts.paths);
+      }
+      const finalTruncated = overdue
+        ? (await announceUnsupervisedOutput({
+            paths: opts.paths,
+            meta: opts.meta,
+            events: await readEvents(opts.paths),
+            writer,
+            final: true,
+          })) || truncated
+        : truncated;
       const ended = await writer.write("command.ended", {
         outcome: overdue ? "timed_out" : "unknown",
         reason: overdue ? "orphan_timeout" : assessment.reason,
         exitCode: null,
         signal: null,
         durationMs: Math.max(0, now() - Date.parse(opts.meta.acceptedAt)),
-        truncated,
+        truncated: finalTruncated,
         suppressed: opts.meta.capture === "metadata",
       });
       await auditEnd({
@@ -173,9 +273,10 @@ export async function recoverLostOwner(opts: {
         meta: opts.meta,
         payload: ended.payload,
       });
-    }
-    return await readEvents(opts.paths);
-  });
+      return await readEvents(opts.paths);
+    },
+    opts.lock
+  );
 }
 
 /**
@@ -197,29 +298,45 @@ async function announceUnsupervisedOutput(opts: {
     return offsets.truncated;
   }
   for (const stream of ["stdout", "stderr"] as const) {
-    const result = await pumpStream({
-      path: outputPath(opts.paths, stream),
-      stream,
-      from: offsets[stream],
-      final: opts.final,
-      secrets: [],
-      captureRemaining: CAPTURE_LIMIT_BYTES - captured,
-      eventsRemaining: OUTPUT_EVENT_LIMIT - outputEvents,
-      redact: false,
-      emit: async (range) => {
-        await opts.writer.write("command.output", {
-          ...range,
-          unsupervised: true,
-        });
-      },
-    });
+    let result: Awaited<ReturnType<typeof pumpStream>>;
+    try {
+      result = await pumpStream({
+        path: outputPath(opts.paths, stream),
+        stream,
+        from: offsets[stream],
+        final: opts.final,
+        secrets: [],
+        captureRemaining: CAPTURE_LIMIT_BYTES - captured,
+        eventsRemaining: OUTPUT_EVENT_LIMIT - outputEvents,
+        redact: false,
+        emit: async (range) => {
+          await opts.writer.write("command.output", {
+            ...range,
+            unsupervised: true,
+          });
+        },
+      });
+    } catch (error: unknown) {
+      // A full disk stops announcing output; the final record still gets
+      // the reserved bytes.
+      if (isNoSpaceError(error)) {
+        return true;
+      }
+      throw error;
+    }
     captured += result.emittedBytes;
     outputEvents += result.events;
     if (result.budgetReached) {
-      await opts.writer.write("command.output_truncated", {
-        capturedBytes: captured,
-        limitBytes: CAPTURE_LIMIT_BYTES,
-      });
+      await opts.writer
+        .write("command.output_truncated", {
+          capturedBytes: captured,
+          limitBytes: CAPTURE_LIMIT_BYTES,
+        })
+        .catch((error: unknown) => {
+          if (!isNoSpaceError(error)) {
+            throw error;
+          }
+        });
       return true;
     }
   }

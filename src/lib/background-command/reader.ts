@@ -35,6 +35,10 @@ export const MIN_READ_MAX_BYTES = OUTPUT_EVENT_MAX_BYTES;
 export const DEFAULT_MCP_WAIT_MS = 25_000;
 export const MAX_WAIT_MS = 30_000;
 const POLL_MS = 200;
+/** Serialized events per read may use this multiple of `maxBytes`. */
+export const READ_SERIALIZED_FACTOR = 4;
+/** Events per read, whatever their size. */
+export const READ_MAX_EVENTS = 1000;
 const OWNER_CHECK_MS = 2000;
 
 export type CommandState = "accepted" | "running" | "stalled" | "ended";
@@ -245,7 +249,12 @@ export async function readCommandEvents(opts: {
       seq,
     });
   const start = parseAfter({ meta, after: opts.after });
-  const batch: Batch = { events: [], used: 0, afterSeq: start.afterSeq };
+  const batch: Batch = {
+    events: [],
+    used: 0,
+    serialized: 0,
+    afterSeq: start.afterSeq,
+  };
   let lastOwnerCheck = Number.NEGATIVE_INFINITY;
   for (;;) {
     // Checking the owner spawns `ps`; do it on the first pass and then at
@@ -280,7 +289,10 @@ export async function readCommandEvents(opts: {
 
 type Batch = {
   readonly events: ProjectedEvent[];
+  /** Projected text bytes, bounded by `maxBytes`. */
   used: number;
+  /** Serialized event bytes, bounded by READ_SERIALIZED_FACTOR × maxBytes. */
+  serialized: number;
   afterSeq: number;
 };
 
@@ -323,14 +335,20 @@ async function collectEvents(opts: {
       event.type === "command.output"
         ? await projectOutput({ journal: opts.journal, event })
         : { event, bytes: 0 };
+    const size = JSON.stringify(projected.event).length;
+    // The first event always fits, so every read moves the cursor. Withheld
+    // output has no text but still costs envelope bytes and an event slot.
     if (
       batch.events.length > 0 &&
-      batch.used + projected.bytes > opts.maxBytes
+      (batch.used + projected.bytes > opts.maxBytes ||
+        batch.serialized + size > opts.maxBytes * READ_SERIALIZED_FACTOR ||
+        batch.events.length >= READ_MAX_EVENTS)
     ) {
       return "budget";
     }
     batch.events.push(projected.event);
     batch.used += projected.bytes;
+    batch.serialized += size;
     batch.afterSeq = event.seq;
     const stop = STOPPING_EVENTS.get(event.type);
     if (stop) {
@@ -418,6 +436,15 @@ export async function inspectCommand(opts: {
   const stalled = events.filter(
     (event) => event.type === "command.stalled"
   ).length;
+  // "unknown" child ownership is reported, never presented as absence.
+  const ownership = ended
+    ? { kind: "ended" }
+    : await assessOwner({
+        ...opts.journal,
+        events,
+        now: Date.now(),
+        observe: opts.observe,
+      });
   return {
     commandId: meta.commandId,
     state: stateOf(events),
@@ -461,6 +488,7 @@ export async function inspectCommand(opts: {
     child: child
       ? { pid: child.pid, processGroupId: child.processGroupId }
       : null,
+    ownership,
     latestCursor: events.at(-1)?.cursor ?? null,
     earliestCursor: formatCursor({
       commandId: meta.commandId,

@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -1485,6 +1485,13 @@ function registerBackgroundCommandTools(opts: {
         }),
         // Starting includes project and env resolution, not the command.
         timeoutMs: DEFAULT_CMD_TIMEOUT_MS,
+        // Background argv may hold literals that outlive the command's
+        // retention in this log: record a value-free summary instead.
+        auditCommand: summarizeBackgroundStart({
+          operation: input.operation,
+          service: input.service,
+          cmd: input.cmd,
+        }),
         extraEnv: { [CALLER_ENV]: caller },
       });
       return buildCommandToolResult({
@@ -1626,6 +1633,22 @@ function registerBackgroundCommandTools(opts: {
       });
     },
   });
+}
+
+/**
+ * Audit text for a background start: operation, service, argv[0], argument
+ * count and a SHA-256 of the argv, never the arguments themselves.
+ */
+export function summarizeBackgroundStart(opts: {
+  readonly operation: string;
+  readonly service: string;
+  readonly cmd: readonly string[];
+}): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify(opts.cmd))
+    .digest("hex");
+  const program = opts.cmd[0] ? basename(opts.cmd[0]) : "";
+  return `hack ${opts.operation} --detach service=${opts.service} argv0=${program} args=${opts.cmd.length} sha256=${digest}`;
 }
 
 /**
@@ -2431,6 +2454,8 @@ async function runHackCommand(opts: {
   readonly timeoutMs?: number;
   /** Reads are not audited; every other call is. */
   readonly audit?: boolean;
+  /** Value-free text recorded in the audit log instead of the argv. */
+  readonly auditCommand?: string;
   readonly extraEnv?: Readonly<Record<string, string>>;
 }): Promise<HackCommandResult> {
   const work = async () => {
@@ -2478,7 +2503,7 @@ async function runHackCommand(opts: {
       await appendAuditLog({
         hackHome: opts.context.hackHome,
         tool: opts.tool,
-        command,
+        command: opts.auditCommand ?? command,
         exitCode,
       });
     }
@@ -2705,7 +2730,8 @@ async function appendAuditLog(opts: {
       command: opts.command,
       exit_code: opts.exitCode,
     };
-    await appendFile(logPath, `${JSON.stringify(payload)}\n`);
+    // Created 0600: audit lines can describe what ran.
+    await appendFile(logPath, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
   } catch {
     return;
   }

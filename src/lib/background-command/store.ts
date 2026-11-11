@@ -35,6 +35,7 @@ import {
   RESERVE_BYTES,
   readEvents,
   readMeta,
+  syncDurably,
 } from "./journal.ts";
 import {
   assessOwner,
@@ -88,7 +89,11 @@ export async function ensureStoreRoot(root = commandsRoot()): Promise<string> {
   if ((stats.mode & 0o077) !== 0) {
     await chmod(root, 0o700);
   }
-  await mkdir(resolve(root, "keys"), { recursive: true, mode: 0o700 });
+  const keys = resolve(root, "keys");
+  await mkdir(keys, { recursive: true, mode: 0o700 });
+  if (!(await lstat(keys)).isDirectory()) {
+    throw storeRefusal();
+  }
   return root;
 }
 
@@ -292,6 +297,8 @@ export async function acceptCommand(opts: {
       time: now,
     });
     await appendLine(paths.events, `${JSON.stringify(accepted)}\n`);
+    // Acceptance is committed before anything can be spawned.
+    await syncDurably({ file: paths.events, directories: [paths.dir, root] });
     if (keyPath) {
       await createPrivateFileExclusive({
         path: keyPath,
@@ -394,6 +401,9 @@ export async function pruneExpired(opts: {
       maxBytes: 4096,
     }).catch(() => null);
     if (tombstone) {
+      // Retried on every sweep: an unlink that failed earlier (or a crash
+      // right after the tombstone) must not leave output behind.
+      await removeJournalPayload(paths);
       const expiredAt = parseExpiredAt(tombstone.text);
       if (expiredAt !== null && opts.now - expiredAt > TOMBSTONE_MS) {
         await removeRequestKey({ root: opts.root, paths });
@@ -460,32 +470,41 @@ async function expireJournal(opts: {
   readonly paths: JournalPaths;
   readonly now: number;
 }): Promise<void> {
-  // The tombstone keeps scope and request-key identity only: argv and workdir
-  // can hold sensitive literals and must not outlive the retention ceiling.
-  const meta = await readMeta(opts.paths).catch(() => null);
-  if (meta) {
-    await replacePrivateFileAtomic({
-      path: opts.paths.meta,
-      directories: [opts.paths.dir],
-      refusal: storeRefusal,
-      text: JSON.stringify({ ...meta, argv: [], workdir: null }),
-    });
-  }
   await replacePrivateFileAtomic({
     path: opts.paths.expired,
     directories: [opts.paths.dir],
     refusal: storeRefusal,
     text: JSON.stringify({ expiredAt: new Date(opts.now).toISOString() }),
   });
+  await removeJournalPayload(opts.paths);
+}
+
+/**
+ * Remove everything but the value-free tombstone. Idempotent: every sweep
+ * runs it again for an expired journal until nothing is left to remove.
+ * The tombstone's meta keeps scope and request-key identity only: argv and
+ * workdir can hold sensitive literals and must not outlive retention.
+ */
+async function removeJournalPayload(paths: JournalPaths): Promise<void> {
+  const meta = await readMeta(paths).catch(() => null);
+  if (meta && (meta.argv.length > 0 || meta.workdir !== null)) {
+    await replacePrivateFileAtomic({
+      path: paths.meta,
+      directories: [paths.dir],
+      refusal: storeRefusal,
+      text: JSON.stringify({ ...meta, argv: [], workdir: null }),
+    }).catch(() => undefined);
+  }
   for (const path of [
-    opts.paths.events,
-    opts.paths.stdout,
-    opts.paths.stderr,
-    opts.paths.launch,
-    opts.paths.reserve,
-    opts.paths.cancel,
-    opts.paths.owner,
-    opts.paths.child,
+    paths.events,
+    paths.stdout,
+    paths.stderr,
+    paths.launch,
+    paths.reserve,
+    paths.cancel,
+    paths.owner,
+    paths.child,
+    paths.spawning,
   ]) {
     await unlink(path).catch(() => undefined);
   }
@@ -509,13 +528,25 @@ async function removeRequestKey(opts: {
   readonly paths: JournalPaths;
 }): Promise<void> {
   const meta = await readMeta(opts.paths).catch(() => null);
-  if (meta?.requestKey) {
-    await unlink(
-      requestKeyPath({
-        root: opts.root,
-        projectRoot: meta.projectRoot,
-        requestKey: meta.requestKey,
-      })
-    ).catch(() => undefined);
+  if (!meta?.requestKey) {
+    return;
+  }
+  // Unlink only through real directories: neither the store root nor its
+  // `keys` directory may be a symlink, so the removal cannot leave the store.
+  const keysDir = resolve(opts.root, "keys");
+  for (const dir of [opts.root, keysDir]) {
+    const stats = await lstat(dir).catch(() => null);
+    if (!stats?.isDirectory()) {
+      return;
+    }
+  }
+  const path = requestKeyPath({
+    root: opts.root,
+    projectRoot: meta.projectRoot,
+    requestKey: meta.requestKey,
+  });
+  const entry = await lstat(path).catch(() => null);
+  if (entry?.isFile()) {
+    await unlink(path).catch(() => undefined);
   }
 }

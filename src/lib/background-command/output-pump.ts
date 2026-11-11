@@ -152,12 +152,19 @@ async function writeRedactions(opts: {
   }[];
 }): Promise<void> {
   for (const region of opts.regions) {
-    await opts.handle.write(
+    const { bytesWritten } = await opts.handle.write(
       Buffer.alloc(region.length, "*"),
       0,
       region.length,
       region.offset
     );
+    if (bytesWritten !== region.length) {
+      // A partial overwrite would leave raw bytes inside a range about to be
+      // announced. Refuse; the caller stops capture and cuts the file back.
+      throw Object.assign(new Error("Short write while redacting output."), {
+        code: "ENOSPC",
+      });
+    }
   }
   if (opts.regions.length > 0) {
     await opts.handle.sync().catch(() => undefined);

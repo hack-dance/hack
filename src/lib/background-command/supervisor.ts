@@ -15,9 +15,9 @@ import {
   OUTPUT_EVENT_LIMIT,
   type OutputStream,
   outputPath,
-  readEvents,
   readLaunch,
   readMeta,
+  reconcileTail,
 } from "./journal.ts";
 import { pumpStream } from "./output-pump.ts";
 import { encodeSecrets } from "./output-scanner.ts";
@@ -29,10 +29,15 @@ import {
   openAppendOnlyOutput,
   type ProcessIdentity,
   readOwnIdentity,
+  readPrivateInput,
   signalProcess,
   signalProcessGroup,
 } from "./platform.ts";
-import { withJournalLock } from "./recovery.ts";
+import {
+  CHILD_BIRTH_EXITED,
+  CHILD_BIRTH_UNOBSERVED,
+  withJournalLock,
+} from "./recovery.ts";
 import { StallTracker } from "./stall.ts";
 
 const NO_SPACE = new Error("no space for command events");
@@ -49,10 +54,7 @@ function isNoSpaceError(error: unknown): boolean {
 /** Hidden entrypoint of the hack binary: `hack <this> <commandId>`. */
 export const BACKGROUND_SUPERVISOR_ARGUMENT =
   "--internal-background-command-supervisor";
-/** Supervisor-only variable carrying redaction values; never passed to the child. */
-export const REDACT_KEYS_ENV = "HACK_BACKGROUND_REDACT_KEYS";
-/** Prefix of supervisor-only variables for values absent from the child env. */
-export const REDACT_VALUE_PREFIX = "HACK_BACKGROUND_REDACT_VALUE_";
+
 /** Values shorter than this are not redacted (too many false matches). */
 export const REDACT_MIN_BYTES = 6;
 
@@ -116,6 +118,12 @@ export async function runBackgroundSupervisor(opts: {
       reason: "cancelled_before_start",
     });
   }
+  // Written before the spawn: if this process dies before the child's
+  // identity is recorded, readers know a child may exist ("unknown").
+  await createPrivateFileExclusive({
+    path: paths.spawning,
+    text: JSON.stringify({ at: new Date().toISOString() }),
+  });
   const proc = startChild({ paths, meta, launch });
   if (!proc) {
     return await finish({
@@ -215,7 +223,8 @@ async function prepare(paths: JournalPaths): Promise<
 > {
   const meta = await readMeta(paths);
   const launch = await readLaunch(paths);
-  const redactValues = readRedactValues();
+  // First, before any child exists: the descriptor must not be inherited.
+  const redactValues = parseRedactValues(await readPrivateInput());
   const own = await readOwnIdentity();
   if (!(meta && launch && own)) {
     return "failed";
@@ -232,7 +241,7 @@ async function prepare(paths: JournalPaths): Promise<
   });
   const events = await withJournalLock(
     paths,
-    async () => await readEvents(paths)
+    async () => await reconcileTail(paths)
   );
   if (endedEvent(events)) {
     return "already_ended";
@@ -291,13 +300,25 @@ async function recordChild(opts: {
   readonly proc: Bun.Subprocess;
 }): Promise<void> {
   const { proc } = opts;
-  const snapshot = await observeIdentities([proc.pid]);
+  let birth: string | null = null;
+  for (let attempt = 0; attempt < 3 && birth === null; attempt += 1) {
+    const snapshot = await observeIdentities([proc.pid]);
+    birth = snapshot?.get(proc.pid)?.birth ?? null;
+    if (birth === null && !unreaped(proc)) {
+      // Reaped before `ps` saw it: it is certainly gone.
+      birth = CHILD_BIRTH_EXITED;
+    }
+    if (birth === null) {
+      await Bun.sleep(50);
+    }
+  }
   await createPrivateFileExclusive({
     path: opts.paths.child,
     text: JSON.stringify({
       pid: proc.pid,
-      // Unobserved birth never matches, so cancel will not signal this pid.
-      birth: snapshot?.get(proc.pid)?.birth ?? "unobserved",
+      // An unobserved birth never matches, so nothing will signal this pid,
+      // and readers treat the child's ownership as unknown, not absent.
+      birth: birth ?? CHILD_BIRTH_UNOBSERVED,
       processGroupId: proc.pid,
     }),
   });
@@ -687,42 +708,22 @@ export function endedPayload(opts: {
   };
 }
 
-/**
- * Redaction values arrive without being packed into one variable: names of
- * child-env keys whose values to redact, plus one supervisor-only variable per
- * value the child env does not already carry. The supervisor-only variables
- * are removed before the child starts; the named keys stay (the child needs
- * them).
- */
-function readRedactValues(): string[] {
-  const values: string[] = [];
-  for (const key of (process.env[REDACT_KEYS_ENV] ?? "").split(",")) {
-    const value = key ? process.env[key] : undefined;
-    if (value) {
-      values.push(value);
-    }
+/** Redaction values from the launcher's private input (a JSON array). */
+function parseRedactValues(text: string): string[] {
+  try {
+    const value: unknown = JSON.parse(text);
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
   }
-  delete process.env[REDACT_KEYS_ENV];
-  for (const key of Object.keys(process.env)) {
-    if (key.startsWith(REDACT_VALUE_PREFIX)) {
-      const value = process.env[key];
-      if (value) {
-        values.push(value);
-      }
-      delete process.env[key];
-    }
-  }
-  return values;
 }
 
 function childEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (
-      typeof value === "string" &&
-      key !== REDACT_KEYS_ENV &&
-      !key.startsWith(REDACT_VALUE_PREFIX)
-    ) {
+    if (typeof value === "string") {
       env[key] = value;
     }
   }

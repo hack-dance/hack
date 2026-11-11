@@ -382,9 +382,11 @@ import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
 import {
   backgroundCommandOptions,
+  refuseDetachedCacheBootstrap,
   refuseDetachForAuthoredProject,
   runOrStartComposeCommand,
   startNativeBackgroundCommand,
+  withBackgroundSweep,
 } from "./background-command-start.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
@@ -699,7 +701,7 @@ const upSpec = defineCommand({
   subcommands: [],
 } as const);
 
-export const upCommand = withHandler(upSpec, handleUp);
+export const upCommand = withHandler(upSpec, withBackgroundSweep(handleUp));
 
 const downSpec = defineCommand({
   name: "down",
@@ -710,7 +712,10 @@ const downSpec = defineCommand({
   subcommands: [],
 } as const);
 
-export const downCommand = withHandler(downSpec, handleDown);
+export const downCommand = withHandler(
+  downSpec,
+  withBackgroundSweep(handleDown)
+);
 
 const restartSpec = defineCommand({
   name: "restart",
@@ -9114,6 +9119,10 @@ async function handleRun({
     targetServices: preparedServices,
     envByService: envOverrides.preflightEnvByService,
   });
+  refuseDetachedCacheBootstrap({
+    background,
+    services: cacheBootstrapServices,
+  });
   const bootstrapCode = await bootstrapDependencyCaches({
     services: cacheBootstrapServices,
     composeFiles: composeFilesWithEnv,
@@ -9379,13 +9388,29 @@ async function startNativeBackgroundIfRequested(opts: {
   // stdout; Hack's own notices go to stderr.
   setLoggerBackendOverride({ backend: "console" });
   const { args } = opts;
+  await refuseDetachForAuthoredProject({
+    cwd: opts.ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+  });
   if (process.env.HACK_RUNTIME_BACKEND !== "native") {
-    await refuseDetachForAuthoredProject({
-      cwd: opts.ctx.cwd,
-      path: args.options.path,
-      project: args.options.project,
-    });
     return await opts.otherwise();
+  }
+  // The synchronous refusals of the foreground native command, before any
+  // acceptance: runtime selection, then exec's env/profile refusal or run's
+  // selection parsing.
+  const native = resolveNativeRuntimeSelection();
+  if (
+    opts.operation === "exec" &&
+    (args.options.env !== undefined || args.options.profile !== undefined)
+  ) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: NATIVE_EXEC_SELECTION_REFUSAL,
+    });
+  }
+  if (opts.operation === "run") {
+    runBackendSelection(Boolean(native), args);
   }
   const project = await resolveProjectForArgs({
     ctx: opts.ctx,

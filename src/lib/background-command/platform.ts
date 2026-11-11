@@ -71,11 +71,16 @@ export function describeStdin(): "terminal_or_null" | "pipe" | "file" {
  * launching shell and its process group. A sandbox that kills by cgroup still
  * kills it; readers then report outcome `unknown`.
  */
-export function spawnInNewSession(opts: {
+export async function spawnInNewSession(opts: {
   readonly argv: readonly string[];
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
-}): { readonly pid: number; readonly exited: Promise<number | null> } {
+  /**
+   * Written to the child's inherited descriptor 3 (a pipe), then closed.
+   * Nothing touches disk and there is no per-variable size limit.
+   */
+  readonly privateInput: string;
+}): Promise<{ readonly pid: number; readonly exited: Promise<number | null> }> {
   const [executable, ...rest] = opts.argv;
   if (!executable) {
     throw new Error("Missing background supervisor executable.");
@@ -84,17 +89,41 @@ export function spawnInNewSession(opts: {
     cwd: opts.cwd,
     env: { ...opts.env },
     detached: true,
-    stdio: ["ignore", "ignore", "ignore"],
+    stdio: ["ignore", "ignore", "ignore", "pipe"],
   });
   const exited = new Promise<number | null>((resolve) => {
     child.once("exit", (code) => resolve(code));
     child.once("error", () => resolve(null));
   });
-  child.unref();
   if (child.pid === undefined) {
     throw new Error("Background supervisor did not start.");
   }
+  const input = child.stdio[3];
+  if (input && "write" in input) {
+    await new Promise<void>((resolve) => {
+      input.once("error", () => resolve());
+      input.end(opts.privateInput, () => resolve());
+    });
+  }
+  child.unref();
   return { pid: child.pid, exited };
+}
+
+/** Descriptor on which the supervisor receives its private input. */
+export const PRIVATE_INPUT_FD = 3;
+
+/**
+ * Read and close the private input descriptor. Empty when it was not given.
+ * Closed before the child is spawned, so the child never inherits it.
+ */
+export async function readPrivateInput(): Promise<string> {
+  try {
+    return await Bun.file(PRIVATE_INPUT_FD).text();
+  } catch {
+    return "";
+  } finally {
+    closeDescriptor(PRIVATE_INPUT_FD);
+  }
 }
 
 /**
@@ -239,3 +268,33 @@ export function signalProcess(pid: number, signal: NodeJS.Signals): boolean {
     return false;
   }
 }
+
+/**
+ * When this machine last booted, in ms since the epoch; null when unknown.
+ * A process recorded before the last boot is certainly gone. Linux reads
+ * `btime` from /proc/stat; macOS reads `kern.boottime` through sysctl.
+ */
+export async function readBootTimeMs(): Promise<number | null> {
+  try {
+    if (process.platform === "linux") {
+      const text = await Bun.file("/proc/stat").text();
+      const match = BTIME_PATTERN.exec(text);
+      return match ? Number(match[1]) * 1000 : null;
+    }
+    if (process.platform === "darwin") {
+      const result = await exec(["sysctl", "-n", "kern.boottime"], {
+        stdin: "ignore",
+        timeoutMs: 2000,
+        env: { ...IDENTITY_PS_ENV },
+      });
+      const match = BOOTTIME_PATTERN.exec(result.stdout);
+      return result.exitCode === 0 && match ? Number(match[1]) * 1000 : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+const BTIME_PATTERN = /^btime (\d+)$/m;
+const BOOTTIME_PATTERN = /sec = (\d+)/;

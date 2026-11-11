@@ -181,7 +181,8 @@ other way round.
   `waitMs` defaults to 25,000 and is capped at 30,000 (a larger value is refused
   before any child starts), which keeps a call under the shortest known client
   tool-call limit. The call returns early when the command ends, a stall starts
-  or the next event would pass `maxBytes`. `data` is `{ state, events,
+  or the next event would pass `maxBytes`, 1,000 events or 4 × `maxBytes` of
+  serialized events (`nextCursor` always advances). `data` is `{ state, events,
   nextCursor, gap, timedOut, ended, reason, outcome?, exitCode?, limits }`.
   Output events carry `text` (UTF-8) or `withheld`. An unknown or expired cursor
   gives `gap: true` and one `gap` event naming the earliest cursor.
@@ -197,7 +198,9 @@ Every call re-checks project and instance scope: `commandId` must match
 their registered code (`E_COMMAND_NOT_FOUND`, `E_RESULT_EXPIRED`,
 `E_CAPTURE_DISABLED`, `E_ADMISSION_LIMIT`, `E_REQUEST_CONFLICT`,
 `E_JOURNAL_VERSION`, …) with `reason: "command_error"`. `start` and `cancel`
-write an `mcp-audit.log` line; `read` and `inspect` do not.
+write an `mcp-audit.log` line; `read` and `inspect` do not. The `start` line
+records the operation, service, `argv[0]`, the argument count and a SHA-256 of
+the arguments, never the arguments themselves.
 
 Differences from the foreground tools:
 

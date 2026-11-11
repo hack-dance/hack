@@ -64,6 +64,7 @@ export const backgroundCommandComposeScenario: Scenario = {
       await checkRun(stack);
       await checkContainerRestart(stack);
       await checkDownMidRun(stack);
+      await checkDownMidBackgroundRun(stack);
       await checkScope({ stack, commandId });
     } finally {
       await ctx
@@ -319,10 +320,14 @@ async function checkRun(stack: Stack): Promise<void> {
   });
 }
 
-/** Start an exec that prints once and sleeps; return its id after the print. */
-async function startSleeper(stack: Stack, marker: string): Promise<string> {
+/** Start an exec (or run) that prints once and sleeps; return its id after the print. */
+async function startSleeper(
+  stack: Stack,
+  marker: string,
+  operation: "exec" | "run" = "exec"
+): Promise<string> {
   const id = await stack.start([
-    "exec",
+    operation,
     "--detach",
     "--json",
     "api",
@@ -401,6 +406,34 @@ async function checkContainerRestart(stack: Stack): Promise<void> {
     result: restart,
   });
   await expectFailedEnd({ stack, id, label: "container restart mid-run" });
+}
+
+/**
+ * hack down while a background `run` runs. `docker compose down` does not
+ * remove a running one-off container, so the command keeps running (it is
+ * not reported as ended); `hack commands cancel` stops it.
+ */
+async function checkDownMidBackgroundRun(stack: Stack): Promise<void> {
+  await stack.cli(["up", "--detach"]);
+  const id = await startSleeper(stack, "before-down-run", "run");
+  await stack.cli(["down"]);
+  const after = parseLines(
+    (await stack.cli(["commands", "read", id, "--json", "--wait-ms", "5000"]))
+      .stdout
+  );
+  const end = after.at(-1);
+  stack.ctx.log(`hack down mid background run: ${JSON.stringify(end)}`);
+  expect({
+    that: end?.ended === false && end.state === "running",
+    message: `a background run keeps running through hack down: ${JSON.stringify(end)}`,
+  });
+  const cancel = extractJsonObject<{ data?: { outcome?: string } }>({
+    text: (await stack.cli(["commands", "cancel", id, "--json"])).stdout,
+  });
+  expect({
+    that: cancel?.data?.outcome === "cancelled",
+    message: `cancel must stop the background run: ${JSON.stringify(cancel)}`,
+  });
 }
 
 /** 3. hack down while a background exec runs. */

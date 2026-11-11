@@ -12,6 +12,7 @@ import {
   type JournalPaths,
   JournalWriter,
   readEvents,
+  reconcileTail,
 } from "./journal.ts";
 import { describeStdin, readSessionId, spawnInNewSession } from "./platform.ts";
 import { stateOf } from "./reader.ts";
@@ -22,11 +23,7 @@ import {
   resolveBackgroundSettings,
 } from "./settings.ts";
 import { acceptCommand, cursorBeforeFirst, expiresAt } from "./store.ts";
-import {
-  BACKGROUND_SUPERVISOR_ARGUMENT,
-  REDACT_KEYS_ENV,
-  REDACT_VALUE_PREFIX,
-} from "./supervisor.ts";
+import { BACKGROUND_SUPERVISOR_ARGUMENT } from "./supervisor.ts";
 
 /** Set by `hack mcp serve` on its children so admission counts per MCP session. */
 export const CALLER_ENV = "HACK_COMMAND_CALLER";
@@ -192,12 +189,8 @@ export async function startBackgroundCommand(
     ...configs,
   });
   const native = opts.backend === "native";
-  const supervisorEnv = buildSupervisorEnv({
-    env: opts.child.env,
-    redactValues: settings.capture === "full" ? opts.redactValues : [],
-  });
   // Refuse before anything is persisted when the supervisor could not start.
-  assertComposeSpawnEnvFits({ env: supervisorEnv, baseEnv: {} });
+  assertComposeSpawnEnvFits({ env: opts.child.env, baseEnv: {} });
   const caller = await resolveCaller();
   const accepted = await acceptCommand({
     input: {
@@ -244,14 +237,19 @@ export async function startBackgroundCommand(
       path: paths.launch,
       text: JSON.stringify({ argv: opts.child.argv, cwd: opts.child.cwd }),
     });
-    const supervisor = spawnInNewSession({
+    const supervisor = await spawnInNewSession({
       argv: [
         ...selfInvocation(),
         BACKGROUND_SUPERVISOR_ARGUMENT,
         meta.commandId,
       ],
       cwd: opts.child.cwd,
-      env: supervisorEnv,
+      env: opts.child.env,
+      // Redaction values go over an inherited pipe: never to disk, never into
+      // an environment string.
+      privateInput: JSON.stringify(
+        settings.capture === "full" ? opts.redactValues : []
+      ),
     });
     const started = await waitForOwner({
       ownerPath: paths.owner,
@@ -318,7 +316,7 @@ async function settleFailedStart(opts: {
     if (await lstat(paths.owner).catch(() => null)) {
       return true;
     }
-    const events = await readEvents(paths);
+    const events = await reconcileTail(paths);
     if (endedEvent(events)) {
       return false;
     }
@@ -338,39 +336,6 @@ async function settleFailedStart(opts: {
     await auditEnd({ paths, meta, payload: ended.payload });
     return false;
   });
-}
-
-/**
- * The supervisor's environment: the child's, plus redaction values as key
- * names when the child env already carries them (no extra bytes), and one
- * supervisor-only variable per remaining value. Never one combined variable,
- * which could pass Linux's per-string limit when the values do not.
- */
-export function buildSupervisorEnv(opts: {
-  readonly env: Readonly<Record<string, string>>;
-  readonly redactValues: readonly string[];
-}): Record<string, string> {
-  const byValue = new Map<string, string>();
-  for (const [key, value] of Object.entries(opts.env)) {
-    if (!byValue.has(value)) {
-      byValue.set(value, key);
-    }
-  }
-  const keys: string[] = [];
-  const extra: Record<string, string> = {};
-  for (const value of new Set(opts.redactValues)) {
-    const key = byValue.get(value);
-    if (key && !key.includes(",")) {
-      keys.push(key);
-    } else {
-      extra[`${REDACT_VALUE_PREFIX}${Object.keys(extra).length}`] = value;
-    }
-  }
-  return {
-    ...opts.env,
-    ...extra,
-    ...(keys.length > 0 ? { [REDACT_KEYS_ENV]: keys.join(",") } : {}),
-  };
 }
 
 async function waitForOwner(opts: {

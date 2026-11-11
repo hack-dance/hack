@@ -9,9 +9,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { refuseDetachForAuthoredProject } from "../src/commands/background-command-start.ts";
+import {
+  refuseDetachedCacheBootstrap,
+  refuseDetachForAuthoredProject,
+} from "../src/commands/background-command-start.ts";
 import { cancelCommand } from "../src/lib/background-command/cancel.ts";
 import {
+  buildEnvelope,
   type CommandMeta,
   formatCursor,
   JOURNAL_FORMAT_VERSION,
@@ -22,7 +26,6 @@ import {
   readEvents,
   readMeta,
 } from "../src/lib/background-command/journal.ts";
-import { buildSupervisorEnv } from "../src/lib/background-command/launch.ts";
 import {
   type ObservedIdentity,
   observeIdentities,
@@ -34,6 +37,7 @@ import {
 import {
   OWNER_START_GRACE_MS,
   recoverLostOwner,
+  withJournalLock,
 } from "../src/lib/background-command/recovery.ts";
 import {
   parseBackgroundCommandConfig,
@@ -686,7 +690,7 @@ describe("review regressions", () => {
     ]);
   });
 
-  test("cancel reports unknown, not cancelled, when the child cannot be confirmed gone", async () => {
+  test("cancel writes no final record while the child cannot be confirmed gone", async () => {
     const { meta, paths } = await acceptCommand({ input: input(), root });
     const child = { pid: 400_002, birth: "c", processGroupId: 400_002 };
     await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
@@ -705,12 +709,12 @@ describe("review regressions", () => {
       },
     });
     expect(signals).toEqual(["400002:SIGTERM", "400002:SIGKILL"]);
-    expect(result.outcome).toBe("unknown");
-    const ended = (await readEvents(paths)).filter(
-      (event) => event.type === "command.ended"
-    );
-    expect(ended).toHaveLength(1);
-    expect(ended[0]?.payload.reason).toBe("cancel_unconfirmed");
+    expect(result.outcome).toBe("unconfirmed");
+    expect(result.confirmed.childExited).toBe(false);
+    // No final record: the command keeps its admission slot and its files.
+    expect(
+      (await readEvents(paths)).some((event) => event.type === "command.ended")
+    ).toBe(false);
   });
 
   test("admission stops an overdue orphaned child it can verify, then records timed_out; reads never do", async () => {
@@ -872,22 +876,203 @@ describe("retention on access", () => {
   });
 });
 
-describe("redaction value transport", () => {
-  test("values travel as key names or one variable each, never one combined string", () => {
-    const big = (fill: string) => fill.repeat(70 * 1024);
-    const env = { PATH: "/usr/bin", HACK_ENV_TOKEN: big("a") };
-    const supervisor = buildSupervisorEnv({
-      env,
-      redactValues: [big("a"), big("b"), big("b")],
+describe("second-review blockers", () => {
+  const deadOwner = {
+    pid: 600_001,
+    birth: "o",
+    processGroupId: 600_001,
+    sessionId: 600_001,
+    newSession: true,
+  };
+  const noReboot = async () => 0;
+
+  test("a child that may exist without a recorded identity is ownership unknown, never absence", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.owner, JSON.stringify(deadOwner), { mode: 0o600 });
+    // The supervisor died between writing the spawn marker and the child record.
+    await writeFile(paths.spawning, "{}", { mode: 0o600 });
+    await writeFile(paths.stdout, "still being written\n", { mode: 0o600 });
+    const events = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
     });
-    expect(supervisor.HACK_BACKGROUND_REDACT_KEYS).toBe("HACK_ENV_TOKEN");
-    const extra = Object.keys(supervisor).filter((key) =>
-      key.startsWith("HACK_BACKGROUND_REDACT_VALUE_")
+    expect(events.some((event) => event.type === "command.ended")).toBe(false);
+    // Retention cannot remove a command that has no final record.
+    await pruneExpired({ root, now: Date.now() + 365 * 24 * 3_600_000 });
+    expect(await readFile(paths.stdout, "utf8")).toBe("still being written\n");
+    // An unobserved birth is unknown too.
+    await writeFile(
+      paths.child,
+      JSON.stringify({
+        pid: 600_002,
+        birth: "unobserved",
+        processGroupId: 600_002,
+      }),
+      { mode: 0o600 }
     );
-    expect(extra).toHaveLength(1);
-    for (const value of Object.values(supervisor)) {
-      expect(value.length).toBeLessThanOrEqual(70 * 1024);
+    const still = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+    });
+    expect(still.some((event) => event.type === "command.ended")).toBe(false);
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    const cancel = await cancelCommand({
+      journal,
+      root,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+      signaller: { process: () => false, group: () => false },
+    });
+    expect(cancel.confirmed.childExited).toBe(false);
+    expect(cancel.outcome).toBe("unconfirmed");
+    // A reboot after acceptance proves the child gone: one unknown end.
+    const after = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      readBootTime: async () => Date.now() + 1000,
+    });
+    expect(
+      after.filter((event) => event.type === "command.ended")
+    ).toHaveLength(1);
+  });
+
+  test("a complete record without its newline is committed once, never duplicated", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.owner, JSON.stringify(deadOwner), { mode: 0o600 });
+    const ended = buildEnvelope({
+      meta,
+      seq: 2,
+      type: "command.ended",
+      payload: { outcome: "succeeded", exitCode: 0 },
+    });
+    // The crash came after the JSON and before its newline.
+    await writeFile(paths.events, JSON.stringify(ended), { flag: "a" });
+    const events = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+    });
+    expect(events.map((event) => event.seq)).toEqual([1, 2]);
+    expect(
+      events.filter((event) => event.type === "command.ended")
+    ).toHaveLength(1);
+    expect(events.at(-1)?.payload.outcome).toBe("succeeded");
+    // A fragment that is not the next record is cut, not committed.
+    const second = await acceptCommand({ input: input(), root });
+    await writeFile(second.paths.owner, JSON.stringify(deadOwner), {
+      mode: 0o600,
+    });
+    await writeFile(second.paths.events, '{"v":1,"seq":9', { flag: "a" });
+    const cut = await recoverLostOwner({
+      paths: second.paths,
+      meta: second.meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+    });
+    expect(cut.map((event) => event.seq)).toEqual([1, 2]);
+    expect(cut.at(-1)?.type).toBe("command.ended");
+    expect(await readFile(second.paths.events, "utf8")).not.toContain(
+      '"seq":9'
+    );
+  });
+
+  test("a full disk during recovery cannot block the final record", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.owner, JSON.stringify(deadOwner), { mode: 0o600 });
+    await writeFile(paths.stdout, "output that cannot be announced\n", {
+      mode: 0o600,
+    });
+    const noSpace = () =>
+      Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    let lockAttempts = 0;
+    const events = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+      // The lock's owner file is the first write in the recovery path.
+      lock: async (lockPaths, run) => {
+        lockAttempts += 1;
+        if (lockAttempts === 1) {
+          throw noSpace();
+        }
+        return await withJournalLock(lockPaths, run);
+      },
+      // Then every append fails except the final record's, which the
+      // released reserve makes room for.
+      append: async (path, line) => {
+        if (!line.includes('"command.ended"')) {
+          throw noSpace();
+        }
+        await writeFile(path, line, { flag: "a" });
+      },
+    });
+    expect(lockAttempts).toBe(2);
+    expect(await lstat(paths.reserve).catch(() => null)).toBeNull();
+    const ended = events.filter((event) => event.type === "command.ended");
+    expect(ended).toHaveLength(1);
+    expect(ended[0]?.payload).toMatchObject({
+      outcome: "unknown",
+      truncated: true,
+    });
+  });
+});
+
+describe("read bounds and run refusals", () => {
+  test("a read is bounded by event count and envelope bytes, and always moves the cursor", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.owner, "{}", { mode: 0o600 });
+    // 1500 one-byte invalid UTF-8 ranges: withheld, so they carry no text.
+    await writeFile(paths.stdout, Buffer.alloc(1500, 0xff), { mode: 0o600 });
+    const writer = new JournalWriter(paths, meta, 1);
+    for (let offset = 0; offset < 1500; offset += 1) {
+      await writer.write("command.output", {
+        stream: "stdout",
+        offset,
+        length: 1,
+      });
     }
-    expect(buildSupervisorEnv({ env, redactValues: [] })).toEqual(env);
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    const first = await readCommandEvents({
+      journal,
+      waitMs: 0,
+      maxBytes: 16_384,
+      observe: fakeObserve(),
+    });
+    expect(first.endReason).toBe("budget");
+    expect(first.events.length).toBeLessThanOrEqual(1000);
+    expect(JSON.stringify(first.events).length).toBeLessThanOrEqual(
+      16_384 * 4 + 1024
+    );
+    const second = await readCommandEvents({
+      journal,
+      after: first.nextCursor,
+      waitMs: 0,
+      maxBytes: 16_384,
+      observe: fakeObserve(),
+    });
+    expect(second.events[0]?.seq).toBe((first.events.at(-1)?.seq ?? 0) + 1);
+  });
+
+  test("run --detach is refused when a dependency-cache installer would run first", () => {
+    const background = { requestKey: null, json: true };
+    expect(() =>
+      refuseDetachedCacheBootstrap({ background, services: ["installer"] })
+    ).toThrow(HackCliError);
+    expect(() =>
+      refuseDetachedCacheBootstrap({ background, services: [] })
+    ).not.toThrow();
+    expect(() =>
+      refuseDetachedCacheBootstrap({
+        background: null,
+        services: ["installer"],
+      })
+    ).not.toThrow();
   });
 });

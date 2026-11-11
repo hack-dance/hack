@@ -19,7 +19,9 @@ import { readReplaceablePrivateFile } from "../private-file.ts";
  *   holds environment values.
  * - `launch.json`: the child argv and cwd, read once by the supervisor.
  * - `owner.json`, `child.json`: supervisor and child identity (pid, birth,
- *   process group), written by the supervisor.
+ *   process group), written by the supervisor. `spawning.json` is written just
+ *   before the child is spawned: with it and no usable `child.json`, a child
+ *   may exist whose identity is unknown ("ownership unknown").
  * - `events.jsonl`: one envelope per line, dense `seq` from 1.
  * - `stdout`, `stderr`: the child's output, appended by the kernel.
  * - `reserve`: preallocated bytes released only to write `command.ended`.
@@ -164,6 +166,7 @@ export type JournalPaths = {
   readonly launch: string;
   readonly owner: string;
   readonly child: string;
+  readonly spawning: string;
   readonly events: string;
   readonly stdout: string;
   readonly stderr: string;
@@ -190,6 +193,7 @@ export function journalPaths(opts: {
     launch: resolve(dir, "launch.json"),
     owner: resolve(dir, "owner.json"),
     child: resolve(dir, "child.json"),
+    spawning: resolve(dir, "spawning.json"),
     events: resolve(dir, "events.jsonl"),
     stdout: resolve(dir, "stdout"),
     stderr: resolve(dir, "stderr"),
@@ -440,6 +444,64 @@ export const appendLine: AppendLine = async (path, line) => {
 };
 
 /**
+ * Make the journal's tail whole before a writer other than the live
+ * supervisor appends (call it under the journal lock, with the supervisor
+ * gone or not yet started). A crash can leave bytes after the last newline:
+ * a complete envelope that is exactly the next sequence number is committed
+ * by adding its newline; anything else is cut off. Readers never treated
+ * those bytes as an event, so the sequence stays dense and a second
+ * `command.ended` cannot appear. Returns the committed events.
+ */
+export async function reconcileTail(
+  paths: JournalPaths
+): Promise<EventEnvelope[]> {
+  const handle = await open(
+    paths.events,
+    constants.O_RDWR | constants.O_NOFOLLOW
+  ).catch((error: unknown) => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+  if (!handle) {
+    return [];
+  }
+  try {
+    const bytes = await handle.readFile();
+    const lastNewline = bytes.lastIndexOf(0x0a);
+    const committedLength = lastNewline + 1;
+    const committed = parseEventLines(
+      bytes.subarray(0, committedLength).toString("utf8")
+    );
+    if (committedLength === bytes.length) {
+      return committed;
+    }
+    const tail = bytes.subarray(committedLength).toString("utf8");
+    const next = parseEnvelope(tail);
+    if (next && next.seq === (committed.at(-1)?.seq ?? 0) + 1) {
+      await handle.write(Buffer.from("\n"), 0, 1, bytes.length);
+      await handle.sync();
+      return [...committed, next];
+    }
+    await handle.truncate(committedLength);
+    await handle.sync();
+    return committed;
+  } finally {
+    await handle.close();
+  }
+}
+
+function parseEnvelope(text: string): EventEnvelope | null {
+  try {
+    const parsed = envelopeSchema.safeParse(JSON.parse(text));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Append events with dense sequence numbers starting after `lastSeq`.
  * `command.ended` is fsynced and, when the disk or quota is full, written
  * after releasing the reserved bytes, so a full disk cannot lose it.
@@ -491,6 +553,36 @@ export class JournalWriter {
       await syncFile(this.paths.events);
     }
     return envelope;
+  }
+}
+
+/**
+ * fsync a file, then the directories that name it, so a committed record
+ * survives power loss. A file fsync failure propagates; directory fsync is
+ * best effort because some filesystems refuse it.
+ */
+export async function syncDurably(opts: {
+  readonly file: string;
+  readonly directories: readonly string[];
+}): Promise<void> {
+  const handle = await open(
+    opts.file,
+    constants.O_RDONLY | constants.O_NOFOLLOW
+  );
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  for (const directory of opts.directories) {
+    const dir = await open(directory, constants.O_RDONLY).catch(() => null);
+    try {
+      await dir?.sync();
+    } catch {
+      // Directory fsync is not supported everywhere.
+    } finally {
+      await dir?.close();
+    }
   }
 }
 

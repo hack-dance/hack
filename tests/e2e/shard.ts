@@ -48,9 +48,9 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   "native-config-build": 155,
   "native-config-down-hooks": 155,
   "native-config-process-policy": 122,
+  // Measured locally (not hosted); refresh from CI.
+  "background-command-compose": 112,
   "native-compose-adoption-local-worktrees": 90,
-  // Measured locally (not hosted) on the first run; refresh from CI.
-  "background-command-compose": 76,
   "pattern-p01-dependency-bootstrap": 66,
   "native-compose-adoption-managed-worktrees": 64,
   "native-compose-adoption-network-health-worktrees": 56,

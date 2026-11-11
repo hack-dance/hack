@@ -9,9 +9,20 @@ available to MCP clients as `hack.project.command.start|read|inspect|cancel`
 Both use one implementation and one journal.
 
 This is phase 1: `exec` and `run` only, for projects with Compose
-configuration (`.hack/docker-compose.yml`). Projects with native or adopted
-configuration refuse `--detach` on the Compose backend. `up`, `restart` and `down`, a
-project-wide event feed and service events are not part of it.
+configuration (`.hack/docker-compose.yml`). `up`, `restart` and `down`, a
+project-wide event feed and service events are not part of it. Qualification
+in real MCP clients (Claude Code, Codex) is still open (HACK-2086).
+
+`--detach` is refused, with `E_USAGE` and the reason, for:
+
+- projects with native (`.hack/hack.project.json`) or adopted configuration:
+  their `exec` and `run` go through a separate dispatcher with its own
+  generation store and ownership proofs, which the background launcher does
+  not use;
+- `run` against a service whose shared dependency cache has an installer that
+  runs before it: the installer would run before the request is accepted and
+  deduplicated. Use the foreground command, or `exec --detach` against the
+  running service.
 
 ## Start
 
@@ -38,7 +49,11 @@ hack exec --detach --json api -- npm test
 
 Start runs the same project resolution, env resolution, validation and refusals
 as the foreground command; a refusal (for example a service that is not running
-for `exec`) is reported at once and nothing is started. Flags, all only valid
+for `exec`) is reported at once and nothing is started. On the native backend
+the synchronous refusals of the foreground command (runtime selection,
+`--env`/`--profile` for `exec`) run first; refusals that the native runtime
+makes later surface as a `failed` command. Start returns once the supervisor
+has recorded itself, which can take up to 10 seconds on a loaded machine. Flags, all only valid
 with `--detach`:
 
 | Flag | Meaning |
@@ -49,9 +64,10 @@ with `--detach`:
 | `--stall-after-ms <ms>` | Advisory stall threshold. Default 120,000; 0 turns it off |
 | `--capture full\|metadata` | Store output (default) or only events and the outcome |
 
-The command runs with stdin closed and no terminal. A command that reads stdin
-sees end of file at once, and a prompt that opens the terminal fails, so neither
-can hang in the background. Input redirected from a file into
+The command runs with stdin closed and no terminal: Hack passes `-T` to
+`docker compose exec` and `run` and never allocates one. A command that reads
+stdin sees end of file at once, and a prompt that opens the terminal fails, so
+neither can hang in the background. Input redirected from a file into
 `hack exec --detach` is refused, because the command would never see it. Input
 piped into it is not forwarded either; Hack does not read the pipe to check.
 
@@ -89,7 +105,10 @@ and status lines go to stderr. `--follow` keeps reading until the command ends.
   boundaries. Output that is not valid UTF-8 is withheld: the event keeps its
   `length` and gets `withheld: "not_utf8"` instead of `text`.
 - `--max-bytes` bounds the text in one read: default 32 KiB, 16 KiB to 256 KiB.
-  One output event is at most 16 KiB, so every read makes progress.
+  The 16 KiB minimum is the largest output event, so every read makes
+  progress. A read also stops at 1,000 events or 4 × `--max-bytes` of
+  serialized events (withheld output has no text but still counts), so many
+  small events cannot make one read too large; `nextCursor` always advances.
 - The cursor contains a journal generation. A cursor from another generation,
   or past the end, returns a single `gap` event with `reason: "E_CURSOR_EXPIRED"`
   and the earliest available cursor, never an empty success.
@@ -114,7 +133,10 @@ ever re-run automatically.
 `hack down` or a container restart while a background `exec` runs stops the
 container under the `docker compose exec` client. The client then exits with
 Docker's status, and the command ends `failed` with that exit code (137 in the
-end-to-end test for both cases). Hack does not reclassify these ends.
+end-to-end test for both cases). `hack down` does not stop a background `run`:
+`docker compose down` leaves a running one-off container in place, so the
+command keeps running until it ends, times out or is cancelled with
+`hack commands cancel` (tested end to end). Hack does not reclassify these ends.
 
 ## Stalls
 
@@ -149,9 +171,15 @@ cursors and the final record. It never prints environment values.
 `cancel` first records the request, then signals the supervisor and the
 command's process group, each only after re-checking its pid, start time and
 process group immediately before the signal; a reused pid is never signalled
-and is listed in `refused`. The supervisor records `cancelled`. The result says
-what was confirmed: `supervisorSignalled`, `childGroupSignalled`, `childExited`,
-and `containerProcess: "not_confirmed"`. Stopping a `docker compose exec` or
+and is listed in `refused`. A live supervisor stops the process group itself:
+it records the group's members first, so descendants that ignore SIGTERM are
+still killed (after checking their pid and start time) once the command's own
+process exits. The supervisor records `cancelled`. A command that already
+exited 0 stays `succeeded` even if a cancel raced its end. The result says what
+was confirmed: `supervisorSignalled`, `childGroupSignalled`, `childExited`, and
+`containerProcess: "not_confirmed"`. When the stop cannot be confirmed (for
+example the command's identity is unknown, see below), no final record is
+written and `outcome` is `unconfirmed`. Stopping a `docker compose exec` or
 `run` client does not prove that the process inside the container stopped.
 
 ## Ownership
@@ -162,13 +190,23 @@ sandbox session that started it. No daemon is needed. The command's stdout and
 stderr are appended by the kernel to files; they do not pass through the
 supervisor. If the supervisor dies, the command keeps running and writing, and
 the next read takes over: it announces the output that landed (marked
-`unsupervised: true`) and, once the command is gone, writes the single final
-record with outcome `unknown`. If the command is still running past its timeout
-with no supervisor, the next background start in the same Hack home stops its
-process group (only after checking its pid, start time and group), records
-`timed_out` with reason `orphan_timeout`, and writes an audit line. Reads never
-signal processes. A sandbox that kills by
-cgroup kills both; that also ends as `unknown`.
+`unsupervised: true`) and, once the command is confirmed gone, writes the
+single final record with outcome `unknown`. Until then the command stays
+running: it keeps its admission slot, and its files are not truncated at the
+capture limit (no owner is left to truncate them). If it is still running past
+its timeout, the next background start in the same Hack home stops its process
+group (only after checking its pid, start time and group), records `timed_out`
+with reason `orphan_timeout`, and writes an audit line. Reads never signal
+processes. A sandbox that kills by cgroup kills both; that also ends as
+`unknown`.
+
+**Ownership unknown.** If the supervisor dies between starting the command and
+recording its identity, or `ps` could not observe the command when it started,
+the command may still exist but cannot be identified. Hack never treats that
+as absence: no final record is written, so the command keeps its admission
+slot and retention keeps its files, and cancel reports `unconfirmed`. It
+resolves when the machine reboots (a process recorded before the last boot is
+certainly gone); `hack commands show` reports the state.
 
 ## Stored output, retention and redaction
 
@@ -178,10 +216,14 @@ user that can select the project can read it, and backups can copy it.
 
 - Journals live under the Hack home, in `commands/<id>/` (directory mode 0700,
   files mode 0600), never under a project's `.hack/` folder.
-- Output of ended commands is removed after the retention period, at most 24
-  hours. Retention is checked whenever a command is read, shown or started, so
-  nothing depends on another command running. A later read fails with
-  `E_RESULT_EXPIRED`.
+- A result is not readable after its retention time (at most 24 hours after
+  the command ends): every read, show or cancel checks it and answers
+  `E_RESULT_EXPIRED`. Files are physically removed at the next sweep, which
+  runs on every background-command operation and at `hack up` and
+  `hack down`; there is no separate timer, so Hack does not promise physical
+  deletion within 24 hours. An expired result keeps a value-free tombstone
+  (no argv or output) for 7 days, and its request key is remembered for those
+  7 days, so a retry is refused rather than re-run.
 - Metadata never contains environment values.
 
 Settings, in the global `~/.hack/hack.config.json` or the project's
@@ -196,8 +238,10 @@ Settings, in the global `~/.hack/hack.config.json` or the project's
 A per-call flag wins over the project default, which wins over the global one.
 
 **Redaction is partial.** Before output is announced, Hack replaces values it
-had already resolved to inject into that command's Compose environment (6 bytes
-or longer) with `*`, in place in the stored file. The command writes to the
+had already resolved to inject into that command's Compose environment with
+`*`, in place in the stored file. Values shorter than 6 bytes are not redacted
+(too many false matches). The values reach the supervisor over an inherited
+pipe; they are never written to disk or put in an environment variable. The command writes to the
 file directly, so a value is on disk unredacted until the supervisor's next
 scan (about 200 ms), and the start of a value stays unredacted until the rest
 arrives or the command ends. It matches across separate writes, so a value split between
@@ -209,9 +253,12 @@ only to redact. Treat stored output as sensitive.
 
 ## Audit
 
-Starts, final outcomes and cancels are appended to `commands/audit.log` under
-the Hack home (no argv, output or values). Reads are not audited. MCP calls also
-write the usual `mcp-audit.log` line, except reads and inspects.
+Starts, final outcomes (whoever writes them) and cancels are appended to
+`commands/audit.log` under the Hack home (no argv, output or values). Reads are
+not audited. MCP calls also write the usual `mcp-audit.log` line, except reads
+and inspects; for `hack.project.command.start` that line records the
+operation, service, `argv[0]`, the argument count and a SHA-256 of the
+arguments, never the arguments. New audit files are created mode 0600.
 
 ## Native backend
 

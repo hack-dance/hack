@@ -7,6 +7,7 @@ import {
   expect,
   test,
 } from "bun:test";
+import { randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -186,6 +187,7 @@ type LaunchConfig = {
   readonly redactValues?: readonly string[];
   readonly linger?: boolean;
   readonly stdinFile?: string;
+  readonly extraEnv?: Record<string, string>;
 };
 
 type Launched = {
@@ -199,21 +201,20 @@ type Launched = {
 };
 
 async function launch(config: LaunchConfig): Promise<Launched> {
-  const proc = Bun.spawn(
-    [
-      process.execPath,
-      LAUNCHER,
-      JSON.stringify({ ...config, cwd: fixture.root }),
-    ],
-    {
-      cwd: fixture.root,
-      env: fixture.env,
-      stdin: config.stdinFile ? Bun.file(config.stdinFile) : "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: config.linger === true,
-    }
+  const configFile = join(fixture.root, `launch-${randomUUID()}.json`);
+  const { extraEnv: _extraEnv, ...launcherConfig } = config;
+  await writeFile(
+    configFile,
+    JSON.stringify({ ...launcherConfig, cwd: fixture.root })
   );
+  const proc = Bun.spawn([process.execPath, LAUNCHER, `@${configFile}`], {
+    cwd: fixture.root,
+    env: { ...fixture.env, ...config.extraEnv },
+    stdin: config.stdinFile ? Bun.file(config.stdinFile) : "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    detached: config.linger === true,
+  });
   await track(proc.pid, config.linger === true);
   // The launcher prints one pretty-printed envelope; read until it parses.
   const reader = proc.stdout.getReader();
@@ -470,7 +471,8 @@ describe("background command processes", () => {
       expect(result.outcome).toBe("cancelled");
       expect(result.confirmed).toMatchObject({
         supervisorSignalled: true,
-        childGroupSignalled: true,
+        // The live supervisor stops the group itself (members first).
+        childGroupSignalled: false,
         childExited: true,
         containerProcess: "not_confirmed",
       });
@@ -610,15 +612,18 @@ describe("background command processes", () => {
         ],
         timeoutMs: 1000,
       });
+      const pidFile = join(fixture.root, "grandchild.pid");
+      const deadlinePid = Date.now() + 5000;
+      while (!(await Bun.file(pidFile).exists()) && Date.now() < deadlinePid) {
+        await Bun.sleep(25);
+      }
+      const grandchild = Number((await readFile(pidFile, "utf8")).trim());
+      expect(grandchild).toBeGreaterThan(1);
+      await track(grandchild, false);
       const read = await readUntilEnded({
         journal: launched.journal as LoadedJournal,
       });
       expect(read.outcome).toBe("timed_out");
-      const grandchild = Number(
-        (await readFile(join(fixture.root, "grandchild.pid"), "utf8")).trim()
-      );
-      expect(grandchild).toBeGreaterThan(1);
-      await track(grandchild, false);
       const deadline = Date.now() + 5000;
       let alive = true;
       while (alive && Date.now() < deadline) {
@@ -666,6 +671,61 @@ describe("background command processes", () => {
         }
       }
       expect(alive).toBe(false);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
+    "cancel: the leader exits on SIGTERM and a descendant that ignores it is still stopped",
+    async () => {
+      const launched = await launch({
+        argv: [
+          "sh",
+          "-c",
+          "(trap '' TERM; exec sleep 30) & echo $! > cancel-grandchild.pid; wait",
+        ],
+      });
+      const pidFile = join(fixture.root, "cancel-grandchild.pid");
+      const deadlinePid = Date.now() + 5000;
+      while (!(await Bun.file(pidFile).exists()) && Date.now() < deadlinePid) {
+        await Bun.sleep(25);
+      }
+      const grandchild = Number((await readFile(pidFile, "utf8")).trim());
+      await track(grandchild, false);
+      const journal = launched.journal as LoadedJournal;
+      const result = await cancelCommand({ journal, root: fixture.store });
+      expect(result.outcome).toBe("cancelled");
+      const deadline = Date.now() + 5000;
+      let alive = true;
+      while (alive && Date.now() < deadline) {
+        alive =
+          (await observeIdentities([grandchild]))?.has(grandchild) ?? true;
+        if (alive) {
+          await Bun.sleep(100);
+        }
+      }
+      expect(alive).toBe(false);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
+    "redaction values of 70 KiB each reach the supervisor without an environment string",
+    async () => {
+      const first = `A${"x".repeat(70 * 1024)}`;
+      const second = `B${"y".repeat(70 * 1024)}`;
+      const launched = await launch({
+        argv: ["sh", "-c", `printf '%s' "$SECRET_ONE"; echo; echo done`],
+        redactValues: [first, second],
+        extraEnv: { SECRET_ONE: first },
+      });
+      expect(launched.envelope.ok).toBe(true);
+      const read = await readUntilEnded({
+        journal: launched.journal as LoadedJournal,
+      });
+      const text = stdoutText(read.events);
+      expect(text).not.toContain("xxxxxxxxxxxxxxxx");
+      expect(text.endsWith("done\n")).toBe(true);
     },
     TEST_TIMEOUT_MS
   );

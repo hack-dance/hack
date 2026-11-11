@@ -18,7 +18,14 @@ type LauncherConfig = {
   readonly linger?: boolean;
 };
 
-const config = JSON.parse(process.argv[2] ?? "{}") as LauncherConfig;
+// `@<path>` reads the config from a file (large redaction values would not
+// fit in one argv string).
+const rawConfig = process.argv[2] ?? "{}";
+const config = JSON.parse(
+  rawConfig.startsWith("@")
+    ? await Bun.file(rawConfig.slice(1)).text()
+    : rawConfig
+) as LauncherConfig;
 const env: Record<string, string> = {};
 for (const [key, value] of Object.entries(process.env)) {
   if (typeof value === "string") {

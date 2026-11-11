@@ -11,6 +11,7 @@ import {
   selfInvocation,
   startBackgroundCommand,
 } from "../lib/background-command/launch.ts";
+import { pruneStore } from "../lib/background-command/store.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
@@ -312,7 +313,39 @@ export async function refuseDetachForAuthoredProject(opts: {
     throw new HackCliError({
       code: "E_USAGE",
       message:
-        "--detach is not supported yet for projects with native or adopted configuration; run the command in the foreground.",
+        "--detach is not supported yet for projects with native (.hack/hack.project.json) or adopted configuration: their exec and run go through a separate dispatcher with its own generation store and ownership proofs, which the background launcher does not use. Run the command in the foreground.",
     });
   }
+}
+
+/**
+ * `run --detach` with dependency-cache installers to run first is refused:
+ * the installers would run before the request is accepted, deduplicated and
+ * admitted, so a retry or a refused request could repeat them.
+ */
+export function refuseDetachedCacheBootstrap(opts: {
+  readonly background: BackgroundRequest | null;
+  readonly services: readonly string[];
+}): void {
+  if (opts.background && opts.services.length > 0) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message:
+        "run --detach is not supported for a service whose shared dependency cache has an installer that runs before it: the installer would run before the request is accepted and deduplicated. Run the command in the foreground, or use exec --detach against the running service.",
+    });
+  }
+}
+
+/**
+ * Run the background-command retention sweep (best effort, never waiting on
+ * a busy store) before a handler. Used for `hack up` and `hack down`, so
+ * expired output is removed even when no background command is used again.
+ */
+export function withBackgroundSweep<Input, Result>(
+  handler: (input: Input) => Promise<Result>
+): (input: Input) => Promise<Result> {
+  return async (input) => {
+    await pruneStore();
+    return await handler(input);
+  };
 }

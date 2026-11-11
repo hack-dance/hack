@@ -17,7 +17,12 @@
 export function spawnDetachedDaemon(opts: {
   readonly argv: readonly string[];
 }): { readonly pid: number } {
+  // `hack doctor --fix` may run this with the read-only service flag; it is
+  // for that one repair, not for the daemon and everything it starts.
+  const env: Record<string, string | undefined> = { ...process.env };
+  Reflect.deleteProperty(env, "HACK_DAEMON_SERVICE_READ_ONLY");
   const proc = Bun.spawn([...opts.argv], {
+    env,
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

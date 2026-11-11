@@ -29,8 +29,10 @@ const FAKE_SYSTEMCTL = `#!/bin/sh
 state="$FAKE_SYSTEMD_STATE"
 printf '%s\\n' "$*" >> "$state/calls.log"
 unit="$XDG_CONFIG_HOME/systemd/user/hackd.service"
-pidfile="$HOME/.hack/daemon/hackd.pid"
-alive() { [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
+# Like systemd, the fake knows only the process it started (MainPID); a
+# directly started hackd is not the unit's.
+main="$state/mainpid"
+alive() { [ -f "$main" ] && kill -0 "$(cat "$main")" 2>/dev/null; }
 if [ -f "$state/no-bus" ]; then
   echo "Failed to connect to bus: No medium found" >&2
   exit 1
@@ -43,19 +45,21 @@ case "$1" in
     if [ "$2" = "--property=Version" ]; then echo "Version=255"; exit 0; fi
     if [ -f "$unit" ]; then echo LoadState=loaded; else echo LoadState=not-found; fi
     if [ -f "$state/enabled" ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi
-    if alive; then echo ActiveState=active; echo "MainPID=$(cat "$pidfile")"; else echo ActiveState=inactive; echo MainPID=0; fi
+    if alive; then echo ActiveState=active; echo "MainPID=$(cat "$main")"; else echo ActiveState=inactive; echo MainPID=0; fi
     exit 0 ;;
   daemon-reload|reset-failed) exit 0 ;;
   enable) : > "$state/enabled"; exit 0 ;;
   start|restart)
     if [ "$1" = start ] && alive; then exit 0; fi
+    if [ "$1" = restart ] && alive; then kill "$(cat "$main")"; sleep 1; fi
     prog=$(sed -n 's/^ExecStart="\\([^"]*\\)".*/\\1/p' "$unit")
     "$prog" daemon start --foreground </dev/null >/dev/null 2>&1 &
+    echo $! > "$main"
     exit 0 ;;
-  stop) alive && kill "$(cat "$pidfile")"; exit 0 ;;
+  stop) alive && kill "$(cat "$main")"; exit 0 ;;
   disable)
     rm -f "$state/enabled"
-    if [ "$2" = "--now" ] && alive; then kill "$(cat "$pidfile")"; fi
+    if [ "$2" = "--now" ] && alive; then kill "$(cat "$main")"; fi
     exit 0 ;;
 esac
 echo "fake systemctl: unsupported $*" >&2
@@ -339,6 +343,51 @@ test.skipIf(process.platform !== "linux")(
     );
     expect(await calls(f)).toEqual([]);
     expect(await Bun.file(f.unitPath).exists()).toBe(false);
+  },
+  90_000
+);
+
+test.skipIf(process.platform !== "linux")(
+  "install hands a directly started hackd over to systemd after proving it",
+  async () => {
+    fixture = await createFixture();
+    const f = fixture;
+
+    // A directly started hackd (no unit yet), detached as usual.
+    const start = await hack(f, ["daemon", "start"]);
+    let direct: number | null = null;
+    for (let i = 0; i < 100; i++) {
+      direct = await readOwnedPid(f);
+      if (direct !== null && isAlive(direct)) {
+        break;
+      }
+      await Bun.sleep(100);
+    }
+    expect(direct).not.toBeNull();
+    const directPid = direct as number;
+    expect(start.code === 0 || isAlive(directPid)).toBe(true);
+    // Give it time to bind its socket so the ownership proof can see it.
+    await Bun.sleep(500);
+
+    const install = await hack(f, ["daemon", "install"]);
+    const out = `${install.stdout}${install.stderr}`;
+    expect(out).toContain(`Stopping directly started hackd (pid ${directPid})`);
+    expect(out).toContain("hackd running under systemd");
+    expect(install.code).toBe(0);
+
+    for (let i = 0; i < 50 && isAlive(directPid); i++) {
+      await Bun.sleep(100);
+    }
+    expect(isAlive(directPid)).toBe(false);
+    const managed = await readOwnedPid(f);
+    expect(managed).not.toBeNull();
+    expect(managed).not.toBe(directPid);
+
+    const status = JSON.parse(
+      (await hack(f, ["daemon", "status", "--json"])).stdout
+    ) as Record<string, unknown>;
+    expect(status.managed_by).toBe("systemd");
+    expect(status.pid).toBe(managed);
   },
   90_000
 );

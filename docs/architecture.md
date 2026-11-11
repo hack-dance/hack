@@ -391,7 +391,14 @@ a daemon that another start or a systemd restart just wrote. `install` stops a
 hackd that was started directly and lets systemd start it. It signals that
 process only after proving it is this `HACK_HOME`'s hackd (a hack daemon command
 line, a socket in this daemon directory, and an unchanged start time); any other
-process named by the pid file is left running and reported. The unit:
+process named by the pid file is left running and reported. `hack daemon stop`
+and the replacement of an incompatible hackd use the same proof (on Linux it
+reads `/proc`, so it does not need `lsof`). A pid file that survived an unclean
+shutdown and now names another program does not count as a running hackd. If
+systemd runs an incompatible hackd from a unit that points at another `hack`,
+`hack daemon status`, `hack doctor` and `hack daemon restart` all point to
+`hack daemon install`, because a restart would start the same version again.
+`install` reports success only when systemd runs the hackd that answers. The unit:
 
 - runs `<hack> daemon start --foreground`, where `<hack>` is the absolute path of
   the `hack` found on `PATH` at install time. Symlinks are kept as they are, so a

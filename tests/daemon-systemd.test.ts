@@ -15,6 +15,7 @@ import {
   startViaSystemdIfInstalled,
   stopViaSystemdIfInstalled,
   uninstallDaemonSystemdService,
+  withSystemdIncompatibleNextStep,
 } from "../src/commands/daemon-systemd.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import { summarizeSystemdService } from "../src/daemon/service-summary.ts";
@@ -1038,4 +1039,57 @@ test("install fails when the ready hackd is not the one systemd runs", async () 
       isPidInUnit: () => Promise.resolve(true),
     })
   ).toBe(0);
+});
+
+test("durability: a home directory kept in git is not a checkout", async () => {
+  const home = "/users-home/example";
+  const exists = (path: string) =>
+    Promise.resolve(
+      path === `${home}/.git` || path === `${home}/src/hack/.git`
+    );
+  const assess = (path: string) =>
+    assessExecutableDurability({ path, tempDirs: [], exists, home });
+  expect((await assess(`${home}/.local/bin/hack`)).durable).toBe(true);
+  expect((await assess(`${home}/src/hack/dist/hack`)).durable).toBe(false);
+});
+
+test("retargeting keeps systemd's $$ in the kept arguments", () => {
+  const edited = unitText().replace(
+    "daemon start --foreground",
+    () => "daemon start --foreground --tag=a$$b"
+  );
+  expect(edited).toContain("--tag=a$$b");
+  const out = retargetSystemdUnitProgram({
+    unitText: edited,
+    hackBinPath: "/usr/local/bin/hack",
+  });
+  expect(out).toContain(
+    'ExecStart="/usr/local/bin/hack" daemon start --foreground --tag=a$$b'
+  );
+});
+
+test("status and doctor point an incompatible systemd-run old hack at install", async () => {
+  const fake = fakeSystemd({ active: true, mainPid: 4242 });
+  await writeOldUnit(fake);
+  const report = {
+    status: "incompatible",
+    pid: 4242,
+    nextStep: "hack daemon restart",
+  };
+  const updated = await withSystemdIncompatibleNextStep({
+    report,
+    deps: fake.deps,
+    resolveExpected: startHooks(fake).resolveExpected,
+  });
+  expect(updated.nextStep).toBe(
+    process.platform === "linux" ? "hack daemon install" : "hack daemon restart"
+  );
+  expect(
+    (
+      await withSystemdIncompatibleNextStep({
+        report: { ...report, status: "running" },
+        deps: fake.deps,
+      })
+    ).nextStep
+  ).toBe("hack daemon restart");
 });

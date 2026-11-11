@@ -12,11 +12,14 @@ import { join } from "node:path";
 
 import {
   type DaemonProcessProbe,
+  findDaemonSocketOwnersFromProc,
+  isHackDaemonProcess,
   proveOwnedDaemonProcess,
   readDaemonPid,
   removeDaemonFilesIfStale,
   terminateProvenDaemon,
 } from "../src/daemon/process.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 /**
  * HACK-2052: nothing signals a pid from the hackd pid file on liveness
@@ -138,7 +141,7 @@ test("the proof refuses another state root's hackd, unknown identity and a reuse
   ).toEqual({ kind: "owned", pid, birth: "Wed Nov 11 10:00:00 2026" });
 });
 
-test.skipIf(!Bun.which("lsof"))(
+test.skipIf(process.platform !== "linux" && !Bun.which("lsof"))(
   "the proof refuses a real hackd-like process that holds another root's socket",
   async () => {
     const foreignRoot = join(root, "foreign");
@@ -264,4 +267,134 @@ test("stale cleanup removes a dead pid and an unanswered socket", async () => {
   });
   expect(await Bun.file(pidPath).exists()).toBe(false);
   expect(await Bun.file(socketPath).exists()).toBe(false);
+});
+
+async function startForeignFixture(
+  socketRoot: string
+): Promise<ReturnType<typeof Bun.spawn>> {
+  const binary = join(root, "hack-fixture");
+  await symlink(process.execPath, binary).catch(() => undefined);
+  const socket = join(socketRoot, "hackd.sock");
+  const ready = join(socketRoot, "ready");
+  const child = Bun.spawn(
+    [
+      binary,
+      "-e",
+      `Bun.serve({ unix: ${JSON.stringify(socket)}, fetch() { return new Response("x"); } }); await Bun.write(${JSON.stringify(ready)}, "ready");`,
+      "--",
+      "daemon",
+      "start",
+      "--foreground",
+    ],
+    { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
+  );
+  children.push(child);
+  for (let i = 0; i < 100 && !(await Bun.file(ready).exists()); i++) {
+    await Bun.sleep(20);
+  }
+  return child;
+}
+
+test.skipIf(process.platform !== "linux")(
+  "Linux socket ownership comes from /proc without lsof",
+  async () => {
+    const ownRoot = join(root, "own");
+    const otherRoot = join(root, "other");
+    await mkdir(ownRoot);
+    await mkdir(otherRoot);
+    const child = await startForeignFixture(ownRoot);
+    const sleeper = spawnSleeper();
+    const owners = await findDaemonSocketOwnersFromProc({
+      daemonRoot: ownRoot,
+      pids: [child.pid, sleeper.pid],
+    });
+    expect(owners).toEqual(new Set([child.pid]));
+    expect(
+      await findDaemonSocketOwnersFromProc({
+        daemonRoot: otherRoot,
+        pids: [child.pid],
+      })
+    ).toEqual(new Set());
+  },
+  10_000
+);
+
+test("a live pid that is not hackd is not treated as a running daemon", async () => {
+  const sleeper = spawnSleeper();
+  expect(await isHackDaemonProcess({ pid: sleeper.pid })).toBe(false);
+  expect(
+    await isHackDaemonProcess({
+      pid: sleeper.pid,
+      probe: probe(),
+    })
+  ).toBe(true);
+  // Its pid file is stale although the pid runs (a reused pid after reboot).
+  const pidPath = join(root, "hackd.pid");
+  const socketPath = join(root, "hackd.sock");
+  await writeFile(pidPath, `${sleeper.pid}\n`);
+  expect(
+    (
+      await removeDaemonFilesIfStale({
+        pidPath,
+        socketPath,
+        observedPid: sleeper.pid,
+      })
+    ).newerOwner
+  ).toBe(true);
+  expect(
+    await removeDaemonFilesIfStale({
+      pidPath,
+      socketPath,
+      observedPid: sleeper.pid,
+      observedPidIsDaemon: false,
+    })
+  ).toEqual({ removedPid: true, removedSocket: false, newerOwner: false });
+  expect(sleeper.exitCode).toBeNull();
+});
+
+test("hack daemon stop does not signal a pid it cannot prove is hackd", async () => {
+  const sleeper = spawnSleeper();
+  const home = join(root, "home");
+  const daemonDir = join(home, ".hack", "daemon");
+  await mkdir(daemonDir, { recursive: true });
+  await writeFile(join(daemonDir, "hackd.pid"), `${sleeper.pid}\n`);
+  const saved = {
+    HOME: process.env.HOME,
+    HACK_LOGGER: process.env.HACK_LOGGER,
+  };
+  process.env.HOME = home;
+  process.env.HACK_LOGGER = "console";
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["daemon", "stop"])).toBe(1);
+  } finally {
+    restoreEnv("HOME", saved.HOME);
+    restoreEnv("HACK_LOGGER", saved.HACK_LOGGER);
+  }
+  await Bun.sleep(100);
+  expect(sleeper.exitCode).toBeNull();
+  expect(process.kill(sleeper.pid, 0)).toBe(true);
+});
+
+test("a detached hackd does not inherit doctor's read-only service flag", async () => {
+  const out = join(root, "env-out");
+  const saved = process.env.HACK_DAEMON_SERVICE_READ_ONLY;
+  process.env.HACK_DAEMON_SERVICE_READ_ONLY = "1";
+  try {
+    const { spawnDetachedDaemon } = await import("../src/daemon/spawn.ts");
+    spawnDetachedDaemon({
+      argv: [
+        "/bin/sh",
+        "-c",
+        `printf '%s' "\${HACK_DAEMON_SERVICE_READ_ONLY:-unset}" > ${JSON.stringify(out)}`,
+      ],
+    });
+  } finally {
+    restoreEnv("HACK_DAEMON_SERVICE_READ_ONLY", saved);
+  }
+  for (let i = 0; i < 100 && !(await Bun.file(out).exists()); i++) {
+    await Bun.sleep(20);
+  }
+  await Bun.sleep(50);
+  expect(await readFile(out, "utf8")).toBe("unset");
 });

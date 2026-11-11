@@ -403,6 +403,41 @@ export async function describeSystemdIncompatibleOwner(opts: {
 }
 
 /**
+ * For an incompatible hackd that systemd runs from another, still existing
+ * `hack`, the fix is `hack daemon install` (switch the service), not
+ * `hack daemon restart` (which starts the same version again). Shared by
+ * `hack daemon status` and doctor so they agree.
+ */
+export async function withSystemdIncompatibleNextStep<
+  T extends {
+    readonly status: string;
+    readonly pid: number | null;
+    readonly nextStep: string | null;
+  },
+>(opts: {
+  readonly report: T;
+  readonly deps?: SystemdDeps;
+  readonly resolveExpected?: typeof resolveExpectedSystemdUnit;
+}): Promise<T> {
+  const { report } = opts;
+  if (
+    process.platform !== "linux" ||
+    report.status !== "incompatible" ||
+    report.pid === null
+  ) {
+    return report;
+  }
+  const owner = await describeSystemdIncompatibleOwner({
+    pid: report.pid,
+    deps: opts.deps,
+    resolveExpected: opts.resolveExpected,
+  });
+  return owner === null
+    ? report
+    : { ...report, nextStep: "hack daemon install" };
+}
+
+/**
  * The single "does systemd run this hackd" rule for stop and install: the
  * unit is active and the pid is its `MainPID`, or (for a `hack` wrapper that
  * keeps hackd as a child) the pid runs in the unit's cgroup.

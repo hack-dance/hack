@@ -245,6 +245,8 @@ export async function assessExecutableDurability(opts: {
   readonly path: string;
   readonly tempDirs?: readonly string[];
   readonly exists?: (path: string) => Promise<boolean>;
+  /** The checkout walk stops below this directory (default `$HOME`). */
+  readonly home?: string | null;
 }): Promise<ExecutableDurability> {
   const exists = opts.exists ?? pathExists;
   const path = resolve(opts.path);
@@ -265,7 +267,15 @@ export async function assessExecutableDurability(opts: {
       reason: `it is in a package cache or dependency directory (${segment})`,
     };
   }
+  // A home directory kept in git (dotfiles) is not a source checkout: for a
+  // path under `$HOME` the walk stops before `$HOME` itself.
+  const home =
+    opts.home === undefined ? normalizeHomeDir(process.env.HOME) : opts.home;
+  const underHome = home !== null && path.startsWith(`${resolve(home)}/`);
   for (let dir = dirname(path); dir !== dirname(dir); dir = dirname(dir)) {
+    if (underHome && home !== null && dir === resolve(home)) {
+      break;
+    }
     if (await exists(resolve(dir, ".git"))) {
       return {
         durable: false,
@@ -306,9 +316,11 @@ export function retargetSystemdUnitProgram(opts: {
   if (!program) {
     return null;
   }
+  // A function replacement: `$` in the kept arguments (systemd's `$$`) must
+  // not be read as a replacement pattern.
   return opts.unitText.replace(
     EXEC_START_PATTERN,
-    `ExecStart=${program}${rest}`
+    () => `ExecStart=${program}${rest}`
   );
 }
 

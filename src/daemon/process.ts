@@ -1,4 +1,4 @@
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readdir, readlink, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { readTextFile, writeTextFile } from "../lib/fs.ts";
@@ -294,6 +294,10 @@ export const defaultDaemonProcessProbe: DaemonProcessProbe = {
     }
   },
   socketOwners: async ({ daemonRoot, pids }) => {
+    // Linux: /proc needs no extra tool (lsof is missing on minimal installs).
+    if (process.platform === "linux") {
+      return await findDaemonSocketOwnersFromProc({ daemonRoot, pids });
+    }
     if (!findExecutableInPath("lsof")) {
       return null;
     }
@@ -437,6 +441,12 @@ export async function removeDaemonFilesIfStale(opts: {
   readonly pidPath: string;
   readonly socketPath: string;
   readonly observedPid: number | null;
+  /**
+   * False when `observedPid` is alive but proven not to be hackd (a pid
+   * reused after an unclean shutdown): the pid file is then stale although
+   * the pid runs.
+   */
+  readonly observedPidIsDaemon?: boolean;
   readonly isAccepting?: (socketPath: string) => Promise<boolean>;
 }): Promise<{
   readonly removedPid: boolean;
@@ -447,7 +457,11 @@ export async function removeDaemonFilesIfStale(opts: {
   if (current !== opts.observedPid) {
     return { removedPid: false, removedSocket: false, newerOwner: true };
   }
-  if (current !== null && isProcessRunning({ pid: current })) {
+  if (
+    current !== null &&
+    opts.observedPidIsDaemon !== false &&
+    isProcessRunning({ pid: current })
+  ) {
     return { removedPid: false, removedSocket: false, newerOwner: true };
   }
   const isAccepting = opts.isAccepting ?? isUnixSocketAccepting;
@@ -509,4 +523,97 @@ async function entryExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+const PROC_SOCKET_LINK = /^socket:\[(\d+)\]$/;
+const DAEMON_SOCKET_NAMES = [
+  "hackd.sock",
+  "hackd.internal.sock",
+  "gateway.internal.sock",
+] as const;
+
+/**
+ * Linux socket ownership without lsof: a pid owns one of this daemon
+ * root's sockets when one of its `/proc/<pid>/fd` links is `socket:[inode]`
+ * and `/proc/net/unix` names that inode with a daemon socket path. Returns
+ * null when `/proc/net/unix` cannot be read; a pid whose fds cannot be read
+ * (another user, gone) is simply not an owner.
+ */
+export async function findDaemonSocketOwnersFromProc(opts: {
+  readonly daemonRoot: string;
+  readonly pids: readonly number[];
+  readonly procRoot?: string;
+}): Promise<ReadonlySet<number> | null> {
+  const proc = opts.procRoot ?? "/proc";
+  const table = await readTextFile(`${proc}/net/unix`);
+  if (table === null) {
+    return null;
+  }
+  const roots = new Set([resolve(opts.daemonRoot)]);
+  try {
+    roots.add(await realpath(opts.daemonRoot));
+  } catch {
+    // A deleted directory can still appear in a socket's path.
+  }
+  const wanted = new Set(
+    [...roots].flatMap((root) =>
+      DAEMON_SOCKET_NAMES.map((name) => resolve(root, name))
+    )
+  );
+  const inodes = new Set<string>();
+  for (const line of table.split("\n").slice(1)) {
+    const fields = line.trim().split(WHITESPACE_PATTERN);
+    const inode = fields[6];
+    const path = fields[7];
+    if (inode && path && wanted.has(path)) {
+      inodes.add(inode);
+    }
+  }
+  const owners = new Set<number>();
+  if (inodes.size === 0) {
+    return owners;
+  }
+  for (const pid of opts.pids) {
+    let fds: string[];
+    try {
+      fds = await readdir(`${proc}/${pid}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      try {
+        const link = await readlink(`${proc}/${pid}/fd/${fd}`);
+        const inode = PROC_SOCKET_LINK.exec(link)?.[1];
+        if (inode && inodes.has(inode)) {
+          owners.add(pid);
+          break;
+        }
+      } catch {
+        // The fd closed while it was read.
+      }
+    }
+  }
+  return owners;
+}
+
+/**
+ * True when `pid` runs a hack daemon command line. A pid file that survived
+ * an unclean shutdown can name a pid that now belongs to another program;
+ * treating that as "hackd already running" would keep hackd from starting.
+ * Unknown (the command line cannot be read) counts as hackd, so the caller
+ * stays on its cautious path.
+ */
+export async function isHackDaemonProcess(opts: {
+  readonly pid: number;
+  readonly probe?: DaemonProcessProbe;
+}): Promise<boolean> {
+  const command = await (opts.probe ?? defaultDaemonProcessProbe).command(
+    opts.pid
+  );
+  if (command === null) {
+    return true;
+  }
+  return (
+    command.includes(DAEMON_COMMAND_MARKER) && isHackDaemonCommand({ command })
+  );
 }

@@ -267,7 +267,10 @@ import {
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
-import { resolveSystemdSummary } from "./daemon-systemd.ts";
+import {
+  resolveSystemdSummary,
+  withSystemdIncompatibleNextStep,
+} from "./daemon-systemd.ts";
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
@@ -1824,13 +1827,15 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     ? await probeDaemonApi({ socketPath: paths.socketPath, timeoutMs: 500 })
     : { reachable: false, compatible: false, version: null };
 
-  const report = buildDaemonStatusReport({
-    pid: status.pid,
-    processRunning: status.running,
-    socketExists: status.socketExists,
-    logExists: status.logExists,
-    apiReachable: probe.reachable,
-    apiCompatible: probe.compatible,
+  const report = await withSystemdIncompatibleNextStep({
+    report: buildDaemonStatusReport({
+      pid: status.pid,
+      processRunning: status.running,
+      socketExists: status.socketExists,
+      logExists: status.logExists,
+      apiReachable: probe.reachable,
+      apiCompatible: probe.compatible,
+    }),
   });
 
   if (report.status === "running") {

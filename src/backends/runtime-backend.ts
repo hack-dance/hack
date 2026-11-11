@@ -106,6 +106,8 @@ function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
 export function buildComposeRunCommand(opts: {
   readonly options: RuntimeRunOptions;
   readonly disableTty: boolean;
+  /** `--name` for the one-off container, so its owner can remove it. */
+  readonly containerName?: string;
 }): string[] {
   const { options } = opts;
   return [
@@ -113,6 +115,7 @@ export function buildComposeRunCommand(opts: {
     "run",
     "--rm",
     ...(opts.disableTty ? ["-T"] : []),
+    ...(opts.containerName ? ["--name", opts.containerName] : []),
     ...(options.noDeps ? ["--no-deps"] : []),
     ...(options.workdir && options.workdir.length > 0
       ? ["-w", options.workdir]

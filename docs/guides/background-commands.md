@@ -136,10 +136,11 @@ Docker's status, and the command ends `failed` with that exit code (137 in the
 end-to-end test for both cases). `hack down` does not stop a background `run`:
 `docker compose down` leaves a running one-off container in place (it exits 0
 but reports that the project network is still in use), so the command keeps
-running until it ends or times out. `hack commands cancel` stops the
-`docker compose run` client and records `cancelled`, but the one-off container
-and the process in it keep running (`containerProcess: "not_confirmed"`)
-until they end; remove it with `docker rm -f` if needed. Both are tested end
+running until it ends or times out. `hack commands cancel` (or the timeout)
+stops the `docker compose run` client and then removes the command's one-off
+container: Hack names it `hack-bg-<random>` at start and removes it only if
+Docker reports it as a one-off container of the expected service. The result
+says `containerProcess: "stopped"` when that is confirmed. Both are tested end
 to end. Hack does not reclassify these ends.
 
 ## Stalls
@@ -191,7 +192,8 @@ process exits by itself just as a cancel arrives, the group was never stopped;
 the final record then also says `descendants: "not_confirmed"`. A command that already
 exited 0 stays `succeeded` even if a cancel raced its end. The result says what
 was confirmed: `supervisorSignalled`, `childGroupSignalled`, `childExited`, and
-`containerProcess: "not_confirmed"`. When the stop cannot be confirmed (for
+`containerProcess`: `"stopped"` when a `run`'s one-off container was removed,
+otherwise `"not_confirmed"`. When the stop cannot be confirmed (for
 example the command's identity is unknown, see below), no final record is
 written and `outcome` is `unconfirmed`. Stopping a `docker compose exec` or
 `run` client does not prove that the process inside the container stopped.

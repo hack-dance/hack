@@ -42,10 +42,12 @@ export type CancelResult = {
     /** No process with the child's pid and birth remains. */
     readonly childExited: boolean;
     /**
-     * Killing a `docker compose exec` or `run` client does not prove the
-     * process inside the container stopped.
+     * Killing a `docker compose exec` client does not prove the process
+     * inside the container stopped (`not_confirmed`). For `run` the
+     * supervisor also removes the one-off container (`stopped` when that is
+     * confirmed).
      */
-    readonly containerProcess: "not_confirmed" | "not_applicable";
+    readonly containerProcess: "stopped" | "not_confirmed" | "not_applicable";
   };
   /** Identities that failed verification and were therefore not signalled. */
   readonly refused: readonly ("supervisor" | "child")[];
@@ -168,7 +170,10 @@ export async function cancelCommand(opts: {
       supervisorSignalled,
       childGroupSignalled,
       childExited,
-      containerProcess,
+      containerProcess:
+        finalEvent?.payload.containerProcess === "stopped"
+          ? "stopped"
+          : containerProcess,
     },
     refused,
   };

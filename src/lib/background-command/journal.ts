@@ -120,6 +120,16 @@ export type ChildRecord = z.infer<typeof identitySchema>;
 const launchSchema = z.object({
   argv: z.array(z.string()).min(1),
   cwd: z.string(),
+  /**
+   * A background `run`'s named one-off container: removed by the supervisor
+   * when it stops the command, after checking these labels.
+   */
+  container: z
+    .object({
+      name: z.string().regex(/^hack-bg-[a-z0-9]{20}$/),
+      service: z.string(),
+    })
+    .optional(),
 });
 export type LaunchRecord = z.infer<typeof launchSchema>;
 

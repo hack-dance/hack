@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
   buildComposeExecCommand,
   buildComposeRunCommand,
@@ -126,6 +127,15 @@ function spawnEnv(
   return { ...env, ...overrides };
 }
 
+function randomToken(): string {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let token = "";
+  for (const byte of randomBytes(20)) {
+    token += alphabet[byte % alphabet.length];
+  }
+  return token;
+}
+
 /** The caller-supplied options of `hack exec|run` that define a request. */
 export type CallerOptions = {
   readonly env?: string;
@@ -173,6 +183,12 @@ export async function startComposeBackgroundCommand(opts: {
   readonly identity: Record<string, unknown>;
 }): Promise<number> {
   const { options } = opts.compose;
+  // A `run` gets a named one-off container so a cancel or timeout can remove
+  // it; stopping the Compose client alone leaves it running.
+  const container =
+    opts.compose.operation === "run"
+      ? { name: `hack-bg-${randomToken()}`, service: options.service }
+      : undefined;
   const argv =
     opts.compose.operation === "exec"
       ? buildComposeExecCommand({
@@ -182,6 +198,7 @@ export async function startComposeBackgroundCommand(opts: {
       : buildComposeRunCommand({
           options: opts.compose.options,
           disableTty: true,
+          containerName: container?.name,
         });
   return await startBackgroundCommand({
     request: opts.request,
@@ -194,7 +211,12 @@ export async function startComposeBackgroundCommand(opts: {
     service: options.service,
     argv: [...options.cmdArgs],
     workdir: options.workdir ?? null,
-    child: { argv, cwd: options.cwd, env: spawnEnv(options.env) },
+    child: {
+      argv,
+      cwd: options.cwd,
+      env: spawnEnv(options.env),
+      ...(container ? { container } : {}),
+    },
     requestIdentity: opts.identity,
     redactValues: opts.redactValues,
   });

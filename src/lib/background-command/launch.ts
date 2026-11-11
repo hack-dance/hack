@@ -155,6 +155,8 @@ export type BackgroundStart = {
     readonly cwd: string;
     /** Complete environment for the child; values are never written to disk. */
     readonly env: Readonly<Record<string, string>>;
+    /** A `run`'s named one-off container (see LaunchRecord). */
+    readonly container?: { readonly name: string; readonly service: string };
   };
   /** Values Hack already resolved for injection into this command. */
   readonly redactValues: readonly string[];
@@ -225,7 +227,11 @@ export async function startBackgroundCommand(
   if (!accepted.reused) {
     await createPrivateFileExclusive({
       path: paths.launch,
-      text: JSON.stringify({ argv: opts.child.argv, cwd: opts.child.cwd }),
+      text: JSON.stringify({
+        argv: opts.child.argv,
+        cwd: opts.child.cwd,
+        ...(opts.child.container ? { container: opts.child.container } : {}),
+      }),
     });
     const supervisor = await spawnInNewSession({
       argv: [

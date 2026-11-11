@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 import { isRecord } from "../guards.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { auditEnd } from "./audit.ts";
+import { removeOneOffContainer } from "./container-stop.ts";
 import {
   CAPTURE_LIMIT_BYTES,
   type CommandMeta,
@@ -173,6 +174,7 @@ export async function runBackgroundSupervisor(opts: {
       await superviseChild({
         proc,
         meta,
+        launch,
         paths,
         capture,
         startedMono,
@@ -375,6 +377,7 @@ async function recordChild(opts: {
 async function superviseChild(opts: {
   readonly proc: Bun.Subprocess;
   readonly meta: CommandMeta;
+  readonly launch: LaunchRecord;
   readonly paths: JournalPaths;
   readonly capture: OutputCapture;
   readonly startedMono: number;
@@ -424,6 +427,15 @@ async function superviseChild(opts: {
   // never stopped, so its descendants are not known to be gone.
   const lateCancel = stopping === "cancelled" && !stopper.signalled;
   await stopper.finish();
+  // A stopped `run`: remove its one-off container too, after checking it is
+  // ours, so a cancel or timeout cannot leave it running.
+  const containerProcess =
+    stopping && opts.launch.container
+      ? await removeOneOffContainer({
+          ...opts.launch.container,
+          env: childEnv(),
+        })
+      : undefined;
   await capture.poll(true);
   const payload = endedPayload({
     stopping,
@@ -433,6 +445,7 @@ async function superviseChild(opts: {
     suppressed: opts.meta.capture === "metadata",
     backend: opts.meta.backend,
     noSpace: capture.noSpace,
+    containerProcess,
   });
   return lateCancel ? { ...payload, descendants: "not_confirmed" } : payload;
 }
@@ -741,6 +754,8 @@ export function endedPayload(opts: {
   readonly suppressed: boolean;
   readonly backend: "compose" | "native";
   readonly noSpace?: boolean;
+  /** Confirmed result of removing a `run`'s container, when attempted. */
+  readonly containerProcess?: "stopped" | "not_confirmed";
 }): Record<string, unknown> {
   let outcome: string;
   if (opts.stopping) {
@@ -760,7 +775,8 @@ export function endedPayload(opts: {
           // The client process group was stopped; a process started inside a
           // container by `docker compose exec` is not proven stopped.
           containerProcess:
-            opts.backend === "compose" ? "not_confirmed" : "not_applicable",
+            opts.containerProcess ??
+            (opts.backend === "compose" ? "not_confirmed" : "not_applicable"),
         }
       : {}),
   };

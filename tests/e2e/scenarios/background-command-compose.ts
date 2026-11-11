@@ -438,14 +438,19 @@ async function checkDownMidBackgroundRun(stack: Stack): Promise<void> {
     that: cancel?.data?.outcome === "cancelled",
     message: `cancel must stop the background run: ${JSON.stringify(cancel)}`,
   });
-  // Stopping the `docker compose run` client does not stop its one-off
-  // container: the result says `containerProcess: "not_confirmed"`, and the
-  // container is still there (the fixture cleanup removes it by ownership).
-  const oneOff = await ownedContainers(stack, "True");
-  stack.ctx.log(`one-off containers after cancel: ${oneOff.length}`);
+  // The supervisor removes the named one-off container after stopping the
+  // client, so nothing keeps running or holds the network.
+  const result = cancel as {
+    data?: { confirmed?: { containerProcess?: string } };
+  } | null;
   expect({
-    that: oneOff.length === 1,
-    message: `the documented gap: one one-off container remains after cancel (saw ${oneOff.length})`,
+    that: result?.data?.confirmed?.containerProcess === "stopped",
+    message: `cancel must confirm the one-off container stopped: ${JSON.stringify(cancel)}`,
+  });
+  const oneOff = await ownedContainers(stack, "True");
+  expect({
+    that: oneOff.length === 0,
+    message: `no one-off container remains after cancel (saw ${oneOff.length})`,
   });
 }
 

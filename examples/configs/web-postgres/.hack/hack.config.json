@@ -1,0 +1,5 @@
+{
+  "$schema": "https://schemas.hack.local/hack.config.schema.json",
+  "name": "web-postgres",
+  "dev_host": "web-postgres.hack.local"
+}

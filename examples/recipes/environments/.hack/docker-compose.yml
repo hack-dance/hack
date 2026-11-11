@@ -1,0 +1,9 @@
+name: environments
+services:
+  app:
+    # Stand-in for your app: prints the settings it received, then waits.
+    image: alpine:3.22
+    command:
+      - sh
+      - -c
+      - echo "APP_ENV=$$APP_ENV LOG_LEVEL=$$LOG_LEVEL PAYMENTS_API_URL=$$PAYMENTS_API_URL"; exec sleep infinity

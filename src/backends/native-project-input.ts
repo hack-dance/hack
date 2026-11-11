@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
-  PROJECT_ENV_SECRET_KEY_ENV,
+  missingProjectEnvKeyHint,
   ProjectEnvKeyMissingError,
   resolveProjectEnvConfig,
   resolveProjectEnvSelection,
@@ -97,7 +97,7 @@ function composeFileRefused(): Error {
 function environmentRefused(error: unknown): Error {
   if (error instanceof ProjectEnvKeyMissingError) {
     return refused(
-      `Hack managed env has secret entries but the project env key is missing. Run "hack env add --secret ..." to generate it, restore the key file, or set ${PROJECT_ENV_SECRET_KEY_ENV}`,
+      `Hack managed env has secret entries but the project env key is missing. ${missingProjectEnvKeyHint()}`,
       "E_CONFIG_INVALID"
     );
   }

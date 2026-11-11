@@ -1,0 +1,12 @@
+# Stand-in for a remote database. Start it yourself only to try the recipe:
+#   docker compose -f stand-in/remote-db.compose.yml -p remote-db-stand-in up -d
+name: remote-db-stand-in
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: stand-in-password
+      POSTGRES_DB: app
+    ports:
+      - "127.0.0.1:55433:5432"

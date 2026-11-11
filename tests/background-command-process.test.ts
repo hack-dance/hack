@@ -575,6 +575,105 @@ describe("background command processes", () => {
   );
 
   test(
+    "cancel leaves a live supervisor that is finishing to finish, and force-stops one that is not",
+    async () => {
+      // A stand-in supervisor that ignores SIGTERM, as a real one in its end
+      // path (descendant cleanup, container removal) keeps running past it.
+      const accept = () =>
+        acceptCommand({
+          root: fixture.store,
+          input: {
+            requestKey: null,
+            operation: "run",
+            backend: "compose",
+            projectId: "fixture",
+            projectRoot: fixture.root,
+            instanceId: "@base",
+            service: "api",
+            argv: ["true"],
+            workdir: null,
+            caller: "test",
+            timeoutMs: 60_000,
+            stallAfterMs: 0,
+            capture: "full",
+            retentionMs: 60_000,
+            liveOutput: "available",
+            stallDetection: "available",
+            redaction: { values: 0 },
+            fingerprintInputs: {},
+          },
+        });
+      const standIn = async () => {
+        const proc = Bun.spawn(["sh", "-c", 'trap "" TERM; sleep 30'], {
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          detached: true,
+        });
+        const identity = await track(proc.pid, true);
+        expect(identity).not.toBeNull();
+        return { proc, identity: identity as ProcessIdentity };
+      };
+      const writeOwner = async (
+        path: string,
+        identity: ProcessIdentity
+      ): Promise<void> => {
+        await writeFile(
+          path,
+          JSON.stringify({
+            ...identity,
+            processGroupId: identity.pid,
+            sessionId: null,
+            newSession: true,
+          }),
+          { mode: 0o600 }
+        );
+      };
+
+      const finishing = await accept();
+      const busy = await standIn();
+      await writeOwner(finishing.paths.owner, busy.identity);
+      await writeFile(finishing.paths.stopping, "finishing", { mode: 0o600 });
+      const left = await cancelCommand({
+        journal: await loadJournal({
+          commandId: finishing.meta.commandId,
+          root: fixture.store,
+        }),
+        root: fixture.store,
+        waitMs: 300,
+      });
+      expect(left.outcome).toBe("cancelling");
+      expect(busy.proc.exitCode).toBeNull();
+      expect(() => process.kill(busy.identity.pid, 0)).not.toThrow();
+      const notEnded = await readEvents(finishing.paths);
+      expect(notEnded.some((event) => event.type === "command.ended")).toBe(
+        false
+      );
+
+      const stuck = await accept();
+      const silent = await standIn();
+      await writeOwner(stuck.paths.owner, silent.identity);
+      const forced = await cancelCommand({
+        journal: await loadJournal({
+          commandId: stuck.meta.commandId,
+          root: fixture.store,
+        }),
+        root: fixture.store,
+        waitMs: 300,
+      });
+      await silent.proc.exited;
+      expect(silent.proc.signalCode).toBe("SIGKILL");
+      // No spawn marker: nothing was started, so with the supervisor gone the
+      // canceller records the end itself.
+      expect(forced.outcome).toBe("cancelled");
+      expect(endedPayload(await readEvents(stuck.paths))?.reason).toBe(
+        "supervisor_unresponsive"
+      );
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
     "stdin is closed: a command that reads it ends at once; input from a file is refused before anything starts",
     async () => {
       const launched = await launch({

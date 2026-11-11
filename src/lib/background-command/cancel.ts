@@ -5,6 +5,7 @@ import {
   type EventEnvelope,
   emittedOffsets,
   endedEvent,
+  type JournalPaths,
   JournalWriter,
   readChild,
   readEvents,
@@ -144,14 +145,13 @@ export async function cancelCommand(opts: {
       snapshot: after,
       readBootTime: opts.readBootTime,
     })) === "gone";
-  // Without a final record the stop is not confirmed (for example the
-  // child's identity is unknown); the command keeps its admission slot.
-  // Without a final record: a supervisor still finishing the stop reports
-  // `cancelling`; otherwise the stop is not confirmed (for example the
-  // child's identity is unknown). Either way the command keeps its slot.
+  // Without a final record: a live supervisor that is finishing (it wrote
+  // the marker) reports `cancelling`; otherwise the stop is not confirmed
+  // (for example the child's identity is unknown). Either way the command
+  // keeps its slot.
   const outcome = finalEvent
     ? String(finalEvent.payload.outcome)
-    : await pendingOutcome(paths);
+    : await pendingOutcome({ paths, observe });
   await appendCommandAudit({
     root: opts.root,
     entry: {
@@ -201,10 +201,16 @@ async function supervisorFinishingStop(opts: {
   );
 }
 
-async function pendingOutcome(paths: {
-  readonly stopping: string;
+/** `cancelling` only while a live supervisor is finishing right now. */
+async function pendingOutcome(opts: {
+  readonly paths: JournalPaths;
+  readonly observe: ObserveIdentities;
 }): Promise<"cancelling" | "unconfirmed"> {
-  return (await lstat(paths.stopping).catch(() => null))
+  return (await supervisorFinishingStop({
+    paths: opts.paths,
+    owner: await readOwner(opts.paths),
+    observe: opts.observe,
+  }))
     ? "cancelling"
     : "unconfirmed";
 }

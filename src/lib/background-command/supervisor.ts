@@ -1,5 +1,5 @@
 import { constants, openSync } from "node:fs";
-import { lstat, open, unlink, writeFile } from "node:fs/promises";
+import { lstat, open, unlink } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { isRecord } from "../guards.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
@@ -417,6 +417,9 @@ async function superviseChild(opts: {
     }
   }
   const exitCode = await proc.exited;
+  // From here on (descendant cleanup, container removal, the final record)
+  // this supervisor is finishing: a canceller must not force-kill it.
+  await markFinishing(opts.paths.stopping);
   // A cancel that arrived while output was being captured (the canceller
   // used to signal the group directly) is still a cancel, not a failure. A
   // clean exit (0, no signal) stays `succeeded` even if a cancel raced it:
@@ -480,6 +483,14 @@ async function stopInContainer(opts: {
   return undefined;
 }
 
+/** Create the private "finishing" marker once; later calls keep it. */
+async function markFinishing(path: string): Promise<void> {
+  await createPrivateFileExclusive({
+    path,
+    text: new Date().toISOString(),
+  }).catch(() => undefined);
+}
+
 /** True until Bun has reaped the child: its pid (and group id) cannot be reused. */
 function unreaped(proc: Bun.Subprocess): boolean {
   return proc.exitCode === null && proc.signalCode === null;
@@ -518,9 +529,7 @@ class GroupStopper {
     // Tells a canceller that this supervisor took the stop over and is
     // making progress (signalling, then container removal): it must not be
     // force-killed for being slow.
-    await writeFile(this.marker, new Date().toISOString(), {
-      mode: 0o600,
-    }).catch(() => undefined);
+    await markFinishing(this.marker);
     signalProcessGroup(this.proc.pid, "SIGTERM");
     this.killTimer = setTimeout(() => {
       this.remember()

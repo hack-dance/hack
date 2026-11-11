@@ -38,9 +38,13 @@ while we wrote and tested these recipes.
   `up.before` hooks run. A value a hook stores with `hack env add` reaches
   containers on the next start. See [Sign in to another CLI](cli-sign-in.md).
 - **Your shell expands `$VAR` before Hack sees it.** In
-  `hack run app psql "$DATABASE_URL"`, the variable comes from your shell, not
-  from Hack. Use `hack run app sh -c 'psql "$DATABASE_URL"'`, or
+  `hack run app echo "$APP_ENV"`, the variable comes from your shell, not
+  from Hack. Use `hack run app sh -c 'echo "$APP_ENV"'`, or
   `hack host exec --shell '...'` on your machine.
+- **Secrets in command arguments.** A token or a connection string with a
+  password, passed as an argument (`--token "$TOKEN"`, `psql "$DATABASE_URL"`),
+  shows up in process listings. Let the tool read it from the environment Hack
+  injects, or from a file.
 - **Compose expands `$` in the Compose file.** To use a container variable in
   a `command`, write `$$VAR`.
 - **Keep `.hack/hack.env.default.yaml`, even when it is empty.** Without it,

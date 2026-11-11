@@ -92,11 +92,15 @@ webhooks you register by hand while testing. OAuth providers need a callback URL
 that you register in advance, so they need a hostname that stays the same:
 
 - **A named tunnel.** Create it once in your tunnel provider's account and run
-  it with a token instead of `--url`. For `cloudflared`, that is
-  `cloudflared tunnel run --token "$TUNNEL_TOKEN"`. Store the token with
-  `hack env add TUNNEL_TOKEN --secret --local --value-stdin`; lifecycle
-  processes receive managed env values in the global and `host` scopes. We did
-  not run a named tunnel, because it needs an account.
+  it with a token instead of `--url`. Store the token with
+  `<secret-source> | hack env add TUNNEL_TOKEN --secret --local --value-stdin`;
+  lifecycle processes receive managed env values in the global and `host`
+  scopes. For `cloudflared`, the process command is then just
+  `cloudflared tunnel run`: it reads `TUNNEL_TOKEN` from its environment
+  (`cloudflared tunnel run --help` lists it). Do not write
+  `--token "$TUNNEL_TOKEN"`; that puts the token in the process's arguments,
+  where other tools on your machine can read it. We did not run a named
+  tunnel, because it needs an account.
 - **A local OAuth alias.** When the provider only needs a callback that your
   browser can reach (not a public one), Hack's `.hack.gy` alias may be enough.
   See `oauth` in [Initialize a project](../guides/init-project.md).

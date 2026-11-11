@@ -146,7 +146,7 @@ flowchart LR
 
    ```sh
    hack up -d --env staging
-   hack exec --env staging app sh -c 'psql "$DATABASE_URL" -c "select 1"'
+   hack exec --env staging app printenv DB_TARGET     # staging
    hack host exec --env staging --scope app -- your-script
    hack down --env staging
    ```

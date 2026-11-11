@@ -105,13 +105,17 @@ stand-in tool.
 runs a command, and removes the container:
 
 ```sh
-hack run migrate                                     # the service's own command
-hack run app sh -c 'psql "$DATABASE_URL" -c "\d"'   # your own command
+hack run migrate                     # the service's own command
+hack run migrate psql -c '\dt'       # your own command; psql reads the PG* values
+hack run migrate sh -c 'echo "$PGHOST"'
 ```
 
 Put Hack options, such as `--env`, before the service name. Wrap a command that
 uses a variable in `sh -c '...'` with single quotes, so the variable expands in
-the container and not in your shell.
+the container and not in your shell. Prefer tools that read credentials from
+the environment (like `psql` with `PG*` variables) over passing a connection
+string with a password as an argument: arguments are visible in process
+listings.
 
 ## From a hook, without a migrate service
 

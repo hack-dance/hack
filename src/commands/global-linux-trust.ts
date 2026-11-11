@@ -30,6 +30,7 @@ import {
   type LinuxSystemTrustOutcome,
   type LinuxTrustHost,
 } from "../lib/linux-trust-setup.ts";
+import { createTrustedDockerExec } from "../lib/trusted-docker.ts";
 import { logger } from "../ui/logger.ts";
 
 function renderSudo(argv: readonly string[]): string {
@@ -56,7 +57,12 @@ function defaultDeps(): LinuxTrustCommandDeps {
   return {
     host: createLinuxTrustHost(),
     readFile: readTextFile,
-    inspectIdentity: inspectCaddyCaIdentity,
+    // The runtime witness must not come from a PATH-selected docker.
+    inspectIdentity: async (opts) =>
+      await inspectCaddyCaIdentity({
+        ...opts,
+        exec: createTrustedDockerExec(),
+      }),
     stage: async (content) =>
       await stagePrivateCopy({ content, fileName: "caddy-local-ca.crt" }),
     canPrompt,

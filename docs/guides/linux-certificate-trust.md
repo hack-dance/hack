@@ -10,7 +10,10 @@ Before it changes any trust store, Hack checks the exported CA
 
 - it holds exactly one PEM certificate, at most 64 KiB;
 - the certificate is a CA, self-signed (a root), and valid now;
-- its bytes equal the root of the Caddy container this Hack home is running.
+- its bytes equal the root of the Caddy container this Hack home is running,
+  read through the system Docker client (`/usr/bin/docker`,
+  `/usr/local/bin/docker` or `/bin/docker`, root-owned and not writable by
+  others), never one found on your `PATH`.
 
 If any check fails, Hack changes nothing and says why
 (`linux_trust_ca_invalid` or `linux_trust_ca_unverified`). A stale export (Caddy

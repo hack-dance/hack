@@ -112,10 +112,7 @@ export async function findOrphanDaemonProcesses(opts: {
     if (!Number.isFinite(pid) || pid <= 0) {
       continue;
     }
-    if (!command.includes(DAEMON_COMMAND_MARKER)) {
-      continue;
-    }
-    if (!isHackDaemonCommand({ command })) {
+    if (!isHackDaemonCommandLine(command)) {
       continue;
     }
     if (pid === opts.trackedPid || pid === process.pid) {
@@ -375,7 +372,12 @@ async function proveOwnedDaemonProcessOnce(opts: {
     return { kind: "refused", reason: "identity-unknown" };
   }
   const command = await probe.command(pid);
-  if (command === null || !isHackDaemonCommandLine(command)) {
+  if (command === null) {
+    // Unreadable is not "not hackd": stop would then drop a real hackd's
+    // pid file. Refuse without a conclusion.
+    return { kind: "refused", reason: "identity-unknown" };
+  }
+  if (!isHackDaemonCommandLine(command)) {
     return { kind: "refused", reason: "not-hackd" };
   }
   const owners = await probe.socketOwners({

@@ -518,3 +518,14 @@ test("hackd command lines with spaces in the executable path are recognized", ()
   );
   expect(isHackDaemonCommandLine("sleep 30")).toBe(false);
 });
+
+test("an unreadable command line is unknown identity, not 'not hackd'", async () => {
+  const sleeper = spawnSleeper();
+  expect(
+    await proveOwnedDaemonProcess({
+      pid: sleeper.pid,
+      daemonRoot: root,
+      probe: probe({ command: () => Promise.resolve(null) }),
+    })
+  ).toEqual({ kind: "refused", reason: "identity-unknown" });
+});

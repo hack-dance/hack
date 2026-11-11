@@ -4,65 +4,87 @@
 
 # Hack
 
-Hack runs a whole project on your machine — services, env, secrets, TLS and logs —
-from a small committed `.hack/` folder, at its own local HTTPS hostname. Many
-projects and branches run at the same time without colliding. Hack is a local CLI:
-nothing is hosted and no account is needed.
+Hack is a command-line tool that runs your whole project on your own machine.
+
+One command, `hack up`, starts the project's services, loads its settings and
+secrets, and gives it a local web address with working HTTPS. You can run many
+projects, and many branches of one project, at the same time. They do not get in
+each other's way.
 
 ```bash
 cd any-repo && hack up
 # → https://myapp.hack.local is live, TLS trusted, env injected
 ```
 
+Everything Hack needs to know about a project lives in a small `.hack/` folder that
+you commit with the code. Nothing is hosted, and you do not need an account.
+
 ## Why it exists
 
-Local development breaks down when one machine runs many things. Two projects fight
-over port 3000. A repo you haven't touched in a month needs an afternoon of
-archaeology to start. Secrets live in `.env` files passed around in chat. Testing a
-PR means tearing down the branch you were working on.
+Running one project locally is easy. Running many is not:
 
-Hack treats these as one problem. The unit is the project's whole environment, not
-its ports: a committed `.hack/` config running on shared local infrastructure,
-Docker Compose for services and Caddy for DNS and trusted TLS. The same project
-identity routes `api.myapp.hack.local`, decrypts its secrets, starts its helpers,
-labels its logs and namespaces its branch instances, so none of it needs glue code.
+- Two projects both want port 3000.
+- A repo you have not opened in a month takes an afternoon to start again.
+- Secrets sit in `.env` files that people pass around in chat.
+- To test a pull request, you have to stop the branch you were working on.
 
-| The job | The usual duct tape | With Hack |
+Hack treats these as one problem. It manages the project's whole environment, not
+only its ports. A project has one identity. Hack uses it to route
+`api.myapp.hack.local`, decrypt the project's secrets, start its helper processes,
+label its logs, and keep its branch instances apart. Under the hood it uses Docker
+Compose for services and Caddy for local DNS and trusted TLS.
+
+| The job | Without Hack | With Hack |
 | --- | --- | --- |
-| Local domains and trusted TLS | mkcert, `/etc/hosts` edits, port lists | `https://myapp.hack.local`, CA trusted once |
-| Parallel branches | a second clone and port surgery | branch instances; worktrees isolate automatically |
-| Secrets and env | `.env` files passed around | encrypted values committed with the repo |
-| "How do I run this" | README, Makefile and tribal knowledge | `.hack/` config and `hack up` |
-| Tunnels, SSO, proxies | ad-hoc scripts in a terminal tab | declared lifecycle processes, stopped on `hack down` |
-| Logs | terminal scrollback, gone on restart | persisted history: `hack logs --loki --since 2h` |
-| Workspaces | hand-rolled tmux setups | `hack session` |
+| Local addresses with trusted HTTPS | mkcert, `/etc/hosts` edits, a list of ports | `https://myapp.hack.local`, certificate authority trusted once |
+| Two branches at once | a second clone and changed ports | branch instances; git worktrees are separated automatically |
+| Secrets and settings | `.env` files passed around | encrypted values committed with the repo |
+| "How do I run this?" | a README, a Makefile and asking a teammate | the `.hack/` folder and `hack up` |
+| Tunnels, single sign-on, proxies | scripts left running in a terminal tab | processes the project declares; `hack down` stops them |
+| Logs | terminal scrollback, gone on restart | saved history: `hack logs --loki --since 2h` |
+| Terminal workspaces | hand-made tmux setups | `hack session` |
 
 ## Core promises
 
+Hack makes three promises.
+
 **1. Run many projects and branches side by side, each at a real HTTPS hostname.**
-Every project gets `https://myapp.hack.local`, per-service subdomains such as
-`api.myapp.hack.local`, and locally trusted certificates. `hack up --branch review`
-starts a second instance of the same project with its own hostnames, and in a
-linked git worktree `hack up` becomes a branch instance automatically, so you can
-review a PR while your main checkout keeps running. `hack dev` runs a repository's
-own side-by-side development build from a committed `.hack/dev.json`. Existing
-`.hack` names and custom domains keep working, and `.hack.gy` alias hosts cover
-OAuth providers that reject local domains.
+
+- Every project gets an address such as `https://myapp.hack.local`. Each service
+  gets its own, such as `api.myapp.hack.local`. Your browser trusts the
+  certificates.
+- `hack up --branch review` starts a second copy of the same project with its own
+  addresses. In a linked git worktree, `hack up` does this automatically, so you
+  can review a pull request while your main checkout keeps running.
+- `hack dev` runs a repository's own development build beside the installed one,
+  from a committed `.hack/dev.json`.
+- Existing `.hack` names and custom domains keep working. `.hack.gy` alias hosts
+  cover OAuth providers that reject local domains.
+
 See [core concepts](docs/core.md) and [side-by-side development](docs/dev.md).
 
-**2. Manage project env and secrets safely.** Values live in committed YAML and
-secrets are encrypted per value, so the file is safe to commit. One gitignored key
-decrypts them; linked worktrees inherit it and CI passes `HACK_ENV_SECRET_KEY`.
-`hack env` reads and writes values without printing secrets, and
-`hack host exec` runs a host command with the project's env injected instead of
-reading `.env` files. See [env and secrets](docs/env.md).
+**2. Manage project env and secrets safely.**
 
-**3. Sessions and lifecycle you can trust.** `hack up`, `hack down` and
-`hack restart` start and stop the whole project, including the tunnels, proxies and
-other host helpers it declares. `hack logs` tails or queries persisted history,
-`hack doctor` diagnoses setup and proposes specific repairs, and `hack session`
-keeps a project workspace alive across terminal restarts and SSH reconnects. See
-[lifecycle](docs/lifecycle.md) and [sessions](docs/sessions.md).
+- Settings live in committed YAML files. Each secret is encrypted on its own, so
+  the file is safe to commit.
+- One key, kept out of git, decrypts them. Linked worktrees share it, and CI passes
+  it as `HACK_ENV_SECRET_KEY`.
+- `hack env` reads and writes values without printing secrets.
+- `hack host exec` runs a command on your machine with the project's settings
+  loaded, so scripts do not read `.env` files.
+
+See [env and secrets](docs/env.md).
+
+**3. Sessions and lifecycle you can trust.**
+
+- `hack up`, `hack down` and `hack restart` start and stop the whole project,
+  including the tunnels, proxies and other helper processes it declares.
+- `hack logs` follows logs or searches saved history.
+- `hack doctor` checks your setup and proposes specific repairs.
+- `hack session` keeps a project's terminal workspace alive when you close the
+  terminal or reconnect over SSH.
+
+See [lifecycle](docs/lifecycle.md) and [sessions](docs/sessions.md).
 
 ## Install
 
@@ -94,8 +116,8 @@ hack up --detach
 hack open
 ```
 
-When something looks wrong, run `hack doctor`, read the diagnosis, then
-`hack doctor --fix` for the repairs you accept.
+If something looks wrong, run `hack doctor` and read what it reports. Then run
+`hack doctor --fix` to apply the repairs you accept.
 [Getting started](docs/guides/getting-started.md) walks through each step.
 
 ## Core commands
@@ -116,15 +138,16 @@ hack session start myapp             # persistent tmux workspace
 hack doctor                          # diagnose setup
 ```
 
-Every command works from the repo root, or anywhere with `--project <name>`.
-`hack help` lists the commands by group; the
-[CLI overview](docs/cli.md) explains which one to use.
+Run a command from the project's folder, or from anywhere with `--project <name>`.
+`hack help` lists the commands by group. The [CLI overview](docs/cli.md) explains
+which one to use.
 
 ## Agent integrations (optional)
 
-An agent with shell access can use Hack directly: commands take `--json` for
-structured results with stable error codes and `--no-interactive` to avoid prompts.
-Nothing else is required, and Hack never writes agent files on its own.
+A coding agent that can run shell commands can use Hack as it is. Commands accept
+`--json` for structured results with stable error codes, and `--no-interactive` to
+avoid prompts. Nothing else is required, and Hack never writes agent files on its
+own. These extras are optional:
 
 - The `hack` plugin gives Codex, Claude Code and Cursor eight Hack skills through
   the client's own plugin manager.
@@ -143,33 +166,34 @@ See [agent integrations](docs/integrations.md).
 
 ## Beta and advanced
 
-Everything above is the supported core. The items below are opt-in.
+Everything above is the supported core. You choose whether to use the items below.
 
 **Native backend (beta, Apple Silicon macOS).** A second way to run the same
-project. Instead of using a Docker app, Hack starts its own small Linux virtual
-machine and runs your services in it. Your `.hack/` folder and your commands stay
-the same. It ships only through the separate `hack-next` channel, not in the stable
-archives or the Homebrew formula, and it supports part of what Compose supports.
-Docker Compose stays the default. Read the [overview](docs/native/README.md),
+project. Hack starts its own small Linux virtual machine and runs Docker inside it,
+so you do not need Docker Desktop or OrbStack. Your `.hack/` folder and your
+commands stay the same. It comes only through the separate `hack-next` channel, not
+in the stable archives or the Homebrew formula, and it supports part of what Compose
+supports. Docker Compose stays the default. Read the [overview](docs/native/README.md),
 [try it](docs/native/try-it.md), or check
 [what works and known limits](docs/native/limits.md).
 
-**v5 prereleases.** v5 keeps the same CLI and project model. `5.0.0-next.N` builds
-install beside stable Hack through `hack-next` and do not touch the stable
-executable. Read [what's new in v5](docs/guides/v5-release-notes.md),
+**v5 prereleases.** v5 keeps the same commands and the same project folder.
+`5.0.0-next.N` builds install beside stable Hack through `hack-next` and do not
+change the stable install. Read [what's new in v5](docs/guides/v5-release-notes.md),
 [upgrade to v5](docs/guides/upgrade-to-v5.md) and
 [install a prerelease](docs/guides/candidate-install.md). The `next` branch holds v5
 work; `main` holds the stable line.
 
-**Managed environments (advanced).** Because the environment is committed with the
-repo, another machine or a cloud agent sandbox can reuse it. The host still needs a
-compatible container runtime and the project's prerequisites, and the secret key
-arrives through that host's secret store. A slim image, `hackdance/hack:slim`, is
+**Managed environments (advanced).** The environment is committed with the repo, so
+another machine or a cloud agent sandbox can reuse it. That machine still needs a
+compatible container runtime and whatever else the project requires, and it gets
+the secret key from its own secret store. A slim image, `hackdance/hack:slim`, is
 built for this. See
 [managed environments](docs/guides/codex-managed-environments.md).
 
-The CLI is the supported product. Remote, gateway, node and dispatch commands and
-the macOS app in this repository are unsupported and are not part of setup.
+The command-line tool is the supported product. The remote, gateway, node and
+dispatch commands and the macOS app in this repository are unsupported. Setup does
+not use them.
 
 ## Documentation
 

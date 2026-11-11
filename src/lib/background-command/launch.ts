@@ -2,6 +2,7 @@ import { lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { emitCliResult, HackCliError, okResult } from "../cli-result.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
+import { appendCommandAudit, auditEnd } from "./audit.ts";
 import {
   type CaptureMode,
   type CommandMeta,
@@ -19,12 +20,7 @@ import {
   readBackgroundCommandConfigs,
   resolveBackgroundSettings,
 } from "./settings.ts";
-import {
-  acceptCommand,
-  appendCommandAudit,
-  cursorBeforeFirst,
-  expiresAt,
-} from "./store.ts";
+import { acceptCommand, cursorBeforeFirst, expiresAt } from "./store.ts";
 import {
   BACKGROUND_SUPERVISOR_ARGUMENT,
   REDACT_VALUES_ENV,
@@ -304,18 +300,20 @@ async function settleFailedStart(opts: {
     if (endedEvent(events)) {
       return false;
     }
-    await new JournalWriter(paths, meta, events.at(-1)?.seq ?? 0).write(
-      "command.ended",
-      {
-        outcome: "unknown",
-        reason: "supervisor_failed_to_start",
-        exitCode: null,
-        signal: null,
-        durationMs: 0,
-        truncated: false,
-        suppressed: meta.capture === "metadata",
-      }
-    );
+    const ended = await new JournalWriter(
+      paths,
+      meta,
+      events.at(-1)?.seq ?? 0
+    ).write("command.ended", {
+      outcome: "unknown",
+      reason: "supervisor_failed_to_start",
+      exitCode: null,
+      signal: null,
+      durationMs: 0,
+      truncated: false,
+      suppressed: meta.capture === "metadata",
+    });
+    await auditEnd({ paths, meta, payload: ended.payload });
     return false;
   });
 }

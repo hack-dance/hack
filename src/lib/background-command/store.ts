@@ -193,22 +193,6 @@ async function countActive(opts: {
         observe: opts.observe,
         enforceTimeout: true,
       });
-      const end = endedEvent(events);
-      if (end?.payload.reason === "orphan_timeout") {
-        await appendCommandAudit({
-          root: opts.root,
-          entry: {
-            event: "end",
-            commandId: meta.commandId,
-            operation: meta.operation,
-            projectId: meta.projectId,
-            instanceId: meta.instanceId,
-            service: meta.service,
-            caller: meta.caller,
-            outcome: "timed_out",
-          },
-        });
-      }
       if (endedEvent(events)) {
         continue;
       }
@@ -492,35 +476,5 @@ async function removeRequestKey(opts: {
         requestKey: meta.requestKey,
       })
     ).catch(() => undefined);
-  }
-}
-
-/**
- * Background audit log, `<hack home>/commands/audit.log` (0600). Starts,
- * final outcomes and cancels are recorded; reads are not. Lines never hold
- * argv, output or environment values.
- */
-export async function appendCommandAudit(opts: {
-  readonly root?: string;
-  readonly entry: {
-    readonly event: "start" | "end" | "cancel";
-    readonly commandId: string;
-    readonly operation: string;
-    readonly projectId: string;
-    readonly instanceId: string;
-    readonly service: string;
-    readonly caller: string;
-    readonly outcome?: string;
-    readonly exitCode?: number | null;
-  };
-}): Promise<void> {
-  try {
-    const root = await ensureStoreRoot(opts.root);
-    await appendLine(
-      resolve(root, "audit.log"),
-      `${JSON.stringify({ ts: new Date().toISOString(), ...opts.entry })}\n`
-    );
-  } catch {
-    // Auditing never blocks or fails a command, matching the MCP audit log.
   }
 }

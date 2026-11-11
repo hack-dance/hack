@@ -1,5 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { withProjectsRegistryLock } from "../projects-registry-lock.ts";
+import { auditEnd } from "./audit.ts";
 import {
   CAPTURE_LIMIT_BYTES,
   type CommandMeta,
@@ -158,7 +159,7 @@ export async function recoverLostOwner(opts: {
       });
     }
     if (childGone) {
-      await writer.write("command.ended", {
+      const ended = await writer.write("command.ended", {
         outcome: overdue ? "timed_out" : "unknown",
         reason: overdue ? "orphan_timeout" : assessment.reason,
         exitCode: null,
@@ -166,6 +167,11 @@ export async function recoverLostOwner(opts: {
         durationMs: Math.max(0, now() - Date.parse(opts.meta.acceptedAt)),
         truncated,
         suppressed: opts.meta.capture === "metadata",
+      });
+      await auditEnd({
+        paths: opts.paths,
+        meta: opts.meta,
+        payload: ended.payload,
       });
     }
     return await readEvents(opts.paths);

@@ -1,5 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { createPrivateFileExclusive } from "../private-file.ts";
+import { appendCommandAudit, auditEnd } from "./audit.ts";
 import {
   type EventEnvelope,
   endedEvent,
@@ -17,7 +18,6 @@ import {
 } from "./platform.ts";
 import type { LoadedJournal } from "./reader.ts";
 import { type ObserveIdentities, withJournalLock } from "./recovery.ts";
-import { appendCommandAudit } from "./store.ts";
 
 const SUPERVISOR_WAIT_MS = 6000;
 const POLL_MS = 100;
@@ -319,7 +319,7 @@ async function finishWithoutSupervisor(opts: {
     const writer = new JournalWriter(paths, meta, current.at(-1)?.seq ?? 0);
     // `cancelled` only when the command's process is confirmed gone;
     // otherwise the outcome is not known.
-    return await writer.write("command.ended", {
+    const ended = await writer.write("command.ended", {
       outcome: stopped.childGone ? "cancelled" : "unknown",
       reason: cancelReason({
         owner: owner !== null,
@@ -332,5 +332,7 @@ async function finishWithoutSupervisor(opts: {
       suppressed: meta.capture === "metadata",
       containerProcess: opts.containerProcess,
     });
+    await auditEnd({ paths, meta, payload: ended.payload });
+    return ended;
   });
 }

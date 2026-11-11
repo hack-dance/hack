@@ -38,6 +38,7 @@ import {
   parseBackgroundCommandConfig,
   resolveBackgroundSettings,
 } from "../src/lib/background-command/settings.ts";
+import { StallTracker } from "../src/lib/background-command/stall.ts";
 import {
   type AcceptInput,
   acceptCommand,
@@ -45,6 +46,10 @@ import {
   HOME_ACTIVE_LIMIT,
   pruneExpired,
 } from "../src/lib/background-command/store.ts";
+import {
+  endedPayload,
+  OutputCapture,
+} from "../src/lib/background-command/supervisor.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -797,5 +802,52 @@ describe("--detach on authored and adopted projects", () => {
     );
     // A legacy project (neither) proceeds; the real selectors find nothing here.
     await refuseDetachForAuthoredProject({ cwd: root });
+  });
+});
+
+describe("a full disk while recording events", () => {
+  test("stops capture, cuts files back to announced output and never throws", async () => {
+    const { paths, meta } = await acceptCommand({ input: input(), root });
+    let appends = 0;
+    const writer = new JournalWriter(paths, meta, 1, async (path, line) => {
+      appends += 1;
+      if (appends > 1) {
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      }
+      await writeFile(path, line, { flag: "a" });
+    });
+    await writeFile(paths.stdout, "first chunk\n", { mode: 0o600 });
+    const capture = new OutputCapture({
+      paths,
+      writer,
+      full: true,
+      secrets: [],
+      stall: new StallTracker(0, 0),
+    });
+    await capture.poll(false);
+    await writeFile(paths.stdout, "second chunk that cannot be announced\n", {
+      flag: "a",
+    });
+    // The child keeps writing; capture must not throw.
+    await capture.poll(false);
+    await capture.poll(true);
+    expect(capture.noSpace).toBe(true);
+    expect(capture.truncated).toBe(true);
+    expect(await readFile(paths.stdout, "utf8")).toBe("first chunk\n");
+    const output = (await readEvents(paths)).filter(
+      (event) => event.type === "command.output"
+    );
+    expect(output.map((event) => event.payload.length)).toEqual([12]);
+    expect(
+      endedPayload({
+        stopping: null,
+        exitCode: 0,
+        signal: null,
+        truncated: true,
+        suppressed: false,
+        backend: "compose",
+        noSpace: true,
+      })
+    ).toMatchObject({ outcome: "succeeded", captureStopped: "no_space" });
   });
 });

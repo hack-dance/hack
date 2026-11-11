@@ -1,6 +1,7 @@
 import { constants, openSync } from "node:fs";
 import { lstat, open, unlink } from "node:fs/promises";
 import { createPrivateFileExclusive } from "../private-file.ts";
+import { auditEnd } from "./audit.ts";
 import {
   CAPTURE_LIMIT_BYTES,
   type CommandMeta,
@@ -29,7 +30,6 @@ import {
 } from "./platform.ts";
 import { withJournalLock } from "./recovery.ts";
 import { StallTracker } from "./stall.ts";
-import { appendCommandAudit } from "./store.ts";
 
 const NO_SPACE = new Error("no space for command events");
 
@@ -89,25 +89,11 @@ export async function runBackgroundSupervisor(opts: {
   const { meta, launch, writer } = prepared;
   const startedMono = performance.now();
   const finish = async (payload: Record<string, unknown>): Promise<number> => {
-    await writer.write("command.ended", {
+    const ended = await writer.write("command.ended", {
       durationMs: Math.round(performance.now() - startedMono),
       ...payload,
     });
-    await appendCommandAudit({
-      root,
-      entry: {
-        event: "end",
-        commandId: meta.commandId,
-        operation: meta.operation,
-        projectId: meta.projectId,
-        instanceId: meta.instanceId,
-        service: meta.service,
-        caller: meta.caller,
-        outcome: String(payload.outcome),
-        exitCode:
-          typeof payload.exitCode === "number" ? payload.exitCode : null,
-      },
-    });
+    await auditEnd({ paths, meta, payload: ended.payload });
     await unlink(paths.reserve).catch(() => undefined);
     return 0;
   };
@@ -382,7 +368,7 @@ type StreamState = {
  * back to what was announced, so storage stays bounded while the child keeps
  * writing.
  */
-class OutputCapture {
+export class OutputCapture {
   truncated = false;
   /** The disk or quota filled while recording events; capture stopped. */
   noSpace = false;
@@ -507,7 +493,9 @@ class OutputCapture {
         },
       });
     } catch (error: unknown) {
-      if (error !== NO_SPACE) {
+      // ENOSPC can also come from redacting in place: copy-on-write
+      // filesystems (APFS, btrfs) allocate new blocks for an overwrite.
+      if (!(error === NO_SPACE || isNoSpaceError(error))) {
         throw error;
       }
       this.truncated = true;

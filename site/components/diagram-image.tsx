@@ -1,4 +1,5 @@
 import defaultComponents from "fumadocs-ui/mdx";
+import Image from "next/image";
 import type { ComponentProps } from "react";
 
 const diagramSource = /^\/diagrams\/[a-f0-9]+\.(light|dark)\.svg$/;
@@ -18,15 +19,15 @@ export function DiagramImage(props: ComponentProps<"img">) {
   if (!variant) {
     return <DefaultImage {...props} />;
   }
+  // `unoptimized`: a static SVG must be served as it is, not rasterised.
   return (
-    // A plain <img>: a static SVG needs no optimisation and must not be rasterised.
-    <img
+    <Image
       alt={props.alt ?? ""}
       className={`diagram diagram-${variant}`}
-      height={props.height}
-      loading="lazy"
-      src={props.src}
-      width={props.width}
+      height={Number(props.height)}
+      src={String(props.src)}
+      unoptimized
+      width={Number(props.width)}
     />
   );
 }

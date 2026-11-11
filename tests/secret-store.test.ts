@@ -13,6 +13,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  listFileSecretStoreEntries,
   provisionEncryptedFileKey,
   resolveSecretStore,
   resolveSecretStoreDescriptor,
@@ -251,6 +252,84 @@ test("project config resolves encrypted_file paths relative to the repo root", a
   });
   expect(provisioned.keyPath).toBe(keyPath);
   await access(keyPath);
+});
+
+// HACK-2001: the cloud shim resolved relative paths against HOME while the
+// descriptor and the read-only listing resolved them against the project.
+test("cloud backend resolves relative encrypted_file paths against the repo root, not HOME", async () => {
+  // No env key and no keychain: the key can only come from the configured key file.
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  const projectRoot = join(tempDir, "repo");
+  const projectDir = join(projectRoot, ".hack");
+  const storePath = join(projectRoot, ".hack-secrets.enc.json");
+  const keyPath = join(projectRoot, ".hack-secrets-file.key");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    join(tempDir, "hack.config.json"),
+    `${JSON.stringify({}, null, 2)}\n`
+  );
+  await writeFile(
+    join(projectDir, "hack.config.json"),
+    `${JSON.stringify(
+      {
+        name: "repo-app",
+        controlPlane: {
+          secrets: {
+            backend: "cloud",
+            cloud: { provider: "aws", project: "synthetic" },
+            encryptedFile: {
+              path: ".hack-secrets.enc.json",
+              keyPath: ".hack-secrets-file.key",
+            },
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const provisioned = await provisionEncryptedFileKey({
+    projectDir,
+    storePath: ".hack-secrets.enc.json",
+    keyPath: ".hack-secrets-file.key",
+  });
+  expect(provisioned.keyPath).toBe(keyPath);
+
+  const store = await resolveSecretStore({
+    projectName: "repo-app",
+    projectDir,
+  });
+  expect(store.descriptor.backend).toBe("cloud");
+  expect(store.descriptor.location).toEndWith(`:${storePath}`);
+
+  await store.set({ key: "API_TOKEN", value: "cloud-relative-secret" });
+  expect(await store.get({ key: "API_TOKEN" })).toBe("cloud-relative-secret");
+
+  // The store and its key land in the project; HOME (tempDir) gets neither.
+  await access(storePath);
+  await expect(
+    access(join(tempDir, ".hack-secrets.enc.json"))
+  ).rejects.toThrow();
+  await expect(
+    access(join(tempDir, ".hack-secrets-file.key"))
+  ).rejects.toThrow();
+
+  // The read-only listing reads the same file the store wrote.
+  const listing = await listFileSecretStoreEntries({
+    projectName: "repo-app",
+    projectDir,
+  });
+  expect(listing.kind).toBe("listed");
+  expect(listing.storePath).toBe(storePath);
+  if (listing.kind === "listed") {
+    expect([...listing.ownEntries.keys()]).toEqual(["API_TOKEN"]);
+  }
 });
 
 test("encrypted_file backend returns recovery guidance when key material is missing", async () => {

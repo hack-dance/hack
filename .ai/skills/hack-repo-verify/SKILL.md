@@ -103,7 +103,7 @@ a deleted `HTTP_PROXY`-style key for `fetch` and `Bun.spawn` without `env`, and
 the guard reports that as `native env <KEY> changed`.
 
 For release workflow edits, run the pinned syntax/context check also enforced by CI:
-`mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml .github/workflows/bun-crash-experiment.yml`.
+`mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/release-prepare.yml .github/workflows/prerelease.yml .github/workflows/bun-crash-experiment.yml`.
 This validates event globs and reusable workflow contexts; Bun YAML parsing alone does not.
 
 `bun run privacy:check` scans Git-tracked files. Stage reviewed new source/tests

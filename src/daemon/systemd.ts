@@ -3,6 +3,7 @@ import {
   lstat,
   mkdir,
   readdir,
+  readlink,
   realpath,
   rm,
   stat,
@@ -1233,33 +1234,64 @@ export async function checkServiceExecutableTrusted(opts: {
   readonly uid?: number;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
-  let target: string;
   try {
-    target = await realpath(opts.path);
+    await realpath(opts.path);
   } catch (error: unknown) {
     return `${opts.path} could not be resolved: ${errorMessage(error)}`;
   }
-  const paths = [...new Set([resolve(opts.path), target])];
-  for (const path of paths) {
-    const chain = [path];
-    for (let dir = dirname(path); ; dir = dirname(dir)) {
-      chain.push(dir);
-      if (dir === dirname(dir)) {
-        break;
-      }
+  const hackHome = resolve(opts.hackHome);
+  // Every symlink hop, on the program or on any directory above it, adds
+  // its target's chain: whoever can write a directory holding any hop can
+  // redirect the program.
+  const pending = [resolve(opts.path)];
+  const seen = new Set<string>();
+  while (pending.length > 0) {
+    const path = pending.pop() as string;
+    if (seen.has(path)) {
+      continue;
     }
-    for (const entry of chain) {
-      const error = await checkServicePathEntry({
-        path: entry,
-        uid,
-        hackHome: resolve(opts.hackHome),
-      });
+    seen.add(path);
+    if (seen.size > MAX_SERVICE_PATH_HOPS) {
+      return `${SYSTEMD_UNIT_NAME} would run ${opts.path}, but its path has too many symlink hops to check`;
+    }
+    for (const entry of pathChain(path)) {
+      const hop = await readSymlinkHop(entry);
+      if (hop !== null) {
+        pending.push(hop);
+      }
+      const error = await checkServicePathEntry({ path: entry, uid, hackHome });
       if (error !== null) {
         return `${SYSTEMD_UNIT_NAME} would run ${opts.path}, but ${error}`;
       }
     }
   }
   return null;
+}
+
+const MAX_SERVICE_PATH_HOPS = 64;
+
+/** `path` and each directory above it, up to `/`. */
+function pathChain(path: string): string[] {
+  const chain = [path];
+  for (let dir = dirname(path); ; dir = dirname(dir)) {
+    chain.push(dir);
+    if (dir === dirname(dir)) {
+      return chain;
+    }
+  }
+}
+
+/** The absolute target of a symlink (one hop), or null when not a link. */
+async function readSymlinkHop(path: string): Promise<string | null> {
+  try {
+    const info = await lstat(path);
+    if (!info.isSymbolicLink()) {
+      return null;
+    }
+    return resolve(dirname(path), await readlink(path));
+  } catch {
+    return null;
+  }
 }
 
 async function checkServicePathEntry(opts: {
@@ -1274,8 +1306,8 @@ async function checkServicePathEntry(opts: {
     return `${opts.path} could not be inspected: ${errorMessage(error)}`;
   }
   if (info.isSymbolicLink()) {
-    // The link itself cannot be rewritten in place; its directory is
-    // checked, and the target is checked separately.
+    // A link cannot be rewritten in place: its directory is checked, and
+    // its target's chain is followed as another hop.
     return null;
   }
   if (opts.uid >= 0 && info.uid !== opts.uid && info.uid !== 0) {

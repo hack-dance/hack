@@ -1666,3 +1666,46 @@ test("install refuses a program in a directory others can write and writes no un
   expect(await Bun.file(unitPath).exists()).toBe(false);
   expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
 });
+
+test("every symlink hop of the service program is checked, not just the ends", async () => {
+  // Codex review: stable/hack -> shared/hack -> <program>, with `shared`
+  // world-writable, passed because neither end's chain included it.
+  const hackHome = join(root, ".hack");
+  const shared = join(root, "shared");
+  await mkdir(shared);
+  await chmod(shared, 0o777);
+  await symlink(program, join(shared, "hack"));
+  const stable = join(root, "stable");
+  await mkdir(stable);
+  await chmod(stable, 0o755);
+  await symlink(join(shared, "hack"), join(stable, "hack"));
+  expect(
+    await checkServiceExecutableTrusted({
+      path: join(stable, "hack"),
+      hackHome,
+    })
+  ).toContain(shared);
+
+  // A hop through a symlinked directory: linked -> shared-dirs (writable),
+  // whose `bin` links to the program's directory.
+  const sharedDirs = join(root, "shared-dirs");
+  await mkdir(sharedDirs);
+  await chmod(sharedDirs, 0o777);
+  await symlink(join(root, "bin"), join(sharedDirs, "bin"));
+  await symlink(sharedDirs, join(root, "linked"));
+  expect(
+    await checkServiceExecutableTrusted({
+      path: join(root, "linked", "bin", "hack"),
+      hackHome,
+    })
+  ).toContain(sharedDirs);
+
+  // The same chain through protected directories passes.
+  await chmod(shared, 0o755);
+  expect(
+    await checkServiceExecutableTrusted({
+      path: join(stable, "hack"),
+      hackHome,
+    })
+  ).toBeNull();
+});

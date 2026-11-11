@@ -272,7 +272,23 @@ try {
       operation: "release",
       identity,
     });
-  return { home, binding, sockets, start, acquire, clean, release };
+  /** Waits until this fixture's owner has finished its own cleanup and exited. */
+  const helperExited = async () =>
+    untilExited(
+      await until(async () =>
+        helperPid(await readFile(join(home, "helper-pid"), "utf8"))
+      )
+    );
+  return {
+    home,
+    binding,
+    sockets,
+    start,
+    acquire,
+    clean,
+    release,
+    helperExited,
+  };
 }
 
 /** Historical recovery exercises only private files; neither owner is spawned. */
@@ -741,11 +757,7 @@ test("child exit during startup never publishes a reusable running endpoint", as
   });
   // "close" is logged while the listener and its temporary socket directory
   // are still being retired; the owner exits only once that has finished.
-  await untilExited(
-    await until(async () =>
-      helperPid(await readFile(join(f.home, "helper-pid"), "utf8"))
-    )
-  );
+  await f.helperExited();
   await expect(
     lstat(join(nativeHttpsOwnerRoot(f.home), "endpoint.json"))
   ).rejects.toThrow();
@@ -1022,6 +1034,8 @@ test("detached startup failure reports only its generation-bound diagnostic and 
     diagnostic
   );
   await expect(readFile(join(root, "endpoint.json"))).rejects.toThrow();
+  // The failure is recorded before the owner removes its temporary socket directory.
+  await f.helperExited();
 });
 
 test("helper exit without a failure receipt remains unknown and cannot authorize recovery", async () => {

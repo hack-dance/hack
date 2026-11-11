@@ -43,6 +43,7 @@ shift
 case "$1" in
   show)
     if [ "$2" = "--property=Version" ]; then echo "Version=255"; exit 0; fi
+    if [ "$2" = "--property=UnitPath" ]; then echo "UnitPath=$XDG_CONFIG_HOME/systemd/user"; exit 0; fi
     if [ -f "$unit" ]; then echo LoadState=loaded; echo "FragmentPath=$unit"; else echo LoadState=not-found; fi
     echo DropInPaths=
     if [ -f "$state/enabled" ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi

@@ -463,7 +463,10 @@ it starts or restarts the unit, Hack asks systemd which files it loads
 (`FragmentPath` and `DropInPaths`, which cover every user-unit load directory,
 `$XDG_DATA_HOME` included): the fragment must be the unit Hack manages, and
 every drop-in and its directory must belong to you or root and not be writable
-by others. The program the unit runs gets the same check when you install the
+by others. Every directory systemd loads user units from (its `UnitPath`) gets
+the same check, even when it is empty or does not exist yet (then its nearest
+existing parent is checked), because another account that can write one could
+add a drop-in for the next login. The program the unit runs gets the same check when you install the
 unit and before each start: the `hack` binary, the file it resolves to, and every
 directory above them must belong to you or root and not be writable by your
 group or others (sticky directories such as `/tmp` excepted). Inside your

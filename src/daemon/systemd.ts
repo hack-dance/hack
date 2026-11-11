@@ -915,9 +915,12 @@ export async function installSystemdUnit(opts: {
   if (!secured.ok) {
     return { ok: false, error: secured.error };
   }
+  // After Hack's own directories are secured: the config unit directory is
+  // one of the load paths.
   const dropIns =
     (await checkSystemdUnitDirectoryChain({ unitPath: opts.unitPath })) ??
-    (await checkSystemdUnitDropIns({ unitPath: opts.unitPath }));
+    (await checkSystemdUnitDropIns({ unitPath: opts.unitPath })) ??
+    (await checkSystemdUnitLoadPaths({ deps: opts.deps }));
   if (dropIns !== null) {
     return { ok: false, error: dropIns };
   }
@@ -1092,6 +1095,7 @@ export async function checkSystemdUnitDropIns(opts: {
 async function checkDropInEntries(opts: {
   readonly dir: string;
   readonly uid: number;
+  readonly allowRoot?: boolean;
 }): Promise<string | null> {
   let entries: string[];
   try {
@@ -1104,6 +1108,7 @@ async function checkDropInEntries(opts: {
       path: resolve(opts.dir, entry),
       uid: opts.uid,
       directory: false,
+      allowRoot: opts.allowRoot,
     });
     if (error !== null) {
       return error;
@@ -1204,6 +1209,10 @@ export async function checkSystemdLoadedUnitPaths(opts: {
   readonly uid?: number;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const loadPaths = await checkSystemdUnitLoadPaths({ deps: opts.deps, uid });
+  if (loadPaths !== null) {
+    return loadPaths;
+  }
   const show = await opts.deps.run("systemctl", [
     "--user",
     "--no-pager",
@@ -1381,6 +1390,82 @@ async function checkServicePathEntry(opts: {
     }
   }
   return `${opts.path} is writable by other users (mode ${(info.mode & 0o777).toString(8)}); run: chmod go-w ${opts.path}`;
+}
+
+/**
+ * Every directory the user manager loads units from (`UnitPath`:
+ * `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, runtime and system directories)
+ * must not be writable by another account, now or later (HACK-2052): one
+ * that can add `hackd.service.d/override.conf` to any of them replaces
+ * `ExecStart` at the next login. For each directory, the nearest one that
+ * exists (so nobody else can create a missing one) gets the chain check of
+ * {@link checkReplaceableChain}, and drop-ins already in it must belong to
+ * this user or root and not be writable by others. Unknown (systemctl
+ * fails or reports no path) is refused.
+ */
+export async function checkSystemdUnitLoadPaths(opts: {
+  readonly deps: SystemdDeps;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    "--property=UnitPath",
+  ]);
+  const paths =
+    show.exitCode === 0
+      ? (parseSystemdProperties(show.stdout).UnitPath ?? "")
+          .split(WHITESPACE)
+          .filter((path) => isAbsolute(path))
+      : [];
+  if (paths.length === 0) {
+    return `Not using ${SYSTEMD_UNIT_NAME}: systemd did not report where it loads user units from (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`;
+  }
+  for (const path of paths) {
+    const error = await checkUnitLoadDirectory({ path, uid });
+    if (error !== null) {
+      return `Not using ${SYSTEMD_UNIT_NAME}: in user unit directory ${path}, ${error}`;
+    }
+  }
+  return null;
+}
+
+async function checkUnitLoadDirectory(opts: {
+  readonly path: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  let existing = resolve(opts.path);
+  while (!(await pathExists(existing)) && existing !== dirname(existing)) {
+    existing = dirname(existing);
+  }
+  const chain = await checkReplaceableChain({
+    path: existing,
+    uid: opts.uid,
+    hackHome: null,
+  });
+  if (chain !== null || existing !== resolve(opts.path)) {
+    return chain;
+  }
+  for (const name of [`${SYSTEMD_UNIT_NAME}.d`, "service.d"]) {
+    const dir = resolve(existing, name);
+    if (!(await pathExists(dir))) {
+      continue;
+    }
+    const error =
+      (await checkReplaceableChain({
+        path: dir,
+        uid: opts.uid,
+        hackHome: null,
+      })) ??
+      (await checkDropInEntries({ dir, uid: opts.uid, allowRoot: true }));
+    if (error !== null) {
+      return error;
+    }
+  }
+  return null;
 }
 
 function errorMessage(error: unknown): string {

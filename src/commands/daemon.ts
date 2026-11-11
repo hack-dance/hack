@@ -27,6 +27,12 @@ import {
 } from "../daemon/process.ts";
 import { runDaemon } from "../daemon/server.ts";
 import {
+  type DaemonServiceSummary,
+  serviceSummaryJson,
+  summarizeLaunchdService,
+} from "../daemon/service-summary.ts";
+import { spawnDetachedDaemon } from "../daemon/spawn.ts";
+import {
   buildDaemonRepairMessage,
   buildDaemonStatusReport,
   type DaemonStatusReport,
@@ -41,6 +47,13 @@ import {
   detectDockerBackend,
 } from "../lib/runtime-guidance.ts";
 import { logger } from "../ui/logger.ts";
+import {
+  installDaemonSystemdService,
+  resolveSystemdSummary,
+  startViaSystemdIfInstalled,
+  stopViaSystemdIfOwned,
+  uninstallDaemonSystemdService,
+} from "./daemon-systemd.ts";
 
 const optForeground = defineOption({
   name: "foreground",
@@ -116,33 +129,34 @@ const optRunAtLoad = defineOption({
   name: "run-at-load",
   type: "boolean",
   long: "--run-at-load",
-  description: "Start hackd automatically on login",
+  description: "Start hackd automatically on login (macOS launchd)",
 } as const);
 
 const optNoRunAtLoad = defineOption({
   name: "no-run-at-load",
   type: "boolean",
   long: "--no-run-at-load",
-  description: "Do not start hackd automatically on login",
+  description: "Do not start hackd automatically on login (macOS launchd)",
 } as const);
 
 const optGuiOnly = defineOption({
   name: "gui-only",
   type: "boolean",
   long: "--gui-only",
-  description: "Only run in GUI sessions (default)",
+  description: "Only run in GUI sessions (macOS launchd; default)",
 } as const);
 
 const optNoGuiOnly = defineOption({
   name: "no-gui-only",
   type: "boolean",
   long: "--no-gui-only",
-  description: "Run in all session types (including SSH)",
+  description: "Run in all session types, including SSH (macOS launchd)",
 } as const);
 
 const installSpec = defineCommand({
   name: "install",
-  summary: "Install hackd as a launchd service (macOS)",
+  summary:
+    "Install hackd as a login service (launchd on macOS, systemd user unit on Linux)",
   group: "Diagnostics",
   options: [optRunAtLoad, optNoRunAtLoad, optGuiOnly, optNoGuiOnly] as const,
   positionals: [],
@@ -151,7 +165,7 @@ const installSpec = defineCommand({
 
 const uninstallSpec = defineCommand({
   name: "uninstall",
-  summary: "Uninstall hackd launchd service (macOS)",
+  summary: "Uninstall the hackd login service (launchd or systemd)",
   group: "Diagnostics",
   options: [],
   positionals: [],
@@ -308,14 +322,40 @@ async function handleDaemonStart({
     return 1;
   }
 
+  // Same rule on Linux: an installed hackd.service owns the daemon.
+  if (process.platform === "linux") {
+    const viaSystemd = await startViaSystemdIfInstalled({
+      paths,
+      waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+    });
+    if (viaSystemd !== null) {
+      return viaSystemd;
+    }
+  }
+
+  return await startDaemonDetached({ paths });
+}
+
+/**
+ * Starts `hack daemon start --foreground` in its own session and process
+ * group (see {@link spawnDetachedDaemon}), so it survives the shell, agent
+ * or process group that ran `hack daemon start` (HACK-2052). hackd writes
+ * its own log file; its stdio is not connected to the caller.
+ */
+async function startDaemonDetached(opts: {
+  readonly paths: DaemonPaths;
+}): Promise<number> {
+  const { paths } = opts;
   const invocation = await resolveHackInvocation();
-  const cmd = [...invocation.args, "daemon", "start", "--foreground"];
-  const proc = Bun.spawn([invocation.bin, ...cmd], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
+  spawnDetachedDaemon({
+    argv: [
+      invocation.bin,
+      ...invocation.args,
+      "daemon",
+      "start",
+      "--foreground",
+    ],
   });
-  proc.unref();
 
   const started = await waitForDaemonStart({ paths });
   if (!started) {
@@ -375,10 +415,15 @@ async function handleDaemonStop({
     return 0;
   }
 
-  process.kill(status.pid, "SIGTERM");
+  const stoppedBySystemd =
+    process.platform === "linux" &&
+    (await stopViaSystemdIfOwned({ pid: status.pid }));
+  if (!stoppedBySystemd) {
+    process.kill(status.pid, "SIGTERM");
+  }
   const exited = await waitForProcessExit({
     pid: status.pid,
-    timeoutMs: 2000,
+    timeoutMs: stoppedBySystemd ? 5000 : 2000,
     pollMs: 200,
   });
   if (!exited) {
@@ -403,6 +448,7 @@ async function handleDaemonStatus({
     socketExists: status.socketExists,
     paths,
   });
+  const launchdStatus = await resolveLaunchdStatus({ paths });
   const report = buildDaemonStatusReport({
     pid: status.pid,
     processRunning: status.running,
@@ -410,8 +456,15 @@ async function handleDaemonStatus({
     logExists: status.logExists,
     apiReachable: api.reachable,
     apiCompatible: api.compatible,
+    serviceLoaded: launchdStatus?.loaded === true,
   });
-  const launchdStatus = await resolveLaunchdStatus({ paths });
+  const service = launchdStatus
+    ? summarizeLaunchdService({
+        status: launchdStatus,
+        daemonPid: status.pid,
+        daemonRunning: status.running,
+      })
+    : await resolveSystemdSummary({ paths });
   const dockerBackend = await detectDockerBackend();
   const dockerStatus = await buildDockerStatusProbe();
 
@@ -420,6 +473,7 @@ async function handleDaemonStatus({
       report,
       paths,
       launchdStatus,
+      service,
     });
     return report.status === "running" ? 0 : 1;
   }
@@ -427,6 +481,7 @@ async function handleDaemonStatus({
   return reportDaemonStatus({
     report,
     launchdStatus,
+    service,
     dockerBackendName: dockerBackend?.name ?? null,
     dockerReachable: dockerStatus.reachable,
   });
@@ -459,6 +514,7 @@ function outputDaemonStatusJson(opts: {
   readonly report: DaemonStatusReport;
   readonly paths: DaemonPaths;
   readonly launchdStatus: LaunchdServiceStatus | null;
+  readonly service: DaemonServiceSummary | null;
 }): void {
   const payload = {
     status: opts.report.status,
@@ -476,6 +532,8 @@ function outputDaemonStatusJson(opts: {
     socket_exists: opts.report.socketExists,
     log_path: opts.paths.logPath,
     log_exists: opts.report.logExists,
+    managed_by: opts.service?.ownsDaemon ? opts.service.manager : null,
+    service: serviceSummaryJson(opts.service),
     launchd: opts.launchdStatus
       ? {
           installed: opts.launchdStatus.installed,
@@ -493,6 +551,7 @@ function outputDaemonStatusJson(opts: {
 function reportDaemonStatus(opts: {
   readonly report: DaemonStatusReport;
   readonly launchdStatus: LaunchdServiceStatus | null;
+  readonly service: DaemonServiceSummary | null;
   readonly dockerBackendName: string | null;
   readonly dockerReachable: boolean;
 }): number {
@@ -502,6 +561,7 @@ function reportDaemonStatus(opts: {
       message: `hackd running (pid ${report.pid ?? "unknown"})`,
     });
     logLaunchdStatus({ launchdStatus, running: true });
+    logSystemdStatus({ service: opts.service });
     return 0;
   }
 
@@ -529,7 +589,29 @@ function reportDaemonStatus(opts: {
     }),
   });
   logLaunchdStatus({ launchdStatus, running: false });
+  logSystemdStatus({ service: opts.service });
   return 1;
+}
+
+/**
+ * Linux only: one line naming who manages hackd and, when something is
+ * wrong, the same `next_step` that `status --json` reports under `service`.
+ */
+function logSystemdStatus(opts: {
+  readonly service: DaemonServiceSummary | null;
+}): void {
+  const { service } = opts;
+  if (service?.manager !== "systemd") {
+    return;
+  }
+  const owner = service.ownsDaemon ? " (manages this hackd)" : "";
+  const fix = service.nextStep ? ` | Run: ${service.nextStep}` : "";
+  const message = `  systemd: ${service.summary}${owner}${fix}`;
+  if (service.severity === "warn") {
+    logger.warn({ message });
+  } else {
+    logger.info({ message });
+  }
 }
 
 function logLaunchdStatus(opts: {
@@ -685,8 +767,25 @@ async function handleDaemonInstall({
   readonly ctx: CliContext;
   readonly args: DaemonInstallArgs;
 }): Promise<number> {
+  if (process.platform === "linux") {
+    const paths = resolveDaemonPaths({});
+    return await installDaemonSystemdService({
+      paths,
+      ignoredOptions: (
+        ["run-at-load", "no-run-at-load", "gui-only", "no-gui-only"] as const
+      )
+        .filter((name) => args.options[name] === true)
+        .map((name) => `--${name}`),
+      startDetached: () => startDaemonDetached({ paths }),
+      stopDirect: (pid) => stopDaemonProcess({ pid, paths }),
+      waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+    });
+  }
   if (process.platform !== "darwin") {
-    logger.warn({ message: "launchd integration is only available on macOS" });
+    logger.warn({
+      message:
+        "hack daemon install supports launchd (macOS) and systemd (Linux) only",
+    });
     return 1;
   }
   assertLaunchdAccess();
@@ -819,8 +918,14 @@ async function handleDaemonUninstall({
   readonly ctx: CliContext;
   readonly args: DaemonUninstallArgs;
 }): Promise<number> {
+  if (process.platform === "linux") {
+    return await uninstallDaemonSystemdService({});
+  }
   if (process.platform !== "darwin") {
-    logger.warn({ message: "launchd integration is only available on macOS" });
+    logger.warn({
+      message:
+        "hack daemon uninstall supports launchd (macOS) and systemd (Linux) only",
+    });
     return 1;
   }
   assertLaunchdAccess();

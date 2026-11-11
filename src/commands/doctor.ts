@@ -97,6 +97,11 @@ import {
   composeBackendCheckResult,
 } from "../lib/doctor-compose-backend.ts";
 import {
+  buildDaemonServiceCheck,
+  DAEMON_SERVICE_CHECK,
+  decideDaemonServiceFix,
+} from "../lib/doctor-daemon-service.ts";
+import {
   describeEnvKeyInspection,
   type EnvKeyInspection,
   gitIsLocalKeyIgnored,
@@ -198,7 +203,7 @@ import {
   type NativeProcessReport,
   nativeProcessCheckFromCompose,
 } from "../lib/native-process-wrappers.ts";
-import { isMac } from "../lib/os.ts";
+import { isLinux, isMac } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -258,6 +263,7 @@ import {
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
+import { resolveSystemdSummary } from "./daemon-systemd.ts";
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
@@ -456,6 +462,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       `network:${DEFAULT_INGRESS_NETWORK} subnet`,
       "global files",
       "daemon",
+      DAEMON_SERVICE_CHECK,
       "gateway config",
       "gateway tokens",
       "grafana",
@@ -766,6 +773,21 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   // Global files
   results.push(await runCheck(s, "global files", () => checkGlobalFiles()));
   results.push(await runCheck(s, "daemon", () => checkDaemonStatus()));
+  if (isLinux()) {
+    // The row is omitted when systemd management is disabled for this
+    // process (isolated HACK_HOME, HACK_SYSTEMD_DISABLE=1); a failure to
+    // read it is reported, not thrown.
+    const serviceCheck = await resolveSystemdSummary({
+      paths: resolveDaemonPaths({}),
+    }).then(buildDaemonServiceCheck, (error: unknown) => ({
+      name: DAEMON_SERVICE_CHECK,
+      status: "warn" as const,
+      message: `Could not read the hackd systemd service: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+    if (serviceCheck) {
+      results.push(await runCheck(s, DAEMON_SERVICE_CHECK, () => serviceCheck));
+    }
+  }
   results.push(await runCheck(s, "gateway config", () => checkGatewayConfig()));
   results.push(await runCheck(s, "gateway tokens", () => checkGatewayTokens()));
 
@@ -3898,6 +3920,7 @@ async function runDoctorFix(opts: {
     await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
+  await maybeInstallDaemonService();
   await maybeRepairHackd();
   // Env migration changes project files only, so it runs before the Docker
   // gate: an unreachable Docker never skips a requested migration.
@@ -5047,6 +5070,45 @@ async function maybeRepairHackd(): Promise<void> {
   });
   if (okStart) {
     await runHackSubcommand({ args: ["daemon", "start"] });
+  }
+}
+
+/**
+ * Linux `--fix`: offer `hack daemon install` when the hackd systemd unit is
+ * missing, drifted or disabled ({@link decideDaemonServiceFix}). It writes
+ * under `~/.config/systemd/user` and enables a login service, so it is a
+ * destructive step: confirmed interactively, skipped and listed without a
+ * TTY. Linger is reported by the check but never changed.
+ */
+async function maybeInstallDaemonService(): Promise<void> {
+  if (!isLinux()) {
+    return;
+  }
+  const decision = decideDaemonServiceFix({
+    summary: await resolveSystemdSummary({ paths: resolveDaemonPaths({}) }),
+    autostart: resolveDaemonAutostartAccess(),
+  });
+  if (decision.kind === "none") {
+    return;
+  }
+  if (decision.kind === "skip") {
+    note(
+      [
+        `Skipped the hackd systemd service install: ${decision.reason}`,
+        `To install it yourself, run: ${decision.command}`,
+      ].join("\n"),
+      "doctor fix"
+    );
+    return;
+  }
+  const ok = await doctorConfirm({
+    message:
+      "Install hackd as a systemd user service (hack daemon install)?\nIt writes ~/.config/systemd/user/hackd.service and starts hackd at login.",
+    initialValue: true,
+    destructive: true,
+  });
+  if (ok) {
+    await runHackSubcommand({ args: ["daemon", "install"] });
   }
 }
 

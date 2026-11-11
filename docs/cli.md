@@ -22,7 +22,7 @@ terminal).
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
-- `hack daemon` — optional local daemon for faster JSON project status
+- `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` keeps it running across logout and reboot (launchd on macOS, a systemd user unit on Linux)
 - `hack agent onboard` — print an onboarding prompt for an existing project
 - Optional agent interfaces — the [`hack` plugin, its skills and the separate MCP server](integrations.md)
 
@@ -710,6 +710,10 @@ A non-default `HACK_HOME` disables hackd launchd management, host-trust launchd
 environment registration, and native DNS launchd inspection/restarts. Set
 `HACK_LAUNCHD_ALLOW_ISOLATED_HOME=1` to opt in to these host-wide effects.
 `HACK_LAUNCHD_DISABLE=1` always disables launchd access, including with that opt-in.
+On Linux a non-default `HACK_HOME` likewise disables management of the `hackd.service`
+systemd user unit (opt in with `HACK_SYSTEMD_ALLOW_ISOLATED_HOME=1`), and
+`HACK_SYSTEMD_DISABLE=1` always disables it. See
+[Keeping hackd running](architecture.md#keeping-hackd-running).
 
 ## Lifecycle
 

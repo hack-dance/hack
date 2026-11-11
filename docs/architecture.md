@@ -368,6 +368,61 @@ never autostart it either, because autostart would run the stable daemon on PATH
 command to run yourself. On macOS the launchd service belongs to the default
 `~/.hack` root only; an isolated `HACK_HOME` runs hackd directly.
 
+### Keeping hackd running
+
+`hack daemon start` runs hackd in its own session and process group, with its
+output going only to `~/.hack/daemon/hackd.log`. Closing the terminal, or an agent
+harness killing the process group that ran the command, does not stop it. It does
+not survive logout or reboot. For that, install it as a login service with
+`hack daemon install`:
+
+- **macOS**: a launchd agent (`~/Library/LaunchAgents/dance.hack.hackd.plist`).
+- **Linux**: a systemd user unit, `hackd.service`, written to
+  `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`, enabled for `default.target` and
+  started with `systemctl --user`. `hack daemon uninstall` stops, disables and
+  removes it.
+
+On Linux, once the unit is installed, `hack daemon start` and `hack daemon stop`
+go through `systemctl --user`, so a single manager owns the socket and pid file.
+`install` stops a hackd that was started directly and lets systemd start it. The
+unit:
+
+- runs `<hack> daemon start --foreground`, where `<hack>` is the absolute path of
+  the `hack` found on `PATH` at install time. Symlinks are kept as they are, so a
+  stable link such as `~/.local/bin/hack` keeps working when an upgrade moves the
+  real binary;
+- restarts hackd after a crash (`Restart=on-failure`), but not after
+  `hack daemon stop`;
+- sends stderr to the journal (`journalctl --user -u hackd.service`); hackd's own
+  log stays in `~/.hack/daemon/hackd.log`.
+
+Hack owns the whole unit file. Put local settings, such as `DOCKER_HOST` for
+rootless Docker, in a drop-in (`systemctl --user edit hackd`). If the recorded
+program no longer exists, `hack daemon start` rewrites the unit. Any other
+difference shows up as drift in `hack daemon status` and `hack doctor`, and
+`hack daemon install` fixes it.
+
+A systemd user manager runs only while you have a login session, unless linger is
+on. `hack daemon install` and `hack daemon status` report linger. When it is off,
+they print the command, `loginctl enable-linger`, which keeps your user services
+running without a session and starts them at boot. Hack never turns linger on for
+you.
+
+Where `systemctl --user` cannot be used (no systemd, a container, WSL without
+systemd, or an SSH session with no user bus), `hack daemon install` explains why,
+writes nothing, starts hackd directly instead and exits 1.
+
+`hack daemon status` reports who manages hackd: `managed_by` (`launchd`,
+`systemd` or `null`) and a `service` object in `--json`, and a `systemd:` line in
+the text output on Linux. The text and JSON give the same next step. On Linux,
+`hack doctor` adds a `daemon service` check that warns when the unit is missing,
+has drifted, is disabled, or linger is off. `hack doctor --fix` offers
+`hack daemon install` only interactively, because it writes outside the project
+and enables a login service. It skips the install without a TTY, and also skips it
+under the same conditions that skip the hackd repair. The unit belongs to the
+default `~/.hack` root: an isolated `HACK_HOME` or `HACK_SYSTEMD_DISABLE=1` turns
+systemd management off (`HACK_SYSTEMD_ALLOW_ISOLATED_HOME=1` opts in).
+
 ## Native backend internals
 
 The native backend is built around explicit ownership: every run has one owner,

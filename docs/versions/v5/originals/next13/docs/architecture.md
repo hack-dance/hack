@@ -105,8 +105,8 @@ plans the project through the config compiler, and runs workloads under a
 foreground owner process that holds the run until it is stopped. Its supported
 commands are whole-project `up` and `restart`, owner-mediated `down`, saved-run
 `ps`, finite `logs`, and noninteractive `exec` and `run`. See
-[the native backend guide](../guides/native-candidate.md) and
-[native authored commands](../reference/native-authored-commands.md). A Compose flag
+[the native backend guide](guides/native-candidate.md) and
+[native authored commands](reference/native-authored-commands.md). A Compose flag
 in these docs does not imply native support.
 
 ## Global vs project scope
@@ -134,7 +134,7 @@ in these docs does not imply native support.
 `hack up` and `hack down` run more than Compose. Hooks and managed host processes
 declared in `.hack/hack.config.json` run around the services, inside a dedicated
 tmux or zellij session that Hack owns and can tear down. The exact ordering is in
-[Lifecycle](../lifecycle.md).
+[Lifecycle](lifecycle.md).
 
 ```mermaid
 ---
@@ -178,7 +178,7 @@ session still proves ownership, and `hack doctor --fix` removes a stale session
 only when its instance is absent and a second check agrees. Fixed-port helpers
 such as database or SSM tunnels can declare a `singleton` listener set so Hack
 reuses an equivalent helper instead of starting a competing one; see
-[shared host helper lifecycle](../reference/shared-host-lifecycle.md).
+[shared host helper lifecycle](reference/shared-host-lifecycle.md).
 
 ## Environment and secrets
 
@@ -218,7 +218,7 @@ flowchart LR
 Later layers win. The primary-checkout layers apply only in a linked git worktree,
 which also inherits the primary checkout's secret key through the shared git
 directory. `HACK_ENV_SECRET_KEY` covers CI and other detached environments.
-[Environment and secrets](../env.md) covers the file format, delivery matrix,
+[Environment and secrets](env.md) covers the file format, delivery matrix,
 rotation and the external secret-store backends.
 
 ## Internal DNS and TLS
@@ -302,7 +302,7 @@ flowchart LR
 ```
 
 `hack doctor` checks linked checkouts for divergent secret keys and `dev_host`
-collisions. See [Worktrees and watchers](../guides/development-runtime-safety.md).
+collisions. See [Worktrees and watchers](guides/development-runtime-safety.md).
 
 ## Logging pipeline
 
@@ -374,7 +374,7 @@ The native backend is built around explicit ownership: every run has one owner,
 every resource it creates is recorded before it can outlive the frontend, and
 cleanup is confirmed rather than assumed. These rules are checked against finite
 TLA+ models under `tests/models/tla/`; the charts below are drawn from those
-specifications, and [the model coverage map](../reference/v5-model-coverage.md)
+specifications, and [the model coverage map](reference/v5-model-coverage.md)
 records what each model does and does not prove.
 
 ### Foreground startup owner
@@ -542,4 +542,4 @@ qualify the installed binary, real filesystems or an application.
 Remote, gateway, node and dispatch code, the extension dispatcher and the macOS
 app remain in the repository for explicit maintenance. They are outside the
 supported local CLI and are hidden from default help. See
-[unsupported retained surfaces](../extensions.md).
+[unsupported retained surfaces](extensions.md).

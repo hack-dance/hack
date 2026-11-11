@@ -122,7 +122,9 @@ order:
 3. The end of `stderr`, past its first 16 KiB, which step 2 cannot take.
 
 A payload that was cut has `outputTruncated: true`, and its `stderr` ends with a
-fixed line saying to use the CLI for full output. A cut never splits a code point.
+fixed line saying to use the CLI for full output. For the log tools, that line
+first suggests narrowing the request with `tail`, `since`, `until` or `service`.
+A cut never splits a code point.
 `ok` and `exitCode` still describe the command, so a command that succeeded stays
 `ok` with `data` omitted. Run the equivalent CLI command when full output is needed.
 

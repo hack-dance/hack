@@ -4,12 +4,21 @@ import { YAML } from "bun";
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { pathExists, readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
-import { exec } from "./shell.ts";
+import { exec, findExecutableInPath } from "./shell.ts";
 
 const GLOBAL_CADDY_PROJECT = "hack-dev-proxy";
 const IPV4_PATTERN = /^\d{1,3}(\.\d{1,3}){3}$/;
 
+/**
+ * The global Caddy container's ingress address, or null when it cannot be
+ * read. A missing `docker` executable is one of those cases (HACK-2046):
+ * spawning it throws instead of exiting non-zero, and callers such as
+ * `hack status` print this address as an optional detail.
+ */
 export async function resolveGlobalCaddyIp(): Promise<string | null> {
+  if (!findExecutableInPath("docker")) {
+    return null;
+  }
   const ps = await exec(
     [
       "docker",

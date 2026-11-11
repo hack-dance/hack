@@ -50,16 +50,28 @@ version-private homes. To run the prerelease CLI on Compose against your
 ordinary Hack home:
 
 ```sh
-HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" --version
+export HACK_RUNTIME_BACKEND=compose
+"$HOME/.hack-next/bin/hack-next" --version
 ```
+
+The export applies to every later `hack-next` command in that shell. A one-off
+`HACK_RUNTIME_BACKEND=compose` prefix selects Compose for that command only; the
+next command without it runs native again. Unset the variable before native testing.
 
 On Compose, the prerelease shares project state with stable v4. Do not run both
 against the same home at the same time, including their daemons. The
 [candidate install guide](../guides/candidate-install.md#test-both-backends) gives
 the exact order: stop the stable daemon first, then run the prerelease.
 
-The rest of these docs write `hack` for the v5 CLI. During the prerelease, read
-that as `"$HOME/.hack-next/bin/hack-next"` with the backend selected as above.
+The rest of these docs write `hack` for the v5 CLI. During the prerelease, in the
+shell where you exported the backend, run the examples through the launcher:
+
+```sh
+hack() { "$HOME/.hack-next/bin/hack-next" "$@"; }
+```
+
+This shell function lasts for the session and does not touch your PATH or the
+stable `hack` executable in other shells.
 
 ## Set up local routing
 

@@ -452,12 +452,13 @@ function launcherEnv(): Record<string, string> {
   return withoutBunRuntimeEnv(process.env);
 }
 
-const BUN_RUNTIME_ENV = /^(BUN_OPTIONS|BUN_CONFIG_.*|BUN_INSPECT.*)$/;
+const BUN_RUNTIME_ENV =
+  /^(BUN_OPTIONS|BUN_BE_BUN|BUN_CONFIG_.*|BUN_INSPECT.*)$/;
 
 /**
  * An environment for re-executing this Bun-compiled binary (the supervisor,
  * the native backend's `hack` child): Bun runtime settings (`BUN_OPTIONS`,
- * `BUN_CONFIG_*`, `BUN_INSPECT*`) are removed, so neither a project nor a
+ * `BUN_BE_BUN`, `BUN_CONFIG_*`, `BUN_INSPECT*`) are removed, so neither a project nor a
  * value that reached this process can make the runtime preload code.
  */
 export function withoutBunRuntimeEnv(

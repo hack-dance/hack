@@ -50,7 +50,8 @@ with `--detach`:
 The command runs with stdin closed and no terminal. A command that reads stdin
 sees end of file at once, and a prompt that opens the terminal fails, so neither
 can hang in the background. Input redirected from a file into
-`hack exec --detach` is refused, because the command would never see it.
+`hack exec --detach` is refused, because the command would never see it. Input
+piped into it is not forwarded either; Hack does not read the pipe to check.
 
 Limits: 4 active background commands per caller session (one terminal session,
 or one MCP session) and 16 per Hack home. Over a limit, start fails with
@@ -108,11 +109,10 @@ and status lines go to stderr. `--follow` keeps reading until the command ends.
 `unknown` is never reported as success or as an inferred failure, and nothing is
 ever re-run automatically.
 
-`hack down` (or a container restart) while a background `exec` runs stops the
+`hack down` or a container restart while a background `exec` runs stops the
 container under the `docker compose exec` client. The client then exits with
-Docker's status, and the command ends `failed` with that exit code (typically
-137). For `run`, `hack down` removes the one-off container as well, with the
-same result. Hack does not reclassify these ends.
+Docker's status, and the command ends `failed` with that exit code (137 in the
+end-to-end test for both cases). Hack does not reclassify these ends.
 
 ## Stalls
 
@@ -158,8 +158,10 @@ stderr are appended by the kernel to files; they do not pass through the
 supervisor. If the supervisor dies, the command keeps running and writing, and
 the next read takes over: it announces the output that landed (marked
 `unsupervised: true`) and, once the command is gone, writes the single final
-record with outcome `unknown`. A sandbox that kills by cgroup kills both; that
-also ends as `unknown`.
+record with outcome `unknown`. If the command is still running past its timeout
+with no supervisor, the next read stops its process group (only after checking
+its pid, start time and group) and records `timed_out`. A sandbox that kills by
+cgroup kills both; that also ends as `unknown`.
 
 ## Stored output, retention and redaction
 
@@ -186,7 +188,10 @@ A per-call flag wins over the project default, which wins over the global one.
 
 **Redaction is partial.** Before output is announced, Hack replaces values it
 had already resolved to inject into that command's Compose environment (6 bytes
-or longer) with `*`. It matches across separate writes, so a value split between
+or longer) with `*`, in place in the stored file. The command writes to the
+file directly, so a value is on disk unredacted until the supervisor's next
+scan (about 200 ms), and the start of a value stays unredacted until the rest
+arrives or the command ends. It matches across separate writes, so a value split between
 two writes is still caught. It does not catch values Hack did not inject, values
 the command transforms (encodes, splits across lines, prints in parts), or
 values printed after the supervisor was lost (such output is withheld from reads
@@ -221,4 +226,5 @@ there, so nothing is redacted.
 An id grants nothing: `read`, `show` and `cancel` select the project and
 instance with the same rules as `hack exec` (`--path`, `--project`, `--branch`,
 or the working directory) and report `E_COMMAND_NOT_FOUND` for an id from
-another project or instance.
+another project or instance, even when that command has expired. When output
+expires, the request's argv and workdir are removed too.

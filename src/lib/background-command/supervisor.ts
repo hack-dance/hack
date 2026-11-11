@@ -65,6 +65,8 @@ export const REDACT_MIN_BYTES = 6;
 
 const TICK_MS = 200;
 const EMIT_INTERVAL_MS = 500;
+/** Scanning time an ordinary poll may spend before it yields to supervision. */
+const POLL_WORK_MS = 100;
 const EMIT_EAGER_BYTES = 16 * 1024;
 const STOP_GRACE_MS = 2000;
 
@@ -650,13 +652,17 @@ export class OutputCapture {
     if (!this.opts.full) {
       return;
     }
+    // An ordinary poll spends a bounded time scanning, then returns so the
+    // supervise loop can check cancel and timeout; the final drain reads
+    // everything (the child is gone).
+    const deadlineMono = final ? undefined : performance.now() + POLL_WORK_MS;
     for (const stream of ["stdout", "stderr"] as const) {
       const now = performance.now();
       await this.observeGrowth(stream, now);
       if (this.truncated) {
         await this.discardPastLimit(stream);
       } else if (this.shouldEmit(stream, now, final)) {
-        await this.emit(stream, now, final);
+        await this.emit(stream, now, final, deadlineMono);
       }
     }
   }
@@ -714,7 +720,8 @@ export class OutputCapture {
   private async emit(
     stream: OutputStream,
     now: number,
-    final: boolean
+    final: boolean,
+    deadlineMono: number | undefined
   ): Promise<void> {
     const state = this.streams[stream];
     let result: Awaited<ReturnType<typeof pumpStream>>;
@@ -729,6 +736,7 @@ export class OutputCapture {
         captureRemaining: CAPTURE_LIMIT_BYTES - this.captured,
         eventsRemaining: OUTPUT_EVENT_LIMIT - this.outputEvents,
         redact: true,
+        ...(deadlineMono === undefined ? {} : { deadlineMono }),
         emit: async (range) => {
           if (!(await this.record("command.output", range))) {
             throw NO_SPACE;

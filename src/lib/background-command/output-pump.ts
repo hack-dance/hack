@@ -39,6 +39,12 @@ export async function pumpStream(opts: {
   readonly eventsRemaining: number;
   /** False for a reader taking over from a lost supervisor: no values to redact. */
   readonly redact: boolean;
+  /**
+   * Monotonic time (`performance.now()`) after which no further slice is
+   * started: an ordinary poll returns so its caller can check cancel and
+   * timeout, and the next poll continues. Not set on the final drain.
+   */
+  readonly deadlineMono?: number;
   readonly emit: (range: {
     readonly stream: OutputStream;
     readonly offset: number;
@@ -103,6 +109,12 @@ export async function pumpStream(opts: {
       // next poll continues.
       const unread = state.from + state.carry.length < state.size;
       if (state.budgetReached || !(progressed || (opts.final && unread))) {
+        break;
+      }
+      if (
+        opts.deadlineMono !== undefined &&
+        performance.now() >= opts.deadlineMono
+      ) {
         break;
       }
     }

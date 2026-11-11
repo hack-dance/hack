@@ -458,6 +458,41 @@ describe("StallTracker", () => {
 });
 
 describe("pumpStream", () => {
+  test("an ordinary poll past its deadline stops after one slice; the next poll continues", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hack-bg-pump-"));
+    try {
+      const path = join(dir, "stdout");
+      const text = "z".repeat(100_000);
+      await writeFile(path, text, { mode: 0o600 });
+      const secrets = encodeSecrets({
+        values: Array.from(
+          { length: REDACTION_VALUES_LIMIT },
+          (_, index) => `value-${index}-padded`
+        ),
+        minLength: 6,
+      });
+      const slice = scanSliceBytes(secrets.length);
+      const pump = (opts: { from: number; deadlineMono?: number }) =>
+        pumpStream({
+          path,
+          stream: "stdout",
+          final: false,
+          ...opts,
+          secrets,
+          captureRemaining: 1 << 23,
+          eventsRemaining: 65_536,
+          redact: true,
+          emit: async () => undefined,
+        });
+      const first = await pump({ from: 0, deadlineMono: 0 });
+      expect(first.emittedTo).toBe(slice);
+      const rest = await pump({ from: first.emittedTo });
+      expect(rest.emittedTo).toBe(text.length);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("the final drain reads past held-back slices until the file is consumed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "hack-bg-pump-"));
     try {

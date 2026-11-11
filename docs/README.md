@@ -23,6 +23,7 @@ Already have a project? Follow [Project setup](guides/init-project.md), or use
 - [Side-by-side development](dev.md) — `hack dev` runs a repository's declared dev command.
 - [Managed environments](guides/codex-managed-environments.md) — reuse a project on another machine or in a cloud agent.
 - [Agent integrations](integrations.md) — the optional `hack` plugin and the separate MCP server.
+- [Recipes](recipes/README.md) — step-by-step setups for other tools and everyday workflows, and [copy-paste config examples](recipes/config-examples.md).
 
 ## Find a command or fix setup
 

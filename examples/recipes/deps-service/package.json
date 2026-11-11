@@ -1,0 +1,11 @@
+{
+  "name": "deps-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/server.ts"
+  },
+  "dependencies": {
+    "rollup": "4.52.5"
+  }
+}

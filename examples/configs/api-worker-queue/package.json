@@ -1,0 +1,12 @@
+{
+  "name": "api-worker-queue",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "api": "bun --watch src/api.ts",
+    "worker": "bun --watch src/worker.ts"
+  },
+  "dependencies": {
+    "zod": "4.1.12"
+  }
+}

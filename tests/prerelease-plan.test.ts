@@ -377,6 +377,21 @@ describe("prerelease decision boundary", () => {
 
   test("requires actual exact-head CI without skipped jobs", () => {
     requireExactHeadCi({ run: ciRun, jobs, sourceRevision: sha });
+    // The stable release gate points the same check at main (HACK-1424).
+    requireExactHeadCi({
+      run: { ...ciRun, head_branch: "main" },
+      jobs,
+      sourceRevision: sha,
+      branch: "main",
+    });
+    expect(() =>
+      requireExactHeadCi({
+        run: ciRun,
+        jobs,
+        sourceRevision: sha,
+        branch: "main",
+      })
+    ).toThrow("A successful main push CI run is required");
     for (const run of [
       { ...ciRun, event: "pull_request" },
       { ...ciRun, head_sha: "b".repeat(40) },

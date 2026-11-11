@@ -273,6 +273,20 @@ function editorialProvenanceLabel(source: {
   return source.explicit ? `; source label: ${source.label}` : "";
 }
 
+/** Site discovery links supplement the hashed environment guide across pins. */
+function recipeLinksForPage(
+  version: "v4" | "v5",
+  slug: string
+): { markdown: string; provenance: string } {
+  if (version !== "v5" || slug !== "env") {
+    return { markdown: "", provenance: "" };
+  }
+  return {
+    markdown: `\n\n## Copy-paste recipes\n\nStart with [Environments](${documentRoute(version, "recipes/environments")}) for overlays,\n[Remote database](${documentRoute(version, "recipes/remote-database")}) for service and host scopes,\nor [Config examples](${documentRoute(version, "recipes/config-examples")}) for complete project files.\n`,
+    provenance: "; site recipe links appended",
+  };
+}
+
 /** Write the sidebar order of each folder that has pages in this version. */
 function stageFolderNavigation(
   version: string,
@@ -373,15 +387,12 @@ async function stageVersion(
       text = publishedCliText(text, version);
     }
     text = pinnedBootstrapText(text, manifest.label);
-    if (version === "v5" && entry.slug === "env") {
-      // Keep the hashed release snapshot as the source; add site-only discovery
-      // links here rather than maintaining a full editorial copy across pins.
-      text += `\n\n## Copy-paste recipes\n\nStart with [Environments](${documentRoute(version, "recipes/environments")}) for overlays,\n[Remote database](${documentRoute(version, "recipes/remote-database")}) for service and host scopes,\nor [Config examples](${documentRoute(version, "recipes/config-examples")}) for complete project files.\n`;
-    }
+    const additions = recipeLinksForPage(version, entry.slug);
+    text += additions.markdown;
     const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
     const provenance = entry.editorial
       ? `Editorial source: ${entry.snapshot}; based on ${entry.source.revision}${editorialProvenanceLabel(entry.source)}`
-      : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
+      : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}${additions.provenance}`;
     const page = await embedDiagrams(
       text.replace(heading, "").trim(),
       diagrams,

@@ -103,7 +103,8 @@ that you register in advance, so they need a hostname that stays the same:
   tunnel, because it needs an account.
 - **A local OAuth alias.** When the provider only needs a callback that your
   browser can reach (not a public one), Hack's `.hack.gy` alias may be enough.
-  See `oauth` in [Initialize a project](../guides/init-project.md).
+  See `--oauth` and `--oauth-tld` under `hack init` in the
+  [Command reference](../reference/cli.md#hack-init).
 
 Point your app's public URL setting (for example `PUBLIC_URL`) at the stable
 hostname, in the overlay you use for tunnel work. See

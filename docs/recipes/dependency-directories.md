@@ -4,8 +4,8 @@ Use this to decide where `node_modules`, virtual environments, build output and
 tool caches live. The short rule: anything a container installs or generates
 goes in a named volume, not in your checkout.
 
-For installing packages, start with [Install dependencies in a deps
-service](deps-service.md). This page covers the other directories, how to share
+For installing packages, start with [Install dependencies in a deps service](deps-service.md).
+This page covers the other directories, how to share
 and clean them, and what changes on the native backend.
 
 ## Where each directory goes

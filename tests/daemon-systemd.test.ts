@@ -1500,6 +1500,15 @@ test("drop-ins another account could have written are refused before use", async
   const userDir = join(root, "config", "systemd", "user");
   const dropInDir = join(userDir, "hackd.service.d");
   await mkdir(dropInDir, { recursive: true });
+  // Whatever the runner's umask, only what each case sets is shared.
+  for (const dir of [
+    "config",
+    "config/systemd",
+    "config/systemd/user",
+    "config/systemd/user/hackd.service.d",
+  ]) {
+    await chmod(join(root, dir), 0o755);
+  }
   const override = join(dropInDir, "override.conf");
   await writeFile(override, "[Service]\nExecStart=\nExecStart=/bin/true\n");
   const own = process.getuid?.() ?? 0;
@@ -1958,4 +1967,34 @@ test("symlink hops are followed in filesystem order, not normalized first", asyn
   expect(
     await checkServiceExecutableTrusted({ path: entry, hackHome })
   ).toBeNull();
+});
+
+test("a symlinked drop-in routed through a writable directory stops install before enable", async () => {
+  // Codex review: the install preflight checked only the resolved file.
+  const fake = fakeSystemd();
+  const dropInDir = join(root, "config", "systemd", "user", "hackd.service.d");
+  await mkdir(dropInDir, { recursive: true });
+  for (const dir of ["config", "config/systemd", "config/systemd/user"]) {
+    await chmod(join(root, dir), 0o755);
+  }
+  await chmod(dropInDir, 0o755);
+  const shared = join(root, "shared-dropins");
+  await mkdir(join(shared, "inner"), { recursive: true });
+  await chmod(join(shared, "inner"), 0o755);
+  const target = join(shared, "inner", "override.conf");
+  await writeFile(target, "");
+  await chmod(target, 0o644);
+  await chmod(shared, 0o777);
+  await symlink(target, join(dropInDir, "override.conf"));
+  const result = await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+  });
+  expect(result.ok).toBe(false);
+  if (!result.ok) {
+    expect(result.error).toContain(shared);
+  }
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
 });

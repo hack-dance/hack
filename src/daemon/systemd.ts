@@ -1114,12 +1114,17 @@ async function checkDropInEntries(opts: {
     return `directory ${opts.dir} could not be read: ${errorMessage(error)}`;
   }
   for (const entry of entries) {
-    const error = await checkOwnerControlledPath({
-      path: resolve(opts.dir, entry),
-      uid: opts.uid,
-      directory: false,
-      allowRoot: opts.allowRoot,
-    });
+    const path = resolve(opts.dir, entry);
+    // The file itself, then everything on the way to it (a symlinked
+    // drop-in can route through a directory others can replace).
+    const error =
+      (await checkOwnerControlledPath({
+        path,
+        uid: opts.uid,
+        directory: false,
+        allowRoot: opts.allowRoot,
+      })) ??
+      (await checkReplaceableChain({ path, uid: opts.uid, hackHome: null }));
     if (error !== null) {
       return error;
     }

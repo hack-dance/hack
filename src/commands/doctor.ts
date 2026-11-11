@@ -138,6 +138,7 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -266,6 +267,7 @@ import {
   resolverHasNameserver,
 } from "./doctor-utils.ts";
 import { inspectLinuxGlobalDns } from "./global-linux-dns.ts";
+import { inspectProxyNetwork } from "./global-proxy-network.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import {
   buildDoctorRecoveryGuidance,
@@ -428,6 +430,8 @@ const doctorSpec = defineCommand({
 
 /** Linux resolver route for Hack's routed suffixes (HACK-2053). */
 const LINUX_DNS_ROUTE_CHECK = "linux dns route";
+/** Proxy containers that run without their ingress network (HACK-2056). */
+const PROXY_NETWORK_CHECK = "proxy network";
 
 /** Doctor check for a missing or outdated committed `.hack/.gitignore`. */
 const HACK_GITIGNORE_CHECK = "hack gitignore";
@@ -465,6 +469,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "gateway tokens",
       "grafana",
       "proxy ports",
+      PROXY_NETWORK_CHECK,
       "caddy local ca",
       "host tls trust",
       SUPERSEDED_ROOTS_CHECK,
@@ -898,6 +903,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   results.push(
     await runCheck(s, "proxy ports", () => checkProxyPortForwarding(), {
       timeoutMs: 5000,
+    })
+  );
+  results.push(
+    await runCheck(s, PROXY_NETWORK_CHECK, () => checkProxyNetwork(), {
+      timeoutMs: 12_000,
     })
   );
 
@@ -5957,4 +5967,38 @@ async function runCheck(
     // A settled check must not keep the process alive until its deadline.
     clearTimeout(timer);
   }
+}
+
+async function checkProxyNetwork(): Promise<CheckResult> {
+  const composeFile = getGlobalPaths().caddyCompose;
+  if (!(await pathExists(composeFile))) {
+    return {
+      name: PROXY_NETWORK_CHECK,
+      status: "warn",
+      message: `Missing ${composeFile} (run: hack global install)`,
+    };
+  }
+  const issues = await inspectProxyNetwork({ composeFile });
+  if (issues === null) {
+    return {
+      name: PROXY_NETWORK_CHECK,
+      status: "warn",
+      message: "Unable to read the proxy containers from Docker",
+    };
+  }
+  if (issues.length === 0) {
+    return {
+      name: PROXY_NETWORK_CHECK,
+      status: "ok",
+      message: `Proxy containers are on ${DEFAULT_INGRESS_NETWORK}`,
+    };
+  }
+  return {
+    name: PROXY_NETWORK_CHECK,
+    status: "error",
+    message: [
+      ...issues.map(describeProxyNetworkIssue),
+      "fix: hack global up (recreates the proxy stack)",
+    ].join("\n"),
+  };
 }

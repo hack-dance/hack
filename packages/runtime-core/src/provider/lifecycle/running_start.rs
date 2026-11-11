@@ -157,6 +157,11 @@ fn verify_trees(
         (tree_witness::SMOLVM, &artifact::SMOLVM),
         (tree_witness::ENGINE, &artifact::ENGINE),
     ];
+    // Validate paths and pins before walking any provider tree. In particular, an
+    // aliased tree must refuse without following it, and old pins keep their diagnostic.
+    let [smolvm_record, engine_record] =
+        pins.map(|(_, pin)| artifact::verify_record(candidate, pin));
+    let anchors = [smolvm_record?.tree_sha256, engine_record?.tree_sha256];
     let metadata = pins
         .map(|(_, pin)| tree_witness::qualified_digest(&artifact::tree_root(candidate, pin), None));
     let [smolvm_metadata, engine_metadata] = metadata;
@@ -170,8 +175,7 @@ fn verify_trees(
     let qualified = rootfs_metadata.is_some() && metadata.iter().all(Option::is_some);
     let mut proven = BTreeMap::new();
     let mut reproven = false;
-    for ((name, pin), metadata) in pins.into_iter().zip(metadata) {
-        let anchor = artifact::verify_record(candidate, pin)?.tree_sha256;
+    for (((name, pin), metadata), anchor) in pins.into_iter().zip(metadata).zip(anchors) {
         let tree = if qualified
             && let Some(metadata) = metadata
             && tree_witness::matches(candidate, process, name, &metadata, &anchor)

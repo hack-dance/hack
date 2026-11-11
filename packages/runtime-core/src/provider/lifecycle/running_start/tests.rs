@@ -181,6 +181,22 @@ fn a_witness_of_another_provider_process_is_never_trusted() {
 }
 
 #[test]
+fn an_aliased_provider_tree_is_refused_before_its_metadata_walk() {
+    let home = Home::new("aliased-tree");
+    let tree = artifact::tree_root(&home.candidate, &artifact::SMOLVM);
+    let moved = tree.with_extension("original");
+    fs::rename(&tree, &moved).unwrap();
+    // A FIFO in the target would fail the metadata walk with artifact_invalid. The
+    // aliased-state boundary must refuse first, without visiting that target.
+    let fifo =
+        std::ffi::CString::new(moved.join("foreign").as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a NUL-terminated pathname inside this fixture's private tree.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    std::os::unix::fs::symlink(&moved, &tree).unwrap();
+    assert_eq!(home.check().unwrap_err().code, "aliased_state");
+}
+
+#[test]
 fn a_rewritten_content_anchor_sends_the_tree_back_to_a_content_proof() {
     let home = Home::new("anchor");
     home.check().unwrap();

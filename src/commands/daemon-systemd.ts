@@ -668,7 +668,7 @@ async function handOverDirectDaemon(opts: {
       await hooks.stopDirect(proof);
     } else {
       logger.warn({
-        message: `Left pid ${daemon.pid} from the hackd pid file running: ${describeDaemonProcessRefusal(proof.reason)}. If it is this HACK_HOME's hackd, run \`hack daemon stop\`, then \`hack daemon install\` again.`,
+        message: `Left pid ${daemon.pid} from the hackd pid file running: ${describeDaemonProcessRefusal(proof.reason)}. If it is this HACK_HOME's hackd, run \`hack daemon restart\` to hand it to systemd.`,
       });
     }
   }

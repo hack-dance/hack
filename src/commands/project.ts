@@ -387,11 +387,7 @@ import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
-import {
-  classifyNativeAlreadyRunning,
-  nativePartiallyRunningRefusal,
-  reportNativeAlreadyRunning,
-} from "./native-up-already-running.ts";
+import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
 import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
@@ -6309,86 +6305,6 @@ async function restartNativeImageProject({
   });
 }
 
-/**
- * Answers a detached native `up` for a project that is already up
- * (HACK-2102): `0` when every service is running, a named refusal when some
- * are not, and `null` to launch as before. One read-only observation, the one
- * `hack ps` makes. Any failure to observe launches as before, so this never
- * hides the reason a real start would report.
- */
-async function answerNativeAlreadyRunning(opts: {
-  readonly ctx: CliContext;
-  readonly args: UpArgs;
-  readonly native: NonNullable<
-    ReturnType<typeof resolveNativeRuntimeSelection>
-  >;
-}): Promise<number | null> {
-  const { args, ctx } = opts;
-  const json = args.options.json === true;
-  const startedAtMs = Date.now();
-  let observed: {
-    readonly state: ReturnType<typeof classifyNativeAlreadyRunning>;
-    readonly projectName: string;
-    readonly branch: string | null;
-  };
-  try {
-    const project = await resolveProjectForArgs({
-      ctx,
-      pathOpt: args.options.path,
-      projectOpt: args.options.project,
-      touchRegistration: false,
-    });
-    const branch = await resolveEffectiveBranchForCommand({
-      project,
-      branchOption: args.options.branch,
-      noticeToStderr: json,
-    });
-    const state = classifyNativeAlreadyRunning(
-      await nativeProjectPs({
-        runtime: opts.native,
-        includeReadiness: true,
-        scope: {
-          projectRoot: project.projectRoot,
-          projectDir: project.projectDir,
-          nativeHome: opts.native.home,
-          branch,
-        },
-      })
-    );
-    if (state.kind === "launch") {
-      return null;
-    }
-    observed = {
-      state,
-      projectName: await resolveComposeProjectName({
-        project,
-        cfg: await readProjectConfig(project),
-      }),
-      branch,
-    };
-  } catch {
-    return null;
-  }
-  if (observed.state.kind === "partial") {
-    throw nativePartiallyRunningRefusal(observed.state.down);
-  }
-  if (observed.state.kind === "running") {
-    reportNativeAlreadyRunning({
-      json,
-      project: observed.projectName,
-      branch: observed.branch,
-      composeProject: resolveLifecycleComposeProjectName({
-        projectName: observed.projectName,
-        branch: observed.branch,
-      }),
-      started: observed.state.started,
-      completed: observed.state.completed,
-      startedAtMs,
-    });
-  }
-  return 0;
-}
-
 async function handleUp({
   ctx,
   args,
@@ -6422,9 +6338,36 @@ async function handleUp({
       }
     }
     const alreadyRunning = await answerNativeAlreadyRunning({
-      ctx,
-      args,
       native,
+      json: args.options.json === true,
+      selection: {
+        path: args.options.path,
+        project: args.options.project,
+        branch: args.options.branch,
+        env: args.options.env,
+        profiles:
+          args.options.profile === undefined
+            ? undefined
+            : parseCsvList(args.options.profile),
+      },
+      resolveProject: () =>
+        resolveProjectForArgs({
+          ctx,
+          pathOpt: args.options.path,
+          projectOpt: args.options.project,
+          touchRegistration: false,
+        }),
+      resolveBranch: (project) =>
+        resolveEffectiveBranchForCommand({
+          project,
+          branchOption: args.options.branch,
+          noticeToStderr: args.options.json === true,
+        }),
+      onBranchResolved: (branch) => {
+        if (args.options.branch === undefined && branch !== null) {
+          childArgs.push(`--branch=${branch}`);
+        }
+      },
     });
     if (alreadyRunning !== null) {
       return alreadyRunning;

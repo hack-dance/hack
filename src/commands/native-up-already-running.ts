@@ -1,5 +1,20 @@
-import type { NativeProjectPsResult } from "../backends/native-project-observe.ts";
+import {
+  type NativeProjectPsResult,
+  nativeProjectPs,
+} from "../backends/native-project-observe.ts";
+import {
+  loadNativeProjectRun,
+  type NativeProjectRun,
+  normalizeNativeProfiles,
+} from "../backends/native-project-run.ts";
+import type { NativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { emitCliResult, HackCliError, okResult } from "../lib/cli-result.ts";
+import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
+import { getString, isRecord } from "../lib/guards.ts";
+import { resolveLifecycleComposeProjectName } from "../lib/lifecycle-runtime.ts";
+import { quoteShellWord } from "../lib/logs.ts";
+import { readNativeComposeDocument } from "../lib/native-compose-backend-features.ts";
+import { type ProjectContext, readProjectConfig } from "../lib/project.ts";
 
 /**
  * `hack up --detach` on a native project that is already up (HACK-2102).
@@ -64,8 +79,7 @@ export function classifyNativeAlreadyRunning(
       down.push(item.service);
     }
   }
-  // Finished one-shots alone are not a running project.
-  if (started.length === 0 && down.length === 0) {
+  if (started.length === 0 && completed.length === 0 && down.length === 0) {
     return { kind: "launch" };
   }
   return down.length > 0
@@ -83,11 +97,12 @@ export function classifyNativeAlreadyRunning(
  * generic refusal; nothing was started or stopped.
  */
 export function nativePartiallyRunningRefusal(
-  down: readonly string[]
+  down: readonly string[],
+  restartCommand: string
 ): HackCliError {
   return new HackCliError({
     code: "E_STARTUP_INCOMPLETE",
-    message: `Native project is already running, but these services are not up: ${down.join(", ")}. Native up cannot start part of a running project: run hack restart. Nothing was started or stopped.`,
+    message: `Native project is already running, but these services have not reached their required state: ${down.join(", ")}. Native up cannot start part of a running project: run ${restartCommand}. Nothing was started or stopped.`,
   });
 }
 
@@ -100,10 +115,11 @@ export function reportNativeAlreadyRunning(opts: {
   readonly started: readonly string[];
   readonly completed: readonly string[];
   readonly startedAtMs: number;
+  readonly restartCommand: string;
 }): void {
   if (!opts.json) {
     process.stdout.write(
-      "Project is already running. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n"
+      `Project is already running. Configuration changes were not applied; run ${opts.restartCommand} to apply edits.\n`
     );
     return;
   }
@@ -125,4 +141,132 @@ export function reportNativeAlreadyRunning(opts: {
       },
     }),
   });
+}
+
+export type NativeUpSelection = {
+  readonly path?: string;
+  readonly project?: string;
+  readonly branch?: string;
+  readonly env?: string;
+  readonly profiles?: readonly string[];
+};
+
+/** One shell-safe command targeting the same instance, without changing its env/profiles. */
+export function nativeScopedCommand(opts: {
+  readonly action: "restart" | "down";
+  readonly selection: NativeUpSelection;
+}): string {
+  const words = ["hack", opts.action];
+  for (const [key, value] of Object.entries({
+    path: opts.selection.path,
+    project: opts.selection.project,
+    branch: opts.selection.branch,
+  })) {
+    if (value !== undefined) {
+      words.push(`--${key}`, quoteShellWord(value));
+    }
+  }
+  return words.join(" ");
+}
+
+function selectionMatches(
+  saved: NativeProjectRun,
+  requested: NativeUpSelection
+): boolean {
+  if (requested.env !== undefined && saved.effectiveEnvName !== requested.env) {
+    return false;
+  }
+  return (
+    requested.profiles === undefined ||
+    (saved.profiles !== undefined &&
+      JSON.stringify(normalizeNativeProfiles(saved.profiles)) ===
+        JSON.stringify(normalizeNativeProfiles(requested.profiles)))
+  );
+}
+
+/** Read-only admission adapter; resolving the CLI's project and branch stays injected. */
+export async function answerNativeAlreadyRunning(opts: {
+  readonly native: NativeRuntimeSelection;
+  readonly json: boolean;
+  readonly selection: NativeUpSelection;
+  readonly resolveProject: () => Promise<ProjectContext>;
+  readonly resolveBranch: (project: ProjectContext) => Promise<string | null>;
+  readonly onBranchResolved?: (branch: string | null) => void;
+}): Promise<number | null> {
+  const startedAtMs = Date.now();
+  let observed: {
+    state: NativeAlreadyRunning;
+    projectName: string;
+    branch: string | null;
+    matches: boolean;
+  };
+  try {
+    const project = await opts.resolveProject();
+    const branch = await opts.resolveBranch(project);
+    opts.onBranchResolved?.(branch);
+    const scope = {
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      nativeHome: opts.native.home,
+      branch,
+    };
+    const result = await nativeProjectPs({
+      runtime: opts.native,
+      scope,
+      includeReadiness: true,
+    });
+    const state = classifyNativeAlreadyRunning(result);
+    if (state.kind === "launch") {
+      return null;
+    }
+    const saved = await loadNativeProjectRun(scope);
+    if (!saved || saved.run !== result.run) {
+      return null;
+    }
+    const compose = await readNativeComposeDocument(project.composeFile);
+    observed = {
+      state,
+      branch,
+      matches: selectionMatches(saved, opts.selection),
+      projectName: await resolveComposeProjectName({
+        project,
+        cfg: await readProjectConfig(project),
+        composeName: isRecord(compose)
+          ? (getString(compose, "name") ?? null)
+          : null,
+      }),
+    };
+  } catch {
+    return null;
+  }
+  const selection = {
+    ...opts.selection,
+    branch: observed.branch ?? opts.selection.branch,
+  };
+  const restartCommand = nativeScopedCommand({ action: "restart", selection });
+  if (!observed.matches) {
+    throw new HackCliError({
+      code: "E_STARTUP_INCOMPLETE",
+      message: `Native project is already running with a different or unknown environment/profile selection. Stop it with ${nativeScopedCommand({ action: "down", selection })}, then rerun this up command. Nothing was started or stopped.`,
+    });
+  }
+  if (observed.state.kind === "partial") {
+    throw nativePartiallyRunningRefusal(observed.state.down, restartCommand);
+  }
+  if (observed.state.kind === "running") {
+    reportNativeAlreadyRunning({
+      json: opts.json,
+      project: observed.projectName,
+      branch: observed.branch,
+      composeProject: resolveLifecycleComposeProjectName({
+        projectName: observed.projectName,
+        branch: observed.branch,
+      }),
+      started: observed.state.started,
+      completed: observed.state.completed,
+      startedAtMs,
+      restartCommand,
+    });
+  }
+  return 0;
 }

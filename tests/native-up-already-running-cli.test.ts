@@ -13,7 +13,10 @@ import {
   type NativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
-import { classifyNativeAlreadyRunning } from "../src/commands/native-up-already-running.ts";
+import {
+  classifyNativeAlreadyRunning,
+  nativeScopedCommand,
+} from "../src/commands/native-up-already-running.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -61,6 +64,8 @@ async function fixture(opts: {
   /** What `graph owner-status` answers; omitted, the request fails. */
   readonly owner?: Record<string, unknown>;
   readonly savedRun?: boolean;
+  readonly record?: NativeProjectRun;
+  readonly branch?: string;
 }) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-up-running-cli-"))
@@ -145,13 +150,33 @@ exit 1
       projectRoot: project,
       projectDir,
       nativeHome,
-      branch: null,
-      run,
+      branch: opts.branch ?? null,
+      run: opts.record ?? run,
     });
   }
+  const registryDir = join(root, "user-home", ".hack");
+  await mkdir(registryDir, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(registryDir, "projects.json"),
+    JSON.stringify({
+      version: 1,
+      projects: [
+        {
+          id: "1".repeat(12),
+          name: "running-fixture",
+          repoRoot: project,
+          projectDirName: ".hack",
+          projectDir,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    })
+  );
   return {
     root,
     project,
+    nativeHome,
+    projectDir,
     env: privateCliEnv({
       root,
       env: {
@@ -186,17 +211,27 @@ const LIVE_OWNER = {
 
 async function up(
   f: Awaited<ReturnType<typeof fixture>>,
-  args: readonly string[]
+  args: readonly string[],
+  opts: {
+    readonly scopeArgs?: readonly string[];
+    readonly timeoutMs?: number;
+  } = {}
 ) {
   const child = Bun.spawn(
-    [process.execPath, entrypoint, "--path", f.project, "up", ...args],
+    [
+      process.execPath,
+      entrypoint,
+      ...(opts.scopeArgs ?? ["--path", f.project]),
+      "up",
+      ...args,
+    ],
     {
       cwd: f.root,
       env: f.env,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      timeout: SPAWN_TIMEOUT_MS - 5000,
+      timeout: opts.timeoutMs ?? SPAWN_TIMEOUT_MS - 5000,
     }
   );
   const [stdout, stderr, code] = await Promise.all([
@@ -223,7 +258,7 @@ test(
     expect(human.output).not.toContain("E_STARTUP_INCOMPLETE");
     expect(human.code).toBe(0);
     expect(human.stdout).toBe(
-      "Project is already running. Use hack ps, hack logs SERVICE --no-follow, and hack down.\n"
+      `Project is already running. Configuration changes were not applied; run hack restart --path ${f.project} to apply edits.\n`
     );
     const json = await up(f, ["--detach", "--json"]);
     expect(json.code).toBe(0);
@@ -268,9 +303,9 @@ test(
     expect(human.code).toBe(1);
     expect(human.stdout).toBe("");
     expect(human.stderr).toContain(
-      "ERROR: E_STARTUP_INCOMPLETE: Native project is already running, but these services are not up: db, worker."
+      "ERROR: E_STARTUP_INCOMPLETE: Native project is already running, but these services have not reached their required state: db, worker."
     );
-    expect(human.stderr).toContain("hack restart");
+    expect(human.stderr).toContain(`run hack restart --path ${f.project}.`);
     expect(human.stderr).not.toContain("was not confirmed");
     const json = await up(f, ["-d", "--json"]);
     expect(json.code).toBe(1);
@@ -319,13 +354,6 @@ test("only a live, ready graph whose owner answers counts as already running", (
     { ...observed, phase: "stopped-data-retained" },
     { ...observed, phase: "starting" },
     { ...observed, items: [] },
-    // Only finished one-shots and nothing running is not a running project.
-    {
-      ...observed,
-      items: [
-        item("seed", { state: "exited", code: 0, readiness: "completed" }),
-      ],
-    },
   ]) {
     expect(classifyNativeAlreadyRunning(other)).toEqual({ kind: "launch" });
   }
@@ -355,4 +383,119 @@ test("only a live, ready graph whose owner answers counts as already running", (
       "web",
     ],
   });
+});
+
+test("a ready graph of completed one-shots is a successful no-op", async () => {
+  const f = await fixture({
+    phase: "ready-observed",
+    services: { seed: { state: "exited", code: 0, readiness: "completed" } },
+    owner: LIVE_OWNER,
+  });
+  const result = await up(f, ["-d", "--json"]);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout).data.services).toEqual({
+    started: [],
+    completed: ["seed"],
+    stopped: [],
+    failed: [],
+  });
+});
+
+test("explicit env/profile flags must match the retained selection, including legacy unknown selections", async () => {
+  const {
+    effectiveEnvName: _env,
+    profiles: _profiles,
+    aws: _aws,
+    ...legacy
+  } = run;
+  const cases = [
+    { record: run, args: ["--profile", "worker"], accepted: false },
+    {
+      record: { ...run, effectiveEnvName: "qa" },
+      args: ["--env", "staging"],
+      accepted: false,
+    },
+    { record: legacy, args: ["--profile", "worker"], accepted: false },
+    { record: legacy, args: ["--env", "staging"], accepted: false },
+    {
+      record: {
+        ...run,
+        profiles: ["api", "worker"],
+        effectiveEnvName: "staging",
+      },
+      args: ["--env", "staging", "--profile", "worker,api"],
+      accepted: true,
+    },
+  ];
+  for (const item of cases) {
+    const f = await fixture({
+      phase: "ready-observed",
+      services: { web: { state: "running" } },
+      owner: LIVE_OWNER,
+      record: item.record,
+    });
+    const result = await up(f, ["-d", "--json", ...item.args]);
+    expect(result.code).toBe(item.accepted ? 0 : 1);
+    if (item.accepted) {
+      expect(JSON.parse(result.stdout).data.alreadyRunning).toBe(true);
+    } else {
+      expect(result.output).toContain(
+        "different or unknown environment/profile selection"
+      );
+      expect(result.output).not.toContain('"alreadyRunning": true');
+    }
+    for (const call of await f.calls()) {
+      expect(["graph inspect", "graph owner-status"]).toContain(call);
+    }
+  }
+});
+
+test("project and branch selection are preserved in the one working recovery command", async () => {
+  const f = await fixture({
+    phase: "ready-observed",
+    services: { web: { state: "running" }, db: { state: "exited", code: 0 } },
+    owner: LIVE_OWNER,
+    branch: "preview",
+  });
+  const result = await up(f, ["-d", "--branch", "preview"], {
+    scopeArgs: ["--project", "running-fixture"],
+  });
+  expect(result.code).toBe(1);
+  expect(result.output).toContain(
+    "run hack restart --project running-fixture --branch preview."
+  );
+  const same = await up(f, ["-d", "--branch", "preview"]);
+  expect(same.code).toBe(1);
+  expect(same.output).toContain(
+    `run hack restart --path ${f.project} --branch preview.`
+  );
+});
+
+test("recovery command quotes every explicit selector as one shell argument", () => {
+  expect(
+    nativeScopedCommand({
+      action: "restart",
+      selection: { path: "/tmp/project with space", branch: "preview" },
+    })
+  ).toBe("hack restart --path '/tmp/project with space' --branch preview");
+  expect(
+    nativeScopedCommand({
+      action: "restart",
+      selection: { project: "fixture's project" },
+    })
+  ).toBe("hack restart --project 'fixture'\\''s project'");
+});
+
+test("an already-running observation never blocks while reading a FIFO Compose name", async () => {
+  const f = await fixture({
+    phase: "ready-observed",
+    services: { web: { state: "running" } },
+    owner: LIVE_OWNER,
+  });
+  const compose = join(f.projectDir, "docker-compose.yml");
+  await rm(compose);
+  expect(Bun.spawnSync(["mkfifo", compose]).exitCode).toBe(0);
+  const result = await up(f, ["-d"], { timeoutMs: 3000 });
+  expect(result.code).toBe(0);
+  expect(result.stdout).toContain("Project is already running.");
 });

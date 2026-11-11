@@ -404,18 +404,26 @@ frontend and Rust foreground owners in a background session, returning after
 readiness and up-after hooks. The frontend keeps host lifecycle processes and
 down hooks alive. From any terminal, use `hack ps`, `hack logs`, `hack exec`,
 `hack restart` or `hack down` through the existing authenticated controls.
-When the project is already up, `hack up -d` starts nothing and succeeds, as it
-does on Compose: it prints `Project is already running.` and exits `0`, and with
+When the project is already up, `hack up -d` starts nothing and succeeds: it
+prints `Project is already running.` and exits `0`, and with
 `--json` returns the same result shape as a start, with `alreadyRunning: true`
 and the running and completed services. That answer is given only for a ready
 graph whose foreground owner answers and whose runtime it verified; any other
-state launches a start as before. When the graph is live but some services are
-not up (stopped, failed or unhealthy), `hack up -d` refuses with
-`E_STARTUP_INCOMPLETE`, names them, and points to `hack restart`: native `up`
+state launches a start as before. This no-op applies no configuration edits;
+the message gives the `hack restart` command for the same project and branch
+to apply them. Explicit `--env` and `--profile` must match the saved run. A
+different selection, or a legacy record whose selection is unknown, refuses
+instead of reporting success; stop that instance before starting a different
+selection. When the graph is live but some services have not reached their
+required state, `hack up -d` refuses with `E_STARTUP_INCOMPLETE`, names them,
+and gives one shell-quoted `hack restart` command preserving the selected
+`--path`, `--project` and `--branch`: native `up`
 cannot start part of a running project. Nothing is started or stopped.
 Completion is accepted only when the runtime receipt requires the service to
 complete and its current observation is exit `0`. A long-running service that
 exits `0`, or an exited service with an unknown readiness goal, is still down.
+A ready graph containing only completed one-shots also succeeds without
+launching another start. A running one-shot has not completed its required state.
 
 Restart starts a new foreground generation; `restart --detach` remains unsupported.
 Without these flags, `hack up` stays attached and Ctrl-C requests ordinary stop.

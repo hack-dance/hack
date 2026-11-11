@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
+  buildComposeArgs,
   buildComposeExecCommand,
   buildComposeRunCommand,
   composeRuntimeBackend,
@@ -7,6 +8,7 @@ import {
   type RuntimeRunOptions,
 } from "../backends/runtime-backend.ts";
 import { defineOption } from "../cli/command.ts";
+import { GUEST_MARKER_ENV } from "../lib/background-command/container-stop.ts";
 import {
   type BackgroundRequest,
   requestIdentity,
@@ -189,11 +191,22 @@ export async function startComposeBackgroundCommand(opts: {
     opts.compose.operation === "run"
       ? { name: `hack-bg-${randomToken()}`, service: options.service }
       : undefined;
+  // An `exec` marks its process in the container so a stop can find and end
+  // it; stopping the Compose client alone leaves it running.
+  const guest =
+    opts.compose.operation === "exec"
+      ? {
+          marker: randomToken(),
+          service: options.service,
+          compose: buildComposeArgs(options),
+        }
+      : undefined;
   const argv =
     opts.compose.operation === "exec"
       ? buildComposeExecCommand({
           options: opts.compose.options,
           disableTty: true,
+          guestEnv: { [GUEST_MARKER_ENV]: guest?.marker ?? "" },
         })
       : buildComposeRunCommand({
           options: opts.compose.options,
@@ -216,6 +229,7 @@ export async function startComposeBackgroundCommand(opts: {
       cwd: options.cwd,
       env: spawnEnv(options.env),
       ...(container ? { container } : {}),
+      ...(guest ? { guest } : {}),
     },
     requestIdentity: opts.identity,
     redactValues: opts.redactValues,

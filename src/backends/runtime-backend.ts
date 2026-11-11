@@ -87,7 +87,7 @@ function shouldDisableExecTty(): boolean {
   return !(process.stdin.isTTY === true && process.stdout.isTTY === true);
 }
 
-function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
+export function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
   return [
     "docker",
     "compose",
@@ -129,12 +129,18 @@ export function buildComposeRunCommand(opts: {
 export function buildComposeExecCommand(opts: {
   readonly options: RuntimeExecOptions;
   readonly disableTty: boolean;
+  /** `-e NAME=value` for the process in the container (a background marker). */
+  readonly guestEnv?: Readonly<Record<string, string>>;
 }): string[] {
   const { options } = opts;
   return [
     ...buildComposeArgs(options),
     "exec",
     ...(opts.disableTty ? ["-T"] : []),
+    ...Object.entries(opts.guestEnv ?? {}).flatMap(([key, value]) => [
+      "-e",
+      `${key}=${value}`,
+    ]),
     ...(options.workdir && options.workdir.length > 0
       ? ["-w", options.workdir]
       : []),

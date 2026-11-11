@@ -157,6 +157,12 @@ export type BackgroundStart = {
     readonly env: Readonly<Record<string, string>>;
     /** A `run`'s named one-off container (see LaunchRecord). */
     readonly container?: { readonly name: string; readonly service: string };
+    /** An `exec`'s marked process in the container (see LaunchRecord). */
+    readonly guest?: {
+      readonly marker: string;
+      readonly service: string;
+      readonly compose: readonly string[];
+    };
   };
   /** Values Hack already resolved for injection into this command. */
   readonly redactValues: readonly string[];
@@ -231,6 +237,7 @@ export async function startBackgroundCommand(
         argv: opts.child.argv,
         cwd: opts.child.cwd,
         ...(opts.child.container ? { container: opts.child.container } : {}),
+        ...(opts.child.guest ? { guest: opts.child.guest } : {}),
       }),
     });
     const supervisor = await spawnInNewSession({

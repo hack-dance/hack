@@ -4,7 +4,7 @@ import { isAbsolute } from "node:path";
 import { isRecord } from "../guards.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { auditEnd } from "./audit.ts";
-import { removeOneOffContainer } from "./container-stop.ts";
+import { removeOneOffContainer, stopExecGuest } from "./container-stop.ts";
 import {
   CAPTURE_LIMIT_BYTES,
   type CommandMeta,
@@ -189,12 +189,10 @@ export async function runBackgroundSupervisor(opts: {
     if (running) {
       signalProcessGroup(proc.pid, "SIGKILL");
     }
-    const containerProcess = launch.container
-      ? await removeOneOffContainer({
-          ...launch.container,
-          env: childEnv(),
-        }).catch(() => "not_confirmed" as const)
-      : undefined;
+    const containerProcess = await stopInContainer({
+      launch,
+      clientInterrupted: true,
+    }).catch(() => "not_confirmed" as const);
     return await finish({
       ...baseEnded,
       truncated: capture.truncated,
@@ -437,12 +435,12 @@ async function superviseChild(opts: {
   // Every `run` end removes its one-off container (after checking it is
   // ours), whether Hack stopped the client or the client died on its own
   // (for example at the file-size cap): no end may leave it running.
-  const containerProcess = opts.launch.container
-    ? await removeOneOffContainer({
-        ...opts.launch.container,
-        env: childEnv(),
-      })
-    : undefined;
+  const containerProcess = await stopInContainer({
+    launch: opts.launch,
+    // An exec client that ended by a signal (stopped by Hack, or killed)
+    // may have left its process in the container running.
+    clientInterrupted: stopping !== null || proc.signalCode !== null,
+  });
   await capture.poll(true);
   const payload = endedPayload({
     stopping,
@@ -455,6 +453,31 @@ async function superviseChild(opts: {
     containerProcess,
   });
   return lateCancel ? { ...payload, descendants: "not_confirmed" } : payload;
+}
+
+/**
+ * What runs in a container must not outlive the command. A `run`'s one-off
+ * container is removed at every end; an `exec`'s marked process is stopped
+ * when its client was interrupted. Undefined when there is nothing to do.
+ */
+async function stopInContainer(opts: {
+  readonly launch: LaunchRecord;
+  readonly clientInterrupted: boolean;
+}): Promise<"stopped" | "not_confirmed" | undefined> {
+  if (opts.launch.container) {
+    return await removeOneOffContainer({
+      ...opts.launch.container,
+      env: childEnv(),
+    });
+  }
+  if (opts.launch.guest && opts.clientInterrupted) {
+    return await stopExecGuest({
+      ...opts.launch.guest,
+      cwd: opts.launch.cwd,
+      env: childEnv(),
+    });
+  }
+  return undefined;
 }
 
 /** True until Bun has reaped the child: its pid (and group id) cannot be reused. */

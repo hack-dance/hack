@@ -50,6 +50,7 @@ import {
   acceptCommand,
   CALLER_ACTIVE_LIMIT,
   HOME_ACTIVE_LIMIT,
+  holdsSlot,
   lookupRequest,
   pruneExpired,
 } from "../src/lib/background-command/store.ts";
@@ -1125,5 +1126,30 @@ describe("request keys before runtime checks", () => {
       }),
       "E_REQUEST_CONFLICT"
     );
+  });
+});
+
+describe("unconfirmed container stops hold admission", () => {
+  test("an end with containerProcess not_confirmed keeps its slot until the timeout window closes", () => {
+    const meta = {
+      acceptedAt: new Date(1_000_000).toISOString(),
+      timeoutMs: 60_000,
+    } as CommandMeta;
+    const held = {
+      payload: { outcome: "cancelled", containerProcess: "not_confirmed" },
+    };
+    expect(holdsSlot({ meta, ended: held, now: 1_000_000 + 59_000 })).toBe(
+      true
+    );
+    expect(holdsSlot({ meta, ended: held, now: 1_000_000 + 61_000 })).toBe(
+      false
+    );
+    expect(
+      holdsSlot({
+        meta,
+        ended: { payload: { containerProcess: "stopped" } },
+        now: 1_000_001,
+      })
+    ).toBe(false);
   });
 });

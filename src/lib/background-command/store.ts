@@ -182,7 +182,15 @@ async function countActive(opts: {
       continue;
     }
     let events = await readEvents(paths);
-    if (endedEvent(events)) {
+    const ended = endedEvent(events);
+    if (ended) {
+      // A stop that could not confirm the process in the container is gone
+      // keeps its slot for the command's timeout window, so a start/cancel
+      // loop cannot run more than the limits allow.
+      if (holdsSlot({ meta, ended, now: opts.now })) {
+        total += 1;
+        caller += meta.caller === opts.caller ? 1 : 0;
+      }
       continue;
     }
     const assessment = await assessOwner({
@@ -209,6 +217,18 @@ async function countActive(opts: {
     }
   }
   return { total, caller };
+}
+
+/** An end whose container process is unconfirmed holds its slot until the timeout window closes. */
+export function holdsSlot(opts: {
+  readonly meta: CommandMeta;
+  readonly ended: { readonly payload: Record<string, unknown> };
+  readonly now: number;
+}): boolean {
+  return (
+    opts.ended.payload.containerProcess === "not_confirmed" &&
+    opts.now < Date.parse(opts.meta.acceptedAt) + opts.meta.timeoutMs
+  );
 }
 
 /**

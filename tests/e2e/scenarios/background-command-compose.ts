@@ -64,6 +64,7 @@ export const backgroundCommandComposeScenario: Scenario = {
       const commandId = await checkResume(stack);
       await checkRun(stack);
       await checkRunClientDeath(stack);
+      await checkExecCancelStopsGuest(stack);
       await checkContainerRestart(stack);
       await checkDownMidRun(stack);
       await checkDownMidBackgroundRun(stack);
@@ -408,6 +409,26 @@ async function checkContainerRestart(stack: Stack): Promise<void> {
     result: restart,
   });
   await expectFailedEnd({ stack, id, label: "container restart mid-run" });
+}
+
+/** Cancelling a background `exec` also stops its process in the container. */
+async function checkExecCancelStopsGuest(stack: Stack): Promise<void> {
+  const id = await startSleeper(stack, "before-exec-cancel");
+  const cancel = extractJsonObject<{
+    data?: { outcome?: string; confirmed?: { containerProcess?: string } };
+  }>({ text: (await stack.cli(["commands", "cancel", id, "--json"])).stdout });
+  expect({
+    that:
+      cancel?.data?.outcome === "cancelled" &&
+      cancel.data.confirmed?.containerProcess === "stopped",
+    message: `cancel must confirm the process in the container stopped: ${JSON.stringify(cancel?.data)}`,
+  });
+  const ps = await stack.cli(["exec", "api", "--", "ps", "-o", "args"]);
+  expect({
+    that: !ps.stdout.includes("sleep 120"),
+    message: "the cancelled exec's process must be gone from the container",
+    result: ps,
+  });
 }
 
 /**

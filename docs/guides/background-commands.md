@@ -197,11 +197,24 @@ process exits by itself just as a cancel arrives, the group was never stopped;
 the final record then also says `descendants: "not_confirmed"`. A command that already
 exited 0 stays `succeeded` even if a cancel raced its end. The result says what
 was confirmed: `supervisorSignalled`, `childGroupSignalled`, `childExited`, and
-`containerProcess`: `"stopped"` when a `run`'s one-off container was removed,
-otherwise `"not_confirmed"`. When the stop cannot be confirmed (for
+`containerProcess`: `"stopped"` when what ran in the container is confirmed
+gone, otherwise `"not_confirmed"`. Stopping a `docker compose` client alone
+does not stop what runs in the container, so:
+
+- a background `run`'s one-off container is removed at every end (see
+  Outcomes);
+- a background `exec` runs its process with `HACK_BACKGROUND_COMMAND=<marker>`
+  in its environment; when its client is stopped or killed, the supervisor
+  ends every process in the container that carries the marker (TERM, then
+  KILL) and reports `stopped` once none is left. That needs `sh`, `/proc`,
+  `tr`, `grep`, `basename`, `sleep` and `kill` in the image; without them the
+  result is `not_confirmed`.
+
+An end whose container process is `not_confirmed` keeps its admission slot
+until the command's timeout window closes, so a start/cancel loop cannot run
+more than the limits allow. When the stop itself cannot be confirmed (for
 example the command's identity is unknown, see below), no final record is
-written and `outcome` is `unconfirmed`. Stopping a `docker compose exec` or
-`run` client does not prove that the process inside the container stopped.
+written and `outcome` is `unconfirmed`.
 
 ## Ownership
 

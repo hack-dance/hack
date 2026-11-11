@@ -130,6 +130,18 @@ const launchSchema = z.object({
       service: z.string(),
     })
     .optional(),
+  /**
+   * A background `exec`'s process in the container carries
+   * `HACK_BACKGROUND_COMMAND=<marker>`; `compose` is the `docker compose`
+   * prefix (project, files, profiles) used to stop it.
+   */
+  guest: z
+    .object({
+      marker: z.string().regex(/^[a-z0-9]{20}$/),
+      service: z.string(),
+      compose: z.array(z.string()).min(2),
+    })
+    .optional(),
 });
 export type LaunchRecord = z.infer<typeof launchSchema>;
 

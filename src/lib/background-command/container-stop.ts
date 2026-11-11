@@ -1,5 +1,23 @@
 import { exec } from "../shell.ts";
 
+/** Environment marker on a background `exec`'s process in the container. */
+export const GUEST_MARKER_ENV = "HACK_BACKGROUND_COMMAND";
+
+/**
+ * POSIX sh run inside the container: TERM, then KILL, every process whose
+ * environment carries the marker, then exit 0 only if none is left. Needs
+ * `sh`, `/proc`, `tr`, `grep`, `basename`, `sleep` and `kill` in the image.
+ */
+const GUEST_STOP_SCRIPT = [
+  `m="${GUEST_MARKER_ENV}=$1"`,
+  'marked() { for d in /proc/[0-9]*; do tr \'\\0\' \'\\n\' 2>/dev/null < "$d/environ" | grep -qx "$m" && basename "$d"; done; }',
+  'for p in $(marked); do kill -TERM "$p" 2>/dev/null; done',
+  "sleep 2",
+  'for p in $(marked); do kill -KILL "$p" 2>/dev/null; done',
+  "sleep 1",
+  'test -z "$(marked)"',
+].join("\n");
+
 /** Kept short so the stop path stays well inside a 30 s MCP control call. */
 const INSPECT_TIMEOUT_MS = 5000;
 const REMOVE_TIMEOUT_MS = 10_000;
@@ -74,5 +92,46 @@ async function docker(
     });
   } catch {
     return null;
+  }
+}
+
+/**
+ * Stop a background `exec`'s process in the container after its Compose
+ * client was stopped or died: stopping the client alone leaves the process
+ * running. Matches processes by the marker in their environment, set by
+ * `docker compose exec -e` at start. Returns `stopped` when the script
+ * confirms none is left, `not_confirmed` otherwise (no `sh` or `/proc` in the
+ * image, the container is gone or unreachable, the script failed).
+ */
+export async function stopExecGuest(opts: {
+  readonly marker: string;
+  readonly service: string;
+  readonly compose: readonly string[];
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<"stopped" | "not_confirmed"> {
+  try {
+    const result = await exec(
+      [
+        ...opts.compose,
+        "exec",
+        "-T",
+        opts.service,
+        "sh",
+        "-c",
+        GUEST_STOP_SCRIPT,
+        "hack-background-stop",
+        opts.marker,
+      ],
+      {
+        stdin: "ignore",
+        cwd: opts.cwd,
+        timeoutMs: REMOVE_TIMEOUT_MS,
+        env: { ...opts.env },
+      }
+    );
+    return result.exitCode === 0 ? "stopped" : "not_confirmed";
+  } catch {
+    return "not_confirmed";
   }
 }

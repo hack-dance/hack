@@ -46,7 +46,7 @@ fn command(
     reservation: &str,
     frontend: Frontend<'_>,
 ) -> Command {
-    let mut command = Command::new(executable);
+    let mut command = crate::provider::process::publisher_command(executable);
     command
         .env_clear()
         .stdin(Stdio::null())

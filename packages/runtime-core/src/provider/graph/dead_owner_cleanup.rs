@@ -22,6 +22,8 @@ struct Intent {
     complete_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     one_off_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enrollment: Option<super::legacy_cleanup_enrollment::Selection>,
 }
 /// Dispatch only an exact completed recovery generation; history is inert.
 pub(super) fn current_completion(
@@ -69,7 +71,16 @@ fn validate(
     expected: &str,
     owner: &str,
 ) -> Result<(), CandidateError> {
-    if intent.version != 1
+    if let Some(enrollment) = &intent.enrollment {
+        enrollment.validate(&intent.original)?;
+        if intent.original.phase != "ready-observed" {
+            return Err(refused());
+        }
+    }
+    if intent.version != if intent.enrollment.is_some() { 2 } else { 1 }
+        || (intent.original.phase == "ready-observed"
+            && intent.original.relay_cleanup.is_some()
+            && intent.enrollment.is_none())
         || intent.original_sha256 != expected
         || selected(&intent.original)? != expected
         || intent.owner_sha256 != owner
@@ -87,6 +98,95 @@ fn exists(path: &std::path::Path) -> Result<bool, CandidateError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(state::io(e)),
     }
+}
+
+/// Read-only dispatch hint. Execution re-admits the exact predecessor boot,
+/// dead process, publication and inventories under their original locks.
+pub(super) fn recovery_hint(
+    candidate: &Candidate,
+    root: &std::path::Path,
+    receipt: &Receipt,
+    owner: &Owner,
+    publication: foreground::transport::PublishedOwner,
+) -> Option<String> {
+    if publication == foreground::transport::PublishedOwner::Running {
+        return None;
+    }
+    recovery_selection(
+        candidate,
+        root,
+        receipt,
+        owner,
+        publication != foreground::transport::PublishedOwner::Absent,
+    )
+    .ok()
+    .flatten()
+}
+
+pub(super) fn recovery_selection(
+    candidate: &Candidate,
+    root: &std::path::Path,
+    receipt: &Receipt,
+    owner: &Owner,
+    publication_present: bool,
+) -> Result<Option<String>, CandidateError> {
+    let (Some(current), Some(previous)) = (&owner.guest_boot_id, &owner.previous_guest_boot_id)
+    else {
+        return Ok(None);
+    };
+    if owner.phase != "running" || current == previous {
+        return Ok(None);
+    }
+    if exists(&root.join(FILE))? {
+        let intent: Intent = state::read(&root.join(FILE))?;
+        if intent.complete_sha256.is_none() && immutable(&intent.original)? != immutable(receipt)? {
+            return Err(refused());
+        }
+        if immutable(&intent.original)? == immutable(receipt)?
+            && intent.old_boot == *previous
+            && intent.new_boot.as_ref() == Some(current)
+        {
+            validate(
+                &intent,
+                receipt,
+                &intent.original_sha256,
+                &intent.owner_sha256,
+            )?;
+            let remaining = publication_present
+                || dependency_slots::reservation_recorded(candidate, &receipt.run)?;
+            if intent.complete_sha256.is_none()
+                || (remaining
+                    && intent.complete_sha256.as_deref() == Some(selected(receipt)?.as_str()))
+            {
+                return Ok(Some(intent.original_sha256));
+            }
+            return Ok(None);
+        }
+    }
+    // A new selection may recover only the phases admitted by execute. Retained
+    // stops without an intent keep their existing unadmitted/ordinary path.
+    if !publication_present
+        || (!matches!(receipt.phase.as_str(), "ready-observed" | "cleanup-intent")
+            && !exists(&root.join("one-off.json"))?)
+    {
+        return Ok(None);
+    }
+    let context = host_relay::context(&receipt.owner, previous)?;
+    let marker_matches = receipt.relay_cleanup.as_ref().is_some_and(|marker| {
+        marker.valid() && marker.boot == context.boot && marker.runtime == context.runtime
+    });
+    let root_matches = receipt.relay_startup.as_ref().is_some_and(|startup| {
+        startup::control_root(
+            &candidate.state_root,
+            &receipt.owner,
+            Some(previous),
+            Some(&receipt.run),
+        )
+        .is_ok_and(|expected| startup.control_root == expected)
+    });
+    (marker_matches || root_matches)
+        .then(|| selected(receipt))
+        .transpose()
 }
 fn no_pending(root: &std::path::Path) -> Result<(), CandidateError> {
     match fs::symlink_metadata(root.join("state.pending")) {
@@ -488,6 +588,9 @@ pub fn retire_recovered_publisher(
     }
     let intent: Intent = state::read(&root.join(FILE))?;
     let complete = selected(&receipt)?;
+    if let Some(enrollment) = &intent.enrollment {
+        enrollment.verify_raw(&intent.original)?;
+    }
     validate(
         &intent,
         &receipt,
@@ -517,6 +620,7 @@ pub fn retire_recovered_publisher(
         return Err(refused());
     }
     let bridges = intent.bridges.as_ref().ok_or_else(refused)?;
+    crate::provider::publication::require_run_absent(candidate, &receipt.owner, run)?;
     bridges::cleanup::verify_recovery_file(&root, bridges, intent.prior_bridges.as_ref())?;
     let legacy = super::host_pin_recovery::load_witness(candidate, run)?.filter(|witness| {
         witness.graph_sha256() == intent.original_sha256
@@ -683,6 +787,7 @@ fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         prior_bridges: None,
         complete_sha256: None,
         one_off_sha256,
+        enrollment: None,
     };
     dead.verify()?;
     retain_interrupted_write(&root)?;
@@ -797,7 +902,8 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         } else {
             None
         };
-        let interrupted_enrollment = receipt.phase == "cleanup-intent"
+        let interrupted_enrollment = ["ready-observed", "cleanup-intent"]
+            .contains(&receipt.phase.as_str())
             && receipt.relay_cleanup.as_ref().is_some_and(|marker| {
                 marker.valid()
                     && marker.phase == cleanup_enrollment::Phase::Pending
@@ -816,6 +922,17 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             return Err(refused());
         }
         initializer_cache::require_resolved(&receipt)?;
+        let enrollment = if receipt.phase == "ready-observed" && receipt.relay_cleanup.is_some() {
+            Some(
+                super::legacy_cleanup_enrollment::Selection::capture_previous(
+                    &receipt,
+                    &old_boot,
+                    dead.process(),
+                )?,
+            )
+        } else {
+            None
+        };
         let bridges = bridges::cleanup::capture_previous_boot(
             candidate,
             &engine,
@@ -826,7 +943,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         let prior_bridges = bridges::cleanup::capture_prior_generation(&root, &bridges, &receipt)?;
         require_prior_bridge_history(&root, &bridges, &receipt, prior_bridges.as_ref())?;
         let intent = Intent {
-            version: 1,
+            version: if enrollment.is_some() { 2 } else { 1 },
             original_sha256: expected.into(),
             owner_sha256: dead.fingerprint(),
             old_boot,
@@ -837,6 +954,7 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
             prior_bridges,
             complete_sha256: None,
             one_off_sha256,
+            enrollment,
         };
         dead.verify()?;
         retain_interrupted_write(&root)?;
@@ -844,6 +962,9 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         intent
     };
     validate(&intent, &receipt, expected, &dead.fingerprint())?;
+    if let Some(enrollment) = &intent.enrollment {
+        enrollment.verify_raw(&intent.original)?;
+    }
     if let Some(guard) = &pin_guard {
         if guard.witness().publisher_sha256() != dead.fingerprint() {
             return Err(refused());
@@ -955,7 +1076,22 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     if let Some(guard) = &pin_guard {
         guard.verify_lock()?;
     }
-    let cleaned = cleanup_owned(candidate, &engine, receipt, &root, false)?;
+    let fence = || {
+        engine.guest().verify()?;
+        dead.verify_retirement_ready()?;
+        if let Some(guard) = &pin_guard {
+            guard.verify_lock()?;
+        }
+        if let Some(enrollment) = &intent.enrollment {
+            enrollment.verify_raw(&intent.original)?;
+        }
+        Ok(())
+    };
+    crate::provider::publication::retire_run(candidate, &receipt.owner, run, &fence)?;
+    let cleaned = cleanup_owned_fenced(candidate, &engine, receipt, &root, false, false, || {
+        fence()?;
+        crate::provider::publication::require_run_absent(candidate, &intent.original.owner, run)
+    })?;
     host_relay::inspect_cleanup_recovery(
         candidate,
         &engine,
@@ -1246,6 +1382,122 @@ pub(super) fn retained(root: &std::path::Path, receipt: &Receipt) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn predecessor_dispatch_selects_only_audited_boot_and_resumes_original_receipt() {
+        let fixture = super::super::retained_startup::tests::Fixture::new();
+        let mut owner = Owner::load(&fixture.candidate).unwrap();
+        let previous = owner.guest_boot_id.clone().unwrap();
+        owner.previous_guest_boot_id = Some(previous.clone());
+        owner.guest_boot_id = Some("22222222-2222-2222-2222-222222222222".into());
+        owner.phase = "running".into();
+        let mut receipt = fixture.receipt();
+        receipt.phase = "ready-observed".into();
+        receipt.relay_startup = Some(serde_json::from_value(json!({"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}})).unwrap());
+        let context = host_relay::context(&receipt.owner, &previous).unwrap();
+        receipt.relay_cleanup = Some(
+            serde_json::from_value(json!({
+                "version":1,"runtime":context.runtime,"boot":context.boot,"operation":([3;16]),
+                "effect":([4;32]),"control_root":"/private/owned","phase":"pending"
+            }))
+            .unwrap(),
+        );
+        let expected = selected(&receipt).unwrap();
+        let hint =
+            || recovery_selection(&fixture.candidate, &fixture.graph(), &receipt, &owner, true);
+        assert_eq!(hint().unwrap(), Some(expected.clone()));
+        assert!(
+            recovery_selection(
+                &fixture.candidate,
+                &fixture.graph(),
+                &receipt,
+                &owner,
+                false
+            )
+            .unwrap()
+            .is_none()
+        );
+        for phase in [
+            "stopped-data-retained",
+            "removed",
+            "preparing",
+            "failed-retained",
+        ] {
+            let mut old = receipt.clone();
+            old.phase = phase.into();
+            assert!(
+                recovery_selection(&fixture.candidate, &fixture.graph(), &old, &owner, true)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        owner.previous_guest_boot_id = Some("33333333-3333-3333-3333-333333333333".into());
+        assert!(
+            recovery_selection(&fixture.candidate, &fixture.graph(), &receipt, &owner, true)
+                .unwrap()
+                .is_none()
+        );
+        owner.previous_guest_boot_id = Some(previous.clone());
+        let mut intent = intent(&receipt);
+        intent.version = 2;
+        intent.enrollment = Some(
+            serde_json::from_value(
+                json!({"coordinator_sha256":"1".repeat(64),"fingerprint":"2".repeat(64)}),
+            )
+            .unwrap(),
+        );
+        intent.old_boot = previous;
+        intent.new_boot = owner.guest_boot_id.clone();
+        state::write(&fixture.graph().join(FILE), &intent).unwrap();
+        let mut progress = receipt.clone();
+        progress.phase = "cleanup-intent".into();
+        assert_eq!(
+            recovery_selection(
+                &fixture.candidate,
+                &fixture.graph(),
+                &progress,
+                &owner,
+                true
+            )
+            .unwrap(),
+            Some(expected)
+        );
+        progress.owner = "f".repeat(32);
+        assert!(
+            recovery_selection(
+                &fixture.candidate,
+                &fixture.graph(),
+                &progress,
+                &owner,
+                true
+            )
+            .is_err()
+        );
+        state::write(&fixture.graph().join(FILE), &json!({"malformed":true})).unwrap();
+        assert!(
+            recovery_selection(&fixture.candidate, &fixture.graph(), &receipt, &owner, true)
+                .is_err()
+        );
+        assert!(
+            recovery_hint(
+                &fixture.candidate,
+                &fixture.graph(),
+                &receipt,
+                &owner,
+                foreground::transport::PublishedOwner::Running
+            )
+            .is_none()
+        );
+        assert!(
+            recovery_hint(
+                &fixture.candidate,
+                &fixture.graph(),
+                &receipt,
+                &owner,
+                foreground::transport::PublishedOwner::Exited
+            )
+            .is_none()
+        );
+    }
     fn partial() -> Receipt {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"failed-retained","readiness":{},"relay_startup":{"control_only":true,"guest_root":null,"control_root":"/private/owned","artifact":"e".repeat(64),"services":{}},"resources":{
           "container:init":{"kind":"container","key":"init","name":"owned-init","id":"f".repeat(64),"image":format!("sha256:{}","a".repeat(64)),"phase":"started"},
@@ -1266,6 +1518,7 @@ mod tests {
             prior_bridges: None,
             complete_sha256: None,
             one_off_sha256: None,
+            enrollment: None,
         }
     }
     #[test]

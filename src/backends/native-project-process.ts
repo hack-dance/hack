@@ -75,7 +75,7 @@ type ProcessOptions = {
 };
 
 /**
- * Keep the graph owner attached to the calling CLI until owned shutdown completes.
+ * Keep the graph owner supervised by the calling CLI until owned shutdown completes.
  * Startup values travel over stdin only. Readiness is a handshake, not application
  * acceptance; the caller must inspect ownership before publishing a run mapping.
  * Aborted/failed attempts retain native recovery state and are never replayed.
@@ -99,6 +99,7 @@ export async function serveNativeProjectGraph(
     ],
     readyLimit: 8192,
     strictReady: false,
+    isolateOwner: true,
     onReady: async (value) => {
       if (
         !isRecord(value) ||
@@ -310,6 +311,8 @@ async function serveGraphProcess(
     readonly command: readonly string[];
     readonly readyLimit: number;
     readonly strictReady: boolean;
+    /** Compose ownership is independent of readiness framing and optional hooks. */
+    readonly isolateOwner?: boolean;
     readonly onReady: (
       value: unknown,
       interrupted: () => boolean,
@@ -339,8 +342,13 @@ async function serveGraphProcess(
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      // Compose owners and their port publishers must outlive the terminal's
+      // group interrupt until this frontend requests owned cleanup. Hooks are
+      // optional; their presence must not decide process ownership.
       detached:
-        opts.beforeStop !== undefined || opts.liveStopOwner !== undefined,
+        opts.isolateOwner === true ||
+        opts.beforeStop !== undefined ||
+        opts.liveStopOwner !== undefined,
     }
   );
   // Descendants may inherit a pipe after the owned receiver exits. Its exit,

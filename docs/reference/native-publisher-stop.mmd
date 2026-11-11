@@ -1,0 +1,32 @@
+---
+title: Native foreground publisher shutdown
+---
+stateDiagram-v2
+    direction TB
+    [*] --> ready
+    ready --> enrolled : Interrupt
+    enrolled --> enrolled : StopPublisher
+    ready --> intent : Recover [owner absent]
+    enrolled --> intent : Recover [owner absent]
+    intent --> intent : StopPublisher [identity matches]
+    enrolled --> bridge_retired : ReleaseBridge [publisher absent]
+    intent --> bridge_retired : ReleaseBridge [proof current]
+    bridge_retired --> intent : Recover [owner absent]
+    bridge_retired --> stopped : CleanupGuest [proof current]
+    stopped --> retired : Retire [proof current]
+    retired --> [*]
+    state "bridge-retired" as bridge_retired
+    note right of intent
+        Dead owner and pinned coordinator
+        Same or audited successor boot
+        Exact bridge and environment inventory
+        Changed evidence retains this intent
+    end note
+    note right of bridge_retired
+        Publisher and bridge helper absent
+        Capacity released before compute removal
+    end note
+    note right of retired
+        Compute absent, data retained
+        Foreground publication retired
+    end note

@@ -817,6 +817,26 @@ durability, crash/power-loss safety, framework concurrency or application readin
 
 ## Foreground graph dependency owner (candidate macOS path)
 
+Compose foreground graph owners run outside the terminal process group even
+without hooks; `process::publisher_command` gives each host port/route publisher
+its own group. Terminal group SIGINT cannot retire a publisher ahead of the
+owner's authenticated cleanup. Portable process tests exercise a real group
+signal; a macOS cross-check is compilation evidence, not real-VM acceptance.
+
+Same-boot dead-owner cleanup also accepts the unchanged ready receipt and Pending
+relay enrollment left when an older publisher exited before cleanup. The old
+coordinator must be EffectStarted for the exact dead owner, graph, operation,
+effect and saved bridge/environment inventories. Recovery pins its bytes in a
+new version3/4 intent (present/absent relay respectively); version1/2 recovery
+records remain unchanged. After an audited immediate successor boot, the frontend
+selects `recover-cleanup` followed by publication retirement. Its new version2
+intent pins the legacy Ready/Pending coordinator; ordinary version1 predecessor
+recovery records remain unchanged. The old coordinator is retained without an ACK or
+admission replay. Publisher shutdown keeps the native PID/birth/UID/executable
+and socket/inode proofs; guest effects follow confirmed publisher exit, held
+dead-owner witnesses and independently rechecked inventories. Changed evidence
+refuses. This does not add VM-loss detection or infer authority for an unrecorded boot.
+
 If an interrupted foreground owner leaves private dependency socket paths after
 the provider has stopped, normal `hack up` still refuses to adopt or replace them.
 `hack-local runtime dependency-socket-recovery --json` selects only owned, unlistened
@@ -2120,3 +2140,24 @@ prove fresh requests succeed on the original port and hostname. Also replace an
 owned container with a foreign/copied-label container and occupy a host port
 after retirement: no forwarding may reach the replacement, and the busy bridge
 must remain retired. Stop must disarm policies and leave no publisher or relay.
+
+### Legacy published-port cleanup acceptance
+
+The opt-in tests under
+`provider::graph::foreground::native_test::same_boot_absent_relay::legacy_enrollment`
+construct the legacy Ready/Pending state through the actual failed cleanup:
+they signal only their exact publisher child and observe its exit with WNOWAIT,
+so the unreaped publisher makes native stop fail before its owner exits. Both
+SIGINT-cleaned endpoints and SIGKILL-left socket/identity files are exercised.
+A separate live-orphan variant pauses cleanup before retiring the publisher and
+kills only its owned owner process. They
+exercise same-boot recovery, a retry after publisher exit but before registry
+publication, the audited successor-boot path, retained volume contents and a new
+graph reusing the released port/bridge. No old receipt or coordinator is fabricated.
+They need a caller-prepared disposable capacity-one pool, a matching all-feature
+CLI, a pinned BusyBox image with `sh`, `httpd` and `sleep`, an exclusive host port
+and an external 300-second watchdog. Set `HACK_LOCAL_TEST_ROOT`,
+`HACK_LOCAL_TEST_BINARY`, `HACK_LOCAL_TEST_IMAGE` and `HACK_LOCAL_TEST_PORT` as for
+other isolated native fixtures. The tests retain their generated data receipts
+for inspection; stop the disposable pool after qualification. They are ignored
+on ordinary test runs and do not qualify recovery until executed on Apple Silicon.

@@ -1368,3 +1368,33 @@ and recreated services. Its 43-state positive bound separates stopped history,
 evidence reset, receipt publication and crash/retry. The two negative controls
 remove reset and fresh old-ID absence respectively. Source mapping, regression
 coverage and native proof limits are in `docs/reference/v5-model-coverage.md`.
+
+## Foreground port publisher shutdown
+
+`native-publisher-stop/PublisherStop.tla` bounds one graph and publisher, one
+owner crash, one incarnation replacement and one audited successor boot. Its six
+initial states include live ready/enrolled owners and the actual legacy state:
+a dead owner with an exited or still-live publisher on either admitted boot. `Interrupt` maps to the
+frontend's group isolation; `StopPublisher` abstracts authenticated control plus
+kernel exit proof; `Recover` pins the exact old owner/coordinator/inventories;
+`ReleaseBridge` maps to confirmed publisher/guest-helper retirement and registry
+release, before `CleanupGuest` removes compute. `Retire` archives the foreground
+publication only after compute absence is verified. A failed or stale proof preserves capacity and evidence.
+The positive configuration explores 48 states. The two guard-removal controls
+must violate `NoUnsafeCleanup` at `ReleaseBridge` and `NoInterruptRace` at
+`Interrupt`. The `NeverComplete` control must reach `Retire`, establishing that
+the positive guards permit completion. No fairness/eventual recovery is claimed.
+Atomic journal steps, identity and exit observations are assumptions here; real
+process tests, legacy journal and opt-in published-port VM fixtures, source
+compilation and Apple Silicon VM qualification remain separate evidence. This
+model abstracts the audited predecessor-boot proof and does not cover provider-loss
+detection, concrete boot identity, host frontend hooks or filesystem power-loss
+durability.
+
+The publisher model permits reselecting a same-boot intent on the successor boot
+as a permissive safety abstraction. The implementation refuses that unfinished
+cross-boot takeover; the qualified predecessor slice starts from the legacy
+Ready/Pending state before any new recovery intent. No completion claim covers
+that abstract reselection. `startup::cleanup_guest(..., false)` checks startup
+artifacts/listener state without removing containers; bridge release then
+precedes `shutdown::stop_owned` and container DELETE in `cleanup_owned_fenced`.

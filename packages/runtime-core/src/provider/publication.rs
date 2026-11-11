@@ -493,6 +493,53 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
         .sync_all()
         .map_err(state::io)
 }
+
+/// The caller holds the provider lease; require every selected recorded process to be absent before
+/// any guest cleanup. A reused, live or inaccessible PID conservatively refuses.
+#[cfg(target_os = "macos")]
+pub(crate) fn require_run_absent(
+    c: &Candidate,
+    owner: &str,
+    run: &str,
+) -> Result<(), CandidateError> {
+    for entry in load(c, owner)?.values().filter(|entry| entry.run == run) {
+        if identity::alive(entry.process.pid)? {
+            return Err(CandidateError::new(
+                "graph_publisher_running",
+                "Recovery cannot prove this run's port publisher exited. No cleanup command is safe with this evidence; retain the native home unchanged for inspection.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A dead graph owner's recovery may use the publisher's original authenticated
+/// shutdown protocol. Each entry is retired only after exact native process exit
+/// and inode proofs succeed; no signal or PID adoption is introduced here.
+#[cfg(target_os = "macos")]
+pub(crate) fn retire_run(
+    c: &Candidate,
+    owner: &str,
+    run: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    let mut entries = load(c, owner)?;
+    let selected = entries
+        .iter()
+        .filter(|(_, entry)| entry.run == run)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in selected {
+        fence()?;
+        cleanup(&entries[&key])?;
+        fence()?;
+        #[cfg(test)]
+        super::graph::publisher_stop_fault(c, run)?;
+        entries.remove(&key);
+        save(c, &entries)?;
+    }
+    require_run_absent(c, owner, run)
+}
 /// Caller holds the provider operation lock. Stop host listeners before guest resources.
 pub(super) fn release(
     c: &Candidate,

@@ -87,6 +87,8 @@ pub use acknowledged_publisher::{
 #[cfg(target_os = "macos")]
 mod dead_owner_cleanup;
 #[cfg(target_os = "macos")]
+mod legacy_cleanup_enrollment;
+#[cfg(target_os = "macos")]
 mod live_owner_cleanup;
 #[cfg(target_os = "macos")]
 pub(in crate::provider) use dead_owner_cleanup::HttpsArchiveGuard;
@@ -777,6 +779,14 @@ pub(super) fn fault_pause(
         }
     }
     Ok(())
+}
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn publisher_stop_fault(candidate: &Candidate, run: &str) -> Result<(), CandidateError> {
+    fault_pause(
+        &directory(candidate, run)?,
+        run,
+        "publisher-recovery-after-stop",
+    )
 }
 impl Session<'_, '_> {
     #[cfg(test)]
@@ -1689,12 +1699,21 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
     let (receipt, root) = load_at(directory(candidate, run)?, run, &owner.token)?;
     let bytes = host_pin_recovery::read_raw(&root.join("state.json"), 1024 * 1024)?;
     let publication = foreground::transport::published_owner(candidate, run)?;
-    let resumable = live_owner_cleanup::resumable_selection(
-        candidate,
-        &root,
-        &receipt,
-        publication != foreground::transport::PublishedOwner::Absent,
-    )?;
+    let running = publication == foreground::transport::PublishedOwner::Running;
+    let resumable = if running {
+        None
+    } else {
+        live_owner_cleanup::resumable_selection(
+            candidate,
+            &root,
+            &receipt,
+            publication != foreground::transport::PublishedOwner::Absent,
+        )?
+    };
+    // Recovery hints grant no authority. A malformed sidecar must not prevent
+    // authenticated cleanup by a live owner, or poison read-only discovery.
+    let predecessor =
+        dead_owner_cleanup::recovery_hint(candidate, &root, &receipt, &owner, publication);
     Ok(json!({
         "version": 1,
         "run": receipt.run,
@@ -1703,6 +1722,7 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "receipt_sha256": format!("{:x}", Sha256::digest(&bytes)),
         "foreground": publication.word(),
         "live_owner_recovery": resumable,
+        "dead_owner_recovery": predecessor,
     }))
 }
 
@@ -2103,6 +2123,8 @@ fn cleanup_owned_fenced(
     };
     startup::cleanup_guest(engine, &receipt, false)?;
     fence()?;
+    #[cfg(test)]
+    fault_pause(root, &receipt.run, "cleanup-before-publisher-stop")?;
     bridges::release_run(candidate, engine, &receipt)?;
     #[cfg(test)]
     if early_intent {

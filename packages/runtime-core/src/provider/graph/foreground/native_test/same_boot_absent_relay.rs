@@ -3,6 +3,7 @@
 //! to manufacture the absent endpoint. Fault controls affect only owned fixtures.
 use super::*;
 mod bridge_normalization;
+mod legacy_enrollment;
 use crate::provider::{identity::ProcessIdentity, relay_owner::publication::dead};
 use std::collections::{BTreeMap, BTreeSet};
 

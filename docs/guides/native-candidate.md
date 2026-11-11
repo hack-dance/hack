@@ -3298,6 +3298,20 @@ separately after restart.
 
 ### Explicit cleanup after a dead foreground owner
 
+![Foreground publisher shutdown and recovery](../reference/native-publisher-stop.svg)
+
+Foreground Compose `up` and `restart` isolate their graph owner from the
+terminal's process group, including projects without hooks. Each port publisher
+also has its own group. Ctrl-C asks the owner to stop through the frontend;
+publisher retirement must still prove exit before graph cleanup is confirmed.
+If the frontend is killed or its terminal closes, the isolated graph owner may
+remain alive with its port; `hack down --recover` uses that owner's authenticated
+stop. Frontend death alone is never evidence that services stopped.
+
+`hack down --recover` uses the ordinary authenticated stop when the graph owner
+is still running, including when its frontend was lost. It does not treat a live
+owner as dead or bypass its cleanup checks.
+
 `hack up` and `hack restart` refuse a run whose foreground publication is still
 present and name the next step: a running owner must be stopped with Ctrl-C or
 `hack down`; an owner that exited while its services were running is stopped by
@@ -3334,8 +3348,25 @@ make them fail or strand a foreground publication.
 For a fully ready graph whose foreground owner died while its pool remains on the
 same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects
 only that graph. It requires matching dead foreground and relay-owner identities,
-unchanged receipt and resource inventories, and exclusive publication locks. The
-relay endpoint may also be absent after the managed owner exited: both relay files
+unchanged receipt and resource inventories, and exclusive publication locks.
+A ready graph left by an older build may already have a pending cleanup
+enrollment. Recovery binds that exact coordinator's raw bytes, operation, effect,
+graph and process incarnation to the saved bridge and environment inventories.
+It writes a distinct recovery intent and preserves the old coordinator; it
+never replays its admission or invents an acknowledgement. Recorded publishers
+are retired only through their original authenticated stop and native exit
+proof, before guest cleanup. Live or reused process identities, changed journals,
+partial publications and unknown inventories still refuse. Recovery resumes its
+own durable intent after an interruption and releases bridge capacity only after
+confirmed publisher/bridge-helper absence; compute absence is verified separately.
+
+If the pool already has an audited immediate successor boot, `down --recover`
+selects `graph recover-cleanup` and then retires the recovered publication. For a
+legacy Ready/Pending enrollment, that path pins the old boot's exact coordinator
+and dead process before any effect. It does not restart the pool, infer an
+arbitrary older boot or treat uncertain publisher exit as absence.
+
+The relay endpoint may also be absent after the managed owner exited: both relay files
 must be absent under the original held operation lock, and the exact dead
 foreground process and ready receipt must select the control root derived for
 this run, runtime owner, and current guest boot. Recovery persists that absence

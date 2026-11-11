@@ -19,7 +19,8 @@
 //!   recorded identities and declared sizes ([`select`], again under the lease).
 //! - The request ([`StartRequest`]): bridges, dependency sockets, network, project share
 //!   (including its live directory) and translation, checked before selection by `start_pool`
-//!   and again under the lease against the receipt this path holds.
+//!   and again under the lease against the receipt this path holds. The general path checks
+//!   the same request under its lease with its own, stricter bindings.
 //! - Pending owner updates, the owner registry and dependency sockets, as before.
 //! - The provider configuration audit (`audit_boot`), as before.
 //! - Provider trees: each record must name this executor's pin, and each tree (SmolVM, engine
@@ -57,20 +58,13 @@ pub(super) struct StartRequest<'a> {
 
 impl StartRequest<'_> {
     /// The request fits the existing pool `owner` records; nothing is resized or replaced.
+    /// `project_share::check_request` also re-validates the requested share's live directory.
     pub(super) fn check(&self, owner: &Owner) -> Result<(), CandidateError> {
         check_amd64_emulation_request(owner, self.amd64_emulation)?;
         super::super::project_share::check_request(&owner.project_shares(), self.project_share)?;
         self.bridges.check(owner.application_bridge)?;
         super::super::network_intent::check_request(&owner.network, self.network)?;
         self.dependencies.check(owner.dependency_sockets)
-    }
-
-    /// The requested project share is still its exact approved directory.
-    fn validate(&self) -> Result<(), CandidateError> {
-        if let Some(share) = self.project_share {
-            share.validate()?;
-        }
-        Ok(())
     }
 }
 
@@ -140,7 +134,6 @@ pub(super) fn resume(
     if owner != running.owner {
         return Err(changed());
     }
-    request.validate()?;
     request.check(&owner)?;
     verify_running(candidate, &owner)?;
     super::super::graph::verify_owner_registry(candidate, &owner)?;

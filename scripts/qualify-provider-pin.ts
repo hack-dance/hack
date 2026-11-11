@@ -333,8 +333,12 @@ export interface WarmPhases {
   total_s: number;
   /** Median interval between samples: each boundary is accurate to about this much. */
   sample_period_s: number | null;
-  /** Phases seen in one sample only: their value is the sample period, an upper bound. */
-  upper_bounds: string[];
+  /**
+   * Phases seen in one sample only. Their value is the interval between the samples either
+   * side of that one, the longest the process can have lived; every other phase value is
+   * accurate to about one period at each end.
+   */
+  single_sample: string[];
 }
 
 /**
@@ -342,7 +346,8 @@ export interface WarmPhases {
  * the launcher until `graph retained-preflight` appears, that preflight, the gap until
  * `runtime up`, `runtime up` itself, and the rest (plan, serve, health and publish) until
  * the command exits at `total`. Each boundary is accurate to about one sampling period; a
- * process seen in a single sample is reported as one period and listed in `upper_bounds`.
+ * process seen in a single sample is reported as the interval between its neighbouring
+ * samples (its longest possible lifetime) and listed in `single_sample`.
  */
 export function warmPhases(samples: PhaseSample[], total: number): WarmPhases {
   const seen = (pattern: RegExp) => {
@@ -365,15 +370,18 @@ export function warmPhases(samples: PhaseSample[], total: number): WarmPhases {
     gaps.length > 0
       ? (gaps[Math.floor((gaps.length - 1) / 2)] as number)
       : null;
-  const upperBounds: string[] = [];
+  const singleSample: string[] = [];
   const span = (from: number | undefined, to: number | undefined) =>
     from === undefined || to === undefined
       ? null
       : round(Math.max(0, to - from));
   const lifetime = (name: string, observed: typeof preflight) => {
-    if (observed && observed.first === observed.last && period !== null) {
-      upperBounds.push(name);
-      return round(period);
+    if (observed && observed.first === observed.last) {
+      singleSample.push(name);
+      const index = samples.findIndex((sample) => sample.at === observed.first);
+      const before = samples[index - 1]?.at ?? 0;
+      const after = samples[index + 1]?.at ?? total;
+      return round(after - before);
     }
     return span(observed?.first, observed?.last);
   };
@@ -385,14 +393,27 @@ export function warmPhases(samples: PhaseSample[], total: number): WarmPhases {
     serve_to_ready_s: span(runtimeUp?.last, total),
     total_s: round(total),
     sample_period_s: period === null ? null : round(period),
-    upper_bounds: upperBounds,
+    single_sample: singleSample,
   };
 }
 
-/** Whether a `ps` command line runs a `hack-native` executable, however it was launched. */
-export function isExecutor(command: string): boolean {
-  const program = command.split(" ")[0] ?? "";
-  return program === "hack-native" || program.endsWith("/hack-native");
+/**
+ * Whether a `ps` command line is an executor process of this run: it runs `native` (or any
+ * `hack-native` executable, however it was launched) with `--candidate-root home`, so other
+ * homes' or the user's own Hack processes on the host are never counted.
+ */
+export function isExecutor(
+  command: string,
+  native: string,
+  home: string
+): boolean {
+  const program = command.startsWith(`${native} `)
+    ? native
+    : (command.split(" ")[0] ?? "");
+  return (
+    (program === "hack-native" || program.endsWith("/hack-native")) &&
+    command.includes(` --candidate-root ${home} `)
+  );
 }
 
 export interface Options {
@@ -1922,13 +1943,21 @@ class Qualification {
         const text = await new Response(listing.stdout).text();
         samples.push({
           at,
-          commands: text.split("\n").filter(isExecutor),
+          commands: text
+            .split("\n")
+            .filter((command) =>
+              isExecutor(command, this.options.native, this.main)
+            ),
         });
         await Bun.sleep(50);
       }
       if (child.exitCode === null) {
         // This run's own child; the pool is left for the failure report.
         child.kill("SIGTERM");
+        await Promise.race([child.exited, Bun.sleep(10_000)]);
+        if (child.exitCode === null) {
+          child.kill("SIGKILL");
+        }
       }
       const code = await child.exited;
       const total = (performance.now() - started) / 1000;

@@ -279,9 +279,9 @@ describe("provider pin qualification", () => {
       serve_to_ready_s: 3.8,
       total_s: 11.1,
       sample_period_s: 0.55,
-      upper_bounds: [],
+      single_sample: [],
     });
-    // A phase never observed is unknown, not zero; one seen once is an upper bound.
+    // A phase never observed is unknown, not zero.
     expect(warmPhases([sample(0.1)], 2).runtime_up_s).toBeNull();
     const brief = warmPhases(
       [
@@ -292,13 +292,31 @@ describe("provider pin qualification", () => {
       ],
       0.3
     );
-    expect(brief.retained_preflight_s).toBe(0.08);
-    expect(brief.upper_bounds).toEqual(["retained_preflight_s"]);
+    // Seen once at 0.08 between samples at 0.00 and 0.16: it lived at most 0.16 s.
+    expect(brief.retained_preflight_s).toBe(0.16);
+    expect(brief.single_sample).toEqual(["retained_preflight_s"]);
+    const bundle = "/Users/x/Application Support/bundle/hack-native";
     expect(
-      isExecutor("/bundle/hack-native --candidate-root /h runtime up")
+      isExecutor(`${bundle} --candidate-root /h runtime up`, bundle, "/h")
     ).toBe(true);
-    expect(isExecutor("hack-native runtime up")).toBe(true);
-    expect(isExecutor("/usr/bin/other /bundle/hack-native")).toBe(false);
+    expect(
+      isExecutor(
+        "/other/hack-native --candidate-root /h runtime up",
+        bundle,
+        "/h"
+      )
+    ).toBe(true);
+    // Another home, or not the executor, is not this run.
+    expect(
+      isExecutor(
+        `${bundle} --candidate-root /elsewhere runtime up`,
+        bundle,
+        "/h"
+      )
+    ).toBe(false);
+    expect(
+      isExecutor("/usr/bin/other --candidate-root /h x", bundle, "/h")
+    ).toBe(false);
     expect(
       parseOptions([...required, "--warm-runs", "3", "--warm-only"])
     ).toMatchObject({

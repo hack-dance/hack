@@ -1359,6 +1359,8 @@ fn start_pool(
         existing_dependencies,
         existing_share.clone(),
     )?;
+    // These leased checks must stay a superset of `running_start::StartRequest::check`, which
+    // the fast path runs under its lease; network is bound to the pre-lease receipt here.
     super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
     if owner.project_share != existing_share
         || owner.additional_project_shares != existing_additional

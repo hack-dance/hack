@@ -8,7 +8,10 @@
 2. **Trust**: making the host trust Caddy's local CA, so `https://` URLs work.
 3. **The daemon service**: optional; see [`hack daemon`](../cli.md).
 
-Hack never runs `sudo` without asking. Every root step is shown first, with the
+Hack never runs `sudo` without asking. It uses only the system `sudo`
+(`/usr/bin/sudo` or `/bin/sudo`, a root-owned setuid file in root-owned
+directories), never one found on your `PATH`, with a fixed system `PATH` for the
+root commands. Every root step is shown first, with the
 files it writes and the exact commands; it runs only after you answer yes in a
 terminal. A run that cannot prompt (no TTY, `HACK_NO_INTERACTIVE=1` or
 `--no-interactive`) changes nothing and prints the commands with a stable code.

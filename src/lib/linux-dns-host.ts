@@ -8,7 +8,8 @@ import {
   parseSystemdVersion,
 } from "./linux-dns.ts";
 import type { LinuxDnsHost } from "./linux-dns-setup.ts";
-import { type ExecResult, exec, run } from "./shell.ts";
+import { runTrustedSudo } from "./privileged-sudo.ts";
+import { type ExecResult, exec } from "./shell.ts";
 
 const PROBE_TIMEOUT_MS = 3000;
 const UNAVAILABLE: ExecResult = { exitCode: 127, stdout: "", stderr: "" };
@@ -70,8 +71,8 @@ export function createLinuxDnsHost(opts: {
       await writeTextFile(path, content);
       return path;
     },
-    runPrivileged: async (argv) =>
-      await run(["sudo", ...argv], { stdin: "inherit" }),
+    // Only a vetted system sudo, never one found on PATH (privileged-sudo.ts).
+    runPrivileged: async (argv) => await runTrustedSudo(argv),
   };
 }
 

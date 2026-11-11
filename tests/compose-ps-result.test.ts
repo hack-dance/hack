@@ -92,6 +92,27 @@ describe("readComposePsResult", () => {
     expect(error.message).not.toContain("Engine said");
   });
 
+  test.each([
+    "services.web include: dial tcp: lookup sample-expanded-host: no such host",
+    "open <project>/sample-expanded-path: connection refused",
+    "sample-expanded-value: error during connect: connection refused",
+  ])("an unreachable marker inside Compose text classifies but is not quoted: %s", (line) => {
+    const error = failure(line);
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).not.toContain("sample-expanded");
+    expect(error.message).not.toContain("Engine said");
+  });
+
+  test("a socket-permission marker inside Compose text classifies but is not quoted", () => {
+    const error = failure(
+      "sample-expanded-value: permission denied reading docker.sock path"
+    );
+    expect(error.code).toBe("E_PERMISSION");
+    expect(error.message).toContain("docker group");
+    expect(error.message).not.toContain("sample-expanded-value");
+    expect(error.message).not.toContain("Engine said");
+  });
+
   test("secret-looking inherited values are redacted even from a recognized engine line", () => {
     const error = failure(
       "Cannot connect to the Docker daemon at tcp://sample-key-material:2376. Is the docker daemon running?",

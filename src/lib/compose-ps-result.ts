@@ -16,7 +16,8 @@
  * - `E_COMPOSE_FAILED`: any other non-zero exit.
  *
  * Only a recognized Docker client connection error (denied socket, engine
- * unreachable) is quoted, as one stderr line with URL credentials, the env
+ * unreachable) is quoted: one stderr line that starts with the client's own
+ * error opening, with URL credentials, the env
  * values Hack passed to Compose and secret-looking inherited values replaced
  * by `[REDACTED]`. Other Compose output is omitted: Compose can expand
  * project `${VAR}` references, including inherited secrets, into its errors.
@@ -53,6 +54,21 @@ const SENSITIVE_ENV_NAME = /^HACK_ENV_|SECRET|TOKEN|PASSW|CREDENTIAL|AUTH|KEY/i;
 const OUTPUT_OMITTED =
   "Its output is omitted because Compose can expand project values into it; run `docker compose ps` in the project (or `hack ps` without --json) to see it.";
 
+/**
+ * How the Docker client itself begins a connection error (lowercased). Only a
+ * line starting with one of these is quoted; the marker lists below only
+ * classify.
+ */
+const CLIENT_PERMISSION_OPENINGS = [
+  "permission denied while trying to connect to the docker",
+] as const;
+const CLIENT_UNREACHABLE_OPENINGS = [
+  "cannot connect to the docker daemon",
+  "failed to connect to the docker api",
+  "error during connect",
+] as const;
+
+/** Classification only: these may appear inside Compose-generated text. */
 const ENGINE_PERMISSION_MARKERS = [
   "docker.sock",
   "docker api",
@@ -228,26 +244,24 @@ function composePsFailureError(opts: {
     ...(opts.redactValues ?? []),
     ...sensitiveInheritedValues({ env: opts.inheritedEnv ?? process.env }),
   ];
-  // Quote only a recognized Docker client connection error. Any other line
-  // can come from Compose, which may expand project `${VAR}` references
-  // (inherited secrets included) into it.
-  const said = (matches: (lowerLine: string) => boolean): string => {
+  // Quote only a line that starts the way the Docker client starts its own
+  // connection errors. Markers elsewhere in a line prove nothing: Compose can
+  // expand project `${VAR}` references (from the environment or the project
+  // `.env`) into its errors, next to text like "no such host".
+  const said = (openings: readonly string[]): string => {
     const line = engineErrorLine({
       stderr: result.stderr,
-      matches,
+      matches: (lowerLine) => openings.some((o) => lowerLine.startsWith(o)),
       redactValues,
     });
     return line === null ? "" : ` Engine said: ${line}`;
   };
 
   if (lower.includes("permission denied")) {
-    const isEnginePermission = (line: string) =>
-      line.includes("permission denied") &&
-      ENGINE_PERMISSION_MARKERS.some((m) => line.includes(m));
     if (ENGINE_PERMISSION_MARKERS.some((m) => lower.includes(m))) {
       return new HackCliError({
         code: "E_PERMISSION",
-        message: `Permission denied connecting to the Docker engine: your user cannot open its socket. Add your user to the docker group and start a new login session, or select an engine you can use with \`docker context use\`, then retry.${said(isEnginePermission)}`,
+        message: `Permission denied connecting to the Docker engine: your user cannot open its socket. Add your user to the docker group and start a new login session, or select an engine you can use with \`docker context use\`, then retry.${said(CLIENT_PERMISSION_OPENINGS)}`,
       });
     }
     return new HackCliError({
@@ -265,7 +279,7 @@ function composePsFailureError(opts: {
   if (ENGINE_UNREACHABLE_MARKERS.some((m) => lower.includes(m))) {
     return new HackCliError({
       code: "E_DOCKER_UNAVAILABLE",
-      message: `The Docker engine is not reachable. Start Docker, or check \`docker context ls\` and DOCKER_HOST point at a running engine, then retry.${said((line) => ENGINE_UNREACHABLE_MARKERS.some((m) => line.includes(m)))}`,
+      message: `The Docker engine is not reachable. Start Docker, or check \`docker context ls\` and DOCKER_HOST point at a running engine, then retry.${said(CLIENT_UNREACHABLE_OPENINGS)}`,
     });
   }
   return new HackCliError({

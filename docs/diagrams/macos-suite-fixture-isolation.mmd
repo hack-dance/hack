@@ -1,0 +1,11 @@
+flowchart TD
+  T[Regression tests] --> M[Mux fixture]
+  T --> G[Global fixture]
+  T --> R[Recovery fixture]
+  M --> Q[Empty listing seam]
+  M --> H[Owned hanging process]
+  G --> E[Isolated environment]
+  G --> L[Mock launchd status]
+  R --> P[Fixture PID census]
+  R --> I[Private child HOME]
+  P --> C[Real identity checks]

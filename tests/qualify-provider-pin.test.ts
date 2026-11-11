@@ -305,7 +305,7 @@ describe("provider pin qualification", () => {
     // Seen once at 0.08 between samples at 0.00 and 0.16: it lived at most 0.16 s.
     expect(brief.retained_preflight_s).toBe(0.16);
     expect(brief.single_sample).toEqual(["retained_preflight_s"]);
-    const bundle = "/Users/x/Application Support/bundle/hack-native";
+    const bundle = "/opt/fixture bundle/Application Support/hack-native";
     expect(
       isExecutor(`${bundle} --candidate-root /h runtime up`, bundle, "/h")
     ).toBe(true);

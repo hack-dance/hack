@@ -192,11 +192,29 @@ candidate that refuses state written by a newer one is not a successful rollback
 `stable` deselects the candidate: `hack-next` then reports that no candidate is
 selected, all bundles and homes are retained, and your stable `hack` is unchanged.
 
-`upgrade-manager` replaces the manager with the reviewed newer one from a bootstrap
-you downloaded from the target release; run it before selecting a bundle whose
-layout the current manager does not understand. A reviewed local archive can be
-installed with an independently obtained digest through `--archive /path` and
-`--sha256 DIGEST` on `install` or `upgrade`.
+A bundle whose layout the installed manager does not understand needs a newer
+manager first. The installed manager cannot fetch one: `upgrade-manager` installs
+the executable it is run from. Download the standalone manager from the target
+release, verify it against that release's `INSTALLER-SHA256SUMS`, then run that
+file against your channel root:
+
+```sh
+curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/hack-next-manager-darwin-arm64 \
+  --output hack-next-manager-darwin-arm64
+curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/INSTALLER-SHA256SUMS \
+  --output INSTALLER-SHA256SUMS
+shasum -a 256 --check --ignore-missing INSTALLER-SHA256SUMS
+chmod 0700 hack-next-manager-darwin-arm64
+./hack-next-manager-darwin-arm64 --root "$HOME/.hack-next" upgrade-manager
+```
+
+The upgrade takes the channel lock, refuses active launchers, recognizes only
+reviewed predecessor managers and the standard launcher, and keeps every installed
+bundle, home and selection. A reviewed local archive can be installed with an
+independently obtained digest through `--archive /path` and `--sha256 DIGEST` on
+`install` or `upgrade`.
 
 Selection changes commit by one atomic receipt replacement. A failed download,
 checksum, signature or quiescence check, or an interrupted replacement, preserves

@@ -8,9 +8,23 @@ import {
   parseSystemdVersion,
 } from "./linux-dns.ts";
 import type { LinuxDnsHost } from "./linux-dns-setup.ts";
-import { exec, run } from "./shell.ts";
+import { type ExecResult, exec, run } from "./shell.ts";
 
 const PROBE_TIMEOUT_MS = 3000;
+const UNAVAILABLE: ExecResult = { exitCode: 127, stdout: "", stderr: "" };
+
+/**
+ * Read-only probe. A missing executable (no systemctl on OpenRC hosts, no
+ * resolvectl or ip) makes `Bun.spawn` throw; report it as a failed probe so
+ * inspection degrades to a diagnostic instead of aborting the command.
+ */
+async function probe(cmd: readonly string[]): Promise<ExecResult> {
+  try {
+    return await exec(cmd, { stdin: "ignore", timeoutMs: PROBE_TIMEOUT_MS });
+  } catch {
+    return UNAVAILABLE;
+  }
+}
 
 /**
  * Real host boundary. Reads `/etc`, `ip` and `resolvectl` output, writes only
@@ -36,24 +50,15 @@ export function createLinuxDnsHost(opts: {
       }
     },
     isResolvedActive: async () => {
-      const res = await exec(["systemctl", "is-active", "systemd-resolved"], {
-        stdin: "ignore",
-        timeoutMs: PROBE_TIMEOUT_MS,
-      });
+      const res = await probe(["systemctl", "is-active", "systemd-resolved"]);
       return res.exitCode === 0 && res.stdout.trim() === "active";
     },
     systemdVersion: async () => {
-      const res = await exec(["systemctl", "--version"], {
-        stdin: "ignore",
-        timeoutMs: PROBE_TIMEOUT_MS,
-      });
+      const res = await probe(["systemctl", "--version"]);
       return res.exitCode === 0 ? parseSystemdVersion(res.stdout) : null;
     },
     findLinkWithAddress: async (address) => {
-      const res = await exec(["ip", "-o", "-4", "addr", "show"], {
-        stdin: "ignore",
-        timeoutMs: PROBE_TIMEOUT_MS,
-      });
+      const res = await probe(["ip", "-o", "-4", "addr", "show"]);
       return res.exitCode === 0
         ? parseLinkForAddress({ ipOutput: res.stdout, address })
         : null;
@@ -75,10 +80,7 @@ async function readResolvectlLinkRoute(
 ): Promise<LinuxLinkRoute | null> {
   const [dns, domain, defaultRoute] = await Promise.all(
     ["dns", "domain", "default-route"].map((verb) =>
-      exec(["resolvectl", verb, link], {
-        stdin: "ignore",
-        timeoutMs: PROBE_TIMEOUT_MS,
-      })
+      probe(["resolvectl", verb, link])
     )
   );
   if (!(dns && domain) || dns.exitCode !== 0 || domain.exitCode !== 0) {

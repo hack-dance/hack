@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import {
   DEFAULT_COREDNS_IP,
   DEFAULT_INGRESS_GATEWAY,
@@ -20,13 +19,17 @@ import {
   renderLinuxDnsUdevRule,
   renderLinuxDnsUnit,
 } from "../src/lib/linux-dns.ts";
+import { createLinuxDnsHost } from "../src/lib/linux-dns-host.ts";
 import {
   applyLinuxDns,
   inspectLinuxDns,
   type LinuxDnsHost,
   removeLinuxDns,
   renderPrivilegedCommand,
+  sha256Hex,
+  VERIFIED_INSTALL_SCRIPT,
 } from "../src/lib/linux-dns-setup.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const DOMAINS = ["hack", "hack.local", "hack.gy"] as const;
 const STUB_RESOLV = "nameserver 127.0.0.53\noptions edns0 trust-ad\n";
@@ -85,10 +88,15 @@ function createFakeHost(init: Partial<FakeHostState> = {}): {
         return 1;
       }
       const [verb] = argv;
-      if (verb === "install") {
-        const source = argv.at(-2) ?? "";
-        const target = argv.at(-1) ?? "";
-        state.files.set(target, state.staged.get(source) ?? "");
+      if (verb === "sh" && argv[3] === "hack-install") {
+        // Mirrors VERIFIED_INSTALL_SCRIPT: install only bytes whose digest
+        // matches the approved one.
+        const [, , , , source = "", digest = "", target = ""] = argv;
+        const content = state.staged.get(source) ?? "";
+        if (sha256Hex(content) !== digest) {
+          return 1;
+        }
+        state.files.set(target, content);
       } else if (verb === "rm") {
         for (const path of argv.slice(2)) {
           state.files.delete(path);
@@ -331,8 +339,8 @@ describe("applyLinuxDns", () => {
     expect(asked).toBe(1);
     expect(shown).toEqual([[LINUX_DNS_UNIT_PATH, LINUX_DNS_UDEV_RULE_PATH]]);
     expect(state.privileged.map((argv) => argv.slice(0, 2).join(" "))).toEqual([
-      "install -D",
-      "install -D",
+      "sh -c",
+      "sh -c",
       "systemctl daemon-reload",
       "udevadm control",
       "systemctl restart",
@@ -425,7 +433,7 @@ describe("applyLinuxDns", () => {
     expect(outcome.code).toBe("linux_dns_route_missing");
     expect(state.privileged).toEqual([]);
     expect(outcome.plan.commands.map(renderPrivilegedCommand)[0]).toBe(
-      `sudo install -D -o root -g root -m 0644 /fake-stage/hack-dns@.service ${LINUX_DNS_UNIT_PATH}`
+      `sudo sh -c '${VERIFIED_INSTALL_SCRIPT.replaceAll("'", "'\\''")}' hack-install /fake-stage/hack-dns@.service ${sha256Hex(renderLinuxDnsUnit({ domains: DOMAINS }))} ${LINUX_DNS_UNIT_PATH}`
     );
   });
 
@@ -562,6 +570,68 @@ describe("applyLinuxDns", () => {
     expect(notes.join("\n")).toContain("bypass systemd-resolved");
   });
 
+  test("a staged file replaced after approval is not installed", async () => {
+    const { host, state } = createFakeHost();
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => undefined,
+      confirm: async () => {
+        // Another process swaps the user-writable staged unit after display.
+        state.staged.set(
+          "/fake-stage/hack-dns@.service",
+          "[Service]\nExecStart=/bin/sh -c 'malicious'\n"
+        );
+        return true;
+      },
+    });
+    expect(outcome).toMatchObject({ status: "failed", exitCode: 1 });
+    expect(state.files.has(LINUX_DNS_UNIT_PATH)).toBe(false);
+  });
+
+  test("the root install script installs approved bytes and refuses others", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hack-linux-dns-install-"));
+    try {
+      const bin = join(dir, "bin");
+      await mkdir(bin);
+      // Fake install(1): copy the last-but-one argument to the last one.
+      await writeFile(
+        join(bin, "install"),
+        '#!/bin/sh\nfor a; do s="$t"; t="$a"; done; cp "$s" "$t"\n',
+        { mode: 0o755 }
+      );
+      const stage = join(dir, "stage.service");
+      const target = join(dir, "target.service");
+      const approved = "[Unit]\nDescription=ok\n";
+      await writeFile(stage, approved);
+      const env = { PATH: `${bin}:/usr/bin:/bin`, TMPDIR: dir };
+      const run = (digest: string) =>
+        Bun.spawn(
+          [
+            "sh",
+            "-c",
+            VERIFIED_INSTALL_SCRIPT,
+            "hack-install",
+            stage,
+            digest,
+            target,
+          ],
+          { env, stderr: "ignore" }
+        ).exited;
+
+      expect(await run(sha256Hex(approved))).toBe(0);
+      expect(await Bun.file(target).text()).toBe(approved);
+
+      await rm(target);
+      await writeFile(stage, "[Unit]\nDescription=swapped\n");
+      expect(await run(sha256Hex(approved))).not.toBe(0);
+      expect(await Bun.file(target).exists()).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a failing privileged step stops and reports it", async () => {
     const { host, state } = createFakeHost({
       failOn: "systemctl daemon-reload",
@@ -665,5 +735,27 @@ describe("removeLinuxDns", () => {
         })
       ).status
     ).toBe("absent");
+  });
+});
+
+describe("createLinuxDnsHost", () => {
+  test("missing probe executables degrade to unavailable instead of throwing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hack-linux-dns-path-"));
+    const savedPath = process.env.PATH;
+    // An empty PATH: systemctl, ip and resolvectl all fail to spawn (ENOENT),
+    // as on OpenRC hosts without systemctl.
+    process.env.PATH = dir;
+    try {
+      const host = createLinuxDnsHost({ stageDir: join(dir, "stage") });
+      expect(await host.isResolvedActive()).toBe(false);
+      expect(await host.systemdVersion()).toBeNull();
+      expect(
+        await host.findLinkWithAddress(DEFAULT_INGRESS_GATEWAY)
+      ).toBeNull();
+      expect(await host.readLinkRoute("br-0123456789ab")).toBeNull();
+    } finally {
+      restoreEnv("PATH", savedPath);
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -6,6 +6,7 @@
  * `sudo`) only after an interactive confirmation. A run that cannot prompt
  * gets the same list back with a stable code and changes nothing.
  */
+import { createHash } from "node:crypto";
 import { DEFAULT_COREDNS_IP, DEFAULT_INGRESS_GATEWAY } from "../constants.ts";
 import {
   detectLinuxResolver,
@@ -349,8 +350,16 @@ async function buildApplyPlan(opts: {
       { path: LINUX_DNS_UDEV_RULE_PATH, content: rule }
     );
     commands.push(
-      installArgv({ source: unitStage, target: LINUX_DNS_UNIT_PATH }),
-      installArgv({ source: ruleStage, target: LINUX_DNS_UDEV_RULE_PATH }),
+      verifiedInstallArgv({
+        source: unitStage,
+        sha256: sha256Hex(unit),
+        target: LINUX_DNS_UNIT_PATH,
+      }),
+      verifiedInstallArgv({
+        source: ruleStage,
+        sha256: sha256Hex(rule),
+        target: LINUX_DNS_UDEV_RULE_PATH,
+      }),
       ["systemctl", "daemon-reload"],
       ["udevadm", "control", "--reload"]
     );
@@ -366,22 +375,33 @@ async function buildApplyPlan(opts: {
   return { files, commands };
 }
 
-function installArgv(opts: {
+/**
+ * Root copies the user-writable staged file into a root-owned temp file,
+ * checks the copy against the digest of the bytes the user approved, and
+ * installs only that copy. Replacing the staged file after the plan was
+ * shown therefore fails the step instead of installing other content.
+ */
+export const VERIFIED_INSTALL_SCRIPT =
+  'set -eu; t=$(mktemp); trap \'rm -f "$t"\' EXIT; cat -- "$1" > "$t"; printf "%s  %s\\n" "$2" "$t" | sha256sum -c --status; install -D -o root -g root -m 0644 "$t" "$3"';
+
+function verifiedInstallArgv(opts: {
   readonly source: string;
+  readonly sha256: string;
   readonly target: string;
 }): string[] {
   return [
-    "install",
-    "-D",
-    "-o",
-    "root",
-    "-g",
-    "root",
-    "-m",
-    "0644",
+    "sh",
+    "-c",
+    VERIFIED_INSTALL_SCRIPT,
+    "hack-install",
     opts.source,
+    opts.sha256,
     opts.target,
   ];
+}
+
+export function sha256Hex(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
 }
 
 /**

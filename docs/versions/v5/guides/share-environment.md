@@ -4,7 +4,7 @@ Read [Environment and secrets](../../env.md) before choosing a backend. Commit
 shareable configuration; keep decryption keys and local overrides separate.
 
 ```sh
-"$HOME/.hack-next/bin/hack-next" env list
+hack env list
 ```
 
 Inspect masked values and provenance rather than printing credentials. Scope

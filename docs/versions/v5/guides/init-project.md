@@ -1,23 +1,42 @@
-# Prepare a project for the native candidate
+# Project setup
 
-Start with [Install](../install.md), [Native preparation](native-candidate.md) and [Getting started](../getting-started.md). Select the explicit next.6 launcher and prepare its provider pool, image and private home before starting an application.
+Complete [Install](../install.md) and [Getting started](../getting-started.md).
+This page covers an existing repository: an app that already has Compose files,
+one that needs custom domains, or one you want an agent to configure.
 
-For ordinary Compose initialization, select v4 in the documentation version selector. Its init/detached-start recipe is not the v5 native setup procedure.
+## Initialize
 
-## Inspect existing inputs
+```sh
+cd your-project
+hack init
+```
 
-Determine whether the project uses authored native configuration, legacy Compose input or an already adopted instance. Installing a native candidate does not migrate resources or data.
+`hack init` detects an existing `docker-compose.yml`, asks about services and
+domains, and writes `.hack/`: the Compose file Hack manages, `hack.config.json`,
+the default env YAML and a `.gitignore` for machine-local state. Review the files
+and commit them. To hand setup to an agent instead, run
+`hack init --with claude` or `hack init --with codex`.
 
-[Authored schema fields](../reference/authored-schema-fields.md) describes native document shapes. [Authored commands](../../reference/native-authored-commands.md) defines the narrower executable subset. Schema validity alone does not establish runtime admission.
+For an existing project, `hack agent onboard` prints an onboarding prompt that
+describes the services, env and routing a Hack setup should cover. See
+[Explicit agent setup](agent-first-setup.md).
 
-For existing Compose data, read [Native config import](../../reference/native-config-import.md) before considering conversion or adoption. Preview reports are not permission to stop containers or change ownership.
+## Check the result
 
-## Start only the prepared workflow
+```sh
+hack up --detach
+hack open
+hack doctor
+```
 
-Follow [Getting started](../getting-started.md) for foreground startup, saved-run status, finite service logs and owned shutdown. Use the same selected launcher and project on every step. Verify the application endpoint and its own health checks.
+`hack doctor` reports missing prerequisites, routing problems and configuration
+drift. Review each repair before `hack doctor --fix`.
 
-If diagnosis reports a problem, inspect the specific failure and its documented repair contract. Do not apply generic doctor repairs, detached Compose examples or inferred branch behavior to an authored-native run.
+## Native backend
 
-## Optional agent assistance
-
-[Explicit agent setup](agent-first-setup.md) explains how to hand off a scoped project task. Use the CLI and versioned documentation directly, or separately review the optional skills/MCP interface in [Integrations](../integrations.md). Project setup does not require instruction-file writes, primer hooks, guidance sync or automatic skill updates.
+Native execution needs more than `hack init`: a prepared provider pool, an
+explicitly adapted project and a private native home. Read
+[Try the native backend](../../guides/native-candidate.md) first. `hack config validate`,
+`config plan` and `config import --dry-run` preview native configuration without
+starting anything; see [Native config import](../../reference/native-config-import.md).
+Installing v5 does not convert a Compose project or move its data.

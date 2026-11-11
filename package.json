@@ -80,6 +80,7 @@
     "generate:agent-plugins": "bun run scripts/generate-agent-plugins.ts",
     "docs:prepare": "bun scripts/docs/prepare.ts",
     "docs:check": "bun scripts/docs/check.ts",
+    "docs:pin": "bun scripts/docs/pin.ts",
     "docs:dev": "bun run docs:prepare && bun run --cwd site dev",
     "docs:build": "bun run docs:prepare && bun run --cwd site build",
     "docs:typecheck": "bun run docs:prepare && tsc --project scripts/docs/tsconfig.json --noEmit && bun run --cwd site typecheck",

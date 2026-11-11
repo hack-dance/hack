@@ -1,6 +1,6 @@
 # Command and output contracts
 
-Historical next.5 field audit. For released next.6 changes and current command sources, see [next.6 release contracts](next6-contracts.md). These field inventories have not been requalified against next.6; they do not override its current generated command reference.
+This field inventory was audited against the `5.0.0-next.5` source and has not been requalified against later prereleases. The [generated command reference](../../reference/cli.md) and the pinned runtime guides take precedence where they differ.
 
 Pinned source: `28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc`. This supplements the [generated command reference](../../reference/cli.md). Command registration and document shape do not establish backend admission.
 
@@ -10,7 +10,7 @@ The pinned source inventory has **92 leaves**, **335 leaf-owned option occurrenc
 
 Retired gateway/node/remote/dispatch, hosted account/team/Tickets, internal helpers, extension dispatch and fun commands are excluded. SSH remote access is excluded. Retained fields within local commands do not establish support for retired backends.
 
-The [historical agent compatibility boundary](agent-compatibility.md) lists the excluded availability and pinned sources. Publication omission does not mean a new runtime removal ships in next.5.
+The retired agent instruction-management commands (`hack setup sync`, standalone `hack setup` exports and `hack agent prime`) are omitted; in v5 they refuse with a retirement notice. See [Agent integrations](../integrations.md).
 
 ## Global flags and parsing
 

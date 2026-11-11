@@ -278,22 +278,25 @@ export function requireExactHeadCi({
   run,
   jobs,
   sourceRevision,
+  branch = "next",
 }: {
   readonly run: unknown;
   readonly jobs: unknown;
   readonly sourceRevision: string;
+  /** Protected branch the push run must belong to; `next` for candidates, `main` for stable. */
+  readonly branch?: "next" | "main";
 }) {
   const ci = object(run);
   if (
     ci.head_sha !== sourceRevision ||
-    ci.head_branch !== "next" ||
+    ci.head_branch !== branch ||
     ci.event !== "push" ||
     ci.status !== "completed" ||
     ci.conclusion !== "success" ||
     ci.path !== ".github/workflows/ci.yml"
   ) {
     throw new Error(
-      "A successful next push CI run is required on the exact source SHA"
+      `A successful ${branch} push CI run is required on the exact source SHA`
     );
   }
   const completed = array(jobs).map(object);
@@ -321,7 +324,7 @@ export function requireExactHeadCi({
   }
 }
 
-type Api = (path: string, allowMissing?: boolean) => Promise<unknown>;
+export type Api = (path: string, allowMissing?: boolean) => Promise<unknown>;
 
 /** Rechecked after environment approval, immediately before any release mutation. */
 export async function verifyPublishGate({
@@ -502,7 +505,7 @@ async function requireBranchChecks({
   }
 }
 
-async function pages({
+export async function pages({
   api,
   path,
   field,
@@ -795,7 +798,7 @@ function env(name: string): string {
   return process.env[name] ?? "";
 }
 
-function githubApi(): Api {
+export function githubApi(): Api {
   if (
     env("GITHUB_ACTIONS") !== "true" ||
     env("GITHUB_REPOSITORY") !== "hack-dance/hack" ||

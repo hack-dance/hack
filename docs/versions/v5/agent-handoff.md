@@ -1,29 +1,30 @@
 # Give an agent the right context
 
-[Agent setup in next.6](guides/agent-setup-v5-branch.md) documents the shipped opt-in model at source `44aaf5156426dfcbb1c8a189b8e20531e5b95613`. Use the actual selected documentation host; source publication does not establish site deployment.
-
-Read this version's [LLM index](/v5/llms.txt) or [full corpus](/v5/llms-full.txt). They contain only the
-selected version's allowlisted public docs. Use these canonical URLs when the
-public site is deployed; for local review use the same paths on the preview host:
+Read this version's [LLM index](/v5/llms.txt) or [full corpus](/v5/llms-full.txt).
+They contain only the selected version's public docs:
 
 ```text
 https://hack.foo/v5/llms.txt
 https://hack.foo/v5/llms-full.txt
 ```
 
-A useful instruction to your agent:
+A useful brief for your agent:
 
 ```text
-Read the selected Hack documentation index and existing repository policy.
-Do not create or modify agent policy, hooks, rules or skills as a side effect.
-Confirm the CLI version, execution host, project and intended instance.
-Follow Install and Getting started for that version. Inspect existing services
-before starting another instance. Keep secret values out of chat and command
-arguments. Verify the application's own health, not just CLI exit status.
+Read the Hack v5 documentation index and the repository's existing agent policy.
+Confirm the Hack executable, version, backend, host, project and intended instance
+before changing anything. Inspect running services before starting another
+instance. Keep secret values out of chat and command arguments. Verify the
+application's own health, not just the CLI exit status. Do not create or modify
+agent policy, hooks, rules or skills as a side effect.
 ```
 
-[Agent integrations](../integrations.md) describes this version's optional client
-setup, with a historical next.5 compatibility boundary. The next.6 plugin manifests select skills only. Choose the selected CLI and
-reviewed skills explicitly. A plugin on your laptop does not install tools in a cloud agent.
-Agents with shell access can use the CLI directly; MCP is a separate interface,
-not a prerequisite for ordinary project use.
+Agents with shell access can use the CLI directly. `hack agent onboard` prints a
+project onboarding prompt for an existing repository; `hack init --with claude|codex`
+hands first setup to an agent. Neither writes instruction files into your repository.
+
+[Agent integrations](../integrations.md) describes the optional `hack` plugin,
+whose skills give Codex, Claude Code and Cursor Hack guidance, and the separate
+`hack-mcp` plugin for clients without shell access. A plugin installed on your
+laptop does not install anything in a cloud agent; see
+[Use a cloud agent or another host](guides/cloud-environments.md).

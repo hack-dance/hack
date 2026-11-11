@@ -81,6 +81,7 @@ import {
   writeTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import {
@@ -162,6 +163,11 @@ import { dockerComposeLogsPretty } from "../ui/docker-logs.ts";
 import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
+import {
+  inspectProxyNetwork,
+  proxyNetworkStatusPayload,
+  repairProxyNetworkBeforeUp,
+} from "./global-proxy-network.ts";
 
 /** Regex to split strings on whitespace. */
 const WHITESPACE_PATTERN = /\s+/;
@@ -1780,6 +1786,13 @@ export async function globalUp(): Promise<number> {
     return 1;
   }
 
+  const proxyRepairExit = await repairProxyNetworkBeforeUp({
+    composeFile: paths.caddyCompose,
+  });
+  if (proxyRepairExit !== 0) {
+    return proxyRepairExit;
+  }
+
   const reservedIps = await resolveReservedIngressIps({
     composePath: paths.caddyCompose,
   });
@@ -1844,6 +1857,21 @@ export async function globalUp(): Promise<number> {
     });
     logger.error({ message: conflict });
     return caddyExit;
+  }
+  const remainingProxyIssues = await inspectProxyNetwork({
+    composeFile: paths.caddyCompose,
+  });
+  if (remainingProxyIssues && remainingProxyIssues.length > 0) {
+    logger.error({
+      message: [
+        "Global proxy is still not on its ingress network after startup:",
+        ...remainingProxyIssues.map(
+          (issue) => `- ${describeProxyNetworkIssue(issue)}`
+        ),
+        "Fix: hack global down && hack global up, then hack doctor",
+      ].join("\n"),
+    });
+    return 1;
   }
   const remoteRoutes = await reconcileRemoteCaddyRoutesStack();
   if (remoteRoutes.status === "failed") {
@@ -2461,22 +2489,28 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
   const paths = getGlobalPaths();
 
   if (opts.json) {
-    const [caddy, logging, networks, gateway] = await Promise.all([
+    const [caddy, logging, networks, gateway, proxyIssues] = await Promise.all([
       readComposeStatus(paths.caddyCompose),
       readComposeStatus(paths.loggingCompose),
       readNetworksStatus([DEFAULT_INGRESS_NETWORK, DEFAULT_LOGGING_NETWORK]),
       collectGatewayStatus(),
+      inspectProxyNetwork({ composeFile: paths.caddyCompose }),
     ]);
+    const proxyNetwork = proxyNetworkStatusPayload(proxyIssues);
+    // Unknown (Docker unreadable) does not fail the summary; real issues do.
+    const proxyNetworkOk = proxyNetwork.ok !== false;
     const summary = {
       caddy_ok: caddy.ok,
       logging_ok: logging.ok,
       networks_ok: networks.ok,
+      proxy_network_ok: proxyNetwork.ok,
       gateway_enabled: gateway.gateway_enabled,
-      ok: caddy.ok && logging.ok && networks.ok,
+      ok: caddy.ok && logging.ok && networks.ok && proxyNetworkOk,
     };
     const payload = {
       generated_at: new Date().toISOString(),
       caddy,
+      proxy_network: proxyNetwork,
       logging,
       networks,
       gateway,
@@ -2488,6 +2522,19 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
 
   await display.section("Caddy");
   await renderComposeStatusTable(paths.caddyCompose);
+  const proxyIssues = await inspectProxyNetwork({
+    composeFile: paths.caddyCompose,
+  });
+  if (proxyIssues && proxyIssues.length > 0) {
+    await display.panel({
+      title: "Proxy network",
+      tone: "warn",
+      lines: [
+        ...proxyIssues.map(describeProxyNetworkIssue),
+        "Fix: hack global up (recreates the proxy stack)",
+      ],
+    });
+  }
 
   await display.section("Logging");
   await renderComposeStatusTable(paths.loggingCompose);

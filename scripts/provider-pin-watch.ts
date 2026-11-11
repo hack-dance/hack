@@ -24,6 +24,13 @@ export const WATCH_LABEL = "provider-pin-watch";
 export const SECURITY_LABEL = "security";
 /** The workflow's `GITHUB_TOKEN` acts as this user; only its issue is ever adopted. */
 export const BOT_LOGIN = "github-actions[bot]";
+/**
+ * Advisories reviewed and judged not to affect how this runtime uses the component, each with
+ * its reason. They are listed in the issue as ignored and never set the label or keep the
+ * issue open. Add an entry only after reading the advisory; remove it when the pin moves.
+ */
+export const IGNORED_ADVISORIES: Readonly<Record<string, string>> = {};
+
 /** Paging bound for releases; reaching it is reported in the issue. */
 const MAX_RELEASE_PAGES = 10;
 
@@ -231,18 +238,84 @@ export function inRange(version: Version, range: string): boolean | null {
     return null;
   }
   const comparators = items.every((item) => /^(<=|>=|<|>)/.test(item));
-  return comparators
-    ? results.every((result) => result === true)
-    : results.some((result) => result === true);
+  if (!comparators) {
+    return results.some((result) => result === true);
+  }
+  // A comparator list no version satisfies (`<= v25.0.18, > v26.0.0`) was meant as
+  // alternatives or is malformed: it cannot be read either way.
+  return satisfiable(items) ? results.every((result) => result === true) : null;
+}
+
+interface Bound {
+  bound: Version;
+  strict: boolean;
+}
+
+/** The tighter of two bounds: the larger lower bound, or the smaller upper bound. */
+function tighter(current: Bound | null, next: Bound, lower: boolean): Bound {
+  if (current === null) {
+    return next;
+  }
+  const order = compare(next.bound, current.bound) * (lower ? 1 : -1);
+  return order > 0 || (order === 0 && next.strict) ? next : current;
+}
+
+/** Whether some version satisfies every comparator of an all-comparator list. */
+function satisfiable(items: string[]): boolean {
+  let low: Bound | null = null;
+  let high: Bound | null = null;
+  for (const item of items) {
+    const match = /^(<=|>=|<|>)\s*(.+)$/.exec(item);
+    const bound = match ? rangeVersion(match[2] as string) : null;
+    if (!(match && bound)) {
+      return false;
+    }
+    const operator = match[1] as string;
+    const next = { bound, strict: !operator.endsWith("=") };
+    if (operator.startsWith(">")) {
+      low = tighter(low, next, true);
+    } else {
+      high = tighter(high, next, false);
+    }
+  }
+  if (!(low && high)) {
+    return true;
+  }
+  const order = compare(low.bound, high.bound);
+  return order < 0 || (order === 0 && !low.strict && !high.strict);
+}
+
+/** The lower bounds a range names: `>`/`>=` comparators, span starts and wildcard lines. */
+function lowerBounds(range: string): Version[] {
+  const bounds: Version[] = [];
+  for (const item of range.split(",").map((part) => part.trim())) {
+    const span = /^(\S+)\s+-\s+\S+$/.exec(item);
+    const lower = /^>=?\s*(.+)$/.exec(item);
+    const wildcard = /^v?(\d+)(?:\.(\d+))?\.[xX*]$/.exec(item);
+    const bound = span
+      ? rangeVersion(span[1] as string)
+      : lower
+        ? rangeVersion(lower[1] as string)
+        : wildcard
+          ? ([Number(wildcard[1]), Number(wildcard[2] ?? 0), 0] as Version)
+          : null;
+    if (bound) {
+      bounds.push(bound);
+    }
+  }
+  return bounds;
 }
 
 /**
  * Whether `version` is at or above every fixed version an advisory lists (`29.9.3`,
- * `>= 23.0.3, >= 20.10.24`, `v0.38.1+`). Ranges with no upper bound rely on this.
+ * `>= 23.0.3, >= 20.10.24`, `v0.38.1+`), and at least one of them can be its fix: on the
+ * pin's own major line, or at or above every lower bound of the vulnerable `range`. A fix
+ * on an older backport line (`v25.0.19` for `> v26.0.0`) never clears a newer pin.
  */
 export function patched(
   version: Version,
-  patchedVersions: string | null
+  patchedVersions: string | null,
+  range = ""
 ): boolean {
   if (!patchedVersions) {
     return false;
@@ -255,9 +328,17 @@ export function patched(
         .replace(/\+$/, "")
     )
   );
-  return (
-    bounds.length > 0 &&
-    bounds.every((bound) => bound !== null && compare(version, bound) >= 0)
+  if (
+    bounds.length === 0 ||
+    bounds.some((bound) => bound === null || compare(version, bound) < 0)
+  ) {
+    return false;
+  }
+  const lowers = lowerBounds(range);
+  return (bounds as Version[]).some(
+    (bound) =>
+      bound[0] === version[0] ||
+      lowers.every((lower) => compare(bound, lower) >= 0)
   );
 }
 
@@ -307,7 +388,11 @@ export function affecting(
         entry.vulnerable_version_range === null
           ? null
           : inRange(pinned, entry.vulnerable_version_range),
-      fixed: patched(pinned, entry.patched_versions),
+      fixed: patched(
+        pinned,
+        entry.patched_versions,
+        entry.vulnerable_version_range ?? ""
+      ),
       patched: entry.patched_versions ?? "",
     }));
     const hit = results.find((entry) => entry.result === true && !entry.fixed);
@@ -315,7 +400,7 @@ export function affecting(
       (entry) => entry.result === null && !entry.fixed
     );
     const match = hit ?? unknown;
-    if (match) {
+    if (match && !(advisory.ghsa_id in IGNORED_ADVISORIES)) {
       found.push({
         id: advisory.ghsa_id,
         url: advisory.html_url,
@@ -377,7 +462,26 @@ export function delta(
   };
 }
 
-const cell = (value: string) => value.replace(/[|\n\r]/g, " ");
+/**
+ * Upstream text in our public issue: one table cell, no mentions (`@` gets a zero-width
+ * joiner), no HTML or images, no code spans.
+ */
+export const cell = (value: string) =>
+  value
+    .replace(/[|\n\r`<>]/g, " ")
+    .replace(/!\[/g, "[")
+    .replace(/@/g, "@\u200d");
+
+/** A link only to GitHub, by an ID of the expected form; otherwise the bare, cleaned text. */
+export function link(label: string, url: string, pattern: RegExp): string {
+  const text = cell(label);
+  return pattern.test(label) && /^https:\/\/github\.com\/[\w./%-]+$/.test(url)
+    ? `[${text}](${url})`
+    : text;
+}
+
+const GHSA = /^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/;
+const TAG = /^[\w.-]+$/;
 
 function advisoryRows(entry: Delta): string[] {
   if (entry.advisories.length === 0) {
@@ -391,7 +495,7 @@ function advisoryRows(entry: Delta): string[] {
       const severity = advisory.certain
         ? advisory.severity
         : `${advisory.severity} (range not understood; read it)`;
-      return `| [${advisory.id}](${advisory.url}) | ${severity} | ${cell(advisory.patched) || "?"} | ${cell(advisory.summary).slice(0, 120)} |`;
+      return `| ${link(advisory.id, advisory.url, GHSA)} | ${cell(severity)} | ${cell(advisory.patched) || "?"} | ${cell(advisory.summary).slice(0, 120)} |`;
     }),
   ];
 }
@@ -409,7 +513,7 @@ function releaseRows(entry: Delta): string[] {
         release.categories.length > 0
           ? release.categories.join(", ")
           : "nothing watched";
-      return `| [${release.tag}](${release.url}) | ${release.date} | ${mentions} |`;
+      return `| ${link(release.tag, release.url, TAG)} | ${cell(release.date)} | ${mentions} |`;
     }),
   ];
 }
@@ -418,7 +522,7 @@ function componentSection(entry: Delta): string[] {
   const truncated = entry.truncated
     ? [
         "",
-        `The release listing stopped at ${MAX_RELEASE_PAGES} pages before reaching the pin; older newer releases are not listed.`,
+        `The release listing stopped at ${MAX_RELEASE_PAGES} pages before reaching the pin; releases between the pin and the listed ones may be missing.`,
       ]
     : [];
   return [
@@ -453,6 +557,15 @@ export function renderBody(deltas: Delta[], checkedAt: string): string {
     if (entry.releases.length > 0 || entry.advisories.length > 0) {
       lines.push(...componentSection(entry));
     }
+  }
+  const ignored = Object.entries(IGNORED_ADVISORIES);
+  if (ignored.length > 0) {
+    lines.push(
+      "",
+      "Reviewed and ignored advisories (`IGNORED_ADVISORIES` in `scripts/provider-pin-watch.ts`):",
+      "",
+      ...ignored.map(([id, reason]) => `- ${cell(id)}: ${cell(reason)}`)
+    );
   }
   lines.push(
     "",
@@ -606,7 +719,13 @@ export class GitHub {
       "GET",
       `/repos/${component.repository}/security-advisories?state=published&per_page=100`
     );
-    return list(value, "security advisories")
+    const raw = list(value, "security advisories");
+    if (raw.length >= 100) {
+      console.warn(
+        `${component.repository}: 100 advisories returned; older ones were not read.`
+      );
+    }
+    return raw
       .map(advisory)
       .filter((entry): entry is Advisory => entry !== null);
   }
@@ -655,8 +774,11 @@ export function plan(
   existing: WatchIssue | null,
   checkedAt: string
 ): Plan {
+  // An advisory whose range cannot be read is listed but never keeps the issue open.
   const behind = deltas.some(
-    (entry) => entry.releases.length > 0 || entry.advisories.length > 0
+    (entry) =>
+      entry.releases.length > 0 ||
+      entry.advisories.some((advisory) => advisory.certain)
   );
   const security = deltas.some((entry) =>
     entry.advisories.some((advisory) => advisory.certain)

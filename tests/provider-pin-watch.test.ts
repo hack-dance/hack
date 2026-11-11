@@ -6,10 +6,12 @@ import {
   affecting,
   BOT_LOGIN,
   COMPONENTS,
+  cell,
   classify,
   delta,
   ISSUE_TITLE,
   inRange,
+  link,
   main,
   parseTag,
   patched,
@@ -41,7 +43,7 @@ function release(
   return {
     tag_name: tag,
     published_at: "2026-11-01T00:00:00Z",
-    html_url: `https://example.invalid/${tag}`,
+    html_url: `https://github.com/o/r/releases/tag/${tag}`,
     prerelease: false,
     draft: false,
     body,
@@ -56,7 +58,7 @@ function advisory(
 ): Advisory {
   return {
     ghsa_id: id,
-    html_url: `https://example.invalid/${id}`,
+    html_url: `https://github.com/o/r/security/advisories/${id}`,
     severity: "high",
     summary: `Synthetic advisory ${id}`,
     vulnerabilities: [
@@ -129,7 +131,8 @@ describe("provider pin watch", () => {
     expect(inRange(pinned, ">= 28.0.0, < 29.8.2")).toBe(true);
     expect(inRange(pinned, ">= 29.6.0, < 29.8.2")).toBe(false);
     expect(inRange(pinned, "26.0.0 - 29.8.1")).toBe(true);
-    expect(inRange(pinned, "<= v25.0.18, > v26.0.0")).toBe(false);
+    // No version satisfies both: unreadable, never "not affected".
+    expect(inRange(pinned, "<= v25.0.18, > v26.0.0")).toBeNull();
     // Lists with spans, wildcards or bare versions are alternatives.
     expect(inRange(pinned, "<= 25.0.18, 26.0.0 - 29.8.1")).toBe(true);
     expect(inRange([28, 2, 7], "28.2.x, 28.3.0, 28.3.1")).toBe(true);
@@ -153,6 +156,19 @@ describe("provider pin watch", () => {
     expect(patched([0, 34, 1], "v0.38.1+")).toBe(false);
     expect(patched([29, 5, 2], null)).toBe(false);
     expect(patched([29, 5, 2], "none")).toBe(false);
+    // A fix on an older backport line never clears a newer pin.
+    expect(patched([29, 5, 2], "v25.0.19", "> v26.0.0")).toBe(false);
+    expect(
+      affecting(
+        [29, 5, 2],
+        [advisory("GHSA-hhhh-hhhh-hhhh", "> v26.0.0", "v25.0.19")]
+      ).map((entry) => entry.certain)
+    ).toEqual([true]);
+    // A fix on the pin's own line, or above the range's lower bound, does.
+    expect(patched([29, 9, 3], "29.9.3", "< 29.9.3")).toBe(true);
+    expect(
+      patched([29, 9, 3], "25.0.19, 29.9.3", "<= 25.0.18, 26.0.0 - 29.9.2")
+    ).toBe(true);
     // Unbounded but fixed long ago: not affecting.
     expect(
       affecting(
@@ -273,6 +289,23 @@ describe("provider pin watch", () => {
     }
   });
 
+  test("upstream text reaches the public issue without mentions, markup or foreign links", () => {
+    const ghsa = /^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/;
+    expect(cell("ping @someone <img src=x> ![x](y) `code` a|b")).not.toMatch(
+      /@s|<|>|!\[|`|\|/
+    );
+    expect(cell("ping @someone")).toContain("@\u200dsomeone");
+    const url =
+      "https://github.com/o/r/security/advisories/GHSA-aaaa-bbbb-cccc";
+    expect(link("GHSA-aaaa-bbbb-cccc", url, ghsa)).toBe(
+      `[GHSA-aaaa-bbbb-cccc](${url})`
+    );
+    expect(link("GHSA-aaaa-bbbb-cccc", "https://evil.example/x", ghsa)).toBe(
+      "GHSA-aaaa-bbbb-cccc"
+    );
+    expect(link("GHSA-<b>", "https://github.com/x", ghsa)).toBe("GHSA- b ");
+  });
+
   test("the pins file names every watched component", () => {
     const pins = readPins(
       join(repository, "packages/runtime-core/provider-pins.json")
@@ -311,14 +344,16 @@ describe("provider pin watch", () => {
       action: "create",
       security: true,
     });
-    // An advisory whose range cannot be read is listed, but never sets the label.
+    // An advisory whose range cannot be read is listed, but never sets the label or keeps
+    // the issue open on its own.
     const unreadable = [
       delta(docker, "29.5.2", [], [advisory("GHSA-gggg-gggg-gggg", "N/A")]),
     ];
     expect(plan(unreadable, null, "2026-11-11")).toMatchObject({
-      action: "create",
+      action: "none",
       security: false,
     });
+    expect(plan(unreadable, open, "2026-11-11").action).toBe("close");
     expect(renderBody(unreadable, "2026-11-11")).toContain(
       "range not understood; read it"
     );
@@ -337,10 +372,10 @@ describe("provider pin watch", () => {
       "| Docker engine | 29.5.2 | docker-v29.5.2 | 0 | 1 |"
     );
     expect(body).toContain(
-      "| [GHSA-aaaa-aaaa-aaaa](https://example.invalid/GHSA-aaaa-aaaa-aaaa) | high | 29.9.3 |"
+      "| [GHSA-aaaa-aaaa-aaaa](https://github.com/o/r/security/advisories/GHSA-aaaa-aaaa-aaaa) | high | 29.9.3 |"
     );
     expect(body).toContain(
-      "| [v1.34.1](https://example.invalid/v1.34.1) | 2026-11-01 | security notes, vsock |"
+      "| [v1.34.1](https://github.com/o/r/releases/tag/v1.34.1) | 2026-11-01 | security notes, vsock |"
     );
     const truncated = renderBody(
       [delta(smolvm, "1.0.0", [release("v1.0.1")], [], true)],
@@ -538,6 +573,23 @@ describe("provider pin watch", () => {
       expect(
         writes(api.calls).some((call) => call.url.includes("/issues/9"))
       ).toBe(false);
+    });
+
+    test("an advisory reopens a not-planned issue and adds the security label", async () => {
+      const api = fakeApi({
+        issues: [ours("closed", { state_reason: "not_planned" })],
+        dockerAdvisories: [
+          advisory("GHSA-aaaa-aaaa-aaaa", "< 29.9.3", "29.9.3"),
+        ],
+      });
+      expect(await run(api)).toBe(0);
+      const issueWrites = writes(api.calls).filter((call) =>
+        call.url.includes("/issues/9")
+      );
+      expect(issueWrites.map((call) => [call.method, call.body])).toEqual([
+        ["PATCH", expect.objectContaining({ state: "open" })],
+        ["POST", { labels: ["security"] }],
+      ]);
     });
 
     test("a not-planned close stays closed without an advisory", async () => {

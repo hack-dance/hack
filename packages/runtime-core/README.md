@@ -493,9 +493,12 @@ and published security advisories. It keeps one issue, "Provider pins behind ups
 `provider-pin-watch`), listing each newer release, which watched SmolVM interfaces its notes
 mention (libkrun, vsock, virtiofs, balloon or reclaim, disks and templates, the `machine`
 subcommands, flags and `SMOLVM_*` variables the runtime passes; a test keeps that list and the
-runtime source in step), and every advisory whose vulnerable range contains a pinned version.
-The issue carries the `security` label exactly while such an advisory exists. It never changes a
-pin; bumps are qualified by hand.
+runtime source in step), and every security advisory the three upstream repositories published
+whose vulnerable range contains a pinned version and whose fix the pin has not reached. The
+issue carries the `security` label exactly while such an advisory exists. Not covered: advisories
+for components SmolVM bundles (libkrun, libkrunfw, the guest kernel and rootfs packages) or
+published only in the global advisory database. It never changes a pin; bumps are qualified by
+hand.
 The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine

@@ -501,6 +501,9 @@ interface Result {
 
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
+/** A candidate home's provider `$HOME` (the runtime's `run/smolvm/home`). */
+const PROVIDER_HOME = join(".hack-local", "run", "smolvm", "home");
+
 class Qualification {
   readonly evidence: string;
   readonly main: string;
@@ -681,7 +684,8 @@ class Qualification {
   record(home: string): Record<string, unknown> {
     const database = join(
       home,
-      ".hack-local/run/smolvm/home/Library/Application Support/smolvm/server/smolvm.db"
+      PROVIDER_HOME,
+      "Library/Application Support/smolvm/server/smolvm.db"
     );
     const result = this.exec("sqlite-record", [
       "/usr/bin/sqlite3",
@@ -921,7 +925,7 @@ class Qualification {
       store,
       "--json",
     ]);
-    const templates = join(this.main, ".hack-local/run/smolvm/home/.smolvm");
+    const templates = join(this.main, PROVIDER_HOME, ".smolvm");
     this.check(
       "no expanded template exists before the first start",
       !Object.keys(TEMPLATE_LENGTHS).some((name) =>
@@ -1136,7 +1140,7 @@ class Qualification {
     this.step = "3 templates";
     const { seconds, ps } = await this.upForeground("up-cold", "up");
     this.measure("cold_up_to_ready_seconds", seconds);
-    const templates = join(this.main, ".hack-local/run/smolvm/home/.smolvm");
+    const templates = join(this.main, PROVIDER_HOME, ".smolvm");
     const digests: Record<string, string> = {};
     for (const [name, length] of Object.entries(TEMPLATE_LENGTHS)) {
       const path = join(templates, name);

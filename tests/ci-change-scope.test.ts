@@ -308,10 +308,19 @@ describe("CI workflow wiring", () => {
         "${{ needs.changes.outputs.suite == 'true' }}"
       );
     }
+    // `docs site` is a required check: the job always runs, and every step
+    // after the scope report is gated, so it passes as a no-op when unneeded.
     expect(jobs["docs-site"]?.needs).toBe("changes");
-    expect(jobs["docs-site"]?.if).toBe(
-      "${{ needs.changes.outputs.docs_site == 'true' }}"
-    );
+    expect(jobs["docs-site"]?.if).toBeUndefined();
+    const docsSteps = jobs["docs-site"]?.steps ?? [];
+    expect(docsSteps[0]?.name).toBe("Report scope");
+    expect(docsSteps[0]?.if).toBeUndefined();
+    expect(docsSteps.length).toBeGreaterThan(5);
+    for (const step of docsSteps.slice(1)) {
+      expect(step.if, step.name ?? step.run).toBe(
+        "${{ needs.changes.outputs.docs_site == 'true' }}"
+      );
+    }
     // Jobs that do not depend on the scope keep running on every event.
     for (const name of ["state-models", "secret-scan"]) {
       expect(jobs[name]?.needs, name).toBeUndefined();

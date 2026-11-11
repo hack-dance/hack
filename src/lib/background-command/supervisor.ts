@@ -1,5 +1,6 @@
 import { constants, openSync } from "node:fs";
 import { lstat, open, unlink } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { isRecord } from "../guards.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { auditEnd } from "./audit.ts";
@@ -320,7 +321,11 @@ export function limitOutputFileSize(
   meta: CommandMeta,
   argv: readonly string[]
 ): string[] {
-  if (meta.capture !== "full") {
+  // Compose only: the cap applies to the host-side Docker client and its
+  // helpers, not to the process in the container. On native the child is the
+  // hack CLI, which writes the whole output in one batch at the end; a cap
+  // there would turn large output into a failed command.
+  if (meta.capture !== "full" || meta.backend !== "compose") {
     return [...argv];
   }
   const blocks = Math.floor(OUTPUT_FILE_LIMIT_BYTES / 512);
@@ -775,7 +780,7 @@ function parsePrivateInput(text: string): {
     if (
       isRecord(value) &&
       typeof value.root === "string" &&
-      value.root.length > 0 &&
+      isAbsolute(value.root) &&
       Array.isArray(value.redactValues) &&
       value.redactValues.every(
         (item): item is string => typeof item === "string"

@@ -281,6 +281,7 @@ function stageFolderNavigation(
 ): void {
   for (const [folder, title] of [
     ["guides", "Guides"],
+    ["recipes", "Recipes"],
     ["reference", "Reference"],
     ["native", "Native backend (beta)"],
   ] as const) {
@@ -410,6 +411,9 @@ async function stageVersion(
         ...optional("dev"),
         "agent-handoff",
         "guides",
+        ...(pages.some((entry) => entry.slug.startsWith("recipes/"))
+          ? ["recipes"]
+          : []),
         "integrations",
         ...(pages.some((entry) => entry.slug.startsWith("native/"))
           ? ["native"]

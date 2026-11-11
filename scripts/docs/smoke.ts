@@ -186,6 +186,40 @@ console.log(
   `Diagram smoke passed: ${diagramBlocks} Mermaid blocks shown as ${diagramFiles.size} served SVGs.`
 );
 
+// Recipe pages contain copy-paste examples, so check their rendered links too:
+// a multiline Markdown link can escape the preparation step's line-based rewrite.
+const recipeLinks = new Map<string, string>();
+for (const { slug } of versions.v5.editorial) {
+  if (!slug.startsWith("recipes/")) {
+    continue;
+  }
+  const route = `/docs/v5/${slug}`;
+  const html = await read(route);
+  if (html.includes("language-mermaid")) {
+    throw new Error(`Unrendered Mermaid source: ${route}`);
+  }
+  for (const match of html.matchAll(/href="([^"<>]+)"/g)) {
+    const url = new URL(match[1] ?? "", new URL(route, base));
+    if (
+      (url.origin === base.origin || url.origin === "https://hack.foo") &&
+      (url.pathname === "/docs/v5" || url.pathname.startsWith("/docs/v5/"))
+    ) {
+      recipeLinks.set(`${url.pathname}${url.hash}`, route);
+    }
+  }
+}
+for (const [target, source] of recipeLinks) {
+  const url = new URL(target, base);
+  const html = await read(url.pathname);
+  const id = decodeURIComponent(url.hash.slice(1)).replaceAll("&", "&amp;");
+  if (id && !html.includes(`id="${id}"`)) {
+    throw new Error(`Missing recipe link anchor: ${source} -> ${target}`);
+  }
+}
+console.log(
+  `Recipe smoke passed: ${recipeLinks.size} local links and anchors.`
+);
+
 // v5 pages that moved into the native section keep their old routes, with and
 // without the version prefix.
 for (const [old, target] of [

@@ -239,18 +239,21 @@ async function readSnapshot(
   return raw;
 }
 
-const bootstrapDownload =
-  /(releases\/download\/v5\.0\.0-next\.)\d+(\/hack-next-install\.sh)/g;
+const installerDownload =
+  /(releases\/download\/v5\.0\.0-next\.)\d+(\/(?:hack-next-install\.sh|hack-next-manager-darwin-arm64|INSTALLER-SHA256SUMS))(?=$|[\s"'`\\])/g;
+const installerVersion = /^(V=5\.0\.0-next\.)\d+\b/gm;
 
 /**
  * A snapshot is taken at the release commit, before that release's tag exists,
- * so its bootstrap download can still name the previous prerelease. Published
- * pages point the bootstrap at the prerelease the version is pinned to.
+ * so its installer artifacts and shell version variable can still name the
+ * previous prerelease. Published examples use the corpus's pinned release.
  */
 export function pinnedBootstrapText(text: string, label: string): string {
   const prerelease = /next\.(\d+)/.exec(label)?.[1];
   return prerelease
-    ? text.replace(bootstrapDownload, `$1${prerelease}$2`)
+    ? text
+        .replace(installerDownload, `$1${prerelease}$2`)
+        .replace(installerVersion, `$1${prerelease}`)
     : text;
 }
 

@@ -1,16 +1,12 @@
 # Use a remote database from local services
 
-The commands and configuration on this page were audited against `v5.0.0-next.13`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
-
 Use this when local services must talk to a shared database, such as staging,
 that is reachable only through a proxy or tunnel. You pick the database with an
 env overlay. A lifecycle process runs the proxy. Guard rails stop you from
 writing to production by accident.
 
 The complete project is in
-[`examples/recipes/remote-database`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/remote-database).
+[`examples/recipes/remote-database`](../../examples/recipes/remote-database).
 Its proxy, `scripts/tcp-forward.ts`, is a small stand-in for a real one. The
 "remote" database is a local stand-in started from `stand-in/`.
 
@@ -217,5 +213,5 @@ The container-to-proxy hop could not be tested on that host: its
 firewall drops traffic from containers to the host. It was not tested on
 macOS.
 
-Related: [Environments](environments.md), [Lifecycle](../../lifecycle.md),
-[Env and secrets](../../env.md), [Common pitfalls](common-pitfalls.md).
+Related: [Environments](environments.md), [Lifecycle](../lifecycle.md),
+[Env and secrets](../env.md), [Common pitfalls](common-pitfalls.md).

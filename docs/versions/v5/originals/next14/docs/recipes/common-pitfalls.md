@@ -1,9 +1,5 @@
 # Common pitfalls
 
-The commands and configuration on this page were audited against `v5.0.0-next.13`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
-
 Small problems that are easy to hit, and what to do instead. Each one came up
 while we wrote and tested these recipes.
 

@@ -1,9 +1,5 @@
 # Clean up branch instances, worktrees and volumes
 
-The commands and configuration on this page were audited against `v5.0.0-next.13`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
-
 Use this to remove what old branches and worktrees leave behind: containers,
 networks, volumes, lifecycle sessions and stale `node_modules`. It also says
 what `hack projects prune` and `hack doctor` cover, and what they leave to you.
@@ -85,7 +81,7 @@ instance's, still uses it. Old ones stay after a lockfile change; remove those
 you no longer use the same way.
 
 On the native backend, `hack down --remove-data` deletes a stopped project's
-data volumes. See the [native backend guide](../../guides/native-candidate.md).
+data volumes. See the [native backend guide](../guides/native-candidate.md).
 
 ## Lifecycle sessions and host processes
 
@@ -130,6 +126,6 @@ On Linux with Docker Engine: removing a running worktree, the doctor report,
 use. `hack doctor --fix` for lifecycle sessions was not exercised here; it is
 covered by the repository's tests.
 
-Related: [Lifecycle](../../lifecycle.md),
+Related: [Lifecycle](../lifecycle.md),
 [Dependency directories and caches](dependency-directories.md),
 [Common pitfalls](common-pitfalls.md).

@@ -335,13 +335,17 @@ if (!prerelease) {
     "v5 label must name the pinned prerelease, e.g. v5 (next.12)"
   );
 }
-// No published v5 page may send a reader to another prerelease's bootstrap.
+// Installer artifacts and version variables must all select the release pin.
 const stagedV5 = resolve(repositoryRoot, "site/content/docs/v5");
-const anyBootstrap =
-  /releases\/download\/v5\.0\.0-next\.(\d+)\/hack-next-install\.sh/g;
+const anyInstaller =
+  /releases\/download\/v5\.0\.0-next\.(\d+)\/(?:hack-next-install\.sh|hack-next-manager-darwin-arm64|INSTALLER-SHA256SUMS)(?=$|[\s"'`\\])/g;
+const exampleVersion = /^V=5\.0\.0-next\.(\d+)\b/gm;
 for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedV5 })) {
   const staged = await Bun.file(resolve(stagedV5, file)).text();
-  for (const match of staged.matchAll(anyBootstrap)) {
+  for (const match of [
+    ...staged.matchAll(anyInstaller),
+    ...staged.matchAll(exampleVersion),
+  ]) {
     if (match[1] !== prerelease) {
       throw new Error(
         `Published v5 page installs next.${match[1]}, not the pinned next.${prerelease}: ${file}`
@@ -352,7 +356,6 @@ for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedV5 })) {
 // The live install examples must name the same prerelease, so the repository
 // docs and the site never tell a reader to install different versions.
 // The `V=5.0.0-next.N` shell variable used by install and setup examples.
-const exampleVersion = /^V=5\.0\.0-next\.(\d+)\b/gm;
 const liveDocs = resolve(repositoryRoot, "docs");
 for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: liveDocs })) {
   if (file.startsWith("versions/")) {
@@ -360,7 +363,7 @@ for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: liveDocs })) {
   }
   const live = await Bun.file(resolve(liveDocs, file)).text();
   for (const match of [
-    ...live.matchAll(anyBootstrap),
+    ...live.matchAll(anyInstaller),
     ...live.matchAll(exampleVersion),
   ]) {
     if (match[1] !== prerelease) {
@@ -381,6 +384,26 @@ if (
   ) !== "releases/download/v5.0.0-next.1/other.sh"
 ) {
   throw new Error("Bootstrap pinning control failed");
+}
+for (const artifact of [
+  "hack-next-manager-darwin-arm64",
+  "INSTALLER-SHA256SUMS",
+]) {
+  const input = `releases/download/v5.0.0-next.1/${artifact}`;
+  if (
+    pinnedBootstrapText(input, `v5 (next.${prerelease})`) !==
+    `releases/download/v5.0.0-next.${prerelease}/${artifact}`
+  ) {
+    throw new Error(`Installer artifact pinning failed: ${artifact}`);
+  }
+}
+if (
+  pinnedBootstrapText(
+    "V=5.0.0-next.1 # installed version",
+    `v5 (next.${prerelease})`
+  ) !== `V=5.0.0-next.${prerelease} # installed version`
+) {
+  throw new Error("Installer version-variable pinning failed");
 }
 const install = await Bun.file(resolve(v5Root, "install.md")).text();
 const bootstrapUrl = `https://github.com/hack-dance/hack/releases/download/v5.0.0-next.${prerelease}/hack-next-install.sh`;

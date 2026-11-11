@@ -1,7 +1,5 @@
 # Install
 
-For Linux-specific setup, see [Linux setup](../guides/linux-setup.md) and
-[Linux certificate trust](../guides/linux-certificate-trust.md).
 
 v5 is in prerelease. Stable Hack today is the v4 line, installed with Homebrew or
 the release installer. v5 prereleases install beside it through a separate
@@ -27,7 +25,7 @@ from the release you want and run it:
 
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.14/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh

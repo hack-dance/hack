@@ -162,9 +162,11 @@ for (const [kind, render, running] of [
 ] as const) {
   test(`bundled ${kind} installer replaces an executable that is still running`, async () => {
     const root = await mkdtemp(join(tmpdir(), "hack-bundled-installer-"));
-    const sleep = Bun.which("sleep", { PATH: "/usr/bin:/bin" });
-    if (sleep === null) {
-      throw new Error("Bundled installer test needs a system sleep binary");
+    // bash keeps working under another file name. A system `sleep` may be a
+    // multi-call binary that picks its applet from argv[0] and exits at once.
+    const shell = Bun.which("bash", { PATH: "/usr/bin:/bin" });
+    if (shell === null) {
+      throw new Error("Bundled installer test needs a system bash binary");
     }
     let daemon: ReturnType<typeof Bun.spawn> | null = null;
     try {
@@ -177,14 +179,22 @@ for (const [kind, render, running] of [
       );
       // The previous install: a real executable, running from the install path.
       const previous = join(bin, running);
-      await copyFile(sleep, previous);
+      await copyFile(shell, previous);
       await chmod(previous, 0o755);
       const before = await stat(previous);
-      daemon = Bun.spawn([previous, "30"], {
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      });
+      // A loop keeps this bash image running instead of exec-ing its last command.
+      daemon = Bun.spawn(
+        [previous, "-c", "while :; do sleep 1; done", "previous-hack"],
+        {
+          env: { PATH: "/usr/bin:/bin" },
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+        }
+      );
+      // Let the previous install prove it is running before the upgrade.
+      await Bun.sleep(200);
+      expect(daemon.exitCode).toBeNull();
       // The new release bundle.
       await Bun.write(join(bundle, "hack"), "#!/bin/sh\necho new hack\n");
       await Bun.write(

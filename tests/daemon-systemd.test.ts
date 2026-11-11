@@ -1888,3 +1888,24 @@ test("a symlink hop owned by another account is refused", async () => {
     await checkServiceExecutableTrusted({ path: link, hackHome })
   ).toBeNull();
 });
+
+test("a missing load directory under a sticky shared parent is refused", async () => {
+  // Codex review: sticky protects existing entries, not the creation of the
+  // missing load directory.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const sticky = join(root, "sticky");
+  await mkdir(sticky);
+  await chmod(sticky, 0o1777);
+  fake.unitSearchPath = `${join(root, "config", "systemd", "user")} ${join(sticky, "missing", "systemd", "user")}`;
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toContain(
+    "lets other users create"
+  );
+  // An existing load directory in a sticky parent is fine (its own mode is
+  // what matters).
+  const present = join(sticky, "present");
+  await mkdir(present);
+  await chmod(present, 0o755);
+  fake.unitSearchPath = `${join(root, "config", "systemd", "user")} ${present}`;
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toBeNull();
+});

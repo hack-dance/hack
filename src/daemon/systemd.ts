@@ -1453,8 +1453,16 @@ async function checkUnitLoadDirectory(opts: {
     uid: opts.uid,
     hackHome: null,
   });
-  if (chain !== null || existing !== resolve(opts.path)) {
+  if (chain !== null) {
     return chain;
+  }
+  if (existing !== resolve(opts.path)) {
+    // The sticky bit stops others replacing existing entries, not creating
+    // the missing directory (and planting a drop-in in it).
+    const mode = (await stat(existing)).mode;
+    return (mode & 0o022) === 0
+      ? null
+      : `${existing} lets other users create ${resolve(opts.path)} (mode ${(mode & 0o7777).toString(8)}); run: chmod go-w ${existing}, or create ${resolve(opts.path)} yourself`;
   }
   for (const name of [`${SYSTEMD_UNIT_NAME}.d`, "service.d"]) {
     const dir = resolve(existing, name);

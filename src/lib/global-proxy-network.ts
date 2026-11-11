@@ -24,6 +24,10 @@ export type ProxyService = "caddy" | "coredns";
 export type ProxyContainerState = {
   readonly service: ProxyService;
   readonly name: string;
+  /**
+   * Running and settled: false while Docker restarts or pauses it, when its
+   * network entry can be empty without the network being the cause.
+   */
   readonly running: boolean;
   /** Network name → IPv4 address ("" when Docker reports none). */
   readonly networks: Readonly<Record<string, string>>;
@@ -125,6 +129,13 @@ function readNetworks(settings: unknown): Record<string, string> {
   return networks;
 }
 
+/** A crash-looping (`Restarting`) or paused proxy is not a network problem. */
+function isSettledRunning(state: Record<string, unknown>): boolean {
+  return (
+    state.Running === true && state.Restarting !== true && state.Paused !== true
+  );
+}
+
 function parseProxyContainerEntry(entry: unknown): ProxyContainerState | null {
   const record = readRecord(entry);
   const labels = readRecord(readRecord(record.Config).Labels);
@@ -138,7 +149,7 @@ function parseProxyContainerEntry(entry: unknown): ProxyContainerState | null {
       typeof record.Name === "string"
         ? record.Name.replace(LEADING_SLASH, "")
         : "",
-    running: readRecord(record.State).Running === true,
+    running: isSettledRunning(readRecord(record.State)),
     networks: readNetworks(record.NetworkSettings),
   };
 }

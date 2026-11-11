@@ -70,7 +70,8 @@ export function proxyNetworkStatusPayload(
   issues: readonly ProxyNetworkIssue[] | null
 ) {
   return {
-    ok: issues !== null && issues.length === 0,
+    /** `null` when Docker could not be read (unknown, not a failure). */
+    ok: issues === null ? null : issues.length === 0,
     readable: issues !== null,
     issues: (issues ?? []).map((issue) => ({
       service: issue.service,

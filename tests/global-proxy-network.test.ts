@@ -147,6 +147,30 @@ describe("parseProxyContainerInspect", () => {
     ]);
   });
 
+  test("a restarting or paused proxy is not reported as a network problem", () => {
+    const raw = JSON.stringify([
+      {
+        Name: "/hack-dev-proxy-caddy-1",
+        Config: { Labels: { "com.docker.compose.service": "caddy" } },
+        State: { Running: true, Restarting: true },
+        NetworkSettings: {
+          Networks: { [DEFAULT_INGRESS_NETWORK]: { IPAddress: "" } },
+        },
+      },
+      {
+        Name: "/hack-dev-proxy-coredns-1",
+        Config: { Labels: { "com.docker.compose.service": "coredns" } },
+        State: { Running: true, Paused: true },
+        NetworkSettings: { Networks: {} },
+      },
+    ]);
+    const containers = parseProxyContainerInspect(raw);
+    expect(containers.map((c) => c.running)).toEqual([false, false]);
+    expect(
+      findProxyNetworkIssues({ containers, reservedIps: RESERVED })
+    ).toEqual([]);
+  });
+
   test("malformed output yields no containers", () => {
     expect(parseProxyContainerInspect("not json")).toEqual([]);
     expect(parseProxyContainerInspect("{}")).toEqual([]);

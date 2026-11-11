@@ -2485,12 +2485,13 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
       inspectProxyNetwork({ composeFile: paths.caddyCompose }),
     ]);
     const proxyNetwork = proxyNetworkStatusPayload(proxyIssues);
-    const proxyNetworkOk = proxyNetwork.issues.length === 0;
+    // Unknown (Docker unreadable) does not fail the summary; real issues do.
+    const proxyNetworkOk = proxyNetwork.ok !== false;
     const summary = {
       caddy_ok: caddy.ok,
       logging_ok: logging.ok,
       networks_ok: networks.ok,
-      proxy_network_ok: proxyNetworkOk,
+      proxy_network_ok: proxyNetwork.ok,
       gateway_enabled: gateway.gateway_enabled,
       ok: caddy.ok && logging.ok && networks.ok && proxyNetworkOk,
     };

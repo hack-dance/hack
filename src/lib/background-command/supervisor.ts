@@ -498,6 +498,7 @@ export class OutputCapture {
       if (!(error === NO_SPACE || isNoSpaceError(error))) {
         throw error;
       }
+      this.noSpace = true;
       this.truncated = true;
       await this.discardPastLimit("stdout");
       await this.discardPastLimit("stderr");

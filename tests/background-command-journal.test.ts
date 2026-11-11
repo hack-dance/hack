@@ -26,6 +26,7 @@ import {
   readEvents,
   readMeta,
 } from "../src/lib/background-command/journal.ts";
+import { requestIdentity } from "../src/lib/background-command/launch.ts";
 import {
   type ObservedIdentity,
   observeIdentities,
@@ -49,6 +50,7 @@ import {
   acceptCommand,
   CALLER_ACTIVE_LIMIT,
   HOME_ACTIVE_LIMIT,
+  lookupRequest,
   pruneExpired,
 } from "../src/lib/background-command/store.ts";
 import {
@@ -1074,5 +1076,49 @@ describe("read bounds and run refusals", () => {
         services: ["installer"],
       })
     ).not.toThrow();
+  });
+});
+
+describe("request keys before runtime checks", () => {
+  test("a retried key is found from caller inputs alone, before any runtime work", async () => {
+    const identity = requestIdentity({
+      request: { requestKey: "retry", json: true },
+      operation: "exec",
+      projectRoot: "/fixture/demo",
+      instanceId: "@base",
+      service: "api",
+      argv: ["npm", "test"],
+      workdir: null,
+      overlay: null,
+      profiles: null,
+    });
+    expect(
+      await lookupRequest({
+        root,
+        projectRoot: "/fixture/demo",
+        requestKey: "retry",
+        fingerprintInputs: identity,
+      })
+    ).toBeNull();
+    const accepted = await acceptCommand({
+      input: input({ requestKey: "retry", fingerprintInputs: identity }),
+      root,
+    });
+    const found = await lookupRequest({
+      root,
+      projectRoot: "/fixture/demo",
+      requestKey: "retry",
+      fingerprintInputs: identity,
+    });
+    expect(found?.meta.commandId).toBe(accepted.meta.commandId);
+    await expectCode(
+      lookupRequest({
+        root,
+        projectRoot: "/fixture/demo",
+        requestKey: "retry",
+        fingerprintInputs: { ...identity, argv: ["rm", "-rf", "x"] },
+      }),
+      "E_REQUEST_CONFLICT"
+    );
   });
 });

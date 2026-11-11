@@ -22,7 +22,12 @@ import {
   readBackgroundCommandConfigs,
   resolveBackgroundSettings,
 } from "./settings.ts";
-import { acceptCommand, cursorBeforeFirst, expiresAt } from "./store.ts";
+import {
+  acceptCommand,
+  cursorBeforeFirst,
+  expiresAt,
+  lookupRequest,
+} from "./store.ts";
 import { BACKGROUND_SUPERVISOR_ARGUMENT } from "./supervisor.ts";
 
 /** Set by `hack mcp serve` on its children so admission counts per MCP session. */
@@ -153,13 +158,11 @@ export type BackgroundStart = {
   /** Values Hack already resolved for injection into this command. */
   readonly redactValues: readonly string[];
   /**
-   * The launch argv without decisions Hack derived from runtime state (such
-   * as `--no-deps` when the stack happens to run), so a retried request key
-   * with the same inputs matches. Defaults to `child.argv`.
+   * What the caller asked for (see `requestIdentity`), never what Hack
+   * derived from runtime state. Two starts with the same request key are the
+   * same request exactly when these match.
    */
-  readonly requestIdentityArgv?: readonly string[];
-  /** Selected env overlay; part of "the same request" for a request key. */
-  readonly overlay: string | null;
+  readonly requestIdentity: Record<string, unknown>;
 };
 
 /**
@@ -214,21 +217,7 @@ export async function startBackgroundCommand(
       redaction: {
         values: settings.capture === "full" ? opts.redactValues.length : 0,
       },
-      fingerprintInputs: {
-        operation: opts.operation,
-        backend: opts.backend,
-        projectRoot: opts.projectRoot,
-        instanceId: opts.instanceId,
-        service: opts.service,
-        argv: [...opts.argv],
-        workdir: opts.workdir,
-        timeoutMs: settings.timeoutMs,
-        stallAfterMs: settings.stallAfterMs,
-        capture: settings.capture,
-        // Compose project, files and profiles, or the foreground CLI argv.
-        childArgv: [...(opts.requestIdentityArgv ?? opts.child.argv)],
-        overlay: opts.overlay,
-      },
+      fingerprintInputs: opts.requestIdentity,
     },
   });
   const { meta, paths } = accepted;
@@ -275,13 +264,92 @@ export async function startBackgroundCommand(
       },
     });
   }
-  const events = await readEvents(paths);
+  printStartResult({
+    meta,
+    reused: accepted.reused,
+    json: opts.request.json,
+    state: accepted.reused ? stateOf(await readEvents(paths)) : "accepted",
+  });
+  return 0;
+}
+
+/**
+ * The identity of a background request: what the caller asked for, from the
+ * command line or MCP inputs only. Runtime-derived decisions (Compose files,
+ * `--no-deps`, resolved defaults) are excluded, so a retry matches whatever
+ * the runtime state is now.
+ */
+export function requestIdentity(opts: {
+  readonly request: BackgroundRequest;
+  readonly operation: CommandOperation;
+  readonly projectRoot: string;
+  readonly instanceId: string;
+  readonly service: string;
+  readonly argv: readonly string[];
+  readonly workdir: string | null;
+  readonly overlay: string | null;
+  readonly profiles: string | null;
+}): Record<string, unknown> {
+  return {
+    operation: opts.operation,
+    projectRoot: opts.projectRoot,
+    instanceId: opts.instanceId,
+    service: opts.service,
+    argv: [...opts.argv],
+    workdir: opts.workdir,
+    overlay: opts.overlay,
+    profiles: opts.profiles,
+    timeoutMs: opts.request.timeoutMs ?? null,
+    stallAfterMs: opts.request.stallAfterMs ?? null,
+    capture: opts.request.capture ?? null,
+  };
+}
+
+/**
+ * A retried request key, answered before any runtime check: when the key
+ * was already used for the same inputs, print that command (even if its
+ * service has since stopped or Docker is unavailable) and return 0. Null
+ * when the key is new. Different inputs or an expired result throw.
+ */
+export async function answerExistingRequest(opts: {
+  readonly request: BackgroundRequest;
+  readonly projectRoot: string;
+  readonly identity: Record<string, unknown>;
+}): Promise<number | null> {
+  if (opts.request.requestKey === null) {
+    return null;
+  }
+  const existing = await lookupRequest({
+    projectRoot: opts.projectRoot,
+    requestKey: opts.request.requestKey,
+    fingerprintInputs: opts.identity,
+  });
+  if (!existing) {
+    return null;
+  }
+  printStartResult({
+    meta: existing.meta,
+    reused: true,
+    json: opts.request.json,
+    state: stateOf(await readEvents(existing.paths)),
+  });
+  return 0;
+}
+
+/** Print a start result: the envelope under `--json`, else the id and a hint. */
+export function printStartResult(opts: {
+  readonly meta: CommandMeta;
+  readonly reused: boolean;
+  readonly json: boolean;
+  readonly state: string;
+}): void {
+  const { meta } = opts;
   const data = {
     commandId: meta.commandId,
     cursor: cursorBeforeFirst(meta),
-    state: accepted.reused ? stateOf(events) : "accepted",
+    state: opts.state,
     expiresAt: expiresAt(meta),
-    reused: accepted.reused,
+    reused: opts.reused,
     capture: meta.capture,
     liveOutput: meta.liveOutput,
     stallDetection: meta.stallDetection,
@@ -291,14 +359,13 @@ export async function startBackgroundCommand(
       retentionMs: meta.retentionMs,
     },
   };
-  if (opts.request.json) {
+  if (opts.json) {
     emitCliResult({ result: okResult({ data }) });
   } else {
     process.stdout.write(
-      `${data.commandId}\nStarted in the background${accepted.reused ? " (existing command for this request key)" : ""}. Follow it with: hack commands read ${data.commandId} --follow\n`
+      `${data.commandId}\nStarted in the background${opts.reused ? " (existing command for this request key)" : ""}. Follow it with: hack commands read ${data.commandId} --follow\n`
     );
   }
-  return 0;
 }
 
 /**

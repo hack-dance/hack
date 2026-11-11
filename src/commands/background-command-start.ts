@@ -8,6 +8,7 @@ import {
 import { defineOption } from "../cli/command.ts";
 import {
   type BackgroundRequest,
+  requestIdentity,
   selfInvocation,
   startBackgroundCommand,
 } from "../lib/background-command/launch.ts";
@@ -125,6 +126,41 @@ function spawnEnv(
   return { ...env, ...overrides };
 }
 
+/** The caller-supplied options of `hack exec|run` that define a request. */
+export type CallerOptions = {
+  readonly env?: string;
+  readonly workdir?: string;
+  readonly profile?: string;
+};
+
+/**
+ * Request identity from what the caller typed (see `requestIdentity`). The
+ * same function serves the early request-key lookup and the acceptance, so a
+ * retry matches whatever the runtime state is now.
+ */
+export function callerIdentity(opts: {
+  readonly request: BackgroundRequest;
+  readonly operation: "exec" | "run";
+  readonly projectRoot: string;
+  readonly branch: string | null;
+  readonly service: string;
+  readonly cmdArgs: readonly string[];
+  readonly options: CallerOptions;
+}): Record<string, unknown> {
+  const workdir = (opts.options.workdir ?? "").trim();
+  return requestIdentity({
+    request: opts.request,
+    operation: opts.operation,
+    projectRoot: opts.projectRoot,
+    instanceId: instanceIdFor(opts.branch),
+    service: opts.service.trim(),
+    argv: opts.cmdArgs,
+    workdir: workdir.length > 0 ? workdir : null,
+    overlay: opts.options.env ?? null,
+    profiles: opts.options.profile ?? null,
+  });
+}
+
 /** Background form of the final `composeRuntimeBackend.exec|run` call. */
 export async function startComposeBackgroundCommand(opts: {
   readonly request: BackgroundRequest;
@@ -134,7 +170,7 @@ export async function startComposeBackgroundCommand(opts: {
     | { readonly operation: "exec"; readonly options: RuntimeExecOptions }
     | { readonly operation: "run"; readonly options: RuntimeRunOptions };
   readonly redactValues: readonly string[];
-  readonly overlay: string | null;
+  readonly identity: Record<string, unknown>;
 }): Promise<number> {
   const { options } = opts.compose;
   const argv =
@@ -159,15 +195,8 @@ export async function startComposeBackgroundCommand(opts: {
     argv: [...options.cmdArgs],
     workdir: options.workdir ?? null,
     child: { argv, cwd: options.cwd, env: spawnEnv(options.env) },
-    requestIdentityArgv:
-      opts.compose.operation === "run"
-        ? buildComposeRunCommand({
-            options: { ...opts.compose.options, noDeps: false },
-            disableTty: true,
-          })
-        : argv,
+    requestIdentity: opts.identity,
     redactValues: opts.redactValues,
-    overlay: opts.overlay,
   });
 }
 
@@ -182,8 +211,9 @@ export async function runOrStartComposeCommand(opts: {
   readonly compose:
     | { readonly operation: "exec"; readonly options: RuntimeExecOptions }
     | { readonly operation: "run"; readonly options: RuntimeRunOptions };
+  /** The caller's own options, for the request identity. */
+  readonly callerOptions: CallerOptions;
   readonly envOverrides: {
-    readonly effectiveEnvName: string | null;
     readonly env: Readonly<Record<string, string>>;
     readonly preflightEnvByService: Readonly<
       Record<string, Readonly<Record<string, string>>>
@@ -201,7 +231,15 @@ export async function runOrStartComposeCommand(opts: {
     project: opts.project,
     branch: opts.branch,
     compose,
-    overlay: opts.envOverrides.effectiveEnvName,
+    identity: callerIdentity({
+      request: opts.background,
+      operation: compose.operation,
+      projectRoot: opts.project.projectRoot,
+      branch: opts.branch,
+      service: compose.options.service,
+      cmdArgs: compose.options.cmdArgs,
+      options: opts.callerOptions,
+    }),
     redactValues: collectRedactionValues({
       env: opts.envOverrides.env,
       serviceEnv:
@@ -257,7 +295,15 @@ export async function startNativeBackgroundCommand(opts: {
       env: spawnEnv({ HACK_NO_INTERACTIVE: "1" }),
     },
     redactValues: [],
-    overlay: opts.options.env ?? null,
+    requestIdentity: callerIdentity({
+      request: opts.request,
+      operation: opts.operation,
+      projectRoot: opts.project.projectRoot,
+      branch: opts.branch,
+      service: opts.service,
+      cmdArgs: opts.cmdArgs,
+      options: opts.options,
+    }),
   });
 }
 

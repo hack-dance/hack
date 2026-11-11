@@ -56,7 +56,7 @@ try {
     workdir: null,
     child: { argv: config.argv, cwd: config.cwd, env },
     redactValues: config.redactValues ?? [],
-    overlay: null,
+    requestIdentity: { argv: config.argv, cwd: config.cwd },
   });
 } catch (error: unknown) {
   const code =

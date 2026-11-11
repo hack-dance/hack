@@ -348,6 +348,28 @@ async function findExistingRequest(opts: {
   return { paths, meta, reused: true };
 }
 
+/** Read-only request-key lookup (no store lock: it never writes). */
+export async function lookupRequest(opts: {
+  readonly projectRoot: string;
+  readonly requestKey: string;
+  readonly fingerprintInputs: Record<string, unknown>;
+  readonly root?: string;
+}): Promise<AcceptResult | null> {
+  const root = opts.root ?? commandsRoot();
+  if (!(await lstat(resolve(root, "keys")).catch(() => null))?.isDirectory()) {
+    return null;
+  }
+  return await findExistingRequest({
+    root,
+    keyPath: requestKeyPath({
+      root,
+      projectRoot: opts.projectRoot,
+      requestKey: opts.requestKey,
+    }),
+    fingerprint: fingerprintOf(opts.fingerprintInputs),
+  });
+}
+
 /** Preallocate bytes that are released only to write `command.ended`. */
 async function reserveFinalRecordSpace(path: string): Promise<void> {
   const handle = await open(

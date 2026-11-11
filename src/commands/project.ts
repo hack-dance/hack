@@ -162,7 +162,10 @@ import {
   reassignCollidingPorts,
   reportInitDiscoveryFindings,
 } from "../init/validation.ts";
-import { parseBackgroundRequest } from "../lib/background-command/launch.ts";
+import {
+  answerExistingRequest,
+  parseBackgroundRequest,
+} from "../lib/background-command/launch.ts";
 import {
   applyBranchToHost,
   applyBranchToHosts,
@@ -382,6 +385,7 @@ import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
 import {
   backgroundCommandOptions,
+  callerIdentity,
   refuseDetachedCacheBootstrap,
   refuseDetachForAuthoredProject,
   runOrStartComposeCommand,
@@ -9165,6 +9169,7 @@ async function handleRun({
     project,
     branch,
     compose: { operation: "run", options: runOptions },
+    callerOptions: args.options,
     envOverrides,
   });
 }
@@ -9365,7 +9370,43 @@ async function handleExec({
     project,
     branch,
     compose: { operation: "exec", options: execOptions },
+    callerOptions: args.options,
     envOverrides,
+  });
+}
+
+async function answerExistingBackgroundRequest(opts: {
+  readonly ctx: CliContext;
+  readonly args: RunArgs;
+  readonly background: NonNullable<ReturnType<typeof parseBackgroundRequest>>;
+  readonly operation: "exec" | "run";
+}): Promise<number | null> {
+  if (opts.background.requestKey === null) {
+    return null;
+  }
+  const { args } = opts;
+  const project = await resolveProjectForArgs({
+    ctx: opts.ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    touchRegistration: false,
+  });
+  return await answerExistingRequest({
+    request: opts.background,
+    projectRoot: project.projectRoot,
+    identity: callerIdentity({
+      request: opts.background,
+      operation: opts.operation,
+      projectRoot: project.projectRoot,
+      branch: await resolveEffectiveBranchForCommand({
+        project,
+        branchOption: args.options.branch,
+        noticeToStderr: true,
+      }),
+      service: args.positionals.service ?? "",
+      cmdArgs: args.positionals.cmd,
+      options: args.options,
+    }),
   });
 }
 
@@ -9393,6 +9434,17 @@ async function startNativeBackgroundIfRequested(opts: {
     path: args.options.path,
     project: args.options.project,
   });
+  // A retried request key is answered before any runtime check, so a retry
+  // finds its command even if the service has stopped since.
+  const existing = await answerExistingBackgroundRequest({
+    ctx: opts.ctx,
+    args,
+    background: opts.background,
+    operation: opts.operation,
+  });
+  if (existing !== null) {
+    return existing;
+  }
   if (process.env.HACK_RUNTIME_BACKEND !== "native") {
     return await opts.otherwise();
   }

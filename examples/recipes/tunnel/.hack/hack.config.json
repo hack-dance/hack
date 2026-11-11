@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schemas.hack.local/hack.config.schema.json",
+  "name": "tunnel",
+  "dev_host": "tunnel.hack.local",
+  "lifecycle": {
+    "processes": [
+      {
+        "name": "tunnel",
+        "command": "cloudflared tunnel --no-autoupdate --url http://127.0.0.1:4310"
+      }
+    ]
+  }
+}

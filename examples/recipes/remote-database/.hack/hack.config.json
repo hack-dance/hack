@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schemas.hack.local/hack.config.schema.json",
+  "name": "remote-database",
+  "dev_host": "remote-database.hack.local",
+  "lifecycle": {
+    "up": {
+      "before": [{ "name": "production guard", "command": "sh scripts/guard-production.sh" }]
+    },
+    "processes": [
+      {
+        "name": "db-proxy",
+        "command": "bun scripts/tcp-forward.ts",
+        "singleton": { "ports": [15432], "onConflict": "fail" }
+      }
+    ]
+  }
+}

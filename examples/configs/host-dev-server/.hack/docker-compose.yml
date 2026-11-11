@@ -1,0 +1,27 @@
+name: host-dev-server
+# Only the backing services run in containers. Their ports are published on
+# the loopback address so the dev server on the host can reach them.
+services:
+  db:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  cache:
+    image: redis:8.2-alpine
+    ports:
+      - "127.0.0.1:63799:6379"
+
+volumes:
+  db-data: {}

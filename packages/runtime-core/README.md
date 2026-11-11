@@ -2166,6 +2166,10 @@ kills only its owned owner process. They
 exercise same-boot recovery, a retry after publisher exit but before registry
 publication, the audited successor-boot path, retained volume contents and a new
 graph reusing the released port/bridge. No old receipt or coordinator is fabricated.
+Both boot paths also interrupt the publication registry after its pending bytes
+are synchronized but before rename. The predecessor path additionally interrupts
+after the stopped receipt commits and before the recovery-intent completion
+digest, then verifies that cleanup resumes before publication retirement.
 They need a caller-prepared disposable capacity-one pool, a matching all-feature
 CLI, a pinned BusyBox image with `sh`, `httpd` and `sleep`, an exclusive host port
 and an external 300-second watchdog. Set `HACK_LOCAL_TEST_ROOT`,

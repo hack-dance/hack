@@ -1,5 +1,7 @@
 //! Foreground host publications. Intent precedes staging/exec; cleanup never adopts unknown files.
 pub mod recovery;
+#[cfg(test)]
+mod retirement_tests;
 use super::{identity, publisher, state};
 use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};
@@ -213,6 +215,13 @@ fn validate(entries: &BTreeMap<String, Entry>, owner: &str) -> Result<(), Candid
 /// Recover only complete, single-step publications while holding the provider lock.
 /// This runs on cleanup paths; startup never replays a pending journal.
 fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
+    recover_pending_fenced(c, owner, &|| Ok(()))
+}
+fn recover_pending_fenced(
+    c: &Candidate,
+    owner: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     let root = root(c);
     let pending = root.join("state.pending");
     if !pending.exists() && !pending.is_symlink() {
@@ -301,6 +310,7 @@ fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
         .map_err(state::io)?
         .sync_all()
         .map_err(state::io)?;
+    fence()?;
     fs::rename(&pending, &path).map_err(state::io)?;
     File::open(root)
         .map_err(state::io)?
@@ -308,6 +318,13 @@ fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
         .map_err(state::io)
 }
 fn save(c: &Candidate, entries: &BTreeMap<String, Entry>) -> Result<(), CandidateError> {
+    save_before_rename(c, entries, &|| Ok(()))
+}
+fn save_before_rename(
+    c: &Candidate,
+    entries: &BTreeMap<String, Entry>,
+    before_rename: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     if serde_json::to_vec_pretty(entries)
         .map_err(|_| error())?
         .len()
@@ -316,7 +333,21 @@ fn save(c: &Candidate, entries: &BTreeMap<String, Entry>) -> Result<(), Candidat
         return Err(error());
     }
     state::private_directory(&root(c))?;
-    state::write(&root(c).join("state.json"), entries)
+    state::write_before_rename(&root(c).join("state.json"), entries, before_rename)
+}
+
+/// Caller holds the provider lease. Finish only a validated single-step journal
+/// under the same recovery fence before selecting entries for retirement.
+#[cfg(any(test, target_os = "macos"))]
+fn retirement_entries(
+    c: &Candidate,
+    owner: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<BTreeMap<String, Entry>, CandidateError> {
+    fence()?;
+    recover_pending_fenced(c, owner, fence)?;
+    fence()?;
+    load(c, owner)
 }
 fn verify_directory(e: &Entry) -> Result<bool, CandidateError> {
     let dir = directory(e);
@@ -523,7 +554,7 @@ pub(crate) fn retire_run(
     run: &str,
     fence: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
-    let mut entries = load(c, owner)?;
+    let mut entries = retirement_entries(c, owner, fence)?;
     let selected = entries
         .iter()
         .filter(|(_, entry)| entry.run == run)
@@ -534,9 +565,14 @@ pub(crate) fn retire_run(
         cleanup(&entries[&key])?;
         fence()?;
         #[cfg(test)]
-        super::graph::publisher_stop_fault(c, run)?;
+        super::graph::publisher_recovery_fault(c, run, "publisher-recovery-after-stop")?;
         entries.remove(&key);
-        save(c, &entries)?;
+        save_before_rename(c, &entries, &|| {
+            fence()?;
+            #[cfg(test)]
+            super::graph::publisher_recovery_fault(c, run, "publisher-recovery-registry-pending")?;
+            Ok(())
+        })?;
     }
     require_run_absent(c, owner, run)
 }

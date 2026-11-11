@@ -1092,6 +1092,8 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
         fence()?;
         crate::provider::publication::require_run_absent(candidate, &intent.original.owner, run)
     })?;
+    #[cfg(test)]
+    fault_pause(&root, run, "dead-owner-after-stop")?;
     host_relay::inspect_cleanup_recovery(
         candidate,
         &engine,

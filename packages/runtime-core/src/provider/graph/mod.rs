@@ -781,12 +781,12 @@ pub(super) fn fault_pause(
     Ok(())
 }
 #[cfg(all(test, target_os = "macos"))]
-pub(super) fn publisher_stop_fault(candidate: &Candidate, run: &str) -> Result<(), CandidateError> {
-    fault_pause(
-        &directory(candidate, run)?,
-        run,
-        "publisher-recovery-after-stop",
-    )
+pub(super) fn publisher_recovery_fault(
+    candidate: &Candidate,
+    run: &str,
+    point: &str,
+) -> Result<(), CandidateError> {
+    fault_pause(&directory(candidate, run)?, run, point)
 }
 impl Session<'_, '_> {
     #[cfg(test)]

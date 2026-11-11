@@ -1396,6 +1396,11 @@ It does not check frontend dispatch between them. TypeScript predecessor-recover
 tests cover stopped receipts with pending, completed and absent completion hints;
 Rust `current_recovery_dispatch_does_not_select_historical_completion` checks the
 exact completion digest rather than treating a stopped receipt as completion.
+Publication-registry sync/rename is also abstracted: portable retirement tests
+exercise the real writer's synchronized pending-removal boundary, fenced
+reconciliation and unchanged evidence on refusal. The opt-in legacy VM fixtures
+interrupt this registry commit on both admitted boots, and the predecessor
+fixture also interrupts between stopped receipt and intent completion.
 
 The publisher model permits reselecting a same-boot intent on the successor boot
 as a permissive safety abstraction. The implementation refuses that unfinished

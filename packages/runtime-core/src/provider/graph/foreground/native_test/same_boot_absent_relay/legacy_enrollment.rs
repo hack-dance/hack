@@ -297,7 +297,41 @@ fn exercise(previous_boot: bool, publisher_exit: &str) {
             graph::foreground_owner(&candidate, &runs[0]).unwrap()["dead_owner_recovery"],
             expected
         );
+        pause_recovery(
+            &candidate,
+            &runs[0],
+            &expected,
+            "publisher-recovery-registry-pending",
+            deadline,
+        );
+        assert!(
+            candidate
+                .state_root
+                .join("run/publications/state.pending")
+                .exists()
+        );
+        pause_recovery(
+            &candidate,
+            &runs[0],
+            &expected,
+            "dead-owner-after-stop",
+            deadline,
+        );
+        assert!(
+            !candidate
+                .state_root
+                .join("run/publications/state.pending")
+                .exists()
+        );
+        assert_eq!(
+            graph::foreground_owner(&candidate, &runs[0]).unwrap()["dead_owner_recovery_complete"],
+            false
+        );
         graph::recover_cleanup(&candidate, &runs[0], &expected).unwrap();
+        assert_eq!(
+            graph::foreground_owner(&candidate, &runs[0]).unwrap()["dead_owner_recovery_complete"],
+            true
+        );
         graph::retire_recovered_publisher(&candidate, &runs[0], &receipt.owner).unwrap();
     } else {
         pause_recovery(
@@ -311,8 +345,27 @@ fn exercise(previous_boot: bool, publisher_exit: &str) {
             &candidate,
             &runs[0],
             &expected,
+            "publisher-recovery-registry-pending",
+            deadline,
+        );
+        assert!(
+            candidate
+                .state_root
+                .join("run/publications/state.pending")
+                .exists()
+        );
+        pause_recovery(
+            &candidate,
+            &runs[0],
+            &expected,
             "live-owner-after-completion",
             deadline,
+        );
+        assert!(
+            !candidate
+                .state_root
+                .join("run/publications/state.pending")
+                .exists()
         );
         graph::recover_live_owner(&candidate, &runs[0], &expected).unwrap();
         let intent: Value = state::read(&root.join("live-owner-cleanup.json")).unwrap();

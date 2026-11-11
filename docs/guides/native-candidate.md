@@ -3359,6 +3359,10 @@ proof, before guest cleanup. Live or reused process identities, changed journals
 partial publications and unknown inventories still refuse. Recovery resumes its
 own durable intent after an interruption and releases bridge capacity only after
 confirmed publisher/bridge-helper absence; compute absence is verified separately.
+If interruption leaves a synchronized publication-registry removal pending,
+recovery validates the existing single-entry journal and rechecks its recovery
+fence before completing the rename. Malformed journals, live publisher identities,
+changed entries and changed recovery evidence retain both registry files.
 
 If the pool already has an audited immediate successor boot, `down --recover`
 selects `graph recover-cleanup` and then retires the recovered publication. For a

@@ -13,7 +13,11 @@ Before it changes any trust store, Hack checks the exported CA
 - its bytes equal the root of the Caddy container this Hack home is running,
   read through the system Docker client (`/usr/bin/docker`,
   `/usr/local/bin/docker` or `/bin/docker`, root-owned and not writable by
-  others), never one found on your `PATH`.
+  others) talking to the system engine socket (`/var/run/docker.sock` or
+  `/run/docker.sock`, root-owned). Your Docker context, `DOCKER_HOST` and
+  client configuration are ignored for this check, so a process running as
+  you cannot answer it. Rootless Docker and Docker Desktop have no system
+  engine, so automatic trust is refused there (`linux_trust_ca_unverified`).
 
 If any check fails, Hack changes nothing and says why
 (`linux_trust_ca_invalid` or `linux_trust_ca_unverified`). A stale export (Caddy

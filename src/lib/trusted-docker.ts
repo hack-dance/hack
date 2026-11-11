@@ -1,18 +1,22 @@
 /**
- * A Docker client Hack trusts to witness the running Caddy root before it
- * offers system-wide trust (`hack global trust` on Linux).
+ * A Docker client and engine Hack trusts to witness the running Caddy root
+ * before it offers system-wide trust (`hack global trust` on Linux).
  *
- * A bare `docker` resolves through the caller's PATH, so a same-user process
- * that can write an earlier PATH directory could answer both the CA export
- * and its supposed runtime witness. The witness therefore uses only a client
- * at a fixed system path that, after resolving symlinks, is a regular
- * executable owned by root and not group- or world-writable, inside
- * directories (up to `/`) owned by root and not group- or world-writable.
- *
- * Engine selection (`DOCKER_HOST`, the current context) is kept: rootless
- * Docker and Docker Desktop for Linux depend on it, and a same-user process
- * able to run its own engine is not something a local check can rule out.
- * The prompt's SHA-256 fingerprint remains the user's final check.
+ * A same-user process must not be able to answer both the CA export and its
+ * runtime witness. So the witness:
+ * - runs only a client at a fixed system path that, after resolving
+ *   symlinks, is a regular executable owned by root and not group- or
+ *   world-writable, inside root-owned, non-writable directories up to `/`;
+ * - talks only to the system engine socket (`/var/run/docker.sock` or
+ *   `/run/docker.sock`) when, after resolving symlinks, it is a socket owned
+ *   by root, not world-writable, inside root-owned, non-writable
+ *   directories; `DOCKER_HOST` is forced to it;
+ * - ignores the user's client configuration: `DOCKER_CONFIG` points at a
+ *   path under `/` that no user can create, so only system CLI plugins
+ *   (including Compose) load, and `DOCKER_CONTEXT` plus TLS/certificate
+ *   selectors are removed.
+ * Rootless Docker and Docker Desktop for Linux have no such system engine;
+ * there the witness is unavailable and automatic trust is refused.
  */
 import { realpath, stat } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -23,18 +27,31 @@ const DOCKER_CANDIDATES = [
   "/usr/local/bin/docker",
   "/bin/docker",
 ] as const;
+const SOCKET_CANDIDATES = ["/var/run/docker.sock", "/run/docker.sock"] as const;
 const ROOT_UID = 0;
 const GROUP_OR_WORLD_WRITE = 0o022;
+const WORLD_WRITE = 0o002;
 const ANY_EXECUTE = 0o111;
+/** No user can create this (its parent is `/`), so no user plugins load. */
+export const FROZEN_DOCKER_CONFIG = "/nonexistent/hack-trusted-docker-config";
+const ENGINE_SELECTORS = [
+  "DOCKER_CONTEXT",
+  "DOCKER_CERT_PATH",
+  "DOCKER_TLS",
+  "DOCKER_TLS_VERIFY",
+  "DOCKER_API_VERSION",
+  "DOCKER_CLI_PLUGIN_EXTRA_DIRS",
+] as const;
 
 export type BinaryFacts = {
   readonly uid: number;
   readonly mode: number;
   readonly isFile: boolean;
   readonly isDirectory: boolean;
+  readonly isSocket: boolean;
 };
 
-/** Filesystem reads used to vet the client; injectable for tests. */
+/** Filesystem reads used to vet the client and socket; injectable for tests. */
 export type BinaryFs = {
   readonly realpath: (path: string) => Promise<string>;
   readonly stat: (path: string) => Promise<BinaryFacts>;
@@ -49,6 +66,7 @@ const realFs: BinaryFs = {
       mode: info.mode,
       isFile: info.isFile(),
       isDirectory: info.isDirectory(),
+      isSocket: info.isSocket(),
     };
   },
 };
@@ -75,19 +93,17 @@ async function directoriesRootOwned(opts: {
   }
 }
 
-/** The vetted absolute docker path, or `null` when none qualifies. */
-export async function resolveTrustedDocker(
-  fs: BinaryFs = realFs
-): Promise<string | null> {
-  for (const candidate of DOCKER_CANDIDATES) {
+async function firstVetted(opts: {
+  readonly fs: BinaryFs;
+  readonly candidates: readonly string[];
+  readonly accept: (facts: BinaryFacts) => boolean;
+}): Promise<string | null> {
+  for (const candidate of opts.candidates) {
     try {
-      const resolved = await fs.realpath(candidate);
-      const facts = await fs.stat(resolved);
+      const resolved = await opts.fs.realpath(candidate);
       if (
-        facts.isFile &&
-        rootOwnedNotWritable(facts) &&
-        (facts.mode & ANY_EXECUTE) !== 0 &&
-        (await directoriesRootOwned({ fs, file: resolved }))
+        opts.accept(await opts.fs.stat(resolved)) &&
+        (await directoriesRootOwned({ fs: opts.fs, file: resolved }))
       ) {
         return resolved;
       }
@@ -98,12 +114,44 @@ export async function resolveTrustedDocker(
   return null;
 }
 
+/** The vetted absolute docker client path, or `null` when none qualifies. */
+export async function resolveTrustedDocker(
+  fs: BinaryFs = realFs
+): Promise<string | null> {
+  return await firstVetted({
+    fs,
+    candidates: DOCKER_CANDIDATES,
+    accept: (facts) =>
+      facts.isFile &&
+      rootOwnedNotWritable(facts) &&
+      (facts.mode & ANY_EXECUTE) !== 0,
+  });
+}
+
+/**
+ * The vetted system engine socket, or `null`. Group write is allowed (the
+ * `docker` group); world write and non-root ownership are not.
+ */
+export async function resolveSystemDockerSocket(
+  fs: BinaryFs = realFs
+): Promise<string | null> {
+  return await firstVetted({
+    fs,
+    candidates: SOCKET_CANDIDATES,
+    accept: (facts) =>
+      facts.isSocket &&
+      facts.uid === ROOT_UID &&
+      (facts.mode & WORLD_WRITE) === 0,
+  });
+}
+
 const UNAVAILABLE: ExecResult = { exitCode: 127, stdout: "", stderr: "" };
 
 /**
- * An `exec` that runs `docker …` through the vetted client only. Any other
- * command, or `docker` when no client qualifies, reports exit 127 so callers
- * treat the runtime as unavailable.
+ * An `exec` that runs `docker …` only through the vetted client against the
+ * vetted system engine, with the user's engine selection and client
+ * configuration ignored. Any other command, or a missing client or system
+ * engine, reports exit 127 so callers treat the runtime as unavailable.
  */
 export function createTrustedDockerExec(opts?: {
   readonly fs?: BinaryFs;
@@ -113,12 +161,23 @@ export function createTrustedDockerExec(opts?: {
     if (cmd[0] !== "docker") {
       return UNAVAILABLE;
     }
-    const docker = await resolveTrustedDocker(opts?.fs);
-    if (docker === null) {
+    const [docker, socket] = await Promise.all([
+      resolveTrustedDocker(opts?.fs),
+      resolveSystemDockerSocket(opts?.fs),
+    ]);
+    if (docker === null || socket === null) {
       return UNAVAILABLE;
     }
     try {
-      return await (opts?.execute ?? exec)([docker, ...cmd.slice(1)], options);
+      return await (opts?.execute ?? exec)([docker, ...cmd.slice(1)], {
+        ...options,
+        env: {
+          ...options?.env,
+          DOCKER_HOST: `unix://${socket}`,
+          DOCKER_CONFIG: FROZEN_DOCKER_CONFIG,
+        },
+        unsetEnvKeys: [...(options?.unsetEnvKeys ?? []), ...ENGINE_SELECTORS],
+      });
     } catch {
       return UNAVAILABLE;
     }

@@ -38,6 +38,7 @@ type EventLine = {
   readonly exitCode?: number | null;
   readonly gap?: boolean;
   readonly ended?: boolean;
+  readonly state?: string;
 };
 
 /**

@@ -323,7 +323,12 @@ arguments, never the arguments. New audit files are created mode 0600.
 On the native backend the same commands work, but output arrives in one batch
 when the command ends, so `liveOutput` and `stallDetection` are reported
 `unavailable`; nothing is simulated. Hack resolves no values in the launcher
-there, so nothing is redacted.
+there, so nothing is redacted. Cancelling or timing out stops the host-side
+`hack` process only; the native engine does not stop the command in the guest
+when its client goes away, and nothing confirms that it ended. Every native
+end other than `succeeded` therefore records `containerProcess:
+"not_confirmed"` and keeps its admission slot until the command's timeout
+window closes.
 
 ## Errors
 

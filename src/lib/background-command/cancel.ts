@@ -88,8 +88,9 @@ export async function cancelCommand(opts: {
   const { meta, paths } = opts.journal;
   const observe = opts.observe ?? observeIdentities;
   const signaller = opts.signaller ?? realSignaller;
-  const containerProcess =
-    meta.backend === "compose" ? "not_confirmed" : "not_applicable";
+  // Neither backend's guest command is stopped by stopping its host client:
+  // Compose `exec` and the native engine's exec both keep running.
+  const containerProcess = "not_confirmed" as const;
   const before = await readEvents(paths);
   const priorEnd = endedEvent(before);
   if (priorEnd) {

@@ -307,17 +307,14 @@ async function recoverLocked(
 }
 
 /**
- * A lost owner never stopped anything in the container: for Compose, the
- * container process is `not_confirmed` (which keeps the admission slot until
- * the timeout window closes) unless no child was ever spawned.
+ * A lost owner never stopped anything in the container or guest (Compose or
+ * native): the container process is `not_confirmed` (which keeps the
+ * admission slot until the timeout window closes) unless no child was ever
+ * spawned.
  */
 async function recoveredContainerProcess(opts: {
   readonly paths: JournalPaths;
-  readonly meta: CommandMeta;
 }): Promise<"not_confirmed" | "not_applicable"> {
-  if (opts.meta.backend !== "compose") {
-    return "not_applicable";
-  }
   const spawned =
     (await readChild(opts.paths)) !== null ||
     (await lstat(opts.paths.spawning).catch(() => null)) !== null;

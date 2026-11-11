@@ -1265,6 +1265,30 @@ describe("request keys before runtime checks", () => {
 });
 
 describe("unconfirmed container stops hold admission", () => {
+  test("a native end other than succeeded is not_confirmed: stopping the host client does not stop the guest", () => {
+    const base = {
+      truncated: false,
+      suppressed: false,
+      backend: "native" as const,
+    };
+    expect(
+      endedPayload({
+        ...base,
+        stopping: "cancelled",
+        exitCode: null,
+        signal: "SIGTERM",
+      }).containerProcess
+    ).toBe("not_confirmed");
+    expect(
+      endedPayload({ ...base, stopping: null, exitCode: 1, signal: null })
+        .containerProcess
+    ).toBe("not_confirmed");
+    expect(
+      endedPayload({ ...base, stopping: null, exitCode: 0, signal: null })
+        .containerProcess
+    ).toBeUndefined();
+  });
+
   test("output retention shorter than the timeout window does not free an unconfirmed stop's slot", async () => {
     const start = Date.now();
     for (let index = 0; index < CALLER_ACTIVE_LIMIT; index += 1) {

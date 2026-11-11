@@ -817,12 +817,14 @@ export function endedPayload(opts: {
     ...(opts.containerProcess
       ? { containerProcess: opts.containerProcess }
       : {}),
-    ...(opts.stopping && !opts.containerProcess
+    ...(!opts.containerProcess &&
+    (opts.stopping || (opts.backend === "native" && outcome !== "succeeded"))
       ? {
-          // The client process group was stopped; a process started inside a
-          // container by `docker compose exec` is not proven stopped.
-          containerProcess:
-            opts.backend === "compose" ? "not_confirmed" : "not_applicable",
+          // The client process group was stopped, or a native client ended
+          // other than cleanly: stopping the host client does not stop the
+          // command in the container or native guest, and nothing here
+          // confirms it ended. The end then holds its admission slot.
+          containerProcess: "not_confirmed",
         }
       : {}),
   };

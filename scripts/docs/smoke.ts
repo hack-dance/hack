@@ -105,47 +105,76 @@ for (const [old, target] of [
   }
 }
 
-// Every rendered diagram a staged page references must reach the browser: the
-// page HTML carries both theme variants as images, and each SVG is served.
-const stagedRoot = new URL("../../site/content/docs/", import.meta.url)
-  .pathname;
-const diagramReference = /\/diagrams\/[a-f0-9]+\.(?:light|dark)\.svg/g;
-let diagramCount = 0;
-for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedRoot })) {
-  const references = new Set(
-    (await Bun.file(`${stagedRoot}${file}`).text()).match(diagramReference)
-  );
-  if (references.size === 0) {
-    continue;
-  }
-  const route = `/docs/${file.replace(/\.md$/, "").replace(/\/index$/, "")}`;
-  const html = await (await fetch(new URL(route, base))).text();
-  for (const reference of references) {
-    const variant = reference.includes(".dark.") ? "dark" : "light";
-    if (
-      !new RegExp(
-        `<img[^>]*class="diagram diagram-${variant}"[^>]*src="${reference}"|<img[^>]*src="${reference}"[^>]*class="diagram diagram-${variant}"`
-      ).test(html)
-    ) {
-      throw new Error(`Diagram image missing from ${route}: ${reference}`);
+// Every Mermaid block in a published source must reach the browser as its two
+// Pele renders. The count comes from the sources, not from the staged output,
+// so a page whose diagrams are dropped anywhere in the pipeline fails here.
+const repositoryRoot = new URL("../../", import.meta.url).pathname;
+const mermaidFence = /^(?:```|~~~)mermaid[ \t]*$/gm;
+const diagramImage = /<img\b[^>]*>/g;
+const diagramSource = /src="(\/diagrams\/[a-f0-9]+\.(light|dark)\.svg)"/;
+let diagramBlocks = 0;
+const diagramFiles = new Set<string>();
+for (const version of ["v4", "v5"] as const) {
+  const m = versions[version];
+  const sources = [
+    ...m.entries
+      .filter((e) => !m.editorial.some((page) => page.slug === e.slug))
+      .map((e) => ({ slug: e.slug, file: e.snapshot })),
+    ...m.editorial.map((page) => ({
+      slug: page.slug,
+      file: `docs/versions/${version}/${page.slug}.md`,
+    })),
+  ];
+  for (const { slug, file } of sources) {
+    const blocks = (
+      (await Bun.file(`${repositoryRoot}${file}`).text()).match(mermaidFence) ??
+      []
+    ).length;
+    if (blocks === 0) {
+      continue;
     }
-    const image = await fetch(new URL(reference, base));
-    if (
-      !(
-        image.ok &&
-        image.headers.get("content-type")?.startsWith("image/svg+xml") &&
-        (await image.text()).includes("<svg")
-      )
-    ) {
-      throw new Error(`Diagram not served as SVG: ${reference}`);
+    const route = `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
+    const shown = { light: 0, dark: 0 };
+    for (const tag of (await read(route)).match(diagramImage) ?? []) {
+      const source = diagramSource.exec(tag);
+      const variant = source?.[2] as "light" | "dark" | undefined;
+      if (
+        source?.[1] &&
+        variant &&
+        tag.includes(`class="diagram diagram-${variant}"`)
+      ) {
+        shown[variant] += 1;
+        diagramFiles.add(source[1]);
+      }
     }
-    diagramCount += 1;
+    if (shown.light !== blocks || shown.dark !== blocks) {
+      throw new Error(
+        `${route}: ${blocks} Mermaid blocks but ${shown.light} light and ${shown.dark} dark diagram images`
+      );
+    }
+    diagramBlocks += blocks;
   }
 }
-if (diagramCount === 0) {
-  throw new Error("No rendered diagrams found in the staged corpus");
+if (diagramBlocks === 0) {
+  throw new Error("No Mermaid blocks found in the published sources");
 }
-console.log(`Diagram smoke passed: ${diagramCount} images served.`);
+for (const file of diagramFiles) {
+  const image = await fetch(new URL(file, base), {
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (
+    !(
+      image.status === 200 &&
+      image.headers.get("content-type")?.startsWith("image/svg+xml") &&
+      (await image.text()).includes("<svg")
+    )
+  ) {
+    throw new Error(`Diagram not served as SVG: ${file}`);
+  }
+}
+console.log(
+  `Diagram smoke passed: ${diagramBlocks} Mermaid blocks shown as ${diagramFiles.size} served SVGs.`
+);
 
 // v5 pages that moved into the native section keep their old routes, with and
 // without the version prefix.

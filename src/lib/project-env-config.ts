@@ -2837,7 +2837,7 @@ function decryptProjectEnvStoredValue(opts: {
   }
   if (!opts.keyText) {
     throw new Error(
-      `Missing ${PROJECT_ENV_KEY_FILENAME}. Run "hack env add --secret ..." or provision the key file.`
+      `Missing ${PROJECT_ENV_KEY_FILENAME}. ${missingProjectEnvKeyHint()}`
     );
   }
   return decryptProjectEnvValue({
@@ -4139,11 +4139,24 @@ async function resolveProjectEnvKey(opts: {
     const searchedPaths = [keyPath, sharedKeyPath]
       .filter((value): value is string => typeof value === "string")
       .join(" or ");
+    // `required` is set only when encrypted values exist (see callers).
     throw new ProjectEnvKeyMissingError(
-      `Missing project env key at ${searchedPaths}. Run "hack env add --secret ..." to generate it, restore the key file, or set ${PROJECT_ENV_SECRET_KEY_ENV}.`
+      `Missing project env key at ${searchedPaths}. ${missingProjectEnvKeyHint()}`
     );
   }
   return null;
+}
+
+/**
+ * Next action when a project env key is needed but not found. A key is only
+ * needed to decrypt values that are already encrypted, so this never
+ * suggests creating one: on a second machine or a fresh checkout a new key
+ * cannot decrypt them, and secrets added under it would split the project
+ * across two keys. (`hack env add --secret` creates a key by itself when the
+ * project has none and nothing is encrypted yet.) Value-free.
+ */
+export function missingProjectEnvKeyHint(): string {
+  return `This project already has encrypted env values, and only the key that encrypted them can decrypt them. Copy ${PROJECT_ENV_KEY_FILENAME} from a machine or checkout that has it into this checkout, or set ${PROJECT_ENV_SECRET_KEY_ENV} to that same key. Do not create a new key with "hack env add --secret": it cannot decrypt the existing values.`;
 }
 
 /**

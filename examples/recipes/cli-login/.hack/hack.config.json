@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schemas.hack.local/hack.config.schema.json",
+  "name": "cli-login",
+  "dev_host": "cli-login.hack.local",
+  "lifecycle": {
+    "up": {
+      "before": [
+        { "name": "deploy platform sign-in", "command": "sh scripts/deploy-login.sh" },
+        { "name": "edge platform sign-in", "command": "sh scripts/edge-login.sh" }
+      ]
+    },
+    "down": {
+      "after": [{ "name": "remove edge token file", "command": "rm -f .credentials/edge-token" }]
+    }
+  }
+}

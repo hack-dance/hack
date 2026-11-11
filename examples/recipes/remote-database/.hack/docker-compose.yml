@@ -1,0 +1,22 @@
+name: remote-database
+services:
+  app:
+    # Stand-in for your service: a Postgres client that stays running.
+    image: postgres:17.6-alpine
+    command: ["sleep", "infinity"]
+    # Lets the container reach the proxy that runs on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # The local database, used when no remote overlay is selected.
+  db:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+volumes:
+  db-data: {}

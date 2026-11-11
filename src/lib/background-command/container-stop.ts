@@ -4,13 +4,31 @@ import { exec } from "../shell.ts";
 export const GUEST_MARKER_ENV = "HACK_BACKGROUND_COMMAND";
 
 /**
- * POSIX sh run inside the container: TERM, then KILL, every process whose
- * environment carries the marker, then exit 0 only if none is left. Needs
- * `sh`, `/proc`, `tr`, `grep`, `basename`, `sleep` and `kill` in the image.
+ * Set on the stop script's own process by the runtime (`exec -e`): the
+ * script's positive control looks for it in its own environment.
  */
-const GUEST_STOP_SCRIPT = [
+export const GUEST_STOP_PROBE_ENV = "HACK_BACKGROUND_STOP_PROBE=1";
+
+/**
+ * POSIX sh run inside the container: TERM, then KILL, every process whose
+ * environment carries the marker, then exit 0 only if none is left.
+ *
+ * Fails closed: it first reads its own `/proc/$$/environ` the same way it
+ * reads every other process's and must find `GUEST_STOP_PROBE_ENV` (set by
+ * the runtime, which really execs this shell; a nested busybox `sh` may not
+ * be exec'd, so its environ cannot serve as the control). A missing `/proc`
+ * or `tr` therefore exits nonzero instead of reading as "none left".
+ * Matching uses shell built-ins only. A process whose environment cannot be
+ * read (another user's, or gone mid-scan) is skipped: the command's own
+ * processes run as the exec user and stay readable unless they change user.
+ * Needs `sh`, `/proc` and `tr`; `sleep` only paces the TERM grace.
+ */
+export const GUEST_STOP_SCRIPT = [
   `m="${GUEST_MARKER_ENV}=$1"`,
-  'marked() { for d in /proc/[0-9]*; do tr \'\\0\' \'\\n\' 2>/dev/null < "$d/environ" | grep -qx "$m" && basename "$d"; done; }',
+  'nl="\n"',
+  `has() { e=$(tr '\\0' '\\n' < "$1/environ" 2>/dev/null) || return 1; case "$nl$e$nl" in *"$nl$2$nl"*) return 0 ;; esac; return 1; }`,
+  `has "/proc/$$" "${GUEST_STOP_PROBE_ENV}" || exit 3`,
+  `marked() { for d in /proc/[0-9]*; do has "$d" "$m" && echo "\${d##*/}"; done; }`,
   'for p in $(marked); do kill -TERM "$p" 2>/dev/null; done',
   "sleep 2",
   'for p in $(marked); do kill -KILL "$p" 2>/dev/null; done',
@@ -116,6 +134,8 @@ export async function stopExecGuest(opts: {
         ...opts.compose,
         "exec",
         "-T",
+        "-e",
+        GUEST_STOP_PROBE_ENV,
         opts.service,
         "sh",
         "-c",

@@ -178,45 +178,57 @@ async function countActive(opts: {
   for (const commandId of await listCommandIds(opts.root)) {
     const paths = journalPaths({ root: opts.root, commandId });
     const meta = await readMeta(paths).catch(() => null);
-    if (!meta) {
-      continue;
-    }
-    let events = await readEvents(paths);
-    const ended = endedEvent(events);
-    if (ended) {
-      // A stop that could not confirm the process in the container is gone
-      // keeps its slot for the command's timeout window, so a start/cancel
-      // loop cannot run more than the limits allow.
-      if (holdsSlot({ meta, ended, now: opts.now })) {
-        total += 1;
-        caller += meta.caller === opts.caller ? 1 : 0;
-      }
-      continue;
-    }
-    const assessment = await assessOwner({
-      paths,
-      meta,
-      events,
-      now: opts.now,
-      observe: opts.observe,
-    });
-    if (assessment.kind === "owner_lost") {
-      events = await recoverLostOwner({
-        paths,
-        meta,
-        observe: opts.observe,
-        enforceTimeout: true,
-      });
-      if (endedEvent(events)) {
-        continue;
-      }
-    }
-    total += 1;
-    if (meta.caller === opts.caller) {
-      caller += 1;
+    if (meta && (await holdsAdmission({ ...opts, paths, meta }))) {
+      total += 1;
+      caller += meta.caller === opts.caller ? 1 : 0;
     }
   }
   return { total, caller };
+}
+
+/** Whether one journal counts against the admission limits right now. */
+async function holdsAdmission(opts: {
+  readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+  readonly now: number;
+  readonly observe?: ObserveIdentities;
+}): Promise<boolean> {
+  const { paths, meta } = opts;
+  const tombstone = await readTombstone(paths);
+  if (tombstone) {
+    // Output expiry keeps a value-free admission hold: retention shorter
+    // than the timeout window must not free an unconfirmed stop's slot.
+    return tombstone.holdUntil !== null && opts.now < tombstone.holdUntil;
+  }
+  const events = await readEvents(paths);
+  const ended = endedEvent(events);
+  if (ended) {
+    // A stop that could not confirm the process in the container is gone
+    // keeps its slot for the command's timeout window, so a start/cancel
+    // loop cannot run more than the limits allow.
+    return holdsSlot({ meta, ended, now: opts.now });
+  }
+  const assessment = await assessOwner({
+    paths,
+    meta,
+    events,
+    now: opts.now,
+    observe: opts.observe,
+  });
+  if (assessment.kind !== "owner_lost") {
+    return true;
+  }
+  const recovered = endedEvent(
+    await recoverLostOwner({
+      paths,
+      meta,
+      observe: opts.observe,
+      enforceTimeout: true,
+    })
+  );
+  return recovered
+    ? holdsSlot({ meta, ended: recovered, now: opts.now })
+    : true;
 }
 
 /** An end whose container process is unconfirmed holds its slot until the timeout window closes. */
@@ -452,17 +464,12 @@ export async function pruneExpired(opts: {
 }): Promise<void> {
   for (const commandId of await listCommandIds(opts.root)) {
     const paths = journalPaths({ root: opts.root, commandId });
-    const tombstone = await readReplaceablePrivateFile({
-      path: paths.expired,
-      directories: [paths.dir],
-      refusal: storeRefusal,
-      maxBytes: 4096,
-    }).catch(() => null);
+    const tombstone = await readTombstone(paths);
     if (tombstone) {
       // Retried on every sweep: an unlink that failed earlier (or a crash
       // right after the tombstone) must not leave output behind.
       await removeJournalPayload(paths);
-      const expiredAt = parseExpiredAt(tombstone.text);
+      const expiredAt = tombstone.expiredAt;
       if (expiredAt !== null && opts.now - expiredAt > TOMBSTONE_MS) {
         await removeRequestKey({ root: opts.root, paths });
         await rm(paths.dir, { recursive: true, force: true });
@@ -480,7 +487,7 @@ export async function pruneExpired(opts: {
     if (opts.now - Date.parse(ended.time) < meta.retentionMs) {
       continue;
     }
-    await expireJournal({ paths, now: opts.now });
+    await expireJournal({ paths, meta, ended, now: opts.now });
   }
 }
 
@@ -500,7 +507,7 @@ export async function expireIfDue(opts: {
   }
   await withJournalLock(opts.paths, async () => {
     if (!(await lstat(opts.paths.expired).catch(() => null))) {
-      await expireJournal({ paths: opts.paths, now: opts.now });
+      await expireJournal({ ...opts, ended });
     }
   });
   return true;
@@ -524,17 +531,47 @@ export async function pruneStore(root = commandsRoot()): Promise<void> {
   }
 }
 
+/**
+ * Write the tombstone, then remove the payload. An end that still holds its
+ * admission slot (see `holdsSlot`) leaves its deadline in the tombstone, so
+ * the hold outlives the events it was read from.
+ */
 async function expireJournal(opts: {
   readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+  readonly ended: { readonly payload: Record<string, unknown> };
   readonly now: number;
 }): Promise<void> {
+  const holdUntil = holdsSlot(opts)
+    ? new Date(
+        Date.parse(opts.meta.acceptedAt) + opts.meta.timeoutMs
+      ).toISOString()
+    : null;
   await replacePrivateFileAtomic({
     path: opts.paths.expired,
     directories: [opts.paths.dir],
     refusal: storeRefusal,
-    text: JSON.stringify({ expiredAt: new Date(opts.now).toISOString() }),
+    text: JSON.stringify({
+      expiredAt: new Date(opts.now).toISOString(),
+      ...(holdUntil ? { holdUntil } : {}),
+    }),
   });
   await removeJournalPayload(opts.paths);
+}
+
+type Tombstone = {
+  readonly expiredAt: number | null;
+  readonly holdUntil: number | null;
+};
+
+async function readTombstone(paths: JournalPaths): Promise<Tombstone | null> {
+  const file = await readReplaceablePrivateFile({
+    path: paths.expired,
+    directories: [paths.dir],
+    refusal: storeRefusal,
+    maxBytes: 4096,
+  }).catch(() => null);
+  return file ? parseTombstone(file.text) : null;
 }
 
 /**
@@ -569,17 +606,19 @@ async function removeJournalPayload(paths: JournalPaths): Promise<void> {
   }
 }
 
-function parseExpiredAt(text: string): number | null {
+function parseTombstone(text: string): Tombstone {
+  let value: unknown = null;
   try {
-    const value: unknown = JSON.parse(text);
-    if (isRecord(value) && typeof value.expiredAt === "string") {
-      const parsed = Date.parse(value.expiredAt);
-      return Number.isFinite(parsed) ? parsed : null;
-    }
+    value = JSON.parse(text);
   } catch {
-    return null;
+    value = null;
   }
-  return null;
+  const time = (field: string): number | null => {
+    const raw = isRecord(value) ? value[field] : undefined;
+    const parsed = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return { expiredAt: time("expiredAt"), holdUntil: time("holdUntil") };
 }
 
 async function removeRequestKey(opts: {

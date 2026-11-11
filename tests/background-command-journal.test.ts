@@ -17,6 +17,7 @@ import { cancelCommand } from "../src/lib/background-command/cancel.ts";
 import {
   buildEnvelope,
   type CommandMeta,
+  type EventEnvelope,
   formatCursor,
   JOURNAL_FORMAT_VERSION,
   JournalWriter,
@@ -463,7 +464,17 @@ describe("lost owner", () => {
     expect(finals[0]?.payload).toMatchObject({
       outcome: "unknown",
       reason: "supervisor_lost",
+      // Nothing stopped the Compose process in the container: it keeps the
+      // admission slot until the timeout window closes.
+      containerProcess: "not_confirmed",
     });
+    expect(
+      holdsSlot({
+        meta,
+        ended: finals[0] as EventEnvelope,
+        now: Date.parse(meta.acceptedAt) + 1000,
+      })
+    ).toBe(true);
   });
 
   test("a live supervisor is never taken over", async () => {
@@ -1130,6 +1141,51 @@ describe("request keys before runtime checks", () => {
 });
 
 describe("unconfirmed container stops hold admission", () => {
+  test("output retention shorter than the timeout window does not free an unconfirmed stop's slot", async () => {
+    const start = Date.now();
+    for (let index = 0; index < CALLER_ACTIVE_LIMIT; index += 1) {
+      const { meta, paths } = await acceptCommand({
+        input: input({ caller: "session-a", retentionMs: 0 }),
+        root,
+        now: new Date(start),
+      });
+      await new JournalWriter(paths, meta, 1).write("command.ended", {
+        outcome: "cancelled",
+        reason: "cancel_requested",
+        exitCode: null,
+        signal: "SIGTERM",
+        durationMs: 10,
+        truncated: false,
+        suppressed: false,
+        containerProcess: "not_confirmed",
+      });
+    }
+    // Retention removes every event; the tombstone keeps the hold.
+    await pruneExpired({ root, now: start + 1000 });
+    const ids = await Array.fromAsync(
+      new Bun.Glob("cmd_*").scan({ cwd: root, onlyFiles: false })
+    );
+    expect(ids).toHaveLength(CALLER_ACTIVE_LIMIT);
+    for (const id of ids) {
+      const paths = journalPaths({ root, commandId: id });
+      expect(await readEvents(paths)).toEqual([]);
+    }
+    await expectCode(
+      acceptCommand({
+        input: input({ caller: "session-a" }),
+        root,
+        now: new Date(start + 2000),
+      }),
+      "E_ADMISSION_LIMIT"
+    );
+    // After the timeout window the hold lapses.
+    await acceptCommand({
+      input: input({ caller: "session-a" }),
+      root,
+      now: new Date(start + 61_000),
+    });
+  });
+
   test("an end with containerProcess not_confirmed keeps its slot until the timeout window closes", () => {
     const meta = {
       acceptedAt: new Date(1_000_000).toISOString(),

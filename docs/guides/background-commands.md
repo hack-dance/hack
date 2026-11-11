@@ -206,13 +206,18 @@ does not stop what runs in the container, so:
 - a background `exec` runs its process with `HACK_BACKGROUND_COMMAND=<marker>`
   in its environment; when its client is stopped or killed, the supervisor
   ends every process in the container that carries the marker (TERM, then
-  KILL) and reports `stopped` once none is left. That needs `sh`, `/proc`,
-  `tr`, `grep`, `basename`, `sleep` and `kill` in the image; without them the
-  result is `not_confirmed`.
+  KILL) and reports `stopped` once none is left. That needs `sh`, `/proc`
+  and `tr` in the image. The script first checks that it can find a known
+  variable in a process's environment, so without them the result is
+  `not_confirmed`, never `stopped`. A process whose environment it cannot
+  read (one that changed to another user) is not seen.
 
 An end whose container process is `not_confirmed` keeps its admission slot
 until the command's timeout window closes, so a start/cancel loop cannot run
-more than the limits allow. When the stop itself cannot be confirmed (for
+more than the limits allow. The hold survives retention: when the output
+expires first, the tombstone keeps the deadline. A Compose command finalized
+after its supervisor was lost also ends with `containerProcess:
+"not_confirmed"`, because nothing stopped what ran in the container. When the stop itself cannot be confirmed (for
 example the command's identity is unknown, see below), no final record is
 written and `outcome` is `unconfirmed`.
 

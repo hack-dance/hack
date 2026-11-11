@@ -16,11 +16,17 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { cancelCommand } from "../src/lib/background-command/cancel.ts";
+import {
+  GUEST_MARKER_ENV,
+  GUEST_STOP_PROBE_ENV,
+  GUEST_STOP_SCRIPT,
+} from "../src/lib/background-command/container-stop.ts";
 import {
   type EventEnvelope,
   journalPaths,
@@ -669,6 +675,48 @@ describe("background command processes", () => {
       expect(endedPayload(await readEvents(stuck.paths))?.reason).toBe(
         "supervisor_unresponsive"
       );
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test.if(process.platform === "linux")(
+    "the in-container stop script ends marked processes and fails closed when it cannot enumerate",
+    async () => {
+      // Run on this host's /proc as a stand-in for a container's.
+      const marker = randomUUID().replaceAll("-", "");
+      const marked = Bun.spawn(["sleep", "30"], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        detached: true,
+        env: { ...fixture.env, [GUEST_MARKER_ENV]: marker },
+      });
+      await track(marked.pid, true);
+      const runScript = (opts: { marker: string; path: string }) =>
+        Bun.spawn(["sh", "-c", GUEST_STOP_SCRIPT, "stop", opts.marker], {
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          env: {
+            PATH: opts.path,
+            [GUEST_STOP_PROBE_ENV.split("=")[0] as string]: "1",
+          },
+        }).exited;
+      expect(
+        await runScript({ marker, path: fixture.env.PATH as string })
+      ).toBe(0);
+      await marked.exited;
+      expect(marked.signalCode).not.toBeNull();
+
+      // Without `tr` the scan would see nothing: it must not read as "none left".
+      const bin = join(fixture.root, "bin-without-tr");
+      await mkdir(bin);
+      for (const tool of ["sh", "sleep"]) {
+        const found = Bun.which(tool);
+        expect(found).not.toBeNull();
+        await symlink(found as string, join(bin, tool));
+      }
+      expect(await runScript({ marker: "nomatch", path: bin })).not.toBe(0);
     },
     TEST_TIMEOUT_MS
   );

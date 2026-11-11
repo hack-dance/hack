@@ -123,6 +123,7 @@ async function runSourceCli(opts: {
   readonly root: string;
   readonly cwd: string;
   readonly args: readonly string[];
+  readonly input?: string;
 }): Promise<{ exitCode: number; stdout: string }> {
   const child = Bun.spawn({
     cmd: [process.execPath, join(REPO_ROOT, "index.ts"), ...opts.args],
@@ -131,11 +132,12 @@ async function runSourceCli(opts: {
       root: opts.root,
       env: { HACK_NO_INTERACTIVE: "1", NO_COLOR: "1" },
     }),
-    stdin: "ignore",
+    stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
     timeout: CLI_TIMEOUT_MS,
   });
+  child.stdin.end(opts.input ?? "");
   const [stdout, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     child.exited,
@@ -293,7 +295,14 @@ test("the current source CLI resolves every example's env overlays", async () =>
 }, 120_000);
 
 test("every include block in the recipe pages equals its example file", async () => {
-  for (const page of await recipePages()) {
+  const siteRecipes = join(REPO_ROOT, "docs/versions/v5/recipes");
+  const pages = [
+    ...(await recipePages()),
+    ...(await readdir(siteRecipes))
+      .filter((name) => name.endsWith(".md"))
+      .map((name) => join(siteRecipes, name)),
+  ];
+  for (const page of pages) {
     expect(
       await docIncludeIssues({
         markdown: await Bun.file(page).text(),
@@ -303,6 +312,45 @@ test("every include block in the recipe pages equals its example file", async ()
     ).toEqual([]);
   }
 });
+
+test("the named-tunnel recipe delivers its token only to the host scope", async () => {
+  const source = await Bun.file(join(RECIPES_DIR, "tunnels.md")).text();
+  const published = await Bun.file(
+    join(REPO_ROOT, "docs/versions/v5/recipes/tunnels.md")
+  ).text();
+  const commandPattern = /hack env add TUNNEL_TOKEN([^`\n]+)/;
+  const flags = commandPattern.exec(source)?.[1]?.trim();
+  expect(flags).toBeDefined();
+  expect(commandPattern.exec(published)?.[1]?.trim()).toBe(flags);
+  if (!flags) {
+    throw new Error("missing named-tunnel env command");
+  }
+  const { root, project } = await copyExample("examples/recipes/tunnel");
+  const fixtureValue = "tunnel-scope-fixture";
+  const added = await runSourceCli({
+    root,
+    cwd: project,
+    args: ["env", "add", "TUNNEL_TOKEN", ...flags.split(/\s+/)],
+    input: `${fixtureValue}\n`,
+  });
+  expect(added.exitCode).toBe(0);
+  const host = await runSourceCli({
+    root,
+    cwd: project,
+    args: ["env", "get", "TUNNEL_TOKEN", "--service", "host"],
+  });
+  expect(host.exitCode).toBe(0);
+  expect(host.stdout).toBe(fixtureValue);
+  for (const scope of ["web", "global"]) {
+    const container = await runSourceCli({
+      root,
+      cwd: project,
+      args: ["env", "get", "TUNNEL_TOKEN", "--service", scope],
+    });
+    expect(container.exitCode, scope).not.toBe(0);
+    expect(container.stdout, scope).toBe("");
+  }
+}, 120_000);
 
 test("every example's config and Compose file are shown on a recipe page", async () => {
   const included = new Set<string>();
@@ -342,6 +390,17 @@ test("negative controls: the example checks reject the mistakes they guard", asy
   };
   expect(composeIssues({ compose, ...rules })).toEqual([]);
   expect(depsPatternIssues(compose)).toEqual([]);
+
+  expect(
+    depsPatternIssues(
+      mutate((copy) => {
+        service(copy, "worker").volumes = [
+          "..:/app",
+          "node_modules:/app/node_modules",
+        ];
+      })
+    )
+  ).toEqual(["worker: writable-deps-volume"]);
 
   expect(
     depsPatternIssues(

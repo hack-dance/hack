@@ -18,7 +18,7 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - ..:/app
-      - venv:/venv
+      - venv:/venv:ro
     depends_on:
       deps:
         condition: service_completed_successfully

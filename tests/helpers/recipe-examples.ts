@@ -86,12 +86,21 @@ function mounts(service: Record<string, unknown>): string[] {
   return stringList(service.volumes);
 }
 
-function mountTarget(mount: string): { source: string; target: string } {
-  const [source = "", target = ""] = mount.split(":");
-  return { source, target };
+function mountTarget(mount: string): {
+  source: string;
+  target: string;
+  readOnly: boolean;
+} {
+  const [source = "", target = "", mode = ""] = mount.split(":");
+  const modes = mode.split(",");
+  return {
+    source,
+    target,
+    readOnly: modes.includes("ro") && !modes.includes("rw"),
+  };
 }
 
-const RUNTIME_IMAGE = /^(oven\/bun|node):/;
+const RUNTIME_IMAGE = /^(oven\/bun|node|python):/;
 
 /**
  * Compose rules every example follows:
@@ -175,7 +184,7 @@ function dependsOnTargets(service: Record<string, unknown>): string[] {
  * The deps-service pattern, for a project whose packages install in
  * containers. Every Node or Bun service that mounts the source (`..:/app`)
  * must mount each volume the `deps` service mounts under `/app` at the same
- * path, and wait for `deps` with `service_completed_successfully`.
+ * path read-only, and wait for `deps` with `service_completed_successfully`.
  */
 export function depsPatternIssues(compose: Record<string, unknown>): string[] {
   const all = services(compose);
@@ -202,16 +211,7 @@ export function depsPatternIssues(compose: Record<string, unknown>): string[] {
     if (!own.some((mount) => mount.source === "..")) {
       continue;
     }
-    for (const volume of depsVolumes) {
-      if (
-        !own.some(
-          (mount) =>
-            mount.source === volume.source && mount.target === volume.target
-        )
-      ) {
-        issues.push(`${name}: missing-deps-volume`);
-      }
-    }
+    issues.push(...consumerMountIssues({ name, own, depsVolumes }));
     const dependsOn = service.depends_on;
     const gate = isRecord(dependsOn) ? dependsOn.deps : undefined;
     if (
@@ -221,6 +221,26 @@ export function depsPatternIssues(compose: Record<string, unknown>): string[] {
     }
   }
   return [...new Set(issues)];
+}
+
+function consumerMountIssues(opts: {
+  readonly name: string;
+  readonly own: readonly ReturnType<typeof mountTarget>[];
+  readonly depsVolumes: readonly ReturnType<typeof mountTarget>[];
+}): string[] {
+  const issues: string[] = [];
+  for (const volume of opts.depsVolumes) {
+    const consumer = opts.own.find(
+      (mount) =>
+        mount.source === volume.source && mount.target === volume.target
+    );
+    if (!consumer) {
+      issues.push(`${opts.name}: missing-deps-volume`);
+    } else if (!consumer.readOnly) {
+      issues.push(`${opts.name}: writable-deps-volume`);
+    }
+  }
+  return issues;
 }
 
 /** Exact dependency versions from one `package.json`, workspace links excluded. */

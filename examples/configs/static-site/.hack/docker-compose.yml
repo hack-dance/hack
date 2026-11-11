@@ -15,7 +15,7 @@ services:
     command: ["bun", "run", "watch"]
     volumes:
       - ..:/app
-      - node_modules:/app/node_modules
+      - node_modules:/app/node_modules:ro
       - site:/site
     depends_on:
       deps:

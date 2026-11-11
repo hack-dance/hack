@@ -149,6 +149,8 @@ export async function startViaSystemdIfInstalled(
       unitPath,
       unitText: expected.unitText,
       deps,
+      // Keep the user's choice: a disabled unit is repaired, not re-enabled.
+      enable: status.enabled,
     });
     if (!repaired.ok) {
       logger.error({

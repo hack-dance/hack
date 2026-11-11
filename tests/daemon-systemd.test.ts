@@ -617,6 +617,24 @@ test("start rewrites a unit that runs another existing hack, then starts it", as
   expect(start).toBeGreaterThan(reload);
 });
 
+test("a start-time rewrite keeps a disabled unit disabled", async () => {
+  const fake = fakeSystemd();
+  const old = join(root, "bin", "hack-old");
+  await writeFile(old, "#!/bin/sh\n");
+  await chmod(old, 0o755);
+  await installSystemdUnit({
+    unitPath,
+    unitText: renderSystemdUnit({ hackBinPath: old }) ?? "",
+    deps: fake.deps,
+  });
+  fake.enabled = false;
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect(await readFile(unitPath, "utf8")).toBe(unitText());
+  expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
+  expect(fake.enabled).toBe(false);
+});
+
 test("start leaves a current unit alone and only starts it", async () => {
   const fake = fakeSystemd();
   await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
@@ -661,6 +679,12 @@ test("cgroup membership identifies hackd under a wrapper MainPID", async () => {
     await isPidInSystemdUnit({
       pid: 1,
       readText: cgroup("0::/user.slice/user-1000.slice/session-3.scope\n"),
+    })
+  ).toBe(false);
+  expect(
+    await isPidInSystemdUnit({
+      pid: 1,
+      readText: cgroup("0::/system.slice/hackd.service\n"),
     })
   ).toBe(false);
   expect(

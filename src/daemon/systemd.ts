@@ -517,9 +517,12 @@ export async function isPidInSystemdUnit(opts: {
   if (text === null) {
     return null;
   }
-  return text
-    .split("\n")
-    .some((line) => line.trimEnd().endsWith(CGROUP_UNIT_SUFFIX));
+  // A user unit lives under `.../user@<uid>.service/.../hackd.service`; a
+  // system unit of the same name does not count.
+  return text.split("\n").some((line) => {
+    const trimmed = line.trimEnd();
+    return trimmed.includes("/user@") && trimmed.endsWith(CGROUP_UNIT_SUFFIX);
+  });
 }
 
 /** Parses `systemctl show` `Key=Value` lines. */
@@ -590,6 +593,11 @@ export async function installSystemdUnit(opts: {
   readonly unitPath: string;
   readonly unitText: string;
   readonly deps: SystemdDeps;
+  /**
+   * Run `systemctl --user enable` (default true). A start-time repair passes
+   * the unit's current state, so a unit the user disabled stays disabled.
+   */
+  readonly enable?: boolean;
 }): Promise<SystemdInstallResult> {
   const access = resolveSystemdAccess({ env: opts.deps.env });
   if (!access.allowed) {
@@ -621,6 +629,9 @@ export async function installSystemdUnit(opts: {
         error: `systemctl --user daemon-reload failed: ${firstLine(reload.stderr) || `exit code ${reload.exitCode}`}`,
       };
     }
+  }
+  if (opts.enable === false) {
+    return { ok: true, changed };
   }
   const enable = await opts.deps.run("systemctl", [
     "--user",

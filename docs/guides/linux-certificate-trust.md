@@ -110,5 +110,10 @@ Hack has no untrust command yet. To remove its changes by hand:
 The anchor files and nickname are fixed names, so these commands also remove an
 entry with the same name that something other than Hack added.
 
+Hack runs the system `sudo` itself (`/usr/bin/sudo` or `/bin/sudo`, which must be
+a root-owned setuid file in root-owned directories), never one found on your
+`PATH`, with a fixed system `PATH` for the root commands. If no such `sudo`
+exists, the root step fails and nothing changes.
+
 Never send a password to an agent or put it in a command; `sudo` asks in your
 terminal.

@@ -14,7 +14,8 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { readTextFile } from "./fs.ts";
 import type { LinuxTrustHost } from "./linux-trust-setup.ts";
-import { exec, run } from "./shell.ts";
+import { runTrustedSudo } from "./privileged-sudo.ts";
+import { exec } from "./shell.ts";
 
 const CERTUTIL_TIMEOUT_MS = 10_000;
 const FALLBACK_DIRS = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"] as const;
@@ -135,12 +136,6 @@ export function createLinuxTrustHost(opts?: {
         return SPAWN_FAILED;
       }
     },
-    runPrivileged: async (argv) => {
-      try {
-        return await run(["sudo", ...argv], { stdin: "inherit" });
-      } catch {
-        return SPAWN_FAILED.exitCode;
-      }
-    },
+    runPrivileged: async (argv) => await runTrustedSudo(argv),
   };
 }

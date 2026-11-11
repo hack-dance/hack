@@ -17,10 +17,12 @@
  * | `code`         | anything else                                     |
  *
  * The outputs written to `$GITHUB_OUTPUT` are the job switches in
- * `.github/workflows/ci.yml`. Only `full` runs the whole macOS matrix; pushes
- * to `next`/`main` are always `full`, so the prerelease exact-head gate keeps
- * its complete evidence. Any doubt widens the scope: an unknown path is
- * TypeScript at least, and a failed or empty diff is `full`.
+ * `.github/workflows/ci.yml`. Only `full` runs every job and every config
+ * compiler host; pushes to `next`/`main` are always `full`, so the prerelease
+ * exact-head gate keeps its complete evidence. Every scope runs the bun shards
+ * in the `pooled` layout: platform-sensitive files on macOS, the rest on Linux
+ * (HACK-2028). Any doubt widens the scope: an unknown path is TypeScript at
+ * least, and a failed or empty diff is `full`.
  */
 import { appendFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -124,7 +126,10 @@ export type ScopeOutputs = {
   readonly runtime_core: boolean;
   /** Bun shards, docker-e2e, runtime images and the Linux lifetime job. */
   readonly suite: boolean;
-  /** `full` (all shards on macOS) or `pooled` (macOS and Linux pools). */
+  /**
+   * `pooled` (macOS and Linux pools) on every scope since HACK-2028; `full`
+   * (all shards on macOS) remains a valid layout for manual runs.
+   */
   readonly test_layout: "full" | "pooled";
   /**
    * The focused test run that replaces the suite: a comma-separated list of
@@ -157,7 +162,7 @@ export function scopeOutputs(scope: ChangeScope): ScopeOutputs {
         compiler_rust: true,
         runtime_core: true,
         suite: true,
-        test_layout: "full",
+        test_layout: "pooled",
         test_focus: "",
       };
     case "code":

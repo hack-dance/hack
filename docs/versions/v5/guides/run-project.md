@@ -41,7 +41,8 @@ registry and container cleanup to one project family.
 ## Native backend
 
 On the native backend, `hack up` starts the whole project, in the foreground or in
-the background with `--detach`. `hack restart` runs in the foreground only. Logs are
-finite snapshots: following logs and service subsets are not available. See
+the background with `--detach`. `hack restart` runs in the foreground only. Neither
+accepts a subset of services. Logs are finite snapshots; following logs is not
+available. See
 [Native authored commands](../../reference/native-authored-commands.md) for the
 exact supported forms.

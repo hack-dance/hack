@@ -54,7 +54,6 @@ import {
 } from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import {
-  type NativeProjectPsResult,
   nativeProjectLogs,
   nativeProjectPs,
   requireComposeOperationAvailable,
@@ -379,6 +378,7 @@ import { readLinesFromStream } from "../ui/lines.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
 import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
+import { displayNativePs } from "./native-ps-display.ts";
 import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
@@ -8781,64 +8781,6 @@ async function maybeManageProjectLogsAfterDown(opts: {
 }
 
 /** Compose-style state cell: an exited container shows its exit code. */
-function nativePsState(item: NativeProjectPsResult["items"][number]): string {
-  return item.state === "exited" && item.exitCode !== null
-    ? `exited (${item.exitCode})`
-    : item.state;
-}
-
-/**
- * Native ps output. `--json` prints the standard `{ok: true, data}` envelope
- * whose `data` is the native ps result, matching authored native ps.
- */
-async function displayNativePs(
-  result: NativeProjectPsResult,
-  json: boolean
-): Promise<void> {
-  if (json) {
-    emitCliResult({ result: okResult({ data: result }) });
-    return;
-  }
-  if (result.status === "pending") {
-    logger.info({
-      message:
-        "Native project startup is pending: a foreground up is starting, or an interrupted start retained its intent. No current service status is confirmed.",
-    });
-    return;
-  }
-  if (result.status === "not_started") {
-    logger.info({ message: "Native project has not been started." });
-  } else if (result.status === "runtime_not_running") {
-    logger.info({
-      message: "Native runtime is not running; no services are running.",
-    });
-  } else if (result.status === "runtime_busy") {
-    logger.info({
-      message:
-        "Native runtime is busy with another operation, such as a starting hack up; service state is available once it finishes or reports ready.",
-    });
-  } else if (result.status === "owner_unconfirmed") {
-    logger.warn({
-      message:
-        "Native graph owner is unconfirmed. Service rows are observations, not usable readiness; explicit retaining recovery is required.",
-    });
-  } else if (result.status === "runtime_degraded") {
-    logger.warn({
-      message:
-        "Native graph owner reported a degraded runtime. Service rows do not prove usable readiness; inspect graph owner-status.",
-    });
-  }
-  await display.table({
-    columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],
-    rows: result.items.map((item) => [
-      item.service,
-      item.container ?? "",
-      nativePsState(item),
-      item.health ?? "",
-    ]),
-  });
-}
-
 async function handlePs({
   ctx,
   args,

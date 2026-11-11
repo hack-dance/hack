@@ -893,7 +893,12 @@ async function handleDaemonRestart({
       return 1;
     }
   }
-  await handleDaemonStop({ ctx, args: stopArgs });
+  // A refused stop (the pid could not be proven to be this HACK_HOME's
+  // hackd) must not turn into "already running" success.
+  const stopped = await handleDaemonStop({ ctx, args: stopArgs });
+  if (stopped !== 0) {
+    return stopped;
+  }
   return await handleDaemonStart({ ctx, args: startArgs });
 }
 

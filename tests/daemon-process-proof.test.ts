@@ -398,3 +398,87 @@ test("a detached hackd does not inherit doctor's read-only service flag", async 
   await Bun.sleep(50);
   expect(await readFile(out, "utf8")).toBe("unset");
 });
+
+test("/proc parsing matches a daemon socket path that contains a space", async () => {
+  const proc = join(root, "proc");
+  const daemonRoot = join(root, "a home", ".hack", "daemon");
+  await mkdir(join(proc, "net"), { recursive: true });
+  await mkdir(join(proc, "4242", "fd"), { recursive: true });
+  await mkdir(daemonRoot, { recursive: true });
+  await writeFile(
+    join(proc, "net", "unix"),
+    [
+      "Num       RefCount Protocol Flags    Type St Inode Path",
+      `0000000000000000: 00000002 00000000 00010000 0001 01 777 ${join(daemonRoot, "hackd.sock")}`,
+      "",
+    ].join("\n")
+  );
+  await symlink("socket:[777]", join(proc, "4242", "fd", "3"));
+  expect(
+    await findDaemonSocketOwnersFromProc({
+      daemonRoot,
+      pids: [4242],
+      procRoot: proc,
+    })
+  ).toEqual(new Set([4242]));
+});
+
+test("the proof waits briefly for a hackd that has not bound its socket yet", async () => {
+  const sleeper = spawnSleeper();
+  let calls = 0;
+  const proof = await proveOwnedDaemonProcess({
+    pid: sleeper.pid,
+    daemonRoot: root,
+    probe: probe({
+      socketOwners: ({ pids }) => {
+        calls += 1;
+        return Promise.resolve(calls < 3 ? new Set<number>() : new Set(pids));
+      },
+    }),
+  });
+  expect(proof.kind).toBe("owned");
+  expect(calls).toBe(3);
+  expect(
+    await proveOwnedDaemonProcess({
+      pid: sleeper.pid,
+      daemonRoot: root,
+      socketRetries: 0,
+      probe: probe({ socketOwners: () => Promise.resolve(new Set<number>()) }),
+    })
+  ).toEqual({ kind: "refused", reason: "foreign-socket" });
+});
+
+test("hack daemon restart fails when stop refuses an unproven pid", async () => {
+  const sleeper = spawnSleeper();
+  const home = join(root, "home");
+  const daemonDir = join(home, ".hack", "daemon");
+  await mkdir(daemonDir, { recursive: true });
+  // The pid is not hackd, so stop refuses it. If restart ignored that, start
+  // would spawn a daemon: HACK_MCP_COMMAND points that spawn at /bin/false
+  // so a regression cannot start a real hackd.
+  await writeFile(join(daemonDir, "hackd.pid"), `${sleeper.pid}\n`);
+  const saved = {
+    HOME: process.env.HOME,
+    HACK_LOGGER: process.env.HACK_LOGGER,
+    HACK_DAEMON_AUTOSTART_DISABLE: process.env.HACK_DAEMON_AUTOSTART_DISABLE,
+    HACK_MCP_COMMAND: process.env.HACK_MCP_COMMAND,
+  };
+  process.env.HOME = home;
+  process.env.HACK_LOGGER = "console";
+  process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+  process.env.HACK_MCP_COMMAND = "/bin/false";
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["daemon", "restart"])).toBe(1);
+  } finally {
+    restoreEnv("HOME", saved.HOME);
+    restoreEnv("HACK_LOGGER", saved.HACK_LOGGER);
+    restoreEnv(
+      "HACK_DAEMON_AUTOSTART_DISABLE",
+      saved.HACK_DAEMON_AUTOSTART_DISABLE
+    );
+    restoreEnv("HACK_MCP_COMMAND", saved.HACK_MCP_COMMAND);
+  }
+  expect(sleeper.exitCode).toBeNull();
+  expect(process.kill(sleeper.pid, 0)).toBe(true);
+}, 20_000);

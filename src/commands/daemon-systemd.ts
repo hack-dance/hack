@@ -1,6 +1,7 @@
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessProof,
+  type DaemonProcessRefusal,
   describeDaemonProcessRefusal,
   proveOwnedDaemonProcess,
 } from "../daemon/process.ts";
@@ -632,6 +633,20 @@ async function readRunningDaemonOwner(opts: {
   return { pid: daemon.pid, bySystemd };
 }
 
+/** What to do after install could not hand a pid over to systemd. */
+function handoverRefusalAdvice(reason: DaemonProcessRefusal): string {
+  switch (reason) {
+    case "foreign-socket":
+      return "It may be the daemon of another HACK_HOME; check HACK_HOME and `hack daemon status` there.";
+    case "not-hackd":
+    case "not-running":
+    case "invalid-pid":
+      return "The pid file is stale; `hack daemon restart` starts hackd under systemd.";
+    default:
+      return "Check `hack daemon status`; if it is this HACK_HOME's hackd, stop it and run `hack daemon install` again.";
+  }
+}
+
 /**
  * A directly started hackd holds the socket and pid file, so systemd's copy
  * would exit at once: stop it so the service owns the daemon. Only a pid
@@ -670,7 +685,7 @@ async function handOverDirectDaemon(opts: {
       await hooks.stopDirect(proof);
     } else {
       logger.warn({
-        message: `Left pid ${daemon.pid} from the hackd pid file running: ${describeDaemonProcessRefusal(proof.reason)}. If it is this HACK_HOME's hackd, run \`hack daemon restart\` to hand it to systemd.`,
+        message: `Left pid ${daemon.pid} from the hackd pid file running: ${describeDaemonProcessRefusal(proof.reason)}. ${handoverRefusalAdvice(proof.reason)}`,
       });
     }
   }

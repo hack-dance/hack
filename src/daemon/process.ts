@@ -323,6 +323,32 @@ export async function proveOwnedDaemonProcess(opts: {
   readonly pid: number;
   readonly daemonRoot: string;
   readonly probe?: DaemonProcessProbe;
+  /**
+   * Retry a `foreign-socket` refusal this many times, 250 ms apart (default
+   * 4): a hackd that just wrote its pid file may not have bound its socket
+   * yet. Other refusals are final.
+   */
+  readonly socketRetries?: number;
+}): Promise<DaemonProcessProof> {
+  const retries = opts.socketRetries ?? 4;
+  let proof = await proveOwnedDaemonProcessOnce(opts);
+  for (
+    let attempt = 0;
+    attempt < retries &&
+    proof.kind === "refused" &&
+    proof.reason === "foreign-socket";
+    attempt += 1
+  ) {
+    await sleep({ ms: 250 });
+    proof = await proveOwnedDaemonProcessOnce(opts);
+  }
+  return proof;
+}
+
+async function proveOwnedDaemonProcessOnce(opts: {
+  readonly pid: number;
+  readonly daemonRoot: string;
+  readonly probe?: DaemonProcessProbe;
 }): Promise<DaemonProcessProof> {
   const probe = opts.probe ?? defaultDaemonProcessProbe;
   const { pid } = opts;
@@ -564,7 +590,8 @@ export async function findDaemonSocketOwnersFromProc(opts: {
   for (const line of table.split("\n").slice(1)) {
     const fields = line.trim().split(WHITESPACE_PATTERN);
     const inode = fields[6];
-    const path = fields[7];
+    // The path is the rest of the line; it can contain spaces.
+    const path = fields.length > 7 ? fields.slice(7).join(" ") : undefined;
     if (inode && path && wanted.has(path)) {
       inodes.add(inode);
     }
@@ -574,26 +601,37 @@ export async function findDaemonSocketOwnersFromProc(opts: {
     return owners;
   }
   for (const pid of opts.pids) {
-    let fds: string[];
-    try {
-      fds = await readdir(`${proc}/${pid}/fd`);
-    } catch {
-      continue;
-    }
-    for (const fd of fds) {
-      try {
-        const link = await readlink(`${proc}/${pid}/fd/${fd}`);
-        const inode = PROC_SOCKET_LINK.exec(link)?.[1];
-        if (inode && inodes.has(inode)) {
-          owners.add(pid);
-          break;
-        }
-      } catch {
-        // The fd closed while it was read.
-      }
+    if (await pidHoldsSocketInode({ proc, pid, inodes })) {
+      owners.add(pid);
     }
   }
   return owners;
+}
+
+/** Whether one of `pid`'s open fds is a socket with one of `inodes`. */
+async function pidHoldsSocketInode(opts: {
+  readonly proc: string;
+  readonly pid: number;
+  readonly inodes: ReadonlySet<string>;
+}): Promise<boolean> {
+  let fds: string[];
+  try {
+    fds = await readdir(`${opts.proc}/${opts.pid}/fd`);
+  } catch {
+    return false;
+  }
+  for (const fd of fds) {
+    try {
+      const link = await readlink(`${opts.proc}/${opts.pid}/fd/${fd}`);
+      const inode = PROC_SOCKET_LINK.exec(link)?.[1];
+      if (inode && opts.inodes.has(inode)) {
+        return true;
+      }
+    } catch {
+      // The fd closed while it was read.
+    }
+  }
+  return false;
 }
 
 /**

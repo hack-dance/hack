@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { readLinesFromStream } from "../../../src/ui/lines.ts";
 import { createMonorepoFixture } from "../fixture.ts";
 import {
   buildCliEnv,
@@ -389,10 +390,16 @@ function parseLines(stdout: string): EventLine[] {
 }
 
 function outputText(lines: readonly EventLine[]): string {
-  return lines
-    .filter((line) => line.type === "command.output")
-    .map((line) => String(line.payload?.text ?? ""))
-    .join("");
+  return (
+    lines
+      // stdout only: Compose reports container progress on stderr.
+      .filter(
+        (line) =>
+          line.type === "command.output" && line.payload?.stream === "stdout"
+      )
+      .map((line) => String(line.payload?.text ?? ""))
+      .join("")
+  );
 }
 
 /** Run a reader process and kill it once `stopWhen` matches a line. */
@@ -410,27 +417,16 @@ async function readUntil(opts: {
     stderr: "ignore",
   });
   const lines: EventLine[] = [];
-  const decoder = new TextDecoder();
-  let buffer = "";
   const timer = setTimeout(() => proc.kill("SIGKILL"), 60_000);
   try {
-    for await (const chunk of proc.stdout) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let index = buffer.indexOf("\n");
-      while (index >= 0) {
-        const line = buffer.slice(0, index);
-        buffer = buffer.slice(index + 1);
-        index = buffer.indexOf("\n");
-        if (!line.startsWith("{")) {
-          continue;
-        }
-        const parsed = JSON.parse(line) as EventLine;
-        lines.push(parsed);
-        if (opts.stopWhen(parsed)) {
-          proc.kill("SIGKILL");
-          await proc.exited;
-          return lines;
-        }
+    for await (const line of readLinesFromStream(proc.stdout)) {
+      if (!line.startsWith("{")) {
+        continue;
+      }
+      const parsed = JSON.parse(line) as EventLine;
+      lines.push(parsed);
+      if (opts.stopWhen(parsed)) {
+        return lines;
       }
     }
   } finally {

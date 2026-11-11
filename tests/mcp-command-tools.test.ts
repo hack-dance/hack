@@ -315,9 +315,13 @@ describe("argv contracts", () => {
       cmd: ["--json"],
     });
     const parsedStart = parseCliArgv(CLI_SPEC, start);
-    expect(parsedStart.ok).toBe(true);
-    const resolved = resolveCommand(CLI_SPEC, start);
-    expect(resolved.ok).toBe(true);
+    // The child's `--json` stays in the command; hack's own flags parse.
+    expect(parsedStart.values.detach).toBe(true);
+    expect(parsedStart.values.requestKey).toBe("k");
+    expect(parsedStart.values.timeoutMs).toBe(5000);
+    const resolved = resolveCommand(CLI_SPEC, parsedStart.positionals);
+    expect(resolved.command?.name).toBe("exec");
+    expect(resolved.remainingPositionals).toEqual(["api", "--json"]);
     for (const action of ["read", "show", "cancel"] as const) {
       const args = buildCommandControlArgs({
         action,
@@ -325,7 +329,13 @@ describe("argv contracts", () => {
         projectArgs: ["--path=/tmp"],
         waitMs: 0,
       });
-      expect(resolveCommand(CLI_SPEC, args).ok).toBe(true);
+      const parsed = parseCliArgv(CLI_SPEC, args);
+      const command = resolveCommand(CLI_SPEC, parsed.positionals);
+      expect(command.path.map((spec) => spec.name)).toEqual([
+        "commands",
+        action,
+      ]);
+      expect(command.remainingPositionals).toEqual([COMMAND_ID]);
     }
   });
 

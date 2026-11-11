@@ -300,7 +300,7 @@ async function superviseChild(opts: {
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   while (!exited) {
     await Bun.sleep(TICK_MS);
-    const reason = stopping
+    const reason: StopReason | null = stopping
       ? null
       : await stopReason({ ...opts, now: performance.now() });
     if (reason) {

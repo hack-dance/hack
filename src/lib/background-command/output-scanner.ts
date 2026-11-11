@@ -6,7 +6,8 @@
  *
  * Invariants:
  * - Emitted ranges are final: bytes are only redacted before they are
- *   emitted. The last `longestSecret - 1` bytes are held back until more
+ *   emitted. A trailing run of bytes that is the start of some value (at
+ *   most `longestSecret - 1` bytes) is held back until more
  *   output arrives or the stream ends, so a value split across two appends is
  *   still seen whole (the carry-over window).
  * - Redaction replaces each byte of a match with `*`, keeping offsets stable.
@@ -90,6 +91,42 @@ export function utf8SafeCut(bytes: Uint8Array, end: number): number {
   return start + needed > end ? start : end;
 }
 
+/**
+ * Length of the longest suffix of `bytes` that is a proper prefix of some
+ * secret: those bytes may become a match once more output arrives. Output
+ * that cannot start a value is never delayed.
+ */
+export function pendingPrefixLength(
+  bytes: Uint8Array,
+  secrets: readonly Uint8Array[]
+): number {
+  let longest = 0;
+  for (const secret of secrets) {
+    const max = Math.min(secret.length - 1, bytes.length);
+    for (let length = max; length > longest; length -= 1) {
+      if (suffixMatchesPrefix(bytes, secret, length)) {
+        longest = length;
+        break;
+      }
+    }
+  }
+  return longest;
+}
+
+function suffixMatchesPrefix(
+  bytes: Uint8Array,
+  secret: Uint8Array,
+  length: number
+): boolean {
+  const start = bytes.length - length;
+  for (let index = 0; index < length; index += 1) {
+    if (bytes[start + index] !== secret[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function findMatches(
   haystack: Uint8Array,
   needle: Uint8Array
@@ -128,11 +165,7 @@ export function scanOutput(input: ScanInput): ScanResult {
       });
     }
   }
-  const longest = secrets.reduce(
-    (max, secret) => Math.max(max, secret.length),
-    0
-  );
-  const holdback = input.final ? 0 : Math.max(0, longest - 1);
+  const holdback = input.final ? 0 : pendingPrefixLength(working, secrets);
   let end = Math.max(0, working.length - holdback);
   if (!input.final) {
     end = utf8SafeCut(working, end);

@@ -193,6 +193,28 @@ describe("scanOutput", () => {
     expect(budgetReached).toBe(true);
   });
 
+  test("only a suffix that could start a value is held back", () => {
+    const secrets = encodeSecrets({ values: ["abcdefgh"], minLength: 1 });
+    const unrelated = scanOutput({
+      bytes: encoder.encode("first\n"),
+      offset: 0,
+      final: false,
+      secrets,
+      captureRemaining: 1 << 20,
+      maxRangeBytes: 1024,
+    });
+    expect(unrelated.ranges).toEqual([{ offset: 0, length: 6 }]);
+    const partial = scanOutput({
+      bytes: encoder.encode("x=abc"),
+      offset: 0,
+      final: false,
+      secrets,
+      captureRemaining: 1 << 20,
+      maxRangeBytes: 1024,
+    });
+    expect(partial.ranges).toEqual([{ offset: 0, length: 2 }]);
+  });
+
   test("short values are not redacted", () => {
     expect(
       encodeSecrets({ values: ["1", "true", "abcdef"], minLength: 6 })

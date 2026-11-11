@@ -307,10 +307,12 @@ function lowerBounds(range: string): Version[] {
 }
 
 /**
- * Whether `version` is at or above every fixed version an advisory lists (`29.9.3`,
- * `>= 23.0.3, >= 20.10.24`, `v0.38.1+`), and at least one of them can be its fix: on the
- * pin's own major line, or at or above every lower bound of the vulnerable `range`. A fix
- * on an older backport line (`v25.0.19` for `> v26.0.0`) never clears a newer pin.
+ * Whether `version` has the fix an advisory lists for its release line (`29.9.3`,
+ * `>= 28.5.1, >= 29.1.1`, `v0.38.1+`). A fix on the pin's own minor line decides; otherwise
+ * fixes on its major line must all be reached. With no fix on the pin's line, it must be at
+ * or above every listed fix, and at least one of them at or above every lower bound of the
+ * vulnerable `range`: a fix on an older backport line (`v25.0.19` for `> v26.0.0`) never
+ * clears a newer pin. Unreadable fixed versions are not a fix.
  */
 export function patched(
   version: Version,
@@ -320,7 +322,7 @@ export function patched(
   if (!patchedVersions) {
     return false;
   }
-  const bounds = patchedVersions.split(",").map((item) =>
+  const parsed = patchedVersions.split(",").map((item) =>
     rangeVersion(
       item
         .trim()
@@ -328,17 +330,26 @@ export function patched(
         .replace(/\+$/, "")
     )
   );
-  if (
-    bounds.length === 0 ||
-    bounds.some((bound) => bound === null || compare(version, bound) < 0)
-  ) {
+  if (parsed.length === 0 || parsed.some((bound) => bound === null)) {
     return false;
   }
+  const bounds = parsed as Version[];
+  const reached = (fixes: Version[]) =>
+    fixes.every((bound) => compare(version, bound) >= 0);
+  const minorLine = bounds.filter(
+    (bound) => bound[0] === version[0] && bound[1] === version[1]
+  );
+  if (minorLine.length > 0) {
+    return reached(minorLine);
+  }
+  const majorLine = bounds.filter((bound) => bound[0] === version[0]);
+  if (majorLine.length > 0) {
+    return reached(majorLine);
+  }
   const lowers = lowerBounds(range);
-  return (bounds as Version[]).some(
-    (bound) =>
-      bound[0] === version[0] ||
-      lowers.every((lower) => compare(bound, lower) >= 0)
+  return (
+    reached(bounds) &&
+    bounds.some((bound) => lowers.every((lower) => compare(bound, lower) >= 0))
   );
 }
 

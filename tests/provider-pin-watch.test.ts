@@ -170,6 +170,20 @@ describe("provider pin watch", () => {
     expect(
       patched([29, 9, 3], "25.0.19, 29.9.3", "<= 25.0.18, 26.0.0 - 29.9.2")
     ).toBe(true);
+    // Fixes for several maintained lines: the pin's own line decides.
+    const lines = ">= 28.5.1, >= 29.1.1";
+    expect(patched([28, 5, 2], lines, ">= 1.12")).toBe(true);
+    expect(patched([28, 5, 0], lines, ">= 1.12")).toBe(false);
+    expect(patched([29, 0, 9], lines, ">= 1.12")).toBe(false);
+    expect(patched([29, 1, 1], lines, ">= 1.12")).toBe(true);
+    expect(patched([28, 6, 0], lines, ">= 1.12")).toBe(true);
+    expect(patched([27, 9, 9], lines, ">= 1.12")).toBe(false);
+    expect(patched([30, 0, 0], lines, ">= 1.12")).toBe(true);
+    expect(patched([0, 37, 3], "0.37.2, 0.38.1")).toBe(true);
+    expect(patched([0, 36, 0], "0.37.2, 0.38.1")).toBe(false);
+    expect(
+      affecting([28, 5, 2], [advisory("GHSA-llll-llll-llll", ">= 1.12", lines)])
+    ).toEqual([]);
     // Unbounded but fixed long ago: not affecting.
     expect(
       affecting(

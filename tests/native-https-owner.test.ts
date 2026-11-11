@@ -3,6 +3,7 @@ import {
   chmod,
   lstat,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -79,6 +80,11 @@ async function fixture(
     readonly releaseFault?: "graph-verification" | "idle-verification";
     /** Fault injected between control-socket publication and its first observation. */
     readonly afterPublish?: "fail" | "replace";
+    /**
+     * Holds the owner between endpoint publication and recording that it runs,
+     * until the test writes "open" or "fail" to the startup-gate file.
+     */
+    readonly holdStartup?: boolean;
   } = {}
 ) {
   const home = await mkdtemp(join(await realpath(tmpdir()), "hk-owner-test-"));
@@ -119,6 +125,20 @@ try {
       // Set the foreign mode exactly even when the helper inherits a private umask.
       if (fault === "replace") { await unlink(path); await writeFile(path, "foreign replacement", { mode: 0o644 }); await chmod(path, 0o644); }
     },
+    afterEndpoint: async () => {
+      ${
+        options.holdStartup
+          ? `await writeFile(home + "/startup-held", "yes");
+      const deadline = Date.now() + 10000;
+      for (;;) { let gate = ""; try { gate = await readFile(home + "/startup-gate", "utf8"); } catch {}
+        if (gate === "open") break;
+        if (gate === "fail" || Date.now() > deadline) throw new Error("startup gate");
+        await Bun.sleep(10);
+      }`
+          : ""
+      }
+    },
+    requestAwaitingStartup: async () => { await appendFile(home + "/startup-waiters", "request\\n"); },
     verifyIdle: async () => {
       failRelease("idle-verification");
       ${
@@ -701,6 +721,80 @@ test("child exit during startup never publishes a reusable running endpoint", as
     f.binding.runtime
   );
   await expect(connectNativeHttpsOwner(configuration, false)).rejects.toThrow();
+}, 20_000);
+
+/**
+ * endpoint.json is visible before the owner records that it runs, so a fresh
+ * owner's first client can deliver its request inside that window. Hold the
+ * owner there and release it only once the request is known to be waiting.
+ */
+async function requestDuringStartup(run: string) {
+  const f = await fixture({ holdStartup: true });
+  const started = await f.start();
+  // The endpoint is linked before the hold begins, so wait for the hold itself.
+  expect(
+    await until(() => readFile(join(f.home, "startup-held"), "utf8"))
+  ).toBe("yes");
+  const acquired = f.acquire(
+    started.socket,
+    started.configuration.ownerGeneration,
+    run
+  );
+  void acquired.catch(() => {});
+  await Promise.race([
+    until(() => readFile(join(f.home, "startup-waiters"), "utf8")),
+    acquired.then(() => {
+      throw new Error("acquire was answered before startup settled");
+    }),
+  ]);
+  expect(await readFile(join(f.home, "startup-waiters"), "utf8")).toBe(
+    "request\n"
+  );
+  const leases = join(nativeHttpsOwnerRoot(f.home), "leases");
+  expect(await readdir(leases)).toEqual([]);
+  return { f, started, acquired, leases };
+}
+
+test("a first request delivered before a fresh owner records running waits and is admitted", async () => {
+  const { f, started, acquired, leases } = await requestDuringStartup("b");
+  await writeFile(join(f.home, "startup-gate"), "open");
+  const identity = await acquired;
+  expect(identity).toEqual(
+    nativeHttpsLeaseIdentity(started.configuration, lease("b"))
+  );
+  expect(await readdir(leases)).toEqual([`${identity.leaseId}.json`]);
+  await f.clean("b");
+  await f.release(started.socket, identity);
+  expect(await readFile(join(f.home, "events"), "utf8")).toBe("start\nclose\n");
+}, 20_000);
+
+test("a first request waiting on a startup that then fails is refused without admitting a lease", async () => {
+  const { f, started, acquired, leases } = await requestDuringStartup("b");
+  await writeFile(join(f.home, "startup-gate"), "fail");
+  await expect(acquired).rejects.toThrow(
+    "ownership is unavailable or unconfirmed"
+  );
+  expect(await readdir(leases)).toEqual([]);
+  await expect(
+    recoverNativeHttpsLease({
+      runtime: f.binding.runtime,
+      identity: nativeHttpsLeaseIdentity(started.configuration, lease("b")),
+      verifyReleased: async () => {
+        throw new Error("must refuse before proof");
+      },
+    })
+  ).rejects.toThrow("endpoint-publication");
+  // Clients are disconnected before the frontend pair closes; the owner exits
+  // only after its failure cleanup has finished.
+  await until(async () => {
+    try {
+      process.kill(started.pid, 0);
+    } catch {
+      return true;
+    }
+    throw new Error("owner still running");
+  });
+  expect(await readFile(join(f.home, "events"), "utf8")).toBe("start\nclose\n");
 }, 20_000);
 
 test("a failure or replacement right after publication closes the listener and retires only its own endpoint", async () => {

@@ -96,6 +96,8 @@ export function nativeFailureNote(detail: {
  * diagnostics. The message is closed, so the CLI prints it without a stack.
  */
 export class NativeRuntimeRequestError extends ClosedCliError {
+  /** Owned request child ended by a terminal stop signal, independent of frontend event ordering. */
+  readonly stopSignal: "SIGINT" | "SIGTERM" | undefined;
   readonly nativeCode: string | undefined;
   readonly nativeCauseCode: string | undefined;
   /** Fixed (value-free) runtime message; see {@link nativeFailureNote}. */
@@ -104,6 +106,7 @@ export class NativeRuntimeRequestError extends ClosedCliError {
   readonly nativeStopFailures: readonly NativeStopFailure[] | undefined;
 
   constructor(opts: {
+    readonly stopSignal?: "SIGINT" | "SIGTERM";
     readonly message: string;
     readonly nativeCode?: string;
     readonly nativeCauseCode?: string;
@@ -112,11 +115,32 @@ export class NativeRuntimeRequestError extends ClosedCliError {
     readonly nativeStopFailures?: readonly NativeStopFailure[];
   }) {
     super(opts.message);
+    this.stopSignal = opts.stopSignal;
     this.nativeCode = opts.nativeCode;
     this.nativeCauseCode = opts.nativeCauseCode;
     this.nativeMessage = opts.nativeMessage;
     this.nativeService = opts.nativeService;
     this.nativeStopFailures = opts.nativeStopFailures;
+  }
+}
+
+/** Preserve owned-child stop evidence through wrappers that replace other runtime failures. */
+export function isNativeRuntimeStopError(
+  error: unknown
+): error is NativeRuntimeRequestError {
+  return (
+    error instanceof NativeRuntimeRequestError && error.stopSignal !== undefined
+  );
+}
+
+/** Classify a child stop independently of when the frontend's signal handler is scheduled. */
+function throwIfNativeRuntimeStopped(signal: NodeJS.Signals | null): void {
+  if (signal === "SIGINT" || signal === "SIGTERM") {
+    throw new NativeRuntimeRequestError({
+      message:
+        "Native runtime request was interrupted; its outcome may be uncertain. No request was replayed.",
+      stopSignal: signal,
+    });
   }
 }
 
@@ -346,6 +370,7 @@ export async function invokeNativeRuntime(opts: {
           "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
       });
     }
+    throwIfNativeRuntimeStopped(child.signalCode);
     if (outputBound(bound) && drain?.signal.aborted) {
       throw new NativeRuntimeRequestError({
         message:

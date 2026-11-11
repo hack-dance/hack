@@ -117,6 +117,15 @@ export function renderGlobalCoreDnsConfig(opts?: {
           `    answer "{{ .Name }} 30 IN A ${DEFAULT_CADDY_IP}"`,
           "    fallthrough",
           "  }",
+          // Routed names have no IPv6 address. Answer AAAA with an empty
+          // NOERROR (NODATA) here; without it the query falls through to the
+          // forwarder, which cannot answer these names, and clients wait for
+          // its timeout (about 2s) before using the A record.
+          "  template IN AAAA {",
+          `    match ${pattern}`,
+          "    rcode NOERROR",
+          "    fallthrough",
+          "  }",
         ]
       : [`  rewrite name regex ${pattern} caddy`]),
     "  forward . 127.0.0.11",

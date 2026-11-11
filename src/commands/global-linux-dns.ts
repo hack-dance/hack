@@ -19,13 +19,14 @@ import {
   type LinuxDnsInspection,
   type LinuxDnsPlan,
   removeLinuxDns,
+  renderManualPlan,
   renderPrivilegedCommand,
 } from "../lib/linux-dns-setup.ts";
 import { logger } from "../ui/logger.ts";
 
 function defaultHost(): LinuxDnsHost {
   return createLinuxDnsHost({
-    stageDir: resolve(resolveGlobalHackDir(), "tmp", "linux-dns"),
+    stageRoot: resolve(resolveGlobalHackDir(), "tmp"),
   });
 }
 
@@ -37,7 +38,7 @@ function renderPlanLines(plan: LinuxDnsPlan): string[] {
   return [
     ...(plan.notes ?? []),
     ...plan.files.flatMap((file) => [
-      `Write ${file.path}:`,
+      `Install ${file.path} (root installs a private copy only if it matches this content):`,
       ...file.content
         .trimEnd()
         .split("\n")
@@ -49,71 +50,91 @@ function renderPlanLines(plan: LinuxDnsPlan): string[] {
 }
 
 /**
+ * Linux DNS result of `hack global install`: `configured`; `skipped` when
+ * nothing was changed (declined, non-interactive, or a manual-only host;
+ * the steps are printed); `failed` when a step the user confirmed failed or
+ * left the route inactive. Only `failed` makes the install exit non-zero.
+ */
+export type LinuxDnsInstallResult = "configured" | "skipped" | "failed";
+
+/**
  * `hack global install` on Linux. Never runs sudo without an interactive yes;
  * a run that cannot prompt prints the commands and a stable code instead.
  */
 export async function bootstrapLinuxGlobalDns(opts: {
   readonly useStaticIps: boolean;
   readonly host?: LinuxDnsHost;
-}): Promise<void> {
+  /** Test seam; defaults to the terminal prompt. */
+  readonly prompt?: {
+    readonly canPrompt: boolean;
+    readonly confirm: () => Promise<boolean>;
+  };
+}): Promise<LinuxDnsInstallResult> {
   const domains = await resolveRoutedDomains();
   if (!opts.useStaticIps) {
     logger.warn({
       message: `Skipping Linux DNS setup: the hack-dev network has no ${DEFAULT_INGRESS_SUBNET} subnet, so CoreDNS has no fixed address (${DEFAULT_COREDNS_IP}) to route to. Recreate the network with hack global install after removing it.`,
     });
-    return;
+    return "skipped";
   }
   const host = opts.host ?? defaultHost();
   const outcome = await applyLinuxDns({
     host,
     domains,
-    canPrompt: canPrompt(),
+    canPrompt: opts.prompt?.canPrompt ?? canPrompt(),
     show: (plan) => note(renderPlanLines(plan).join("\n"), "Linux DNS"),
-    confirm: async () => {
-      try {
-        return await confirmSafe({
-          message: "Apply these DNS changes now? (requires sudo)",
-          initialValue: true,
-          nonInteractive: "decline",
-        });
-      } catch (error) {
-        // Ctrl-C at the prompt (confirmSafe throws "Canceled"): treat as
-        // "no" so install still finishes. Any other error propagates.
-        if (error instanceof Error && error.message === "Canceled") {
-          return false;
+    confirm:
+      opts.prompt?.confirm ??
+      (async () => {
+        try {
+          return await confirmSafe({
+            message: "Apply these DNS changes now? (requires sudo)",
+            initialValue: true,
+            nonInteractive: "decline",
+          });
+        } catch (error) {
+          // Ctrl-C at the prompt (confirmSafe throws "Canceled"): treat as
+          // "no" so install still finishes. Any other error propagates.
+          if (error instanceof Error && error.message === "Canceled") {
+            return false;
+          }
+          throw error;
         }
-        throw error;
-      }
-    },
+      }),
   });
   switch (outcome.status) {
     case "configured":
       logger.success({ message: `DNS: ${outcome.inspection.message}` });
-      return;
+      return "configured";
     case "manual":
       reportInspection({ inspection: outcome.inspection });
-      return;
+      return "skipped";
     case "pending":
       logger.warn({
         message: [
           `Linux DNS not applied (code=${outcome.code}). Run these commands, then check with hack doctor:`,
           ...(outcome.plan.notes ?? []),
-          ...outcome.plan.commands.map(
-            (command) => `  ${renderPrivilegedCommand(command)}`
-          ),
+          ...renderManualPlan(outcome.plan).map((line) => `  ${line}`),
         ].join("\n"),
       });
-      return;
+      return "skipped";
     case "failed":
-      logger.warn({
-        message: `Linux DNS setup failed (code=${outcome.code}): \`${renderPrivilegedCommand(outcome.failedCommand)}\` exited ${outcome.exitCode}. Rerun hack global install, or run the remaining commands by hand.`,
+      logger.error({
+        message: `Linux DNS setup failed (code=${outcome.code}): \`${outcome.failedStep}\` exited ${outcome.exitCode}. Rerun hack global install, or run these commands by hand:\n${renderManualPlan(
+          outcome.plan
+        )
+          .map((line) => `  ${line}`)
+          .join("\n")}`,
       });
-      return;
+      return "failed";
     case "applied_unverified":
       reportInspection({ inspection: outcome.inspection });
-      return;
+      // The confirmed steps ran; only the bypassed-resolver note is expected.
+      return outcome.inspection.code === "linux_dns_resolved_bypassed"
+        ? "skipped"
+        : "failed";
     default:
-      return;
+      return "failed";
   }
 }
 
@@ -156,12 +177,14 @@ export function linuxDnsStatusPayload(inspection: LinuxDnsInspection) {
 /**
  * `hack global down` on Linux: offer to undo the DNS route (the counterpart
  * of stopping dnsmasq on macOS). Defaults to no; non-interactive runs keep it.
+ * Only files and link settings that are exactly Hack's are removed.
  */
 export async function offerLinuxGlobalDnsRemoval(opts?: {
   readonly host?: LinuxDnsHost;
 }): Promise<void> {
   const outcome = await removeLinuxDns({
     host: opts?.host ?? defaultHost(),
+    domains: await resolveRoutedDomains(),
     confirm: async (plan) =>
       await confirmSafe({
         message: [
@@ -176,7 +199,15 @@ export async function offerLinuxGlobalDnsRemoval(opts?: {
     logger.success({ message: "Removed Hack's Linux DNS route" });
   } else if (outcome.status === "failed") {
     logger.warn({
-      message: `Removing Hack's Linux DNS route failed: \`${renderPrivilegedCommand(outcome.failedCommand)}\` exited ${outcome.exitCode}`,
+      message: `Removing Hack's Linux DNS route failed: \`${outcome.failedStep}\` exited ${outcome.exitCode}`,
+    });
+  }
+  if (outcome.leftInPlace.length > 0) {
+    logger.warn({
+      message: [
+        "Linux DNS: left in place",
+        ...outcome.leftInPlace.map((line) => `  ${line}`),
+      ].join("\n"),
     });
   }
 }

@@ -957,7 +957,9 @@ async function globalInstall(): Promise<number> {
   await materializeGlobalInstallFiles({ paths, useStaticIps });
   logger.success({ message: "Global files ready in ~/.hack/" });
   await globalUp();
-  await completeGlobalInstallHostBootstrap({ useStaticIps });
+  const hostBootstrapOk = await completeGlobalInstallHostBootstrap({
+    useStaticIps,
+  });
   note(
     [
       "Next:",
@@ -967,7 +969,7 @@ async function globalInstall(): Promise<number> {
     "Global install"
   );
 
-  return 0;
+  return hostBootstrapOk ? 0 : 1;
 }
 
 async function ensureOptionalInstallDependencies(opts: {
@@ -1155,16 +1157,20 @@ async function writeGlobalInstallAssets(opts: {
   );
 }
 
+/** Returns `false` only when a confirmed host step failed (exit non-zero). */
 async function completeGlobalInstallHostBootstrap(opts: {
   readonly useStaticIps: boolean;
-}): Promise<void> {
+}): Promise<boolean> {
   if (isMac()) {
     await bootstrapMacGlobalInstall();
-    return;
+    return true;
   }
   if (isLinux()) {
-    await bootstrapLinuxGlobalDns({ useStaticIps: opts.useStaticIps });
-    return;
+    const dns = await bootstrapLinuxGlobalDns({
+      useStaticIps: opts.useStaticIps,
+    });
+    logger.info({ message: `Linux DNS result: ${dns}` });
+    return dns !== "failed";
   }
 
   logger.warn({
@@ -1177,6 +1183,7 @@ async function completeGlobalInstallHostBootstrap(opts: {
     ].join("\n"),
     "DNS setup"
   );
+  return true;
 }
 
 async function bootstrapMacGlobalInstall(): Promise<void> {

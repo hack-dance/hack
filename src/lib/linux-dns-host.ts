@@ -1,6 +1,6 @@
-import { readdir } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ensureDir, readTextFile, writeTextFile } from "./fs.ts";
+import { ensureDir, readTextFile } from "./fs.ts";
 import {
   type LinuxLinkRoute,
   parseLinkForAddress,
@@ -29,11 +29,11 @@ async function probe(cmd: readonly string[]): Promise<ExecResult> {
 
 /**
  * Real host boundary. Reads `/etc`, `ip` and `resolvectl` output, writes only
- * under `stageDir`, and runs root steps as `sudo <argv>` with the terminal
- * attached so sudo can ask for a password itself.
+ * fresh private directories under `stageRoot`, and runs root steps as
+ * `sudo <argv>` with the terminal attached so sudo can ask for a password.
  */
 export function createLinuxDnsHost(opts: {
-  readonly stageDir: string;
+  readonly stageRoot: string;
 }): LinuxDnsHost {
   return {
     readFile: async (path) => {
@@ -59,17 +59,33 @@ export function createLinuxDnsHost(opts: {
       return res.exitCode === 0 ? parseSystemdVersion(res.stdout) : null;
     },
     findLinkWithAddress: async (address) => {
-      const res = await probe(["ip", "-o", "-4", "addr", "show"]);
+      // JSON gives the exact ifname (the text form can append `@peer`).
+      const res = await probe(["ip", "-j", "-4", "addr", "show"]);
       return res.exitCode === 0
-        ? parseLinkForAddress({ ipOutput: res.stdout, address })
+        ? parseLinkForAddress({ ipJson: res.stdout, address })
         : null;
     },
     readLinkRoute: async (link) => await readResolvectlLinkRoute(link),
-    stageFile: async ({ name, content }) => {
-      await ensureDir(opts.stageDir);
-      const path = join(opts.stageDir, name);
-      await writeTextFile(path, content);
-      return path;
+    stageFiles: async (files) => {
+      await ensureDir(opts.stageRoot);
+      // mkdtemp: a new directory with an unpredictable name, mode 0700.
+      const dir = await mkdtemp(join(opts.stageRoot, "linux-dns-"));
+      const cleanup = async () => {
+        await rm(dir, { recursive: true, force: true });
+      };
+      try {
+        const paths: string[] = [];
+        for (const file of files) {
+          const path = join(dir, file.name);
+          // "wx": create exclusively; never follow or reuse an existing path.
+          await writeFile(path, file.content, { flag: "wx", mode: 0o600 });
+          paths.push(path);
+        }
+        return { paths, cleanup };
+      } catch (error) {
+        await cleanup();
+        throw error;
+      }
     },
     // Only a vetted system sudo, never one found on PATH (privileged-sudo.ts).
     runPrivileged: async (argv) => await runTrustedSudo(argv),
@@ -81,7 +97,7 @@ async function readResolvectlLinkRoute(
 ): Promise<LinuxLinkRoute | null> {
   const [dns, domain, defaultRoute] = await Promise.all(
     ["dns", "domain", "default-route"].map((verb) =>
-      probe(["resolvectl", verb, link])
+      probe(["resolvectl", verb, "--", link])
     )
   );
   if (!(dns && domain) || dns.exitCode !== 0 || domain.exitCode !== 0) {

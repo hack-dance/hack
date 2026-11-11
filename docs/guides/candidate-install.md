@@ -1,6 +1,7 @@
 # Install a native prerelease alongside stable Hack
 
-v5 prereleases are opt-in Apple Silicon macOS bundles identified by `5.0.0-next.N`,
+v5 prereleases carry the native backend (beta). They are opt-in Apple Silicon macOS
+bundles identified by `5.0.0-next.N`,
 with a positive number and no leading zero. After a stable v5 release, candidates
 move to the next line, such as `5.1.0-next.N`; see
 [versions and artifacts](prereleases.md#versions-and-artifacts). Each release ships

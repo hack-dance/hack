@@ -9,12 +9,13 @@ terminal).
 
 - `hack init` — generate `.hack/` (compose + config); `--with claude|codex` also hands off to
   agent-assisted onboarding
-- `hack up` / `hack down` / `hack restart`
+- `hack up` / `hack down` / `hack restart` — start, stop and restart the project
+- `hack up --branch <name>` — a parallel branch instance with its own hostnames
+- `hack dev` — the repository's [side-by-side development build](dev.md)
 - `hack open` — open/print the project URL
 - `hack logs` — tail logs (compose by default; Loki via `--loki`/`--query`)
 - `hack ps` / `hack status` — project status
 - `hack projects` — registry + running instances; `hack projects prune --project <name>` safely scopes stale registry/container cleanup to one project family (omit `--project` only for an intentional machine-wide prune)
-  entries and stops orphaned containers
 - `hack env` — env values and local secrets
 - `hack host exec` / `hack host shell` — host commands/shells with Hack-resolved env injected
 - `hack run <service> [cmd...]` — one-off command in a fresh service container
@@ -22,7 +23,6 @@ terminal).
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
 - `hack daemon` — optional local daemon for faster JSON project status
-- `hack agent onboard` — agent-assisted onboarding for existing projects
 - `hack agent onboard` — print an onboarding prompt for an existing project
 - Optional agent interfaces — the [`hack` plugin, its skills and the separate MCP server](integrations.md)
 

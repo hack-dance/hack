@@ -1,5 +1,7 @@
 # Upgrade to v5
 
+For the summary of the release, read [What's new in Hack 5.0](v5-release-notes.md).
+
 v5 keeps the v4 project model and commands. Your `.hack/` folder, encrypted env
 values, branch instances, lifecycle processes and sessions carry over. What changes
 is the runtime layer underneath and the product boundary around it.
@@ -13,14 +15,16 @@ is the runtime layer underneath and the product boundary around it.
 
 ## What is new
 
-- **An opt-in native backend.** On Apple Silicon macOS, `HACK_RUNTIME_BACKEND=native`
-  runs explicitly prepared projects without Docker. It supports a bounded command
-  subset and is qualified project by project. See [the native backend](native-candidate.md).
+- **Native backend (beta).** On Apple Silicon macOS, through the `hack-next` channel,
+  `HACK_RUNTIME_BACKEND=native` runs explicitly prepared projects without Docker. It
+  supports a bounded command subset and is qualified project by project. See
+  [the native backend](native-candidate.md).
 - **A config compiler.** `hack config validate`, `config plan`, `config import
   --dry-run` and `config adopt --dry-run` inspect and preview native configuration
   without starting workloads. See [Native config import](../reference/native-config-import.md).
 - **`hack dev`.** Runs a repository's declared development command from a committed
-  `.hack/dev.json`, without Docker. See [Side-by-side development](../dev.md).
+  `.hack/dev.json`, without Docker. It first shipped in 4.3.0; if you are coming from
+  an older v4, it is new to you. See [Side-by-side development](../dev.md).
 - **A separate prerelease channel.** `hack-next` installs immutable `5.0.0-next.N`
   builds beside stable Hack. See [Install a prerelease](candidate-install.md).
 - **Stricter command parsing.** Hack options go before the command tail. For

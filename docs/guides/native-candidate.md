@@ -1,6 +1,6 @@
 # Opt-in native candidate bundle
 
-`hack-native` is an experimental Apple Silicon macOS executor installed alongside
+The native backend is beta. `hack-native` is an opt-in Apple Silicon macOS executor installed alongside
 Hack's supported CLI. It does not replace `hack`, select a Docker context, migrate
 projects, or install DNS or trust automatically. Its graph commands support a
 bounded subset;

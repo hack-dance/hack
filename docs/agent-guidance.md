@@ -15,7 +15,7 @@ permission, approval or sandbox overrides, no output-style settings, and no hook
 | Root `AGENTS.md` | Contributor baseline; root `CLAUDE.md` imports it |
 | `apps/macos/AGENTS.md` | Explicit maintenance of the unsupported native app |
 | `.ai/skills/` | Contributor quality, verification, work units, performance and TLA+ workflows |
-| `src/agents/instruction-source.ts` | Project AGENTS/CLAUDE snippets, standalone/shared Hack skill, Cursor rules, session primer, native plugin skill/rule |
+| `src/agents/instruction-source.ts` | The plugin skills and the standalone Codex skill. It also renders the retired project snippets, Cursor rules and session primer, which no command writes any more. |
 | `src/agents/onboarding-prompt.ts` | The one onboarding builder: `hack agent onboard`, `hack agent init`, init handoff, and MCP onboarding prompt (same core, per-entry framing only) |
 | `src/agents/hack-init-skill.ts` | Thin Claude/Codex/plugin adapter that fetches onboarding guidance |
 | `src/agents/init-patterns.ts`, `init-assistant.ts` | Repo inventory embedded by the onboarding builder, and pattern hints |
@@ -23,7 +23,7 @@ permission, approval or sandbox overrides, no output-style settings, and no hook
 | `src/agents/focused-skills.ts` | Plugin `hack-branches`, `hack-env` and `hack-diagnose` skills, composed from canonical section ids, and the plugin `hack-cli` routing description |
 | `src/agents/feedback-review.ts`, `feedback-skill.ts` | Plugin `hack-feedback` skill, its issue-template and examples references, and `.github/ISSUE_TEMPLATE/hack-feedback.md`, all rendered from one typed contract (taxonomy, statuses, evidence classes, redaction kinds, posting-gate refusals) |
 | `src/agents/error-code-reference.ts` | `hack-diagnose` error-code reference, rendered from the exported `HACK_ERROR_CODES` registry in `src/lib/cli-result.ts` |
-| `scripts/generate-agent-plugins.ts` | Skills-only `hack` plugin (portable manifest, three client compatibility manifests, eight skills, Cursor rule), the feedback issue template, and the complete opt-in `hack-mcp` plugin |
+| `scripts/generate-agent-plugins.ts` | Skills-only `hack` plugin (portable manifest, three client compatibility manifests, eight skills), the feedback issue template, and the complete opt-in `hack-mcp` plugin |
 
 The `hack` plugin is skills-only: the generator refuses a client manifest that
 declares `mcpServers` and removes stale `.mcp.json`/`mcp.json` files from it. Each

@@ -6,8 +6,7 @@ Do not ship provider model pins or copy global instruction packs into this plugi
 `tests/agent-plugin-generation.test.ts` enforces this for the generated guidance
 surfaces (`plugins/hack`, `plugins/hack-mcp`, the client marketplace manifests, `.agents`, and the
 example agent configuration): no model, model-override or reasoning-effort keys, no
-permission, approval or sandbox overrides, no output-style settings, and hooks that
-run only `hack agent prime`. See [model-policy ownership](reference/agent-client-capabilities.md#model-policy-ownership).
+permission, approval or sandbox overrides, no output-style settings, and no hooks. See [model-policy ownership](reference/agent-client-capabilities.md#model-policy-ownership).
 
 ## Sources and installed surfaces
 

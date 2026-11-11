@@ -1,7 +1,8 @@
 # Packaging & Distribution
 
-This doc covers how to package `hack` for local testing and public release, plus how the installer
-works and where assets live.
+This doc covers how to package the stable `hack` CLI for local testing and public release, plus
+how the installer works and where assets live. v5 prerelease bundles use a separate channel; see
+[the prerelease guide](docs/guides/prereleases.md).
 
 ## Local workflows (source)
 
@@ -111,7 +112,7 @@ Environment overrides:
 
 Dependency checks (macOS, inside the inner installer):
 - `chafa` (used by `hack the planet`)
-- `dnsmasq` (required for `*.hack` DNS)
+- `dnsmasq` (local DNS for `.hack.local` and legacy `.hack` names)
 - `mkcert` (only for `hack global cert`)
 
 Gum is **not** installed via brew; the CLI uses the bundled gum tarballs when present.
@@ -121,10 +122,7 @@ The inner script can optionally run `hack global install` after setup.
 ## Assets + discovery
 
 - `HACK_ASSETS_DIR` is used to locate bundled gum tarballs.
-- `hack global install` generates schemas into `~/.hack/schemas/` and serves them at
-  `https://schemas.hack`.
-- `hack the planet` currently resolves GIFs from the repo root or current working directory. The
-  release bundle includes GIFs under `assets/gifs/` for convenience.
+- `hack global install` generates schemas into `~/.hack/schemas/` and serves them locally.
 
 ## Public distribution (recommended)
 
@@ -137,12 +135,11 @@ The inner script can optionally run `hack global install` after setup.
 - Provide a one-line install snippet that downloads + runs the installer:
 
 ```bash
-curl -fsSL https://github.com/hack-dance/hack-cli/releases/latest/download/hack-install.sh | bash
+curl -fsSL https://github.com/hack-dance/hack/releases/latest/download/hack-install.sh | bash
 ```
 
 ## Verification checklist
 
 - `hack --help` works after install.
 - `hack global install` succeeds on a clean machine.
-- `https://logs.hack` and `https://schemas.hack` are reachable.
-- `hack the planet --loop`
+- `hack doctor` passes and a project's local HTTPS URL opens.

@@ -28,8 +28,7 @@ trusted TLS. Nothing is hosted. Your machine is the platform.
 **A real URL for every project.** New projects get `https://myapp.hack.local`, with
 per-service subdomains like `api.myapp.hack.local` and locally-trusted certificates.
 No ports to remember, no collisions, and OAuth-friendly `.hack.gy` alias hosts when a
-provider rejects `.hack.local` (or legacy `.hack`). Existing `.hack` names, `.hack.gy`
-aliases, and custom domains keep working in parallel.
+provider rejects `.hack.local`. Existing `.hack` names and custom domains keep working.
 
 **`hack up` is the whole answer to "how do I run this repo".** Services, env,
 lifecycle hooks, and host-side helpers (tunnels, SSO, proxies) are declared in
@@ -45,12 +44,13 @@ get injected env through `hack host exec` instead of reading `.env` files.
 linked git worktree, `hack up` automatically becomes a separate instance named after
 the branch — review a PR while your main checkout keeps running.
 
-**Built for agents.** `hack init --with claude|codex` hands setup to an agent.
-Machine surfaces are first-class: `--json` envelopes with stable error codes and
-`--no-interactive`. The optional `hack` plugin for Codex, Claude Code, and Cursor
-gives agents Hack skills through the client's plugin manager, without writing into
-your repository. Clients without shell access can add the separate `hack-mcp`
-plugin. See [agent plugin setup](docs/integrations.md#optional-native-plugins).
+**Built for agents.** `hack init --with claude|codex` hands setup to an agent, and
+`hack agent onboard` prints an onboarding prompt for an existing repo. Machine
+surfaces are first-class: `--json` envelopes with stable error codes and
+`--no-interactive`. The optional `hack` plugin gives Codex, Claude Code and Cursor
+eight Hack skills through the client's own plugin manager, without writing into your
+repository. Clients without shell access can add the separate `hack-mcp` plugin.
+See [agent integrations](docs/integrations.md).
 
 ## More than ports
 
@@ -79,18 +79,11 @@ logs, and namespaces its branch instances. That's why none of it needs glue code
 
 Remote coding environments — Codex, Claude Code, Cursor, your own sandboxes — all
 stall on the same problem: someone has to hand-build the project's environment
-inside the box. Services, env, secrets, startup order. It's manual, it drifts, and
-it has to be redone for every project and every platform.
-
-A hack project has already done this work. The environment is committed with the
-repo and isolated by design, so teammates and agents can reuse the same project
-definition. Each host still needs a compatible container runtime and the project's
-prerequisites. Install Hack,
-configure those prerequisites, provide the secret key through an appropriate secret
-store, and run `hack up`. See [managed environments](docs/guides/codex-managed-environments.md)
-for the supported boundaries.
-
-There's a slim container image (`hackdance/hack:slim`) built for exactly this; see
+inside the box. A hack project has already done this work. The environment is
+committed with the repo and isolated by design, so teammates and agents reuse the
+same definition. Each host still needs a compatible container runtime and the
+project's prerequisites; the secret key arrives through that host's secret store.
+There's a slim container image (`hackdance/hack:slim`) built for exactly this. See
 [managed environments](./docs/guides/codex-managed-environments.md).
 
 ## Install
@@ -107,6 +100,9 @@ curl -fsSL \
   https://github.com/hack-dance/hack/releases/latest/download/hack-install.sh \
   | bash
 ```
+
+This installs the stable v4 line. v5 is in prerelease; see
+[v5 status](#v5-status) below.
 
 ## Quick start
 
@@ -152,26 +148,34 @@ hack down
 
 Every command works from the repo root, or anywhere with `--project <name>`.
 
-## Learn more
+## v5 status
 
-- [Docs index](./docs/README.md) — concepts, guides, and reference
+v5 keeps the same CLI and project model. Docker Compose stays the default backend.
+New in v5: an opt-in native backend for Apple Silicon macOS that runs prepared
+projects without Docker, a config compiler, `hack dev` for side-by-side builds, and
+stricter, safer command and env handling. Hosted accounts, the web dashboard, Hack
+Tickets, built-in GitHub/Linear integrations and automatic agent instruction
+injection are retired.
+
+Prereleases (`5.0.0-next.N`) install beside stable Hack through the separate
+`hack-next` channel. Read [Upgrade to v5](docs/guides/upgrade-to-v5.md), the
+[prerelease channel](docs/guides/prereleases.md) and
+[installing a prerelease](docs/guides/candidate-install.md). The `next` branch holds
+v5 work; `main` holds the stable line.
+
+## Documentation
+
+Start with [Getting started](docs/guides/getting-started.md) or the
+[documentation index](docs/README.md). The public site is
+[hack.foo](https://hack.foo); its source lives in [`site/`](site/README.md).
+
 - [CLI overview](./docs/cli.md) and the [generated command reference](./docs/reference/cli.md)
 - [Env & secrets](./docs/env.md) · [Lifecycle](./docs/lifecycle.md) · [Sessions](./docs/sessions.md)
-- [Agent-first setup](./docs/guides/agent-first-setup.md)
+- [Agent-first setup](./docs/guides/agent-first-setup.md) · [Agent integrations](./docs/integrations.md)
 
-The CLI is the supported product. The retained macOS app and
+The CLI is the supported product. The retained macOS app and the
 remote/gateway/node/dispatch commands are unsupported and are not part of setup.
-Optional agent integrations and container environments are covered in the docs.
 
 ## License
 
 See [LICENSE](./LICENSE).
-
-## Documentation
-
-Start with [Getting started](docs/guides/getting-started.md) or browse the
-[documentation index](docs/README.md). Stable Docker Compose setup is primary;
-the [native v5 candidate](docs/guides/v5-dogfooding.md) is experimental.
-
-The local docs site is prepared with `bun run docs:prepare`. See
-[site development](site/README.md) for installation, checks and the public corpus policy.

@@ -8,14 +8,14 @@ Stable Hack remains the default while a candidate is qualified beside it. Reuse
 
 ## Version, channel and exact source
 
-Official release metadata checked on 2026-10-28 reports stable **v4.2.4** and
-prerelease **v5.0.0-next.5**. Protected `next` is
-[`f73fbd56`](https://github.com/hack-dance/hack/commit/f73fbd56340078d66c0046ec5e371cd948173d2f).
-The branch's package.json version is not the latest published stable version.
-Recheck official releases and branch heads immediately before preparing a release.
+Read the current stable and prerelease versions from the
+[releases page](https://github.com/hack-dance/hack/releases) and the protected
+`next` head immediately before preparing a release; the branch's package.json
+version is not the latest published stable version.
 
-The next proposed native release is **5.0.0-next.6**, channel **prerelease**, only
-if that number is still unused. It is not reserved or approved for publication.
+The next proposed prerelease is the next unused `5.0.0-next.N`, channel
+**prerelease**. A number is not reserved or approved for publication until the
+release workflow runs.
 An exact integration candidate/artifact has not been selected: reviewed local
 follow-ups and held draft PRs are not an integrated release. Record the immutable
 source SHA, all included changes, build/tool versions, platform, artifact digests,

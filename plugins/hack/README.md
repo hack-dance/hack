@@ -16,8 +16,7 @@ The bundle contains eight skills:
 - `hack-install`: installation, stable/prerelease selection, upgrade and rollback.
 - `hack-remote`: prepare an existing project on another machine or in Codex Cloud.
 
-It also contains Claude primer hooks and a Cursor rule selected when relevant. It
-ships no MCP server: no `mcpServers` declaration and no `.mcp.json` or `mcp.json`
+It ships no hooks, rules or MCP server: no `mcpServers` declaration and no `.mcp.json` or `mcp.json`
 file. It is generated from Hack's canonical guidance and versioned with the CLI.
 Portable clients use root `plugin.json`; older clients retain their compatibility
 manifests. The repository marketplace is not evidence of an OpenAI directory listing.
@@ -46,8 +45,7 @@ codex plugin list --json --marketplace hack-dance
 Start a fresh client and confirm all eight plugin skills load. If you also installed
 `hack-mcp`, call a harmless MCP tool such as `hack.projects.list` against an isolated
 registry, after inspecting the actual discovered tool names.
-The Claude hooks and the `hack-mcp` server still resolve `hack` from the client's
-PATH; installing a plugin does not switch them to `hack-next`. Use the explicit
+The skills and the `hack-mcp` server resolve `hack` from the client's PATH; installing a plugin does not switch them to `hack-next`. Use the explicit
 candidate CLI for candidate work. A separately configured MCP integration must pin
 the intended executable and home before it can operate on that channel.
 
@@ -68,9 +66,9 @@ registration before creating another. Private installation, account registration
 and public publication are separate steps.
 
 See [installation and migration guidance](../../docs/integrations.md#optional-native-plugins).
-Existing standalone setup remains supported. Installation never deletes legacy
-content, changes global policy, or triggers broad integration sync. Use one integration
-path per client to avoid duplicate skills, hooks, and MCP registrations.
+Installation never deletes existing content, changes global policy or triggers an
+integration sync. Use one integration path per client to avoid duplicate skills and
+MCP registrations.
 
 Contributors: run `bun run generate:agent-plugins` after changing canonical guidance.
 The root portable manifest is derived from `.codex-plugin/plugin.json`; edit that

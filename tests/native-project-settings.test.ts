@@ -752,35 +752,3 @@ test("doctor notes the host listener wait only when a selection and persistent h
     expect(result.message).not.toContain("host_wait_seconds");
   }
 });
-
-test("shell forwarding consent is a strict private machine setting with no environment override", async () => {
-  const f = await fixture();
-  expect(
-    (await f.host({ HACK_NATIVE_SHELL_ENV_ALLOW: "GITHUB_TOKEN" }))
-      .shellEnvironmentAllow
-  ).toBeUndefined();
-  await f.machine({
-    version: 1,
-    shellEnvironmentAllow: [" API_KEY ", "TOKEN", "TOKEN"],
-  });
-  expect(
-    (await f.host({ HACK_NATIVE_SHELL_ENV_ALLOW: "GITHUB_TOKEN" }))
-      .shellEnvironmentAllow
-  ).toEqual(["API_KEY", "TOKEN"]);
-  for (const invalid of [
-    "TOKEN",
-    [""],
-    ["*"],
-    ["A,B"],
-    ["BAD-NAME"],
-    [42],
-    Array.from({ length: 257 }, () => "TOKEN"),
-  ]) {
-    await f.machine({ version: 1, shellEnvironmentAllow: invalid });
-    await expectCodedRefusal(
-      f.host(),
-      "E_CONFIG_INVALID",
-      "Native machine settings field shellEnvironmentAllow is invalid; values omitted."
-    );
-  }
-});

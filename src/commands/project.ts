@@ -6007,7 +6007,6 @@ async function handleNativeUp({
     envName: requestedEnvName,
     profiles: parseCsvList(args.options.profile),
     sharedSource: host.sharedSource,
-    shellEnvironmentAllow: host.shellEnvironmentAllow,
     dependencyFile: host.dependencyFile,
     dependencyFileByEnv: host.dependencyFileByEnv,
     dependencyOwners: createNativeDependencyOwnerResolver({
@@ -6234,7 +6233,6 @@ async function restartNativeImageProject({
         runtime: native,
         scope: startup.scope,
         composeFile: startup.composeFile,
-        shellEnvironmentAllow: startup.shellEnvironmentAllow,
         adaptationFile: startup.adaptationFile,
         adaptationFileByEnv: startup.adaptationFileByEnv,
         dependencyFile: startup.dependencyFile,

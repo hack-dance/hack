@@ -13,8 +13,6 @@ import {
 } from "../lib/project-env-config.ts";
 import type { NativeEmulationPolicy } from "./native-project-platform.ts";
 import {
-  NativeShellConsentError,
-  requireShellEnvironmentConsent,
   resolveShellEnvironment,
   shellDeliveryProblem,
 } from "./native-shell-environment.ts";
@@ -74,6 +72,10 @@ export type NativeProjectInput = {
   >;
   /** Services whose private delivery includes a value from the shell, once merged. */
   readonly shellServices?: readonly string[];
+  /** Forwarded source names by service, for value-free operator notices only. */
+  readonly forwardedShellVariables?: Readonly<
+    Record<string, readonly string[]>
+  >;
   /**
    * Value-free notes about shell references in service `environment`, such as
    * a referenced variable that is not set. Names only.
@@ -251,25 +253,14 @@ function resolveServiceShellEnvironment(opts: {
   readonly services: Record<string, unknown>;
   readonly managedEnvironment: Record<string, Record<string, string>>;
   readonly env?: Readonly<Record<string, string | undefined>>;
-  readonly shellEnvironmentAllow?: readonly string[];
 }): {
   readonly shellEnvironment: Record<string, Record<string, string>>;
   readonly notices: NativeEnvironmentNotice[];
+  readonly forwardedNames: Readonly<Record<string, readonly string[]>>;
 } {
   const shellEnvironment: Record<string, Record<string, string>> = {};
   const notices: NativeEnvironmentNotice[] = [];
-  if (opts.env !== undefined) {
-    for (const [name, service] of Object.entries(opts.services)) {
-      if (!isRecord(service) || service.environment == null) {
-        continue;
-      }
-      requireShellEnvironmentConsent({
-        environment: environment(service.environment, name),
-        managed: new Set(Object.keys(opts.managedEnvironment[name] ?? {})),
-        allowed: opts.shellEnvironmentAllow,
-      });
-    }
-  }
+  const forwardedNames: Record<string, readonly string[]> = {};
   for (const [name, service] of Object.entries(opts.services)) {
     // An `environment:` key with every entry commented out is YAML null.
     if (
@@ -283,7 +274,6 @@ function resolveServiceShellEnvironment(opts: {
       service: name,
       environment: environment(service.environment, name),
       env: opts.env,
-      allowed: opts.shellEnvironmentAllow,
       managed: new Set(Object.keys(opts.managedEnvironment[name] ?? {})),
     });
     if (resolution === null) {
@@ -291,13 +281,14 @@ function resolveServiceShellEnvironment(opts: {
     }
     service.environment = resolution.environment;
     shellEnvironment[name] = resolution.delivered;
+    forwardedNames[name] = resolution.forwardedNames;
     if (SERVICE_NAME.test(name)) {
       notices.push(
         ...resolution.notices.map((line) => ({ service: name, line }))
       );
     }
   }
-  return { shellEnvironment, notices };
+  return { shellEnvironment, notices, forwardedNames };
 }
 
 /**
@@ -463,8 +454,6 @@ export async function prepareNativeProjectInput(opts: {
    * process environment.
    */
   readonly env?: Readonly<Record<string, string | undefined>>;
-  /** Caller consent from the private native machine settings, never project intent. */
-  readonly shellEnvironmentAllow?: readonly string[];
 }): Promise<NativeProjectInput> {
   try {
     const bytes = await readCompose(opts.composeFile);
@@ -514,7 +503,6 @@ export async function prepareNativeProjectInput(opts: {
       services: compose.services,
       managedEnvironment,
       env: opts.env,
-      shellEnvironmentAllow: opts.shellEnvironmentAllow,
     });
     const normalizedComposeJson = JSON.stringify(compose);
     if (Buffer.byteLength(normalizedComposeJson) > LIMIT) {
@@ -545,12 +533,10 @@ export async function prepareNativeProjectInput(opts: {
       environmentFiles: resolved?.files ?? [],
       serviceNames,
       shellEnvironment: shell.shellEnvironment,
+      forwardedShellVariables: shell.forwardedNames,
       environmentNotices: shell.notices,
     };
   } catch (error: unknown) {
-    if (error instanceof NativeShellConsentError) {
-      throw refused(error.message);
-    }
     // Only this module's closed refusals carry a cause; anything else stays generic.
     throw error instanceof NativeProjectInputRefusal ? error : refused();
   }

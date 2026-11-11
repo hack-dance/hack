@@ -479,17 +479,6 @@ test("plain shell references and bare names are resolved privately; everything e
   });
   const result = await prepareNativeProjectInput({
     ...opts,
-    shellEnvironmentAllow: [
-      "SHELL_SET",
-      "SHELL_UNSET",
-      "PASSED",
-      "NOT_PASSED",
-      "constructor",
-      "toString",
-      "HACK_ENV_SECRET_KEY",
-      "AWS_SECRET_ACCESS_KEY",
-      "COMPOSE_PROJECT_NAME",
-    ],
     env: {
       SHELL_SET: PRIVATE,
       PASSED: `${PRIVATE}-passed`,
@@ -603,12 +592,10 @@ test("the reviewed document does not depend on the shell, and nothing is read un
   };
   const set = await prepareNativeProjectInput({
     ...(await fixture(compose)),
-    shellEnvironmentAllow: ["SHELL_TOKEN", "PASSED"],
     env: { SHELL_TOKEN: "shell-private", PASSED: "passed-private" },
   });
   const unset = await prepareNativeProjectInput({
     ...(await fixture(compose)),
-    shellEnvironmentAllow: ["SHELL_TOKEN", "PASSED"],
     env: {},
   });
   // Same public document from a shell that sets the variables and one that does not.
@@ -686,7 +673,6 @@ test("merged shell values join the private delivery, and a delivery the runtime 
   const prepared = async (count: number, value: string) =>
     await prepareNativeProjectInput({
       ...(await fixture(compose(count))),
-      shellEnvironmentAllow: ["BIG"],
       env: { BIG: value },
     });
   const merged = mergeNativeShellEnvironment(await prepared(2, "small"));
@@ -736,40 +722,4 @@ test("merged shell values join the private delivery, and a delivery the runtime 
     expect(message).not.toContain(value.slice(0, 12));
     expect(message).not.toContain("\0");
   }
-});
-
-test("whole-project consent is checked before an approved service can read its shell values", async () => {
-  const opts = await fixture({
-    services: {
-      a: { image: "bun:1", environment: { TOKEN: reference("ALLOWED") } },
-      b: { image: "bun:1", environment: { LEAK: reference("GITHUB_TOKEN") } },
-    },
-  });
-  const caller = Object.defineProperties(
-    {},
-    {
-      ALLOWED: {
-        enumerable: true,
-        get() {
-          throw new Error("approved value acquired before project consent");
-        },
-      },
-      GITHUB_TOKEN: {
-        enumerable: true,
-        get() {
-          throw new Error("unapproved value acquired");
-        },
-      },
-    }
-  );
-  await expect(
-    prepareNativeProjectInput({
-      ...opts,
-      env: caller,
-      shellEnvironmentAllow: ["ALLOWED"],
-    })
-  ).rejects.toMatchObject({
-    code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: expect.stringContaining("shellEnvironmentAllow"),
-  });
 });

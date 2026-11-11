@@ -9,6 +9,10 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  nativeDetachedUpShellVariables,
+  nativeShellForwardingNotice,
+} from "../lib/native-detached-up.ts";
+import {
   describeNativeProcessRefusals,
   type NativeProcessRefusal,
   requireWrappableNativeProcesses,
@@ -408,8 +412,8 @@ const DEFAULTS: Dependencies = {
   exitMonitorIntervalMs: 2000,
 };
 /**
- * Names the referenced shell variables that were not set, for the services
- * the reviewed plan marks active. Names only.
+ * Reports forwarded source names and unset-reference notices for active services.
+ * Detached launchers receive only validated names over IPC; values stay private.
  */
 function reportNativeEnvironmentNotices(
   input: NativeProjectInput,
@@ -417,6 +421,16 @@ function reportNativeEnvironmentNotices(
   warn: (line: string) => void
 ): void {
   const active = nativeReviewedActiveServices(reviewedPlan);
+  const names = [
+    ...new Set(
+      Object.entries(input.forwardedShellVariables ?? {})
+        .filter(([service]) => active.has(service))
+        .flatMap(([, names]) => names)
+    ),
+  ].sort();
+  if (!nativeDetachedUpShellVariables(names)) {
+    warn(nativeShellForwardingNotice(names));
+  }
   for (const notice of input.environmentNotices ?? []) {
     if (active.has(notice.service)) {
       warn(notice.line);
@@ -1748,7 +1762,6 @@ type NativeProjectStartOptions = {
   readonly envName?: string | null;
   readonly profiles?: readonly string[];
   readonly sharedSource: boolean;
-  readonly shellEnvironmentAllow?: readonly string[];
   readonly restore?: NativeProjectRun;
   readonly onReady?: (services: {
     readonly started: readonly string[];
@@ -1879,7 +1892,6 @@ async function startNativeProjectAttempt(
     envName: selection.envName,
     // Service `environment` references are resolved from the caller's shell.
     env: process.env,
-    shellEnvironmentAllow: opts.shellEnvironmentAllow,
   });
   // Digest the selection now: later steps adapt the delivered values.
   const selectedEnvironment = opts.onEnvironmentReady

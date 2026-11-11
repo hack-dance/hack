@@ -1580,11 +1580,12 @@ test("AWS delivery warns value-free before expiry and clears its timers on exit"
   expect(
     await startNativeProject({ ...opts, aws: { profile: "qa-test" } })
   ).toBe(0);
-  expect(lines).toHaveLength(1);
+  expect(lines).toHaveLength(2);
   expect(lines[0]).toMatch(
     /^AWS credentials delivered to 2 services expire at \d\d:\d\d; run hack restart to renew\.$/
   );
   expect(lines[0]).not.toContain("qa-test");
+  expect(lines[1]).toBe("Forwarding shell variables: (none).");
 });
 
 test("reviewed dependency caches bind published source and successful completion readiness", async () => {
@@ -5828,7 +5829,13 @@ test("shell values reach private stdin but never startup observations, saved rec
   opts.dependencies.prepare = async (request) => ({
     ...(await prepare(request)),
     shellEnvironment: { web: { API_KEY: privateValue } },
+    forwardedShellVariables: {
+      web: ["FIXTURE_API_KEY", "FIXTURE_API_KEY"],
+      inactive: ["INACTIVE_SOURCE"],
+    },
   });
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
   const save = opts.dependencies.save!;
   opts.dependencies.save = async (request) => {
     expect(JSON.stringify(request)).not.toContain(privateValue);
@@ -5866,6 +5873,12 @@ test("shell values reach private stdin but never startup observations, saved rec
     })
   ).toBe(0);
   expect(received).toBe(true);
+  expect(notices).toContain("Forwarding shell variables: FIXTURE_API_KEY.");
+  expect(
+    notices.filter((line) => line.startsWith("Forwarding shell variables:"))
+  ).toHaveLength(1);
+  expect(notices.join("\n")).not.toContain(privateValue);
+  expect(notices.join("\n")).not.toContain("INACTIVE_SOURCE");
   const pending = [opts.scope.nativeHome];
   for (const directory of pending) {
     for (const entry of await readdir(directory, { withFileTypes: true })) {

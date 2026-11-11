@@ -380,7 +380,6 @@ async function pinRestartImages(opts: {
 
 /** Review the same public graph before stopping anything; never run startup hooks here. */
 export async function preflightNativeRestart(opts: {
-  readonly shellEnvironmentAllow?: readonly string[];
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly composeFile: string;
@@ -454,7 +453,6 @@ export async function preflightNativeRestart(opts: {
       envName: selected.envName,
       // As native start: `environment` references read the caller's shell.
       env: process.env,
-      shellEnvironmentAllow: opts.shellEnvironmentAllow,
     })
   );
   const environmentChange = nativeRunEnvironmentChange({

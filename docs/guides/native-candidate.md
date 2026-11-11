@@ -1249,32 +1249,19 @@ by an older bundle, so clean up such a graph with the bundle that started it.
 
 Compose reads a variable reference from the shell that runs it. The native runtime
 reads no ambient environment, so two forms of a service `environment` entry could
-never start on native. `hack up` and `hack restart` resolve them only after you
-grant the exact source names in the private native machine settings:
+never start on native. `hack up` and `hack restart` resolve those forms from the
+caller's environment. Only source variables named by the project's Compose file
+are read; the ambient environment is never forwarded as a whole.
 
-```json
-{
-  "version": 1,
-  "projectRoots": ["/absolute/project"],
-  "shellEnvironmentAllow": ["API_KEY", "TOKEN"]
-}
-```
-
-This is the existing `settings.json` outside the project, under
-`${XDG_CONFIG_HOME:-$HOME/.config}/hack/native/<project>/`. Its directory must
-be `0700`, its file `0600`, and `projectRoots` must grant this canonical checkout.
-The list contains at most 256 exact variable names, with no wildcards or empty
-entries. Whitespace around a name is trimmed. There is no environment or
-project-file override: a repository `.env` cannot grant consent. An unapproved
-reference refuses before shell values are read, and restart refuses before it
-stops the current graph. Keep credentials in Hack managed env when practical.
-
-With consent:
+Every native start prints one line to stderr naming the forwarded source
+variables, or `(none)`, including detached and JSON starts. Names are deduplicated
+and sorted; values are never printed. Foreground starts also report unset
+references separately. There is no consent prompt in this feature.
 
 | Entry | Shell has the variable | Shell does not |
 | --- | --- | --- |
-| `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose, and the command prints which variable is not set. |
-| `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The service gets an empty value, and the command prints which variable is not set. Compose would leave it unset instead. |
+| `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose. |
+| `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The service gets an empty value. Compose would leave it unset instead. |
 
 A value read from the shell is never written to the reviewed Compose document, a
 plan, a receipt, an env fingerprint or a log. The entry stays a reference and the
@@ -1308,9 +1295,9 @@ What stays as it was:
   would with Compose: the start still fails with `execution_environment_missing`,
   as it did before.
 - **A project `.env` file.** Hack does not parse it for shell references. A launch
-  runtime such as Bun may preload dotenv into its process environment; forwarded
-  names still require consent in the private machine settings. Dotenv cannot
-  create that grant, and a missing reference is reported as unset.
+  runtime such as Bun may preload dotenv into its process environment. Only
+  explicitly referenced, non-excluded names are read from that environment;
+  a missing reference is reported as unset.
 
 Three consequences of the private delivery:
 
@@ -2798,8 +2785,6 @@ non-empty `HACK_NATIVE_AWS_PROFILE` selects the AWS variables; `HACK_NATIVE_AWS_
 without it is ignored, as before. Existing scripts that export the variables keep
 their exact behavior.
 
-`shellEnvironmentAllow` is an exception: it grants shell source names only from
-this private machine file. It has no environment or committed-project override.
 
 **Per-env files.** `adaptation.<env>.json` and `dependenciesByEnv.<env>` replace the
 base file for runs whose effective env is `<env>`: the `--env` you pass, the env a

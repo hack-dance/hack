@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -20,7 +21,12 @@ import {
   onboardingContextWithoutInventory,
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
-import { HackCliError, type HackErrorCode } from "../lib/cli-result.ts";
+import { CALLER_ENV } from "../lib/background-command/launch.ts";
+import {
+  HACK_ERROR_CODES,
+  HackCliError,
+  type HackErrorCode,
+} from "../lib/cli-result.ts";
 import { ensureDir, pathExists } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -48,6 +54,16 @@ import { TASK_ID_PATTERN } from "../lib/task-catalog-recipe.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import type { McpCommandAdmission } from "./command-admission.ts";
 import { superviseMcpCommand } from "./command-lifetime.ts";
+import {
+  buildCommandControlArgs,
+  buildCommandStartArgs,
+  MCP_COMMAND_CHILD_SLACK_MS,
+  MCP_COMMAND_CONTROL_TIMEOUT_MS,
+  MCP_COMMAND_WAIT_DEFAULT_MS,
+  MCP_COMMAND_WAIT_MAX_MS,
+  parseCliEnvelope,
+  parseCommandReadOutput,
+} from "./command-tools.ts";
 import {
   MCP_ENV_KEY_PATTERN,
   MCP_ENV_OUTPUT_WITHHELD_MESSAGE,
@@ -176,8 +192,16 @@ type ToolResultPayload = HackCommandResult & {
         readonly reason: McpRefusalReason;
         readonly message: string;
       }
-    | typeof MCP_LOG_BACKEND_ERROR;
+    | typeof MCP_LOG_BACKEND_ERROR
+    | {
+        readonly code: HackErrorCode;
+        readonly reason: typeof MCP_COMMAND_ERROR_REASON;
+        readonly message: string;
+      };
 };
+
+/** Reason for an error envelope reported by a background-command CLI child. */
+const MCP_COMMAND_ERROR_REASON = "command_error";
 
 type ProjectArgsResolution =
   | { readonly ok: true; readonly args: string[] }
@@ -247,8 +271,12 @@ const toolOutputSchema = {
   spawned: z.literal(false).optional(),
   error: z
     .object({
-      code: z.enum(["E_USAGE", "E_PROJECT_NOT_FOUND", "E_UNEXPECTED"]),
-      reason: z.enum([...MCP_REFUSAL_REASONS, MCP_LOG_BACKEND_ERROR.reason]),
+      code: z.enum(HACK_ERROR_CODES),
+      reason: z.enum([
+        ...MCP_REFUSAL_REASONS,
+        MCP_LOG_BACKEND_ERROR.reason,
+        MCP_COMMAND_ERROR_REASON,
+      ]),
       message: z.string(),
     })
     .optional(),
@@ -1345,7 +1373,315 @@ function registerTools(opts: {
     },
   });
 
+  registerBackgroundCommandTools({ register, context: opts.context });
+
   installTypedToolDispatch({ server: opts.server, tools });
+}
+
+const REQUEST_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const COMMAND_ID_INPUT = z
+  .string()
+  .regex(/^cmd_[a-z0-9]{26}$/)
+  .describe("Background command id from hack.project.command.start");
+
+/**
+ * `hack.project.command.start|read|inspect|cancel`: adapters over
+ * `hack exec|run --detach` and `hack commands read|show|cancel`. Every call
+ * re-checks project and instance scope in the CLI; an id grants nothing.
+ */
+function registerBackgroundCommandTools(opts: {
+  readonly register: <const Shape extends z.ZodRawShape>(
+    tool: HackToolDefinition<Shape>
+  ) => void;
+  readonly context: McpSessionContext;
+}): void {
+  const { register, context } = opts;
+  // Admission limits count active background commands per MCP session.
+  const caller = `mcp:${randomUUID()}`;
+  const scopeInput = {
+    projectName: z
+      .string()
+      .describe("Registered project name (from ~/.hack/projects.json)")
+      .optional(),
+    repoRoot: z
+      .string()
+      .describe("Repo root path (absolute or relative)")
+      .optional(),
+    path: z
+      .string()
+      .describe("Path inside a repo (absolute or relative)")
+      .optional(),
+    branch: branchIdentifierInput(
+      "Branch/worktree instance the command was started on"
+    ).optional(),
+  };
+
+  register({
+    name: "hack.project.command.start",
+    title: "Start a background command",
+    description:
+      'Start `exec` (in a running service container) or `run` (one-off container) in the background and return a commandId and cursor at once; then call hack.project.command.read with the cursor until it reports ended. Uses the same validation and argv handling as hack.project.exec/run. Output is stored in private files under the Hack home for up to 24 hours (capture: "metadata" stores none); redaction of values Hack injected is partial, not a safety guarantee. Unlike the foreground tools, reaching the 8 MiB capture limit stops capture but the command keeps running. requestKey makes retries safe: the same key with the same inputs returns the existing command and never runs it twice.',
+    annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...scopeInput,
+      operation: z.enum(["exec", "run"]).describe("exec or run"),
+      service: composeIdentifierInput("Compose service name"),
+      cmd: z
+        .array(z.string())
+        .describe("Command and arguments (exec needs at least one entry)"),
+      workdir: z
+        .string()
+        .describe("Working directory inside container")
+        .optional(),
+      timeoutMs: z
+        .number()
+        .int()
+        .min(1000)
+        .max(21_600_000)
+        .describe("Stop the command after this long (default 1800000)")
+        .optional(),
+      stallAfterMs: z
+        .number()
+        .int()
+        .min(0)
+        .max(21_600_000)
+        .describe(
+          "Advisory stall after this long without output (default 120000, 0 off)"
+        )
+        .optional(),
+      capture: z
+        .enum(["full", "metadata"])
+        .describe("Store output (full) or only events and outcome (metadata)")
+        .optional(),
+      requestKey: z
+        .string()
+        .regex(REQUEST_KEY_PATTERN)
+        .describe("Caller-chosen idempotency key for this start"),
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: context.cwd,
+        registryPath: context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+      const result = await runHackCommand({
+        context,
+        signal: extra.signal,
+        tool: "hack.project.command.start",
+        args: buildCommandStartArgs({
+          operation: input.operation,
+          projectArgs: resolved.args,
+          branch: input.branch,
+          workdir: input.workdir,
+          requestKey: input.requestKey,
+          timeoutMs: input.timeoutMs,
+          stallAfterMs: input.stallAfterMs,
+          capture: input.capture,
+          service: input.service,
+          cmd: input.cmd,
+        }),
+        // Starting includes project and env resolution, not the command.
+        timeoutMs: DEFAULT_CMD_TIMEOUT_MS,
+        extraEnv: { [CALLER_ENV]: caller },
+      });
+      return buildCommandToolResult({
+        result,
+        parsed: parseCliEnvelope(result.stdout),
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.command.read",
+    title: "Read a background command",
+    description: `Wait for events of a background command after a cursor: output (as text, cut on UTF-8 boundaries; non-UTF-8 output is withheld with its size), stalls (advisory) and the end with its outcome and exit code. Returns early when the command ends, a stall starts or maxBytes of output is reached; otherwise after waitMs (default ${MCP_COMMAND_WAIT_DEFAULT_MS}, at most ${MCP_COMMAND_WAIT_MAX_MS}). Pass nextCursor back as after. An expired or unknown cursor returns gap: true with the earliest cursor. Read-only.`,
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...scopeInput,
+      commandId: COMMAND_ID_INPUT,
+      after: z
+        .string()
+        .max(128)
+        .describe("Cursor from a previous result (default: from the start)")
+        .optional(),
+      waitMs: z
+        .number()
+        .int()
+        .min(0)
+        .max(MCP_COMMAND_WAIT_MAX_MS)
+        .describe(`Longest wait in ms (0-${MCP_COMMAND_WAIT_MAX_MS})`)
+        .optional(),
+      maxBytes: z
+        .number()
+        .int()
+        .min(16_384)
+        .max(262_144)
+        .describe("Output text budget in bytes (16384-262144, default 32768)")
+        .optional(),
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: context.cwd,
+        registryPath: context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+      const waitMs = input.waitMs ?? MCP_COMMAND_WAIT_DEFAULT_MS;
+      const result = await runHackCommand({
+        context,
+        signal: extra.signal,
+        tool: "hack.project.command.read",
+        args: buildCommandControlArgs({
+          action: "read",
+          commandId: input.commandId,
+          projectArgs: resolved.args,
+          branch: input.branch,
+          after: input.after,
+          waitMs,
+          maxBytes: input.maxBytes,
+        }),
+        timeoutMs: waitMs + MCP_COMMAND_CHILD_SLACK_MS,
+        audit: false,
+      });
+      return buildCommandToolResult({
+        result,
+        parsed: parseCommandReadOutput(result.stdout),
+        extraData: { limits: { waitMs } },
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.command.inspect",
+    title: "Inspect a background command",
+    description:
+      "Show a background command's state, limits, capture and redaction settings, output sizes, supervisor and child identity, cursors and final outcome (hack commands show --json). Never returns environment values. Read-only.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: { ...scopeInput, commandId: COMMAND_ID_INPUT },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: context.cwd,
+        registryPath: context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+      const result = await runHackCommand({
+        context,
+        signal: extra.signal,
+        tool: "hack.project.command.inspect",
+        args: buildCommandControlArgs({
+          action: "show",
+          commandId: input.commandId,
+          projectArgs: resolved.args,
+          branch: input.branch,
+        }),
+        timeoutMs: MCP_COMMAND_CONTROL_TIMEOUT_MS,
+        audit: false,
+      });
+      return buildCommandToolResult({
+        result,
+        parsed: parseCliEnvelope(result.stdout),
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.command.cancel",
+    title: "Cancel a background command",
+    description:
+      "Cancel a background command. The supervisor and the command's process group are signalled only after their pid, birth time and group are verified. The result says what was confirmed: stopping a docker compose exec or run client does not prove the process inside the container stopped.",
+    annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
+    inputSchema: { ...scopeInput, commandId: COMMAND_ID_INPUT },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: context.cwd,
+        registryPath: context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+      const result = await runHackCommand({
+        context,
+        signal: extra.signal,
+        tool: "hack.project.command.cancel",
+        args: buildCommandControlArgs({
+          action: "cancel",
+          commandId: input.commandId,
+          projectArgs: resolved.args,
+          branch: input.branch,
+        }),
+        timeoutMs: MCP_COMMAND_CONTROL_TIMEOUT_MS,
+      });
+      return buildCommandToolResult({
+        result,
+        parsed: parseCliEnvelope(result.stdout),
+      });
+    },
+  });
+}
+
+/**
+ * Result for the background command tools. A parsed CLI envelope becomes
+ * `data` (success) or `error` with reason `command_error`; raw stdout is not
+ * repeated, since `data` already carries it. Unparseable output falls back to
+ * {@link buildToolResult}.
+ */
+function buildCommandToolResult(opts: {
+  readonly result: HackCommandResult;
+  readonly parsed:
+    | { readonly ok: true; readonly data: unknown }
+    | {
+        readonly ok: false;
+        readonly error: { readonly code: string; readonly message: string };
+      }
+    | null;
+  readonly extraData?: Record<string, unknown>;
+}): CallToolResult {
+  const { result, parsed } = opts;
+  if (!parsed || result.outputTruncated) {
+    return buildToolResult({ result });
+  }
+  const base = {
+    command: result.command,
+    exitCode: result.exitCode,
+    stdout: "",
+    stderr: result.stderr,
+  };
+  const payload: ToolResultPayload = parsed.ok
+    ? {
+        ...base,
+        ok: true,
+        data:
+          opts.extraData && isRecord(parsed.data)
+            ? { ...parsed.data, ...opts.extraData }
+            : parsed.data,
+      }
+    : {
+        ...base,
+        ok: false,
+        error: {
+          code: (HACK_ERROR_CODES as readonly string[]).includes(
+            parsed.error.code
+          )
+            ? (parsed.error.code as HackErrorCode)
+            : "E_UNEXPECTED",
+          reason: MCP_COMMAND_ERROR_REASON,
+          message: parsed.error.message,
+        },
+      };
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    structuredContent: payload,
+    ...(payload.ok ? {} : { isError: true }),
+  };
 }
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
@@ -2093,6 +2429,9 @@ async function runHackCommand(opts: {
   readonly args: readonly string[];
   readonly cwd?: string;
   readonly timeoutMs?: number;
+  /** Reads are not audited; every other call is. */
+  readonly audit?: boolean;
+  readonly extraEnv?: Readonly<Record<string, string>>;
 }): Promise<HackCommandResult> {
   const work = async () => {
     const invocation = await resolveHackInvocation(opts.context);
@@ -2101,7 +2440,7 @@ async function runHackCommand(opts: {
     const proc = Bun.spawn(cmd, {
       detached: true,
       cwd: opts.cwd ?? opts.context.cwd,
-      env: buildChildEnv(opts.context.env),
+      env: { ...buildChildEnv(opts.context.env), ...opts.extraEnv },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -2135,12 +2474,14 @@ async function runHackCommand(opts: {
         "\nMCP output exceeded the 8 MiB capture limit; use the CLI for full output.\n";
     }
     const command = formatCommand(cmd);
-    await appendAuditLog({
-      hackHome: opts.context.hackHome,
-      tool: opts.tool,
-      command,
-      exitCode,
-    });
+    if (opts.audit !== false) {
+      await appendAuditLog({
+        hackHome: opts.context.hackHome,
+        tool: opts.tool,
+        command,
+        exitCode,
+      });
+    }
 
     return {
       command,

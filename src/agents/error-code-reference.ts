@@ -117,6 +117,42 @@ const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
       "The command needs an answer at a prompt but is running without one.",
     readFirst: "`hack <command> --help`",
   },
+  E_COMMAND_NOT_FOUND: {
+    meaning:
+      "No background command with this id exists for the selected project and instance.",
+    readFirst:
+      "`hack commands show <id> --json` from the project that started it",
+  },
+  E_RESULT_EXPIRED: {
+    meaning:
+      "The background command's result passed its retention and its output was removed; it is never re-run.",
+    readFirst: "`hack commands show <id> --json`",
+  },
+  E_CURSOR_EXPIRED: {
+    meaning:
+      "A read cursor is from another journal generation or past the end; the read returned a gap with the earliest cursor.",
+    readFirst: "`hack commands read <id> --json` without `--after`",
+  },
+  E_CAPTURE_DISABLED: {
+    meaning:
+      "Output capture for background commands is turned off in the global config.",
+    readFirst: "`hack config get backgroundCommands --global`",
+  },
+  E_ADMISSION_LIMIT: {
+    meaning:
+      "Too many background commands are active for this session or Hack home.",
+    readFirst: "`hack commands show <id> --json` for the running commands",
+  },
+  E_REQUEST_CONFLICT: {
+    meaning:
+      "A background request key was reused with different inputs; the earlier command is unchanged.",
+    readFirst: "`hack commands show <id> --json`",
+  },
+  E_JOURNAL_VERSION: {
+    meaning:
+      "A background command journal was written by a newer Hack journal format.",
+    readFirst: "`hack --version`",
+  },
   E_USAGE: {
     meaning: "Arguments or flags were invalid for the command.",
     readFirst: "`hack <command> --help`",

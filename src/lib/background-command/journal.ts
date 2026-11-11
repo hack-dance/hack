@@ -1,0 +1,548 @@
+import { randomBytes } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, open, readFile, unlink } from "node:fs/promises";
+import { resolve } from "node:path";
+import { z } from "zod";
+import pkg from "../../../package.json";
+import { HackCliError } from "../cli-result.ts";
+import { resolveGlobalHackDir } from "../config-paths.ts";
+import { isRecord } from "../guards.ts";
+import { readReplaceablePrivateFile } from "../private-file.ts";
+
+/**
+ * On-disk journal of one background command.
+ *
+ * Layout, under `<hack home>/commands/<commandId>/` (directory 0700, files
+ * 0600; never under a project's `.hack/`, which may be committed or synced):
+ *
+ * - `meta.json`: immutable request metadata written at acceptance. It never
+ *   holds environment values.
+ * - `launch.json`: the child argv and cwd, read once by the supervisor.
+ * - `owner.json`, `child.json`: supervisor and child identity (pid, birth,
+ *   process group), written by the supervisor.
+ * - `events.jsonl`: one envelope per line, dense `seq` from 1.
+ * - `stdout`, `stderr`: the child's output, appended by the kernel.
+ * - `reserve`: preallocated bytes released only to write `command.ended`.
+ * - `cancel.json`: a cancel request, written before any signal is sent.
+ * - `expired.json`: tombstone left when retention removed the output.
+ *
+ * Writers: the launcher writes `command.accepted` (seq 1) before the
+ * supervisor exists; the live supervisor is then the only writer. Any other
+ * process (a reader or a canceller) appends only under the journal lock and
+ * only after verifying, by pid and birth, that the supervisor is gone.
+ */
+
+export const JOURNAL_FORMAT_VERSION = 1;
+export const HACK_VERSION: string = (pkg as { readonly version: string })
+  .version;
+export const RESERVE_BYTES = 64 * 1024;
+/** Capture limit per command, stdout and stderr together. */
+export const CAPTURE_LIMIT_BYTES = 8 * 1024 * 1024;
+/** Largest byte range one output event covers. */
+export const OUTPUT_EVENT_MAX_BYTES = 16 * 1024;
+/** Output events per command; past this capture stops as if the byte limit were hit. */
+export const OUTPUT_EVENT_LIMIT = 65_536;
+
+const COMMAND_ID_PATTERN = /^cmd_[a-z0-9]{26}$/;
+const GENERATION_PATTERN = /^[a-z0-9]{8}$/;
+const SEQ_PATTERN = /^\d{1,12}$/;
+const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+export const OUTCOMES = [
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "unknown",
+] as const;
+export type CommandOutcome = (typeof OUTCOMES)[number];
+
+export const EVENT_TYPES = [
+  "command.accepted",
+  "command.started",
+  "command.output",
+  "command.stalled",
+  "command.resumed",
+  "command.output_truncated",
+  "command.ended",
+] as const;
+export type StoredEventType = (typeof EVENT_TYPES)[number];
+
+export type CommandOperation = "exec" | "run";
+export type CaptureMode = "full" | "metadata";
+
+const metaSchema = z.object({
+  formatVersion: z.number().int().positive(),
+  writerVersion: z.string(),
+  commandId: z.string().regex(COMMAND_ID_PATTERN),
+  generation: z.string().regex(GENERATION_PATTERN),
+  requestKey: z.string().nullable(),
+  fingerprint: z.string(),
+  operation: z.enum(["exec", "run"]),
+  backend: z.enum(["compose", "native"]),
+  projectId: z.string(),
+  projectRoot: z.string(),
+  instanceId: z.string(),
+  service: z.string(),
+  argv: z.array(z.string()),
+  workdir: z.string().nullable(),
+  caller: z.string(),
+  acceptedAt: z.string(),
+  timeoutMs: z.number().int().positive(),
+  stallAfterMs: z.number().int().nonnegative(),
+  capture: z.enum(["full", "metadata"]),
+  retentionMs: z.number().int().nonnegative(),
+  liveOutput: z.enum(["available", "unavailable"]),
+  stallDetection: z.enum(["available", "unavailable"]),
+  redaction: z.object({ values: z.number().int().nonnegative() }),
+});
+export type CommandMeta = z.infer<typeof metaSchema>;
+
+const identitySchema = z.object({
+  pid: z.number().int().positive(),
+  birth: z.string().min(1),
+  processGroupId: z.number().int().positive(),
+});
+const ownerSchema = identitySchema.extend({
+  sessionId: z.number().int().positive().nullable(),
+  newSession: z.boolean(),
+});
+export type OwnerRecord = z.infer<typeof ownerSchema>;
+export type ChildRecord = z.infer<typeof identitySchema>;
+
+const launchSchema = z.object({
+  argv: z.array(z.string()).min(1),
+  cwd: z.string(),
+});
+export type LaunchRecord = z.infer<typeof launchSchema>;
+
+const envelopeSchema = z.object({
+  v: z.literal(1),
+  id: z.string(),
+  seq: z.number().int().positive(),
+  cursor: z.string(),
+  time: z.string(),
+  projectId: z.string(),
+  instanceId: z.string(),
+  commandId: z.string(),
+  service: z.string(),
+  type: z.enum(EVENT_TYPES),
+  payload: z.record(z.string(), z.unknown()),
+});
+export type EventEnvelope = z.infer<typeof envelopeSchema>;
+
+export type OutputStream = "stdout" | "stderr";
+
+export function commandsRoot(): string {
+  return resolve(resolveGlobalHackDir(), "commands");
+}
+
+export function isCommandId(value: string): boolean {
+  return COMMAND_ID_PATTERN.test(value);
+}
+
+function randomToken(length: number): string {
+  const bytes = randomBytes(length);
+  let token = "";
+  for (const byte of bytes) {
+    token += ALPHABET[byte % ALPHABET.length];
+  }
+  return token;
+}
+
+export function newCommandId(): string {
+  return `cmd_${randomToken(26)}`;
+}
+
+export function newGeneration(): string {
+  return randomToken(8);
+}
+
+export type JournalPaths = {
+  readonly dir: string;
+  readonly meta: string;
+  readonly launch: string;
+  readonly owner: string;
+  readonly child: string;
+  readonly events: string;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly reserve: string;
+  readonly cancel: string;
+  readonly expired: string;
+  readonly lock: string;
+};
+
+export function journalPaths(opts: {
+  readonly root: string;
+  readonly commandId: string;
+}): JournalPaths {
+  if (!isCommandId(opts.commandId)) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: "Invalid command id.",
+    });
+  }
+  const dir = resolve(opts.root, opts.commandId);
+  return {
+    dir,
+    meta: resolve(dir, "meta.json"),
+    launch: resolve(dir, "launch.json"),
+    owner: resolve(dir, "owner.json"),
+    child: resolve(dir, "child.json"),
+    events: resolve(dir, "events.jsonl"),
+    stdout: resolve(dir, "stdout"),
+    stderr: resolve(dir, "stderr"),
+    reserve: resolve(dir, "reserve"),
+    cancel: resolve(dir, "cancel.json"),
+    expired: resolve(dir, "expired.json"),
+    lock: resolve(dir, "lock"),
+  };
+}
+
+export function outputPath(paths: JournalPaths, stream: OutputStream): string {
+  return stream === "stdout" ? paths.stdout : paths.stderr;
+}
+
+// --- Cursors --------------------------------------------------------------
+
+/** `<commandId>:<generation>:<seq>`; seq 0 means "before the first event". */
+export function formatCursor(opts: {
+  readonly commandId: string;
+  readonly generation: string;
+  readonly seq: number;
+}): string {
+  return `${opts.commandId}:${opts.generation}:${opts.seq}`;
+}
+
+export type ParsedCursor = {
+  readonly commandId: string;
+  readonly generation: string;
+  readonly seq: number;
+};
+
+export function parseCursor(value: string): ParsedCursor | null {
+  const parts = value.split(":");
+  if (parts.length !== 3) {
+    return null;
+  }
+  const [commandId = "", generation = "", seqText = ""] = parts;
+  if (
+    !(
+      isCommandId(commandId) &&
+      GENERATION_PATTERN.test(generation) &&
+      SEQ_PATTERN.test(seqText)
+    )
+  ) {
+    return null;
+  }
+  return { commandId, generation, seq: Number(seqText) };
+}
+
+// --- Private JSON records ----------------------------------------------------
+
+function journalRefusal(): Error {
+  return new HackCliError({
+    code: "E_PERMISSION",
+    message:
+      "A background command record is not a private regular file; it was not read.",
+  });
+}
+
+async function readPrivateJson(opts: {
+  readonly path: string;
+  readonly dir: string;
+}): Promise<unknown> {
+  const file = await readReplaceablePrivateFile({
+    path: opts.path,
+    directories: [opts.dir],
+    refusal: journalRefusal,
+    maxBytes: 1024 * 1024,
+  });
+  if (!file) {
+    return null;
+  }
+  try {
+    return JSON.parse(file.text);
+  } catch {
+    return null;
+  }
+}
+
+/** Refuse a journal written by a newer format, naming the writer's version. */
+function assertSupportedFormat(value: unknown): void {
+  if (
+    isRecord(value) &&
+    typeof value.formatVersion === "number" &&
+    value.formatVersion > JOURNAL_FORMAT_VERSION
+  ) {
+    const writer =
+      typeof value.writerVersion === "string" ? value.writerVersion : "newer";
+    throw new HackCliError({
+      code: "E_JOURNAL_VERSION",
+      message: `This background command was recorded by Hack ${writer} in journal format ${value.formatVersion}; this Hack (${HACK_VERSION}) reads format ${JOURNAL_FORMAT_VERSION}. Use the newer Hack to read it.`,
+    });
+  }
+}
+
+export async function readMeta(
+  paths: JournalPaths
+): Promise<CommandMeta | null> {
+  const value = await readPrivateJson({ path: paths.meta, dir: paths.dir });
+  if (value === null) {
+    return null;
+  }
+  assertSupportedFormat(value);
+  const parsed = metaSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+export async function readOwner(
+  paths: JournalPaths
+): Promise<OwnerRecord | null> {
+  const parsed = ownerSchema.safeParse(
+    await readPrivateJson({ path: paths.owner, dir: paths.dir })
+  );
+  return parsed.success ? parsed.data : null;
+}
+
+export async function readChild(
+  paths: JournalPaths
+): Promise<ChildRecord | null> {
+  const parsed = identitySchema.safeParse(
+    await readPrivateJson({ path: paths.child, dir: paths.dir })
+  );
+  return parsed.success ? parsed.data : null;
+}
+
+export async function readLaunch(
+  paths: JournalPaths
+): Promise<LaunchRecord | null> {
+  const parsed = launchSchema.safeParse(
+    await readPrivateJson({ path: paths.launch, dir: paths.dir })
+  );
+  return parsed.success ? parsed.data : null;
+}
+
+export async function isExpired(paths: JournalPaths): Promise<boolean> {
+  return (await lstat(paths.expired).catch(() => null)) !== null;
+}
+
+// --- Events ------------------------------------------------------------------
+
+/** Parse complete lines only; an unterminated final line is a write in progress. */
+export function parseEventLines(text: string): EventEnvelope[] {
+  const end = text.lastIndexOf("\n");
+  if (end < 0) {
+    return [];
+  }
+  const events: EventEnvelope[] = [];
+  for (const line of text.slice(0, end).split("\n")) {
+    if (line.length === 0) {
+      continue;
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const parsed = envelopeSchema.safeParse(value);
+    if (parsed.success) {
+      events.push(parsed.data);
+    }
+  }
+  return events;
+}
+
+export async function readEvents(
+  paths: JournalPaths
+): Promise<EventEnvelope[]> {
+  const text = await readFile(paths.events, "utf8").catch((error: unknown) => {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return "";
+    }
+    throw error;
+  });
+  return parseEventLines(text);
+}
+
+export function buildEnvelope(opts: {
+  readonly meta: CommandMeta;
+  readonly seq: number;
+  readonly type: StoredEventType;
+  readonly payload: Record<string, unknown>;
+  readonly time?: Date;
+}): EventEnvelope {
+  return {
+    v: 1,
+    id: `${opts.meta.commandId}.${opts.meta.generation}.${opts.seq}`,
+    seq: opts.seq,
+    cursor: formatCursor({
+      commandId: opts.meta.commandId,
+      generation: opts.meta.generation,
+      seq: opts.seq,
+    }),
+    time: (opts.time ?? new Date()).toISOString(),
+    projectId: opts.meta.projectId,
+    instanceId: opts.meta.instanceId,
+    commandId: opts.meta.commandId,
+    service: opts.meta.service,
+    type: opts.type,
+    payload: opts.payload,
+  };
+}
+
+function isNoSpace(error: unknown): boolean {
+  return (
+    isRecord(error) && (error.code === "ENOSPC" || error.code === "EDQUOT")
+  );
+}
+
+/** Seam for tests: the append primitive. */
+export type AppendLine = (path: string, line: string) => Promise<void>;
+
+export const appendLine: AppendLine = async (path, line) => {
+  const handle = await open(
+    path,
+    constants.O_WRONLY |
+      constants.O_APPEND |
+      constants.O_CREAT |
+      constants.O_NOFOLLOW,
+    0o600
+  );
+  try {
+    // One write per line: concurrent readers see whole lines or none.
+    await handle.write(line);
+  } finally {
+    await handle.close();
+  }
+};
+
+/**
+ * Append events with dense sequence numbers starting after `lastSeq`.
+ * `command.ended` is fsynced and, when the disk or quota is full, written
+ * after releasing the reserved bytes, so a full disk cannot lose it.
+ */
+export class JournalWriter {
+  readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+  private seq: number;
+  private readonly append: AppendLine;
+
+  constructor(
+    paths: JournalPaths,
+    meta: CommandMeta,
+    lastSeq: number,
+    append: AppendLine = appendLine
+  ) {
+    this.paths = paths;
+    this.meta = meta;
+    this.seq = lastSeq;
+    this.append = append;
+  }
+
+  get lastSeq(): number {
+    return this.seq;
+  }
+
+  async write(
+    type: StoredEventType,
+    payload: Record<string, unknown>
+  ): Promise<EventEnvelope> {
+    const envelope = buildEnvelope({
+      meta: this.meta,
+      seq: this.seq + 1,
+      type,
+      payload,
+    });
+    const line = `${JSON.stringify(envelope)}\n`;
+    try {
+      await this.append(this.paths.events, line);
+    } catch (error: unknown) {
+      if (!(type === "command.ended" && isNoSpace(error))) {
+        throw error;
+      }
+      await unlink(this.paths.reserve).catch(() => undefined);
+      await this.append(this.paths.events, line);
+    }
+    this.seq += 1;
+    if (type === "command.ended") {
+      await syncFile(this.paths.events);
+    }
+    return envelope;
+  }
+}
+
+async function syncFile(path: string): Promise<void> {
+  const handle = await open(path, constants.O_RDONLY).catch(() => null);
+  try {
+    await handle?.sync();
+  } catch {
+    // Best effort; the line is already written.
+  } finally {
+    await handle?.close();
+  }
+}
+
+export function endedEvent(
+  events: readonly EventEnvelope[]
+): EventEnvelope | null {
+  return events.find((event) => event.type === "command.ended") ?? null;
+}
+
+/** Bytes already covered by output events, per stream. */
+export function emittedOffsets(events: readonly EventEnvelope[]): {
+  readonly stdout: number;
+  readonly stderr: number;
+  readonly captured: number;
+  readonly outputEvents: number;
+  readonly truncated: boolean;
+} {
+  let stdout = 0;
+  let stderr = 0;
+  let captured = 0;
+  let outputEvents = 0;
+  let truncated = false;
+  for (const event of events) {
+    if (event.type === "command.output_truncated") {
+      truncated = true;
+    }
+    if (event.type !== "command.output") {
+      continue;
+    }
+    const range = outputRange(event);
+    if (!range) {
+      continue;
+    }
+    outputEvents += 1;
+    captured += range.length;
+    const end = range.offset + range.length;
+    if (range.stream === "stdout") {
+      stdout = Math.max(stdout, end);
+    } else {
+      stderr = Math.max(stderr, end);
+    }
+  }
+  return { stdout, stderr, captured, outputEvents, truncated };
+}
+
+export function outputRange(event: EventEnvelope): {
+  readonly stream: OutputStream;
+  readonly offset: number;
+  readonly length: number;
+} | null {
+  const { stream, offset, length } = event.payload;
+  if (
+    (stream === "stdout" || stream === "stderr") &&
+    typeof offset === "number" &&
+    typeof length === "number" &&
+    Number.isSafeInteger(offset) &&
+    Number.isSafeInteger(length) &&
+    offset >= 0 &&
+    length >= 0
+  ) {
+    return { stream, offset, length };
+  }
+  return null;
+}

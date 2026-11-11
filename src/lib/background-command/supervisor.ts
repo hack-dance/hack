@@ -1,0 +1,586 @@
+import { constants, openSync } from "node:fs";
+import { lstat, open, unlink } from "node:fs/promises";
+import { createPrivateFileExclusive } from "../private-file.ts";
+import {
+  CAPTURE_LIMIT_BYTES,
+  type CommandMeta,
+  commandsRoot,
+  endedEvent,
+  isCommandId,
+  type JournalPaths,
+  JournalWriter,
+  journalPaths,
+  type LaunchRecord,
+  OUTPUT_EVENT_LIMIT,
+  type OutputStream,
+  outputPath,
+  readEvents,
+  readLaunch,
+  readMeta,
+} from "./journal.ts";
+import { pumpStream } from "./output-pump.ts";
+import { encodeSecrets } from "./output-scanner.ts";
+import {
+  closeDescriptor,
+  observeIdentities,
+  openAppendOnlyOutput,
+  readOwnIdentity,
+  signalProcessGroup,
+} from "./platform.ts";
+import { withJournalLock } from "./recovery.ts";
+import { StallTracker } from "./stall.ts";
+import { appendCommandAudit } from "./store.ts";
+
+/** Hidden entrypoint of the hack binary: `hack <this> <commandId>`. */
+export const BACKGROUND_SUPERVISOR_ARGUMENT =
+  "--internal-background-command-supervisor";
+/** Supervisor-only variable carrying redaction values; never passed to the child. */
+export const REDACT_VALUES_ENV = "HACK_BACKGROUND_REDACT_VALUES";
+/** Values shorter than this are not redacted (too many false matches). */
+export const REDACT_MIN_BYTES = 6;
+
+const TICK_MS = 200;
+const EMIT_INTERVAL_MS = 500;
+const EMIT_EAGER_BYTES = 16 * 1024;
+const STOP_GRACE_MS = 2000;
+
+type StopReason = "cancelled" | "timed_out";
+
+/**
+ * Supervisor of one background command, run in its own session.
+ *
+ * It records its identity, starts the child in a new process group with stdin
+ * closed and stdout/stderr appended by the kernel to the journal's files, and
+ * then only observes: it announces appended output as byte-range events,
+ * redacts known values in place before announcing them, reports advisory
+ * stalls, enforces the timeout, stops capture at the limit without stopping
+ * the command, and writes the single `command.ended`. If it dies, the child
+ * keeps running and writing; a later reader takes over (see recovery.ts).
+ *
+ * SIGTERM (sent by cancel after identity checks) stops the child group and
+ * records `cancelled`; a pending `cancel.json` has the same effect, so a
+ * signal that arrives before the handler is installed is not lost.
+ */
+export async function runBackgroundSupervisor(opts: {
+  readonly commandId: string;
+  readonly root?: string;
+}): Promise<number> {
+  if (!isCommandId(opts.commandId)) {
+    return 2;
+  }
+  const signals = installSignalHandlers();
+  const root = opts.root ?? commandsRoot();
+  const paths = journalPaths({ root, commandId: opts.commandId });
+  const prepared = await prepare(paths);
+  if (prepared === "failed" || prepared === "already_ended") {
+    return prepared === "failed" ? 1 : 0;
+  }
+  const { meta, launch, writer } = prepared;
+  const startedMono = performance.now();
+  const finish = async (payload: Record<string, unknown>): Promise<number> => {
+    await writer.write("command.ended", {
+      durationMs: Math.round(performance.now() - startedMono),
+      ...payload,
+    });
+    await appendCommandAudit({
+      root,
+      entry: {
+        event: "end",
+        commandId: meta.commandId,
+        operation: meta.operation,
+        projectId: meta.projectId,
+        instanceId: meta.instanceId,
+        service: meta.service,
+        caller: meta.caller,
+        outcome: String(payload.outcome),
+        exitCode:
+          typeof payload.exitCode === "number" ? payload.exitCode : null,
+      },
+    });
+    await unlink(paths.reserve).catch(() => undefined);
+    return 0;
+  };
+  const baseEnded = {
+    exitCode: null,
+    signal: null,
+    truncated: false,
+    suppressed: meta.capture === "metadata",
+  };
+  if (await cancelRequested(paths)) {
+    return await finish({
+      ...baseEnded,
+      outcome: "cancelled",
+      reason: "cancelled_before_start",
+    });
+  }
+  const proc = await startChild({ paths, meta, launch });
+  if (!proc) {
+    return await finish({
+      ...baseEnded,
+      outcome: "failed",
+      reason: "spawn_failed",
+    });
+  }
+  await writer.write("command.started", {
+    pid: proc.pid,
+    processGroupId: proc.pid,
+  });
+  const capture = new OutputCapture({
+    paths,
+    writer,
+    full: meta.capture === "full",
+    secrets: encodeSecrets({
+      values: prepared.redactValues,
+      minLength: REDACT_MIN_BYTES,
+    }),
+    stall: new StallTracker(
+      meta.stallDetection === "available" ? meta.stallAfterMs : 0,
+      performance.now()
+    ),
+  });
+  try {
+    return await finish(
+      await superviseChild({
+        proc,
+        meta,
+        paths,
+        capture,
+        startedMono,
+        stopRequested: signals.stopRequested,
+      })
+    );
+  } catch (error: unknown) {
+    // An internal failure must not be reported as the command's result.
+    return await finish({
+      ...baseEnded,
+      truncated: capture.truncated,
+      outcome: "unknown",
+      reason: "supervisor_error",
+      detail: error instanceof Error ? error.name : "error",
+    }).catch(() => 1);
+  }
+}
+
+/**
+ * The supervisor has no terminal and must outlive its launcher's session:
+ * interrupt, hangup and broken-pipe signals are ignored. SIGTERM is the
+ * cancel request.
+ */
+function installSignalHandlers(): { readonly stopRequested: () => boolean } {
+  let requested = false;
+  process.on("SIGINT", () => undefined);
+  process.on("SIGHUP", () => undefined);
+  process.on("SIGPIPE", () => undefined);
+  process.on("SIGTERM", () => {
+    requested = true;
+  });
+  return { stopRequested: () => requested };
+}
+
+/**
+ * Read the request, record this process as the owner (pid, birth, session),
+ * and return the writer, or "already_ended" when a canceller that found no
+ * supervisor already wrote the final record.
+ */
+async function prepare(paths: JournalPaths): Promise<
+  | "failed"
+  | "already_ended"
+  | {
+      readonly meta: CommandMeta;
+      readonly launch: LaunchRecord;
+      readonly writer: JournalWriter;
+      readonly redactValues: readonly string[];
+    }
+> {
+  const meta = await readMeta(paths);
+  const launch = await readLaunch(paths);
+  const redactValues = readRedactValues();
+  const own = await readOwnIdentity();
+  if (!(meta && launch && own)) {
+    return "failed";
+  }
+  await createPrivateFileExclusive({
+    path: paths.owner,
+    text: JSON.stringify({
+      pid: own.identity.pid,
+      birth: own.identity.birth,
+      processGroupId: own.identity.processGroupId,
+      sessionId: own.sessionId,
+      newSession: own.sessionId === own.identity.pid,
+    }),
+  });
+  const events = await withJournalLock(
+    paths,
+    async () => await readEvents(paths)
+  );
+  if (endedEvent(events)) {
+    return "already_ended";
+  }
+  return {
+    meta,
+    launch,
+    redactValues,
+    writer: new JournalWriter(paths, meta, events.at(-1)?.seq ?? 0),
+  };
+}
+
+/**
+ * Start the child in its own session and process group, stdin closed, stdout
+ * and stderr appended by the kernel to the journal files (or /dev/null for
+ * metadata capture), then record its identity. Null when it cannot start.
+ */
+async function startChild(opts: {
+  readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+  readonly launch: LaunchRecord;
+}): Promise<Bun.Subprocess | null> {
+  const descriptors =
+    opts.meta.capture === "full"
+      ? {
+          stdout: openAppendOnlyOutput(opts.paths.stdout),
+          stderr: openAppendOnlyOutput(opts.paths.stderr),
+        }
+      : (() => {
+          const sink = openSync("/dev/null", constants.O_WRONLY);
+          return { stdout: sink, stderr: sink };
+        })();
+  let proc: Bun.Subprocess;
+  try {
+    proc = Bun.spawn([...opts.launch.argv], {
+      cwd: opts.launch.cwd,
+      env: childEnv(),
+      stdin: "ignore",
+      stdout: descriptors.stdout,
+      stderr: descriptors.stderr,
+      detached: true,
+    });
+  } catch {
+    return null;
+  } finally {
+    // The child holds its own copies; the supervisor never writes output.
+    closeDescriptor(descriptors.stdout);
+    closeDescriptor(descriptors.stderr);
+  }
+  const snapshot = await observeIdentities([proc.pid]);
+  await createPrivateFileExclusive({
+    path: opts.paths.child,
+    text: JSON.stringify({
+      pid: proc.pid,
+      // Unobserved birth never matches, so cancel will not signal this pid.
+      birth: snapshot?.get(proc.pid)?.birth ?? "unobserved",
+      processGroupId: proc.pid,
+    }),
+  });
+  return proc;
+}
+
+/**
+ * Observe the child until it exits: capture output, enforce the timeout,
+ * honour cancel, report stalls. Returns the `command.ended` payload.
+ */
+async function superviseChild(opts: {
+  readonly proc: Bun.Subprocess;
+  readonly meta: CommandMeta;
+  readonly paths: JournalPaths;
+  readonly capture: OutputCapture;
+  readonly startedMono: number;
+  readonly stopRequested: () => boolean;
+}): Promise<Record<string, unknown>> {
+  const { proc, capture } = opts;
+  let exited = false;
+  proc.exited.then(
+    () => {
+      exited = true;
+    },
+    () => {
+      exited = true;
+    }
+  );
+  let stopping: StopReason | null = null;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  while (!exited) {
+    await Bun.sleep(TICK_MS);
+    const reason = stopping
+      ? null
+      : await stopReason({ ...opts, now: performance.now() });
+    if (reason) {
+      stopping = reason;
+      signalProcessGroup(proc.pid, "SIGTERM");
+      killTimer = setTimeout(
+        () => signalProcessGroup(proc.pid, "SIGKILL"),
+        STOP_GRACE_MS
+      );
+    }
+    await capture.poll(false);
+    if (!(stopping || exited)) {
+      await capture.checkStall(performance.now());
+    }
+  }
+  const exitCode = await proc.exited;
+  clearTimeout(killTimer);
+  if (stopping) {
+    // Descendants must not outlive a forced stop.
+    signalProcessGroup(proc.pid, "SIGKILL");
+  }
+  await capture.poll(true);
+  return endedPayload({
+    stopping,
+    exitCode,
+    signal: proc.signalCode ?? null,
+    truncated: capture.truncated,
+    suppressed: opts.meta.capture === "metadata",
+    backend: opts.meta.backend,
+  });
+}
+
+async function stopReason(opts: {
+  readonly meta: CommandMeta;
+  readonly paths: JournalPaths;
+  readonly startedMono: number;
+  readonly now: number;
+  readonly stopRequested: () => boolean;
+}): Promise<StopReason | null> {
+  if (opts.now - opts.startedMono >= opts.meta.timeoutMs) {
+    return "timed_out";
+  }
+  return opts.stopRequested() || (await cancelRequested(opts.paths))
+    ? "cancelled"
+    : null;
+}
+
+type StreamState = {
+  emittedTo: number;
+  size: number;
+  lastEmitMono: number;
+  carry: Uint8Array;
+};
+
+/**
+ * Turns kernel-appended output into events. The first output of a stream is
+ * announced on the next tick; later output is coalesced to one batch per
+ * EMIT_INTERVAL_MS unless EMIT_EAGER_BYTES are pending. At the capture limit
+ * it records `command.output_truncated` and from then on truncates the files
+ * back to what was announced, so storage stays bounded while the child keeps
+ * writing.
+ */
+class OutputCapture {
+  truncated = false;
+  private captured = 0;
+  private outputEvents = 0;
+  private readonly streams: Record<OutputStream, StreamState> = {
+    stdout: {
+      emittedTo: 0,
+      size: 0,
+      lastEmitMono: Number.NEGATIVE_INFINITY,
+      carry: new Uint8Array(0),
+    },
+    stderr: {
+      emittedTo: 0,
+      size: 0,
+      lastEmitMono: Number.NEGATIVE_INFINITY,
+      carry: new Uint8Array(0),
+    },
+  };
+  private readonly opts: {
+    readonly paths: JournalPaths;
+    readonly writer: JournalWriter;
+    readonly full: boolean;
+    readonly secrets: readonly Uint8Array[];
+    readonly stall: StallTracker;
+  };
+
+  constructor(opts: OutputCapture["opts"]) {
+    this.opts = opts;
+  }
+
+  async poll(final: boolean): Promise<void> {
+    if (!this.opts.full) {
+      return;
+    }
+    for (const stream of ["stdout", "stderr"] as const) {
+      const now = performance.now();
+      await this.observeGrowth(stream, now);
+      if (this.truncated) {
+        await this.discardPastLimit(stream);
+      } else if (this.shouldEmit(stream, now, final)) {
+        await this.emit(stream, now, final);
+      }
+    }
+  }
+
+  async checkStall(nowMono: number): Promise<void> {
+    const stalled = this.opts.stall.check(nowMono);
+    if (stalled?.type === "command.stalled") {
+      await this.opts.writer.write("command.stalled", {
+        idleMs: stalled.idleMs,
+        lastOutputAt: stalled.lastOutputAt,
+      });
+    }
+  }
+
+  private async observeGrowth(
+    stream: OutputStream,
+    now: number
+  ): Promise<void> {
+    const state = this.streams[stream];
+    const size = await fileSize(outputPath(this.opts.paths, stream));
+    if (size <= state.size) {
+      return;
+    }
+    state.size = size;
+    const resumed = this.opts.stall.activity({
+      nowMono: now,
+      wall: new Date().toISOString(),
+      output: true,
+    });
+    if (resumed) {
+      await this.opts.writer.write(resumed.type, {
+        idleMs: Math.round(resumed.idleMs),
+      });
+    }
+  }
+
+  private shouldEmit(
+    stream: OutputStream,
+    now: number,
+    final: boolean
+  ): boolean {
+    const state = this.streams[stream];
+    const pending = state.size - state.emittedTo;
+    return (
+      pending > 0 &&
+      (final ||
+        pending >= EMIT_EAGER_BYTES ||
+        now - state.lastEmitMono >= EMIT_INTERVAL_MS)
+    );
+  }
+
+  private async emit(
+    stream: OutputStream,
+    now: number,
+    final: boolean
+  ): Promise<void> {
+    const state = this.streams[stream];
+    const result = await pumpStream({
+      path: outputPath(this.opts.paths, stream),
+      stream,
+      from: state.emittedTo,
+      carry: state.carry,
+      final,
+      secrets: this.opts.secrets,
+      captureRemaining: CAPTURE_LIMIT_BYTES - this.captured,
+      eventsRemaining: OUTPUT_EVENT_LIMIT - this.outputEvents,
+      redact: true,
+      emit: async (range) => {
+        await this.opts.writer.write("command.output", range);
+      },
+    });
+    state.emittedTo = result.emittedTo;
+    state.carry = result.carry;
+    state.lastEmitMono = now;
+    this.captured += result.emittedBytes;
+    this.outputEvents += result.events;
+    if (result.budgetReached) {
+      this.truncated = true;
+      await this.opts.writer.write("command.output_truncated", {
+        capturedBytes: this.captured,
+        limitBytes: CAPTURE_LIMIT_BYTES,
+      });
+      await this.discardPastLimit("stdout");
+      await this.discardPastLimit("stderr");
+    }
+  }
+
+  /**
+   * Output past the limit is discarded; growth past `emittedTo` on the next
+   * tick is new output and still counts as activity.
+   */
+  private async discardPastLimit(stream: OutputStream): Promise<void> {
+    const state = this.streams[stream];
+    await truncateTo(outputPath(this.opts.paths, stream), state.emittedTo);
+    state.size = state.emittedTo;
+  }
+}
+
+export function endedPayload(opts: {
+  readonly stopping: StopReason | null;
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+  readonly truncated: boolean;
+  readonly suppressed: boolean;
+  readonly backend: "compose" | "native";
+}): Record<string, unknown> {
+  let outcome: string;
+  if (opts.stopping) {
+    outcome = opts.stopping;
+  } else {
+    outcome = opts.exitCode === 0 && !opts.signal ? "succeeded" : "failed";
+  }
+  return {
+    outcome,
+    exitCode: opts.signal ? null : opts.exitCode,
+    signal: opts.signal,
+    truncated: opts.truncated,
+    suppressed: opts.suppressed,
+    ...(opts.stopping
+      ? {
+          // The client process group was stopped; a process started inside a
+          // container by `docker compose exec` is not proven stopped.
+          containerProcess:
+            opts.backend === "compose" ? "not_confirmed" : "not_applicable",
+        }
+      : {}),
+  };
+}
+
+function readRedactValues(): string[] {
+  const raw = process.env[REDACT_VALUES_ENV];
+  delete process.env[REDACT_VALUES_ENV];
+  if (!raw) {
+    return [];
+  }
+  try {
+    const value: unknown = JSON.parse(raw);
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function childEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string" && key !== REDACT_VALUES_ENV) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+async function cancelRequested(paths: JournalPaths): Promise<boolean> {
+  return (await lstat(paths.cancel).catch(() => null)) !== null;
+}
+
+async function fileSize(path: string): Promise<number> {
+  return (await lstat(path).catch(() => null))?.size ?? 0;
+}
+
+/** Stop storing past the capture limit; the child keeps writing at the new end. */
+async function truncateTo(path: string, length: number): Promise<void> {
+  const handle = await open(
+    path,
+    constants.O_WRONLY | constants.O_NOFOLLOW
+  ).catch(() => null);
+  if (!handle) {
+    return;
+  }
+  try {
+    if ((await handle.stat()).size > length) {
+      await handle.truncate(length);
+    }
+  } finally {
+    await handle.close();
+  }
+}

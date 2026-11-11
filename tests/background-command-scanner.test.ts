@@ -1,0 +1,241 @@
+import { describe, expect, test } from "bun:test";
+import {
+  encodeSecrets,
+  scanOutput,
+  utf8SafeCut,
+} from "../src/lib/background-command/output-scanner.ts";
+import { StallTracker } from "../src/lib/background-command/stall.ts";
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * Feed `chunks` through scanOutput as a supervisor would: append to a file
+ * image, apply redactions in place, and collect emitted ranges.
+ */
+function simulate(opts: {
+  readonly chunks: readonly string[];
+  readonly secrets?: readonly string[];
+  readonly captureLimit?: number;
+  readonly maxRangeBytes?: number;
+}): {
+  file: Uint8Array;
+  ranges: { offset: number; length: number }[];
+  budgetReached: boolean;
+} {
+  const secrets = encodeSecrets({ values: opts.secrets ?? [], minLength: 1 });
+  // `raw` is what the child wrote (the supervisor's carry plus new bytes);
+  // `file` is the stored image, redacted in place.
+  let raw: Uint8Array = new Uint8Array(0);
+  let file: Uint8Array = new Uint8Array(0);
+  let emitted = 0;
+  const ranges: { offset: number; length: number }[] = [];
+  let budgetReached = false;
+  const step = (final: boolean) => {
+    const result = scanOutput({
+      bytes: raw.subarray(emitted),
+      offset: emitted,
+      final,
+      secrets,
+      captureRemaining:
+        (opts.captureLimit ?? 1 << 30) -
+        ranges.reduce((sum, range) => sum + range.length, 0),
+      maxRangeBytes: opts.maxRangeBytes ?? 16 * 1024,
+    });
+    for (const region of result.redactions) {
+      // Ranges are final once emitted: redaction never touches them.
+      expect(region.offset).toBeGreaterThanOrEqual(emitted);
+      file.fill(0x2a, region.offset, region.offset + region.length);
+    }
+    for (const range of result.ranges) {
+      expect(range.offset).toBe(emitted);
+      ranges.push(range);
+      emitted += range.length;
+    }
+    budgetReached ||= result.budgetReached;
+  };
+  for (const chunk of opts.chunks) {
+    const bytes = encoder.encode(chunk);
+    const nextRaw = new Uint8Array(raw.length + bytes.length);
+    nextRaw.set(raw);
+    nextRaw.set(bytes, raw.length);
+    raw = nextRaw;
+    const next = new Uint8Array(file.length + bytes.length);
+    next.set(file);
+    next.set(bytes, file.length);
+    file = next;
+    step(false);
+  }
+  step(true);
+  return { file, ranges, budgetReached };
+}
+
+describe("utf8SafeCut", () => {
+  test("never splits a multi-byte character", () => {
+    const bytes = encoder.encode("aé€😀");
+    // a(1) é(2) €(3) 😀(4) = 10 bytes
+    expect(utf8SafeCut(bytes, 10)).toBe(10);
+    expect(utf8SafeCut(bytes, 9)).toBe(6);
+    expect(utf8SafeCut(bytes, 8)).toBe(6);
+    expect(utf8SafeCut(bytes, 7)).toBe(6);
+    expect(utf8SafeCut(bytes, 5)).toBe(3);
+    expect(utf8SafeCut(bytes, 2)).toBe(1);
+  });
+
+  test("does not hold back invalid bytes forever", () => {
+    const bytes = Uint8Array.from([0x61, 0xff, 0xfe]);
+    expect(utf8SafeCut(bytes, 3)).toBe(3);
+  });
+});
+
+describe("scanOutput", () => {
+  test("ranges decode independently when a character arrives split", () => {
+    const text = "héllo wörld 😀 done";
+    const raw = encoder.encode(text);
+    const chunks: string[] = [];
+    // Split at every byte by feeding raw bytes through latin1-free pieces.
+    const { ranges, file } = (() => {
+      let file = new Uint8Array(0);
+      let emitted = 0;
+      const out: { offset: number; length: number }[] = [];
+      for (let index = 0; index < raw.length; index += 1) {
+        const next = new Uint8Array(file.length + 1);
+        next.set(file);
+        next[file.length] = raw[index] ?? 0;
+        file = next;
+        const result = scanOutput({
+          bytes: file.subarray(emitted),
+          offset: emitted,
+          final: index === raw.length - 1,
+          secrets: [],
+          captureRemaining: 1 << 20,
+          maxRangeBytes: 4,
+        });
+        for (const range of result.ranges) {
+          out.push(range);
+          emitted += range.length;
+        }
+      }
+      return { ranges: out, file };
+    })();
+    expect(chunks).toEqual([]);
+    for (const range of ranges) {
+      expect(() =>
+        decoder.decode(file.subarray(range.offset, range.offset + range.length))
+      ).not.toThrow();
+    }
+    expect(decoder.decode(file)).toBe(text);
+    expect(ranges.reduce((sum, range) => sum + range.length, 0)).toBe(
+      raw.length
+    );
+  });
+
+  test("redacts a value split across appends (carry-over window)", () => {
+    const secret = "s3cr3t-token-value";
+    const { file, ranges } = simulate({
+      chunks: [
+        "before s3cr3t-to",
+        "ken-value after\n",
+        "and s3cr3t-token-value again",
+      ],
+      secrets: [secret],
+    });
+    const text = decoder.decode(file);
+    expect(text).not.toContain(secret);
+    expect(text).toBe(
+      `before ${"*".repeat(secret.length)} after\nand ${"*".repeat(secret.length)} again`
+    );
+    expect(ranges.reduce((sum, range) => sum + range.length, 0)).toBe(
+      file.length
+    );
+  });
+
+  test("redacts a value split one byte at a time", () => {
+    const secret = "abcdefgh";
+    const { file } = simulate({
+      chunks: ["xx", ...secret.split(""), "yy"],
+      secrets: [secret],
+    });
+    expect(decoder.decode(file)).toBe("xx********yy");
+  });
+
+  test("a value overlapping one redacted on an earlier append is still found", () => {
+    const { file } = simulate({
+      chunks: ["key=abcdef", "123456 end"],
+      secrets: ["abcdef", "def123456"],
+    });
+    expect(decoder.decode(file)).toBe("key=************ end");
+  });
+
+  test("overlapping values are both redacted", () => {
+    const { file } = simulate({
+      chunks: ["key=abcdef123456 end"],
+      secrets: ["abcdef", "def123456"],
+    });
+    expect(decoder.decode(file)).toBe("key=************ end");
+  });
+
+  test("ranges never exceed the event size", () => {
+    const { ranges } = simulate({
+      chunks: ["x".repeat(100)],
+      maxRangeBytes: 16,
+    });
+    expect(ranges.every((range) => range.length <= 16)).toBe(true);
+    expect(ranges.reduce((sum, range) => sum + range.length, 0)).toBe(100);
+  });
+
+  test("capture budget stops emission and reports it", () => {
+    const { ranges, budgetReached } = simulate({
+      chunks: ["a".repeat(30), "b".repeat(30)],
+      captureLimit: 40,
+    });
+    expect(ranges.reduce((sum, range) => sum + range.length, 0)).toBe(40);
+    expect(budgetReached).toBe(true);
+  });
+
+  test("short values are not redacted", () => {
+    expect(
+      encodeSecrets({ values: ["1", "true", "abcdef"], minLength: 6 })
+    ).toHaveLength(1);
+  });
+});
+
+describe("StallTracker", () => {
+  test("reports one stall per quiet period on the monotonic clock, then resumed", () => {
+    const tracker = new StallTracker(1000, 0);
+    expect(tracker.check(999)).toBeNull();
+    expect(tracker.check(1000)).toEqual({
+      type: "command.stalled",
+      idleMs: 1000,
+      lastOutputAt: null,
+    });
+    expect(tracker.check(5000)).toBeNull();
+    expect(
+      tracker.activity({
+        nowMono: 5500,
+        wall: "2026-11-11T00:00:00.000Z",
+        output: true,
+      })
+    ).toEqual({ type: "command.resumed", idleMs: 5500 });
+    expect(tracker.check(6000)).toBeNull();
+    expect(tracker.check(6500)).toEqual({
+      type: "command.stalled",
+      idleMs: 1000,
+      lastOutputAt: "2026-11-11T00:00:00.000Z",
+    });
+  });
+
+  test("a state change also counts as activity", () => {
+    const tracker = new StallTracker(1000, 0);
+    expect(
+      tracker.activity({ nowMono: 900, wall: "w", output: false })
+    ).toBeNull();
+    expect(tracker.check(1500)).toBeNull();
+    expect(tracker.check(1900)?.type).toBe("command.stalled");
+  });
+
+  test("0 turns detection off", () => {
+    const tracker = new StallTracker(0, 0);
+    expect(tracker.check(10_000_000)).toBeNull();
+  });
+});

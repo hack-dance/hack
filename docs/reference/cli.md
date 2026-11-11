@@ -331,6 +331,12 @@ Everything from `<cmd>` on is passed to the command unchanged, including flags s
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--workdir <path>` | Working directory inside the container (docker compose run -w) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
+| `--detach` | Start in the background and print a command id at once; read it with `hack commands read <id>` |
+| `--json` | With --detach: print the start result as a JSON envelope |
+| `--request-key <key>` | With --detach: retrying the same key with the same inputs returns the existing command instead of running it again |
+| `--timeout-ms <ms>` | With --detach: stop the command after this long (default 1800000, maximum 21600000) |
+| `--stall-after-ms <ms>` | With --detach: report an advisory stall after this long without output (default 120000, 0 turns it off) |
+| `--capture <full|metadata>` | With --detach: store output (full, the default) or only events and the outcome (metadata) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -365,6 +371,127 @@ Everything from `<cmd>` on is passed to the command unchanged, including flags s
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--workdir <path>` | Working directory inside the container (docker compose run -w) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
+| `--detach` | Start in the background and print a command id at once; read it with `hack commands read <id>` |
+| `--json` | With --detach: print the start result as a JSON envelope |
+| `--request-key <key>` | With --detach: retrying the same key with the same inputs returns the existing command instead of running it again |
+| `--timeout-ms <ms>` | With --detach: stop the command after this long (default 1800000, maximum 21600000) |
+| `--stall-after-ms <ms>` | With --detach: report an advisory stall after this long without output (default 120000, 0 turns it off) |
+| `--capture <full|metadata>` | With --detach: store output (full, the default) or only events and the outcome (metadata) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+
+## `hack commands`
+
+Read, inspect or cancel background commands started with `hack exec\|run --detach`
+
+### Usage
+
+```bash
+hack commands <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack commands read <commandId>` | Read a background command's events and output from a cursor |
+| `hack commands show <commandId>` | Show a background command's state, limits and outcome |
+| `hack commands cancel <commandId>` | Cancel a background command |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack commands read <commandId>`
+
+Read a background command's events and output from a cursor
+
+### Usage
+
+```bash
+hack commands read <commandId> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `commandId` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--after <cursor>` | Read events after this cursor (default: from the start) |
+| `--follow, -f` | Keep reading until the command ends |
+| `--wait-ms <ms>` | Wait up to this long for new events (0-30000; default 0, or no limit with --follow) |
+| `--max-bytes <n>` | Output text per read (16384-262144; default 32768) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack commands show <commandId>`
+
+Show a background command's state, limits and outcome
+
+### Usage
+
+```bash
+hack commands show <commandId> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `commandId` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack commands cancel <commandId>`
+
+Cancel a background command
+
+### Usage
+
+```bash
+hack commands cancel <commandId> [options]
+```
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `commandId` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

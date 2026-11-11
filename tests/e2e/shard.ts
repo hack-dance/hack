@@ -69,6 +69,7 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   "native-config-files": 30,
   "exec-stale-env": 29,
   "mcp-logs-compose": 24,
+  "background-command-compose": 20,
   "lifecycle-session-recovery": 21,
   "cache-prune": 18,
   "up-down": 16,

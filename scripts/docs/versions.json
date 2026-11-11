@@ -4141,6 +4141,83 @@
       {
         "slug": "native/reference",
         "title": "Reference map"
+      },
+      {
+        "slug": "recipes/overview",
+        "title": "Recipes",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/README.md"
+      },
+      {
+        "slug": "recipes/cli-sign-in",
+        "title": "Sign in to another CLI at startup",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/cli-sign-in.md"
+      },
+      {
+        "slug": "recipes/tunnels",
+        "title": "Expose a local service through a tunnel",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/tunnels.md"
+      },
+      {
+        "slug": "recipes/remote-database",
+        "title": "Use a remote database from local services",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/remote-database.md"
+      },
+      {
+        "slug": "recipes/migrations",
+        "title": "Run database migrations",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/migrations.md"
+      },
+      {
+        "slug": "recipes/environments",
+        "title": "Switch between environments",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/environments.md"
+      },
+      {
+        "slug": "recipes/deps-service",
+        "title": "Install dependencies in a deps service",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/deps-service.md"
+      },
+      {
+        "slug": "recipes/dependency-directories",
+        "title": "Dependency directories and caches",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/dependency-directories.md"
+      },
+      {
+        "slug": "recipes/cleanup",
+        "title": "Clean up branch instances, worktrees and volumes",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/cleanup.md"
+      },
+      {
+        "slug": "recipes/config-examples",
+        "title": "Config examples",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/config-examples.md"
+      },
+      {
+        "slug": "recipes/common-pitfalls",
+        "title": "Common pitfalls",
+        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
+        "sourceLabel": "Recipe source (next.13 compatible)",
+        "sourceFile": "docs/recipes/common-pitfalls.md"
       }
     ]
   }

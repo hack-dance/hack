@@ -1,5 +1,9 @@
 # Configuration fields
 
+For complete project files, start with [Config examples](../recipes/config-examples.md)
+or browse [Recipes](../recipes/overview.md). For overlay examples, see
+[Environments](../recipes/environments.md).
+
 This field inventory was audited against the `5.0.0-next.5` source and has not been requalified against later prereleases. The [generated command reference](../../reference/cli.md) and the pinned runtime guides take precedence where they differ.
 
 This reference describes v5 (next.5). Use [Environment and secrets](../../env.md) and [Lifecycle](../../lifecycle.md) for workflows. Fields below come from the version-pinned schema and readers, not a newer checkout.

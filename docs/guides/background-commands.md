@@ -170,14 +170,15 @@ from space reserved at start) has `truncated: true` and `captureStopped:
 "no_space"`. On the Compose backend each output file is also capped at 64 MiB
 by a kernel file-size limit on the host-side `docker compose` client, so a
 burst between two supervisor polls cannot fill the disk. A client that writes
-more than that within one poll (200 ms) gets a "File too large" (EFBIG) error
-and exits: the command ends `failed`, output after that point is lost, and
-what ran in the container is then stopped like at any other end (see Inspect
-and cancel). Everything the client starts on the host inherits the same 64 MiB
-file limit (with SIGXFSZ ignored). A command whose program does not exist ends
-`failed` with exit code 127. The native backend has no such cap. This differs
-from the foreground `hack.project.exec` and `hack.project.run` MCP tools,
-where reaching 8 MiB stops the command.
+more than that within one poll (200 ms), or keeps writing faster than capture
+can scan its output (most likely with many values to redact), gets a "File too
+large" (EFBIG) error and exits: the command ends `failed`, output after that
+point is lost, and what ran in the container is then stopped like at any other
+end (see Inspect and cancel). Everything the client starts on the host
+inherits the same 64 MiB file limit (with SIGXFSZ ignored). A command whose
+program does not exist ends `failed` with exit code 127. The native backend
+has no such cap. This differs from the foreground `hack.project.exec` and
+`hack.project.run` MCP tools, where reaching 8 MiB stops the command.
 
 ## Inspect and cancel
 

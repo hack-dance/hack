@@ -4232,6 +4232,7 @@ async function configureLinuxHostTlsTrust(input: {
   note(`Current shell: source ${scriptPath}`, "Host TLS");
   return await configureLinuxSystemAndBrowserTrust({
     certPath: input.certPath,
+    composeFile: getGlobalPaths().caddyCompose,
   });
 }
 

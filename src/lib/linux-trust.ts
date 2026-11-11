@@ -10,6 +10,8 @@
  * Root steps are returned as argv arrays; the caller shows them and runs each
  * as `sudo <argv>` only after an interactive yes. NSS steps need no root.
  */
+import { createHash, X509Certificate } from "node:crypto";
+import { inspectMacCaEligibility } from "./mac-ca-trust.ts";
 
 export type LinuxDistroFamily = "debian" | "arch" | "fedora" | "suse";
 
@@ -178,18 +180,20 @@ export function bundleContainsCertificate(opts: {
   return pemCertificateBodies(opts.bundle).includes(cert);
 }
 
+/** Every `certutil` call names the resolved absolute binary, never a bare name. */
+type CertutilDb = { readonly certutil: string; readonly dbDir: string };
+
 /** `certutil` argv that adds the CA as a trusted TLS issuer to one NSS db. */
-export function nssAddArgv(opts: {
-  readonly dbDir: string;
-  readonly certPath: string;
-}): readonly string[] {
+export function nssAddArgv(
+  opts: CertutilDb & { readonly certPath: string }
+): readonly string[] {
   return [
-    "certutil",
+    opts.certutil,
     "-d",
     `sql:${opts.dbDir}`,
     "-A",
     "-t",
-    "C,,",
+    NSS_TLS_ISSUER_TRUST,
     "-n",
     NSS_CA_NICKNAME,
     "-i",
@@ -197,29 +201,212 @@ export function nssAddArgv(opts: {
   ];
 }
 
+/** `certutil` argv that sets the TLS issuer trust on Hack's existing entry. */
+export function nssModifyTrustArgv(opts: CertutilDb): readonly string[] {
+  return [
+    opts.certutil,
+    "-d",
+    `sql:${opts.dbDir}`,
+    "-M",
+    "-n",
+    NSS_CA_NICKNAME,
+    "-t",
+    NSS_TLS_ISSUER_TRUST,
+  ];
+}
+
 /** `certutil` argv that creates an empty user NSS db (no password). */
-export function nssCreateArgv(dbDir: string): readonly string[] {
-  return ["certutil", "-d", `sql:${dbDir}`, "-N", "--empty-password"];
+export function nssCreateArgv(opts: CertutilDb): readonly string[] {
+  return [opts.certutil, "-d", `sql:${opts.dbDir}`, "-N", "--empty-password"];
 }
 
 /** `certutil` argv that deletes Hack's entry (before replacing it). */
-export function nssDeleteArgv(dbDir: string): readonly string[] {
-  return ["certutil", "-d", `sql:${dbDir}`, "-D", "-n", NSS_CA_NICKNAME];
-}
-
-/** `certutil` argv that prints the entry, exit 0 when it exists. */
-export function nssListArgv(dbDir: string): readonly string[] {
-  return ["certutil", "-d", `sql:${dbDir}`, "-L", "-n", NSS_CA_NICKNAME, "-a"];
-}
-
-/** Manual steps when the family is unknown. */
-export function renderUnknownDistroTrustSteps(
-  certPath: string
-): readonly string[] {
+export function nssDeleteArgv(opts: CertutilDb): readonly string[] {
   return [
-    "Unknown distribution (no matching ID or ID_LIKE in /etc/os-release). Add the CA to your trust store, for example:",
-    `  Debian/Ubuntu: sudo install -m 0644 ${certPath} /usr/local/share/ca-certificates/${LINUX_ANCHOR_FILENAME} && sudo update-ca-certificates`,
-    `  Fedora/RHEL:   sudo install -m 0644 ${certPath} /etc/pki/ca-trust/source/anchors/${LINUX_ANCHOR_FILENAME} && sudo update-ca-trust extract`,
-    `  Arch:          sudo trust anchor --store ${certPath}`,
+    opts.certutil,
+    "-d",
+    `sql:${opts.dbDir}`,
+    "-D",
+    "-n",
+    NSS_CA_NICKNAME,
   ];
 }
+
+/** `certutil` argv that prints the entry as PEM, exit 0 when it exists. */
+export function nssExportArgv(opts: CertutilDb): readonly string[] {
+  return [
+    opts.certutil,
+    "-d",
+    `sql:${opts.dbDir}`,
+    "-L",
+    "-n",
+    NSS_CA_NICKNAME,
+    "-a",
+  ];
+}
+
+/** `certutil` argv that lists every entry with its trust attributes. */
+export function nssListTrustArgv(opts: CertutilDb): readonly string[] {
+  return [opts.certutil, "-d", `sql:${opts.dbDir}`, "-L"];
+}
+
+/** SSL/TLS trust "C" (trusted CA for server certificates); e-mail and code signing unset. */
+export const NSS_TLS_ISSUER_TRUST = "C,,";
+
+/**
+ * Trust attributes for `nickname` from `certutil -L` output, whose rows are
+ * "<nickname padded with spaces> <ssl>,<email>,<object>". `null` when absent.
+ */
+export function parseNssTrustFlags(opts: {
+  readonly listing: string;
+  readonly nickname?: string;
+}): string | null {
+  const nickname = opts.nickname ?? NSS_CA_NICKNAME;
+  for (const line of opts.listing.split("\n")) {
+    const trimmed = line.trimEnd();
+    if (!trimmed.startsWith(nickname)) {
+      continue;
+    }
+    const rest = trimmed.slice(nickname.length);
+    if (rest.length > 0 && !WHITESPACE_START.test(rest)) {
+      continue;
+    }
+    const flags = rest.trim();
+    if (NSS_FLAGS.test(flags)) {
+      return flags;
+    }
+  }
+  return null;
+}
+
+const WHITESPACE_START = /^\s/;
+const NSS_FLAGS = /^[A-Za-z]*,[A-Za-z]*,[A-Za-z]*$/;
+
+/** The SSL segment carries the trusted-CA flag "C" for server certificates. */
+export function hasTlsIssuerTrust(flags: string | null): boolean {
+  return (flags?.split(",")[0] ?? "").includes("C");
+}
+
+const SAFE_SHELL_WORD = /^[\w@%+=:,./~-]+$/;
+
+/** Render argv as one copyable POSIX shell command line. */
+export function renderShellCommand(argv: readonly string[]): string {
+  return argv
+    .map((word) =>
+      SAFE_SHELL_WORD.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`
+    )
+    .join(" ");
+}
+
+/**
+ * Manual steps when the family is unknown, rendered from the same argument
+ * arrays and quoting as the supported families (a path with spaces or shell
+ * syntax stays one literal argument).
+ */
+export function renderUnknownDistroTrustSteps(opts: {
+  readonly certPath: string;
+  readonly sha256: string;
+}): readonly string[] {
+  const steps: string[] = [
+    "Unknown distribution (no matching ID or ID_LIKE in /etc/os-release). Run the commands for your distribution family:",
+  ];
+  const families: readonly [string, LinuxDistroFamily][] = [
+    ["Debian/Ubuntu", "debian"],
+    ["Fedora/RHEL", "fedora"],
+    ["Arch", "arch"],
+    ["openSUSE", "suse"],
+  ];
+  for (const [label, family] of families) {
+    steps.push(`  ${label}:`);
+    for (const command of linuxSystemTrustCommands({
+      family,
+      certPath: opts.certPath,
+      sha256: opts.sha256,
+    })) {
+      steps.push(`    sudo ${renderShellCommand(command)}`);
+    }
+  }
+  return steps;
+}
+
+/** A validated Caddy root: exactly one self-signed CA, currently valid. */
+export type ValidatedCa = {
+  readonly pem: string;
+  readonly certificate: X509Certificate;
+  /** SHA-256 of the DER certificate, colon-separated (shown to the user). */
+  readonly fingerprint256: string;
+  /** SHA-256 of the exact PEM bytes installed (bound into root steps). */
+  readonly pemSha256: string;
+};
+
+/**
+ * Validate the exported CA before any trust writer sees it: exactly one PEM
+ * certificate (the macOS eligibility gate: single block, size limit, CA,
+ * within validity), and self-signed, so it is eligible as a trust root.
+ */
+export async function validateCaddyRootPem(opts: {
+  readonly pem: string;
+  readonly now?: number;
+}): Promise<
+  | { readonly ok: true; readonly ca: ValidatedCa }
+  | { readonly ok: false; readonly issue: string }
+> {
+  const eligibility = await inspectMacCaEligibility({
+    certPath: "<exported Caddy root>",
+    readTextFile: async () => opts.pem,
+    now: opts.now,
+  });
+  if (!eligibility.installable) {
+    return { ok: false, issue: eligibility.issue };
+  }
+  const { certificate } = eligibility;
+  if (
+    certificate.issuer !== certificate.subject ||
+    !certificate.checkIssued(certificate) ||
+    !certificate.verify(certificate.publicKey)
+  ) {
+    return {
+      ok: false,
+      issue: "Current Caddy Local CA is not a self-signed root",
+    };
+  }
+  return {
+    ok: true,
+    ca: {
+      pem: opts.pem,
+      certificate,
+      fingerprint256: certificate.fingerprint256,
+      pemSha256: createHash("sha256").update(opts.pem).digest("hex"),
+    },
+  };
+}
+
+const CADDY_ROOT_SUBJECT = "Caddy Local Authority";
+
+/**
+ * Caddy roots in a trust bundle other than `current` (by DER): roots left
+ * trusted after Caddy rotated its CA. Only public fingerprints are returned.
+ */
+export function findOtherCaddyRoots(opts: {
+  readonly bundle: string;
+  readonly current: X509Certificate;
+}): readonly string[] {
+  const others: string[] = [];
+  for (const match of opts.bundle.matchAll(PEM_BLOCK)) {
+    try {
+      const certificate = new X509Certificate(match[0]);
+      if (
+        certificate.subject.includes(CADDY_ROOT_SUBJECT) &&
+        !certificate.raw.equals(opts.current.raw)
+      ) {
+        others.push(certificate.fingerprint256);
+      }
+    } catch {
+      // Not a parseable certificate; ignore it.
+    }
+  }
+  return others;
+}
+
+const PEM_BLOCK =
+  /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;

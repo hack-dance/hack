@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -29,6 +31,7 @@ const SPAWN_TIMEOUT_MS = 60_000;
 const IMAGE = `sha256:${"e".repeat(64)}`;
 /** Appears only in authored values; it must never reach any output. */
 const PRIVATE = "synthetic-private-sentinel";
+const NAMESPACE = "c".repeat(64);
 
 afterEach(async () => {
   for (const root of roots.splice(0)) {
@@ -79,10 +82,16 @@ exit 1
     /** Script one stub reply file, for example `runtime-up.out`. */
     reply: write,
     /** Script the runtime review's reply. */
-    review: async (diagnostics: unknown[]) =>
+    review: async (
+      diagnostics: unknown[],
+      plan: Record<string, unknown> = {}
+    ) =>
       await write("project-plan.out", {
         plan_id: "f".repeat(64),
         plan: {
+          namespace: NAMESPACE,
+          services: {},
+          ...plan,
           enrollment_compatible: !diagnostics.some(
             (entry) =>
               typeof entry === "object" &&
@@ -90,13 +99,17 @@ exit 1
               "severity" in entry &&
               entry.severity === "error"
           ),
-          services: {},
           diagnostics,
         },
       }),
     /** Make the runtime review stop with one closed code. */
     reviewStops: async (code: string) =>
       await write("project-plan.err", { code }),
+    /** Every stub invocation's full argument line. */
+    argv: async () =>
+      (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
+        .split("\n")
+        .filter(Boolean),
     calls: async () =>
       (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
         .split("\n")
@@ -139,8 +152,16 @@ async function cli(
   return { stdout, stderr, code, output: stdout + stderr };
 }
 
-async function preflight(f: Fixture, env: Record<string, string> = {}) {
-  const result = await cli(f, ["doctor", "--native-preflight", "--json"], env);
+async function preflight(
+  f: Fixture,
+  env: Record<string, string> = {},
+  extra: readonly string[] = []
+) {
+  const result = await cli(
+    f,
+    ["doctor", "--native-preflight", "--json", ...extra],
+    env
+  );
   const parsed = JSON.parse(result.stdout) as {
     ok: boolean;
     data: NativePreflightReport;
@@ -262,8 +283,8 @@ test(
     // Authored values and the runtime's own text never reach the output.
     expect(output).not.toContain(PRIVATE);
     expect(output).not.toContain("runtime text");
-    // The only runtime request is the review: nothing is started.
-    expect(await f.calls()).toEqual(["project plan"]);
+    // The only runtime requests are the two reviews: nothing is started.
+    expect(await f.calls()).toEqual(["project plan", "project plan"]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -347,12 +368,16 @@ test(
       "Runtime review: skipped, because no native runtime is selected."
     );
     expect(human.stdout).toContain("No blockers found by the checks that ran.");
-    // Native selected without a candidate degrades the same way.
-    const incomplete = await preflight(clean, {
-      ...GRANT,
-      HACK_RUNTIME_BACKEND: "native",
+    // Native selected without a candidate is named as that, not as "not selected".
+    const incompleteEnv = { ...GRANT, HACK_RUNTIME_BACKEND: "native" };
+    const incomplete = await preflight(clean, incompleteEnv);
+    expect(incomplete.report.runtime_review).toEqual({
+      status: "skipped",
+      code: "native_selection_incomplete",
     });
-    expect(incomplete.report.runtime_review).toEqual({ status: "skipped" });
+    expect(
+      (await cli(clean, ["doctor", "--native-preflight"], incompleteEnv)).stdout
+    ).toContain("native is selected without a candidate");
   },
   SPAWN_TIMEOUT_MS
 );
@@ -377,15 +402,25 @@ test(
     expect(first.report.blockers[0]?.fix).toContain(
       "run the preflight again after fixing it"
     );
-    // The stub's default reply is a transport-level failure, not a review verdict.
-    const down = await fixture({ services: { web: { image: IMAGE } } });
-    const second = await preflight(down, { ...down.native, ...GRANT });
-    expect(second.code).toBe(0);
-    expect(second.report).toMatchObject({
-      ready: false,
-      blockers: [],
-      runtime_review: { status: "unavailable", code: "runtime_not_running" },
-    });
+    // A failure of the runtime itself is not a verdict on the project. That
+    // covers the stub's default "not running" and any code this version does
+    // not know as a project problem.
+    for (const code of [null, "plan_budget", "serialization_failed"]) {
+      const down = await fixture({ services: { web: { image: IMAGE } } });
+      if (code) {
+        await down.reviewStops(code);
+      }
+      const result = await preflight(down, { ...down.native, ...GRANT });
+      expect(result.code).toBe(0);
+      expect(result.report).toMatchObject({
+        ready: false,
+        blockers: [],
+        runtime_review: {
+          status: "unavailable",
+          code: code ?? "runtime_not_running",
+        },
+      });
+    }
   },
   SPAWN_TIMEOUT_MS
 );
@@ -475,7 +510,7 @@ test(
     const mixed = await cli(f, ["doctor", "--native-preflight", "--fix"]);
     expect(mixed.code).toBe(1);
     expect(mixed.output).toContain(
-      "--native-preflight accepts only --path and --json"
+      "--native-preflight accepts only --path, --profile and --json"
     );
     const outside = join(f.root, "outside");
     await mkdir(outside);
@@ -496,6 +531,266 @@ test(
     ]);
     expect(code).toBe(1);
     expect(stderr).toContain("Native preflight checks one project.");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "the review covers what native up reviews: the adapted document, with the selected profiles",
+  async () => {
+    const f = await fixture({
+      services: { web: { image: IMAGE, networks: ["shared"] } },
+      networks: { shared: { external: true } },
+    });
+    await mkdir(join(f.projectDir, "native"));
+    await writeFile(
+      join(f.projectDir, "native", "adaptation.json"),
+      JSON.stringify({ version: 1, isolatedNetworks: ["shared"] })
+    );
+    await f.review([]);
+    const { report, code } = await preflight(f, { ...f.native, ...GRANT }, [
+      "--profile",
+      "dev, ops,dev",
+    ]);
+    // The adaptation isolates the network, so it is not a blocker at either gate.
+    expect(code).toBe(0);
+    expect(report).toMatchObject({ ready: true, blockers: [] });
+    const [original, normalized] = await f.argv();
+    expect(original).toContain("project plan --project ");
+    expect(original).toContain("--profile dev --profile ops --json");
+    expect(original).not.toContain("--normalized-file");
+    // The second review is of the adapted document, bound to the original file.
+    const sha = createHash("sha256")
+      .update(await readFile(join(f.projectDir, "docker-compose.yml")))
+      .digest("hex");
+    expect(normalized).toContain("--normalized-file ");
+    expect(normalized).toContain(`--expect-original ${sha}`);
+    expect(normalized).toContain(`--expect-namespace ${NAMESPACE}`);
+    expect(normalized).toContain("--profile dev --profile ops");
+    // The private review directory is gone afterwards.
+    const reviewed = normalized?.split("--normalized-file ")[1]?.split(" ")[0];
+    expect(reviewed).toBeDefined();
+    expect(await Bun.file(reviewed ?? "").exists()).toBe(false);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "an invalid adaptation, project configuration or native setting is a blocker of its own",
+  async () => {
+    const adaptation = await fixture({ services: { web: { image: IMAGE } } });
+    await mkdir(join(adaptation.projectDir, "native"));
+    await writeFile(
+      join(adaptation.projectDir, "native", "adaptation.json"),
+      JSON.stringify({ version: 1, httpProbes: { missing: {} } })
+    );
+    expect(codes((await preflight(adaptation, GRANT)).report, "cli")).toEqual([
+      "native_adaptation_invalid",
+    ]);
+
+    const config = await fixture({ services: { web: { image: IMAGE } } });
+    await writeFile(join(config.projectDir, "hack.config.json"), "{ not json");
+    expect(codes((await preflight(config, GRANT)).report, "cli")).toEqual([
+      "project_config_invalid",
+    ]);
+
+    const settings = await fixture({ services: { web: { image: IMAGE } } });
+    const invalid = await preflight(settings, {
+      HACK_NATIVE_AWS_PROFILE: "not a profile!",
+    });
+    // Unreadable settings do not also ask for the source-share grant.
+    expect(codes(invalid.report, "cli")).toEqual(["native_settings_invalid"]);
+
+    const unreadable = await fixture({ services: { web: { image: IMAGE } } });
+    await writeFile(
+      join(unreadable.projectDir, "docker-compose.yml"),
+      "services: [unclosed"
+    );
+    expect(codes((await preflight(unreadable, GRANT)).report, "cli")).toEqual([
+      "compose_file_unreadable",
+    ]);
+  },
+  SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "route admission, project-wide hosts and per-environment dependency files are checked as native up checks them",
+  async () => {
+    // A routed service without a native HTTP probe: the review only warns, native up refuses.
+    const routed = await fixture({
+      services: {
+        web: {
+          image: IMAGE,
+          labels: {
+            caddy: "web.example.test",
+            "caddy.reverse_proxy": "{{upstreams 3000}}",
+          },
+        },
+      },
+    });
+    await routed.review(
+      [
+        {
+          severity: "warning",
+          code: "route_binding_required",
+          field: "services.web.labels",
+          message: "runtime text",
+        },
+      ],
+      { services: { web: { active: true, routing: { port: 3000 } } } }
+    );
+    const route = await preflight(routed, { ...routed.native, ...GRANT });
+    expect(route.code).toBe(1);
+    expect(route.report.ready).toBe(false);
+    expect(codes(route.report, "cli")).toEqual(["route_probe_required"]);
+
+    // Project-wide extra hosts with no dependency selection.
+    const hosts = await fixture({ services: { web: { image: IMAGE } } });
+    await writeFile(
+      join(hosts.projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "preflight-fixture",
+        internal: { extra_hosts: { "api.internal.test": "host-gateway" } },
+      })
+    );
+    expect(codes((await preflight(hosts, GRANT)).report, "cli")).toEqual([
+      "internal_hosts_without_dependencies",
+    ]);
+
+    // A dependency file for another environment only does not cover this one.
+    const perEnv = await fixture({
+      services: {
+        web: { image: IMAGE, extra_hosts: ["db.test:host-gateway"] },
+      },
+    });
+    const home = join(perEnv.root, "user-home");
+    const directory = join(
+      home,
+      ".config",
+      "hack",
+      "native",
+      "preflight-fixture"
+    );
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(join(home, ".config"), 0o700);
+    await chmod(join(home, ".config", "hack"), 0o700);
+    await chmod(join(home, ".config", "hack", "native"), 0o700);
+    await writeFile(
+      join(directory, "settings.json"),
+      JSON.stringify({
+        version: 1,
+        projectRoots: [perEnv.project],
+        sharedSource: true,
+        // A sibling file name, selected for the `staging` env only.
+        dependenciesByEnv: { staging: "dependencies.staging.json" },
+      }),
+      { mode: 0o600 }
+    );
+    const other = await preflight(perEnv);
+    expect(codes(other.report, "cli")).toEqual([
+      "extra_hosts_without_dependencies:web",
+    ]);
+  },
+  SPAWN_TIMEOUT_MS * 2
+);
+
+test(
+  "builds, probes and service names are judged per service, and a dotted service name is not truncated",
+  async () => {
+    const BUILDS = { ...GRANT, HACK_NATIVE_BUILDS: "1" };
+    const f = await fixture({
+      services: {
+        api: { image: IMAGE },
+        "api.v2": { image: IMAGE },
+        built: { build: { context: "." } },
+        remote: { build: { context: "https://example.test/repo.git" } },
+        probed: {
+          image: IMAGE,
+          healthcheck: { "x-hack-http": { port: "not-a-port" } },
+        },
+        ".hidden": { image: IMAGE },
+      },
+    });
+    await f.review([
+      {
+        severity: "error",
+        code: "unsupported_field",
+        field: "services.api.v2.shm_size",
+        message: "runtime text",
+      },
+      {
+        severity: "error",
+        code: "unsupported_field",
+        field: "services.api.shm_size",
+        message: "runtime text",
+      },
+      {
+        severity: "error",
+        code: "unsupported_field",
+        field: "services.undeclared.shm_size",
+        message: "runtime text",
+      },
+    ]);
+    const { report } = await preflight(f, { ...f.native, ...BUILDS });
+    // With builds enabled an admitted build is no blocker and needs no image.
+    expect(codes(report, "cli")).toEqual([
+      "invalid_http_probe:probed",
+      "invalid_service_name",
+      "unsupported_build_form:remote",
+    ]);
+    expect(
+      report.blockers
+        .filter((found) => found.gate === "runtime")
+        .map((found) => [found.service ?? null, found.field])
+    ).toEqual([
+      ["api.v2", "services.api.v2.shm_size"],
+      ["api", "services.api.shm_size"],
+      [null, "services.undeclared.shm_size"],
+    ]);
+    // Without the opt-in, the same admissible build needs it.
+    const off = await preflight(f, { ...f.native, ...GRANT });
+    expect(codes(off.report, "cli")).toContain("build_requires_opt_in:built");
+    expect(codes(off.report, "cli")).not.toContain("missing_image:built");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "a review that does not admit the project is never reported ready, even with no usable finding",
+  async () => {
+    const f = await fixture({ services: { web: { image: IMAGE } } });
+    await f.review([{ severity: "error", code: "Not A Code", field: "x" }]);
+    const { report, code } = await preflight(f, { ...f.native, ...GRANT });
+    expect(code).toBe(1);
+    expect(report.ready).toBe(false);
+    expect(codes(report, "runtime")).toEqual(["review_incompatible"]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "a project with a native project file is told the preflight does not apply",
+  async () => {
+    const f = await fixture({ services: { web: { image: IMAGE } } });
+    // Native project inputs only: no Compose file and no legacy configuration.
+    await rm(join(f.projectDir, "docker-compose.yml"));
+    await rm(join(f.projectDir, "hack.config.json"));
+    await writeFile(
+      join(f.projectDir, "hack.project.json"),
+      JSON.stringify({ schema_version: 1, name: "authored" })
+    );
+    const result = await cli(f, ["doctor", "--native-preflight"]);
+    expect(result.code).toBe(1);
+    expect(result.output).toContain(
+      "Native preflight covers Compose-file projects."
+    );
+    expect(result.output).not.toMatch(/^\s+at /m);
+    const compose = await fixture({ services: { web: { image: IMAGE } } });
+    const profile = await cli(compose, ["doctor", "--profile", "dev"]);
+    expect(profile.code).toBe(1);
+    expect(profile.output).toContain(
+      "--profile applies only to --native-preflight."
+    );
   },
   SPAWN_TIMEOUT_MS
 );

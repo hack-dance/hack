@@ -387,7 +387,15 @@ const doctorOptions = [
     type: "boolean",
     long: "--native-preflight",
     description:
-      "List everything that would stop this project from starting on the native backend, with a fix for each; read-only, with --path and --json",
+      "List everything that would stop this Compose project from starting on the native backend, with a fix for each; read-only, with --path, --profile and --json",
+  } as const),
+  defineOption({
+    name: "profile",
+    type: "string",
+    long: "--profile",
+    valueHint: "<name[,name...]>",
+    description:
+      "Compose profiles to review with --native-preflight (comma-separated)",
   } as const),
   defineOption({
     name: "nativeCleanup",
@@ -621,31 +629,50 @@ async function maybeRunNativeMappingRecovery(
   return null;
 }
 
-/** `--native-preflight` is its own read-only mode: it runs no other check. */
+/** The only options `--native-preflight` accepts beside itself. */
+const NATIVE_PREFLIGHT_OPTIONS = new Set([
+  "nativePreflight",
+  "path",
+  "json",
+  "profile",
+]);
+
+/** Comma-separated profile names, trimmed, unique, in the order given. */
+function preflightProfiles(value: string | undefined): string[] {
+  return [
+    ...new Set(
+      (value ?? "")
+        .split(",")
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0)
+    ),
+  ];
+}
+
+/**
+ * `--native-preflight` is its own read-only mode: it runs no other check. An
+ * allow-list, so an option added to doctor later is refused here until it is
+ * deliberately supported.
+ */
 async function runNativePreflightMode(
   args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
 ): Promise<number> {
-  const o = args.options;
-  if (
-    o.fix ||
-    o.migrateEnvConfig ||
-    o.acceptTrackedEnvChanges ||
-    o.domainMigration ||
-    o.browserUrl ||
-    o.browserResult ||
-    o.branch !== undefined ||
-    o.nativeCleanup !== undefined ||
-    o.nativeRunMapping !== undefined ||
-    o.expectSelection !== undefined ||
-    o.acceptLegacyDeviceRebind
-  ) {
+  const options: Readonly<Record<string, unknown>> = args.options;
+  const other = Object.entries(options).some(
+    ([name, value]) =>
+      !NATIVE_PREFLIGHT_OPTIONS.has(name) &&
+      value !== undefined &&
+      value !== false
+  );
+  if (other) {
     throw new CliUsageError(
-      "--native-preflight accepts only --path and --json; it changes nothing and runs no other check."
+      "--native-preflight accepts only --path, --profile and --json; it changes nothing and runs no other check."
     );
   }
   return await runNativePreflightCommand({
-    startDir: resolveDoctorStartDir(o.path),
-    json: o.json === true,
+    startDir: resolveDoctorStartDir(args.options.path),
+    json: args.options.json === true,
+    profiles: preflightProfiles(args.options.profile),
   });
 }
 
@@ -654,6 +681,9 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 }): Promise<number> => {
   if (args.options.nativePreflight) {
     return await runNativePreflightMode(args);
+  }
+  if (args.options.profile !== undefined) {
+    throw new CliUsageError("--profile applies only to --native-preflight.");
   }
   const adopted = await preflightDoctorProject({
     startDir: resolveDoctorStartDir(args.options.path),

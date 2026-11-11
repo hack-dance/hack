@@ -193,27 +193,29 @@ adopting an unrelated branch or project.
 
 `hack up` on the native backend checks a Compose project in two places and stops
 at the first refusal of each: the CLI's own admission, then the runtime review.
-To see everything at once, run the preflight:
+To see the findings together, run the preflight:
 
 ```sh
 hack doctor --native-preflight            # in the project, or with --path <root>
+hack doctor --native-preflight --profile dev,ops
 hack doctor --native-preflight --json
 ```
 
-It lists every blocker and every note for the project's
-`.hack/docker-compose.yml`, each with a plain sentence and a fix. It is
-read-only: it starts no VM, pulls no image, runs no lifecycle hook and writes
-nothing. It accepts only `--path` and `--json`. The exit status is `0` when no
-blocker was found and `1` otherwise.
+It lists the blockers and notes for the project's `.hack/docker-compose.yml`,
+each with a plain sentence and a fix. It judges what `hack up` judges: the
+Compose document after the selected native adaptation and the project-wide
+extra hosts are applied, reviewed with the profiles you pass.
 
-The report never prints authored values. A finding names a closed code, a
-service and a field; environment values, label keys and values, paths and image
-names are left out.
+It changes nothing in the project and starts nothing: no VM, no image pull, no
+lifecycle hook. It accepts only `--path`, `--profile` and `--json`. The report
+never prints authored values. A finding names a closed code, a service and a
+field; environment values, label keys and values, paths and image names are
+left out.
 
 The runtime review half needs a native runtime, so run the preflight from the
-`hack-next` launcher for the full list. Stable `hack`, or any shell without
-native selection, still runs the CLI's checks and reports the review as
-`skipped`. The review needs no running VM.
+`hack-next` launcher for the full list. Without native selection only the CLI's
+checks run and the review is reported as `skipped`. The review needs no running
+VM.
 
 With `--json` the report is the `data` of the standard result envelope:
 
@@ -241,27 +243,55 @@ With `--json` the report is the `data` of the standard result envelope:
 
 - `ready` is true only when there is no blocker and the runtime review
   completed.
+- The exit status follows the blockers: `0` with none, `1` otherwise. A skipped
+  or unavailable review is not a blocker, so that run exits `0` with
+  `ready: false`. With `--json` the envelope is `ok: true` in both cases; read
+  `ready` and `blockers` for the verdict.
 - `gate` is `cli` or `runtime`: which of the two checks reported the finding.
-- `runtime_review.status` is `completed`, `stopped`, `skipped` or `unavailable`.
-  `stopped` means the review met a problem it cannot continue past, such as an
-  anonymous volume or a mount outside the project; its `code` names it, the
-  finding is listed as a blocker, and more findings can appear once it is fixed.
-  `unavailable` means the selected runtime did not answer.
+- `runtime_review.status` is one of:
+  - `completed`: the review ran.
+  - `stopped`: the review met a project problem it cannot continue past, such as
+    an anonymous volume (`invalid_mount`) or a mount outside the project
+    (`source_escape`). `code` names it, it is listed as a blocker, and more
+    findings can appear once it is fixed.
+  - `skipped`: no native runtime is selected. `code` is
+    `native_selection_incomplete` when `HACK_RUNTIME_BACKEND=native` is set
+    without a candidate.
+  - `unavailable`: the selected runtime did not return a review. `code`, when
+    present, is the runtime's own failure code. This says nothing about the
+    project.
 - Codes are stable. The CLI's codes are `compose_file_unreadable`,
-  `external_network`, `external_volume`, `reserved_label`, `unsupported_build`,
-  `foreign_platform`, `native_adaptation_invalid`, `native_settings_invalid`,
+  `project_config_invalid`, `native_settings_invalid`,
+  `native_adaptation_invalid`, `internal_hosts_unreadable`,
+  `internal_hosts_without_dependencies`, `external_network`, `external_volume`,
+  `reserved_label`, `unsupported_build`, `foreign_platform`,
   `invalid_service_name`, `invalid_service`, `build_requires_opt_in`,
-  `unsupported_build_form`, `env_file`, `missing_image`,
+  `unsupported_build_form`, `emulated_build`, `env_file`, `missing_image`,
   `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
-  `unsupported_label`, `invalid_http_probe`, `dotenv_without_managed_env` and
-  `shared_source_grant_required`. Runtime findings use the review's own
-  diagnostic codes, for example `privileged_service` or `invalid_mount`. A code
-  this version has no sentence for is still listed, by its code and field.
+  `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
+  `dotenv_without_managed_env`, `shared_source_grant_required`,
+  `route_probe_required` and `too_many_routes`. Runtime findings use the
+  review's own diagnostic codes, for example `privileged_service` or
+  `invalid_mount`, and `review_incompatible` when the review does not admit the
+  project and gives no finding this version can show. A code this version has
+  no sentence for is still listed, by its code and field.
 
 The preflight is a report, not an admission decision: `hack up` still runs its
-own checks, and a clean report starts nothing. It does not cover what only a
-start can find, such as an image that cannot be pulled, a source tree over the
-size limit, or a host port that is already in use.
+own checks, and a clean report starts nothing. It does not cover:
+
+- A project with a native project file (`.hack/hack.project.json`) or one whose
+  Compose file was adopted into generated native inputs. Those take another
+  admission path; the preflight refuses the first and does not detect the
+  second.
+- `--env`. It uses the project's default environment to select the per-env
+  adaptation and dependency files.
+- Checks that need secret values or a resolved managed environment: a build
+  argument that carries a stored secret, and managed env that fails to resolve.
+- What only a start can find: an image that cannot be pulled or admitted, a
+  source tree over the size limit, a process wrapper a service cannot run, a
+  host dependency without a binding, or a host port that is already in use.
+- More than the first problem of a kind that stops the review. See `stopped`
+  above.
 
 ## Compose projects that stay on the Compose backend
 

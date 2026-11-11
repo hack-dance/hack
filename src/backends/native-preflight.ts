@@ -1,4 +1,13 @@
-import { access } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  access,
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -8,7 +17,17 @@ import {
 } from "../lib/native-compose-backend-features.ts";
 import { projectEnvConfigExists } from "../lib/project-env-config.ts";
 import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
+import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { admitNativeProjectBuild } from "./native-project-builds.ts";
+import type { NativeProjectInput } from "./native-project-input.ts";
+import {
+  applyNativeInternalHostAliases,
+  type NativeHostAliasSource,
+} from "./native-project-internal-hosts.ts";
+import {
+  nativeBridgeCapacity,
+  reviewedNativeRoutes,
+} from "./native-project-routing.ts";
 import {
   type NativeServicePreparationProblem,
   nativeServicePreparationProblems,
@@ -30,9 +49,14 @@ import {
  * project with the same rules and collects every finding instead.
  *
  * Invariants:
- * - Read-only. It starts no VM, pulls no image, runs no lifecycle hook and
- *   writes nothing. The only runtime request is `project plan`, which reads
- *   the project and needs no running runtime.
+ * - Read-only for the project and the runtime. It starts no VM, pulls no
+ *   image, runs no lifecycle hook and writes nothing to the project. The only
+ *   runtime requests are `project plan` reviews, which read the project and
+ *   need no running runtime; the adapted Compose document they review lives
+ *   in a private temporary directory that is removed afterwards.
+ * - It judges what `hack up` judges: the Compose document after the selected
+ *   native adaptation and project-wide host aliases are applied, not the raw
+ *   file.
  * - Value-free. A finding carries a closed code, a service name, a field path
  *   and fixed sentences. Authored values (environment values, label keys and
  *   values, paths, image names) are never printed, and neither is the
@@ -64,9 +88,9 @@ export type NativePreflightReviewStatus =
   | "completed"
   /** The review stopped at a problem it cannot continue past; fix it and run again. */
   | "stopped"
-  /** No native runtime is selected, so only the CLI's checks ran. */
+  /** No usable native runtime is selected, so only the CLI's checks ran. */
   | "skipped"
-  /** A native runtime is selected but the review request failed. */
+  /** A native runtime is selected but it did not return a review. */
   | "unavailable";
 
 export type NativePreflightReport = {
@@ -78,7 +102,10 @@ export type NativePreflightReport = {
   readonly ready: boolean;
   readonly runtime_review: {
     readonly status: NativePreflightReviewStatus;
-    /** The closed runtime code when the review stopped or failed. */
+    /**
+     * The closed runtime code when the review stopped or failed, or
+     * `native_selection_incomplete` when native is selected without a candidate.
+     */
     readonly code?: string;
   };
   readonly blockers: readonly NativePreflightFinding[];
@@ -226,7 +253,8 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     fix: "Remove the driver.",
   },
   unsupported_network_mode: {
-    message: "The service uses network_mode host or service.",
+    message:
+      "The service uses a network_mode that shares another network stack (host, service or container).",
     fix: "Remove network_mode and attach the service to a project network.",
   },
   undeclared_network: {
@@ -235,7 +263,7 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   },
   invalid_port: {
     message: "A published port is not in a form native accepts.",
-    fix: "Publish one TCP port as host:container. Port ranges are not supported.",
+    fix: "Publish one port as host:container. Port ranges are not supported.",
   },
   unresolved_port_binding: {
     message: "A published port depends on a variable with no default.",
@@ -256,7 +284,7 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   },
   external_logging_driver: {
     message: "The service sends logs to an external logging driver.",
-    fix: "Remove logging, or use the json-file, local or none driver.",
+    fix: "Remove logging. Native keeps its own bounded container logs; read them with hack logs.",
   },
   missing_dependency: {
     message: "depends_on names a service that does not exist.",
@@ -340,6 +368,11 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     message: "The top-level version key is obsolete and is ignored.",
     fix: "Remove it when convenient.",
   },
+  isolated_network_replacement: {
+    message:
+      "An external network is replaced with an isolated network that native owns.",
+    fix: "Nothing to do. Services on it reach each other, not the original network.",
+  },
   optional_dependency_inactive: {
     message: "An optional dependency is not active and is skipped.",
     fix: "Nothing to do.",
@@ -355,9 +388,12 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     fix: "Add caddy.reverse_proxy if the service should be reachable by that hostname.",
   },
   explicit_dependency_binding_required: {
-    message: "extra_hosts needs a host dependency binding.",
-    fix: "Select a dependency file with HACK_NATIVE_DEPENDENCIES.",
+    message:
+      "extra_hosts entries reach the host only through a reviewed host dependency binding.",
+    fix: "Nothing to do if a dependency file is selected for this environment; otherwise select one with HACK_NATIVE_DEPENDENCIES.",
   },
+  // The next three are reported only by a runtime that accepts these settings
+  // with a warning; other runtimes refuse them under the codes above.
   mount_host_hint_ignored: {
     message:
       "A mount carries a host-only hint (cached, delegated, consistent, z or Z), which is ignored.",
@@ -372,29 +408,70 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     message: "The logging configuration is not applied.",
     fix: "Nothing to do. Read container logs with hack logs.",
   },
-  restart_policy_not_applied: {
-    message:
-      "The restart policy is not applied to a service with published ports or routes.",
-    fix: "Nothing to do. The service starts without automatic restarts.",
-  },
 };
 
 /**
- * Failures of the runtime itself, not verdicts on the project. The review
- * needs no running runtime, so these mean the selected binary could not
- * answer; they are reported as an unavailable review, never as a blocker.
+ * Codes the runtime review stops with because of the project itself: its
+ * Compose file, its mounts or its source tree. Only these become a blocker.
+ * Any other failure of a review request (a stopped or busy runtime, a budget,
+ * a transport or serialization error, an argument an older runtime does not
+ * know) says nothing about the project and is reported as an unavailable
+ * review.
  */
-const RUNTIME_STATE_CODES = new Set([
-  "runtime_not_running",
-  "runtime_busy",
-  "checkout_mismatch",
-  "invalid_candidate_root",
+const REVIEW_STOP_CODES = new Set([
+  "compose_unavailable",
+  "conflicting_environment_owner",
+  "duplicate_dependency",
+  "duplicate_env_file",
+  "duplicate_environment_key",
+  "duplicate_mount_target",
+  "excluded_source",
+  "invalid_build",
+  "invalid_command",
+  "invalid_compose_field",
+  "invalid_compose_file",
+  "invalid_compose_merge",
+  "invalid_compose_path",
+  "invalid_compose_yaml",
+  "invalid_container_path",
+  "invalid_dependency",
+  "invalid_dependency_cache",
+  "invalid_dependency_condition",
+  "invalid_disposable_cache",
+  "invalid_duration",
+  "invalid_env_file",
+  "invalid_environment_key",
+  "invalid_extra_hosts",
+  "invalid_healthcheck",
+  "invalid_identifier",
+  "invalid_ignore_rules",
+  "invalid_image",
+  "invalid_interpolation",
+  "invalid_limit",
+  "invalid_mount",
+  "invalid_network",
+  "invalid_network_replacement",
+  "invalid_restart",
+  "invalid_stop_signal",
+  "invalid_user",
+  "missing_services",
+  "missing_source",
+  "service_budget",
+  "source_escape",
+  "source_symlink",
+  "unresolved_source_path",
+  "unsupported_mount_option",
+  "unsupported_platform",
+  "unsupported_source_name",
 ]);
 
-const SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
+/** The same service-name rule as native start (`native-project-input.ts`). */
+const SERVICE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 /** A review field path: dotted Compose keys and list indexes, no authored text. */
 const FIELD = /^[A-Za-z0-9_.[\]-]{1,256}$/;
+const COMPOSE_LIMIT = 256 * 1024;
+const DIGEST = /^[a-f0-9]{64}$/;
 
 function finding(
   base: Omit<NativePreflightFinding, "message" | "fix">,
@@ -403,13 +480,101 @@ function finding(
   return { ...base, message: text.message, fix: text.fix };
 }
 
-/** The service a `services.<name>…` review field names, when it is well formed. */
-function serviceOfField(field: string): string | undefined {
+/** Byte-wise order, so the report does not depend on the caller's locale. */
+function byCodePoint(a: string, b: string): number {
+  if (a === b) {
+    return 0;
+  }
+  return a < b ? -1 : 1;
+}
+
+/**
+ * The service a `services.<name>…` review field names. Service names may
+ * contain dots, so the longest declared name that prefixes the field wins; a
+ * field that matches no declared service names none.
+ */
+function serviceOfField(
+  field: string,
+  services: readonly string[]
+): string | undefined {
   if (!field.startsWith("services.")) {
     return;
   }
-  const name = field.slice("services.".length).split(".", 1)[0] ?? "";
-  return SERVICE.test(name) ? name : undefined;
+  const rest = field.slice("services.".length);
+  let best: string | undefined;
+  for (const name of services) {
+    if (
+      (rest === name || rest.startsWith(`${name}.`)) &&
+      (best === undefined || name.length > best.length)
+    ) {
+      best = name;
+    }
+  }
+  return best;
+}
+
+/** Build findings for one service, and whether its build is admitted. */
+function buildFindings(opts: {
+  readonly name: string;
+  readonly service: Readonly<Record<string, unknown>>;
+  readonly projectRoot: string;
+  readonly composeFile: string;
+  readonly buildsEnabled: boolean;
+  readonly emulated: ReadonlySet<string>;
+}): { readonly found: NativePreflightFinding[]; readonly admitted: boolean } {
+  const { name } = opts;
+  const base = { severity: "blocker", gate: "cli", service: name } as const;
+  try {
+    admitNativeProjectBuild({
+      name,
+      service: opts.service,
+      projectRoot: opts.projectRoot,
+      composeFile: opts.composeFile,
+    });
+  } catch {
+    return {
+      admitted: false,
+      found: [
+        finding(
+          { ...base, code: "unsupported_build_form", field: "build" },
+          {
+            message: "The service build is not in a form native builds accept.",
+            fix: "Use a local context inside the project, a relative Dockerfile, and literal args; do not set image beside build.",
+          }
+        ),
+      ],
+    };
+  }
+  if (!opts.buildsEnabled) {
+    return {
+      admitted: false,
+      found: [
+        finding(
+          { ...base, code: "build_requires_opt_in", field: "build" },
+          {
+            message:
+              "The service is built from a Dockerfile, and native builds are off by default.",
+            fix: "Set HACK_NATIVE_BUILDS=1 and prepare the native builder, or give the service a prebuilt image.",
+          }
+        ),
+      ],
+    };
+  }
+  return {
+    admitted: true,
+    found: opts.emulated.has(name)
+      ? [
+          finding(
+            { ...base, code: "emulated_build", field: "build" },
+            {
+              message:
+                "The service is built natively and also opted in to amd64 emulation. Native builds produce arm64 images.",
+              fix: "Remove the service from amd64Emulation in the native adaptation, or give it a prebuilt image.",
+            }
+          ),
+        ]
+      : [],
+  };
 }
 
 function cliServiceFindings(opts: {
@@ -419,44 +584,19 @@ function cliServiceFindings(opts: {
   readonly composeFile: string;
   readonly buildsEnabled: boolean;
   readonly hasHostDependencies: boolean;
+  /** Services the native adaptation opted in to amd64 emulation. */
+  readonly emulated: ReadonlySet<string>;
 }): NativePreflightFinding[] {
   const { name, service } = opts;
   const base = { severity: "blocker", gate: "cli", service: name } as const;
   const found: NativePreflightFinding[] = [];
   const builds = new Set<string>();
-  if (isRecord(service) && service.build !== undefined) {
-    if (opts.buildsEnabled) {
-      try {
-        admitNativeProjectBuild({
-          name,
-          service,
-          projectRoot: opts.projectRoot,
-          composeFile: opts.composeFile,
-        });
-        builds.add(name);
-      } catch {
-        found.push(
-          finding(
-            { ...base, code: "unsupported_build_form", field: "build" },
-            {
-              message:
-                "The service build is not in a form native builds accept.",
-              fix: "Use a local context inside the project, a relative Dockerfile, and literal args; do not set image beside build.",
-            }
-          )
-        );
-      }
-    } else {
-      found.push(
-        finding(
-          { ...base, code: "build_requires_opt_in", field: "build" },
-          {
-            message:
-              "The service is built from a Dockerfile, and native builds are off by default.",
-            fix: "Set HACK_NATIVE_BUILDS=1 and prepare the native builder, or give the service a prebuilt image.",
-          }
-        )
-      );
+  const declaresBuild = isRecord(service) && service.build !== undefined;
+  if (isRecord(service) && declaresBuild) {
+    const build = buildFindings({ ...opts, service });
+    found.push(...build.found);
+    if (build.admitted) {
+      builds.add(name);
     }
   }
   if (isRecord(service) && Object.hasOwn(service, "env_file")) {
@@ -470,7 +610,6 @@ function cliServiceFindings(opts: {
       )
     );
   }
-  const declaresBuild = isRecord(service) && service.build !== undefined;
   for (const problem of nativeServicePreparationProblems({
     name,
     service,
@@ -522,32 +661,133 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
+/** What the CLI's admission would judge: the adapted Compose document. */
+type AdaptedProject = {
+  readonly findings: NativePreflightFinding[];
+  /** Absent when the Compose file cannot be read. */
+  readonly document?: {
+    readonly originalSha256: string;
+    /** The public document native start would review, as JSON. */
+    readonly normalizedComposeJson: string;
+    readonly services: Readonly<Record<string, unknown>>;
+    readonly emulated: ReadonlySet<string>;
+  };
+};
+
+/**
+ * Applies the selected native adaptation and the project-wide host aliases to
+ * the Compose document, as native start does before it admits services. Each
+ * step that native start would refuse becomes a finding, and the document
+ * from before that step is kept so later checks still run.
+ */
+async function adaptForPreflight(opts: {
+  readonly composeFile: string;
+  readonly adaptationFile: string | undefined;
+  readonly internalHosts: Readonly<Record<string, string>> | null;
+  readonly internalHostSources: Readonly<Record<string, NativeHostAliasSource>>;
+  readonly hasHostDependencies: boolean;
+}): Promise<AdaptedProject> {
+  const blocker = { severity: "blocker", gate: "cli" } as const;
+  const compose = await readNativeComposeDocument(opts.composeFile);
+  const bytes = await readFile(opts.composeFile).catch(() => null);
+  if (
+    !(isRecord(compose) && isRecord(compose.services)) ||
+    bytes === null ||
+    bytes.byteLength > COMPOSE_LIMIT
+  ) {
+    return {
+      findings: [
+        finding(
+          { ...blocker, code: "compose_file_unreadable" },
+          {
+            message:
+              "The Compose file is missing, too large, not valid YAML, or has no services mapping.",
+            fix: "Check the project's Compose file. Native reads this one file and does not merge override files.",
+          }
+        ),
+      ],
+    };
+  }
+  const findings: NativePreflightFinding[] = [];
+  // Only the public document is adapted; no private value is involved.
+  let input = {
+    originalSha256: createHash("sha256").update(bytes).digest("hex"),
+    normalizedComposeJson: JSON.stringify(compose),
+  } as NativeProjectInput;
+  try {
+    input = await prepareNativeProjectAdaptation({
+      input,
+      path: opts.adaptationFile,
+    });
+  } catch {
+    findings.push(
+      finding(
+        { ...blocker, code: "native_adaptation_invalid" },
+        {
+          message:
+            "The native adaptation file is not valid or conflicts with the Compose file.",
+          fix: "Check .hack/native/adaptation.json, or the file HACK_NATIVE_ADAPTATION names: version 1, known keys only, services that exist, and no httpProbes for a service that already has a healthcheck.",
+        }
+      )
+    );
+  }
+  if (opts.internalHosts === null) {
+    findings.push(
+      finding(
+        { ...blocker, code: "internal_hosts_unreadable" },
+        {
+          message: "The project-wide extra hosts could not be read.",
+          fix: "Check internal.extra_hosts in the project configuration and the local extra hosts file.",
+        }
+      )
+    );
+  } else {
+    try {
+      input = applyNativeInternalHostAliases({
+        input,
+        hosts: opts.internalHosts,
+        sources: opts.internalHostSources,
+        hasDependencySelection: opts.hasHostDependencies,
+      });
+    } catch {
+      findings.push(
+        finding(
+          { ...blocker, code: "internal_hosts_without_dependencies" },
+          {
+            message:
+              "The project declares project-wide extra hosts that native cannot apply: no host dependency binding is selected, or an entry is not an exact host-gateway alias.",
+            fix: "Select a dependency file with HACK_NATIVE_DEPENDENCIES or the dependencies setting, or remove the entries from internal.extra_hosts.",
+          }
+        )
+      );
+    }
+  }
+  const adapted: unknown = JSON.parse(input.normalizedComposeJson);
+  return {
+    findings,
+    document: {
+      originalSha256: input.originalSha256,
+      normalizedComposeJson: input.normalizedComposeJson,
+      services:
+        isRecord(adapted) && isRecord(adapted.services) ? adapted.services : {},
+      emulated: new Set(Object.keys(input.amd64Emulation ?? {})),
+    },
+  };
+}
+
 /** Findings from the CLI's own admission. Reads project files only. */
-export async function collectNativeCliFindings(opts: {
+async function collectNativeCliFindings(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly composeFile: string;
-  readonly adaptationCandidates?: readonly (string | undefined)[];
+  readonly adaptationCandidates: readonly (string | undefined)[];
   readonly buildsEnabled: boolean;
-  /** The source-share grant (`HACK_NATIVE_SHARED_SOURCE=1` or `sharedSource`). */
   readonly sharedSource: boolean;
   readonly hasHostDependencies: boolean;
+  readonly adapted: NonNullable<AdaptedProject["document"]>;
 }): Promise<NativePreflightFinding[]> {
   const found: NativePreflightFinding[] = [];
   const blocker = { severity: "blocker", gate: "cli" } as const;
-  const compose = await readNativeComposeDocument(opts.composeFile);
-  if (!(isRecord(compose) && isRecord(compose.services))) {
-    return [
-      finding(
-        { ...blocker, code: "compose_file_unreadable" },
-        {
-          message:
-            "The Compose file is missing, too large, not valid YAML, or has no services mapping.",
-          fix: "Check .hack/docker-compose.yml. Native reads this one file and does not merge override files.",
-        }
-      ),
-    ];
-  }
   try {
     const reading = await readComposeBackendReading(opts.composeFile, {
       adaptationCandidates: opts.adaptationCandidates,
@@ -559,19 +799,10 @@ export async function collectNativeCliFindings(opts: {
       );
     }
   } catch {
-    found.push(
-      finding(
-        { ...blocker, code: "native_adaptation_invalid" },
-        {
-          message:
-            "The native adaptation file is not valid or conflicts with the Compose file.",
-          fix: "Check .hack/native/adaptation.json, or the file HACK_NATIVE_ADAPTATION names.",
-        }
-      )
-    );
+    // An invalid adaptation is reported once, by the adaptation step.
   }
-  for (const [name, service] of Object.entries(compose.services).sort(
-    ([a], [b]) => a.localeCompare(b)
+  for (const [name, service] of Object.entries(opts.adapted.services).sort(
+    ([a], [b]) => byCodePoint(a, b)
   )) {
     if (!SERVICE.test(name)) {
       found.push(
@@ -579,7 +810,7 @@ export async function collectNativeCliFindings(opts: {
           { ...blocker, code: "invalid_service_name" },
           {
             message: "A service name uses characters native does not accept.",
-            fix: "Use letters, digits, dot, dash and underscore.",
+            fix: "Start with a letter or digit, then use letters, digits, dot, dash and underscore.",
           }
         )
       );
@@ -593,13 +824,24 @@ export async function collectNativeCliFindings(opts: {
         composeFile: opts.composeFile,
         buildsEnabled: opts.buildsEnabled,
         hasHostDependencies: opts.hasHostDependencies,
+        emulated: opts.adapted.emulated,
       })
     );
   }
   const managedEnv = await projectEnvConfigExists({
     projectDir: opts.projectDir,
-  }).catch(() => true);
-  if (
+  }).catch(() => null);
+  if (managedEnv === null) {
+    found.push(
+      finding(
+        { ...blocker, code: "managed_env_unreadable" },
+        {
+          message: "The project's Hack managed env files could not be read.",
+          fix: "Run hack env list to see the problem.",
+        }
+      )
+    );
+  } else if (
     !managedEnv &&
     ((await exists(join(opts.projectDir, ".env"))) ||
       (await exists(join(opts.projectRoot, ".env"))))
@@ -631,7 +873,10 @@ export async function collectNativeCliFindings(opts: {
 }
 
 /** One runtime review diagnostic as a finding, or nothing when it is malformed. */
-function runtimeFinding(diagnostic: unknown): NativePreflightFinding | null {
+function runtimeFinding(
+  diagnostic: unknown,
+  services: readonly string[]
+): NativePreflightFinding | null {
   if (
     !(
       isRecord(diagnostic) &&
@@ -646,7 +891,7 @@ function runtimeFinding(diagnostic: unknown): NativePreflightFinding | null {
     typeof diagnostic.field === "string" && FIELD.test(diagnostic.field)
       ? diagnostic.field
       : undefined;
-  const service = field ? serviceOfField(field) : undefined;
+  const service = field ? serviceOfField(field, services) : undefined;
   return finding(
     {
       severity: diagnostic.severity === "error" ? "blocker" : "warning",
@@ -662,108 +907,276 @@ function runtimeFinding(diagnostic: unknown): NativePreflightFinding | null {
   );
 }
 
-/**
- * Findings from the runtime review of the original Compose file. One
- * `project plan` request; no VM is needed and nothing is started.
- */
-export async function collectNativeRuntimeFindings(opts: {
-  readonly runtime: NativeRuntimeSelection | null;
-  readonly projectRoot: string;
-  readonly composeFile: string;
-  readonly profiles?: readonly string[];
-  readonly invoke?: typeof invokeNativeRuntime;
-}): Promise<{
+type RuntimeReview = {
   readonly review: NativePreflightReport["runtime_review"];
   readonly findings: NativePreflightFinding[];
-}> {
-  if (!opts.runtime) {
-    return { review: { status: "skipped" }, findings: [] };
+  /** The reviewed plan, when the review completed. */
+  readonly plan?: Readonly<Record<string, unknown>>;
+};
+
+/** How a failed review request is reported: a project verdict, or no review. */
+function reviewFailure(error: unknown): RuntimeReview {
+  const code =
+    error instanceof NativeRuntimeRequestError &&
+    typeof error.nativeCode === "string" &&
+    CODE.test(error.nativeCode)
+      ? error.nativeCode
+      : undefined;
+  if (!(code && REVIEW_STOP_CODES.has(code))) {
+    return {
+      review: { status: "unavailable", ...(code ? { code } : {}) },
+      findings: [],
+    };
   }
-  const file = relative(opts.projectRoot, opts.composeFile);
+  const text = RUNTIME_FINDINGS[code] ?? {
+    message: `The native review stopped with ${code}.`,
+    fix: "See the native backend guide for this code.",
+  };
+  return {
+    review: { status: "stopped", code },
+    findings: [
+      finding(
+        { severity: "blocker", gate: "runtime", code },
+        {
+          message: text.message,
+          fix: `${text.fix} The review stops at the first problem of this kind, so run the preflight again after fixing it.`,
+        }
+      ),
+    ],
+  };
+}
+
+/**
+ * The runtime review native start would judge: the original Compose file
+ * first, for its namespace, then the adapted document. Two `project plan`
+ * requests; no VM is needed and nothing is started.
+ */
+async function collectNativeRuntimeFindings(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly composeFile: string;
+  readonly profiles: readonly string[];
+  readonly adapted: NonNullable<AdaptedProject["document"]>;
+  readonly invoke?: typeof invokeNativeRuntime;
+}): Promise<RuntimeReview> {
+  const invoke = opts.invoke ?? invokeNativeRuntime;
+  const projectArgs = [
+    "--project",
+    opts.projectRoot,
+    "--file",
+    relative(opts.projectRoot, opts.composeFile),
+    ...opts.profiles.flatMap((profile) => ["--profile", profile]),
+  ];
+  const directory = await mkdtemp(join(tmpdir(), "hack-native-preflight-"));
   let reply: unknown;
   try {
-    reply = await (opts.invoke ?? invokeNativeRuntime)({
+    const original = await invoke({
+      runtime: opts.runtime,
+      cwd: opts.projectRoot,
+      args: ["project", "plan", ...projectArgs, "--json"],
+    });
+    const namespace =
+      isRecord(original) && isRecord(original.plan)
+        ? original.plan.namespace
+        : undefined;
+    if (typeof namespace !== "string" || !DIGEST.test(namespace)) {
+      return { review: { status: "unavailable" }, findings: [] };
+    }
+    await chmod(directory, 0o700);
+    const normalized = join(directory, "compose.json");
+    await writeFile(normalized, opts.adapted.normalizedComposeJson, {
+      mode: 0o600,
+      flag: "wx",
+    });
+    reply = await invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
       args: [
         "project",
         "plan",
-        "--project",
-        opts.projectRoot,
-        "--file",
-        file,
-        ...(opts.profiles ?? []).flatMap((profile) => ["--profile", profile]),
+        ...projectArgs,
+        "--normalized-file",
+        normalized,
+        "--expect-original",
+        opts.adapted.originalSha256,
+        "--expect-namespace",
+        namespace,
         "--json",
       ],
     });
   } catch (error: unknown) {
-    const code =
-      error instanceof NativeRuntimeRequestError &&
-      typeof error.nativeCode === "string" &&
-      CODE.test(error.nativeCode)
-        ? error.nativeCode
-        : undefined;
-    if (!code || RUNTIME_STATE_CODES.has(code)) {
-      return {
-        review: { status: "unavailable", ...(code ? { code } : {}) },
-        findings: [],
-      };
-    }
-    const text = RUNTIME_FINDINGS[code] ?? {
-      message: `The native review stopped with ${code}.`,
-      fix: "See the native backend guide for this code.",
-    };
-    return {
-      review: { status: "stopped", code },
-      findings: [
-        finding(
-          { severity: "blocker", gate: "runtime", code },
-          {
-            message: text.message,
-            fix: `${text.fix} The review stops at the first problem of this kind, so run the preflight again after fixing it.`,
-          }
-        ),
-      ],
-    };
+    return reviewFailure(error);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
   if (!(isRecord(reply) && isRecord(reply.plan))) {
     return { review: { status: "unavailable" }, findings: [] };
   }
+  const services = Object.keys(opts.adapted.services).filter((name) =>
+    SERVICE.test(name)
+  );
   const diagnostics = Array.isArray(reply.plan.diagnostics)
     ? reply.plan.diagnostics
     : [];
-  return {
-    review: { status: "completed" },
-    findings: diagnostics.flatMap((diagnostic) => {
-      const found = runtimeFinding(diagnostic);
-      return found ? [found] : [];
-    }),
-  };
+  const findings = diagnostics.flatMap((diagnostic) => {
+    const found = runtimeFinding(diagnostic, services);
+    return found ? [found] : [];
+  });
+  // Native start refuses on this flag alone; never report ready against it.
+  if (
+    reply.plan.enrollment_compatible !== true &&
+    !findings.some((found) => found.severity === "blocker")
+  ) {
+    findings.push(
+      finding(
+        { severity: "blocker", gate: "runtime", code: "review_incompatible" },
+        {
+          message:
+            "The native review does not admit this project, and gave no finding this version can show.",
+          fix: "Update Hack, or see the native backend guide.",
+        }
+      )
+    );
+  }
+  return { review: { status: "completed" }, findings, plan: reply.plan };
 }
 
-/** Both gates, merged: a runtime finding the CLI already reported is dropped. */
-export function buildNativePreflightReport(opts: {
+/**
+ * Route admission, which native start runs on the reviewed plan: a routed
+ * service needs a native HTTP probe on its route port, and a pool serves at
+ * most 32 routes.
+ */
+function routeFindings(opts: {
+  readonly plan: Readonly<Record<string, unknown>>;
+  readonly services: Readonly<Record<string, unknown>>;
+}): NativePreflightFinding[] {
+  const specs: Record<string, Record<string, unknown>> = {};
+  for (const [name, service] of Object.entries(opts.services)) {
+    if (isRecord(service)) {
+      specs[name] = service;
+    }
+  }
+  const blocker = { severity: "blocker", gate: "cli" } as const;
+  let capacity: number;
+  try {
+    capacity = nativeBridgeCapacity(specs);
+  } catch {
+    return [
+      finding(
+        { ...blocker, code: "too_many_routes" },
+        {
+          message: "The project declares more than 32 routed services.",
+          fix: "Route at most 32 services on native.",
+        }
+      ),
+    ];
+  }
+  try {
+    reviewedNativeRoutes({ plan: opts.plan, specs, capacity });
+    return [];
+  } catch {
+    return [
+      finding(
+        { ...blocker, code: "route_probe_required" },
+        {
+          message:
+            "A service with caddy routing labels has no enabled native HTTP probe on its route port, or also declares a dependency cache.",
+          fix: "Give each routed service a healthcheck with x-hack-http on the port its route proxies to, or add one under httpProbes in the native adaptation.",
+        }
+      ),
+    ];
+  }
+}
+
+/** Inputs the command layer resolves; nothing here is a secret value. */
+export type NativePreflightOptions = {
   readonly projectRoot: string;
+  readonly projectDir: string;
   readonly composeFile: string;
-  readonly cli: readonly NativePreflightFinding[];
-  readonly runtime: Awaited<ReturnType<typeof collectNativeRuntimeFindings>>;
-}): NativePreflightReport {
-  const seen = new Set(
-    opts.cli.map((found) => `${found.code}\0${found.service ?? ""}`)
+  /** Findings the command layer already has, such as unreadable settings. */
+  readonly settings: readonly NativePreflightFinding[];
+  /** The adaptation file for the effective env, as native start selects it. */
+  readonly adaptationFile: string | undefined;
+  /** Every adaptation a start could apply, for the Compose-backend pre-check. */
+  readonly adaptationCandidates: readonly (string | undefined)[];
+  /** Project-wide extra hosts, or null when they cannot be read. */
+  readonly internalHosts: Readonly<Record<string, string>> | null;
+  readonly internalHostSources: Readonly<Record<string, NativeHostAliasSource>>;
+  readonly buildsEnabled: boolean;
+  /** The source-share grant (`HACK_NATIVE_SHARED_SOURCE=1` or `sharedSource`). */
+  readonly sharedSource: boolean;
+  /** Whether a dependency file is selected for the effective env. */
+  readonly hasHostDependencies: boolean;
+  readonly profiles: readonly string[];
+  /** The native runtime, `"incomplete"` for a selection without a candidate, or null. */
+  readonly runtime: NativeRuntimeSelection | "incomplete" | null;
+  readonly invoke?: typeof invokeNativeRuntime;
+};
+
+/** Runs both gates over one project and merges their findings. */
+export async function collectNativePreflight(
+  opts: NativePreflightOptions
+): Promise<NativePreflightReport> {
+  const adapted = await adaptForPreflight(opts);
+  const cli = [...opts.settings, ...adapted.findings];
+  let runtime: RuntimeReview = {
+    review:
+      opts.runtime === "incomplete"
+        ? { status: "skipped", code: "native_selection_incomplete" }
+        : { status: "skipped" },
+    findings: [],
+  };
+  if (adapted.document) {
+    cli.push(
+      ...(await collectNativeCliFindings({
+        ...opts,
+        adapted: adapted.document,
+      }))
+    );
+    if (opts.runtime !== null && opts.runtime !== "incomplete") {
+      runtime = await collectNativeRuntimeFindings({
+        runtime: opts.runtime,
+        projectRoot: opts.projectRoot,
+        composeFile: opts.composeFile,
+        profiles: opts.profiles,
+        adapted: adapted.document,
+        invoke: opts.invoke,
+      });
+      if (runtime.plan) {
+        cli.push(
+          ...routeFindings({
+            plan: runtime.plan,
+            services: adapted.document.services,
+          })
+        );
+      }
+    }
+  }
+  // A runtime finding the CLI already reported for the same service is
+  // dropped, and so is an exact repeat (one per published port, for example).
+  const reported = new Set(
+    cli.map((found) => `${found.code}\0${found.service ?? ""}`)
   );
-  const all = [
-    ...opts.cli,
-    ...opts.runtime.findings.filter(
-      (found) => !seen.has(`${found.code}\0${found.service ?? ""}`)
-    ),
-  ];
+  const exact = new Set<string>();
+  const all = [...cli];
+  for (const found of runtime.findings) {
+    const key = `${found.severity}\0${found.code}\0${found.service ?? ""}\0${found.field ?? ""}`;
+    if (
+      reported.has(`${found.code}\0${found.service ?? ""}`) ||
+      exact.has(key)
+    ) {
+      continue;
+    }
+    exact.add(key);
+    all.push(found);
+  }
   const blockers = all.filter((found) => found.severity === "blocker");
   return {
     report_version: 1,
     backend: "native",
     compose_file: relative(opts.projectRoot, opts.composeFile),
-    ready: blockers.length === 0 && opts.runtime.review.status === "completed",
-    runtime_review: opts.runtime.review,
+    ready: blockers.length === 0 && runtime.review.status === "completed",
+    runtime_review: runtime.review,
     blockers,
     warnings: all.filter((found) => found.severity === "warning"),
   };
@@ -772,8 +1185,7 @@ export function buildNativePreflightReport(opts: {
 function findingLines(found: NativePreflightFinding): string[] {
   const where = [
     found.service ? `service ${found.service}` : null,
-    found.field && !found.field.startsWith("services.") ? found.field : null,
-    found.field?.startsWith("services.") ? found.field : null,
+    found.field ?? null,
   ]
     .filter((part) => part !== null)
     .join(", ");
@@ -783,15 +1195,20 @@ function findingLines(found: NativePreflightFinding): string[] {
   ];
 }
 
-const REVIEW_LINES: Readonly<Record<NativePreflightReviewStatus, string>> = {
-  completed: "Runtime review: completed.",
-  stopped:
-    "Runtime review: stopped early. More findings may appear after the blocker below is fixed.",
-  skipped:
-    "Runtime review: skipped, because no native runtime is selected. Only the CLI's own checks ran. Run this from the hack-next launcher for the full list.",
-  unavailable:
-    "Runtime review: unavailable; the selected native runtime did not answer. Only the CLI's own checks ran.",
-};
+function reviewLine(review: NativePreflightReport["runtime_review"]): string {
+  if (review.status === "completed") {
+    return "Runtime review: completed.";
+  }
+  if (review.status === "stopped") {
+    return "Runtime review: stopped early. More findings may appear after the blocker below is fixed.";
+  }
+  if (review.status === "unavailable") {
+    return "Runtime review: unavailable; the selected native runtime did not return a review. Only the CLI's own checks ran.";
+  }
+  return review.code === "native_selection_incomplete"
+    ? "Runtime review: skipped, because native is selected without a candidate (HACK_NATIVE_BINARY and HACK_NATIVE_HOME). Only the CLI's own checks ran. Run this from the hack-next launcher for the full list."
+    : "Runtime review: skipped, because no native runtime is selected. Only the CLI's own checks ran. Run this from the hack-next launcher for the full list.";
+}
 
 /** The report for a person: plain sentences, one fix per finding, no values. */
 export function renderNativePreflightReport(
@@ -799,7 +1216,7 @@ export function renderNativePreflightReport(
 ): string {
   const lines = [
     `Native preflight for ${report.compose_file}`,
-    REVIEW_LINES[report.runtime_review.status],
+    reviewLine(report.runtime_review),
     "",
   ];
   if (report.blockers.length === 0) {

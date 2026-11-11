@@ -49,8 +49,9 @@
  * evidence/failure.json and exits 1; nothing is stopped or removed, so the state can be
  * inspected, and the line names the command that stops each pool. With `--keep-going`
  * every failed check is recorded and the run continues (a failed step 1-3 still ends it).
- * After a step that throws, every pool of the run is asked to stop and the run shows that no
- * provider of its homes and no foreground it started is still running before the next step
+ * After any failed step, including a recorded check failure, every pool of the run is asked
+ * to stop and the run shows that no provider of its homes and no foreground it started is
+ * still running before the next step
  * boots a pool; when it cannot, every later step is skipped and the evidence recorded. At
  * the end the run asks every pool to stop, lists each failure and exits 1. Exit 0 means
  * every check passed; the recovery answers of steps 5 and 11 are recorded, not checked, so
@@ -523,6 +524,36 @@ export const BLOB_SHA256 = createHash("sha256")
   .digest("hex");
 
 class Failure extends Error {}
+
+/** Console progress from this foreground's own stderr, after startup has completed. */
+export function foregroundReadyRun(stderr: string): string | null {
+  return (
+    /^SUCCESS: Project is ready \([^\r\n]*; run ([0-9a-f]{32})\)\. Use hack ps and hack logs from another terminal; press Ctrl-C to stop\.$/m.exec(
+      stderr
+    )?.[1] ?? null
+  );
+}
+
+/** Startup progress is small; fail closed rather than reading an unbounded log. */
+function startupOutput(path: string): string {
+  if (!existsSync(path)) {
+    return "";
+  }
+  const descriptor = openSync(path, "r");
+  try {
+    const length = fstatSync(descriptor).size;
+    if (length > 1024 * 1024) {
+      throw new Failure(
+        "Startup diagnostic exceeds the observation limit; see evidence."
+      );
+    }
+    const bytes = Buffer.alloc(length);
+    const read = readSync(descriptor, bytes, 0, length, 0);
+    return bytes.subarray(0, read).toString("utf8");
+  } finally {
+    closeSync(descriptor);
+  }
+}
 
 interface Result {
   code: number;
@@ -1173,7 +1204,7 @@ export class Qualification {
     );
   }
 
-  /** Start a `hack up`/`restart` foreground and wait for a ready observation. */
+  /** Wait for this foreground's ready line before any provider-lock-taking observation. */
   async upForeground(
     name: string,
     command: "up" | "restart",
@@ -1195,13 +1226,42 @@ export class Qualification {
         stderr: err,
       }
     );
+    // Keep the old child reachable before any readiness observation can fail. If spawn
+    // itself throws, this.foreground still holds the previous child.
+    if (previous) {
+      this.strays.push(previous);
+    }
     const deadline = started + 900_000;
     while (performance.now() < deadline) {
-      if (this.foreground.exitCode !== null) {
+      const stderr = startupOutput(join(this.evidence, `${label}.stderr`));
+      if (
+        this.foreground.exitCode !== null ||
+        this.foreground.signalCode !== null
+      ) {
+        if (
+          /\bprovider_busy\b|Another candidate operation holds the provider lock/.test(
+            stderr
+          )
+        ) {
+          this.record(`known_product_bug_provider_busy_${label}`, {
+            operation: command,
+            exit: this.foreground.exitCode,
+            evidence: `${label}.stderr`,
+          });
+          throw new Failure(
+            `${name}: KNOWN_PRODUCT_BUG provider_busy during ${command}; this does not establish a provider pin regression (see evidence ${label}.stderr)`
+          );
+        }
         throw new Failure(
           `${name} exited ${this.foreground.exitCode} before readiness (see evidence ${label}.stderr)`
         );
       }
+      const readyRun = foregroundReadyRun(stderr);
+      if (!readyRun) {
+        await Bun.sleep(500);
+        continue;
+      }
+      // This is a confirmation after the child's startup signal, never startup polling.
       const ps = this.exec(
         `${name}-ps`,
         [this.options.hack, "ps", "--path", this.project, "--json"],
@@ -1213,30 +1273,48 @@ export class Qualification {
       const container =
         items.find((item) => item.service === "web")?.container ??
         items[0]?.container;
-      if (data && items.length > 0 && container !== previousContainer) {
+      if (
+        ps.code === 0 &&
+        data?.run === readyRun &&
+        items.length > 0 &&
+        container !== previousContainer
+      ) {
         const seconds = round((performance.now() - started) / 1000);
         if (previous && command === "restart") {
-          const code = await Promise.race([
-            previous.exited,
-            Bun.sleep(this.exitWaitMs).then(() => null),
-          ]);
-          if (code === null) {
-            this.strays.push(previous);
-            throw new Failure(
-              `${name}: the previous foreground is still running ${this.exitWaitMs / 1000} s after its replacement became ready (${this.identity(previous)}); it is kept for cleanup`
-            );
-          }
-          this.check(
-            `${name}: the previous foreground exits 0`,
-            code === 0,
-            `exit ${code}`
-          );
+          await this.waitForReplacedForeground(name, previous);
         }
         return { seconds, ps: data };
       }
-      await Bun.sleep(500);
+      throw new Failure(
+        `${name}: foreground signalled ready but its run was not confirmed by ps (see evidence ${label}.stderr)`
+      );
     }
     throw new Failure(`${name} readiness deadline`);
+  }
+
+  /** A replaced child remains tracked until its bounded exit observation succeeds. */
+  async waitForReplacedForeground(
+    name: string,
+    previous: ReturnType<typeof Bun.spawn>
+  ): Promise<void> {
+    const code = await Promise.race([
+      previous.exited,
+      Bun.sleep(this.exitWaitMs).then(() => null),
+    ]);
+    if (code === null) {
+      throw new Failure(
+        `${name}: the previous foreground is still running ${this.exitWaitMs / 1000} s after its replacement became ready (${this.identity(previous)}); it is kept for cleanup`
+      );
+    }
+    const previousIndex = this.strays.indexOf(previous);
+    if (previousIndex >= 0) {
+      this.strays.splice(previousIndex, 1);
+    }
+    this.check(
+      `${name}: the previous foreground exits 0`,
+      code === 0,
+      `exit ${code}`
+    );
   }
 
   async down(name: string, extra: string[] = []): Promise<number> {
@@ -1428,9 +1506,15 @@ export class Qualification {
       ["runtime", "down", "--json"],
       300
     );
+    const stopped = this.status(this.main).process_alive !== true;
+    if (!stopped) {
+      throw new Failure(
+        "The main pool is still running; refusing auxiliary pool boot."
+      );
+    }
     this.check(
       `the main pool is stopped before the ${before} pool boots`,
-      this.status(this.main).process_alive !== true
+      true
     );
   }
 
@@ -1816,6 +1900,7 @@ export class Qualification {
         this.note(`SKIP ${name}: ${this.blocked}`);
         continue;
       }
+      const failuresBefore = this.failed.length;
       try {
         await step();
       } catch (error) {
@@ -1825,6 +1910,8 @@ export class Qualification {
         }
         this.failed.push(`${name}: ${message}`);
         this.note(`FAIL ${name}: ${message} (continuing: --keep-going)`);
+      }
+      if (this.failed.length > failuresBefore) {
         await this.settle(name);
       }
     }

@@ -272,6 +272,42 @@ describe("scanOutput", () => {
     expect(scanSliceBytes(1_000_000)).toBe(16 * 1024);
   });
 
+  test("a carried-over prefix is not searched again for every value", () => {
+    const big = `BEGIN${"q".repeat(120_000)}END`;
+    const values = [
+      big,
+      ...Array.from({ length: 1000 }, (_, index) => `short-${index}-value`),
+    ];
+    const secrets = encodeSecrets({ values, minLength: 1 });
+    // Held back from the previous pass: all of the big value but its tail.
+    const carry = `out:${big.slice(0, -2)}`;
+    const bytes = encoder.encode(
+      `${carry}${big.slice(-2)} done ${"z".repeat(16_000)}`
+    );
+    const scan = (scannedPrefix: number) => {
+      const started = performance.now();
+      const result = scanOutput({
+        bytes,
+        offset: 0,
+        secrets,
+        final: true,
+        captureRemaining: 1 << 23,
+        maxRangeBytes: 16_384,
+        scannedPrefix,
+      });
+      return { result, ms: performance.now() - started };
+    };
+    const full = scan(0);
+    const bounded = scan(encoder.encode(carry).length);
+    // Same regions: the only match ends in the new bytes.
+    expect(bounded.result.redactions).toEqual(full.result.redactions);
+    expect(bounded.result.redactions).toEqual([
+      { offset: 4, length: encoder.encode(big).length },
+    ]);
+    // Relative, not absolute: the carry is ~8x the new bytes here.
+    expect(bounded.ms).toBeLessThan(full.ms / 2);
+  });
+
   test("bytes past the capture budget are not scanned", () => {
     const bytes = encoder.encode(`${"x".repeat(40)}secret!${"y".repeat(10)}`);
     const result = scanOutput({

@@ -31,6 +31,14 @@ export type ScanInput = {
   readonly secrets: readonly Uint8Array[];
   /** Bytes the command may still capture, across both streams. */
   readonly captureRemaining: number;
+  /**
+   * Leading bytes already searched for values by an earlier scan (the
+   * carried-over held-back bytes). A match wholly inside them was already
+   * redacted, so each value is searched only from where a match could first
+   * reach a new byte: work per value is its length plus the new bytes, never
+   * the carry again.
+   */
+  readonly scannedPrefix?: number;
   readonly maxRangeBytes: number;
 };
 
@@ -209,7 +217,15 @@ export function scanOutput(input: ScanInput): ScanResult {
   // rather than values x runs.
   let union: { start: number; length: number }[] = [];
   for (const secret of secrets) {
-    union = mergeSortedIntervals(union, findMatches(scanned, secret));
+    const from = Math.max(
+      0,
+      Math.min(scanned.length, input.scannedPrefix ?? 0) - (secret.length - 1)
+    );
+    const found = findMatches(scanned.subarray(from), secret).map((match) => ({
+      start: match.start + from,
+      length: match.length,
+    }));
+    union = mergeSortedIntervals(union, found);
   }
   const redactions = union.map((match) => ({
     offset: input.offset + match.start,

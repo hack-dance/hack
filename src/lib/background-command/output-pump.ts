@@ -83,6 +83,8 @@ export async function pumpStream(opts: {
       }
       const scan = scanOutput({
         bytes: slice.bytes,
+        // The carry was searched by the scan that held it back.
+        scannedPrefix: state.carry.length,
         offset: state.from,
         final: slice.final,
         secrets: opts.redact ? opts.secrets : [],

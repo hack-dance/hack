@@ -404,6 +404,40 @@ esac
     }
   });
 
+  test("a cleanup check that throws counts as processes left running", async () => {
+    const { run, done } = fixture();
+    try {
+      run.runningProviders = () => {
+        throw new Error("synthetic ps failure");
+      };
+      let later = false;
+      const code = await run.runSteps([
+        [
+          "fails",
+          false,
+          () => {
+            throw new Error("synthetic failure");
+          },
+        ],
+        [
+          "next",
+          false,
+          () => {
+            later = true;
+          },
+        ],
+      ]);
+      expect(code).toBeNull();
+      expect(later).toBe(false);
+      expect(run.blocked).toContain("synthetic ps failure");
+      expect(run.recorded.stopped_after_fails).toEqual({
+        cleanup_check_failed: "synthetic ps failure",
+      });
+    } finally {
+      done();
+    }
+  });
+
   test("restart reports a previous foreground that never exits instead of waiting forever", async () => {
     const { root, run, done } = fixture();
     try {

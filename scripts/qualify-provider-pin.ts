@@ -53,10 +53,12 @@
  * boots a pool; when it cannot, every later step is skipped and the evidence recorded. At
  * the end the run asks every pool to stop, lists each failure and exits 1. Exit 0 means
  * every check passed; the recovery answers of steps 5 and 11 are recorded, not checked, so
- * read them in qualification.json. The only processes it signals are its own children (a
- * foreground still running after every pool stopped gets SIGTERM at cleanup) and, in step
- * 11, the provider VM process of its own pool, which it identifies by the pool receipt,
- * executable path, user and start time before sending SIGKILL.
+ * read them in qualification.json. At the end it also checks that no provider of its homes
+ * is still running (a run that leaves one fails and lists it). The only processes it
+ * signals are its own children (a foreground still running after every pool was asked to
+ * stop gets SIGTERM at cleanup) and, in step 11, the provider VM process of its own pool,
+ * which it identifies by the pool receipt, executable path, user and start time before
+ * sending SIGKILL.
  */
 import { createHash } from "node:crypto";
 import {
@@ -1311,21 +1313,36 @@ export class Qualification {
       this.strays.push(this.foreground);
       this.foreground = null;
     }
-    this.stopAll("after-failed-step");
-    const foregrounds = await this.alive(this.strays, this.exitWaitMs);
-    const providers = this.homes().flatMap((home) =>
+    const key = `stopped_after_${after.replace(/\W+/g, "_")}`;
+    try {
+      this.stopAll("after-failed-step");
+      const foregrounds = await this.alive(this.strays, this.exitWaitMs);
+      const evidence = {
+        foregrounds_running: foregrounds.map((child) => this.identity(child)),
+        providers_running: this.runningProviders(),
+      };
+      this.record(key, evidence);
+      if (
+        evidence.foregrounds_running.length > 0 ||
+        evidence.providers_running.length > 0
+      ) {
+        this.blocked = `step ${after} left processes running after cleanup: ${JSON.stringify(evidence)}`;
+      } else {
+        this.strays.length = 0;
+      }
+    } catch (error) {
+      // An absence that could not be shown is treated as presence.
+      const message = error instanceof Error ? error.message : String(error);
+      this.record(key, { cleanup_check_failed: message });
+      this.blocked = `the cleanup check after step ${after} failed: ${message}`;
+    }
+  }
+
+  /** Provider processes of every home of this run, as `home:pid`. */
+  runningProviders(): string[] {
+    return this.homes().flatMap((home) =>
       this.providerPids(home).map((pid) => `${basename(home)}:${pid}`)
     );
-    const evidence = {
-      foregrounds_running: foregrounds.map((child) => this.identity(child)),
-      providers_running: providers,
-    };
-    this.record(`stopped_after_${after.replace(/\W+/g, "_")}`, evidence);
-    if (foregrounds.length > 0 || providers.length > 0) {
-      this.blocked = `step ${after} left processes running after cleanup: ${JSON.stringify(evidence)}`;
-    } else {
-      this.strays.length = 0;
-    }
   }
 
   /** The current foreground; a method so flow narrowing does not pin an earlier value. */
@@ -1671,6 +1688,21 @@ export class Qualification {
       for (const child of lingering) {
         child.kill("SIGTERM");
       }
+    }
+    // Pools asked to stop must be gone: one still running fails the run and is listed.
+    let left: string[];
+    try {
+      left = this.runningProviders();
+    } catch (error) {
+      left = [
+        `not shown: ${error instanceof Error ? error.message : String(error)}`,
+      ];
+    }
+    this.record("providers_running_at_exit", left);
+    if (left.length > 0) {
+      this.failed.push(
+        `cleanup: provider processes still running after runtime down: ${left.join(", ")}`
+      );
     }
     this.dependencyServer?.kill("SIGTERM");
     writeFileSync(

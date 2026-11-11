@@ -102,29 +102,52 @@ export function pendingPrefixLength(
 ): number {
   let longest = 0;
   for (const secret of secrets) {
-    const max = Math.min(secret.length - 1, bytes.length);
-    for (let length = max; length > longest; length -= 1) {
-      if (suffixMatchesPrefix(bytes, secret, length)) {
-        longest = length;
-        break;
-      }
-    }
+    longest = Math.max(longest, longestSuffixPrefix(bytes, secret));
   }
   return longest;
 }
 
-function suffixMatchesPrefix(
-  bytes: Uint8Array,
-  secret: Uint8Array,
-  length: number
-): boolean {
-  const start = bytes.length - length;
-  for (let index = 0; index < length; index += 1) {
-    if (bytes[start + index] !== secret[index]) {
-      return false;
+/**
+ * Length of the longest proper prefix of `secret` that `bytes` ends with, in
+ * linear time (KMP prefix function over the secret, then one pass over at
+ * most `secret.length - 1` trailing bytes). A naive suffix-by-suffix
+ * comparison is quadratic and, with a long value, could stall a capture poll
+ * (and so cancel and timeout handling) for seconds.
+ */
+function longestSuffixPrefix(bytes: Uint8Array, secret: Uint8Array): number {
+  if (secret.length < 2 || bytes.length === 0) {
+    return 0;
+  }
+  const failure = prefixFunction(secret);
+  const tail = bytes.subarray(Math.max(0, bytes.length - (secret.length - 1)));
+  let matched = 0;
+  for (const byte of tail) {
+    while (matched > 0 && secret[matched] !== byte) {
+      matched = failure[matched - 1] ?? 0;
+    }
+    if (secret[matched] === byte) {
+      matched += 1;
+    }
+    if (matched === secret.length) {
+      matched = failure[matched - 1] ?? 0;
     }
   }
-  return true;
+  return matched;
+}
+
+function prefixFunction(secret: Uint8Array): Uint32Array {
+  const failure = new Uint32Array(secret.length);
+  let k = 0;
+  for (let index = 1; index < secret.length; index += 1) {
+    while (k > 0 && secret[index] !== secret[k]) {
+      k = failure[k - 1] ?? 0;
+    }
+    if (secret[index] === secret[k]) {
+      k += 1;
+    }
+    failure[index] = k;
+  }
+  return failure;
 }
 
 /**

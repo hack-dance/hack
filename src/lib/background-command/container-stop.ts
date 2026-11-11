@@ -31,9 +31,11 @@ export const GUEST_STOP_SCRIPT = [
   `marked() { for d in /proc/[0-9]*; do has "$d" "$m" && echo "\${d##*/}"; done; }`,
   "first=$(marked)",
   'test -z "$first" && exit 0',
-  'for p in $first; do kill -TERM "$p" 2>/dev/null; done',
+  // Each pid is re-checked for the marker right before its signal: one that
+  // exited and was reused during the scan no longer carries it.
+  'for p in $first; do has "/proc/$p" "$m" && kill -TERM "$p" 2>/dev/null; done',
   "sleep 2",
-  'for p in $(marked); do kill -KILL "$p" 2>/dev/null; done',
+  'for p in $(marked); do has "/proc/$p" "$m" && kill -KILL "$p" 2>/dev/null; done',
   "sleep 1",
   'test -z "$(marked)"',
 ].join("\n");

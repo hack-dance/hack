@@ -224,6 +224,32 @@ describe("scanOutput", () => {
     expect(performance.now() - started).toBeLessThan(10_000);
   });
 
+  test("holding back a partial long value is linear, not suffix by suffix", () => {
+    const secrets = encodeSecrets({
+      values: [`${"a".repeat(100_000)}b`],
+      minLength: 1,
+    });
+    const scan = (text: string) => {
+      const bytes = encoder.encode(text);
+      const result = scanOutput({
+        bytes,
+        offset: 0,
+        secrets,
+        final: false,
+        captureRemaining: 1 << 23,
+        maxRangeBytes: 16_384,
+      });
+      return bytes.length - result.ranges.reduce((sum, r) => sum + r.length, 0);
+    };
+    const started = performance.now();
+    // Could not start the value (ends in "c"): nothing held back.
+    expect(scan(`${"a".repeat(100_000)}c`)).toBe(0);
+    // Ends with a prefix of the value: exactly that prefix is held back.
+    expect(scan(`${"x".repeat(10)}${"a".repeat(99_990)}`)).toBe(99_990);
+    // Loose bound: the quadratic version took seconds here.
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
   test("bytes past the capture budget are not scanned", () => {
     const bytes = encoder.encode(`${"x".repeat(40)}secret!${"y".repeat(10)}`);
     const result = scanOutput({

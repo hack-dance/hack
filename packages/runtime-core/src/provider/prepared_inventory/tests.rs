@@ -247,3 +247,206 @@ fn malformed_reports_are_refused() {
         assert_eq!(refused.code, "prepared_base_unverified", "{label}");
     }
 }
+
+#[test]
+fn the_empty_attach_directories_of_smolvm_1_34_are_allowed_and_nothing_below_them() {
+    let mut dirs = vec![
+        "run",
+        "run/smolvm",
+        "run/smolvm/attach",
+        "run/smolvm/attach/ro",
+        "run/smolvm/attach/rw",
+    ];
+    let inventory = evaluate(&report(&[("upper_dirs", list(&dirs))]), &[]).unwrap();
+    assert!(
+        inventory.unexpected.is_empty(),
+        "{:?}",
+        inventory.unexpected
+    );
+    dirs.push("run/smolvm/attach/rw/share");
+    let inventory = evaluate(
+        &report(&[
+            ("upper_dirs", list(&dirs)),
+            ("upper_files", list(&["run/smolvm/attach/ro/file"])),
+        ]),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        inventory.unexpected,
+        [
+            "overlay-dir:run/smolvm/attach/rw/share",
+            "overlay:run/smolvm/attach/ro/file",
+        ]
+    );
+}
+
+/// `guest-prepared-inventory.sh` against a fake guest: its absolute paths point into a private
+/// root, and fake `blkid`, `mount` and `umount` stand in for the guest's. The fake `mount` can
+/// refuse a read-only mount the way util-linux 2.42 in the SmolVM 1.34.1 guest does (a warning on
+/// stdout, exit 32). Linux only: it needs GNU `find`, `base64` and `sha256sum`.
+#[cfg(target_os = "linux")]
+mod fake_guest {
+    use super::evaluate;
+    use std::fs;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::PathBuf;
+    use std::process::{Command, Output};
+
+    const MOUNT: &str = r#"#!/bin/bash
+set -eu
+test "$1" = -n; shift
+opts=
+if test "$1" = -o; then opts=$2; shift 2; fi
+echo "mount $opts" >> "$FAKE_STATE/log"
+case "$opts" in
+  ro)
+    if test -e "$FAKE_STATE/ro-refused"; then
+      printf 'mount warning:\n      * vdb: Can'"'"'t mount, would change RO state\n'; exit 32
+    fi
+    echo "36 25 254:16 / $2 ro,relatime - ext4 $1 ro" > "$FAKE_STATE/mountinfo" ;;
+  "") echo "36 25 254:16 / $2 rw,relatime - ext4 $1 rw" > "$FAKE_STATE/mountinfo" ;;
+  remount,bind,ro)
+    if test -e "$FAKE_STATE/remount-refused"; then echo "remount refused" >&2; exit 32; fi
+    sed -i 's/ rw,relatime / ro,relatime /' "$FAKE_STATE/mountinfo" ;;
+  *) exit 99 ;;
+esac
+"#;
+    const UMOUNT: &str =
+        "#!/bin/bash\necho umount >> \"$FAKE_STATE/log\"\n: > \"$FAKE_STATE/mountinfo\"\n";
+    const BLKID: &str =
+        "#!/bin/sh\necho '/dev/vdb: LABEL=\"smolvm-overlay\" UUID=\"fixture\" TYPE=\"ext4\"'\n";
+
+    struct Guest {
+        dir: PathBuf,
+    }
+    impl Drop for Guest {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+    impl Guest {
+        /// A clean seed as a 1.34.1 verifier boot leaves it, including the empty attach
+        /// directories.
+        fn new(name: &str) -> Self {
+            let dir = crate::private_test_root(
+                &std::env::temp_dir().canonicalize().unwrap(),
+                &format!("hack-inventory-guest-{name}"),
+            );
+            for sub in [
+                "bin",
+                "state",
+                "root/storage/docker/volumes",
+                "root/storage/containerd",
+                "root/etc/hack-local-network-tools",
+                "root/mnt/upper/etc",
+                "root/mnt/upper/run/smolvm/virtiofs/smolvm0",
+                "root/mnt/upper/run/smolvm/attach/ro",
+                "root/mnt/upper/run/smolvm/attach/rw",
+                "root/mnt/upper/run/hack-local",
+            ] {
+                fs::create_dir_all(dir.join(sub)).unwrap();
+            }
+            fs::write(
+                dir.join("root/mnt/upper/etc/resolv.conf"),
+                "nameserver fixture\n",
+            )
+            .unwrap();
+            symlink("/run", dir.join("root/mnt/upper/run/docker.sock")).unwrap();
+            fs::write(dir.join("root/storage/docker/volumes/metadata.db"), "").unwrap();
+            fs::write(dir.join("state/mountinfo"), "").unwrap();
+            for (name, body) in [("mount", MOUNT), ("umount", UMOUNT), ("blkid", BLKID)] {
+                let path = dir.join("bin").join(name);
+                fs::write(&path, body).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            Self { dir }
+        }
+        fn flag(&self, name: &str) {
+            fs::write(self.dir.join("state").join(name), "").unwrap();
+        }
+        fn run(&self) -> Output {
+            let root = self.dir.join("root");
+            let script = include_str!("../guest-prepared-inventory.sh")
+                .replace(
+                    "/proc/self/mountinfo",
+                    &self.dir.join("state/mountinfo").display().to_string(),
+                )
+                .replace(
+                    "/etc/hack-local-network-tools",
+                    &root
+                        .join("etc/hack-local-network-tools")
+                        .display()
+                        .to_string(),
+                )
+                .replace(
+                    "mountpoint=/mnt",
+                    &format!("mountpoint={}", root.join("mnt").display()),
+                )
+                .replace("/storage", &root.join("storage").display().to_string());
+            let path = format!("{}:/usr/bin:/bin", self.dir.join("bin").display());
+            Command::new("/bin/bash")
+                .args(["-c", &script, "inventory"])
+                .env_clear()
+                .env("PATH", path)
+                .env("FAKE_STATE", self.dir.join("state"))
+                .output()
+                .unwrap()
+        }
+        fn log(&self) -> String {
+            fs::read_to_string(self.dir.join("state/log")).unwrap_or_default()
+        }
+    }
+
+    fn report(output: &Output) -> String {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout.clone()).unwrap()
+    }
+
+    #[test]
+    fn a_refused_read_only_mount_stays_out_of_the_report_and_the_overlay_is_read_read_only() {
+        let guest = Guest::new("ro-refused");
+        guest.flag("ro-refused");
+        let output = guest.run();
+        let text = report(&output);
+        assert!(!text.contains("mount warning"), "{text}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("would change RO state"));
+        assert_eq!(
+            guest.log(),
+            "mount ro\nmount \nmount remount,bind,ro\numount\n"
+        );
+        let inventory = evaluate(&text, &[]).unwrap();
+        assert!(
+            inventory.unexpected.is_empty(),
+            "{:?}",
+            inventory.unexpected
+        );
+    }
+
+    #[test]
+    fn a_read_only_mount_that_succeeds_is_used_as_is() {
+        let guest = Guest::new("ro-allowed");
+        let text = report(&guest.run());
+        assert_eq!(guest.log(), "mount ro\numount\n");
+        assert!(evaluate(&text, &[]).unwrap().unexpected.is_empty());
+    }
+
+    #[test]
+    fn nothing_is_read_when_the_mount_cannot_be_made_read_only() {
+        let guest = Guest::new("remount-refused");
+        guest.flag("ro-refused");
+        guest.flag("remount-refused");
+        let output = guest.run();
+        assert!(!output.status.success());
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(!text.contains("upper_"), "{text}");
+        assert_eq!(
+            guest.log(),
+            "mount ro\nmount \nmount remount,bind,ro\numount\n"
+        );
+    }
+}

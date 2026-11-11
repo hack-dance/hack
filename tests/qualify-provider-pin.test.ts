@@ -31,6 +31,7 @@ import {
   parseTopMemory,
   providerProcesses,
   Qualification,
+  readJson,
   readyData,
   rootProblem,
   sourceTemplatePins,
@@ -271,6 +272,12 @@ describe("provider pin qualification", () => {
       )
     ).toBeNull();
     expect(readyData(JSON.stringify({ ok: false, data: ready }))).toBeNull();
+    expect(readJson('{"receipt":{"base_id":"b"}}')).toEqual({
+      receipt: { base_id: "b" },
+    });
+    for (const other of ["", "[]", "null", "mount warning:"]) {
+      expect(readJson(other)).toBeNull();
+    }
     expect(readyData("not json")).toBeNull();
   });
 

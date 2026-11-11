@@ -659,6 +659,7 @@ for a security fix, so each bump stays small enough to review against upstream n
 3. On an Apple Silicon Mac, run [`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts)
    once with a bundle built from the current pin (baseline) and once with the bump,
    each in its own empty private root. It checks the archive and signature, prepare,
+   a prepared base built and verified (its overlay inventory), a pool without internet,
    template expansion and digests, exact disk identity, restart, down and up, network
    modes, the dependency-socket relay, Rosetta and a web-plus-database project, then
    prints the timing and idle-footprint measurements to compare. What `down --recover`

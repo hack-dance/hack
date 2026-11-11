@@ -10,7 +10,8 @@
  *      `checksums.sha256` when given), the archive's own `checksums.txt` matches its files,
  *      and `smolvm-bin` passes `codesign --verify --strict`.
  *   2. prepare: `runtime prepare`, `prepare-engine`, `prepare-network-tools` and `probe`
- *      in three homes; a prepared base built and verified in the second home; and a pool
+ *      in three homes. 2a: `prepared-base build`, `verify` (both disks and the overlay's
+ *      upper-layer inventory) and `remove` in the second home, each its own check. 2b: a pool
  *      without internet access booted and stopped in the third (network tools included).
  *   3. templates: the first start expands both disk templates at their logical sizes; their
  *      content digests (the runtime's own definition) are printed and compared with the
@@ -932,82 +933,81 @@ export class Qualification {
   }
 
   /**
-   * Pools without internet access, before any other pool runs: a prepared base (its verifier
-   * pool boots without internet, installs the network tools and checks the overlay inventory)
-   * and a plain isolated pool. Both failed on the first SmolVM 1.34.1 run, so they are their
-   * own step and `--keep-going` continues past them.
+   * 2a. A prepared base, before any other pool runs: `build` boots a verifier pool without
+   * internet in the second home (installing the network tools), and `verify` boots it again
+   * and checks both disks, including the overlay's upper-layer inventory against the pinned
+   * guest's file set. Each command is its own check; the base is removed afterwards.
    */
-  isolatedPools(): void {
-    try {
-      this.preparedBase();
-    } catch (error) {
-      this.check(
-        "a prepared base builds and verifies its upper-layer inventory",
-        false,
-        error instanceof Error ? error.message : String(error)
-      );
-    }
-    this.isolatedBoot();
-  }
-
   preparedBase(): void {
-    // A prepared base boots a verifier pool, installs the network tools and checks the
-    // overlay's upper-layer inventory, so it exercises the apk-tools 3 file set of the
-    // pinned guest. It runs in the second home before that home's own pool exists.
     const store = join(this.options.root, "prepared-bases");
     mkdirSync(store, { mode: 0o700 });
-    const buildStarted = performance.now();
-    const built = this.runtime(
-      this.aux,
-      "prepared-base-build",
-      [
-        "runtime",
-        "prepared-base",
-        "build",
-        "--profile",
-        this.options.profile,
-        "--store",
-        store,
-        "--json",
-      ],
-      900
-    );
+    const native = (name: string, args: string[]) =>
+      this.exec(
+        name,
+        [
+          this.options.native,
+          "--candidate-root",
+          this.aux,
+          "runtime",
+          "prepared-base",
+          ...args,
+          "--store",
+          store,
+          "--json",
+        ],
+        { timeout: 900, allowFailure: true }
+      );
+    const detail = (result: Result) =>
+      (result.stderr || result.stdout).trim().slice(-600);
+    let started = performance.now();
+    const built = native("prepared-base-build", [
+      "build",
+      "--profile",
+      this.options.profile,
+    ]);
     const base = String(
-      (built.receipt as Record<string, unknown> | undefined)?.base_id ?? ""
-    );
-    this.measure(
-      "prepared_base_build_seconds",
-      round((performance.now() - buildStarted) / 1000)
-    );
-    this.runtime(
-      this.aux,
-      "prepared-base-verify",
-      [
-        "runtime",
-        "prepared-base",
-        "verify",
-        "--base-id",
-        base,
-        "--store",
-        store,
-        "--json",
-      ],
-      900
+      (readJson(built.stdout)?.receipt as Record<string, unknown> | undefined)
+        ?.base_id ?? ""
     );
     this.check(
-      "a prepared base builds and verifies its upper-layer inventory",
-      base.length > 0
+      "prepared-base build succeeds",
+      built.code === 0 && base.length > 0,
+      detail(built)
     );
-    this.runtime(this.aux, "prepared-base-remove", [
-      "runtime",
-      "prepared-base",
+    if (built.code !== 0 || base.length === 0) {
+      return;
+    }
+    this.measure(
+      "prepared_base_build_seconds",
+      round((performance.now() - started) / 1000)
+    );
+    started = performance.now();
+    const verified = native("prepared-base-verify", [
+      "verify",
+      "--base-id",
+      base,
+    ]);
+    this.check(
+      "prepared-base verify accepts the base's disks and upper-layer inventory",
+      verified.code === 0,
+      detail(verified)
+    );
+    if (verified.code === 0) {
+      this.measure(
+        "prepared_base_verify_seconds",
+        round((performance.now() - started) / 1000)
+      );
+    }
+    const removed = native("prepared-base-remove", [
       "remove",
       "--base-id",
       base,
-      "--store",
-      store,
-      "--json",
     ]);
+    this.check(
+      "prepared-base remove succeeds",
+      removed.code === 0,
+      detail(removed)
+    );
   }
 
   /**
@@ -1608,7 +1608,8 @@ export class Qualification {
     const steps: [string, boolean, () => Promise<void> | void][] = [
       ["1 archive", true, () => this.archive()],
       ["2 prepare", true, () => this.prepare()],
-      ["2b pools without internet", false, () => this.isolatedPools()],
+      ["2a prepared base", false, () => this.preparedBase()],
+      ["2b pool without internet", false, () => this.isolatedBoot()],
       [
         "3 templates",
         true,
@@ -2285,6 +2286,18 @@ function readyContainer(status: Record<string, unknown>): string | null {
 }
 
 /** `hack ps --json` data when the run is observed ready. */
+/** A JSON object printed by a command, or null when it printed anything else. */
+export function readJson(stdout: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(stdout);
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function readyData(stdout: string): Record<string, unknown> | null {
   try {
     const value = JSON.parse(stdout) as {
@@ -2392,7 +2405,8 @@ export async function main(argv: string[]): Promise<number> {
     sequence: [
       "1 archive",
       "2 prepare",
-      "2b pools without internet",
+      "2a prepared base",
+      "2b pool without internet",
       "3 templates",
       "4 disk identity",
       "5 lifecycle",

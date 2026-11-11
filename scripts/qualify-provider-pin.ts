@@ -1559,6 +1559,20 @@ export class Qualification {
     );
   }
 
+  /** The main pool's provider process as `pid@start`, from its receipt, or null. */
+  providerIdentity(): string | null {
+    try {
+      const process = this.owner(this.main).process as
+        | Record<string, unknown>
+        | undefined;
+      return process?.pid && process.start_micros
+        ? `${String(process.pid)}@${String(process.start_micros)}`
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
   observedReady(): boolean {
     const ps = this.exec(
       "ps-after-recover",
@@ -2451,6 +2465,7 @@ export class Qualification {
     const runs: WarmPhases[] = [];
     for (let run = 1; run <= this.options.warmRuns; run++) {
       const label = this.label(`warm-up-d-${run}`);
+      const providerBefore = this.providerIdentity();
       const started = performance.now();
       const child = Bun.spawn(
         [this.options.hack, "up", "-d", "--path", this.project],
@@ -2491,27 +2506,37 @@ export class Qualification {
       }
       const code = await child.exited;
       const total = (performance.now() - started) / 1000;
+      const phases = warmPhases(samples, total);
+      // The evidence first, so a failed check below still leaves it.
+      writeFileSync(
+        join(this.evidence, `${label}.phases.json`),
+        JSON.stringify({ phases, samples }, null, 2)
+      );
+      // A phase shorter than one sample period is not seen; its time is unknown, not a
+      // failure. That the warm start happened is shown independently: the command exits 0,
+      // the project is observed ready, and the pool kept the same provider process.
       this.check(
         `warm up -d run ${run} exits 0`,
         code === 0,
         `exit ${code} (see ${label}.stderr)`
       );
-      const phases = warmPhases(samples, total);
-      // A fast preflight can fall between two samples; only `runtime up` must be seen.
       this.check(
-        `warm up -d run ${run}: runtime up was observed`,
-        phases.runtime_up_s !== null,
-        `see ${label}.phases.json`
+        `warm up -d run ${run}: the project is observed ready`,
+        this.observedReady()
       );
-      if (phases.retained_preflight_s === null) {
-        this.note(
-          `INFO warm up -d run ${run}: retained preflight not sampled (shorter than one ${phases.sample_period_s ?? "?"} s period, or not run)`
-        );
+      const providerAfter = this.providerIdentity();
+      this.check(
+        `warm up -d run ${run}: the pool kept its provider process (no cold boot)`,
+        providerBefore !== null && providerAfter === providerBefore,
+        `${providerBefore} -> ${providerAfter}`
+      );
+      for (const key of ["retained_preflight_s", "runtime_up_s"] as const) {
+        if (phases[key] === null) {
+          this.note(
+            `INFO warm up -d run ${run}: ${key} not sampled (shorter than one ${phases.sample_period_s ?? "?"} s period, or not run); recorded as unknown`
+          );
+        }
       }
-      writeFileSync(
-        join(this.evidence, `${label}.phases.json`),
-        JSON.stringify({ phases, samples }, null, 2)
-      );
       runs.push(phases);
       this.measure(`warm_up_d_run_${run}`, phases);
       this.hack(`warm-down-${run}`, ["down", "--path", this.project], 300);

@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -394,6 +395,7 @@ echo "$*" >> '${root}/hack.log'
 case "$1" in
   ps) printf '{"ok":true,"data":{"status":"observed","phase":"ready-observed","items":[{"service":"web","container":"c-%s"}]}}' "$(cat '${root}/gen' 2>/dev/null)" ;;
   up|restart)
+    if [ "$2" = -d ]; then exit 0; fi
     n=$(( $(cat '${root}/gen' 2>/dev/null || echo 0) + 1 )); echo "$n" > '${root}/gen'
     if [ -e '${root}/stubborn' ]; then exec sleep 20; fi
     while [ ! -e '${root}/stop' ]; do sleep 0.05; done; rm -f '${root}/stop' ;;
@@ -547,6 +549,33 @@ esac
       expect(run.runningProviders()).toEqual([]);
     } finally {
       verifier.kill("SIGKILL");
+      done();
+    }
+  });
+
+  test("a warm start too short to sample is recorded as unknown, not failed", async () => {
+    const { root, run, done } = fixture();
+    try {
+      const receipt = join(root, "candidate", ".hack-local", "run", "smolvm");
+      mkdirSync(receipt, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(receipt, "owner.json"),
+        JSON.stringify({ process: { pid: 4242, start_micros: 17 } })
+      );
+      (run.options as { warmRuns: number }).warmRuns = 2;
+      await run.warm();
+      expect(run.failed).toEqual([]);
+      expect(
+        run.passed.filter((line) => line.includes("kept its provider process"))
+      ).toHaveLength(2);
+      const first = run.measurements.warm_up_d_run_1 as Record<string, unknown>;
+      expect(first.runtime_up_s).toBeNull();
+      expect(
+        readdirSync(join(root, "evidence")).filter((name) =>
+          name.endsWith(".phases.json")
+        )
+      ).toHaveLength(2);
+    } finally {
       done();
     }
   });

@@ -127,7 +127,14 @@ function suffixMatchesPrefix(
   return true;
 }
 
-function findMatches(
+/**
+ * Every occurrence of `needle`, overlapping ones included, as merged
+ * intervals: a run of overlapping or adjacent occurrences (for example a
+ * periodic value in periodic output) is one interval, so memory grows with
+ * the number of separate runs, never with the number of occurrences.
+ * Exported for tests.
+ */
+export function findMatches(
   haystack: Uint8Array,
   needle: Uint8Array
 ): { readonly start: number; readonly length: number }[] {
@@ -146,7 +153,12 @@ function findMatches(
     if (index < 0) {
       break;
     }
-    matches.push({ start: index, length: needle.length });
+    const last = matches.at(-1);
+    if (last && index <= last.start + last.length) {
+      last.length = index + needle.length - last.start;
+    } else {
+      matches.push({ start: index, length: needle.length });
+    }
     from = index + 1;
   }
   return matches;
@@ -156,9 +168,19 @@ export function scanOutput(input: ScanInput): ScanResult {
   const secrets = input.secrets.filter((secret) => secret.length > 0);
   // Match against the raw bytes, so overlapping values are all found.
   const working = input.bytes;
+  // Bytes past the capture budget are never published: scan only up to it,
+  // plus enough for a value that starts inside it to finish.
+  const longest = secrets.reduce(
+    (max, secret) => Math.max(max, secret.length),
+    0
+  );
+  const scanned = working.subarray(
+    0,
+    Math.min(working.length, Math.max(0, input.captureRemaining) + longest)
+  );
   const redactions: { offset: number; length: number }[] = [];
   for (const secret of secrets) {
-    for (const match of findMatches(working, secret)) {
+    for (const match of findMatches(scanned, secret)) {
       redactions.push({
         offset: input.offset + match.start,
         length: match.length,

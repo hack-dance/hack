@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   encodeSecrets,
+  findMatches,
   scanOutput,
   utf8SafeCut,
 } from "../src/lib/background-command/output-scanner.ts";
@@ -173,6 +174,47 @@ describe("scanOutput", () => {
       secrets: ["abcdef", "def123456"],
     });
     expect(decoder.decode(file)).toBe("val=************ end");
+  });
+
+  test("periodic output against a periodic value yields one merged region, not one per occurrence", () => {
+    const bytes = encoder.encode("a".repeat(1024 * 1024));
+    const result = scanOutput({
+      bytes,
+      offset: 0,
+      secrets: encodeSecrets({ values: ["aaaaaa"], minLength: 1 }),
+      final: true,
+      captureRemaining: bytes.length,
+      maxRangeBytes: 16_384,
+    });
+    expect(result.redactions).toEqual([{ offset: 0, length: bytes.length }]);
+    // Matches are merged as found: one interval, never a million objects.
+    expect(
+      findMatches(
+        bytes,
+        encodeSecrets({ values: ["aaaaaa"], minLength: 1 })[0] as Uint8Array
+      )
+    ).toEqual([{ start: 0, length: bytes.length }]);
+    expect(
+      findMatches(encoder.encode("ab-ab-xab"), encoder.encode("ab"))
+    ).toEqual([
+      { start: 0, length: 2 },
+      { start: 3, length: 2 },
+      { start: 7, length: 2 },
+    ]);
+  });
+
+  test("bytes past the capture budget are not scanned", () => {
+    const bytes = encoder.encode(`${"x".repeat(40)}secret!${"y".repeat(10)}`);
+    const result = scanOutput({
+      bytes,
+      offset: 0,
+      secrets: encodeSecrets({ values: ["secret!"], minLength: 1 }),
+      final: true,
+      captureRemaining: 20,
+      maxRangeBytes: 16_384,
+    });
+    expect(result.redactions).toEqual([]);
+    expect(result.budgetReached).toBe(true);
   });
 
   test("ranges never exceed the event size", () => {

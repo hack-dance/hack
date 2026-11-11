@@ -47,11 +47,16 @@
  * By default the first failed check prints one `FAIL <step>: <check>: <detail>` line, writes
  * evidence/failure.json and exits 1; nothing is stopped or removed, so the state can be
  * inspected, and the line names the command that stops each pool. With `--keep-going`
- * every failed check is recorded and the run continues (a failed step 1-3 still ends it);
- * the run then asks every pool to stop, lists each failure and exits 1. The only processes
- * it signals are its own children and, in step 11, the provider VM process of its own pool,
- * which it identifies by the pool receipt, executable path, user and start time before
- * sending SIGKILL.
+ * every failed check is recorded and the run continues (a failed step 1-3 still ends it).
+ * After a step that throws, every pool of the run is asked to stop and the run shows that no
+ * provider of its homes and no foreground it started is still running before the next step
+ * boots a pool; when it cannot, every later step is skipped and the evidence recorded. At
+ * the end the run asks every pool to stop, lists each failure and exits 1. Exit 0 means
+ * every check passed; the recovery answers of steps 5 and 11 are recorded, not checked, so
+ * read them in qualification.json. The only processes it signals are its own children (a
+ * foreground still running after every pool stopped gets SIGTERM at cleanup) and, in step
+ * 11, the provider VM process of its own pool, which it identifies by the pool receipt,
+ * executable path, user and start time before sending SIGKILL.
  */
 import { createHash } from "node:crypto";
 import {
@@ -68,7 +73,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 export const GIB = 1024 * 1024 * 1024;
 
@@ -528,7 +533,7 @@ const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 /** A candidate home's provider `$HOME` (the runtime's `run/smolvm/home`). */
 const PROVIDER_HOME = join(".hack-local", "run", "smolvm", "home");
 
-class Qualification {
+export class Qualification {
   readonly evidence: string;
   readonly main: string;
   readonly aux: string;
@@ -544,6 +549,12 @@ class Qualification {
   step = "setup";
   pins: Record<string, Record<string, unknown>> = {};
   foreground: ReturnType<typeof Bun.spawn> | null = null;
+  /** Foregrounds of this run that were replaced or abandoned while still running. */
+  readonly strays: ReturnType<typeof Bun.spawn>[] = [];
+  /** Set when a failed step's pools or foregrounds could not be shown stopped. */
+  blocked: string | null = null;
+  /** How long a foreground of this run gets to exit after it was asked to. */
+  exitWaitMs = 120_000;
   dependencyServer: ReturnType<typeof Bun.spawn> | null = null;
   dependencyPort = 0;
   sequence = 0;
@@ -1174,9 +1185,20 @@ class Qualification {
       if (data && items.length > 0 && container !== previousContainer) {
         const seconds = round((performance.now() - started) / 1000);
         if (previous && command === "restart") {
+          const code = await Promise.race([
+            previous.exited,
+            Bun.sleep(this.exitWaitMs).then(() => null),
+          ]);
+          if (code === null) {
+            this.strays.push(previous);
+            throw new Failure(
+              `${name}: the previous foreground is still running ${this.exitWaitMs / 1000} s after its replacement became ready (${this.identity(previous)}); it is kept for cleanup`
+            );
+          }
           this.check(
             `${name}: the previous foreground exits 0`,
-            (await previous.exited) === 0
+            code === 0,
+            `exit ${code}`
           );
         }
         return { seconds, ps: data };
@@ -1195,8 +1217,12 @@ class Qualification {
     if (this.foreground) {
       const code = await Promise.race([
         this.foreground.exited,
-        Bun.sleep(120_000).then(() => -1),
+        Bun.sleep(this.exitWaitMs).then(() => -1),
       ]);
+      if (code === -1) {
+        this.strays.push(this.foreground);
+      }
+      this.foreground = null;
       if (extra.length === 0) {
         this.check(
           `${name}: the foreground exits 0 after down`,
@@ -1204,9 +1230,102 @@ class Qualification {
           `exit ${code}`
         );
       }
-      this.foreground = null;
     }
     return result.seconds;
+  }
+
+  /** PID, start time and command of a child of this run, for a report. */
+  identity(child: ReturnType<typeof Bun.spawn>): string {
+    const row = this.exec(
+      "foreground-identity",
+      [
+        "/bin/ps",
+        "-ww",
+        "-o",
+        "pid=,lstart=,command=",
+        "-p",
+        String(child.pid),
+      ],
+      { timeout: 30, allowFailure: true }
+    ).stdout.trim();
+    return row || `PID ${child.pid}, no longer listed`;
+  }
+
+  /** The children of this run that are still running after waiting up to `ms`. */
+  async alive(
+    children: ReturnType<typeof Bun.spawn>[],
+    ms: number
+  ): Promise<ReturnType<typeof Bun.spawn>[]> {
+    await Promise.race([
+      Promise.all(children.map((child) => child.exited)),
+      Bun.sleep(ms),
+    ]);
+    return children.filter(
+      (child) => child.exitCode === null && child.signalCode === null
+    );
+  }
+
+  /** Provider processes running from a home's own provider tree. */
+  providerPids(home: string): number[] {
+    if (!existsSync(join(home, ".hack-local/providers"))) {
+      return [];
+    }
+    return this.processes(home).map((row) => row.pid);
+  }
+
+  /** Every pool home of this run. */
+  homes(): string[] {
+    return [this.main, this.aux, this.isolated];
+  }
+
+  /** Ask every pool of this run to stop: the project first, then each home's pool. */
+  stopAll(name: string): void {
+    this.hack(`down-${name}`, ["down", "--path", this.project], 300, true);
+    for (const home of this.homes()) {
+      if (existsSync(join(home, ".hack-local/run/smolvm/owner.json"))) {
+        this.exec(
+          `runtime-down-${name}`,
+          [
+            this.options.native,
+            "--candidate-root",
+            home,
+            "runtime",
+            "down",
+            "--json",
+          ],
+          { timeout: 300, allowFailure: true }
+        );
+      }
+    }
+  }
+
+  /**
+   * After a failed step under --keep-going, before another step boots a pool: stop what this
+   * run owns, then show that no provider of any of its homes and no foreground it started is
+   * still running. Without that, every later step is skipped (each boots a pool, and two
+   * pools must never run at once, nor may a stale one skew measurements); the evidence is
+   * kept and recorded.
+   */
+  async settle(after: string): Promise<void> {
+    if (this.foreground) {
+      this.strays.push(this.foreground);
+      this.foreground = null;
+    }
+    this.stopAll("after-failed-step");
+    const foregrounds = await this.alive(this.strays, this.exitWaitMs);
+    const providers = this.homes().flatMap((home) =>
+      this.providerPids(home).map((pid) => `${basename(home)}:${pid}`)
+    );
+    const evidence = {
+      foregrounds_running: foregrounds.map((child) => this.identity(child)),
+      providers_running: providers,
+    };
+    this.record(`stopped_after_${after.replace(/\W+/g, "_")}`, evidence);
+    if (foregrounds.length > 0 || providers.length > 0) {
+      this.blocked = `step ${after} left processes running after cleanup: ${JSON.stringify(evidence)}`;
+    } else {
+      this.strays.length = 0;
+    }
   }
 
   /** The current foreground; a method so flow narrowing does not pin an earlier value. */
@@ -1533,37 +1652,24 @@ class Qualification {
       ],
       ["11 unclean stop (recorded)", false, () => this.uncleanStop(identity)],
     ];
-    for (const [name, required, step] of steps) {
-      this.step = name;
-      this.stepRequired = required;
-      try {
-        await step();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!this.options.keepGoing || required) {
-          return this.fail(message);
-        }
-        this.failed.push(`${name}: ${message}`);
-        this.note(`FAIL ${name}: ${message} (continuing: --keep-going)`);
-        this.foreground = null;
-      }
+    const failed = await this.runSteps(steps);
+    if (failed !== null) {
+      return failed;
     }
     this.step = "cleanup";
-    this.hack("down-cleanup", ["down", "--path", this.project], 300, true);
-    for (const home of [this.main, this.aux, this.isolated]) {
-      if (existsSync(join(home, ".hack-local/run/smolvm/owner.json"))) {
-        this.exec(
-          "runtime-down-cleanup",
-          [
-            this.options.native,
-            "--candidate-root",
-            home,
-            "runtime",
-            "down",
-            "--json",
-          ],
-          { timeout: 300, allowFailure: true }
-        );
+    this.stopAll("cleanup");
+    const children = this.foreground
+      ? [...this.strays, this.foreground]
+      : [...this.strays];
+    // Only this run's own children, after every pool was asked to stop.
+    const lingering = await this.alive(children, this.exitWaitMs);
+    if (lingering.length > 0) {
+      this.record(
+        "foregrounds_terminated_at_cleanup",
+        lingering.map((child) => this.identity(child))
+      );
+      for (const child of lingering) {
+        child.kill("SIGTERM");
       }
     }
     this.dependencyServer?.kill("SIGTERM");
@@ -1590,9 +1696,39 @@ class Qualification {
       return 1;
     }
     this.note(
-      "PASS all checks; every pool was asked to stop. Remove the root yourself once the evidence is copied."
+      "PASS all checks; every pool was asked to stop. Recovery outcomes are recorded, not checked: read `recorded` in qualification.json. Remove the root yourself once the evidence is copied."
     );
     return 0;
+  }
+
+  /**
+   * Run the steps in order. Returns the exit code when a failure ends the run, or null when
+   * every step ran or was recorded as failed or skipped under --keep-going.
+   */
+  async runSteps(
+    steps: [string, boolean, () => Promise<void> | void][]
+  ): Promise<number | null> {
+    for (const [name, required, step] of steps) {
+      this.step = name;
+      this.stepRequired = required;
+      if (this.blocked) {
+        this.failed.push(`${name}: skipped: ${this.blocked}`);
+        this.note(`SKIP ${name}: ${this.blocked}`);
+        continue;
+      }
+      try {
+        await step();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!this.options.keepGoing || required) {
+          return this.fail(message);
+        }
+        this.failed.push(`${name}: ${message}`);
+        this.note(`FAIL ${name}: ${message} (continuing: --keep-going)`);
+        await this.settle(name);
+      }
+    }
+    return null;
   }
 
   fail(message: string): number {
@@ -1613,7 +1749,7 @@ class Qualification {
     );
     console.log(`FAIL ${this.step}: ${message}`);
     console.log(
-      `Nothing was stopped or removed. Stop the pools with: ${this.options.native} --candidate-root <home> runtime down --json for ${this.main}, ${this.aux} and ${this.isolated}; the dependency listener is PID ${this.dependencyServer?.pid ?? "none"}.`
+      `Nothing was stopped or removed. Stop the pools with: ${this.options.native} --candidate-root <home> runtime down --json for ${this.main}, ${this.aux} and ${this.isolated}; the dependency listener is PID ${this.dependencyServer?.pid ?? "none"}; foregrounds of this run: ${[...this.strays, ...(this.foreground ? [this.foreground] : [])].map((child) => child.pid).join(", ") || "none"}.`
     );
     return 1;
   }
@@ -1801,6 +1937,10 @@ class Qualification {
       Bun.sleep(120_000).then(() => "still running after 120 s"),
     ]);
     this.record("foreground_after_unclean_stop", String(code));
+    const after = this.running();
+    if (after && after.exitCode === null && after.signalCode === null) {
+      this.strays.push(after);
+    }
     this.foreground = null;
     const retired = this.hack(
       "down-recover-after-unclean",

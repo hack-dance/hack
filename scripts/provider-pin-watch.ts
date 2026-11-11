@@ -523,7 +523,7 @@ function componentSection(entry: Delta): string[] {
   const truncated = entry.truncated
     ? [
         "",
-        `The release listing stopped at ${MAX_RELEASE_PAGES} pages before reaching the pin; releases between the pin and the listed ones may be missing.`,
+        `The release listing stopped at ${MAX_RELEASE_PAGES} pages; releases on later pages were not read and may be missing.`,
       ]
     : [];
   return [
@@ -676,40 +676,29 @@ export class GitHub {
     return { status: response.status, value: body_ ? JSON.parse(body_) : null };
   }
 
-  /**
-   * Releases, newest first, until a page reaches a release at or below the pin. Release
-   * lists interleave tag families, so only this component's stable tags decide that. Stops
-   * at the paging bound and reports it.
-   */
-  async releasesSince(
-    component: Component,
-    pinned: string
+  /** Every listed release of the component's repository, up to the paging bound. */
+  async releases(
+    component: Component
   ): Promise<{ releases: Release[]; truncated: boolean }> {
-    const base = parseTag(
-      `${component.tagPrefix}${pinned}`,
-      component.tagPrefix
-    ) as Version;
     const releases: Release[] = [];
+    // The listing is ordered by creation, not by version: a maintenance release below the
+    // pin can precede newer releases, so no tag ends the scan. Every page is read up to the
+    // cap (the watched repositories have a few hundred releases); `delta` keeps the newer ones.
     for (let page = 1; page <= MAX_RELEASE_PAGES; page++) {
       const { value } = await this.request(
         "GET",
         `/repos/${component.repository}/releases?per_page=100&page=${page}`
       );
       const raw = list(value, "releases");
-      const batch = raw
-        .map(release)
-        .filter((entry): entry is Release => entry !== null);
-      releases.push(...batch);
-      const reachedPin = batch.some((entry) => {
-        const version = parseTag(entry.tag_name, component.tagPrefix);
-        return version !== null && compare(version, base) <= 0;
-      });
-      if (raw.length < 100 || reachedPin) {
+      releases.push(
+        ...raw.map(release).filter((entry): entry is Release => entry !== null)
+      );
+      if (raw.length < 100) {
         return { releases, truncated: false };
       }
     }
     console.warn(
-      `${component.repository}: release listing stopped at ${MAX_RELEASE_PAGES} pages before the pin.`
+      `${component.repository}: release listing stopped at ${MAX_RELEASE_PAGES} pages; older pages were not read.`
     );
     return { releases, truncated: true };
   }
@@ -904,10 +893,7 @@ export async function main(
   const deltas: Delta[] = [];
   for (const component of COMPONENTS) {
     const pinned = pins.get(component.key) as string;
-    const { releases, truncated } = await github.releasesSince(
-      component,
-      pinned
-    );
+    const { releases, truncated } = await github.releases(component);
     deltas.push(
       delta(
         component,

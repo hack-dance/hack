@@ -9,6 +9,7 @@ import {
   cell,
   classify,
   delta,
+  GitHub,
   ISSUE_TITLE,
   inRange,
   link,
@@ -386,6 +387,46 @@ describe("provider pin watch", () => {
     );
     expect(truncated).toContain("| 1+ |");
     expect(truncated).toContain("stopped at 10 pages");
+  });
+
+  test("release paging ignores version order and reports the bound", async () => {
+    const pages = new Map<number, Release[]>([
+      [
+        1,
+        [
+          release("docker-v28.5.3"),
+          ...Array.from({ length: 99 }, (_, i) => release(`api/v1.${i}`)),
+        ],
+      ],
+      [2, [release("docker-v29.9.0"), release("docker-v29.5.2")]],
+    ]);
+    const requested: number[] = [];
+    const fetcher = (async (input: string | URL | Request) => {
+      const page = Number(new URL(String(input)).searchParams.get("page"));
+      requested.push(page);
+      return Response.json(pages.get(page) ?? []);
+    }) as typeof fetch;
+    const listed = await new GitHub("synthetic", fetcher).releases(docker);
+    expect(requested).toEqual([1, 2]);
+    expect(listed.truncated).toBe(false);
+    expect(
+      delta(docker, "29.5.2", listed.releases, []).releases.map(
+        (item) => item.tag
+      )
+    ).toEqual(["docker-v29.9.0"]);
+
+    const full = Array.from({ length: 100 }, () => release("docker-v1.0.0"));
+    const endless = (async () =>
+      Response.json(full)) as unknown as typeof fetch;
+    const warn = console.warn;
+    console.warn = () => undefined;
+    try {
+      const capped = await new GitHub("synthetic", endless).releases(docker);
+      expect(capped.truncated).toBe(true);
+      expect(capped.releases).toHaveLength(1000);
+    } finally {
+      console.warn = warn;
+    }
   });
 
   describe("against a fake GitHub API", () => {

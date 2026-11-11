@@ -1413,6 +1413,25 @@ yet, and pinning an unmeasured value could do worse than upstream's. The provide
 qualification script measures idle footprint at 0, 3 and 10 minutes; pin it
 explicitly once those numbers are recorded.
 
+### Starting a pool that is already running
+
+`runtime up` on a pool that is already running and owned by this home (every warm frontend
+`up` and `restart`) takes a named fast path, `lifecycle::running_start`. It allocates
+nothing, so it skips the host admission windows, which guard memory, swapout, thermal and
+disk headroom for a VM allocation (four seconds of sampling pauses per call). It keeps the
+ownership, provider identity, disk identity and size, request, owner registry, dependency
+socket and provider configuration checks, under the startup lease.
+
+Provider trees are proven by content once per boot. A successful boot records a witness
+(`run/smolvm/provider-trees.json`) bound to its provider process: a metadata digest of the
+SmolVM tree, the engine tree and the guest rootfs copy, taken around the content proof.
+Later commands of that running pool, including retained preflight, accept a tree whose
+metadata digest is unchanged (paths, types, modes, owners, inodes, link counts, sizes,
+modification and status-change times, symlink targets) and prove it by content again on any
+difference. A stopped pool, a new boot and `runtime repair-provider-tree` always prove by
+content. `tree_witness` states the threat model: the metadata check gives up only content
+changes that keep all of that metadata, which needs root or silent media corruption.
+
 ### Extending a stopped pool's approved hosts
 
 `runtime network extend --allow-host pkg-npm.githubusercontent.com --json` adds

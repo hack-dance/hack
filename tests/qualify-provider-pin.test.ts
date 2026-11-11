@@ -30,6 +30,7 @@ import {
   readyData,
   rootProblem,
   sourceTemplatePins,
+  warmPhases,
 } from "../scripts/qualify-provider-pin.ts";
 
 const repository = resolve(import.meta.dir, "..");
@@ -246,6 +247,49 @@ describe("provider pin qualification", () => {
         "/private/tmp/q/candidate/.hack-local/providers"
       ).map((row) => row.pid)
     ).toEqual([10]);
+  });
+
+  test("warm up -d phases come from executor process lifetimes", () => {
+    const native = "/bundle/hack-native";
+    const sample = (at: number, ...commands: string[]) => ({
+      at,
+      commands: commands.map(
+        (command) => `${native} --candidate-root /h ${command}`
+      ),
+    });
+    const phases = warmPhases(
+      [
+        sample(0.05),
+        sample(0.6, "graph retained-preflight --run-id x --json"),
+        sample(1.2, "graph retained-preflight --run-id x --json"),
+        sample(1.3),
+        sample(1.4, "runtime up --profile development --json"),
+        sample(7.3, "runtime up --profile development --json"),
+        sample(7.4, "runtime status --json"),
+        sample(9.9, "graph serve --run-id x"),
+      ],
+      11.1
+    );
+    expect(phases).toEqual({
+      launcher_to_preflight_s: 0.6,
+      retained_preflight_s: 0.6,
+      preflight_to_runtime_up_s: 0.2,
+      runtime_up_s: 5.9,
+      serve_to_ready_s: 3.8,
+      total_s: 11.1,
+    });
+    // A phase never observed is unknown, not zero.
+    expect(warmPhases([sample(0.1)], 2).runtime_up_s).toBeNull();
+    expect(
+      parseOptions([...required, "--warm-runs", "3", "--warm-only"])
+    ).toMatchObject({
+      warmRuns: 3,
+      warmOnly: true,
+    });
+    expect(parseOptions(required).warmRuns).toBe(5);
+    expect(() => parseOptions([...required, "--warm-runs", "21"])).toThrow(
+      "warm-runs"
+    );
   });
 
   test("readiness requires an observed ready run", () => {

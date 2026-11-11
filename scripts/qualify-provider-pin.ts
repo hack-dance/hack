@@ -28,7 +28,11 @@
  *      an unclean stop.
  *  10. measurements: prepare time, cold and warm `up` to ready, `restart`, `down`, VM plus
  *      helper physical footprint at idle after 0, 3 and 10 minutes (3 is past the 2-minute
- *      reclaim pulse), and idle CPU.
+ *      reclaim pulse), and idle CPU; then `--warm-runs` (default 5) warm `up -d` runs on the
+ *      running pool, each split into phases from the executor's process lifetimes sampled
+ *      every 50 ms: launcher until `graph retained-preflight`, the preflight, the gap, `runtime
+ *      up`, and serve to ready. `--warm-only` runs steps 1-3 and these warm runs only, for a
+ *      quick before/after comparison.
  *
  * Preview-first: without --run it prints the plan and changes nothing. It never uses
  * sudo, never reads or writes the real home (every child gets a HOME, XDG directories,
@@ -313,6 +317,55 @@ export function providerProcesses(
   return rows.filter((row) => row.command.startsWith(prefix));
 }
 
+/** One `ps` sample of this home's executor processes, at `at` seconds after the command began. */
+export interface PhaseSample {
+  at: number;
+  commands: string[];
+}
+
+/** Per-phase timings of one warm `up -d`, from executor process lifetimes (sampled). */
+export interface WarmPhases {
+  launcher_to_preflight_s: number | null;
+  retained_preflight_s: number | null;
+  preflight_to_runtime_up_s: number | null;
+  runtime_up_s: number | null;
+  serve_to_ready_s: number | null;
+  total_s: number;
+}
+
+/**
+ * Split a warm `up -d` into phases from samples of the executor's process command lines:
+ * the launcher until `graph retained-preflight` appears, that preflight, the gap until
+ * `runtime up`, `runtime up` itself, and the rest (plan, serve, health and publish) until
+ * the command exits at `total`. Each boundary is accurate to about one sampling period.
+ */
+export function warmPhases(samples: PhaseSample[], total: number): WarmPhases {
+  const seen = (pattern: RegExp) => {
+    const times = samples
+      .filter((sample) =>
+        sample.commands.some((command) => pattern.test(command))
+      )
+      .map((sample) => sample.at);
+    return times.length > 0
+      ? { first: Math.min(...times), last: Math.max(...times) }
+      : null;
+  };
+  const preflight = seen(/\sgraph retained-preflight(\s|$)/);
+  const runtimeUp = seen(/\sruntime up(\s|$)/);
+  const span = (from: number | undefined, to: number | undefined) =>
+    from === undefined || to === undefined
+      ? null
+      : round(Math.max(0, to - from));
+  return {
+    launcher_to_preflight_s: span(0, preflight?.first),
+    retained_preflight_s: span(preflight?.first, preflight?.last),
+    preflight_to_runtime_up_s: span(preflight?.last, runtimeUp?.first),
+    runtime_up_s: span(runtimeUp?.first, runtimeUp?.last),
+    serve_to_ready_s: span(runtimeUp?.last, total),
+    total_s: round(total),
+  };
+}
+
 export interface Options {
   hack: string;
   native: string;
@@ -328,6 +381,8 @@ export interface Options {
   amd64Image: string | null;
   idleMinutes: number[];
   skipIdle: boolean;
+  warmRuns: number;
+  warmOnly: boolean;
   caddy: string | null;
   httpsPort: number | null;
   run: boolean;
@@ -338,7 +393,36 @@ const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hac
   --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
   [--upstream-checksums /abs/checksums.sha256] [--approved-host example.com --approved-host example.org] \\
   [--amd64-image repo@sha256:...] [--idle-minutes 0,3,10 | --skip-idle] \\
+  [--warm-runs 5] [--warm-only] \\
   [--caddy /abs/caddy --https-port 8443] [--run]`;
+
+function idleMinutes(text: string): number[] {
+  const idle = text.split(",").map(Number);
+  const valid =
+    idle.length > 0 &&
+    idle.every(
+      (minute) => Number.isInteger(minute) && minute >= 0 && minute <= 60
+    ) &&
+    idle.every(
+      (minute, index) => index === 0 || minute > (idle[index - 1] as number)
+    );
+  if (!valid) {
+    throw new Error(
+      "--idle-minutes must be increasing whole minutes from 0 to 60."
+    );
+  }
+  return idle;
+}
+
+function wholeNumber(name: string, text: string, maximum: number): number {
+  const value = Number(text);
+  if (!(Number.isInteger(value) && value >= 0 && value <= maximum)) {
+    throw new Error(`${name} must be a whole number from 0 to ${maximum}.`);
+  }
+  return value;
+}
+
+const FLAGS = new Set(["--run", "--skip-idle", "--warm-only"]);
 
 /** Parse and validate arguments; throws with a usage line on any problem. */
 export function parseOptions(argv: string[]): Options {
@@ -346,7 +430,7 @@ export function parseOptions(argv: string[]): Options {
   const flags = new Set<string>();
   for (let index = 0; index < argv.length; index++) {
     const name = argv[index] as string;
-    if (name === "--run" || name === "--skip-idle") {
+    if (FLAGS.has(name)) {
       flags.add(name);
       continue;
     }
@@ -394,22 +478,12 @@ export function parseOptions(argv: string[]): Options {
       "--approved-host must be given twice (or not at all) as DNS names."
     );
   }
-  const idle = (one("--idle-minutes", false) ?? "0,3,10")
-    .split(",")
-    .map(Number);
-  if (
-    idle.length === 0 ||
-    idle.some(
-      (minute) => !Number.isInteger(minute) || minute < 0 || minute > 60
-    ) ||
-    idle.some(
-      (minute, index) => index > 0 && minute <= (idle[index - 1] as number)
-    )
-  ) {
-    throw new Error(
-      "--idle-minutes must be increasing whole minutes from 0 to 60."
-    );
-  }
+  const idle = idleMinutes(one("--idle-minutes", false) ?? "0,3,10");
+  const warmRuns = wholeNumber(
+    "--warm-runs",
+    one("--warm-runs", false) ?? "5",
+    20
+  );
   const caddy = absolute("--caddy", false);
   const portText = one("--https-port", false);
   const httpsPort = portText === null ? null : Number(portText);
@@ -437,6 +511,8 @@ export function parseOptions(argv: string[]): Options {
     amd64Image: pinned("--amd64-image", false),
     idleMinutes: flags.has("--skip-idle") ? [] : idle,
     skipIdle: flags.has("--skip-idle"),
+    warmRuns,
+    warmOnly: flags.has("--warm-only"),
     caddy,
     httpsPort,
     run: flags.has("--run"),
@@ -1326,6 +1402,30 @@ class Qualification {
       this.writeProject();
       await this.startDependencyServer();
       const first = await this.firstStart();
+      if (this.options.warmOnly) {
+        // Steps 1-3 then the warm `up -d` phases only: a quick before/after comparison.
+        await this.dbReady();
+        this.step = "10 measurements";
+        await this.down("down-before-warm");
+        await this.warm();
+        this.runtime(
+          this.main,
+          "runtime-down-final",
+          ["runtime", "down", "--json"],
+          300
+        );
+        this.dependencyServer?.kill("SIGTERM");
+        writeFileSync(
+          join(this.evidence, "qualification.json"),
+          JSON.stringify(
+            { passed: this.passed, measurements: this.measurements },
+            null,
+            2
+          )
+        );
+        this.note("PASS warm-only run; the pool is stopped.");
+        return 0;
+      }
       await this.dbReady();
       const marker = `marker-${crypto.randomUUID()}`;
       this.psql(
@@ -1396,6 +1496,7 @@ class Qualification {
         JSON.stringify(this.diskIdentity()) === JSON.stringify(identity)
       );
       this.measure("final_down_seconds", round(await this.down("down-final")));
+      await this.warm();
       this.runtime(
         this.main,
         "runtime-down-final",
@@ -1760,6 +1861,76 @@ class Qualification {
       rss_mib: round(rows.reduce((sum, row) => sum + row.rssKib, 0) / 1024),
       cpu_seconds: rows.reduce((sum, row) => sum + row.cpuSeconds, 0),
     };
+  }
+
+  /**
+   * Warm `up -d` on the running pool, `warmRuns` times: total time and phases from this
+   * home's executor processes sampled every 50 ms, then `down`. Prints each run and medians.
+   */
+  async warm(): Promise<void> {
+    const runs: WarmPhases[] = [];
+    for (let run = 1; run <= this.options.warmRuns; run++) {
+      const label = this.label(`warm-up-d-${run}`);
+      const started = performance.now();
+      const child = Bun.spawn(
+        [this.options.hack, "up", "-d", "--path", this.project],
+        {
+          cwd: this.project,
+          env: this.env,
+          stdin: "ignore",
+          stdout: Bun.file(join(this.evidence, `${label}.stdout`)),
+          stderr: Bun.file(join(this.evidence, `${label}.stderr`)),
+        }
+      );
+      const samples: PhaseSample[] = [];
+      while (child.exitCode === null && performance.now() - started < 600_000) {
+        const at = (performance.now() - started) / 1000;
+        const listing = Bun.spawn(["/bin/ps", "-A", "-ww", "-o", "command="], {
+          stdout: "pipe",
+          stderr: "ignore",
+        });
+        const text = await new Response(listing.stdout).text();
+        samples.push({
+          at,
+          commands: text
+            .split("\n")
+            .filter((command) => command.startsWith(`${this.options.native} `)),
+        });
+        await Bun.sleep(50);
+      }
+      const code = await child.exited;
+      const total = (performance.now() - started) / 1000;
+      this.check(
+        `warm up -d run ${run} exits 0`,
+        code === 0,
+        `exit ${code} (see ${label}.stderr)`
+      );
+      const phases = warmPhases(samples, total);
+      writeFileSync(
+        join(this.evidence, `${label}.phases.json`),
+        JSON.stringify({ phases, samples }, null, 2)
+      );
+      runs.push(phases);
+      this.measure(`warm_up_d_run_${run}`, phases);
+      this.hack(`warm-down-${run}`, ["down", "--path", this.project], 300);
+    }
+    if (runs.length > 0) {
+      const median = (values: (number | null)[]) => {
+        const known = values
+          .filter((value): value is number => value !== null)
+          .sort((a, b) => a - b);
+        return known.length === 0
+          ? null
+          : (known[Math.floor((known.length - 1) / 2)] as number);
+      };
+      const keys = Object.keys(runs[0] as WarmPhases) as (keyof WarmPhases)[];
+      this.measure(
+        "warm_up_d_median",
+        Object.fromEntries(
+          keys.map((key) => [key, median(runs.map((phases) => phases[key]))])
+        )
+      );
+    }
   }
 
   async idle(): Promise<void> {

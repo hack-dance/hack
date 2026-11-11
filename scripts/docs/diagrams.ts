@@ -98,7 +98,8 @@ export async function embedDiagrams(
   if (blocks.length === 0) {
     return markdown;
   }
-  let result = markdown;
+  const parts: string[] = [];
+  let cursor = 0;
   for (const match of blocks) {
     const source = match[2] ?? "";
     const id = hash(source);
@@ -127,7 +128,9 @@ export async function embedDiagrams(
       "",
       "</details>",
     ].join("\n");
-    result = result.replace(match[0], replacement);
+    parts.push(markdown.slice(cursor, match.index), replacement);
+    cursor = (match.index ?? 0) + match[0].length;
   }
-  return result;
+  parts.push(markdown.slice(cursor));
+  return parts.join("");
 }

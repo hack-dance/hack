@@ -79,6 +79,17 @@ function helperPid(text: string): number {
   }
   return pid;
 }
+/** Waits until a helper this test started has exited (signal 0 finds no process). */
+function untilExited(pid: number): Promise<true> {
+  return until(async () => {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    throw new Error("owned helper still running");
+  });
+}
 /** Appended marker files can be read partly written; wait for their complete content. */
 function untilText(path: string, expected: string): Promise<string> {
   return until(async () => {
@@ -208,15 +219,7 @@ try {
       try {
         process.kill(pid, "SIGKILL");
       } catch {}
-      const ownedPid = pid;
-      await until(async () => {
-        try {
-          process.kill(ownedPid, 0);
-        } catch {
-          return true;
-        }
-        throw new Error("owned helper still exiting");
-      });
+      await untilExited(pid);
     }
     if (socketDirectory) {
       await rm(socketDirectory, { recursive: true, force: true });
@@ -736,6 +739,13 @@ test("child exit during startup never publishes a reusable running endpoint", as
     );
     return true;
   });
+  // "close" is logged while the listener and its temporary socket directory
+  // are still being retired; the owner exits only once that has finished.
+  await untilExited(
+    await until(async () =>
+      helperPid(await readFile(join(f.home, "helper-pid"), "utf8"))
+    )
+  );
   await expect(
     lstat(join(nativeHttpsOwnerRoot(f.home), "endpoint.json"))
   ).rejects.toThrow();
@@ -806,14 +816,7 @@ test("a first request waiting on a startup that then fails is refused without ad
   ).rejects.toThrow("endpoint-publication");
   // Clients are disconnected before the frontend pair closes; the owner exits
   // only after its failure cleanup has finished.
-  await until(async () => {
-    try {
-      process.kill(started.pid, 0);
-    } catch {
-      return true;
-    }
-    throw new Error("owner still running");
-  });
+  await untilExited(started.pid);
   expect(await readFile(join(f.home, "events"), "utf8")).toBe("start\nclose\n");
 }, 20_000);
 
@@ -828,14 +831,7 @@ test("a failure or replacement right after publication closes the listener and r
       helperPid(await readFile(join(f.home, "helper-pid"), "utf8"))
     );
     // The owner exits: a listener left open would keep it running.
-    await until(async () => {
-      try {
-        process.kill(pid, 0);
-      } catch {
-        return true;
-      }
-      throw new Error("owner still running");
-    });
+    await untilExited(pid);
     await expect(
       lstat(join(nativeHttpsOwnerRoot(f.home), "endpoint.json"))
     ).rejects.toThrow();

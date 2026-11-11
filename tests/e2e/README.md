@@ -29,14 +29,14 @@ jobs. Shard 8 also runs typecheck, privacy, quality checks and builds.
 `scripts/test-shard-plan.ts` assigns the test files; the workflow owns job
 conditions and aggregate results.
 
-Pushes to `next`/`main` run the full suite with all eight unit shards on macOS.
+Pushes to `next`/`main` run the full suite. Pushes and eligible pull requests use
+the pooled layout with unit shards 1–3 on macOS and 4–8 on Linux.
 Pull requests use `scripts/ci-change-scope.ts`: documentation-only changes
 (including the root README, changelog, security/packaging documents and license)
 and runtime-core-only changes run focused tests instead of the eight unit shards
 and Docker E2E. A mix of documentation and runtime-core changes selects both
 focuses. TypeScript/code changes and unknown or unavailable diffs retain the
-full test set; eligible PRs use the pooled layout with unit shards 1–3 on macOS
-and 4–8 on Linux. Other jobs, including compiler and candidate-core checks, have
+full test set. Other jobs, including compiler and candidate-core checks, have
 their own scope conditions; they do not all run on every PR. Every job has a
 `timeout-minutes` budget.
 

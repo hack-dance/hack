@@ -381,7 +381,7 @@ async function stageVersion(
     const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
     const provenance = entry.editorial
       ? `Editorial source: ${entry.snapshot}; based on ${entry.source.revision}${editorialProvenanceLabel(entry.source)}`
-      : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
+      : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}${version === "v5" && entry.slug === "env" ? "; site recipe links appended" : ""}`;
     const page = await embedDiagrams(
       text.replace(heading, "").trim(),
       diagrams,

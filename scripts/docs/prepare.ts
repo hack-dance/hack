@@ -138,6 +138,17 @@ async function writeDocuments(
   }
 }
 
+/** Reading order of the v5 "Native backend (beta)" section. */
+const nativeSectionOrder = [
+  "overview",
+  "try-it",
+  "limits",
+  "install",
+  "reference",
+  "authored-commands",
+  "config-import",
+  "full-reference",
+];
 const diagramsOutput = resolve(repositoryRoot, "site/public/diagrams");
 
 /** Rendered diagrams are generated output: the directory holds exactly this run's set. */
@@ -347,20 +358,36 @@ async function stageVersion(
         "agent-handoff",
         "guides",
         "integrations",
+        ...(pages.some((entry) => entry.slug.startsWith("native/"))
+          ? ["native"]
+          : []),
         "cli",
         "architecture",
         "reference",
       ],
     })
   );
-  for (const folder of ["guides", "reference"]) {
+  for (const [folder, title] of [
+    ["guides", "Guides"],
+    ["reference", "Reference"],
+    ["native", "Native backend (beta)"],
+  ] as const) {
+    const slugs = pages
+      .filter((entry) => entry.slug.startsWith(`${folder}/`))
+      .map((entry) => entry.slug.slice(folder.length + 1));
+    if (slugs.length === 0) {
+      continue;
+    }
+    // The native section reads in order: introduction first, reference last.
+    const order = folder === "native" ? nativeSectionOrder : [];
     staged.set(
       `${version}/${folder}/meta.json`,
       JSON.stringify({
-        title: folder === "guides" ? "Guides" : "Reference",
-        pages: pages
-          .filter((entry) => entry.slug.startsWith(`${folder}/`))
-          .map((entry) => entry.slug.slice(folder.length + 1)),
+        title,
+        pages: [
+          ...order.filter((slug) => slugs.includes(slug)),
+          ...slugs.filter((slug) => !order.includes(slug)),
+        ],
       })
     );
   }

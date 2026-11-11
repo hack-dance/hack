@@ -1,4 +1,10 @@
-# Opt-in native candidate bundle
+# Native backend reference
+
+This is the detailed reference for the native backend (beta). It is long and
+precise. For a short introduction, read the [overview](../native/README.md),
+[try it](../native/try-it.md) and
+[what works and known limits](../native/limits.md). The
+[reference map](../native/reference.md) lists this page's sections by topic.
 
 The native backend is beta. `hack-native` is an opt-in Apple Silicon macOS executor installed alongside
 Hack's supported CLI. It does not replace `hack`, select a Docker context, migrate

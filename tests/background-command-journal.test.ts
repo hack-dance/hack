@@ -22,6 +22,7 @@ import {
   readEvents,
   readMeta,
 } from "../src/lib/background-command/journal.ts";
+import { buildSupervisorEnv } from "../src/lib/background-command/launch.ts";
 import {
   type ObservedIdentity,
   observeIdentities,
@@ -868,5 +869,25 @@ describe("retention on access", () => {
     );
     expect(await lstat(paths.stdout).catch(() => null)).toBeNull();
     expect(await readFile(paths.meta, "utf8")).not.toContain("echo");
+  });
+});
+
+describe("redaction value transport", () => {
+  test("values travel as key names or one variable each, never one combined string", () => {
+    const big = (fill: string) => fill.repeat(70 * 1024);
+    const env = { PATH: "/usr/bin", HACK_ENV_TOKEN: big("a") };
+    const supervisor = buildSupervisorEnv({
+      env,
+      redactValues: [big("a"), big("b"), big("b")],
+    });
+    expect(supervisor.HACK_BACKGROUND_REDACT_KEYS).toBe("HACK_ENV_TOKEN");
+    const extra = Object.keys(supervisor).filter((key) =>
+      key.startsWith("HACK_BACKGROUND_REDACT_VALUE_")
+    );
+    expect(extra).toHaveLength(1);
+    for (const value of Object.values(supervisor)) {
+      expect(value.length).toBeLessThanOrEqual(70 * 1024);
+    }
+    expect(buildSupervisorEnv({ env, redactValues: [] })).toEqual(env);
   });
 });

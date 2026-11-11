@@ -50,7 +50,9 @@ function isNoSpaceError(error: unknown): boolean {
 export const BACKGROUND_SUPERVISOR_ARGUMENT =
   "--internal-background-command-supervisor";
 /** Supervisor-only variable carrying redaction values; never passed to the child. */
-export const REDACT_VALUES_ENV = "HACK_BACKGROUND_REDACT_VALUES";
+export const REDACT_KEYS_ENV = "HACK_BACKGROUND_REDACT_KEYS";
+/** Prefix of supervisor-only variables for values absent from the child env. */
+export const REDACT_VALUE_PREFIX = "HACK_BACKGROUND_REDACT_VALUE_";
 /** Values shorter than this are not redacted (too many false matches). */
 export const REDACT_MIN_BYTES = 6;
 
@@ -685,26 +687,42 @@ export function endedPayload(opts: {
   };
 }
 
+/**
+ * Redaction values arrive without being packed into one variable: names of
+ * child-env keys whose values to redact, plus one supervisor-only variable per
+ * value the child env does not already carry. The supervisor-only variables
+ * are removed before the child starts; the named keys stay (the child needs
+ * them).
+ */
 function readRedactValues(): string[] {
-  const raw = process.env[REDACT_VALUES_ENV];
-  delete process.env[REDACT_VALUES_ENV];
-  if (!raw) {
-    return [];
+  const values: string[] = [];
+  for (const key of (process.env[REDACT_KEYS_ENV] ?? "").split(",")) {
+    const value = key ? process.env[key] : undefined;
+    if (value) {
+      values.push(value);
+    }
   }
-  try {
-    const value: unknown = JSON.parse(raw);
-    return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === "string")
-      : [];
-  } catch {
-    return [];
+  delete process.env[REDACT_KEYS_ENV];
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith(REDACT_VALUE_PREFIX)) {
+      const value = process.env[key];
+      if (value) {
+        values.push(value);
+      }
+      delete process.env[key];
+    }
   }
+  return values;
 }
 
 function childEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string" && key !== REDACT_VALUES_ENV) {
+    if (
+      typeof value === "string" &&
+      key !== REDACT_KEYS_ENV &&
+      !key.startsWith(REDACT_VALUE_PREFIX)
+    ) {
       env[key] = value;
     }
   }

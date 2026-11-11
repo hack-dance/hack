@@ -2,6 +2,7 @@ import { lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { emitCliResult, HackCliError, okResult } from "../cli-result.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
+import { assertComposeSpawnEnvFits } from "../spawn-env-limit.ts";
 import { appendCommandAudit, auditEnd } from "./audit.ts";
 import {
   type CaptureMode,
@@ -23,7 +24,8 @@ import {
 import { acceptCommand, cursorBeforeFirst, expiresAt } from "./store.ts";
 import {
   BACKGROUND_SUPERVISOR_ARGUMENT,
-  REDACT_VALUES_ENV,
+  REDACT_KEYS_ENV,
+  REDACT_VALUE_PREFIX,
 } from "./supervisor.ts";
 
 /** Set by `hack mcp serve` on its children so admission counts per MCP session. */
@@ -190,6 +192,12 @@ export async function startBackgroundCommand(
     ...configs,
   });
   const native = opts.backend === "native";
+  const supervisorEnv = buildSupervisorEnv({
+    env: opts.child.env,
+    redactValues: settings.capture === "full" ? opts.redactValues : [],
+  });
+  // Refuse before anything is persisted when the supervisor could not start.
+  assertComposeSpawnEnvFits({ env: supervisorEnv, baseEnv: {} });
   const caller = await resolveCaller();
   const accepted = await acceptCommand({
     input: {
@@ -243,12 +251,7 @@ export async function startBackgroundCommand(
         meta.commandId,
       ],
       cwd: opts.child.cwd,
-      env: {
-        ...opts.child.env,
-        ...(settings.capture === "full" && opts.redactValues.length > 0
-          ? { [REDACT_VALUES_ENV]: JSON.stringify(opts.redactValues) }
-          : {}),
-      },
+      env: supervisorEnv,
     });
     const started = await waitForOwner({
       ownerPath: paths.owner,
@@ -335,6 +338,39 @@ async function settleFailedStart(opts: {
     await auditEnd({ paths, meta, payload: ended.payload });
     return false;
   });
+}
+
+/**
+ * The supervisor's environment: the child's, plus redaction values as key
+ * names when the child env already carries them (no extra bytes), and one
+ * supervisor-only variable per remaining value. Never one combined variable,
+ * which could pass Linux's per-string limit when the values do not.
+ */
+export function buildSupervisorEnv(opts: {
+  readonly env: Readonly<Record<string, string>>;
+  readonly redactValues: readonly string[];
+}): Record<string, string> {
+  const byValue = new Map<string, string>();
+  for (const [key, value] of Object.entries(opts.env)) {
+    if (!byValue.has(value)) {
+      byValue.set(value, key);
+    }
+  }
+  const keys: string[] = [];
+  const extra: Record<string, string> = {};
+  for (const value of new Set(opts.redactValues)) {
+    const key = byValue.get(value);
+    if (key && !key.includes(",")) {
+      keys.push(key);
+    } else {
+      extra[`${REDACT_VALUE_PREFIX}${Object.keys(extra).length}`] = value;
+    }
+  }
+  return {
+    ...opts.env,
+    ...extra,
+    ...(keys.length > 0 ? { [REDACT_KEYS_ENV]: keys.join(",") } : {}),
+  };
 }
 
 async function waitForOwner(opts: {

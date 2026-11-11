@@ -2,10 +2,8 @@
  * `hack global` wiring for Linux host DNS. Decisions live in
  * `lib/linux-dns*.ts`; this file renders them and supplies the prompts.
  */
-import { resolve } from "node:path";
 import { note } from "@clack/prompts";
 import { DEFAULT_COREDNS_IP, DEFAULT_INGRESS_SUBNET } from "../constants.ts";
-import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
   managedLocalDomains,
   resolveDefaultDomain,
@@ -25,9 +23,7 @@ import {
 import { logger } from "../ui/logger.ts";
 
 function defaultHost(): LinuxDnsHost {
-  return createLinuxDnsHost({
-    stageRoot: resolve(resolveGlobalHackDir(), "tmp"),
-  });
+  return createLinuxDnsHost();
 }
 
 async function resolveRoutedDomains(): Promise<readonly string[]> {
@@ -65,6 +61,12 @@ export async function bootstrapLinuxGlobalDns(opts: {
   readonly useStaticIps: boolean;
   readonly host?: LinuxDnsHost;
   /** Test seam; defaults to the terminal prompt. */
+  /**
+   * Where the paste-able manual plan goes, verbatim: no logger prefix or
+   * indentation, so a heredoc terminator stays at column 0. Defaults to the
+   * logger's stream (stderr).
+   */
+  readonly print?: (text: string) => void;
   readonly prompt?: {
     readonly canPrompt: boolean;
     readonly confirm: () => Promise<boolean>;
@@ -78,6 +80,11 @@ export async function bootstrapLinuxGlobalDns(opts: {
     return "skipped";
   }
   const host = opts.host ?? defaultHost();
+  const print =
+    opts.print ??
+    ((text: string) => {
+      process.stderr.write(text);
+    });
   const outcome = await applyLinuxDns({
     host,
     domains,
@@ -112,20 +119,17 @@ export async function bootstrapLinuxGlobalDns(opts: {
     case "pending":
       logger.warn({
         message: [
-          `Linux DNS not applied (code=${outcome.code}). Run these commands, then check with hack doctor:`,
+          `Linux DNS not applied (code=${outcome.code}). Run the commands below as they are, then check with hack doctor.`,
           ...(outcome.plan.notes ?? []),
-          ...renderManualPlan(outcome.plan).map((line) => `  ${line}`),
         ].join("\n"),
       });
+      print(renderManualPlanText(outcome.plan));
       return "skipped";
     case "failed":
       logger.error({
-        message: `Linux DNS setup failed (code=${outcome.code}): \`${outcome.failedStep}\` exited ${outcome.exitCode}. Rerun hack global install, or run these commands by hand:\n${renderManualPlan(
-          outcome.plan
-        )
-          .map((line) => `  ${line}`)
-          .join("\n")}`,
+        message: `Linux DNS setup failed (code=${outcome.code}): \`${outcome.failedStep}\` exited ${outcome.exitCode}. Rerun hack global install, or run the commands below as they are.`,
       });
+      print(renderManualPlanText(outcome.plan));
       return "failed";
     case "applied_unverified":
       reportInspection({ inspection: outcome.inspection });
@@ -136,6 +140,11 @@ export async function bootstrapLinuxGlobalDns(opts: {
     default:
       return "failed";
   }
+}
+
+/** The manual plan as one paste-able block, framed by blank lines. */
+export function renderManualPlanText(plan: LinuxDnsPlan): string {
+  return `\n${renderManualPlan(plan).join("\n")}\n\n`;
 }
 
 function reportInspection(opts: {

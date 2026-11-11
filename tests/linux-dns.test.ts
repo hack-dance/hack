@@ -1,13 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  mkdir,
-  mkdtemp,
-  readdir,
-  rm,
-  stat,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,12 +8,13 @@ import {
 } from "../src/constants.ts";
 import {
   detectLinuxResolver,
+  hasLinuxDnsMarker,
   isConfigurableInterfaceName,
+  LINUX_DNS_MARKER,
   LINUX_DNS_UDEV_RULE_PATH,
   LINUX_DNS_UNIT_PATH,
   type LinuxLinkRoute,
   NM_DNSMASQ_HACK_PATH,
-  parseHackUnitDomains,
   parseLinkForAddress,
   parseNetworkManagerDnsMode,
   parseResolvectlLinkValues,
@@ -29,17 +22,22 @@ import {
   renderLinuxDnsUdevRule,
   renderLinuxDnsUnit,
 } from "../src/lib/linux-dns.ts";
-import { createLinuxDnsHost } from "../src/lib/linux-dns-host.ts";
+import {
+  createLinuxDnsHost,
+  parseNeedDaemonReload,
+} from "../src/lib/linux-dns-host.ts";
 import {
   applyLinuxDns,
   inspectLinuxDns,
   type LinuxDnsHost,
+  type LinuxDnsPlan,
   removeLinuxDns,
   renderManualPlan,
-  renderVerifiedInstallScript,
-  sha256Hex,
-  VERIFIED_INSTALL_SCRIPT,
 } from "../src/lib/linux-dns-setup.ts";
+import {
+  STDIN_INSTALL_SCRIPT,
+  sha256Hex,
+} from "../src/lib/privileged-install.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const DOMAINS = ["hack", "hack.local", "hack.gy"] as const;
@@ -52,20 +50,21 @@ type FakeHostState = {
   resolvedActive: boolean;
   link: string | null;
   routes: Map<string, LinuxLinkRoute>;
-  staged: Map<string, string>;
-  /** Every stageFiles call, in order; staging must follow confirmation. */
-  stageCalls: number;
-  /** Runs before each privileged install reads its staged copy. */
-  beforeInstall?: (source: string) => void;
   privileged: string[][];
+  /** stdin given to each privileged call (undefined when none). */
+  inputs: (Uint8Array | undefined)[];
   systemdVersion: number | null;
+  /** systemd's NeedDaemonReload for the unit; an install sets it. */
+  needsReload: boolean | null;
   /** Fail the first privileged command whose argv starts with this. */
   failOn?: string;
 };
 
 /**
- * In-memory host. Privileged commands mutate the fake `/etc` and link state
- * the way the real commands would, so a re-inspection sees their effect.
+ * In-memory host. Privileged commands mutate the fake `/etc`, systemd and
+ * link state the way the real commands would, so a re-inspection sees their
+ * effect. Installs mirror the root stdin script's preconditions: content
+ * only from stdin, exactly the declared byte count and digest.
  */
 function createFakeHost(init: Partial<FakeHostState> = {}): {
   readonly host: LinuxDnsHost;
@@ -77,12 +76,29 @@ function createFakeHost(init: Partial<FakeHostState> = {}): {
     resolvedActive: init.resolvedActive ?? true,
     link: init.link === undefined ? BRIDGE : init.link,
     routes: init.routes ?? new Map(),
-    staged: new Map(),
-    stageCalls: 0,
     privileged: [],
+    inputs: [],
     systemdVersion:
       init.systemdVersion === undefined ? 255 : init.systemdVersion,
+    needsReload: init.needsReload === undefined ? false : init.needsReload,
     failOn: init.failOn,
+  };
+  const install = (argv: readonly string[], input?: Uint8Array): number => {
+    const [, , script, name, bytes = "", digest = "", target = ""] = argv;
+    expect(script).toBe(STDIN_INSTALL_SCRIPT);
+    expect(name).toBe("hack-install");
+    expect(argv).toHaveLength(8);
+    if (input === undefined || input.byteLength !== Number(bytes)) {
+      return 66;
+    }
+    if (sha256Hex(input) !== digest) {
+      return 67;
+    }
+    state.files.set(target, new TextDecoder().decode(input));
+    if (target === LINUX_DNS_UNIT_PATH) {
+      state.needsReload = true;
+    }
+    return 0;
   };
   const host: LinuxDnsHost = {
     readFile: async (path) => state.files.get(path) ?? null,
@@ -92,49 +108,32 @@ function createFakeHost(init: Partial<FakeHostState> = {}): {
     findLinkWithAddress: async (address) =>
       address === DEFAULT_INGRESS_GATEWAY ? state.link : null,
     readLinkRoute: async (link) =>
-      state.routes.get(link) ?? { dns: [], domains: [], defaultRoute: true },
-    stageFiles: async (files) => {
-      state.stageCalls += 1;
-      // A new unique directory per call, like mkdtemp.
-      const dir = `/fake-stage/${state.stageCalls}`;
-      const paths = files.map((file) => {
-        const path = `${dir}/${file.name}`;
-        if (state.staged.has(path)) {
-          throw new Error("exclusive create: path exists");
-        }
-        state.staged.set(path, file.content);
-        return path;
-      });
-      return {
-        paths,
-        cleanup: async () => {
-          for (const path of paths) {
-            state.staged.delete(path);
-          }
-        },
-      };
-    },
-    runPrivileged: async (argv) => {
+      state.routes.get(link) ?? {
+        dns: [],
+        domains: [],
+        defaultRoute: true,
+        dnssec: null,
+        dnsOverTls: null,
+      },
+    unitNeedsReload: async () => state.needsReload,
+    runPrivileged: async (argv, opts) => {
       state.privileged.push([...argv]);
+      state.inputs.push(opts?.input);
       if (state.failOn && argv.join(" ").startsWith(state.failOn)) {
         return 1;
       }
       const [verb] = argv;
-      if (verb === "sh" && argv[3] === "hack-install") {
-        // Mirrors VERIFIED_INSTALL_SCRIPT: install only bytes whose digest
-        // matches the approved one.
-        const [, , , , source = "", digest = "", target = ""] = argv;
-        state.beforeInstall?.(source);
-        const content = state.staged.get(source) ?? "";
-        if (sha256Hex(content) !== digest) {
-          return 1;
-        }
-        state.files.set(target, content);
-      } else if (verb === "rm") {
+      if (verb === "/bin/sh") {
+        return install(argv, opts?.input);
+      }
+      expect(opts?.input).toBeUndefined();
+      if (verb === "rm") {
         expect(argv.slice(0, 3)).toEqual(["rm", "-f", "--"]);
         for (const path of argv.slice(3)) {
           state.files.delete(path);
         }
+      } else if (verb === "systemctl" && argv[1] === "daemon-reload") {
+        state.needsReload = false;
       } else if (verb === "systemctl" && argv[1] === "restart") {
         expect(argv[2]).toBe("--");
         const link = /^hack-dns@(.+)\.service$/.exec(argv[3] ?? "")?.[1];
@@ -160,7 +159,13 @@ function routeFromUnit(unit: string): LinuxLinkRoute {
       .exec(unit)?.[1]
       ?.split(" ")
       .map((word) => word.replaceAll('"', "")) ?? [];
-  return { dns: [dns], domains, defaultRoute: false };
+  return {
+    dns: [dns],
+    domains,
+    defaultRoute: false,
+    dnssec: "no",
+    dnsOverTls: "no",
+  };
 }
 
 function configuredFiles(domains: readonly string[] = DOMAINS) {
@@ -177,6 +182,8 @@ const appliedRoute = (
   dns: [DEFAULT_COREDNS_IP],
   domains: domains.map((domain) => `~${domain}`),
   defaultRoute: false,
+  dnssec: "no",
+  dnsOverTls: "no",
 });
 
 describe("detectLinuxResolver", () => {
@@ -485,8 +492,8 @@ describe("applyLinuxDns", () => {
     expect(asked).toBe(1);
     expect(shown).toEqual([[LINUX_DNS_UNIT_PATH, LINUX_DNS_UDEV_RULE_PATH]]);
     expect(state.privileged.map((argv) => argv.slice(0, 2).join(" "))).toEqual([
-      "sh -c",
-      "sh -c",
+      "/bin/sh -c",
+      "/bin/sh -c",
       "systemctl daemon-reload",
       "udevadm control",
       "systemctl restart",
@@ -497,9 +504,14 @@ describe("applyLinuxDns", () => {
       "--",
       `hack-dns@${BRIDGE}.service`,
     ]);
-    // Staged once, after the single confirmation, and cleaned up.
-    expect(state.stageCalls).toBe(1);
-    expect(state.staged.size).toBe(0);
+    // Only the two installs carry stdin; root is given no path to read.
+    expect(state.inputs.map((input) => input !== undefined)).toEqual([
+      true,
+      true,
+      false,
+      false,
+      false,
+    ]);
     expect(state.files.get(LINUX_DNS_UNIT_PATH)).toBe(
       renderLinuxDnsUnit({ domains: DOMAINS })
     );
@@ -523,7 +535,6 @@ describe("applyLinuxDns", () => {
     });
     expect(outcome.status).toBe("configured");
     expect(state.privileged).toEqual([]);
-    expect(state.stageCalls).toBe(0);
   });
 
   test("drifted config (new default_domain) is reported stale and rewritten", async () => {
@@ -563,7 +574,6 @@ describe("applyLinuxDns", () => {
       ["udevadm", "control", "--reload"],
       ["systemctl", "restart", "--", `hack-dns@${BRIDGE}.service`],
     ]);
-    expect(state.stageCalls).toBe(0);
   });
 
   test("non-interactive returns the commands with a stable code and runs nothing", async () => {
@@ -585,9 +595,6 @@ describe("applyLinuxDns", () => {
     }
     expect(outcome.code).toBe("linux_dns_route_missing");
     expect(state.privileged).toEqual([]);
-    // Nothing is staged without a confirmation: the printed steps carry the
-    // file content themselves.
-    expect(state.stageCalls).toBe(0);
     const manual = renderManualPlan(outcome.plan);
     expect(manual.slice(0, 2)).toEqual([
       "sudo install -d -m 0755 /etc/systemd/system",
@@ -614,7 +621,6 @@ describe("applyLinuxDns", () => {
     });
     expect(outcome.status).toBe("pending");
     expect(state.privileged).toEqual([]);
-    expect(state.stageCalls).toBe(0);
   });
 
   test("resolved inactive gives manual steps and never prompts", async () => {
@@ -691,7 +697,6 @@ describe("applyLinuxDns", () => {
     }
     expect(outcome.inspection.code).toBe("linux_dns_bridge_missing");
     expect(state.privileged).toEqual([]);
-    expect(state.stageCalls).toBe(0);
   });
 
   test("installed files but the bridge is gone reports bridge_missing", async () => {
@@ -739,14 +744,25 @@ describe("applyLinuxDns", () => {
     expect(notes.join("\n")).toContain("bypass systemd-resolved");
   });
 
-  test("a staged file replaced before root copies it is not installed", async () => {
+  test("root gets the approved bytes on stdin; other bytes are refused", async () => {
     const { host, state } = createFakeHost();
-    // Another same-user process swaps the staged unit after staging.
-    state.beforeInstall = (source) => {
-      state.staged.set(source, "[Service]\nExecStart=/bin/sh -c 'malicious'\n");
+    const tampering: LinuxDnsHost = {
+      ...host,
+      // Something between Hack and root alters the bytes in flight.
+      runPrivileged: async (argv, opts) =>
+        await host.runPrivileged(argv, {
+          input:
+            opts?.input === undefined
+              ? undefined
+              : new TextEncoder().encode(
+                  new TextDecoder()
+                    .decode(opts.input)
+                    .replace("Type=oneshot", "Type=oneshoX")
+                ),
+        }),
     };
     const outcome = await applyLinuxDns({
-      host,
+      host: tampering,
       domains: DOMAINS,
       canPrompt: true,
       show: () => undefined,
@@ -755,52 +771,19 @@ describe("applyLinuxDns", () => {
     expect(outcome).toMatchObject({
       status: "failed",
       failedStep: `install ${LINUX_DNS_UNIT_PATH}`,
-      exitCode: 1,
+      exitCode: 67,
     });
     expect(state.files.has(LINUX_DNS_UNIT_PATH)).toBe(false);
-    expect(state.staged.size).toBe(0);
-  });
-
-  test("the root install script installs approved bytes and refuses others", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "hack-linux-dns-install-"));
-    try {
-      const bin = join(dir, "bin");
-      await mkdir(bin);
-      // Fake install(1): copy the last-but-one argument to the last one.
-      await writeFile(
-        join(bin, "install"),
-        '#!/bin/sh\nfor a; do s="$t"; t="$a"; done; cp "$s" "$t"\n',
-        { mode: 0o755 }
-      );
-      const stage = join(dir, "stage.service");
-      const target = join(dir, "target.service");
-      const approved = "[Unit]\nDescription=ok\n";
-      await writeFile(stage, approved);
-      const env = { PATH: `${bin}:/usr/bin:/bin`, TMPDIR: dir };
-      const run = (digest: string) =>
-        Bun.spawn(
-          [
-            "sh",
-            "-c",
-            VERIFIED_INSTALL_SCRIPT,
-            "hack-install",
-            stage,
-            digest,
-            target,
-          ],
-          { env, stderr: "ignore" }
-        ).exited;
-
-      expect(await run(sha256Hex(approved))).toBe(0);
-      expect(await Bun.file(target).text()).toBe(approved);
-
-      await rm(target);
-      await writeFile(stage, "[Unit]\nDescription=swapped\n");
-      expect(await run(sha256Hex(approved))).not.toBe(0);
-      expect(await Bun.file(target).exists()).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    // The install argv names the destination only; no source path exists.
+    expect(state.privileged[0]?.slice(4)).toEqual([
+      String(
+        new TextEncoder().encode(renderLinuxDnsUnit({ domains: DOMAINS }))
+          .byteLength
+      ),
+      sha256Hex(renderLinuxDnsUnit({ domains: DOMAINS })),
+      LINUX_DNS_UNIT_PATH,
+      "0644",
+    ]);
   });
 
   test("a failing privileged step stops and reports it", async () => {
@@ -893,11 +876,11 @@ describe("review hardening", () => {
     ).toBe(true);
   });
 
-  test("bypassed resolved: steps check upstreams, keep a backup and verify", async () => {
+  test("bypassed resolved: no resolver switch is printed, only forwarding and the guide", async () => {
     const files = configuredFiles();
     files.set(
       "/etc/resolv.conf",
-      "nameserver 192.0.2.1\nnameserver 192.0.2.2\nsearch corp.example lab.example\n"
+      "nameserver 192.0.2.1\nsearch corp.example\n"
     );
     files.set("/etc/nsswitch.conf", "hosts: files dns\n");
     const { host } = createFakeHost({
@@ -907,21 +890,16 @@ describe("review hardening", () => {
     const inspection = await inspectLinuxDns({ host, domains: DOMAINS });
     expect(inspection.code).toBe("linux_dns_resolved_bypassed");
     const fix = inspection.fix.join("\n");
-    expect(fix).toContain("192.0.2.1 192.0.2.2");
-    expect(fix).toContain("search corp.example lab.example");
-    const backup = fix.indexOf(
-      "sudo cp -P /etc/resolv.conf /etc/resolv.conf.before-hack"
-    );
-    const link = fix.indexOf(
-      "sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf"
-    );
-    const verify = fix.indexOf("getent hosts example.com");
-    expect(backup).toBeGreaterThan(fix.indexOf("resolvectl dns"));
-    expect(link).toBeGreaterThan(backup);
-    expect(verify).toBeGreaterThan(link);
-    expect(fix).toContain(
-      "sudo mv /etc/resolv.conf.before-hack /etc/resolv.conf"
-    );
+    for (const switchStep of [
+      "ln -s",
+      "resolv.conf.before-hack",
+      "systemctl enable",
+      "cp -P",
+    ]) {
+      expect(fix).not.toContain(switchStep);
+    }
+    expect(fix).toContain(`server=/hack/${DEFAULT_COREDNS_IP}`);
+    expect(fix).toContain("docs/guides/linux-setup.md (Switching resolvers)");
   });
 
   test("interface names outside the safe set get manual steps and no prompt", async () => {
@@ -959,115 +937,30 @@ describe("review hardening", () => {
     }
   });
 
-  test("the installed unit is recognized only when byte-for-byte Hack's", () => {
-    const unit = renderLinuxDnsUnit({ domains: ["hack", "corp.test"] });
-    expect(parseHackUnitDomains(unit)).toEqual(["hack", "corp.test"]);
-    expect(parseHackUnitDomains(`${unit}\n`)).toBeNull();
+  test("Hack's files are recognised by the first-line marker, any format version", () => {
+    const unit = renderLinuxDnsUnit({ domains: DOMAINS });
+    expect(unit.split("\n")[0]).toBe(LINUX_DNS_MARKER);
+    expect(LINUX_DNS_MARKER).toContain("format=2");
+    expect(hasLinuxDnsMarker(unit)).toBe(true);
+    expect(hasLinuxDnsMarker(renderLinuxDnsUdevRule())).toBe(true);
+    // The unversioned marker of the first format (older Hack).
     expect(
-      parseHackUnitDomains(unit.replace("sleep 0.25", "sleep 1"))
-    ).toBeNull();
-    expect(parseHackUnitDomains("[Unit]\n")).toBeNull();
-  });
-});
-
-describe("root install script bounds", () => {
-  async function withScript(
-    run: (opts: {
-      readonly dir: string;
-      readonly exec: (source: string, digest: string) => Promise<number>;
-      readonly target: string;
-    }) => Promise<void>
-  ) {
-    const dir = await mkdtemp(join(tmpdir(), "hack-linux-dns-bounds-"));
-    try {
-      const bin = join(dir, "bin");
-      await mkdir(bin);
-      await writeFile(
-        join(bin, "install"),
-        '#!/bin/sh\nfor a; do s="$t"; t="$a"; done; cp "$s" "$t"\n',
-        { mode: 0o755 }
-      );
-      const target = join(dir, "target");
-      const script = renderVerifiedInstallScript({
-        maxBytes: 1024,
-        timeoutSeconds: 1,
-      });
-      await run({
-        dir,
-        target,
-        exec: async (source, digest) =>
-          await Bun.spawn(
-            ["sh", "-c", script, "hack-install", source, digest, target],
-            {
-              env: { PATH: `${bin}:/usr/bin:/bin` },
-              stderr: "ignore",
-            }
-          ).exited,
-      });
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  }
-
-  test("a FIFO is refused, or killed by the time bound if swapped in after the check", async () => {
-    await withScript(async ({ dir, exec, target }) => {
-      const fifo = join(dir, "fifo");
-      expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
-      const started = Date.now();
-      expect(await exec(fifo, sha256Hex(""))).not.toBe(0);
-      expect(Date.now() - started).toBeLessThan(5000);
-      expect(await Bun.file(target).exists()).toBe(false);
-    });
-    // The bounded copy itself (the check skipped): `timeout` ends a blocked open.
-    const dir = await mkdtemp(join(tmpdir(), "hack-linux-dns-fifo-"));
-    try {
-      const fifo = join(dir, "fifo");
-      expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
-      const started = Date.now();
-      const code = await Bun.spawn(
-        [
-          "sh",
-          "-c",
-          `timeout -k 1 1 head -c 1025 -- "${fifo}" > "${dir}/copy"`,
-        ],
-        { stderr: "ignore" }
-      ).exited;
-      expect(code).not.toBe(0);
-      expect(Date.now() - started).toBeLessThan(5000);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("a link to /dev/zero is refused, and an oversized file fails before install", async () => {
-    await withScript(async ({ dir, exec, target }) => {
-      const link = join(dir, "zero");
-      await symlink("/dev/zero", link);
-      expect(await exec(link, sha256Hex(""))).not.toBe(0);
-      const big = join(dir, "big");
-      const content = "x".repeat(2048);
-      await writeFile(big, content);
-      expect(await exec(big, sha256Hex(content))).not.toBe(0);
-      expect(await exec("relative/path", sha256Hex(""))).not.toBe(0);
-      expect(await Bun.file(target).exists()).toBe(false);
-      const ok = join(dir, "ok");
-      await writeFile(ok, "fine\n");
-      expect(await exec(ok, sha256Hex("fine\n"))).toBe(0);
-      expect(await Bun.file(target).text()).toBe("fine\n");
-    });
-  });
-
-  test("the default script carries the default bounds", () => {
-    expect(VERIFIED_INSTALL_SCRIPT).toContain(
-      "timeout -k 1 10 head -c 65537 --"
-    );
-    expect(VERIFIED_INSTALL_SCRIPT).toContain('[ ! -L "$1" ]');
+      hasLinuxDnsMarker(
+        "# Managed by hack (hack global install). Remove with: hack global down\n[Unit]\n"
+      )
+    ).toBe(true);
+    expect(hasLinuxDnsMarker(`[Unit]\n${LINUX_DNS_MARKER}\n`)).toBe(false);
+    expect(hasLinuxDnsMarker("# Managed by someone else\n")).toBe(false);
   });
 });
 
 describe("removeLinuxDns", () => {
-  const remove = (host: LinuxDnsHost, confirm = async () => true) =>
-    removeLinuxDns({ host, domains: DOMAINS, confirm });
+  const remove = (
+    host: LinuxDnsHost,
+    confirm: (plan: LinuxDnsPlan) => Promise<boolean> = async () => true
+  ) => removeLinuxDns({ host, domains: DOMAINS, confirm });
+  const LEGACY_MARKER =
+    "# Managed by hack (hack global install). Remove with: hack global down";
 
   test("reverts the link and deletes both files after confirmation", async () => {
     const { host, state } = createFakeHost({
@@ -1087,22 +980,29 @@ describe("removeLinuxDns", () => {
     );
   });
 
-  test("a route matching the installed unit's older domains is still Hack's", async () => {
-    const older = ["hack", "old.example"];
-    const { host, state } = createFakeHost({
-      files: configuredFiles(older),
-      routes: new Map([[BRIDGE, appliedRoute(older)]]),
-    });
-    expect((await remove(host)).status).toBe("removed");
-    expect(state.privileged[0]).toEqual(["resolvectl", "revert", "--", BRIDGE]);
-  });
-
-  test("edited or foreign files are left in place and described", async () => {
+  test("files from an older Hack (unversioned marker, older template) are removed", async () => {
     const files = configuredFiles();
     files.set(
       LINUX_DNS_UNIT_PATH,
-      `${renderLinuxDnsUnit({ domains: DOMAINS })}# local edit\n`
+      `${LEGACY_MARKER}\n[Unit]\nDescription=Hack split DNS on %i\n[Service]\nExecStart=/bin/sh -ec 'old' hack-dns %i\n`
     );
+    files.set(
+      LINUX_DNS_UDEV_RULE_PATH,
+      `${LEGACY_MARKER}\nACTION=="add", ENV{SYSTEMD_WANTS}+="hack-dns@%k.service"\n`
+    );
+    const { host, state } = createFakeHost({ files });
+    expect((await inspectLinuxDns({ host, domains: DOMAINS })).state).toBe(
+      "stale"
+    );
+    const outcome = await remove(host);
+    expect(outcome).toEqual({ status: "removed", leftInPlace: [] });
+    expect(state.files.has(LINUX_DNS_UNIT_PATH)).toBe(false);
+    expect(state.files.has(LINUX_DNS_UDEV_RULE_PATH)).toBe(false);
+  });
+
+  test("files without Hack's marker are left in place and described", async () => {
+    const files = configuredFiles();
+    files.set(LINUX_DNS_UNIT_PATH, "[Unit]\nDescription=someone else's\n");
     files.set(LINUX_DNS_UDEV_RULE_PATH, "# someone else's rule\n");
     const { host, state } = createFakeHost({ files });
     const outcome = await remove(host, async () => {
@@ -1117,12 +1017,11 @@ describe("removeLinuxDns", () => {
     expect(state.files.has(LINUX_DNS_UNIT_PATH)).toBe(true);
   });
 
-  test("only Hack's file is removed when the other is foreign", async () => {
+  test("only Hack's file is removed when the other has no marker", async () => {
     const files = configuredFiles();
     files.set(LINUX_DNS_UDEV_RULE_PATH, "# someone else's rule\n");
     const { host, state } = createFakeHost({ files });
-    const outcome = await remove(host);
-    expect(outcome.status).toBe("removed");
+    expect((await remove(host)).status).toBe("removed");
     expect(state.privileged[0]).toEqual([
       "rm",
       "-f",
@@ -1134,27 +1033,43 @@ describe("removeLinuxDns", () => {
     );
   });
 
-  test("a link with CoreDNS mixed into other settings is not reverted", async () => {
-    for (const route of [
-      { ...appliedRoute(), dns: [DEFAULT_COREDNS_IP, "192.0.2.53"] },
-      {
-        ...appliedRoute(),
-        domains: [...appliedRoute().domains, "~corp.example"],
-      },
-      { dns: [DEFAULT_COREDNS_IP], domains: [], defaultRoute: null },
-    ]) {
-      const { host, state } = createFakeHost({
-        routes: new Map([[BRIDGE, route]]),
-      });
-      const outcome = await remove(host, async () => {
-        throw new Error("no prompt expected");
-      });
-      expect(outcome.status).toBe("absent");
-      expect(outcome.leftInPlace.join("\n")).toContain(
-        `sudo resolvectl revert -- ${BRIDGE}`
-      );
-      expect(state.privileged).toEqual([]);
-    }
+  test("a link whose servers are Hack's is reverted; other settings on it are listed first", async () => {
+    const route: LinuxLinkRoute = {
+      ...appliedRoute(),
+      domains: [...appliedRoute().domains, "~corp.example"],
+      dnssec: "allow-downgrade",
+    };
+    const { host, state } = createFakeHost({
+      routes: new Map([[BRIDGE, route]]),
+    });
+    const notes: string[] = [];
+    const outcome = await remove(host, async (plan) => {
+      notes.push(...(plan.notes ?? []));
+      return true;
+    });
+    expect(outcome.status).toBe("removed");
+    expect(state.privileged).toEqual([["resolvectl", "revert", "--", BRIDGE]]);
+    expect(notes.join("\n")).toContain("~corp.example");
+    expect(notes.join("\n")).toContain("dnssec allow-downgrade");
+  });
+
+  test("a link with other servers next to CoreDNS is left alone and reported", async () => {
+    const { host, state } = createFakeHost({
+      routes: new Map([
+        [
+          BRIDGE,
+          { ...appliedRoute(), dns: [DEFAULT_COREDNS_IP, "192.0.2.53"] },
+        ],
+      ]),
+    });
+    const outcome = await remove(host, async () => {
+      throw new Error("no prompt expected");
+    });
+    expect(outcome.status).toBe("absent");
+    expect(outcome.leftInPlace.join("\n")).toContain(
+      `sudo resolvectl revert -- ${BRIDGE}`
+    );
+    expect(state.privileged).toEqual([]);
   });
 
   test("declined or absent changes nothing", async () => {
@@ -1181,7 +1096,7 @@ describe("createLinuxDnsHost", () => {
     // as on OpenRC hosts without systemctl.
     process.env.PATH = dir;
     try {
-      const host = createLinuxDnsHost({ stageRoot: join(dir, "stage") });
+      const host = createLinuxDnsHost();
       expect(await host.isResolvedActive()).toBe(false);
       expect(await host.systemdVersion()).toBeNull();
       expect(
@@ -1191,38 +1106,6 @@ describe("createLinuxDnsHost", () => {
     } finally {
       restoreEnv("PATH", savedPath);
       await rm(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("createLinuxDnsHost staging", () => {
-  test("each call stages into a new private directory with exclusive files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "hack-linux-dns-stage-"));
-    try {
-      const host = createLinuxDnsHost({ stageRoot: root });
-      const first = await host.stageFiles([
-        { name: "a.rules", content: "one\n" },
-      ]);
-      const second = await host.stageFiles([
-        { name: "a.rules", content: "two\n" },
-      ]);
-      expect(first.paths[0]).not.toBe(second.paths[0]);
-      const dir = join(first.paths[0] ?? "", "..");
-      expect((await stat(dir)).mode & 0o777).toBe(0o700);
-      expect((await stat(first.paths[0] ?? "")).mode & 0o777).toBe(0o600);
-      expect(await Bun.file(first.paths[0] ?? "").text()).toBe("one\n");
-      // A duplicate name in one call is never written through.
-      await expect(
-        host.stageFiles([
-          { name: "x", content: "1" },
-          { name: "x", content: "2" },
-        ])
-      ).rejects.toThrow();
-      await first.cleanup();
-      await second.cleanup();
-      expect(await readdir(root)).toEqual([]);
-    } finally {
-      await rm(root, { recursive: true, force: true });
     }
   });
 });
@@ -1284,5 +1167,245 @@ describe("bootstrapLinuxGlobalDns result (install exit status)", () => {
       );
       expect(await run({ resolvedActive: false }, yes).result).toBe("skipped");
     });
+  });
+});
+
+describe("review round two", () => {
+  test("DNS-over-TLS or DNSSEC drift on the link is not configured, and a repair fixes it", async () => {
+    for (const drift of [
+      { dnsOverTls: "yes" },
+      { dnsOverTls: "opportunistic" },
+      { dnssec: "allow-downgrade" },
+      { dnssec: null },
+    ]) {
+      const { host, state } = createFakeHost({
+        files: configuredFiles(),
+        routes: new Map([[BRIDGE, { ...appliedRoute(), ...drift }]]),
+      });
+      expect(await inspectLinuxDns({ host, domains: DOMAINS })).toMatchObject({
+        state: "not_applied",
+        code: "linux_dns_route_not_applied",
+      });
+      const outcome = await applyLinuxDns({
+        host,
+        domains: DOMAINS,
+        canPrompt: true,
+        show: () => undefined,
+        confirm: async () => true,
+      });
+      expect(outcome.status).toBe("configured");
+      expect(state.routes.get(BRIDGE)).toEqual(appliedRoute());
+    }
+  });
+
+  test("a pending daemon-reload is not configured even when the link matches", async () => {
+    const { host, state } = createFakeHost({
+      files: configuredFiles(),
+      routes: new Map([[BRIDGE, appliedRoute()]]),
+      needsReload: true,
+    });
+    expect(await inspectLinuxDns({ host, domains: DOMAINS })).toMatchObject({
+      state: "not_applied",
+      code: "linux_dns_reload_pending",
+    });
+    const outcome = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => undefined,
+      confirm: async () => true,
+    });
+    expect(outcome.status).toBe("configured");
+    expect(state.privileged).toEqual([
+      ["systemctl", "daemon-reload"],
+      ["udevadm", "control", "--reload"],
+      ["systemctl", "restart", "--", `hack-dns@${BRIDGE}.service`],
+    ]);
+    // Unknown reload state is a repair too, never "configured".
+    const unknown = createFakeHost({
+      files: configuredFiles(),
+      routes: new Map([[BRIDGE, appliedRoute()]]),
+      needsReload: null,
+    });
+    expect(
+      (await inspectLinuxDns({ host: unknown.host, domains: DOMAINS })).code
+    ).toBe("linux_dns_reload_pending");
+  });
+
+  test("a failed reload after an install is repeated on retry", async () => {
+    const { host, state } = createFakeHost({
+      failOn: "systemctl daemon-reload",
+    });
+    const first = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => undefined,
+      confirm: async () => true,
+    });
+    expect(first.status).toBe("failed");
+    expect(state.needsReload).toBe(true);
+    // Even if the link already carried the route, the pending reload shows.
+    state.routes.set(BRIDGE, appliedRoute());
+    state.failOn = undefined;
+    expect((await inspectLinuxDns({ host, domains: DOMAINS })).code).toBe(
+      "linux_dns_reload_pending"
+    );
+    state.privileged = [];
+    const retry = await applyLinuxDns({
+      host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: () => undefined,
+      confirm: async () => true,
+    });
+    expect(retry.status).toBe("configured");
+    expect(state.privileged[0]).toEqual(["systemctl", "daemon-reload"]);
+  });
+
+  test("the unit's own script applies the interface-name policy", async () => {
+    const unit = renderLinuxDnsUnit({ domains: DOMAINS });
+    const line = unit
+      .split("\n")
+      .find((entry) => entry.startsWith("ExecStart="));
+    const script = /\/bin\/sh -ec '(.*)' hack-dns %i$/.exec(line ?? "")?.[1];
+    const shell = (script ?? "").replaceAll("$$", "$");
+    const dir = await mkdtemp(join(tmpdir(), "hack-linux-dns-names-"));
+    try {
+      const bin = join(dir, "bin");
+      const calls = join(dir, "calls");
+      await mkdir(bin);
+      // ip reports the gateway on every name, so only the policy can stop it.
+      await writeFile(
+        join(bin, "ip"),
+        `#!/bin/sh\necho "7: x    inet ${DEFAULT_INGRESS_GATEWAY}/16 scope global x"\n`,
+        { mode: 0o755 }
+      );
+      await writeFile(
+        join(bin, "resolvectl"),
+        `#!/bin/sh\necho "$*" >> ${calls}\n`,
+        { mode: 0o755 }
+      );
+      const run = async (name: string) =>
+        await Bun.spawn(["sh", "-ec", shell, "hack-dns", name], {
+          env: { PATH: `${bin}:/usr/bin:/bin` },
+        }).exited;
+      for (const name of [
+        "",
+        "-h",
+        ".hidden",
+        "br%test",
+        "br@blue",
+        "br test",
+        "a".repeat(16),
+      ]) {
+        expect(await run(name)).toBe(0);
+        expect(await Bun.file(calls).exists()).toBe(false);
+        expect(isConfigurableInterfaceName(name)).toBe(false);
+      }
+      expect(await run("br_x.1-a")).toBe(0);
+      expect((await readFile(calls, "utf8")).split("\n")[0]).toBe(
+        `dns -- br_x.1-a ${DEFAULT_COREDNS_IP}`
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+    expect(renderLinuxDnsUdevRule()).toContain('KERNEL=="[A-Za-z0-9_]*"');
+  });
+
+  test("systemctl show NeedDaemonReload", () => {
+    expect(parseNeedDaemonReload("NeedDaemonReload=no\n")).toBe(false);
+    expect(parseNeedDaemonReload("NeedDaemonReload=yes\n")).toBe(true);
+    expect(parseNeedDaemonReload("")).toBeNull();
+  });
+
+  test("the printed manual plan pastes into a shell as is", async () => {
+    const home = await mkdtemp(join(tmpdir(), "hack-linux-dns-paste-"));
+    const saved = {
+      HOME: process.env.HOME,
+      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+      XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+    };
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = join(home, ".config");
+    process.env.XDG_DATA_HOME = join(home, ".local", "share");
+    try {
+      const { bootstrapLinuxGlobalDns } = await import(
+        "../src/commands/global-linux-dns.ts"
+      );
+      const { managedLocalDomains, resolveDefaultDomain } = await import(
+        "../src/lib/default-domain.ts"
+      );
+      const domains = managedLocalDomains(await resolveDefaultDomain());
+      const { host } = createFakeHost();
+      let printed = "";
+      const result = await bootstrapLinuxGlobalDns({
+        useStaticIps: true,
+        host,
+        print: (text) => {
+          printed += text;
+        },
+        prompt: {
+          canPrompt: false,
+          confirm: async () => {
+            throw new Error("must not prompt");
+          },
+        },
+      });
+      expect(result).toBe("skipped");
+      // Raw: the heredoc terminator sits at column 0.
+      expect(printed.split("\n")).toContain("HACK_DNS_FILE_END");
+
+      const bin = join(home, "bin");
+      const out = join(home, "out");
+      const log = join(home, "sudo.log");
+      await mkdir(bin);
+      await mkdir(out);
+      await writeFile(
+        join(bin, "sudo"),
+        [
+          "#!/bin/sh",
+          `echo "$*" >> "${log}"`,
+          'if [ "$1" = tee ]; then',
+          `  cat > "${out}/$(printf %s "$2" | tr / _)"`,
+          "fi",
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o755 }
+      );
+      const pasted = Bun.spawn(["sh", "-e"], {
+        stdin: new Blob([printed]),
+        env: { PATH: `${bin}:/usr/bin:/bin` },
+        stderr: "pipe",
+      });
+      expect(await pasted.exited).toBe(0);
+      expect(
+        await readFile(
+          join(out, LINUX_DNS_UNIT_PATH.replaceAll("/", "_")),
+          "utf8"
+        )
+      ).toBe(renderLinuxDnsUnit({ domains }));
+      expect(
+        await readFile(
+          join(out, LINUX_DNS_UDEV_RULE_PATH.replaceAll("/", "_")),
+          "utf8"
+        )
+      ).toBe(renderLinuxDnsUdevRule());
+      expect((await readFile(log, "utf8")).trim().split("\n")).toEqual([
+        "install -d -m 0755 /etc/systemd/system",
+        `tee ${LINUX_DNS_UNIT_PATH}`,
+        "install -d -m 0755 /etc/udev/rules.d",
+        `tee ${LINUX_DNS_UDEV_RULE_PATH}`,
+        "systemctl daemon-reload",
+        "udevadm control --reload",
+        `systemctl restart -- hack-dns@${BRIDGE}.service`,
+      ]);
+    } finally {
+      restoreEnv("HOME", saved.HOME);
+      restoreEnv("XDG_CONFIG_HOME", saved.XDG_CONFIG_HOME);
+      restoreEnv("XDG_DATA_HOME", saved.XDG_DATA_HOME);
+      await rm(home, { recursive: true, force: true });
+    }
   });
 });

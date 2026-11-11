@@ -20,6 +20,22 @@
  */
 import { DEFAULT_COREDNS_IP, DEFAULT_INGRESS_GATEWAY } from "../constants.ts";
 
+/**
+ * First line of every root file Hack writes for Linux DNS. `format=` versions
+ * the file layout; removal recognises Hack's files by this line at Hack's
+ * fixed root-owned paths, so a file from an older Hack (including the
+ * unversioned first format) is still recognised after the template changes.
+ */
+export const LINUX_DNS_FILE_FORMAT = 2;
+export const LINUX_DNS_MARKER = `# Managed by hack (hack global install), format=${LINUX_DNS_FILE_FORMAT}. Remove with: hack global down`;
+const MARKER_LINE =
+  /^# Managed by hack \(hack global install\)(?:, format=\d+)?\. Remove with: hack global down$/;
+
+/** Whether `text` starts with Hack's marker line (any format version). */
+export function hasLinuxDnsMarker(text: string): boolean {
+  return MARKER_LINE.test(text.split("\n", 1)[0] ?? "");
+}
+
 /** Template unit started once per bridge interface by the udev rule. */
 export const LINUX_DNS_UNIT_PATH = "/etc/systemd/system/hack-dns@.service";
 /** udev rule that starts the template unit for every new bridge. */
@@ -48,7 +64,8 @@ export type LinuxDnsCode =
   | "linux_dns_resolver_manual"
   | "linux_dns_resolved_bypassed"
   | "linux_dns_systemd_too_old"
-  | "linux_dns_interface_unsupported";
+  | "linux_dns_interface_unsupported"
+  | "linux_dns_reload_pending";
 
 export type LinuxResolverKind =
   | "systemd-resolved-stub"
@@ -241,9 +258,11 @@ export function renderLinuxDnsUnit(opts: {
   const gatewayIp = opts.gatewayIp ?? DEFAULT_INGRESS_GATEWAY;
   const dnsIp = opts.dnsIp ?? DEFAULT_COREDNS_IP;
   const script = [
-    // Hack only routes names in the conservative set (see
-    // isConfigurableInterfaceName); never pass an option-like name on.
-    'case "$$1" in ""|-*) exit 0;; esac',
+    // The same interface-name policy as isConfigurableInterfaceName: a
+    // letter, digit or `_` first, then letters, digits, `_`, `.`, `-`, at
+    // most 15 bytes. Any other name exits before a command sees it.
+    'case "$$1" in ""|[!A-Za-z0-9_]*|*[!A-Za-z0-9_.-]*) exit 0;; esac',
+    '[ "$${#1}" -le 15 ] || exit 0',
     "n=0",
     "found=0",
     `while [ "$$n" -lt 40 ]; do if ip -o -4 addr show dev "$$1" 2>/dev/null | grep -qF " inet ${gatewayIp}/"; then found=1; break; fi`,
@@ -260,7 +279,7 @@ export function renderLinuxDnsUnit(opts: {
     'resolvectl dnsovertls -- "$$1" no',
   ].join("; ");
   return [
-    "# Managed by hack (hack global install). Remove with: hack global down",
+    LINUX_DNS_MARKER,
     "# Routes Hack's DNS suffixes to Hack's CoreDNS on the Docker bridge that",
     `# carries ${gatewayIp}. Started for each new bridge by ${LINUX_DNS_UDEV_RULE_PATH}.`,
     "[Unit]",
@@ -276,10 +295,10 @@ export function renderLinuxDnsUnit(opts: {
 
 export function renderLinuxDnsUdevRule(): string {
   return [
-    "# Managed by hack (hack global install). Remove with: hack global down",
+    LINUX_DNS_MARKER,
     "# Starts hack-dns@<ifname>.service for every new bridge; the unit skips",
     "# bridges that are not Hack's ingress network.",
-    'ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="bridge", TAG+="systemd", ENV{SYSTEMD_WANTS}+="hack-dns@%k.service"',
+    'ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="bridge", KERNEL=="[A-Za-z0-9_]*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="hack-dns@%k.service"',
     "",
   ].join("\n");
 }
@@ -388,6 +407,10 @@ export type LinuxLinkRoute = {
   readonly dns: readonly string[];
   readonly domains: readonly string[];
   readonly defaultRoute: boolean | null;
+  /** `resolvectl dnssec LINK` value ("no", "yes", "allow-downgrade"), or null. */
+  readonly dnssec: string | null;
+  /** `resolvectl dnsovertls LINK` value ("no", "yes", "opportunistic"), or null. */
+  readonly dnsOverTls: string | null;
 };
 
 function sameSet(actual: readonly string[], expected: readonly string[]) {
@@ -399,7 +422,8 @@ function sameSet(actual: readonly string[], expected: readonly string[]) {
 /**
  * The link carries exactly Hack's route: CoreDNS as its only server, exactly
  * Hack's routing-only suffixes (an extra `~.` would send every lookup to
- * CoreDNS) and no default route.
+ * CoreDNS), no default route, and DNSSEC and DNS-over-TLS off as read from
+ * the link (CoreDNS serves plain, unsigned answers).
  */
 export function linkRouteMatches(opts: {
   readonly route: LinuxLinkRoute | null;
@@ -417,30 +441,10 @@ export function linkRouteMatches(opts: {
       route.domains,
       opts.domains.map((domain) => `~${domain}`)
     ) &&
-    route.defaultRoute === false
+    route.defaultRoute === false &&
+    route.dnssec === "no" &&
+    route.dnsOverTls === "no"
   );
-}
-
-const UNIT_DOMAINS = /resolvectl domain -- "\$\$1" ((?:"~[a-z0-9.-]+" ?)+);/;
-
-/**
- * The domains of a unit file Hack wrote, or `null` when the text is not
- * byte-for-byte what Hack renders for some domain set (edited or foreign).
- */
-export function parseHackUnitDomains(text: string): readonly string[] | null {
-  const match = UNIT_DOMAINS.exec(text);
-  if (!match?.[1]) {
-    return null;
-  }
-  const domains = match[1]
-    .trim()
-    .split(" ")
-    .map((word) => word.slice(2, -1));
-  return text === renderLinuxDnsUnit({ domains }) ? domains : null;
-}
-
-export function isHackUdevRule(text: string): boolean {
-  return text === renderLinuxDnsUdevRule();
 }
 
 /** Whether a NetworkManager dnsmasq config already routes every domain. */
@@ -456,36 +460,9 @@ export function dnsmasqRoutesDomains(opts: {
   );
 }
 
-const STUB_RESOLV_CONF = "/run/systemd/resolve/stub-resolv.conf";
-const RESOLV_BACKUP = "/etc/resolv.conf.before-hack";
-
-/**
- * Steps for a host where resolved runs but glibc bypasses it. They change
- * /etc/resolv.conf only after the user confirms resolved already has this
- * host's upstream servers and search domains, keep a backup, and end with a
- * verification plus the restore command.
- */
-function stubSwitchSteps(opts: {
-  readonly nameservers: readonly string[];
-  readonly search: readonly string[];
-  readonly domains: readonly string[];
-}): readonly string[] {
-  const upstream =
-    opts.nameservers.length > 0 ? opts.nameservers.join(" ") : "(none listed)";
-  const search = opts.search.length > 0 ? opts.search.join(" ") : "(none)";
-  return [
-    `1. Check that systemd-resolved already uses this host's upstream DNS (/etc/resolv.conf lists nameservers ${upstream}, search ${search}):`,
-    "  resolvectl dns",
-    "  resolvectl domain",
-    "   If they are missing there, stop: add them to resolved first (resolved.conf DNS= and Domains=, or your network manager), or leave /etc/resolv.conf as it is.",
-    "2. Keep a copy, then point /etc/resolv.conf at the resolved stub:",
-    `  sudo cp -P /etc/resolv.conf ${RESOLV_BACKUP}`,
-    `  sudo ln -sf ${STUB_RESOLV_CONF} /etc/resolv.conf`,
-    "3. Verify ordinary and Hack lookups:",
-    `  getent hosts example.com && resolvectl query hack-check.${opts.domains[0] ?? "hack"}`,
-    `   If ordinary lookups fail, restore the copy: sudo mv ${RESOLV_BACKUP} /etc/resolv.conf`,
-  ];
-}
+/** Where switching resolvers is explained, with its risks. */
+export const LINUX_SETUP_GUIDE =
+  "docs/guides/linux-setup.md (Switching resolvers)";
 
 function forwardingSteps(opts: {
   readonly intro: string;
@@ -495,7 +472,7 @@ function forwardingSteps(opts: {
     opts.intro,
     "Hack does not change this host's resolver. To use Hack's names, have the resolver you run forward these suffixes to Hack's CoreDNS, for example as dnsmasq lines:",
     ...opts.conf.split("\n").map((line) => `  ${line}`),
-    "Or switch the host to systemd-resolved (keeping its upstream DNS), then rerun hack global install. See docs/guides/linux-setup.md.",
+    `Switching this host's resolver is a separate decision with its own risks; see ${LINUX_SETUP_GUIDE}.`,
   ];
 }
 
@@ -507,9 +484,6 @@ export function renderLinuxManualDnsSteps(opts: {
   readonly kind: LinuxResolverKind;
   readonly domains: readonly string[];
   readonly dnsIp?: string;
-  /** resolv.conf contents, carried into the resolved-bypassed steps. */
-  readonly nameservers?: readonly string[];
-  readonly search?: readonly string[];
 }): readonly string[] {
   const dnsIp = opts.dnsIp ?? DEFAULT_COREDNS_IP;
   const conf = renderNetworkManagerDnsmasqConf({
@@ -537,14 +511,11 @@ export function renderLinuxManualDnsSteps(opts: {
         conf,
       });
     case "systemd-resolved":
-      return [
-        "systemd-resolved is running, but /etc/resolv.conf does not point at its stub and /etc/nsswitch.conf does not reach its `resolve` module, so lookups bypass it.",
-        ...stubSwitchSteps({
-          nameservers: opts.nameservers ?? [],
-          search: opts.search ?? [],
-          domains: opts.domains,
-        }),
-      ];
+      return forwardingSteps({
+        intro:
+          "systemd-resolved is running, but /etc/resolv.conf does not point at its stub and /etc/nsswitch.conf does not reach its `resolve` module, so lookups bypass it and Hack's route has no effect.",
+        conf,
+      });
     case "systemd-resolved-stub":
       return [];
     default:

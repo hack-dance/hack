@@ -1,6 +1,5 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { ensureDir, readTextFile } from "./fs.ts";
+import { readdir } from "node:fs/promises";
+import { readTextFile } from "./fs.ts";
 import {
   type LinuxLinkRoute,
   parseLinkForAddress,
@@ -13,6 +12,7 @@ import { type ExecResult, exec } from "./shell.ts";
 
 const PROBE_TIMEOUT_MS = 3000;
 const UNAVAILABLE: ExecResult = { exitCode: 127, stdout: "", stderr: "" };
+const NEED_DAEMON_RELOAD = /^NeedDaemonReload=(yes|no)$/m;
 
 /**
  * Read-only probe. A missing executable (no systemctl on OpenRC hosts, no
@@ -27,14 +27,19 @@ async function probe(cmd: readonly string[]): Promise<ExecResult> {
   }
 }
 
+/** `NeedDaemonReload=` from `systemctl show`, or `null` when not reported. */
+export function parseNeedDaemonReload(output: string): boolean | null {
+  const value = NEED_DAEMON_RELOAD.exec(output)?.[1];
+  return value === undefined ? null : value === "yes";
+}
+
 /**
- * Real host boundary. Reads `/etc`, `ip` and `resolvectl` output, writes only
- * fresh private directories under `stageRoot`, and runs root steps as
- * `sudo <argv>` with the terminal attached so sudo can ask for a password.
+ * Real host boundary. Reads `/etc`, `ip`, `systemctl` and `resolvectl`
+ * output, writes nothing itself, and runs root steps as `sudo <argv>` with
+ * the terminal attached so sudo can ask for a password; file content goes to
+ * root on stdin.
  */
-export function createLinuxDnsHost(opts: {
-  readonly stageRoot: string;
-}): LinuxDnsHost {
+export function createLinuxDnsHost(): LinuxDnsHost {
   return {
     readFile: async (path) => {
       try {
@@ -66,50 +71,53 @@ export function createLinuxDnsHost(opts: {
         : null;
     },
     readLinkRoute: async (link) => await readResolvectlLinkRoute(link),
-    stageFiles: async (files) => {
-      await ensureDir(opts.stageRoot);
-      // mkdtemp: a new directory with an unpredictable name, mode 0700.
-      const dir = await mkdtemp(join(opts.stageRoot, "linux-dns-"));
-      const cleanup = async () => {
-        await rm(dir, { recursive: true, force: true });
-      };
-      try {
-        const paths: string[] = [];
-        for (const file of files) {
-          const path = join(dir, file.name);
-          // "wx": create exclusively; never follow or reuse an existing path.
-          await writeFile(path, file.content, { flag: "wx", mode: 0o600 });
-          paths.push(path);
-        }
-        return { paths, cleanup };
-      } catch (error) {
-        await cleanup();
-        throw error;
-      }
+    unitNeedsReload: async (unit) => {
+      const res = await probe([
+        "systemctl",
+        "show",
+        "-p",
+        "NeedDaemonReload",
+        "--",
+        unit,
+      ]);
+      return res.exitCode === 0 ? parseNeedDaemonReload(res.stdout) : null;
     },
     // Only a vetted system sudo, never one found on PATH (privileged-sudo.ts).
-    runPrivileged: async (argv) => await runTrustedSudo(argv),
+    runPrivileged: async (argv, runOpts) =>
+      await runTrustedSudo(
+        argv,
+        runOpts?.input === undefined ? undefined : { input: runOpts.input }
+      ),
   };
 }
+
+const LINK_VERBS = [
+  "dns",
+  "domain",
+  "default-route",
+  "dnssec",
+  "dnsovertls",
+] as const;
 
 async function readResolvectlLinkRoute(
   link: string
 ): Promise<LinuxLinkRoute | null> {
-  const [dns, domain, defaultRoute] = await Promise.all(
-    ["dns", "domain", "default-route"].map((verb) =>
-      probe(["resolvectl", verb, "--", link])
-    )
+  const [dns, domain, defaultRoute, dnssec, dnsOverTls] = await Promise.all(
+    LINK_VERBS.map((verb) => probe(["resolvectl", verb, "--", link]))
   );
   if (!(dns && domain) || dns.exitCode !== 0 || domain.exitCode !== 0) {
     return null;
   }
-  const routeValue =
-    defaultRoute?.exitCode === 0
-      ? parseResolvectlLinkValues(defaultRoute.stdout)[0]
-      : undefined;
+  const single = (res: ExecResult | undefined): string | null =>
+    res?.exitCode === 0
+      ? (parseResolvectlLinkValues(res.stdout)[0] ?? null)
+      : null;
+  const routeValue = single(defaultRoute);
   return {
     dns: parseResolvectlLinkValues(dns.stdout),
     domains: parseResolvectlLinkValues(domain.stdout),
-    defaultRoute: routeValue === undefined ? null : routeValue === "yes",
+    defaultRoute: routeValue === null ? null : routeValue === "yes",
+    dnssec: single(dnssec),
+    dnsOverTls: single(dnsOverTls),
   };
 }

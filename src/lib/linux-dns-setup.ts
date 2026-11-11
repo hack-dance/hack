@@ -1,17 +1,17 @@
 /**
  * Inspect, apply and remove Hack's Linux host DNS route.
  *
- * All host effects go through {@link LinuxDnsHost}. Root-only steps are a
- * plain list of argv arrays: the caller shows them, and they run (each with
- * `sudo`) only after an interactive confirmation. A run that cannot prompt
- * gets the same list back with a stable code and changes nothing.
+ * All host effects go through {@link LinuxDnsHost}. Root-only steps are
+ * shown first and run (each with `sudo`) only after an interactive
+ * confirmation. A run that cannot prompt gets the same plan back with a
+ * stable code and changes nothing. Root never opens a path the user can
+ * write: file content reaches root on stdin (`privileged-install.ts`).
  */
-import { createHash } from "node:crypto";
 import { DEFAULT_COREDNS_IP, DEFAULT_INGRESS_GATEWAY } from "../constants.ts";
 import {
   detectLinuxResolver,
   dnsmasqRoutesDomains,
-  isHackUdevRule,
+  hasLinuxDnsMarker,
   isResolvedKind,
   LINUX_DNS_MIN_SYSTEMD,
   LINUX_DNS_UDEV_RULE_PATH,
@@ -21,7 +21,6 @@ import {
   type LinuxResolverDetection,
   linkRouteMatches,
   NM_DNSMASQ_DIR,
-  parseHackUnitDomains,
   renderLinuxDnsUdevRule,
   renderLinuxDnsUnit,
   renderLinuxManualDnsSteps,
@@ -29,8 +28,9 @@ import {
   renderNetworkManagerDnsmasqConf,
   unitInstanceForInterface,
 } from "./linux-dns.ts";
+import { stdinInstallStep } from "./privileged-install.ts";
 
-/** Host boundary. Implementations must not write outside the staging dir. */
+/** Host boundary. Implementations write nothing except through `runPrivileged`. */
 export type LinuxDnsHost = {
   /** File text, or `null` when absent or unreadable. */
   readonly readFile: (path: string) => Promise<string | null>;
@@ -44,19 +44,18 @@ export type LinuxDnsHost = {
   /** systemd-resolved's per-link state, or `null` when unreadable. */
   readonly readLinkRoute: (link: string) => Promise<LinuxLinkRoute | null>;
   /**
-   * Write private copies for privileged installs. Called only after the user
-   * confirmed. Each call uses a new, uniquely named 0700 directory and creates
-   * every file exclusively (an existing path or link is never followed).
-   * Returns the paths in order and a cleanup that removes the directory.
+   * systemd's `NeedDaemonReload` for a unit: `true` when its file changed
+   * since systemd loaded it, `null` when unknown.
    */
-  readonly stageFiles: (
-    files: readonly { readonly name: string; readonly content: string }[]
-  ) => Promise<{
-    readonly paths: readonly string[];
-    readonly cleanup: () => Promise<void>;
-  }>;
-  /** Run `sudo <argv>` with the terminal attached; returns the exit code. */
-  readonly runPrivileged: (argv: readonly string[]) => Promise<number>;
+  readonly unitNeedsReload: (unit: string) => Promise<boolean | null>;
+  /**
+   * Run `sudo <argv>` with the terminal attached; returns the exit code.
+   * `input`, when given, is the child's stdin (sudo prompts on the terminal).
+   */
+  readonly runPrivileged: (
+    argv: readonly string[],
+    opts?: { readonly input?: Uint8Array }
+  ) => Promise<number>;
 };
 
 export type LinuxDnsRouteState =
@@ -193,8 +192,6 @@ export async function inspectLinuxDns(opts: {
       fix: renderLinuxManualDnsSteps({
         kind: resolver.kind,
         domains,
-        nameservers: resolver.nameservers,
-        search: resolver.search,
       }),
     };
   }
@@ -287,7 +284,18 @@ async function inspectResolvedRoute(opts: {
       ...base,
       state: "not_applied",
       code: "linux_dns_route_not_applied",
-      message: `${link} does not carry exactly Hack's DNS route`,
+      message: `${link} does not carry exactly Hack's DNS route (CoreDNS only, Hack's suffixes only, default-route, DNSSEC and DNS-over-TLS off)`,
+      fix: ["hack global install"],
+    };
+  }
+  // Matching files and a matching link do not prove systemd loaded the
+  // current unit: a failed daemon-reload leaves the old one cached.
+  if ((await host.unitNeedsReload(`hack-dns@${link}.service`)) !== false) {
+    return {
+      ...base,
+      state: "not_applied",
+      code: "linux_dns_reload_pending",
+      message: `systemd has not loaded the current ${LINUX_DNS_UNIT_PATH} (reload pending or unknown)`,
       fix: ["hack global install"],
     };
   }
@@ -300,8 +308,6 @@ async function inspectResolvedRoute(opts: {
       fix: renderLinuxManualDnsSteps({
         kind: resolver.kind,
         domains,
-        nameservers: resolver.nameservers,
-        search: resolver.search,
       }),
     };
   }
@@ -321,9 +327,9 @@ function describeDomains(domains: readonly string[]): string {
 }
 
 /**
- * A privileged plan. Each file is installed as root from a private copy that
- * is checked against the digest of the content shown; then every command runs
- * as `sudo <argv>`.
+ * A privileged plan. Each file is installed by root from bytes Hack sends on
+ * stdin, checked against the digest of the content shown; then every command
+ * runs as `sudo <argv>`.
  */
 export type LinuxDnsPlan = {
   /** Files to install, with the rendered content shown to the user. */
@@ -437,98 +443,17 @@ function buildApplyPlan(opts: {
   return { files, commands };
 }
 
-/** Largest file the root install step copies (Hack's files are ~2 KiB). */
-export const VERIFIED_INSTALL_MAX_BYTES = 65_536;
-/** Seconds the root copy may take before it is killed. */
-export const VERIFIED_INSTALL_TIMEOUT_SECONDS = 10;
-
-/**
- * Root copies the private staged file into a root-owned 0700 directory it
- * creates under /tmp (named explicitly, never `TMPDIR`), checks the copy
- * against the digest of the bytes the user approved, and installs only that
- * copy, so a file replaced after the plan was shown is never installed.
- *
- * The copy itself is bounded, because a same-user process can still swap the
- * staged path: the source must be an absolute path to a regular file that is
- * not a link, `head -c` reads at most one byte past the limit (a swapped-in
- * `/dev/zero` cannot fill /tmp), and `timeout` kills a copy that blocks (a
- * swapped-in FIFO). An oversized copy fails before the digest check.
- */
-export function renderVerifiedInstallScript(opts?: {
-  readonly maxBytes?: number;
-  readonly timeoutSeconds?: number;
-}): string {
-  const maxBytes = opts?.maxBytes ?? VERIFIED_INSTALL_MAX_BYTES;
-  const seconds = opts?.timeoutSeconds ?? VERIFIED_INSTALL_TIMEOUT_SECONDS;
-  return [
-    "set -eu",
-    "umask 077",
-    'case "$1" in /*) ;; *) exit 64;; esac',
-    '[ -f "$1" ] && [ ! -L "$1" ] || exit 65',
-    "d=$(mktemp -d /tmp/hack-root.XXXXXXXX)",
-    `trap 'rm -rf "$d"' EXIT`,
-    't="$d/copy"',
-    `timeout -k 1 ${seconds} head -c ${maxBytes + 1} -- "$1" > "$t"`,
-    `[ "$(wc -c < "$t")" -le ${maxBytes} ] || exit 66`,
-    'printf "%s  %s\\n" "$2" "$t" | sha256sum -c --status',
-    'install -D -o root -g root -m 0644 "$t" "$3"',
-  ].join("; ");
-}
-
-export const VERIFIED_INSTALL_SCRIPT = renderVerifiedInstallScript();
-
-export function verifiedInstallArgv(opts: {
-  readonly source: string;
-  readonly sha256: string;
-  readonly target: string;
-}): string[] {
-  return [
-    "sh",
-    "-c",
-    VERIFIED_INSTALL_SCRIPT,
-    "hack-install",
-    opts.source,
-    opts.sha256,
-    opts.target,
-  ];
-}
-
-export function sha256Hex(content: string): string {
-  return createHash("sha256").update(content).digest("hex");
-}
-
-function stageName(path: string): string {
-  return path.slice(path.lastIndexOf("/") + 1);
-}
-
-/** Run a confirmed plan. Files are staged only now, after the user said yes. */
+/** Run a confirmed plan: installs via stdin, then the commands, in order. */
 async function runPlan(opts: {
   readonly host: LinuxDnsHost;
   readonly plan: LinuxDnsPlan;
 }): Promise<{ readonly failedStep: string; readonly exitCode: number } | null> {
   const { host, plan } = opts;
-  if (plan.files.length > 0) {
-    const staged = await host.stageFiles(
-      plan.files.map((file) => ({
-        name: stageName(file.path),
-        content: file.content,
-      }))
-    );
-    try {
-      for (const [index, file] of plan.files.entries()) {
-        const exitCode = await host.runPrivileged(
-          verifiedInstallArgv({
-            source: staged.paths[index] ?? "",
-            sha256: sha256Hex(file.content),
-            target: file.path,
-          })
-        );
-        if (exitCode !== 0) {
-          return { failedStep: `install ${file.path}`, exitCode };
-        }
-      }
-    } finally {
-      await staged.cleanup();
+  for (const file of plan.files) {
+    const step = stdinInstallStep({ target: file.path, content: file.content });
+    const exitCode = await host.runPrivileged(step.argv, { input: step.input });
+    if (exitCode !== 0) {
+      return { failedStep: `install ${file.path}`, exitCode };
     }
   }
   for (const command of plan.commands) {
@@ -572,8 +497,6 @@ export async function applyLinuxDns(opts: {
           ...renderLinuxManualDnsSteps({
             kind: inspection.resolver.kind,
             domains,
-            nameservers: inspection.resolver.nameservers,
-            search: inspection.resolver.search,
           }),
         ],
       }
@@ -611,70 +534,83 @@ export type LinuxDnsRemoveOutcome =
     };
 
 /**
- * Undo {@link applyLinuxDns}, touching only what is exactly Hack's: a file is
- * deleted only when it is byte-for-byte what Hack renders (for the current
- * domains or the domains in the installed unit), and the link is reverted
- * only when its DNS settings are exactly Hack's route. Anything else is left
- * in place and described in `leftInPlace` with how to remove it by hand.
+ * Hack's files at Hack's fixed root-owned paths, recognised by the marker on
+ * their first line (any format version), and notes for files without it.
  */
-/** Hack's own route files present on disk, and notes for foreign ones. */
 function classifyRouteFiles(opts: {
   readonly unit: string | null;
   readonly rule: string | null;
-  readonly unitDomains: readonly string[] | null;
 }): { readonly owned: readonly string[]; readonly foreign: readonly string[] } {
   const owned: string[] = [];
   const foreign: string[] = [];
-  for (const [path, text, ours] of [
-    [LINUX_DNS_UNIT_PATH, opts.unit, opts.unitDomains !== null],
-    [
-      LINUX_DNS_UDEV_RULE_PATH,
-      opts.rule,
-      opts.rule !== null && isHackUdevRule(opts.rule),
-    ],
+  for (const [path, text] of [
+    [LINUX_DNS_UNIT_PATH, opts.unit],
+    [LINUX_DNS_UDEV_RULE_PATH, opts.rule],
   ] as const) {
     if (text === null) {
       continue;
     }
-    if (ours) {
+    if (hasLinuxDnsMarker(text)) {
       owned.push(path);
     } else {
       foreign.push(
-        `${path} is not the file Hack writes, so it was left in place. If it is yours to remove: sudo rm -- ${path}`
+        `${path} does not carry Hack's marker, so it was left in place. If it is yours to remove: sudo rm -- ${path}`
       );
     }
   }
   return { owned, foreign };
 }
 
-/** Whether the link's DNS settings are exactly Hack's route, and a note when mixed. */
+/**
+ * The link is Hack's to revert when its DNS servers are exactly Hack's
+ * CoreDNS. `resolvectl revert` clears every per-link setting, so any setting
+ * that is not Hack's is listed for the plan; a link with other servers next
+ * to CoreDNS is left alone and reported.
+ */
 function classifyLinkRoute(opts: {
   readonly instance: string;
   readonly route: LinuxLinkRoute | null;
-  readonly domainSets: readonly (readonly string[])[];
-}): { readonly ours: boolean; readonly note: string | null } {
+  readonly domains: readonly string[];
+}): {
+  readonly ours: boolean;
+  readonly alsoCleared: readonly string[];
+  readonly note: string | null;
+} {
   const { instance, route } = opts;
-  if (route === null) {
-    return { ours: false, note: null };
+  if (route === null || !route.dns.includes(DEFAULT_COREDNS_IP)) {
+    return { ours: false, alsoCleared: [], note: null };
   }
-  if (opts.domainSets.some((domains) => linkRouteMatches({ route, domains }))) {
-    return { ours: true, note: null };
+  if (route.dns.some((server) => server !== DEFAULT_COREDNS_IP)) {
+    return {
+      ours: false,
+      alsoCleared: [],
+      note: `${instance} uses Hack's CoreDNS (${DEFAULT_COREDNS_IP}) next to other DNS servers (${route.dns.join(" ")}), so its settings were left in place. To clear all of that link's DNS settings: sudo resolvectl revert -- ${instance}`,
+    };
   }
-  if (!route.dns.includes(DEFAULT_COREDNS_IP)) {
-    return { ours: false, note: null };
-  }
-  return {
-    ours: false,
-    note: `${instance} uses Hack's CoreDNS (${DEFAULT_COREDNS_IP}) but its DNS settings are not exactly Hack's route (dns: ${route.dns.join(" ") || "none"}; domains: ${route.domains.join(" ") || "none"}), so they were left in place. To clear all of that link's DNS settings: sudo resolvectl revert -- ${instance}`,
-  };
+  const hackDomains = new Set(opts.domains.map((domain) => `~${domain}`));
+  const otherDomains = route.domains.filter(
+    (domain) => !hackDomains.has(domain)
+  );
+  const alsoCleared = [
+    ...(otherDomains.length > 0
+      ? [`domains not in Hack's current set: ${otherDomains.join(" ")}`]
+      : []),
+    ...(route.defaultRoute === true ? ["default-route yes"] : []),
+    ...(route.dnssec !== null && route.dnssec !== "no"
+      ? [`dnssec ${route.dnssec}`]
+      : []),
+    ...(route.dnsOverTls !== null && route.dnsOverTls !== "no"
+      ? [`dnsovertls ${route.dnsOverTls}`]
+      : []),
+  ];
+  return { ours: true, alsoCleared, note: null };
 }
 
 /**
- * Undo {@link applyLinuxDns}, touching only what is exactly Hack's: a file is
- * deleted only when it is byte-for-byte what Hack renders (for the current
- * domains or the domains in the installed unit), and the link is reverted
- * only when its DNS settings are exactly Hack's route. Anything else is left
- * in place and described in `leftInPlace` with how to remove it by hand.
+ * Undo {@link applyLinuxDns}: delete the files at Hack's fixed paths that
+ * carry Hack's marker, and revert the link when its servers are Hack's.
+ * Anything else is left in place and described in `leftInPlace` with how to
+ * remove it by hand; settings a revert also clears are listed in the plan.
  */
 export async function removeLinuxDns(opts: {
   readonly host: LinuxDnsHost;
@@ -687,17 +623,16 @@ export async function removeLinuxDns(opts: {
     host.readFile(LINUX_DNS_UDEV_RULE_PATH),
     host.findLinkWithAddress(DEFAULT_INGRESS_GATEWAY),
   ]);
-  const unitDomains = unit === null ? null : parseHackUnitDomains(unit);
-  const { owned, foreign } = classifyRouteFiles({ unit, rule, unitDomains });
+  const { owned, foreign } = classifyRouteFiles({ unit, rule });
   const leftInPlace = [...foreign];
   const instance = link === null ? null : unitInstanceForInterface(link);
   const linkRoute =
     instance === null
-      ? { ours: false, note: null }
+      ? { ours: false, alsoCleared: [], note: null }
       : classifyLinkRoute({
           instance,
           route: await host.readLinkRoute(instance),
-          domainSets: [opts.domains, unitDomains ?? opts.domains],
+          domains: opts.domains,
         });
   if (linkRoute.note !== null) {
     leftInPlace.push(linkRoute.note);
@@ -717,7 +652,17 @@ export async function removeLinuxDns(opts: {
   if (commands.length === 0) {
     return { status: "absent", leftInPlace };
   }
-  const plan: LinuxDnsPlan = { files: [], commands };
+  const plan: LinuxDnsPlan = {
+    files: [],
+    commands,
+    ...(routeIsHacks && linkRoute.alsoCleared.length > 0
+      ? {
+          notes: [
+            `Reverting ${instance} also clears settings that are not Hack's: ${linkRoute.alsoCleared.join("; ")}`,
+          ],
+        }
+      : {}),
+  };
   if (!(await opts.confirm(plan))) {
     return { status: "declined", plan, leftInPlace };
   }

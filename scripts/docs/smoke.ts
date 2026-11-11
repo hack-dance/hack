@@ -105,6 +105,77 @@ for (const [old, target] of [
   }
 }
 
+// Every Mermaid block in a published source must reach the browser as its two
+// Pele renders. The count comes from the sources, not from the staged output,
+// so a page whose diagrams are dropped anywhere in the pipeline fails here.
+const repositoryRoot = new URL("../../", import.meta.url).pathname;
+const mermaidFence = /^(?:```|~~~)mermaid[ \t]*$/gm;
+const diagramImage = /<img\b[^>]*>/g;
+const diagramSource = /src="(\/diagrams\/[a-f0-9]+\.(light|dark)\.svg)"/;
+let diagramBlocks = 0;
+const diagramFiles = new Set<string>();
+for (const version of ["v4", "v5"] as const) {
+  const m = versions[version];
+  const sources = [
+    ...m.entries
+      .filter((e) => !m.editorial.some((page) => page.slug === e.slug))
+      .map((e) => ({ slug: e.slug, file: e.snapshot })),
+    ...m.editorial.map((page) => ({
+      slug: page.slug,
+      file: `docs/versions/${version}/${page.slug}.md`,
+    })),
+  ];
+  for (const { slug, file } of sources) {
+    const blocks = (
+      (await Bun.file(`${repositoryRoot}${file}`).text()).match(mermaidFence) ??
+      []
+    ).length;
+    if (blocks === 0) {
+      continue;
+    }
+    const route = `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
+    const shown = { light: 0, dark: 0 };
+    for (const tag of (await read(route)).match(diagramImage) ?? []) {
+      const source = diagramSource.exec(tag);
+      const variant = source?.[2] as "light" | "dark" | undefined;
+      if (
+        source?.[1] &&
+        variant &&
+        tag.includes(`class="diagram diagram-${variant}"`)
+      ) {
+        shown[variant] += 1;
+        diagramFiles.add(source[1]);
+      }
+    }
+    if (shown.light !== blocks || shown.dark !== blocks) {
+      throw new Error(
+        `${route}: ${blocks} Mermaid blocks but ${shown.light} light and ${shown.dark} dark diagram images`
+      );
+    }
+    diagramBlocks += blocks;
+  }
+}
+if (diagramBlocks === 0) {
+  throw new Error("No Mermaid blocks found in the published sources");
+}
+for (const file of diagramFiles) {
+  const image = await fetch(new URL(file, base), {
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (
+    !(
+      image.status === 200 &&
+      image.headers.get("content-type")?.startsWith("image/svg+xml") &&
+      (await image.text()).includes("<svg")
+    )
+  ) {
+    throw new Error(`Diagram not served as SVG: ${file}`);
+  }
+}
+console.log(
+  `Diagram smoke passed: ${diagramBlocks} Mermaid blocks shown as ${diagramFiles.size} served SVGs.`
+);
+
 // v5 pages that moved into the native section keep their old routes, with and
 // without the version prefix.
 for (const [old, target] of [

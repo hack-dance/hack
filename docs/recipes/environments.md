@@ -54,14 +54,40 @@ The complete project is in
        PAYMENTS_API_URL: https://payments.sandbox.example.com
    ```
 
-3. Check what a service will get, without starting anything:
+3. The stand-in app prints what it received. Note `$$`: Compose turns it into
+   `$`, so the container's shell expands the variable, not Compose. The project
+   config needs nothing special for overlays.
+
+   <!-- include: examples/recipes/environments/.hack/docker-compose.yml -->
+   ```yaml
+   name: environments
+   services:
+     app:
+       # Stand-in for your app: prints the settings it received, then waits.
+       image: alpine:3.22
+       command:
+         - sh
+         - -c
+         - echo "APP_ENV=$$APP_ENV LOG_LEVEL=$$LOG_LEVEL PAYMENTS_API_URL=$$PAYMENTS_API_URL"; exec sleep infinity
+   ```
+
+   <!-- include: examples/recipes/environments/.hack/hack.config.json -->
+   ```json
+   {
+     "$schema": "https://schemas.hack.local/hack.config.schema.json",
+     "name": "environments",
+     "dev_host": "environments.hack.local"
+   }
+   ```
+
+4. Check what a service will get, without starting anything:
 
    ```sh
    hack env list --env qa --service app
    hack env explain PAYMENTS_API_URL --env qa --service app   # where a value comes from
    ```
 
-4. Start with an overlay. Containers, lifecycle hooks and lifecycle processes
+5. Start with an overlay. Containers, lifecycle hooks and lifecycle processes
    all get it.
 
    ```sh
@@ -71,7 +97,7 @@ The complete project is in
    `hack restart` and `hack down` reuse the overlay the stack was started with.
    `hack exec` does not: pass the same `--env`, or it refuses.
 
-5. Run host commands with the same values. `--scope` adds one service's
+6. Run host commands with the same values. `--scope` adds one service's
    values; the command still runs on your machine.
 
    ```sh

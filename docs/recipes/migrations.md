@@ -73,6 +73,17 @@ values:
     DATABASE_URL: postgres://app:app@db:5432/app
 ```
 
+The project config needs nothing for this pattern:
+
+<!-- include: examples/recipes/migrations/.hack/hack.config.json -->
+```json
+{
+  "$schema": "https://schemas.hack.local/hack.config.schema.json",
+  "name": "migrations",
+  "dev_host": "migrations.hack.local"
+}
+```
+
 ```sh
 hack up -d
 hack logs migrate --no-follow   # applying 001_create_notes ... migrations up to date

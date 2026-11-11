@@ -366,7 +366,7 @@ async function superviseChild(opts: {
   }
   const exitCode = await proc.exited;
   // A cancel that arrived while output was being captured (the canceller
-  // also signals the group directly) is still a cancel, not a failure. A
+  // used to signal the group directly) is still a cancel, not a failure. A
   // clean exit (0, no signal) stays `succeeded` even if a cancel raced it:
   // reporting `cancelled` could make a caller run the command again.
   const cleanExit = exitCode === 0 && proc.signalCode === null;
@@ -376,9 +376,12 @@ async function superviseChild(opts: {
   ) {
     stopping = "cancelled";
   }
+  // The leader ended on its own while a cancel was pending: the group was
+  // never stopped, so its descendants are not known to be gone.
+  const lateCancel = stopping === "cancelled" && !stopper.signalled;
   await stopper.finish();
   await capture.poll(true);
-  return endedPayload({
+  const payload = endedPayload({
     stopping,
     exitCode,
     signal: proc.signalCode ?? null,
@@ -387,6 +390,7 @@ async function superviseChild(opts: {
     backend: opts.meta.backend,
     noSpace: capture.noSpace,
   });
+  return lateCancel ? { ...payload, descendants: "not_confirmed" } : payload;
 }
 
 /** True until Bun has reaped the child: its pid (and group id) cannot be reused. */
@@ -405,6 +409,11 @@ class GroupStopper {
   private readonly members = new Map<number, ProcessIdentity>();
   private killTimer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
+
+  /** True once this stopper signalled the child's group. */
+  get signalled(): boolean {
+    return this.stopped;
+  }
 
   constructor(proc: Bun.Subprocess) {
     this.proc = proc;

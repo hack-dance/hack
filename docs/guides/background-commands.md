@@ -178,7 +178,9 @@ process group immediately before the signal; a reused pid is never signalled
 and is listed in `refused`. A live supervisor stops the process group itself:
 it records the group's members first, so descendants that ignore SIGTERM are
 still killed (after checking their pid and start time) once the command's own
-process exits. The supervisor records `cancelled`. A command that already
+process exits. The supervisor records `cancelled`. If the command's own
+process exits by itself just as a cancel arrives, the group was never stopped;
+the final record then also says `descendants: "not_confirmed"`. A command that already
 exited 0 stays `succeeded` even if a cancel raced its end. The result says what
 was confirmed: `supervisorSignalled`, `childGroupSignalled`, `childExited`, and
 `containerProcess: "not_confirmed"`. When the stop cannot be confirmed (for

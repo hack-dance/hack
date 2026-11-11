@@ -80,6 +80,7 @@ import {
 } from "./native-project-start.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeStopError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 import {
@@ -154,7 +155,10 @@ async function verifyNativeRestartListeners(opts: {
         cwd: opts.projectRoot,
         args: ["graph", "dependency-plan", "--dependencies", path, "--json"],
       });
-    } catch {
+    } catch (error) {
+      if (isNativeRuntimeStopError(error)) {
+        throw error;
+      }
       throw new ClosedCliError(
         "Native restart host dependency listener is unavailable or changed; refresh its private selection before restart. The current graph was not stopped."
       );
@@ -274,7 +278,10 @@ async function inspectRestartGraph(opts: {
       run: opts.run.run,
       invoke: opts.invoke,
     });
-  } catch {
+  } catch (error) {
+    if (isNativeRuntimeStopError(error)) {
+      throw error;
+    }
     throw new ClosedCliError(
       "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
     );

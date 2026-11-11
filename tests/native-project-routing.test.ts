@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   hasOnlyNativeSupportedLabels,
+  isInertMetadataLabel,
   nativeBridgeCapacity,
   reviewedNativeRoutes,
 } from "../src/backends/native-project-routing.ts";
@@ -41,11 +42,28 @@ test("supported routing and cache label keys remain bounded without rewriting va
   for (const unsupported of [
     { "caddy.header": "X" },
     { caddy_ingress_network: "dev" },
-    { other: "value" },
+    { caddy_0: "app.example" },
+    { "traefik.enable": "true" },
+    { "com.docker.compose.project": "x" },
+    { "io.hack-local.owner": "x" },
+    { "io.hack-local": "x" },
+    { hack: "x" },
     [1],
   ]) {
     expect(hasOnlyNativeSupportedLabels(unsupported)).toBe(false);
   }
+  // Plain metadata is admitted; the native review reports it as not applied.
+  for (const metadata of [
+    { other: "value" },
+    { "com.example.team": "web" },
+    ["org.opencontainers.image.source=synthetic"],
+    { hackathon: "2026" },
+  ]) {
+    expect(hasOnlyNativeSupportedLabels(metadata)).toBe(true);
+  }
+  // A mirror of the runtime's rule: the two must agree key by key.
+  expect(isInertMetadataLabel("com.docker.compose")).toBe(false);
+  expect(isInertMetadataLabel("com.docker.composed")).toBe(true);
   expect(
     nativeBridgeCapacity({ inactive: spec, active: spec, unrouted: {} })
   ).toBe(2);

@@ -1,5 +1,6 @@
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
+import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "../lib/hack-ownership-labels.ts";
 import { hasOnlyNativeCacheLabels } from "./native-project-cache.ts";
 
 const ROUTE_LABELS = new Set(["caddy", "caddy.reverse_proxy", "caddy.tls"]);
@@ -41,6 +42,36 @@ function labelEntries(
 function labelKeys(labels: unknown): string[] | undefined {
   return labelEntries(labels)?.map(([key]) => key);
 }
+/**
+ * Router label families. Caddy and Traefik label dialects also use forms such
+ * as `caddy_0` and `caddy_ingress_network`, so any key that starts with the
+ * word belongs to the router.
+ */
+const ROUTER_LABEL_WORDS = ["caddy", "traefik"] as const;
+
+/** Runtime and Hack namespaces: the exact key and everything under it. */
+const RESERVED_LABEL_NAMESPACES = ["hack", "com.docker.compose"] as const;
+
+/**
+ * Whether a label is plain metadata, such as `com.example.team` or
+ * `org.opencontainers.image.source`: outside every Hack ownership namespace,
+ * every router label family and every reserved namespace. Native never sends
+ * such a label to the engine, so it cannot change a run; the native review
+ * reports it as `labels_not_applied`. Mirrors `inert_metadata_label` in
+ * `packages/runtime-core/src/project/compose/mod.rs`.
+ */
+export function isInertMetadataLabel(key: string): boolean {
+  return !(
+    HACK_OWNERSHIP_LABEL_NAMESPACES.some(
+      (namespace) => key.startsWith(namespace) || key === namespace.slice(0, -1)
+    ) ||
+    ROUTER_LABEL_WORDS.some((word) => key.startsWith(word)) ||
+    RESERVED_LABEL_NAMESPACES.some(
+      (prefix) => key === prefix || key.startsWith(`${prefix}.`)
+    )
+  );
+}
+
 /** Values and complete routing semantics remain native review's responsibility. */
 export function hasOnlyNativeSupportedLabels(labels: unknown): boolean {
   return (
@@ -48,8 +79,29 @@ export function hasOnlyNativeSupportedLabels(labels: unknown): boolean {
       ([key, value]) =>
         ROUTE_LABELS.has(key) ||
         hasOnlyNativeCacheLabels({ [key]: "" }) ||
-        (key === ONE_SHOT_LABEL && value === "true")
+        (key === ONE_SHOT_LABEL && value === "true") ||
+        isInertMetadataLabel(key)
     ) ?? false
+  );
+}
+
+/** Log drivers that keep logs in the engine; native reviews them and applies none. */
+const LOCAL_LOGGING_DRIVERS = new Set(["json-file", "local", "none"]);
+
+/**
+ * Whether a service's `logging` is absent or names a local driver. The native
+ * review reports an admitted block as `logging_not_applied`; an external sink
+ * stays refused.
+ */
+export function hasOnlyNativeSupportedLogging(logging: unknown): boolean {
+  if (logging === undefined) {
+    return true;
+  }
+  return (
+    isRecord(logging) &&
+    (logging.driver === undefined ||
+      (typeof logging.driver === "string" &&
+        LOCAL_LOGGING_DRIVERS.has(logging.driver)))
   );
 }
 /**

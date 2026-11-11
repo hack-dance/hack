@@ -239,8 +239,16 @@ The bundle's `hack-v5` entrypoint and the `hack-next` launcher accept the same
 selection; see [Test both backends](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends).
 
 Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
-(`hack.dependencies.*`) labels are reviewed as before, and other ordinary labels
-are refused with the general native configuration refusal.
+(`hack.dependencies.*`) labels are reviewed as before. Other ordinary labels, such
+as `com.example.team` or `org.opencontainers.image.*`, are plain metadata: native
+does not apply them to containers and reports the warning `labels_not_applied`.
+Router and runtime labels outside those forms (`traefik.*`, other `caddy.*`,
+`hack.*`) still refuse with `external_route_or_owner_label`.
+
+A `logging:` block with the `json-file`, `local` or `none` driver is accepted and
+not applied (warning `logging_not_applied`): native keeps its own bounded container
+logs, read with `hack logs`. Any other driver still refuses with
+`external_logging_driver`.
 
 Hack's own one-shot marker is not an ownership label. A service labeled exactly
 `hack.service.one-shot: "true"` (or `hack.service.one-shot=true` in list form),
@@ -736,8 +744,16 @@ Provider setup is separate and explicit. Obtain the exact archives identified in
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare --archive /absolute/smolvm-archive.tar.gz
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-engine --archive /absolute/docker-archive.tgz
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-network-tools --directory /absolute/private/pinned-apks
-./hack-native --candidate-root /absolute/private/candidate-home runtime probe --json
+./hack-native --candidate-root /absolute/private/candidate-home runtime probe --profile development --json
 ```
+
+For a `hack-next` install, `hack-native` is
+`~/.hack-next/versions/<version>/bundle/hack-native` and its home is
+`~/.hack-next/versions/<version>/native-home`. `runtime probe` checks the research
+profile unless you pass `--profile development`; the research profile can report
+"not admitted" on a Mac that the development profile admits. The Alpine package
+hashes are listed under [network tool packages](#network-tool-packages), not in
+`provider-pins.json`.
 
 Preparation keeps each archive it extracted (`providers/smolvm-installing/release.tar.gz`
 and `providers/docker-installing/release.tgz`). If something outside Hack changes a
@@ -835,6 +851,8 @@ engine refuses those), and every image whose ownership labels are not exactly th
 runtime's. Each removal deletes that one image only, never its untagged parent
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
+
+### Network tool packages
 
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with
@@ -1702,13 +1720,17 @@ requires ownership inspection rather than automatic removal.
 Ctrl-C while restart stops the previous run lets that stop finish: the stop's
 runtime requests run in their own process group, so the terminal's interrupt
 reaches only the restart. It then exits 130 as a stopped project with data
-retained, and a plain `up` resumes it. If the stop cannot be confirmed (for
-example the restart itself was killed, or a down hook failed), the saved intent
-stays and `up` refuses with `use hack restart`. Run `hack restart` then: it
-resumes the exact saved run, owner and plan, stopping the previous run if it is
-still active or confirming from fresh native observations that its own owner
-already stopped it, and it waits for that owner's frontend to finish before
-starting the replacement. Restart does not
+retained, and a plain `up` resumes it. A preflight runtime child ended by SIGINT
+or SIGTERM cancels before cleanup with exit 130 or 143, even if its exit is
+observed before the frontend signal handler runs. A stop request child ended
+by either signal reports `stopping` and the interrupted-stop guidance, retaining
+the prepared intent and exit 1 because cleanup is unconfirmed. If the stop cannot
+be confirmed (for example the restart itself was killed, or a down hook failed),
+the saved intent stays and `up` refuses with `use hack restart`. Run `hack restart`
+then: it resumes the exact saved run, owner and plan, stopping the previous run
+if it is still active or confirming from fresh native observations that its
+own owner already stopped it, and it waits for that owner's frontend to finish
+before starting the replacement. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
 When an interrupted frontend cannot write that final acknowledgement, an explicit
 `restart --recover-frontend --expect-finalization-attempt <32-hex>` can resume

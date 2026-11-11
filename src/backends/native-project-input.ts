@@ -30,6 +30,12 @@ export type NativeManagedFile = {
   readonly content: Buffer;
 };
 
+/** One value-free note about a service's `environment`: names only. */
+export type NativeEnvironmentNotice = {
+  readonly service: string;
+  readonly line: string;
+};
+
 export type NativeProjectInput = {
   readonly originalSha256: string;
   readonly normalizedComposeJson: string;
@@ -64,11 +70,13 @@ export type NativeProjectInput = {
   readonly shellEnvironment?: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
+  /** Services whose private delivery includes a value from the shell, once merged. */
+  readonly shellServices?: readonly string[];
   /**
    * Value-free notes about shell references in service `environment`, such as
    * a referenced variable that is not set. Names only.
    */
-  readonly environmentNotices?: readonly string[];
+  readonly environmentNotices?: readonly NativeEnvironmentNotice[];
   /**
    * Emulation policy of each service the native adaptation opted in to `linux/amd64`
    * (`amd64Emulation`); absent when none did. See `native-project-platform.ts`.
@@ -243,10 +251,10 @@ function resolveServiceShellEnvironment(opts: {
   readonly env: Readonly<Record<string, string | undefined>>;
 }): {
   readonly shellEnvironment: Record<string, Record<string, string>>;
-  readonly notices: string[];
+  readonly notices: NativeEnvironmentNotice[];
 } {
   const shellEnvironment: Record<string, Record<string, string>> = {};
-  const notices: string[] = [];
+  const notices: NativeEnvironmentNotice[] = [];
   for (const [name, service] of Object.entries(opts.services)) {
     // An `environment:` key with every entry commented out is YAML null.
     if (
@@ -268,7 +276,9 @@ function resolveServiceShellEnvironment(opts: {
     service.environment = resolution.environment;
     shellEnvironment[name] = resolution.delivered;
     if (SERVICE_NAME.test(name)) {
-      notices.push(...resolution.notices);
+      notices.push(
+        ...resolution.notices.map((line) => ({ service: name, line }))
+      );
     }
   }
   return { shellEnvironment, notices };
@@ -279,10 +289,7 @@ function resolveServiceShellEnvironment(opts: {
  * start and restart call this once, after the env fingerprints are taken, so a
  * shell value is delivered to its service and never digested to disk. Commands
  * that prepare input without calling it (exec, stale-env checks) deliver no
- * shell value.
- *
- * Refuses, naming the service, when the merged delivery of a service that got
- * a shell value would exceed what the runtime accepts.
+ * shell value. Calling it again changes nothing.
  */
 export function mergeNativeShellEnvironment(
   input: NativeProjectInput
@@ -303,14 +310,35 @@ export function mergeNativeShellEnvironment(
       ...shell[name],
     };
   }
+  return {
+    ...input,
+    managedEnvironment,
+    shellEnvironment: {},
+    shellServices: fromShell,
+  };
+}
+
+/**
+ * Refuses, naming the service, when the private delivery of a service that got
+ * a value from the shell exceeds what the runtime accepts. Call it on the
+ * input that is about to be delivered: after the credential adapters added
+ * theirs, and after {@link selectActiveNativeProjectInput}, because the runtime
+ * receives nothing for a service the selected profiles leave out.
+ */
+export function requireNativeShellDeliveryFits(
+  input: NativeProjectInput
+): void {
   const problem = shellDeliveryProblem({
-    services: managedEnvironment,
-    fromShell: new Set(fromShell),
+    services: input.managedEnvironment,
+    fromShell: new Set(
+      (input.shellServices ?? []).filter((name) =>
+        Object.hasOwn(input.managedEnvironment, name)
+      )
+    ),
   });
   if (problem !== null) {
     throw refused(shellDeliveryRefusal(problem));
   }
-  return { ...input, managedEnvironment, shellEnvironment: {} };
 }
 
 function shellDeliveryRefusal(

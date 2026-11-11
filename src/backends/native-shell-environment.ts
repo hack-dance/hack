@@ -24,8 +24,9 @@ import { COMPOSE_PROJECT_NAME_VARIABLE } from "./native-compose-project-name.ts"
  *   alternative or an error operator is left to the runtime, as before.
  * - A key Hack manages for the service is never taken from the shell, and a
  *   reference to a managed variable is left for the runtime, which refuses it.
- * - A name the runtime supplies itself, and the cloud credential names the
- *   scoped credential adapters own, are never read from the shell.
+ * - A name the runtime supplies itself, Hack's own `HACK_*` variables and the
+ *   cloud credential names the scoped adapters own are never read from the
+ *   shell.
  *
  * Scope: an entry whose whole value is one plain reference, or a bare name.
  * A reference inside a longer string, or in any field other than
@@ -49,17 +50,30 @@ const RUNTIME_SUPPLIED_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Cloud credential and selector names. Long-lived shell credentials are not
- * copied into containers; the AWS and gcloud adapters deliver scoped ones
- * (see the native guide). Such an entry is left as written.
+ * Name prefixes that are never read from the shell. Such an entry is left as
+ * written, so it fails the start as it did before.
+ *
+ * - `HACK_`: Hack's own settings and credentials. `HACK_ENV_SECRET_KEY`
+ *   decrypts every managed secret of a project, and a Compose file from the
+ *   repository must not be able to copy it into a container. The runtime also
+ *   owns the `HACK_*` keys it gives services as metadata.
+ * - `AWS_`, `GOOGLE_`, `CLOUDSDK_`: cloud credential and selector names.
+ *   Long-lived shell credentials are not copied into containers; the AWS and
+ *   gcloud adapters deliver scoped ones (see the native guide). This also
+ *   covers non-secret names under these prefixes, such as `AWS_REGION`.
  */
-const CREDENTIAL_NAME_PREFIXES = ["AWS_", "GOOGLE_", "CLOUDSDK_"] as const;
+const UNREADABLE_NAME_PREFIXES = [
+  "HACK_",
+  "AWS_",
+  "GOOGLE_",
+  "CLOUDSDK_",
+] as const;
 
 /** Whether `name` may be read from the caller's shell. */
 export function shellVariableReadable(name: string): boolean {
   return !(
     RUNTIME_SUPPLIED_NAMES.has(name) ||
-    CREDENTIAL_NAME_PREFIXES.some((prefix) => name.startsWith(prefix))
+    UNREADABLE_NAME_PREFIXES.some((prefix) => name.startsWith(prefix))
   );
 }
 
@@ -166,7 +180,11 @@ const MAX_PRIVATE_SERVICES = 32;
 export function shellDeliveryProblem(opts: {
   /** The merged private values of each service that has any. */
   readonly services: Readonly<Record<string, Readonly<Record<string, string>>>>;
-  /** Services that received a value from the shell; only these are reported. */
+  /**
+   * Services that received a value from the shell; only these are reported.
+   * Pass only services that will run: the runtime receives nothing for a
+   * service the selected profiles leave out.
+   */
   readonly fromShell: ReadonlySet<string>;
 }):
   | { readonly kind: "value" | "size" | "keys"; readonly service: string }

@@ -82,6 +82,7 @@ import {
   type NativeProjectInput,
   nativeReviewedActiveServices,
   prepareNativeProjectInput,
+  requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
@@ -404,14 +405,36 @@ const DEFAULTS: Dependencies = {
   downHooks: createNativeForegroundDownHooks,
   exitMonitorIntervalMs: 2000,
 };
-/** Names only: which referenced shell variables were not set. */
+/**
+ * Names the referenced shell variables that were not set, for the services
+ * the reviewed plan marks active. Names only.
+ */
 function reportNativeEnvironmentNotices(
   input: NativeProjectInput,
+  reviewedPlan: unknown,
   warn: (line: string) => void
 ): void {
-  for (const line of input.environmentNotices ?? []) {
-    warn(line);
+  const active = nativeReviewedActiveServices(reviewedPlan);
+  for (const notice of input.environmentNotices ?? []) {
+    if (active.has(notice.service)) {
+      warn(notice.line);
+    }
   }
+}
+
+/**
+ * The input about to be delivered: the services the reviewed plan marks
+ * active, checked against the runtime's delivery limits. The check comes
+ * last, after the credential adapters added theirs and after the profile
+ * filter, because the runtime receives nothing for an inactive service.
+ */
+function activeNativeDeliveryInput(opts: {
+  readonly input: NativeProjectInput;
+  readonly reviewedPlan: unknown;
+}): NativeProjectInput {
+  const active = selectActiveNativeProjectInput(opts);
+  requireNativeShellDeliveryFits(active);
+  return active;
 }
 
 /** Fixed text of the native foreground configuration refusal. */
@@ -1854,7 +1877,6 @@ async function startNativeProjectAttempt(
     // Service `environment` references are resolved from the caller's shell.
     env: process.env,
   });
-  reportNativeEnvironmentNotices(input, deps.warn);
   // Digest the selection now: later steps adapt the delivered values.
   const selectedEnvironment = opts.onEnvironmentReady
     ? withComposeServiceEnvFingerprints({
@@ -2202,6 +2224,7 @@ async function startNativeProjectAttempt(
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
         reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
+        reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,
@@ -2292,7 +2315,7 @@ async function startNativeProjectAttempt(
               invoke: deps.invoke,
             });
           const delivery = nativeEnvironmentDelivery({
-            input: selectActiveNativeProjectInput({
+            input: activeNativeDeliveryInput({
               input,
               reviewedPlan: review.report.plan,
             }),

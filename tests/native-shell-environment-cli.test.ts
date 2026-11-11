@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -97,6 +98,23 @@ exit 1
     join(stub, "project-source-size.out"),
     JSON.stringify(nativeSourceSizeReceipt())
   );
+  // Replies that carry `up` through the runtime review, where the active
+  // services are known and the notices are printed.
+  await writeFile(join(stub, "runtime-up.out"), "{}");
+  await writeFile(
+    join(stub, "project-plan.out"),
+    JSON.stringify({
+      plan_id: "f".repeat(64),
+      plan: {
+        namespace: "c".repeat(64),
+        compose_sha256: createHash("sha256")
+          .update(JSON.stringify(COMPOSE))
+          .digest("hex"),
+        enrollment_compatible: true,
+        services: { web: { active: true } },
+      },
+    })
+  );
   return {
     root,
     project,
@@ -155,7 +173,7 @@ test(
     expect(output).not.toContain(PRIVATE);
     // The project passed the CLI's admission: the stub runtime was asked to start.
     expect(output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
-    expect(await f.calls()).toContain("runtime up");
+    expect(await f.calls()).toContain("project plan");
   },
   SPAWN_TIMEOUT_MS
 );

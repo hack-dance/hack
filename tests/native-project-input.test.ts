@@ -15,6 +15,7 @@ import {
   mergeNativeShellEnvironment,
   nativeReviewedActiveServices,
   prepareNativeProjectInput,
+  requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
@@ -439,6 +440,10 @@ test("plain shell references and bare names are resolved privately; everything e
           LITERAL: "plain",
           PARTIAL: `http://${reference("SHELL_SET")}:80`,
           ESCAPED: `$${reference("SHELL_SET")}`,
+          // Hack's own variables: the env decryption key must never be copyable.
+          LEAKED_KEY: reference("HACK_ENV_SECRET_KEY"),
+          HACK_ENV_SECRET_KEY: null,
+          HACK_GATEWAY_TOKEN: reference("HACK_GATEWAY_TOKEN"),
           // Names the runtime supplies or the credential adapters own.
           PROJECT: reference("COMPOSE_PROJECT_NAME"),
           COMPOSE_PROJECT_NAME: reference("SHELL_SET"),
@@ -474,6 +479,8 @@ test("plain shell references and bare names are resolved privately; everything e
       AWS_SECRET_ACCESS_KEY: "long-lived-credential",
       AWS_ACCESS_KEY_ID: "long-lived-id",
       GOOGLE_APPLICATION_CREDENTIALS: "credential-path",
+      HACK_ENV_SECRET_KEY: "project-env-decryption-key",
+      HACK_GATEWAY_TOKEN: "gateway-token",
       // Never read: no entry references it.
       UNRELATED: "unrelated-private",
     },
@@ -504,6 +511,8 @@ test("plain shell references and bare names are resolved privately; everything e
     "long-lived-credential",
     "long-lived-id",
     "credential-path",
+    "project-env-decryption-key",
+    "gateway-token",
   ]) {
     expect(result.normalizedComposeJson).not.toContain(hidden);
     expect(JSON.stringify(result.shellEnvironment)).not.toContain(hidden);
@@ -526,6 +535,9 @@ test("plain shell references and bare names are resolved privately; everything e
     AWS_SECRET_ACCESS_KEY: reference("AWS_SECRET_ACCESS_KEY"),
     COPIED_KEY: reference("AWS_ACCESS_KEY_ID"),
     GOOGLE_APPLICATION_CREDENTIALS: null,
+    LEAKED_KEY: reference("HACK_ENV_SECRET_KEY"),
+    HACK_ENV_SECRET_KEY: null,
+    HACK_GATEWAY_TOKEN: reference("HACK_GATEWAY_TOKEN"),
   });
   expect(services.worker?.environment).toEqual({
     PASSED: null,
@@ -539,11 +551,26 @@ test("plain shell references and bare names are resolved privately; everything e
   expect(services.empty?.environment).toBeNull();
   // Names only, never values.
   expect(result.environmentNotices).toEqual([
-    "Service api: UNSET is empty because SHELL_UNSET is not set in your shell.",
-    "Service api: NOT_PASSED is empty because it is not set in your shell.",
-    "Service api: constructor is empty because it is not set in your shell.",
-    "Service api: INHERITED is empty because toString is not set in your shell.",
-    "Service worker: NOT_PASSED is empty because it is not set in your shell.",
+    {
+      service: "api",
+      line: "Service api: UNSET is empty because SHELL_UNSET is not set in your shell.",
+    },
+    {
+      service: "api",
+      line: "Service api: NOT_PASSED is empty because it is not set in your shell.",
+    },
+    {
+      service: "api",
+      line: "Service api: constructor is empty because it is not set in your shell.",
+    },
+    {
+      service: "api",
+      line: "Service api: INHERITED is empty because toString is not set in your shell.",
+    },
+    {
+      service: "worker",
+      line: "Service worker: NOT_PASSED is empty because it is not set in your shell.",
+    },
   ]);
 });
 
@@ -622,7 +649,7 @@ test("a key Hack manages is delivered from managed env, never from the shell", a
   expect(result.environmentNotices).toEqual([]);
 });
 
-test("merging shell values adds them to the private delivery and refuses what the runtime would refuse, naming the service", async () => {
+test("merged shell values join the private delivery, and a delivery the runtime would refuse is refused first, naming the service", async () => {
   const compose = (count: number) => ({
     services: {
       api: {
@@ -646,6 +673,10 @@ test("merging shell values adds them to the private delivery and refuses what th
     api: { KEY_0: "small", KEY_1: "small" },
   });
   expect(merged.shellEnvironment).toEqual({});
+  expect(merged.shellServices).toEqual(["api"]);
+  // Merging again changes nothing, and a delivery within the limits passes.
+  expect(mergeNativeShellEnvironment(merged)).toBe(merged);
+  expect(() => requireNativeShellDeliveryFits(merged)).not.toThrow();
   // An input with nothing from the shell is returned as it is.
   const untouched = await prepareNativeProjectInput(
     await fixture({ services: { api: { image: "bun:1" } } })
@@ -660,12 +691,22 @@ test("merging shell values adds them to the private delivery and refuses what th
     [1, "bad\0value", "contains a NUL byte"],
   ] as const) {
     const input = await prepared(count, value);
+    const delivery = mergeNativeShellEnvironment(input);
     let refusal: unknown;
     try {
-      mergeNativeShellEnvironment(input);
+      requireNativeShellDeliveryFits(delivery);
     } catch (caught: unknown) {
       refusal = caught;
     }
+    // A service the selected profiles leave out is not delivered, so it is not counted.
+    expect(() =>
+      requireNativeShellDeliveryFits(
+        selectActiveNativeProjectInput({
+          input: delivery,
+          reviewedPlan: { services: { api: { active: false } } },
+        })
+      )
+    ).not.toThrow();
     expect(refusal).toBeInstanceOf(HackCliError);
     const message = String((refusal as Error).message);
     expect(message).toContain("service api field environment");

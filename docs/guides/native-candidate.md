@@ -1268,9 +1268,17 @@ What stays as it was:
   the shell, and an entry that references a managed variable is still refused by the
   runtime (`execution_environment_owner`).
 - **`COMPOSE_PROJECT_NAME`.** The runtime supplies it; it is not read from the shell.
-- **Cloud credential names** (`AWS_*`, `GOOGLE_*`, `CLOUDSDK_*`). Long-lived shell
-  credentials are not copied into containers; use the scoped AWS and gcloud
-  delivery described below. Such an entry is left as written.
+- **Hack's own variables** (`HACK_*`), as the entry's name or as the variable it
+  references. They include the key that decrypts a project's managed secrets, so a
+  Compose file can never copy one into a container.
+- **Cloud names** (`AWS_*`, `GOOGLE_*`, `CLOUDSDK_*`). Long-lived shell credentials
+  are not copied into containers; use the scoped AWS and gcloud delivery described
+  below. The rule goes by prefix, so it also covers non-secret names such as
+  `AWS_REGION` and `GOOGLE_CLOUD_PROJECT`.
+
+  An entry under either rule is left as written. It does not pass through as it
+  would with Compose: the start still fails with `execution_environment_missing`,
+  as it did before.
 - **A project `.env` file.** Compose also reads it for these references; native does
   not, so "not set in your shell" can be printed for a variable your `.env` defines.
 
@@ -1279,13 +1287,14 @@ Three consequences of the private delivery:
 - A service that receives a value this way runs under the native process launcher,
   like a service with managed env. The launcher refuses a non-numeric `user`, an
   empty entrypoint and a few other settings; `hack up` names the service.
-- The name of a delivered variable may not be referenced by another field of the
-  same service. `PORT: ${PORT}` with `command: ... --port ${PORT:-3000}` is refused
-  with `execution_environment_owner`, whose text says "Hack-managed"; here it means
-  the value came from your shell.
-- All private values of one service, counting managed env, must fit in 32 KiB as
-  JSON, in at most 256 variables, for at most 32 services. `hack up` refuses a
-  project over these limits and names the service.
+- The entry's own name, the variable the container receives, may not be referenced
+  by another field of the same service. `PORT: ${PORT}` with
+  `command: ... --port ${PORT:-3000}` is refused with `execution_environment_owner`,
+  whose text says "Hack-managed"; here it means the value came from your shell.
+- All private values of one service, counting managed env and delivered
+  credentials, must fit in 32 KiB as JSON, in at most 256 variables, and at most 32
+  services that run may receive any. `hack up` refuses a project over these limits
+  and names the service. Services the selected profiles leave out are not counted.
 
 `hack exec` does not read your shell for these entries, so a command started with
 it does not receive these values. The containers keep the values they started with

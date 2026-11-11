@@ -29,12 +29,16 @@ jobs. Shard 8 also runs typecheck, privacy, quality checks and builds.
 `scripts/test-shard-plan.ts` assigns the test files; the workflow owns job
 conditions and aggregate results.
 
-Pushes to `next`/`main` run the full suite. Pull requests use
-`scripts/ci-change-scope.ts`: docs/site-only and runtime-core-only changes run
-focused tests instead of the eight unit shards and Docker E2E. TypeScript/code
-changes and unknown or unavailable diffs retain the full suite. Other jobs,
-including compiler and candidate-core checks, have their own scope conditions;
-they do not all run on every PR. Every job has a `timeout-minutes` budget.
+Pushes to `next`/`main` run the full suite with all eight unit shards on macOS.
+Pull requests use `scripts/ci-change-scope.ts`: documentation-only changes
+(including the root README, changelog, security/packaging documents and license)
+and runtime-core-only changes run focused tests instead of the eight unit shards
+and Docker E2E. A mix of documentation and runtime-core changes selects both
+focuses. TypeScript/code changes and unknown or unavailable diffs retain the
+full test set; eligible PRs use the pooled layout with unit shards 1–3 on macOS
+and 4–8 on Linux. Other jobs, including compiler and candidate-core checks, have
+their own scope conditions; they do not all run on every PR. Every job has a
+`timeout-minutes` budget.
 
 The `test` aggregate checks the unit shards or the selected focused tests.
 It accepts cancellation as a non-failure, including cancellation of scope
@@ -499,7 +503,7 @@ fixtures or admit file/build/job/health/custom-network intersections.
 
 ## Native config process-policy qualification
 
-`native-config-process-policy` is registered in the optional `docker-e2e` CI job. It needs the
+`native-config-process-policy` is registered in the `docker-e2e` CI job. It needs the
 current compiled CLI, matching compiler and cached `oven/bun:1.4.4-slim`; it resolves
 the immutable image ID and never pulls, publishes ports, or activates DNS/trust.
 
@@ -556,7 +560,7 @@ exposes this check as mode `settled`.
 
 ## Native config routing qualification
 
-`native-config-routing` is an optional `docker-e2e` CI scenario using the current compiled
+`native-config-routing` is a `docker-e2e` CI scenario using the current compiled
 CLI and matching config compiler. Prepare `oven/bun:1.4.4-slim` and
 `lucaslorentz/caddy-docker-proxy:2.10.0-alpine` locally first; the scenario resolves
 cached immutable image IDs and never pulls. It requires the existing `hack-dev`
@@ -803,7 +807,7 @@ control, an explicit `setup agents --agents-md`, must change exactly
 
 ## Native build acceptance
 
-`native-config-build` is an optional `docker-e2e` CI scenario using the cached
+`native-config-build` is a `docker-e2e` CI scenario using the cached
 `oven/bun:1.4.4-slim` base and the current compiled CLI/compiler. Its native-only
 project builds a selected multistage target through a checkout-anchored context
 with literal dollar characters and a context-relative nested Dockerfile. A second

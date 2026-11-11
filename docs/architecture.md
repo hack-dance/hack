@@ -385,15 +385,36 @@ not survive logout or reboot. For that, install it as a login service with
 On Linux, once the unit is installed, `hack daemon start` and `hack daemon stop`
 go through `systemctl --user`, so a single manager owns the socket and pid file.
 `stop` goes through systemd even when the pid file is missing or stale, which also
-cancels a restart systemd has scheduled after a crash. `start` removes stale pid
-and socket files only while they are still stale, so it never deletes the files of
-a daemon that another start or a systemd restart just wrote. `install` stops a
-hackd that was started directly and lets systemd start it. It signals that
-process only after proving it is this `HACK_HOME`'s hackd (a hack daemon command
-line, a socket in this daemon directory, and an unchanged start time); any other
-process named by the pid file is left running and reported. `hack daemon stop`
-and the replacement of an incompatible hackd use the same proof (on Linux it
-reads `/proc`, so it does not need `lsof`). A pid file that survived an unclean
+cancels a restart systemd has scheduled after a crash. `stop` does not touch
+a unit whose effective environment (unit file and drop-ins) sets a different
+`HACK_HOME` from the shell's, or whose environment it cannot read (for example an
+`EnvironmentFile=`): it exits 1 and prints `systemctl --user stop hackd.service`
+for stopping it by hand. `start`, `stop` and `clear` remove stale pid and socket
+files only while they are still stale: the socket is removed only if, right
+before removal, the pid file is still the stale one, the socket is the same file
+that was checked, and nothing answers on it. So they never delete the files of a
+daemon that another start or a systemd restart just wrote. `install` stops a
+hackd that was started directly and lets systemd start it.
+
+Every signal Hack sends to a hackd goes through one proof, whether it comes from
+`stop`, `restart`, `install`, replacing an incompatible hackd, or the sweep for
+untracked ("orphan") daemons in `start` and `clear`. The proof needs all of:
+
+- the exact argument list and the resolved executable (Linux `/proc`, macOS
+  `KERN_PROCARGS2` and `proc_pidpath`), never `ps` text. The executable must be
+  a Hack binary (named `hack` or `hack-*` once symlinks are resolved) or `bun`
+  running this checkout's entry file, and the arguments must be a
+  `daemon start --foreground` in any option order. A script named `hack` that
+  runs another interpreter does not count;
+- an open socket in this `HACK_HOME`'s daemon directory;
+- a start time that does not change while it is checked (clock ticks on Linux).
+
+The whole proof runs again immediately before each signal, SIGKILL included, and
+must give the same executable, arguments and start time, so a reused pid or a
+process that `exec`ed another program is never signalled. A process that fails
+the proof is reported with its pid and left running. When a proven hackd cannot
+be confirmed stopped, `stop` exits 1 and says it is still running, and `restart`,
+`start` and the `install` handover stop there. A pid file that survived an unclean
 shutdown and now names another program does not count as a running hackd. If
 systemd runs an incompatible hackd from a unit that points at another `hack`,
 `hack daemon status`, `hack doctor` and `hack daemon restart` all point to
@@ -417,13 +438,20 @@ systemd runs an incompatible hackd from a unit that points at another `hack`,
 `install` writes the `hack` it was run from, and warns when that path is in a
 temporary directory, a package cache or a source checkout.
 
+`hack daemon start` reads `ExecStart` only when it is a single plain absolute
+path. A prefix (`-`, `@`, `:`, `+`, `!`), a specifier such as `%h`, an escape or
+several `ExecStart=` lines make the program unknown: `start` leaves that unit as
+it is and says so, and `hack daemon status` and `hack doctor` report it. An unknown
+program is never treated as a missing one.
+
 `hack daemon start` and autostart never rewrite a unit whose program still exists,
 even when the `hack` on the current `PATH` is a different one: they say so, and
 `hack daemon install` switches the service. If systemd runs an incompatible
 hackd from such a unit, `start` reports it instead of replacing it, because
 systemd would only start the same version again. Only when the unit's program no
-longer exists may `start` repair it, and only to a durable location (not a
-temporary directory, package cache or source checkout). It then replaces just the
+longer exists may `start` repair it, and only to a durable location: the path
+and the file it resolves to must both be outside temporary directories, package
+caches and source checkouts. The unit keeps the path as written. It then replaces just the
 program in `ExecStart` and keeps every other line, including your edits;
 otherwise it reports the problem and asks you to run `hack daemon install`. If an
 earlier `daemon-reload` failed (`NeedDaemonReload=yes`), `start` and `install`

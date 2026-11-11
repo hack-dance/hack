@@ -91,6 +91,15 @@ export function summarizeSystemdService(opts: {
       severity: "warn",
     };
   }
+  if (status.drift === "program-unknown") {
+    return {
+      ...base,
+      nextStep: INSTALL_COMMAND,
+      summary:
+        "the unit's ExecStart uses syntax hack does not read (a prefix, specifier or escape), so hack leaves the unit as it is; `hack daemon install` replaces it with hack's unit",
+      severity: "warn",
+    };
+  }
   if (status.drift === "content") {
     return {
       ...base,

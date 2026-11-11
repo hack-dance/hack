@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -28,6 +29,7 @@ import {
   extractSystemdExecProgram,
   installSystemdUnit,
   isPidInSystemdUnit,
+  parseSystemdExecProgram,
   probeSystemdUserManager,
   readSystemdServiceStatus,
   renderSystemdUnit,
@@ -77,6 +79,10 @@ type Fake = {
   /** Overrides ActiveState, e.g. "activating" during a restart delay. */
   activeState: string | null;
   needsReload: boolean;
+  /** The unit's effective `Environment=` as `systemctl show` prints it. */
+  unitEnvironment: string;
+  /** `EnvironmentFiles=` as `systemctl show` prints it ("" for none). */
+  environmentFiles: string;
 };
 
 let root: string;
@@ -109,6 +115,8 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     showFails: false,
     activeState: null,
     needsReload: false,
+    unitEnvironment: "PATH=/usr/bin:/bin HACK_NO_INTERACTIVE=1",
+    environmentFiles: "",
     deps: undefined as unknown as SystemdDeps,
   };
   const ok = (stdout = ""): ServiceCommandResult => ({
@@ -144,6 +152,16 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
         stdout: "",
         stderr: "Failed to get properties: Connection timed out",
       });
+    }
+    if (
+      verb === "show" &&
+      args.includes("--property=Environment,EnvironmentFiles")
+    ) {
+      return Promise.resolve(
+        ok(
+          `Environment=${state.unitEnvironment}\nEnvironmentFiles=${state.environmentFiles}\n`
+        )
+      );
     }
     if (verb === "show") {
       return Promise.resolve(
@@ -786,7 +804,12 @@ test("durability: temp dirs, package caches and checkouts are not durable", asyn
   const noGit = (_path: string) => Promise.resolve(false);
   const tempDirs = ["/scratch-tmp"];
   const assess = (path: string, exists = noGit) =>
-    assessExecutableDurability({ path, tempDirs, exists });
+    assessExecutableDurability({
+      path,
+      tempDirs,
+      exists,
+      resolveReal: (p) => Promise.resolve(p),
+    });
   expect((await assess("/usr/local/bin/hack")).durable).toBe(true);
   expect((await assess("/opt/hack/bin/hack")).durable).toBe(true);
   expect((await assess("/tmp/x/hack")).durable).toBe(false);
@@ -909,21 +932,31 @@ test("stop cancels a pending restart through systemd without a live pid", async 
   fake.activeState = "activating";
   fake.calls.length = 0;
   expect(
-    await stopViaSystemdIfInstalled({ pid: null, deps: fake.deps })
+    await stopViaSystemdIfInstalled({
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    })
   ).toEqual({
     handled: true,
     ownedPid: false,
     failed: null,
+    refused: null,
   });
   expect(fake.calls).toContain("systemctl --user stop hackd.service");
 
   fake.calls.length = 0;
   expect(
-    await stopViaSystemdIfInstalled({ pid: null, deps: fake.deps })
+    await stopViaSystemdIfInstalled({
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    })
   ).toEqual({
     handled: false,
     ownedPid: false,
     failed: null,
+    refused: null,
   });
   expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
 });
@@ -955,7 +988,7 @@ function installHooks(fake: Fake, stopped: number[]) {
     startDetached: () => Promise.resolve(0),
     stopDirect: (proof: { readonly pid: number }) => {
       stopped.push(proof.pid);
-      return Promise.resolve();
+      return Promise.resolve(true);
     },
   };
 }
@@ -1014,7 +1047,15 @@ test("install hands over only a proven hackd and leaves a systemd-run one alone"
   await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
   const stopped: number[] = [];
   const owned = () =>
-    Promise.resolve({ kind: "owned", pid: process.pid, birth: "b" } as const);
+    Promise.resolve({
+      kind: "owned",
+      pid: process.pid,
+      birth: "b",
+      image: {
+        executable: "/usr/local/bin/hack",
+        argv: ["/usr/local/bin/hack", "daemon", "start", "--foreground"],
+      },
+    } as const);
   // Under a wrapper MainPID, the pid runs in the unit's cgroup: not stopped.
   await installDaemonSystemdService({
     ...installHooks(fake, stopped),
@@ -1037,6 +1078,31 @@ test("install hands over only a proven hackd and leaves a systemd-run one alone"
     proveDaemon: owned,
   });
   expect(stopped).toEqual([process.pid]);
+});
+
+test("install stops when a proven direct hackd could not be confirmed stopped", async () => {
+  // Review r2 #6: the old hackd may still hold the socket; starting the unit
+  // now would only make its copy exit.
+  const fake = fakeSystemd({ mainPid: 999_999 });
+  await writePidFile(process.pid);
+  const code = await installDaemonSystemdService({
+    ...installHooks(fake, []),
+    isPidInUnit: () => Promise.resolve(false),
+    proveDaemon: () =>
+      Promise.resolve({
+        kind: "owned",
+        pid: process.pid,
+        birth: "b",
+        image: {
+          executable: "/usr/local/bin/hack",
+          argv: ["/usr/local/bin/hack", "daemon", "start", "--foreground"],
+        },
+      } as const),
+    stopDirect: () => Promise.resolve(false),
+  });
+  expect(code).toBe(1);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+  expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
 });
 
 test("install fails when the ready hackd is not the one systemd runs", async () => {
@@ -1070,9 +1136,120 @@ test("durability: a home directory kept in git is not a checkout", async () => {
       path === `${home}/.git` || path === `${home}/src/hack/.git`
     );
   const assess = (path: string) =>
-    assessExecutableDurability({ path, tempDirs: [], exists, home });
+    assessExecutableDurability({
+      path,
+      tempDirs: [],
+      exists,
+      home,
+      resolveReal: (p) => Promise.resolve(p),
+    });
   expect((await assess(`${home}/.local/bin/hack`)).durable).toBe(true);
   expect((await assess(`${home}/src/hack/dist/hack`)).durable).toBe(false);
+});
+
+test("durability: a stable path that resolves into a temp dir, cache or build output is not durable", async () => {
+  // Review r2 #5: both the written path and its resolved target must pass.
+  const targets: Record<string, string> = {
+    "/usr/local/bin/hack-tmp": "/tmp/build-123/hack",
+    "/usr/local/bin/hack-cache": "/srv/u/.cache/hack/hack",
+    "/usr/local/bin/hack-checkout": "/srv/src/hack/dist/hack",
+    "/usr/local/bin/hack": "/opt/hack/5.0.0/hack",
+  };
+  const assess = (path: string) =>
+    assessExecutableDurability({
+      path,
+      tempDirs: [],
+      exists: (p) => Promise.resolve(p === "/srv/src/hack/.git"),
+      resolveReal: (p) => Promise.resolve(targets[p] ?? p),
+    });
+  const tmp = await assess("/usr/local/bin/hack-tmp");
+  expect(tmp).toEqual({
+    durable: false,
+    reason:
+      "it resolves to /tmp/build-123/hack, and it is in a temporary directory",
+  });
+  expect((await assess("/usr/local/bin/hack-cache")).durable).toBe(false);
+  expect((await assess("/usr/local/bin/hack-checkout")).durable).toBe(false);
+  expect((await assess("/usr/local/bin/hack")).durable).toBe(true);
+  // A dangling symlink cannot be resolved: not durable.
+  expect(
+    (
+      await assessExecutableDurability({
+        path: "/usr/local/bin/hack",
+        tempDirs: [],
+        exists: () => Promise.resolve(false),
+        resolveReal: () => Promise.reject(new Error("ENOENT")),
+      })
+    ).durable
+  ).toBe(false);
+});
+
+test("durability: a real symlink into a temp dir is caught (real filesystem)", async () => {
+  const stable = join(root, "stable");
+  await mkdir(stable);
+  const target = join(root, "target-hack");
+  await writeFile(target, "#!/bin/sh\n");
+  await symlink(target, join(stable, "hack"));
+  const result = await assessExecutableDurability({
+    path: join(stable, "hack"),
+    // Only the target's directory is temporary here.
+    tempDirs: [join(root, "target-hack")],
+    exists: () => Promise.resolve(false),
+  });
+  expect(result.durable).toBe(false);
+});
+
+test("an ExecStart prefix or specifier is unknown, never a missing program", () => {
+  const base = unitText();
+  for (const exec of [
+    `ExecStart=-${program} daemon start --foreground`,
+    `ExecStart=@${program} hackd daemon start --foreground`,
+    "ExecStart=%h/.local/bin/hack daemon start --foreground",
+    `ExecStart="%h/.local/bin/hack" daemon start --foreground`,
+    `ExecStart=${program}\\`,
+  ]) {
+    const text = base.replace(/^ExecStart=.*$/m, () => exec);
+    expect(parseSystemdExecProgram({ unitText: text }).kind).toBe("unknown");
+    expect(extractSystemdExecProgram({ unitText: text })).toBeNull();
+    expect(
+      retargetSystemdUnitProgram({ unitText: text, hackBinPath: program })
+    ).toBeNull();
+  }
+  const twice = `${base}\nExecStart=${program} daemon start --foreground\n`;
+  expect(parseSystemdExecProgram({ unitText: twice }).kind).toBe("unknown");
+  // `%%` is the one specifier the parser reads.
+  const percent = base.replace(
+    /^ExecStart=.*$/m,
+    () => 'ExecStart="/opt/100%%/hack" daemon start --foreground'
+  );
+  expect(parseSystemdExecProgram({ unitText: percent })).toEqual({
+    kind: "path",
+    path: "/opt/100%/hack",
+  });
+});
+
+test("start leaves a unit with an ExecStart prefix or specifier as it is", async () => {
+  // Review r2 #4: `-/opt/...` and `%h/...` used to read as a missing
+  // program, and start rewrote the unit and dropped the prefix.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  for (const exec of [
+    "ExecStart=-/opt/hack-old/hack daemon start --foreground",
+    "ExecStart=%h/.local/bin/hack daemon start --foreground",
+  ]) {
+    const text = unitText().replace(/^ExecStart=.*$/m, () => exec);
+    await writeFile(unitPath, text);
+    const status = await readSystemdServiceStatus({
+      unitPath,
+      deps: fake.deps,
+    });
+    expect(status?.drift).toBe("program-unknown");
+    fake.calls.length = 0;
+    expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+    expect(await readFile(unitPath, "utf8")).toBe(text);
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    expect(fake.calls).toContain("systemctl --user start hackd.service");
+  }
 });
 
 test("retargeting keeps systemd's $$ in the kept arguments", () => {
@@ -1178,14 +1355,50 @@ test("uninstall clears a leftover restart-pending marker", async () => {
   expect(await Bun.file(marker).exists()).toBe(false);
 });
 
-test("stop still asks systemd to stop when the unit state cannot be read", async () => {
+test("stop refuses, with the manual command, when the unit cannot be read", async () => {
+  // Review r2 decision: an unreadable unit environment may belong to another
+  // Hack home, so stop does not touch it and says how to stop it by hand.
   const fake = fakeSystemd();
   await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
   fake.activeState = "activating";
   fake.showFails = true;
   fake.calls.length = 0;
-  expect(
-    await stopViaSystemdIfInstalled({ pid: null, deps: fake.deps })
-  ).toEqual({ handled: true, ownedPid: false, failed: null });
-  expect(fake.calls).toContain("systemctl --user stop hackd.service");
+  const result = await stopViaSystemdIfInstalled({
+    pid: null,
+    hackHome: join(root, ".hack"),
+    deps: fake.deps,
+  });
+  expect(result.handled).toBe(false);
+  expect(result.refused).toContain("could not be read");
+  expect(result.refused).toContain("systemctl --user stop hackd.service");
+  expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+});
+
+test("stop refuses a unit whose effective Hack home is another one", async () => {
+  const fake = fakeSystemd({ active: true });
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const stop = () =>
+    stopViaSystemdIfInstalled({
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+  // A drop-in set HACK_HOME for the unit.
+  fake.unitEnvironment = `"PATH=/usr/bin:/bin" HACK_HOME=/srv/other-home HACK_NO_INTERACTIVE=1`;
+  fake.calls.length = 0;
+  const foreign = await stop();
+  expect(foreign.refused).toContain("/srv/other-home");
+  expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+  // An EnvironmentFile is not visible here: unknown, refused.
+  fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+  fake.environmentFiles = "/srv/hackd.env (ignore_errors=no)";
+  expect((await stop()).refused).toContain("EnvironmentFile");
+  expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+  // The same home, explicitly or by default: stopped.
+  fake.environmentFiles = "";
+  fake.unitEnvironment = `HACK_HOME=${join(root, ".hack")}`;
+  expect((await stop()).handled).toBe(true);
+  fake.active = true;
+  fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+  expect((await stop()).handled).toBe(true);
 });

@@ -23,6 +23,7 @@ import {
   probeSystemdUserManager,
   readLingerStatus,
   readSystemdServiceStatus,
+  readSystemdUnitHackHome,
   resolveExpectedSystemdUnit,
   resolveSystemdAccess,
   resolveSystemdUnitPath,
@@ -57,10 +58,11 @@ export interface SystemdCommandHooks {
   /**
    * Stops a directly started hackd that {@link proveDaemon} proved is this
    * HACK_HOME's daemon, and removes its pid/socket files if still stale.
+   * False (already reported) when its exit was not confirmed.
    */
   readonly stopDirect: (
     proof: Extract<DaemonProcessProof, { kind: "owned" }>
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   /** Defaults to {@link proveOwnedDaemonProcess}; tests pin the observations. */
   readonly proveDaemon?: (pid: number) => Promise<DaemonProcessProof>;
   /** Defaults to {@link assessExecutableDurability}. */
@@ -212,6 +214,12 @@ async function prepareSystemdUnitForStart(opts: {
     hooks.resolveExpected ?? resolveExpectedSystemdUnit
   )();
 
+  if (status.drift === "program-unknown") {
+    // Never evidence that the program is missing: leave the unit as it is.
+    logger.info({
+      message: `${SYSTEMD_UNIT_NAME} has an ExecStart hack does not read (a prefix, specifier or escape); starting it unchanged`,
+    });
+  }
   if (status.drift !== "program-missing") {
     return await completePendingReload({ status, deps, expected, readOnly });
   }
@@ -326,6 +334,8 @@ const MANAGER_STOPPABLE_STATES = new Set([
  */
 export async function stopViaSystemdIfInstalled(opts: {
   readonly pid: number | null;
+  /** The invoking CLI's Hack home (the parent of its daemon root). */
+  readonly hackHome: string;
   readonly deps?: SystemdDeps;
   readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
 }): Promise<{
@@ -333,8 +343,13 @@ export async function stopViaSystemdIfInstalled(opts: {
   readonly ownedPid: boolean;
   /** systemctl stop failed: the manager may still (re)start hackd. */
   readonly failed: string | null;
+  /**
+   * Not stopped: the unit belongs to another Hack home, or its Hack home
+   * could not be read. The message says how to stop it by hand.
+   */
+  readonly refused: string | null;
 }> {
-  const none = { handled: false, ownedPid: false, failed: null };
+  const none = { handled: false, ownedPid: false, failed: null, refused: null };
   const deps = opts.deps ?? defaultSystemdDeps();
   if (!resolveSystemdAccess({ env: deps.env }).allowed) {
     return none;
@@ -356,6 +371,22 @@ export async function stopViaSystemdIfInstalled(opts: {
   ) {
     return none;
   }
+  // The unit is a per-user singleton: stopping it from a shell with another
+  // Hack home would stop someone else's daemon (HACK-2052).
+  const unitHome = await readSystemdUnitHackHome({ deps });
+  const manual = `To stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`;
+  if (unitHome.kind === "unknown") {
+    return {
+      ...none,
+      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: its Hack home could not be read (${unitHome.detail}). ${manual}`,
+    };
+  }
+  if (unitHome.path !== resolve(opts.hackHome)) {
+    return {
+      ...none,
+      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: it runs hackd for ${unitHome.path}, not this shell's ${resolve(opts.hackHome)}. ${manual}`,
+    };
+  }
   const ownedPid =
     opts.pid !== null &&
     (await systemdRunsPid({
@@ -365,9 +396,9 @@ export async function stopViaSystemdIfInstalled(opts: {
     }));
   const stopped = await systemdServiceAction({ action: "stop", deps });
   if (!stopped.ok) {
-    return { handled: false, ownedPid, failed: stopped.error };
+    return { handled: false, ownedPid, failed: stopped.error, refused: null };
   }
-  return { handled: true, ownedPid, failed: null };
+  return { handled: true, ownedPid, failed: null, refused: null };
 }
 
 /**
@@ -570,7 +601,11 @@ export async function installDaemonSystemdService(
     });
   }
 
-  await handOverDirectDaemon({ hooks, before });
+  if (!(await handOverDirectDaemon({ hooks, before }))) {
+    // The directly started hackd may still hold the socket: starting the
+    // unit now would only make its copy exit. Stop here.
+    return 1;
+  }
 
   // A running service must be restarted when its loaded config changed:
   // this install wrote a new unit, it completed a reload that an earlier
@@ -696,44 +731,40 @@ function handoverRefusalAdvice(reason: DaemonProcessRefusal): string {
  * A directly started hackd holds the socket and pid file, so systemd's copy
  * would exit at once: stop it so the service owns the daemon. Only a pid
  * proven to be this HACK_HOME's hackd is signalled; anything else is left
- * running and reported.
+ * running and reported. False when a proven hackd's exit was not confirmed.
  */
 async function handOverDirectDaemon(opts: {
   readonly hooks: SystemdCommandHooks;
   readonly before: SystemdServiceStatus | null;
-}): Promise<void> {
-  // A directly started hackd holds the socket and pid file; systemd's copy
-  // would exit at once. Stop it so the service owns the daemon.
+}): Promise<boolean> {
   const { hooks, before } = opts;
   const daemon = await readDaemonStatus({ paths: hooks.paths });
   if (
-    daemon.running &&
-    daemon.pid !== null &&
-    !(
-      before &&
+    !(daemon.running && daemon.pid !== null) ||
+    (before &&
       (await systemdRunsPid({
         status: before,
         pid: daemon.pid,
         isPidInUnit: hooks.isPidInUnit,
-      }))
-    )
+      })))
   ) {
-    const proof = await (
-      hooks.proveDaemon ??
-      ((pid: number) =>
-        proveOwnedDaemonProcess({ pid, daemonRoot: hooks.paths.root }))
-    )(daemon.pid);
-    if (proof.kind === "owned") {
-      logger.info({
-        message: `Stopping directly started hackd (pid ${proof.pid}) so systemd can manage it`,
-      });
-      await hooks.stopDirect(proof);
-    } else {
-      logger.warn({
-        message: `Left pid ${daemon.pid} from the hackd pid file running: ${describeDaemonProcessRefusal(proof.reason)}. ${handoverRefusalAdvice(proof.reason)}`,
-      });
-    }
+    return true;
   }
+  const proof = await (
+    hooks.proveDaemon ??
+    ((pid: number) =>
+      proveOwnedDaemonProcess({ pid, daemonRoot: hooks.paths.root }))
+  )(daemon.pid);
+  if (proof.kind !== "owned") {
+    logger.warn({
+      message: `Left pid ${daemon.pid} from the hackd pid file running: ${describeDaemonProcessRefusal(proof.reason)}. ${handoverRefusalAdvice(proof.reason)}`,
+    });
+    return true;
+  }
+  logger.info({
+    message: `Stopping directly started hackd (pid ${proof.pid}) so systemd can manage it`,
+  });
+  return await hooks.stopDirect(proof);
 }
 
 function reportLinger(opts: { readonly linger: boolean | null }): void {

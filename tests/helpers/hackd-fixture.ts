@@ -1,6 +1,8 @@
 import { mkdtemp, symlink } from "node:fs/promises";
 import { join } from "node:path";
 
+import type { DaemonIdentityExpectation } from "../../src/daemon/process.ts";
+
 /**
  * Starts a process whose command line is exactly a dev-tree hackd
  * (`bun <dir>/hack-fixture.ts daemon start --foreground`) and that serves the
@@ -12,7 +14,11 @@ export async function spawnHackdLikeFixture(opts: {
   readonly dir: string;
   readonly socket: string;
   readonly ready: string;
-}): Promise<ReturnType<typeof Bun.spawn>> {
+}): Promise<{
+  readonly child: ReturnType<typeof Bun.spawn>;
+  /** Accepts this fixture's entry file as "this checkout's" entry. */
+  readonly expectation: DaemonIdentityExpectation;
+}> {
   const dir = await mkdtemp(join(opts.dir, "fixture-"));
   const runtime = join(dir, "bun");
   const script = join(dir, "hack-fixture.ts");
@@ -21,13 +27,17 @@ export async function spawnHackdLikeFixture(opts: {
     script,
     'Bun.serve({ unix: process.env.FIXTURE_SOCKET ?? "", fetch() { return new Response("x"); } });\nawait Bun.write(process.env.FIXTURE_READY ?? "", "ready");\n'
   );
-  return Bun.spawn([runtime, script, "daemon", "start", "--foreground"], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-    env: {
-      FIXTURE_SOCKET: opts.socket,
-      FIXTURE_READY: opts.ready,
-    },
-  });
+  const child = Bun.spawn(
+    [runtime, script, "daemon", "start", "--foreground"],
+    {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: {
+        FIXTURE_SOCKET: opts.socket,
+        FIXTURE_READY: opts.ready,
+      },
+    }
+  );
+  return { child, expectation: { entryFiles: new Set([script]) } };
 }

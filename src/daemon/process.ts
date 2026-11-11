@@ -1,9 +1,14 @@
 import { lstat, readdir, readlink, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 
 import { readTextFile, writeTextFile } from "../lib/fs.ts";
 import { readObservedProcesses } from "../lib/host-command-observation.ts";
 import { exec, findExecutableInPath } from "../lib/shell.ts";
+import {
+  type ProcessImage,
+  readLinuxProcessStartTicks,
+  readProcessImage,
+} from "./process-image.ts";
 
 export async function readDaemonPid({
   pidPath,
@@ -74,7 +79,26 @@ function sleep({ ms }: { readonly ms: number }): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** A daemon start candidate in `ps` text: only a cheap pre-filter. */
+const CANDIDATE_WORDS = ["daemon", "start", "--foreground"] as const;
 const WHITESPACE_PATTERN = /\s+/;
+
+/** A process the orphan sweep found but may not signal, and why. */
+export interface RefusedDaemonProcess {
+  readonly pid: number;
+  readonly reason: DaemonProcessRefusal;
+}
+
+export interface OrphanDaemonScan {
+  /** Proven to be this state root's hackd and not tracked by the pid file. */
+  readonly orphans: readonly OwnedDaemonProof[];
+  /**
+   * Looked like a daemon start but failed the proof (another state root's
+   * daemon, another program, unknown identity). Never signalled; callers
+   * report them.
+   */
+  readonly refused: readonly RefusedDaemonProcess[];
+}
 
 /**
  * Finds hackd processes that the pid file does not track ("orphans").
@@ -85,9 +109,10 @@ const WHITESPACE_PATTERN = /\s+/;
  * pid file — the root cause of "daemon starts then exits" contradictions:
  * the orphan holds the API while every newly spawned daemon exits.
  *
- * Only processes holding a socket in the target daemon directory are eligible.
- * A command-name match alone cannot distinguish another HOME/HACK_HOME daemon.
- * Missing ownership evidence must never authorize termination.
+ * `ps` text only nominates candidates; every candidate must pass
+ * {@link proveOwnedDaemonProcess} (exact argv, resolved executable, a socket
+ * in `daemonRoot`, start time) before it is returned as an orphan (HACK-2052).
+ * A text match never authorizes a signal.
  *
  * @param opts.trackedPid - pid currently recorded in the pid file, if any.
  * @param opts.psLines - injectable `ps -axo pid=,command=` lines for tests.
@@ -96,10 +121,12 @@ export async function findOrphanDaemonProcesses(opts: {
   readonly trackedPid: number | null;
   readonly daemonRoot: string;
   readonly psLines?: readonly string[];
-  readonly lsofLines?: readonly string[];
-}): Promise<readonly number[]> {
+  readonly probe?: DaemonProcessProbe;
+  readonly expectation?: DaemonIdentityExpectation;
+}): Promise<OrphanDaemonScan> {
   const lines = opts.psLines ?? (await listProcessTable());
-  const orphans: number[] = [];
+  const orphans: OwnedDaemonProof[] = [];
+  const refused: RefusedDaemonProcess[] = [];
   for (const line of lines) {
     const trimmed = line.trim();
     const spaceIdx = trimmed.indexOf(" ");
@@ -107,35 +134,43 @@ export async function findOrphanDaemonProcesses(opts: {
       continue;
     }
     const pid = Number.parseInt(trimmed.slice(0, spaceIdx), 10);
-    const command = trimmed.slice(spaceIdx + 1);
-    if (!Number.isFinite(pid) || pid <= 0) {
-      continue;
-    }
-    if (!isHackDaemonCommandLine(command)) {
+    if (!Number.isSafeInteger(pid) || pid <= 0) {
       continue;
     }
     if (pid === opts.trackedPid || pid === process.pid) {
       continue;
     }
-    orphans.push(pid);
+    const words = new Set(
+      trimmed.slice(spaceIdx + 1).split(WHITESPACE_PATTERN)
+    );
+    if (!CANDIDATE_WORDS.every((word) => words.has(word))) {
+      continue;
+    }
+    const proof = await proveOwnedDaemonProcess({
+      pid,
+      daemonRoot: opts.daemonRoot,
+      probe: opts.probe,
+      expectation: opts.expectation,
+      socketRetries: 0,
+    });
+    if (proof.kind === "owned") {
+      orphans.push(proof);
+    } else if (proof.reason !== "not-running") {
+      refused.push({ pid, reason: proof.reason });
+    }
   }
-  if (orphans.length === 0) {
-    return [];
-  }
-  // Linux reads socket ownership from /proc (no lsof needed); injected
-  // lsof lines (tests) and other platforms use lsof.
-  const owners =
-    opts.lsofLines === undefined && process.platform === "linux"
-      ? ((await findDaemonSocketOwnersFromProc({
-          daemonRoot: opts.daemonRoot,
-          pids: orphans,
-        })) ?? new Set<number>())
-      : await findDaemonSocketOwners({
-          daemonRoot: opts.daemonRoot,
-          lines:
-            opts.lsofLines ?? (await listOpenUnixSockets({ pids: orphans })),
-        });
-  return orphans.filter((orphan) => owners.has(orphan));
+  return { orphans, refused };
+}
+
+/**
+ * Parses `lsof -Fpn` output: the pids holding one of `daemonRoot`'s
+ * sockets.
+ */
+export async function parseLsofDaemonSocketOwners(opts: {
+  readonly daemonRoot: string;
+  readonly lines: readonly string[];
+}): Promise<ReadonlySet<number>> {
+  return await findDaemonSocketOwners(opts);
 }
 
 async function findDaemonSocketOwners(opts: {
@@ -206,33 +241,6 @@ async function listProcessTable(): Promise<readonly string[]> {
   return text.split("\n");
 }
 
-/**
- * Terminates orphan daemon processes (SIGTERM, bounded wait). Returns the
- * pids that were actually terminated.
- */
-export async function terminateOrphanDaemonProcesses(opts: {
-  readonly pids: readonly number[];
-  readonly timeoutMs?: number;
-}): Promise<readonly number[]> {
-  const terminated: number[] = [];
-  for (const pid of opts.pids) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      continue;
-    }
-    const exited = await waitForProcessExit({
-      pid,
-      timeoutMs: opts.timeoutMs ?? 3000,
-      pollMs: 100,
-    });
-    if (exited) {
-      terminated.push(pid);
-    }
-  }
-  return terminated;
-}
-
 export type DaemonProcessRefusal =
   | "invalid-pid"
   | "not-running"
@@ -241,16 +249,27 @@ export type DaemonProcessRefusal =
   | "foreign-socket"
   | "identity-changed";
 
+/** A process proven to be this state root's hackd, as observed. */
+export interface OwnedDaemonProof {
+  readonly kind: "owned";
+  readonly pid: number;
+  readonly birth: string;
+  readonly image: ProcessImage;
+}
+
 export type DaemonProcessProof =
-  | { readonly kind: "owned"; readonly pid: number; readonly birth: string }
+  | OwnedDaemonProof
   | { readonly kind: "refused"; readonly reason: DaemonProcessRefusal };
 
 /** The observations a proof uses; injectable so tests can model each refusal. */
 export interface DaemonProcessProbe {
-  /** Process start time (`ps -o lstart=`), or null when unknown. */
+  /**
+   * Process start time, or null when unknown. Linux: clock ticks since boot
+   * (`/proc/<pid>/stat`); elsewhere `ps -o lstart=` (whole seconds).
+   */
   readonly birth: (pid: number) => Promise<string | null>;
-  /** Full command line, or null when unknown. */
-  readonly command: (pid: number) => Promise<DaemonCommandLine | null>;
+  /** Exact argv and resolved executable ({@link readProcessImage}). */
+  readonly image: (pid: number) => Promise<ProcessImage | null>;
   /**
    * Pids among `pids` holding one of this daemon root's sockets; null when
    * socket ownership cannot be observed (no `lsof`).
@@ -263,33 +282,14 @@ export interface DaemonProcessProbe {
 
 export const defaultDaemonProcessProbe: DaemonProcessProbe = {
   birth: async (pid) => {
+    if (process.platform === "linux") {
+      const ticks = await readLinuxProcessStartTicks(pid);
+      return ticks === null ? null : `ticks:${ticks}`;
+    }
     const rows = await readObservedProcesses([pid]);
     return rows?.find((row) => row.pid === pid)?.birth ?? null;
   },
-  command: async (pid) => {
-    // Linux keeps argument boundaries in /proc/<pid>/cmdline (NUL-separated),
-    // so an executable path with spaces is read correctly.
-    if (process.platform === "linux") {
-      const raw = await readTextFile(`/proc/${pid}/cmdline`);
-      if (raw !== null && raw.length > 0) {
-        return raw
-          .split("\0")
-          .filter((arg, index, all) =>
-            index < all.length - 1 ? true : arg.length > 0
-          );
-      }
-    }
-    try {
-      const result = await exec(["ps", "-o", "command=", "-p", String(pid)], {
-        stdin: "ignore",
-        timeoutMs: 2000,
-      });
-      const text = result.stdout.trim();
-      return result.exitCode === 0 && text.length > 0 ? text : null;
-    } catch {
-      return null;
-    }
-  },
+  image: readProcessImage,
   socketOwners: async ({ daemonRoot, pids }) => {
     // Linux: /proc needs no extra tool (lsof is missing on minimal installs).
     if (process.platform === "linux") {
@@ -306,20 +306,56 @@ export const defaultDaemonProcessProbe: DaemonProcessProbe = {
 };
 
 /**
+ * Which programs count as hackd. A compiled Hack binary (resolved
+ * executable named `hack` or `hack-*`) always qualifies. A source run
+ * qualifies only as `bun <entry> ...` where `<entry>` is one of
+ * `entryFiles`: this checkout's entry file, so `bun /other/index.ts daemon
+ * start --foreground` is not this CLI's daemon.
+ */
+export interface DaemonIdentityExpectation {
+  readonly entryFiles: ReadonlySet<string>;
+}
+
+let defaultExpectation: Promise<DaemonIdentityExpectation> | null = null;
+
+/**
+ * The running CLI's own entry file (as given and resolved) when it runs
+ * from source; none for a compiled binary, whose entry is a virtual path.
+ */
+export function defaultDaemonIdentityExpectation(): Promise<DaemonIdentityExpectation> {
+  defaultExpectation ??= (async () => {
+    const main = Bun.main;
+    if (!isAbsolute(main) || main.startsWith("/$bunfs/")) {
+      return { entryFiles: new Set<string>() };
+    }
+    const entries = new Set([main]);
+    try {
+      entries.add(await realpath(main));
+    } catch {
+      // The entry was removed; its spelling still matches a daemon's argv.
+    }
+    return { entryFiles: entries };
+  })();
+  return defaultExpectation;
+}
+
+/**
  * Proves that `pid` is this state root's hackd before anything signals it.
  *
  * Liveness is not identity: a pid file can name a recycled pid, another
  * HACK_HOME's daemon, or `0` (the caller's own process group). The proof
  * requires all of: a positive pid other than this process; a known start
- * time; a hack daemon command line (`... daemon start --foreground`); and an
- * open socket in `daemonRoot`. The start time is read again at the end and
- * must not have changed, so the pid was not reused while it was checked.
- * Missing evidence refuses; it never authorizes a signal.
+ * time; an exact argv and resolved executable that
+ * {@link isHackDaemonImage} accepts; and an open socket in `daemonRoot`.
+ * The start time is read again at the end and must not have changed, so
+ * the pid was not reused while it was checked. Missing evidence refuses; it
+ * never authorizes a signal.
  */
 export async function proveOwnedDaemonProcess(opts: {
   readonly pid: number;
   readonly daemonRoot: string;
   readonly probe?: DaemonProcessProbe;
+  readonly expectation?: DaemonIdentityExpectation;
   /**
    * Retry a `foreign-socket` refusal this many times, 250 ms apart (default
    * 4): a hackd that just wrote its pid file may not have bound its socket
@@ -328,7 +364,9 @@ export async function proveOwnedDaemonProcess(opts: {
   readonly socketRetries?: number;
 }): Promise<DaemonProcessProof> {
   const retries = opts.socketRetries ?? 4;
-  let proof = await proveOwnedDaemonProcessOnce(opts);
+  const expectation =
+    opts.expectation ?? (await defaultDaemonIdentityExpectation());
+  let proof = await proveOwnedDaemonProcessOnce({ ...opts, expectation });
   for (
     let attempt = 0;
     attempt < retries &&
@@ -337,7 +375,7 @@ export async function proveOwnedDaemonProcess(opts: {
     attempt += 1
   ) {
     await sleep({ ms: 250 });
-    proof = await proveOwnedDaemonProcessOnce(opts);
+    proof = await proveOwnedDaemonProcessOnce({ ...opts, expectation });
   }
   return proof;
 }
@@ -346,6 +384,7 @@ async function proveOwnedDaemonProcessOnce(opts: {
   readonly pid: number;
   readonly daemonRoot: string;
   readonly probe?: DaemonProcessProbe;
+  readonly expectation: DaemonIdentityExpectation;
 }): Promise<DaemonProcessProof> {
   const probe = opts.probe ?? defaultDaemonProcessProbe;
   const { pid } = opts;
@@ -357,15 +396,21 @@ async function proveOwnedDaemonProcessOnce(opts: {
   }
   const birth = await probe.birth(pid);
   if (birth === null) {
-    return { kind: "refused", reason: "identity-unknown" };
+    return {
+      kind: "refused",
+      reason: isProcessRunning({ pid }) ? "identity-unknown" : "not-running",
+    };
   }
-  const command = await probe.command(pid);
-  if (command === null) {
+  const image = await probe.image(pid);
+  if (image === null) {
     // Unreadable is not "not hackd": stop would then drop a real hackd's
     // pid file. Refuse without a conclusion.
-    return { kind: "refused", reason: "identity-unknown" };
+    return {
+      kind: "refused",
+      reason: isProcessRunning({ pid }) ? "identity-unknown" : "not-running",
+    };
   }
-  if (!isHackDaemonCommandLine(command)) {
+  if (!isHackDaemonImage({ image, expectation: opts.expectation })) {
     return { kind: "refused", reason: "not-hackd" };
   }
   const owners = await probe.socketOwners({
@@ -381,7 +426,7 @@ async function proveOwnedDaemonProcessOnce(opts: {
   if ((await probe.birth(pid)) !== birth) {
     return { kind: "refused", reason: "identity-changed" };
   }
-  return { kind: "owned", pid, birth };
+  return { kind: "owned", pid, birth, image };
 }
 
 /** Plain-language reason for a refused proof, for logs. */
@@ -396,7 +441,7 @@ export function describeDaemonProcessRefusal(
     case "identity-unknown":
       return "its process identity could not be read";
     case "not-hackd":
-      return "that process is not a hack daemon";
+      return "that process is not this hack's daemon";
     case "foreign-socket":
       return "it does not hold this HACK_HOME's daemon socket (another state root's daemon, or a reused pid)";
     default:
@@ -404,47 +449,143 @@ export function describeDaemonProcessRefusal(
   }
 }
 
+function sameImage(a: ProcessImage, b: ProcessImage): boolean {
+  return (
+    a.executable === b.executable &&
+    a.argv.length === b.argv.length &&
+    a.argv.every((arg, index) => arg === b.argv[index])
+  );
+}
+
 /**
- * Stops a proven hackd: SIGTERM, a bounded wait, then SIGKILL only if the
- * same process (same start time) is still there. Each signal is preceded by
- * an identity re-check, so a pid reused after the proof is never signalled.
- * Returns true when the process exited.
+ * What became of a proven hackd that {@link terminateProvenDaemon} was
+ * asked to stop. Only `exited` confirms it is gone.
+ */
+export type DaemonTermination =
+  | { readonly kind: "exited" }
+  | {
+      readonly kind: "not-confirmed";
+      /**
+       * `still-running`: the same hackd is alive after SIGKILL.
+       * `changed`: the pid now runs something that fails the proof (another
+       * program after `exec`, or hackd without its socket); not signalled.
+       * `identity-unknown`: its identity could not be read; not signalled.
+       */
+      readonly reason: "still-running" | "changed" | "identity-unknown";
+    };
+
+/** Plain-language outcome for a termination that was not confirmed. */
+export function describeDaemonTermination(
+  pid: number,
+  termination: Extract<DaemonTermination, { kind: "not-confirmed" }>
+): string {
+  switch (termination.reason) {
+    case "still-running":
+      return `hackd (pid ${pid}) is still running after SIGTERM and SIGKILL`;
+    case "changed":
+      return `pid ${pid} no longer passes the hackd identity check, so it was not signalled again; it is still running`;
+    default:
+      return `the identity of pid ${pid} could not be read again, so it was not signalled; it is still running`;
+  }
+}
+
+/**
+ * Stops a proven hackd: SIGTERM, a bounded wait, then SIGKILL. Immediately
+ * before each signal the whole proof runs again (exact argv, resolved
+ * executable, socket in `daemonRoot`, start time) and must match the
+ * original proof: a pid that was reused, or a process that `exec`ed another
+ * program (same pid and start time), is never signalled (HACK-2052).
  */
 export async function terminateProvenDaemon(opts: {
-  readonly proof: { readonly pid: number; readonly birth: string };
+  readonly proof: OwnedDaemonProof;
+  readonly daemonRoot: string;
   readonly timeoutMs?: number;
+  readonly killTimeoutMs?: number;
   readonly probe?: DaemonProcessProbe;
-}): Promise<boolean> {
+  readonly expectation?: DaemonIdentityExpectation;
+  /** Defaults to `process.kill`; tests model a process that will not die. */
+  readonly sendSignal?: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
+}): Promise<DaemonTermination> {
   const probe = opts.probe ?? defaultDaemonProcessProbe;
-  const { pid, birth } = opts.proof;
-  const same = async () =>
-    isProcessRunning({ pid }) && (await probe.birth(pid)) === birth;
-  if (!(await same())) {
-    return true;
-  }
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return true;
-  }
-  if (
-    await waitForProcessExit({
+  const expectation =
+    opts.expectation ?? (await defaultDaemonIdentityExpectation());
+  const { proof } = opts;
+  const { pid } = proof;
+
+  /** "same" authorizes the next signal; "gone" confirms the exit. */
+  const recheck = async (): Promise<
+    "same" | "gone" | "changed" | "identity-unknown"
+  > => {
+    if (!isProcessRunning({ pid })) {
+      return "gone";
+    }
+    const birth = await probe.birth(pid);
+    if (birth === null) {
+      return isProcessRunning({ pid }) ? "identity-unknown" : "gone";
+    }
+    if (birth !== proof.birth) {
+      // A different process now has the pid: the proven one exited.
+      return "gone";
+    }
+    const again = await proveOwnedDaemonProcessOnce({
       pid,
-      timeoutMs: opts.timeoutMs ?? 2000,
+      daemonRoot: opts.daemonRoot,
+      probe,
+      expectation,
+    });
+    if (again.kind === "owned") {
+      return again.birth === proof.birth && sameImage(again.image, proof.image)
+        ? "same"
+        : "changed";
+    }
+    switch (again.reason) {
+      case "not-running":
+        return "gone";
+      case "identity-changed":
+        return "gone";
+      case "identity-unknown":
+        return "identity-unknown";
+      default:
+        return "changed";
+    }
+  };
+  const notConfirmed = (
+    reason: "still-running" | "changed" | "identity-unknown"
+  ): DaemonTermination => ({ kind: "not-confirmed", reason });
+
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    const state = await recheck();
+    if (state === "gone") {
+      return { kind: "exited" };
+    }
+    if (state !== "same") {
+      return notConfirmed(state);
+    }
+    try {
+      (opts.sendSignal ?? ((target, name) => process.kill(target, name)))(
+        pid,
+        signal
+      );
+    } catch {
+      // ESRCH: it exited between the check and the signal.
+      if (!isProcessRunning({ pid })) {
+        return { kind: "exited" };
+      }
+      return notConfirmed("still-running");
+    }
+    const exited = await waitForProcessExit({
+      pid,
+      timeoutMs:
+        signal === "SIGTERM"
+          ? (opts.timeoutMs ?? 2000)
+          : (opts.killTimeoutMs ?? 1000),
       pollMs: 100,
-    })
-  ) {
-    return true;
+    });
+    if (exited) {
+      return { kind: "exited" };
+    }
   }
-  if (!(await same())) {
-    return true;
-  }
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    return true;
-  }
-  return await waitForProcessExit({ pid, timeoutMs: 1000, pollMs: 100 });
+  return notConfirmed("still-running");
 }
 
 /**
@@ -456,8 +597,10 @@ export async function terminateProvenDaemon(opts: {
  *
  * - The pid file is removed only if it still names `observedPid` (null for
  *   "absent") and that pid is not running.
- * - The socket is removed only if the pid file is now absent or stale and no
- *   process accepts connections on the socket.
+ * - The socket is removed only if, immediately before removal, the pid file
+ *   is still the observed stale one (or the one this call removed), the
+ *   socket is the same directory entry that was checked, and nothing
+ *   accepts connections on it. Any change means a newer owner.
  *
  * Returns what it removed and whether it found a newer owner.
  */
@@ -472,38 +615,74 @@ export async function removeDaemonFilesIfStale(opts: {
    */
   readonly observedPidIsDaemon?: boolean;
   readonly isAccepting?: (socketPath: string) => Promise<boolean>;
+  /** Test hook: runs after the first checks, before anything is removed. */
+  readonly beforeRemove?: () => Promise<void>;
 }): Promise<{
   readonly removedPid: boolean;
   readonly removedSocket: boolean;
   readonly newerOwner: boolean;
 }> {
+  const newer = { removedPid: false, removedSocket: false, newerOwner: true };
   const current = await readDaemonPid({ pidPath: opts.pidPath });
   if (current !== opts.observedPid) {
-    return { removedPid: false, removedSocket: false, newerOwner: true };
+    return newer;
   }
   if (
     current !== null &&
     opts.observedPidIsDaemon !== false &&
     isProcessRunning({ pid: current })
   ) {
-    return { removedPid: false, removedSocket: false, newerOwner: true };
+    return newer;
   }
   const isAccepting = opts.isAccepting ?? isUnixSocketAccepting;
+  const socketBefore = await entryIdentity(opts.socketPath);
   if (await isAccepting(opts.socketPath)) {
-    return { removedPid: false, removedSocket: false, newerOwner: true };
+    return newer;
   }
+  await opts.beforeRemove?.();
+
   // Re-read right before removal: the narrowest window this check allows.
-  const removedPid =
-    (await entryExists(opts.pidPath)) &&
-    (await readDaemonPid({ pidPath: opts.pidPath })) === opts.observedPid;
+  if ((await readDaemonPid({ pidPath: opts.pidPath })) !== opts.observedPid) {
+    return newer;
+  }
+  const removedPid = await entryExists(opts.pidPath);
   if (removedPid) {
     await removeFileIfExists({ path: opts.pidPath });
   }
-  const socketExists = await entryExists(opts.socketPath);
-  if (socketExists) {
-    await removeFileIfExists({ path: opts.socketPath });
+  // A starter that wrote a pid file after the removal owns the socket.
+  const pidAfter = await readDaemonPid({ pidPath: opts.pidPath });
+  if (pidAfter !== null && pidAfter !== opts.observedPid) {
+    return { removedPid, removedSocket: false, newerOwner: true };
   }
-  return { removedPid, removedSocket: socketExists, newerOwner: false };
+  const socketNow = await entryIdentity(opts.socketPath);
+  if (socketNow === null) {
+    return { removedPid, removedSocket: false, newerOwner: false };
+  }
+  if (socketNow !== socketBefore || (await isAccepting(opts.socketPath))) {
+    return { removedPid, removedSocket: false, newerOwner: true };
+  }
+  // hackd writes its pid file before it binds the socket, so a starter that
+  // could own this socket shows up here. Checked last, right before unlink.
+  const pidLast = await readDaemonPid({ pidPath: opts.pidPath });
+  if (pidLast !== null && pidLast !== opts.observedPid) {
+    return { removedPid, removedSocket: false, newerOwner: true };
+  }
+  await removeFileIfExists({ path: opts.socketPath });
+  return { removedPid, removedSocket: true, newerOwner: false };
+}
+
+/**
+ * Device, inode and change time (ns) of a directory entry, or null when it
+ * does not exist. The change time tells a new entry apart when the
+ * filesystem reuses the inode number at once (tmpfs does).
+ */
+async function entryIdentity(path: string): Promise<string | null> {
+  try {
+    const info = await lstat(path, { bigint: true });
+    return `${info.dev}:${info.ino}:${info.ctimeNs}`;
+  } catch {
+    return null;
+  }
 }
 
 /** True when something accepts a connection on the Unix socket. */
@@ -635,49 +814,35 @@ async function pidHoldsSocketInode(opts: {
 }
 
 /**
- * True when `pid` runs a hack daemon command line. A pid file that survived
- * an unclean shutdown can name a pid that now belongs to another program;
+ * True when `pid` runs this CLI's hack daemon. A pid file that survived an
+ * unclean shutdown can name a pid that now belongs to another program;
  * treating that as "hackd already running" would keep hackd from starting.
- * Unknown (the command line cannot be read) counts as hackd, so the caller
- * stays on its cautious path.
+ * Unknown (the image cannot be read) counts as hackd, so the caller stays
+ * on its cautious path. This decides only whether to start; it never
+ * authorizes a signal ({@link proveOwnedDaemonProcess} does).
  */
 export async function isHackDaemonProcess(opts: {
   readonly pid: number;
   readonly probe?: DaemonProcessProbe;
+  readonly expectation?: DaemonIdentityExpectation;
 }): Promise<boolean> {
-  const command = await (opts.probe ?? defaultDaemonProcessProbe).command(
-    opts.pid
-  );
-  if (command === null) {
+  const image = await (opts.probe ?? defaultDaemonProcessProbe).image(opts.pid);
+  if (image === null) {
     return true;
   }
-  return isHackDaemonCommandLine(command);
+  return isHackDaemonImage({
+    image,
+    expectation: opts.expectation ?? (await defaultDaemonIdentityExpectation()),
+  });
 }
-
-/**
- * A process command line: argv (Linux `/proc/<pid>/cmdline`, exact) or the
- * single string `ps` prints, where argument boundaries are lost.
- */
-export type DaemonCommandLine = string | readonly string[];
 
 function isHackExecutableName(path: string): boolean {
-  const base = path.split("/").pop()?.toLowerCase() ?? "";
-  return base === "hack" || base.startsWith("hack-");
-}
-
-function isBunDevPrefix(tokens: readonly string[]): boolean {
-  if (tokens.length !== 2) {
-    return false;
-  }
-  const runtime = (tokens[0] ?? "").split("/").pop()?.toLowerCase();
-  const script = (tokens[1] ?? "").split("/").pop()?.toLowerCase() ?? "";
-  return (
-    runtime === "bun" && (script === "index.ts" || script.startsWith("hack"))
-  );
+  const name = basename(path).toLowerCase();
+  return name === "hack" || name.startsWith("hack-");
 }
 
 /**
- * True when the arguments after the executable are a foreground daemon start
+ * True when the arguments after the program are a foreground daemon start
  * in any supported option placement: the positionals are exactly
  * `daemon start`, and `--foreground` appears among the options. The CLI
  * parser accepts options anywhere (`--no-interactive daemon start
@@ -695,37 +860,32 @@ function isForegroundDaemonStartArgs(args: readonly string[]): boolean {
 }
 
 /**
- * True for `hack[-*] ... daemon start ... --foreground` or a dev-tree
- * `bun <index.ts|hack*> ... daemon start ... --foreground`, with options in
- * any supported position.
+ * The identity rule (HACK-2052), on exact argv and the resolved executable:
  *
- * With argv the executable path is exact, spaces included. With a `ps`
- * string argument boundaries are lost, so each split point is tried: the
- * words before it must name the executable (an install path with spaces
- * still matches) and the words after it must be a foreground daemon start.
+ * - a Hack binary: the executable is named `hack` or `hack-*` and the
+ *   arguments after argv[0] are a foreground daemon start; or
+ * - a source run: the executable is `bun`, argv[1] is one of this
+ *   checkout's entry files ({@link DaemonIdentityExpectation}), and the
+ *   arguments after it are a foreground daemon start.
+ *
+ * A script named `hack` that runs another interpreter resolves to that
+ * interpreter and does not match.
  */
-export function isHackDaemonCommandLine(command: DaemonCommandLine): boolean {
-  if (typeof command !== "string") {
-    if (
-      isHackExecutableName(command[0] ?? "") &&
-      isForegroundDaemonStartArgs(command.slice(1))
-    ) {
-      return true;
-    }
-    return (
-      isBunDevPrefix(command.slice(0, 2)) &&
-      isForegroundDaemonStartArgs(command.slice(2))
-    );
+export function isHackDaemonImage(opts: {
+  readonly image: ProcessImage;
+  readonly expectation: DaemonIdentityExpectation;
+}): boolean {
+  const { executable, argv } = opts.image;
+  if (isHackExecutableName(executable)) {
+    return isForegroundDaemonStartArgs(argv.slice(1));
   }
-  const words = command.trim().split(WHITESPACE_PATTERN);
-  for (let at = 1; at < words.length; at += 1) {
-    if (!isForegroundDaemonStartArgs(words.slice(at))) {
-      continue;
-    }
-    const prefix = words.slice(0, at);
-    if (isHackExecutableName(prefix.join(" ")) || isBunDevPrefix(prefix)) {
-      return true;
-    }
+  if (basename(executable).toLowerCase() !== "bun") {
+    return false;
   }
-  return false;
+  const entry = argv[1] ?? "";
+  return (
+    isAbsolute(entry) &&
+    opts.expectation.entryFiles.has(entry) &&
+    isForegroundDaemonStartArgs(argv.slice(2))
+  );
 }

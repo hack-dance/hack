@@ -3,24 +3,27 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import {
+  type DaemonIdentityExpectation,
   type DaemonProcessProbe,
   findDaemonSocketOwnersFromProc,
   findOrphanDaemonProcesses,
-  isHackDaemonCommandLine,
+  isHackDaemonImage,
   isHackDaemonProcess,
+  type OwnedDaemonProof,
   proveOwnedDaemonProcess,
   readDaemonPid,
   removeDaemonFilesIfStale,
   terminateProvenDaemon,
 } from "../src/daemon/process.ts";
+import type { ProcessImage } from "../src/daemon/process-image.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { spawnHackdLikeFixture } from "./helpers/hackd-fixture.ts";
 
@@ -76,16 +79,26 @@ function spawnSleeper(): ReturnType<typeof Bun.spawn> {
   return child;
 }
 
+const BIRTH = "Wed Nov 11 10:00:00 2026";
+const HACK_IMAGE: ProcessImage = {
+  executable: "/usr/local/bin/hack",
+  argv: ["/usr/local/bin/hack", "daemon", "start", "--foreground"],
+};
+const NO_ENTRIES: DaemonIdentityExpectation = { entryFiles: new Set() };
+
 function probe(
   overrides: Partial<DaemonProcessProbe> = {}
 ): DaemonProcessProbe {
   return {
-    birth: () => Promise.resolve("Wed Nov 11 10:00:00 2026"),
-    command: () =>
-      Promise.resolve("/usr/local/bin/hack daemon start --foreground"),
+    birth: () => Promise.resolve(BIRTH),
+    image: () => Promise.resolve(HACK_IMAGE),
     socketOwners: ({ pids }) => Promise.resolve(new Set(pids)),
     ...overrides,
   };
+}
+
+function ownedProof(pid: number, birth = BIRTH): OwnedDaemonProof {
+  return { kind: "owned", pid, birth, image: HACK_IMAGE };
 }
 
 test("a pid file holding 0 or a negative value reads as no pid", async () => {
@@ -164,7 +177,7 @@ test("the proof refuses another state root's hackd, unknown identity and a reuse
   ).toEqual({ kind: "refused", reason: "identity-changed" });
   expect(
     await proveOwnedDaemonProcess({ pid, daemonRoot: root, probe: probe() })
-  ).toEqual({ kind: "owned", pid, birth: "Wed Nov 11 10:00:00 2026" });
+  ).toEqual(ownedProof(pid));
 });
 
 test.skipIf(process.platform !== "linux" && !Bun.which("lsof"))(
@@ -176,19 +189,37 @@ test.skipIf(process.platform !== "linux" && !Bun.which("lsof"))(
     await mkdir(ownRoot);
     const socket = join(foreignRoot, "hackd.sock");
     const ready = join(foreignRoot, "ready");
-    const child = await spawnHackdLikeFixture({ dir: root, socket, ready });
+    const { child, expectation } = await spawnHackdLikeFixture({
+      dir: root,
+      socket,
+      ready,
+    });
     children.push(child);
     for (let i = 0; i < 100 && !(await Bun.file(ready).exists()); i++) {
       await Bun.sleep(20);
     }
     expect(
-      await proveOwnedDaemonProcess({ pid: child.pid, daemonRoot: ownRoot })
+      await proveOwnedDaemonProcess({
+        pid: child.pid,
+        daemonRoot: ownRoot,
+        expectation,
+      })
     ).toEqual({ kind: "refused", reason: "foreign-socket" });
     const own = await proveOwnedDaemonProcess({
       pid: child.pid,
       daemonRoot: foreignRoot,
+      expectation,
     });
     expect(own.kind).toBe("owned");
+    // The same process is not this CLI's daemon when its entry file is not
+    // this checkout's (`bun /other/index.ts daemon start --foreground`).
+    expect(
+      await proveOwnedDaemonProcess({
+        pid: child.pid,
+        daemonRoot: foreignRoot,
+        expectation: NO_ENTRIES,
+      })
+    ).toEqual({ kind: "refused", reason: "not-hackd" });
     expect(child.exitCode).toBeNull();
   },
   10_000
@@ -198,10 +229,11 @@ test("terminate does not signal a pid whose start time no longer matches", async
   const sleeper = spawnSleeper();
   expect(
     await terminateProvenDaemon({
-      proof: { pid: sleeper.pid, birth: "a different process" },
+      proof: ownedProof(sleeper.pid, "a different process"),
+      daemonRoot: root,
       probe: probe({ birth: () => Promise.resolve("the current process") }),
     })
-  ).toBe(true);
+  ).toEqual({ kind: "exited" });
   await Bun.sleep(100);
   expect(sleeper.exitCode).toBeNull();
   expect(process.kill(sleeper.pid, 0)).toBe(true);
@@ -211,12 +243,110 @@ test("terminate stops the proven process", async () => {
   const sleeper = spawnSleeper();
   expect(
     await terminateProvenDaemon({
-      proof: { pid: sleeper.pid, birth: "same" },
-      probe: probe({ birth: () => Promise.resolve("same") }),
+      proof: ownedProof(sleeper.pid),
+      daemonRoot: root,
+      probe: probe(),
     })
-  ).toBe(true);
+  ).toEqual({ kind: "exited" });
   await sleeper.exited;
   expect(sleeper.signalCode).toBe("SIGTERM");
+});
+
+test("terminate does not signal a process that exec'd another program (same pid and start time)", async () => {
+  // Review r2 #2: exec keeps the pid and start time; only the image shows
+  // the change. Not hackd any more, or hackd with other arguments.
+  const replaced: readonly ProcessImage[] = [
+    { executable: "/usr/bin/python3", argv: ["python3", "-c", "pass"] },
+    {
+      executable: "/usr/local/bin/hack",
+      argv: [
+        "/usr/local/bin/hack",
+        "--no-interactive",
+        "daemon",
+        "start",
+        "--foreground",
+      ],
+    },
+  ];
+  for (const image of replaced) {
+    const sleeper = spawnSleeper();
+    const signals: string[] = [];
+    expect(
+      await terminateProvenDaemon({
+        proof: ownedProof(sleeper.pid),
+        daemonRoot: root,
+        probe: probe({ image: () => Promise.resolve(image) }),
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+        },
+      })
+    ).toEqual({ kind: "not-confirmed", reason: "changed" });
+    expect(signals).toEqual([]);
+    expect(process.kill(sleeper.pid, 0)).toBe(true);
+  }
+});
+
+test("terminate re-proves identity before SIGKILL too", async () => {
+  const sleeper = spawnSleeper();
+  let images = 0;
+  const signals: string[] = [];
+  const termination = await terminateProvenDaemon({
+    proof: ownedProof(sleeper.pid),
+    daemonRoot: root,
+    timeoutMs: 100,
+    probe: probe({
+      // Proven before SIGTERM; another program by the SIGKILL check.
+      image: () => {
+        images += 1;
+        return Promise.resolve(
+          images === 1
+            ? HACK_IMAGE
+            : { executable: "/usr/bin/vim", argv: ["vim"] }
+        );
+      },
+    }),
+    // SIGTERM is "ignored": nothing is delivered.
+    sendSignal: (_pid, signal) => {
+      signals.push(signal);
+    },
+  });
+  expect(termination).toEqual({ kind: "not-confirmed", reason: "changed" });
+  expect(signals).toEqual(["SIGTERM"]);
+  expect(process.kill(sleeper.pid, 0)).toBe(true);
+});
+
+test("terminate reports a hackd that survives SIGKILL as still running", async () => {
+  const sleeper = spawnSleeper();
+  const signals: string[] = [];
+  expect(
+    await terminateProvenDaemon({
+      proof: ownedProof(sleeper.pid),
+      daemonRoot: root,
+      timeoutMs: 100,
+      killTimeoutMs: 100,
+      probe: probe(),
+      sendSignal: (_pid, signal) => {
+        signals.push(signal);
+      },
+    })
+  ).toEqual({ kind: "not-confirmed", reason: "still-running" });
+  expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+});
+
+test("terminate does not signal when identity cannot be read again", async () => {
+  const sleeper = spawnSleeper();
+  const signals: string[] = [];
+  expect(
+    await terminateProvenDaemon({
+      proof: ownedProof(sleeper.pid),
+      daemonRoot: root,
+      probe: probe({ image: () => Promise.resolve(null) }),
+      sendSignal: (_pid, signal) => {
+        signals.push(signal);
+      },
+    })
+  ).toEqual({ kind: "not-confirmed", reason: "identity-unknown" });
+  expect(signals).toEqual([]);
 });
 
 test("stale cleanup keeps files a newer owner wrote", async () => {
@@ -240,6 +370,56 @@ test("stale cleanup keeps files a newer owner wrote", async () => {
   });
   expect((await readFile(pidPath, "utf8")).trim()).toBe(String(live.pid));
   expect(await Bun.file(socketPath).exists()).toBe(true);
+});
+
+test("stale cleanup keeps the socket when a starter writes a new pid file during cleanup", async () => {
+  // Review r2 #3: the pid file changed after the first checks; the socket
+  // now belongs to the new starter.
+  const pidPath = join(root, "hackd.pid");
+  const socketPath = join(root, "hackd.sock");
+  await writeFile(pidPath, "999999\n");
+  await writeFile(socketPath, "");
+  const live = spawnSleeper();
+  const result = await removeDaemonFilesIfStale({
+    pidPath,
+    socketPath,
+    observedPid: 999_999,
+    isAccepting: () => Promise.resolve(false),
+    beforeRemove: async () => {
+      await writeFile(pidPath, `${live.pid}\n`);
+    },
+  });
+  expect(result).toEqual({
+    removedPid: false,
+    removedSocket: false,
+    newerOwner: true,
+  });
+  expect((await readFile(pidPath, "utf8")).trim()).toBe(String(live.pid));
+  expect(await Bun.file(socketPath).exists()).toBe(true);
+});
+
+test("stale cleanup keeps a socket that was replaced during cleanup", async () => {
+  const pidPath = join(root, "hackd.pid");
+  const socketPath = join(root, "hackd.sock");
+  await writeFile(socketPath, "old");
+  const result = await removeDaemonFilesIfStale({
+    pidPath,
+    socketPath,
+    observedPid: null,
+    isAccepting: () => Promise.resolve(false),
+    beforeRemove: async () => {
+      // A starter replaced the socket with a new directory entry (written
+      // first, so it has its own inode).
+      await writeFile(`${socketPath}.next`, "new");
+      await rename(`${socketPath}.next`, socketPath);
+    },
+  });
+  expect(result).toEqual({
+    removedPid: false,
+    removedSocket: false,
+    newerOwner: true,
+  });
+  expect(await readFile(socketPath, "utf8")).toBe("new");
 });
 
 test("stale cleanup keeps a socket that something accepts on", async () => {
@@ -284,15 +464,15 @@ test("stale cleanup removes a dead pid and an unanswered socket", async () => {
 
 async function startForeignFixture(
   socketRoot: string
-): Promise<ReturnType<typeof Bun.spawn>> {
+): Promise<Awaited<ReturnType<typeof spawnHackdLikeFixture>>> {
   const socket = join(socketRoot, "hackd.sock");
   const ready = join(socketRoot, "ready");
-  const child = await spawnHackdLikeFixture({ dir: root, socket, ready });
-  children.push(child);
+  const fixture = await spawnHackdLikeFixture({ dir: root, socket, ready });
+  children.push(fixture.child);
   for (let i = 0; i < 100 && !(await Bun.file(ready).exists()); i++) {
     await Bun.sleep(20);
   }
-  return child;
+  return fixture;
 }
 
 test.skipIf(process.platform !== "linux")(
@@ -302,7 +482,7 @@ test.skipIf(process.platform !== "linux")(
     const otherRoot = join(root, "other");
     await mkdir(ownRoot);
     await mkdir(otherRoot);
-    const child = await startForeignFixture(ownRoot);
+    const { child } = await startForeignFixture(ownRoot);
     const sleeper = spawnSleeper();
     const owners = await findDaemonSocketOwnersFromProc({
       daemonRoot: ownRoot,
@@ -467,40 +647,62 @@ test("hack daemon restart replaces a stale pid file without signalling its pid",
   expect(process.kill(sleeper.pid, 0)).toBe(true);
 }, 20_000);
 
-test("hackd command lines with spaces in the executable path are recognized", () => {
-  const spaced = "/opt/My Tools/bin/hack";
-  // argv (Linux /proc/<pid>/cmdline): exact boundaries.
+test("the identity rule uses the resolved executable and exact argv", () => {
+  const entry = "/src/hack repo/index.ts";
+  const expectation: DaemonIdentityExpectation = {
+    entryFiles: new Set([entry]),
+  };
+  const matches = (image: ProcessImage) =>
+    isHackDaemonImage({ image, expectation });
+  const daemonArgs = ["daemon", "start", "--foreground"];
+  // A Hack binary, spaces in its path included.
   expect(
-    isHackDaemonCommandLine([spaced, "daemon", "start", "--foreground"])
+    matches({
+      executable: "/opt/My Tools/bin/hack",
+      argv: ["/opt/My Tools/bin/hack", ...daemonArgs],
+    })
   ).toBe(true);
+  // This checkout's entry under bun.
   expect(
-    isHackDaemonCommandLine([
-      "/usr/bin/bun",
-      "/src/hack repo/index.ts",
-      "daemon",
-      "start",
-      "--foreground",
-    ])
+    matches({
+      executable: "/opt/bun/bin/bun",
+      argv: ["bun", entry, ...daemonArgs],
+    })
   ).toBe(true);
+  // Review r2 #1: another program, whatever its arguments say.
   expect(
-    isHackDaemonCommandLine(["/usr/bin/vim", "daemon", "start", "--foreground"])
+    matches({
+      executable: "/usr/bin/python3",
+      argv: ["/usr/bin/python3", "/tmp/hack-fixture", ...daemonArgs],
+    })
   ).toBe(false);
-  expect(isHackDaemonCommandLine(["/usr/bin/sleep", "30"])).toBe(false);
-  // ps output: boundaries lost, the executable is the prefix.
-  expect(isHackDaemonCommandLine(`${spaced} daemon start --foreground`)).toBe(
-    true
-  );
+  // A script named `hack` resolves to its interpreter.
   expect(
-    isHackDaemonCommandLine("/usr/local/bin/hack daemon start --foreground")
-  ).toBe(true);
-  expect(isHackDaemonCommandLine("/opt/notes daemon start --foreground")).toBe(
-    false
-  );
-  expect(isHackDaemonCommandLine("sleep 30")).toBe(false);
+    matches({
+      executable: "/usr/bin/dash",
+      argv: ["/bin/sh", "/usr/local/bin/hack", ...daemonArgs],
+    })
+  ).toBe(false);
+  // Another checkout's entry.
+  expect(
+    matches({
+      executable: "/usr/bin/bun",
+      argv: ["bun", "/other/index.ts", ...daemonArgs],
+    })
+  ).toBe(false);
+  expect(
+    matches({ executable: "/usr/bin/sleep", argv: ["/usr/bin/sleep", "30"] })
+  ).toBe(false);
 });
 
 test("hackd command lines are recognized with options in any supported position", () => {
   const hack = "/usr/local/bin/hack";
+  const entry = "/src/hack/index.ts";
+  const expectation: DaemonIdentityExpectation = {
+    entryFiles: new Set([entry]),
+  };
+  const matches = (executable: string, argv: readonly string[]) =>
+    isHackDaemonImage({ image: { executable, argv }, expectation });
   // The CLI parser accepts these placements (all options here are boolean).
   const placements: readonly (readonly string[])[] = [
     ["daemon", "start", "--no-interactive", "--foreground"],
@@ -510,32 +712,36 @@ test("hackd command lines are recognized with options in any supported position"
     ["--foreground", "daemon", "start"],
   ];
   for (const args of placements) {
-    expect(isHackDaemonCommandLine([hack, ...args])).toBe(true);
-    expect(
-      isHackDaemonCommandLine(["/usr/bin/bun", "/src/hack/index.ts", ...args])
-    ).toBe(true);
-    expect(isHackDaemonCommandLine(`${hack} ${args.join(" ")}`)).toBe(true);
-    expect(
-      isHackDaemonCommandLine(`/opt/My Tools/bin/hack ${args.join(" ")}`)
-    ).toBe(true);
+    expect(matches(hack, [hack, ...args])).toBe(true);
+    expect(matches("/usr/bin/bun", ["bun", entry, ...args])).toBe(true);
   }
-  // Not a foreground daemon: no --foreground, other positionals, other program.
-  expect(isHackDaemonCommandLine([hack, "daemon", "start"])).toBe(false);
-  expect(
-    isHackDaemonCommandLine([hack, "daemon", "stop", "--foreground"])
-  ).toBe(false);
-  expect(
-    isHackDaemonCommandLine([hack, "up", "daemon", "start", "--foreground"])
-  ).toBe(false);
-  expect(isHackDaemonCommandLine(`${hack} daemon start --no-interactive`)).toBe(
+  // Not a foreground daemon: no --foreground, other positionals.
+  expect(matches(hack, [hack, "daemon", "start"])).toBe(false);
+  expect(matches(hack, [hack, "daemon", "stop", "--foreground"])).toBe(false);
+  expect(matches(hack, [hack, "up", "daemon", "start", "--foreground"])).toBe(
     false
   );
-  expect(
-    isHackDaemonCommandLine(
-      "/usr/bin/vim --no-interactive daemon start --foreground"
-    )
-  ).toBe(false);
 });
+
+test.skipIf(process.platform !== "linux")(
+  "a script named hack that runs another interpreter is not hackd (real observations)",
+  async () => {
+    const script = join(root, "hack");
+    // `: ` after sleep keeps the shell from exec-ing sleep as its last command.
+    await writeFile(script, "#!/bin/sh\nsleep 30\n:\n", { mode: 0o755 });
+    // The kernel runs the script's interpreter; argv names a `hack`.
+    const child = Bun.spawn([script, "daemon", "start", "--foreground"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    children.push(child);
+    await Bun.sleep(100);
+    expect(await isHackDaemonProcess({ pid: child.pid })).toBe(false);
+    expect(
+      await proveOwnedDaemonProcess({ pid: child.pid, daemonRoot: root })
+    ).toEqual({ kind: "refused", reason: "not-hackd" });
+  }
+);
 
 test("an unreadable command line is unknown identity, not 'not hackd'", async () => {
   const sleeper = spawnSleeper();
@@ -543,7 +749,7 @@ test("an unreadable command line is unknown identity, not 'not hackd'", async ()
     await proveOwnedDaemonProcess({
       pid: sleeper.pid,
       daemonRoot: root,
-      probe: probe({ command: () => Promise.resolve(null) }),
+      probe: probe({ image: () => Promise.resolve(null) }),
     })
   ).toEqual({ kind: "refused", reason: "identity-unknown" });
 });
@@ -555,16 +761,23 @@ test.skipIf(process.platform !== "linux")(
     const otherRoot = join(root, "other-orphan");
     await mkdir(ownRoot);
     await mkdir(otherRoot);
-    const child = await startForeignFixture(ownRoot);
-    expect(
-      await findOrphanDaemonProcesses({ trackedPid: null, daemonRoot: ownRoot })
-    ).toContain(child.pid);
-    expect(
-      await findOrphanDaemonProcesses({
-        trackedPid: null,
-        daemonRoot: otherRoot,
-      })
-    ).not.toContain(child.pid);
+    const { child, expectation } = await startForeignFixture(ownRoot);
+    const own = await findOrphanDaemonProcesses({
+      trackedPid: null,
+      daemonRoot: ownRoot,
+      expectation,
+    });
+    expect(own.orphans.map((orphan) => orphan.pid)).toContain(child.pid);
+    const other = await findOrphanDaemonProcesses({
+      trackedPid: null,
+      daemonRoot: otherRoot,
+      expectation,
+    });
+    expect(other.orphans.map((orphan) => orphan.pid)).not.toContain(child.pid);
+    expect(other.refused).toContainEqual({
+      pid: child.pid,
+      reason: "foreign-socket",
+    });
     expect(child.exitCode).toBeNull();
   },
   10_000

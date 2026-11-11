@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -21,14 +22,15 @@ import {
 import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessRefusal,
+  type DaemonTermination,
   describeDaemonProcessRefusal,
+  describeDaemonTermination,
   findOrphanDaemonProcesses,
   isHackDaemonProcess,
+  type OwnedDaemonProof,
   proveOwnedDaemonProcess,
   readDaemonPid,
   removeDaemonFilesIfStale,
-  removeFileIfExists,
-  terminateOrphanDaemonProcesses,
   terminateProvenDaemon,
   waitForProcessExit,
 } from "../daemon/process.ts";
@@ -47,7 +49,7 @@ import {
 } from "../daemon/status.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
-import { pathExists, readTextFile } from "../lib/fs.ts";
+import { readTextFile } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import {
   buildDockerStatusProbe,
@@ -267,7 +269,10 @@ async function handleDaemonStart({
     }
   }
 
-  await sweepOrphanDaemons({ trackedPid: status.pid, paths });
+  const sweep = await sweepOrphanDaemons({ trackedPid: status.pid, paths });
+  if (!sweep.allStopped) {
+    return 1;
+  }
 
   // An installed hackd.service owns the daemon on Linux. Start through it
   // before touching the pid/socket files: systemd (a pending restart) or
@@ -386,21 +391,76 @@ async function reportUnprovenStop(opts: {
  * Daemons that outlived their pid file (e.g. a launchd-managed instance
  * surviving a manual clear/restart) hold the API socket invisibly and make
  * every freshly spawned daemon exit cleanly. Sweep them first.
+ *
+ * Only processes that pass the full identity proof are signalled, each
+ * re-proven immediately before every signal; anything else is reported with
+ * its pid and left alone. `allStopped` is false when a proven orphan could
+ * not be confirmed stopped: the caller must not go on as if the socket
+ * were free.
  */
 async function sweepOrphanDaemons(opts: {
   readonly trackedPid: number | null;
   readonly paths: DaemonPaths;
-}): Promise<void> {
-  const orphans = await findOrphanDaemonProcesses({
+}): Promise<{ readonly allStopped: boolean; readonly stopped: number }> {
+  const scan = await findOrphanDaemonProcesses({
     trackedPid: opts.trackedPid,
     daemonRoot: opts.paths.root,
   });
-  if (orphans.length > 0) {
-    logger.warn({
-      message: `Stopping orphaned hackd process(es) not tracked by the pid file: ${orphans.join(", ")}`,
+  for (const refused of scan.refused) {
+    logger.info({
+      message: `Left pid ${refused.pid} running: it looks like a hack daemon start, but ${describeDaemonProcessRefusal(refused.reason)}`,
     });
-    await terminateOrphanDaemonProcesses({ pids: orphans });
   }
+  let allStopped = true;
+  let stopped = 0;
+  for (const orphan of scan.orphans) {
+    logger.warn({
+      message: `Stopping orphaned hackd process not tracked by the pid file: ${orphan.pid}`,
+    });
+    const termination = await terminateProvenDaemon({
+      proof: orphan,
+      daemonRoot: opts.paths.root,
+    });
+    if (termination.kind === "exited") {
+      stopped += 1;
+    } else {
+      allStopped = false;
+      logger.error({
+        message: `${describeDaemonTermination(orphan.pid, termination)} | Check: hack daemon status`,
+      });
+    }
+  }
+  return { allStopped, stopped };
+}
+
+/**
+ * Stops a proven hackd and, once its exit is confirmed, removes its files
+ * if still stale. Returns false (and reports) when the exit was not
+ * confirmed: callers must not continue as if hackd were stopped.
+ */
+export async function stopProvenDaemon(opts: {
+  readonly proof: OwnedDaemonProof;
+  readonly paths: DaemonPaths;
+  /** Defaults to {@link terminateProvenDaemon}; tests pin the outcome. */
+  readonly terminate?: (proof: OwnedDaemonProof) => Promise<DaemonTermination>;
+}): Promise<boolean> {
+  const termination = await (
+    opts.terminate ??
+    ((proof: OwnedDaemonProof) =>
+      terminateProvenDaemon({ proof, daemonRoot: opts.paths.root }))
+  )(opts.proof);
+  if (termination.kind !== "exited") {
+    logger.error({
+      message: `${describeDaemonTermination(opts.proof.pid, termination)} | Check: hack daemon status`,
+    });
+    return false;
+  }
+  await removeDaemonFilesIfStale({
+    pidPath: opts.paths.pidPath,
+    socketPath: opts.paths.socketPath,
+    observedPid: opts.proof.pid,
+  });
+  return true;
 }
 
 /**
@@ -447,12 +507,9 @@ async function handleRunningDaemonAtStart(opts: {
     return 1;
   }
   logger.warn({ message: `Replacing incompatible hackd (pid ${opts.pid})` });
-  await terminateProvenDaemon({ proof });
-  await removeDaemonFilesIfStale({
-    pidPath: opts.paths.pidPath,
-    socketPath: opts.paths.socketPath,
-    observedPid: opts.pid,
-  });
+  if (!(await stopProvenDaemon({ proof, paths: opts.paths }))) {
+    return 1;
+  }
   return null;
 }
 
@@ -540,8 +597,13 @@ async function handleDaemonStop({
     process.platform === "linux"
       ? await stopViaSystemdIfInstalled({
           pid: initial.running ? initial.pid : null,
+          hackHome: dirname(paths.root),
         })
-      : { handled: false, ownedPid: false, failed: null };
+      : { handled: false, ownedPid: false, failed: null, refused: null };
+  if (viaSystemd.refused !== null) {
+    logger.error({ message: viaSystemd.refused });
+    return 1;
+  }
   if (viaSystemd.failed !== null) {
     // Signalling hackd would not stop the manager, which can start it again
     // (a pending Restart=on-failure). Report the failure instead.
@@ -598,13 +660,9 @@ async function handleDaemonStop({
       paths,
     });
   }
-  await terminateProvenDaemon({ proof });
-
-  await removeDaemonFilesIfStale({
-    pidPath: paths.pidPath,
-    socketPath: paths.socketPath,
-    observedPid: status.pid,
-  });
+  if (!(await stopProvenDaemon({ proof, paths }))) {
+    return 1;
+  }
   logger.success({ message: "hackd stopped" });
   return 0;
 }
@@ -862,35 +920,33 @@ async function handleDaemonClear({
     return 1;
   }
 
-  const orphans = await findOrphanDaemonProcesses({
-    trackedPid: status.pid,
-    daemonRoot: paths.root,
-  });
-  if (orphans.length > 0) {
-    logger.warn({
-      message: `Stopping orphaned hackd process(es): ${orphans.join(", ")}`,
-    });
-    await terminateOrphanDaemonProcesses({ pids: orphans });
+  const sweep = await sweepOrphanDaemons({ trackedPid: status.pid, paths });
+  if (!sweep.allStopped) {
+    return 1;
   }
 
-  const pidExists = await pathExists(paths.pidPath);
-  const socketExists = await pathExists(paths.socketPath);
-
-  if (!(pidExists || socketExists)) {
+  // Same stale-only rule as start and stop: a concurrent start may have
+  // written a new pid file and socket since status was read.
+  const cleanup = await removeDaemonFilesIfStale({
+    pidPath: paths.pidPath,
+    socketPath: paths.socketPath,
+    observedPid: status.pid,
+  });
+  if (cleanup.newerOwner) {
+    logger.warn({
+      message:
+        "hackd state changed while clearing (another process is starting hackd); left it in place | Check: hack daemon status",
+    });
+    return 1;
+  }
+  if (!(cleanup.removedPid || cleanup.removedSocket)) {
     logger.info({
       message:
-        orphans.length > 0
+        sweep.stopped > 0
           ? "Cleared orphaned hackd process(es); no stale files found"
           : "No stale hackd state found",
     });
     return 0;
-  }
-
-  if (pidExists) {
-    await removeFileIfExists({ path: paths.pidPath });
-  }
-  if (socketExists) {
-    await removeFileIfExists({ path: paths.socketPath });
   }
 
   logger.success({ message: "Cleared stale hackd state" });
@@ -976,14 +1032,7 @@ async function handleDaemonInstall({
         .filter((name) => args.options[name] === true)
         .map((name) => `--${name}`),
       startDetached: () => startDaemonDetached({ paths }),
-      stopDirect: async (proof) => {
-        await terminateProvenDaemon({ proof });
-        await removeDaemonFilesIfStale({
-          pidPath: paths.pidPath,
-          socketPath: paths.socketPath,
-          observedPid: proof.pid,
-        });
-      },
+      stopDirect: (proof) => stopProvenDaemon({ proof, paths }),
       waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
     });
   }

@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises";
+import { realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 
@@ -240,6 +240,12 @@ export type ExecutableDurability =
  * automatic repair. Temporary directories, package caches and a checkout's
  * build output are not: cleaning them later would break login startup.
  * Explicit `hack daemon install` may still write such a path, with a warning.
+ *
+ * Both the path as written and its fully resolved target must pass: a
+ * stable-looking symlink into a temporary directory, a package cache or a
+ * build output breaks the same way (HACK-2052). The unit keeps the written
+ * spelling, so an upgrade that moves the target behind a stable symlink
+ * keeps working.
  */
 export async function assessExecutableDurability(opts: {
   readonly path: string;
@@ -247,9 +253,43 @@ export async function assessExecutableDurability(opts: {
   readonly exists?: (path: string) => Promise<boolean>;
   /** The checkout walk stops below this directory (default `$HOME`). */
   readonly home?: string | null;
+  /** Defaults to `fs.realpath`; tests pin symlink targets. */
+  readonly resolveReal?: (path: string) => Promise<string>;
+}): Promise<ExecutableDurability> {
+  const written = resolve(opts.path);
+  const asWritten = await assessPathDurability({ ...opts, path: written });
+  if (!asWritten.durable) {
+    return asWritten;
+  }
+  let target: string;
+  try {
+    target = await (opts.resolveReal ?? realpath)(written);
+  } catch {
+    return {
+      durable: false,
+      reason: "its real location could not be resolved",
+    };
+  }
+  if (target === written) {
+    return asWritten;
+  }
+  const resolved = await assessPathDurability({ ...opts, path: target });
+  return resolved.durable
+    ? resolved
+    : {
+        durable: false,
+        reason: `it resolves to ${target}, and ${resolved.reason}`,
+      };
+}
+
+async function assessPathDurability(opts: {
+  readonly path: string;
+  readonly tempDirs?: readonly string[];
+  readonly exists?: (path: string) => Promise<boolean>;
+  readonly home?: string | null;
 }): Promise<ExecutableDurability> {
   const exists = opts.exists ?? pathExists;
-  const path = resolve(opts.path);
+  const { path } = opts;
   const temps = [
     ...TEMP_ROOTS,
     ...(opts.tempDirs ?? [process.env.TMPDIR ?? "", tmpdir()]),
@@ -298,7 +338,10 @@ export function retargetSystemdUnitProgram(opts: {
   const rendered = renderSystemdUnit({ hackBinPath: opts.hackBinPath });
   const renderedLine = rendered?.match(EXEC_START_PATTERN)?.[0];
   const current = opts.unitText.match(EXEC_START_PATTERN);
-  if (!(renderedLine && current)) {
+  if (
+    !(renderedLine && current) ||
+    parseSystemdExecProgram({ unitText: opts.unitText }).kind !== "path"
+  ) {
     return null;
   }
   const line = current[1]?.trim() ?? "";
@@ -396,32 +439,77 @@ const NO_USER_BUS =
   /connect to (the )?bus|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR/i;
 const UNIT_MISSING = /not loaded|does not exist|not found|No such file/i;
 
+/**
+ * What a unit's `ExecStart=` runs, as far as this parser can tell.
+ *
+ * `path`: exactly one `ExecStart=` line whose program is a plain absolute
+ * path (quoted or bare, `%%` the only specifier, no escapes).
+ * `unknown`: anything else, for example an `-`, `@`, `:`, `+` or `!`
+ * prefix, a specifier such as `%h`, an escape, a continuation line, or
+ * several `ExecStart=` lines. Unknown is never evidence that the program is
+ * missing: callers leave such a unit as it is (HACK-2052).
+ */
+export type SystemdExecProgram =
+  | { readonly kind: "path"; readonly path: string }
+  | { readonly kind: "unknown"; readonly reason: string }
+  | { readonly kind: "none" };
+
+const EXEC_START_LINE = /^\s*ExecStart\s*=(.*)$/gm;
+const EXEC_PREFIX = /^[-@:+!|]/;
+
 /** Reads the program (first word of `ExecStart=`) from unit text. */
+export function parseSystemdExecProgram(opts: {
+  readonly unitText: string;
+}): SystemdExecProgram {
+  const lines = [...opts.unitText.matchAll(EXEC_START_LINE)];
+  if (lines.length === 0) {
+    return { kind: "none" };
+  }
+  if (lines.length > 1) {
+    return { kind: "unknown", reason: "several ExecStart= lines" };
+  }
+  const value = (lines[0]?.[1] ?? "").trim();
+  if (value.length === 0) {
+    return { kind: "none" };
+  }
+  if (value.endsWith("\\")) {
+    return { kind: "unknown", reason: "a continued ExecStart= line" };
+  }
+  if (EXEC_PREFIX.test(value)) {
+    return { kind: "unknown", reason: "an ExecStart= prefix" };
+  }
+  let word: string;
+  if (value.startsWith('"')) {
+    const close = value.indexOf('"', 1);
+    if (close < 0) {
+      return { kind: "unknown", reason: "an unterminated quote" };
+    }
+    word = value.slice(1, close);
+  } else {
+    word = value.split(WHITESPACE)[0] ?? "";
+  }
+  if (word.includes("\\") || word.includes("$") || word.includes("'")) {
+    return { kind: "unknown", reason: "an escaped or expanded program" };
+  }
+  if (word.replace(/%%/g, "").includes("%")) {
+    return { kind: "unknown", reason: "a specifier in the program path" };
+  }
+  const path = unescapeSystemdWord(word);
+  if (!isAbsolute(path)) {
+    return {
+      kind: "unknown",
+      reason: "a program that is not an absolute path",
+    };
+  }
+  return { kind: "path", path };
+}
+
+/** The program path, or null when there is none or it is not understood. */
 export function extractSystemdExecProgram(opts: {
   readonly unitText: string;
 }): string | null {
-  const line = opts.unitText.match(EXEC_START_PATTERN)?.[1]?.trim();
-  if (!line) {
-    return null;
-  }
-  if (!line.startsWith('"')) {
-    const word = line.split(WHITESPACE)[0] ?? "";
-    return word.length > 0 ? unescapeSystemdWord(word) : null;
-  }
-  let out = "";
-  for (let i = 1; i < line.length; i += 1) {
-    const ch = line[i];
-    if (ch === "\\" && i + 1 < line.length) {
-      out += line[i + 1];
-      i += 1;
-      continue;
-    }
-    if (ch === '"') {
-      return unescapeSystemdWord(out);
-    }
-    out += ch;
-  }
-  return null;
+  const parsed = parseSystemdExecProgram(opts);
+  return parsed.kind === "path" ? parsed.path : null;
 }
 
 function unescapeSystemdWord(word: string): string {
@@ -508,7 +596,15 @@ export function describeSystemdUnavailable(opts: {
   }
 }
 
-export type SystemdUnitDrift = "none" | "content" | "program-missing";
+/**
+ * `program-unknown`: the unit's ExecStart is not fully understood
+ * ({@link parseSystemdExecProgram}); it is left as it is.
+ */
+export type SystemdUnitDrift =
+  | "none"
+  | "content"
+  | "program-missing"
+  | "program-unknown";
 
 export interface SystemdServiceStatus {
   readonly unitPath: string;
@@ -550,12 +646,11 @@ export async function readSystemdServiceStatus(opts: {
   const exists = opts.exists ?? pathExists;
   const unitText = await readTextFile(opts.unitPath);
   const installed = unitText !== null;
-  const program = unitText ? extractSystemdExecProgram({ unitText }) : null;
-  const drift = await computeDrift({
-    unitText,
-    program,
-    exists,
-  });
+  const parsed = unitText
+    ? parseSystemdExecProgram({ unitText })
+    : ({ kind: "none" } as const);
+  const program = parsed.kind === "path" ? parsed.path : null;
+  const drift = await computeDrift({ unitText, parsed, exists });
 
   const availability = await probeSystemdUserManager(opts.deps);
   const linger = await readLingerStatus(opts.deps);
@@ -610,16 +705,19 @@ export async function readSystemdServiceStatus(opts: {
  */
 async function computeDrift(opts: {
   readonly unitText: string | null;
-  readonly program: string | null;
+  readonly parsed: SystemdExecProgram;
   readonly exists: (path: string) => Promise<boolean>;
 }): Promise<SystemdUnitDrift> {
   if (opts.unitText === null) {
     return "none";
   }
-  if (opts.program === null || !(await opts.exists(opts.program))) {
+  if (opts.parsed.kind === "unknown") {
+    return "program-unknown";
+  }
+  if (opts.parsed.kind === "none" || !(await opts.exists(opts.parsed.path))) {
     return "program-missing";
   }
-  const rendered = renderSystemdUnit({ hackBinPath: opts.program });
+  const rendered = renderSystemdUnit({ hackBinPath: opts.parsed.path });
   return rendered === opts.unitText ? "none" : "content";
 }
 
@@ -660,6 +758,66 @@ export function parseSystemdProperties(text: string): Record<string, string> {
     out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
   }
   return out;
+}
+
+export type SystemdUnitHackHome =
+  | { readonly kind: "home"; readonly path: string }
+  | { readonly kind: "unknown"; readonly detail: string };
+
+const ENV_WORD = /"([^"]*)"|(\S+)/g;
+
+/**
+ * The Hack home the unit's hackd uses: `HACK_HOME` from the unit's
+ * effective environment (unit file and drop-ins, as systemd reports it),
+ * else `$HOME/.hack` with the unit's `HOME` or the user's. Unknown when
+ * systemd cannot be asked, the unit reads an `EnvironmentFile=` (not
+ * visible here), or the value is relative.
+ */
+export async function readSystemdUnitHackHome(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<SystemdUnitHackHome> {
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    SYSTEMD_UNIT_NAME,
+    "--property=Environment,EnvironmentFiles",
+  ]);
+  if (show.exitCode !== 0) {
+    return {
+      kind: "unknown",
+      detail: `systemctl --user show failed: ${firstLine(show.stderr) || `exit code ${show.exitCode}`}`,
+    };
+  }
+  const props = parseSystemdProperties(show.stdout);
+  if ((props.EnvironmentFiles ?? "").length > 0) {
+    return {
+      kind: "unknown",
+      detail: "the unit reads an EnvironmentFile",
+    };
+  }
+  const env: Record<string, string> = {};
+  for (const match of (props.Environment ?? "").matchAll(ENV_WORD)) {
+    const word = match[1] ?? match[2] ?? "";
+    const eq = word.indexOf("=");
+    if (eq > 0) {
+      env[word.slice(0, eq)] = word.slice(eq + 1);
+    }
+  }
+  const override = (env.HACK_HOME ?? "").trim();
+  if (override.length > 0) {
+    return isAbsolute(override)
+      ? { kind: "home", path: resolve(override) }
+      : { kind: "unknown", detail: `HACK_HOME=${override} is relative` };
+  }
+  const home =
+    normalizeHomeDir(env.HOME) ??
+    normalizeHomeDir(opts.deps.env.HOME) ??
+    normalizeHomeDir(homedir());
+  if (!home) {
+    return { kind: "unknown", detail: "no home directory" };
+  }
+  return { kind: "home", path: resolve(home, GLOBAL_HACK_DIR_NAME) };
 }
 
 /** Reads `Linger` for the current user; null when it cannot be determined. */

@@ -45,11 +45,13 @@ test.skipIf(!Bun.which("lsof"))(
     await mkdir(foreignRoot);
     const socket = join(foreignRoot, "hackd.sock");
     const ready = join(foreignRoot, "ready");
-    foreignDaemon = await spawnHackdLikeFixture({
+    const fixture = await spawnHackdLikeFixture({
       dir: tempDir,
       socket,
       ready,
     });
+    const daemon = fixture.child;
+    foreignDaemon = daemon;
     for (let attempt = 0; attempt < 100; attempt++) {
       if (await Bun.file(ready).exists()) {
         break;
@@ -57,12 +59,12 @@ test.skipIf(!Bun.which("lsof"))(
       await Bun.sleep(20);
     }
     expect(await Bun.file(ready).exists()).toBe(true);
-    expect(
-      await findOrphanDaemonProcesses({
-        trackedPid: null,
-        daemonRoot: foreignRoot,
-      })
-    ).toContain(foreignDaemon.pid);
+    const scan = await findOrphanDaemonProcesses({
+      trackedPid: null,
+      daemonRoot: foreignRoot,
+      expectation: fixture.expectation,
+    });
+    expect(scan.orphans.map((orphan) => orphan.pid)).toContain(daemon.pid);
 
     const paths = resolveDaemonPaths({});
     await mkdir(paths.root, { recursive: true });
@@ -70,8 +72,8 @@ test.skipIf(!Bun.which("lsof"))(
     const { runCli } = await import("../src/cli/run.ts");
     expect(await runCli(["daemon", "clear"])).toBe(0);
     await Bun.sleep(100);
-    expect(foreignDaemon.exitCode).toBeNull();
-    expect(process.kill(foreignDaemon.pid, 0)).toBe(true);
+    expect(daemon.exitCode).toBeNull();
+    expect(process.kill(daemon.pid, 0)).toBe(true);
   },
   10_000
 );
@@ -91,4 +93,37 @@ test("daemon clear removes stale pid and socket files", async () => {
 
   expect(pidExists).toBe(false);
   expect(socketExists).toBe(false);
+});
+
+test("a stop whose termination is not confirmed fails and keeps hackd's files", async () => {
+  // Review r2 #6: stop, restart and the install handover must not go on as
+  // if hackd had stopped.
+  const { stopProvenDaemon } = await import("../src/commands/daemon.ts");
+  const paths = resolveDaemonPaths({});
+  await mkdir(paths.root, { recursive: true });
+  await writeFile(paths.pidPath, `${process.pid}\n`);
+  await writeFile(paths.socketPath, "");
+  const proof = {
+    kind: "owned",
+    pid: process.pid,
+    birth: "b",
+    image: {
+      executable: "/usr/local/bin/hack",
+      argv: ["/usr/local/bin/hack", "daemon", "start", "--foreground"],
+    },
+  } as const;
+  for (const reason of [
+    "still-running",
+    "changed",
+    "identity-unknown",
+  ] as const) {
+    expect(
+      await stopProvenDaemon({
+        proof,
+        paths,
+        terminate: () => Promise.resolve({ kind: "not-confirmed", reason }),
+      })
+    ).toBe(false);
+    expect(await Bun.file(paths.pidPath).exists()).toBe(true);
+  }
 });

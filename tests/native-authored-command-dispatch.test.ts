@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { nativeBetaNotice } from "../src/backends/native-beta.ts";
 import {
   NATIVE_EXEC_SELECTION_REFUSAL,
   NATIVE_RUN_EMPTY_SELECTION_REFUSAL,
@@ -424,9 +425,11 @@ macTest.each(
       logger: "console",
     });
     expect(value.code).toBe(1);
-    expect(value.stdout + value.stderr).toMatch(
-      /^ERROR: E_NATIVE_PROJECT_UNSUPPORTED:/
+    // The one beta line (HACK-2026) comes first; the refusal is the only other line.
+    expect(value.stdout + value.stderr).toStartWith(
+      `INFO: ${nativeBetaNotice()}\nERROR: E_NATIVE_PROJECT_UNSUPPORTED:`
     );
+    expect((value.stdout + value.stderr).trimEnd().split("\n")).toHaveLength(2);
     expect(value.stdout + value.stderr).not.toContain("E_STARTUP_INCOMPLETE");
     expect(value.stdout + value.stderr).toContain(
       "no native consumer was started"

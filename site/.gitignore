@@ -6,3 +6,4 @@ public/llms*.txt
 node_modules/
 public/v4/
 public/v5/
+public/diagrams/

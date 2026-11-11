@@ -159,7 +159,7 @@ const logsPositionals = [{ name: "runId", required: true }] as const;
 
 const dispatchSpec = defineCommand({
   name: "dispatch",
-  summary: "Beta: run branch-scoped jobs on remote nodes",
+  summary: "Unsupported: run branch-scoped jobs on remote nodes",
   group: "Beta",
   options: [],
   positionals: [],

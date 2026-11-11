@@ -1,61 +1,21 @@
-# Extension reference
+# Unsupported retained surfaces
 
-This page documents the lower-level extension and control-plane surfaces that still ship in the
-repo.
+Hack is a local-first CLI. Some older subsystems remain in the repository for
+explicit maintenance but are outside the supported product. They are hidden from
+`hack --help` (list them with `hack help --all`) and print a warning when invoked.
 
-If you want the supported product overview first, read [integrations.md](integrations.md) and
-[core.md](core.md).
+- `hack remote`, `hack gateway`, `hack node`, `hack dispatch`: remote execution and
+  the control-plane gateway.
+- `hack x <namespace> <command>`: the extension dispatcher, with the built-in
+  `gateway`, `supervisor`, `cloudflare` and `tailscale` namespaces. `hack x list`
+  shows registered extensions; enablement lives under `controlPlane.extensions`.
+- The macOS app under `apps/macos/`, which is not distributed with the CLI.
 
-Hack is local-first. The supported product does not include hosted auth, a web dashboard,
-built-in GitHub integration, or built-in Linear integration.
+Hosted accounts, organizations and teams, the web dashboard, Hack Tickets and the
+built-in GitHub and Linear integrations are retired and no longer registered.
 
-## Scope
-
-- Unsupported experimental workflows:
-  - Gateway: `hack x gateway ...`
-  - Supervisor: `hack x supervisor ...`
-  - Remote node / dispatch flows (unsupported)
-- Hosted auth, GitHub, Linear, and Tickets integrations are not registered.
-
-## Behavior
-
-- Built-in extensions are registered in `src/control-plane/extensions/builtins.ts`.
-- The CLI dispatches extension commands via `hack x <namespace> <command>`.
-- Global enablement lives in `~/.hack/hack.config.json` via `controlPlane.extensions`.
-- Per-project overrides live in `.hack/hack.config.json`.
-- Built-in gateway enablement remains project-scoped through `controlPlane.gateway.enabled` — the
-  global config's `gateway.enabled` field is explicitly ignored when resolving gateway state; only
-  the per-project opt-in decides whether gateway is enabled.
-- When a disabled extension's command is run, the CLI prints the exact enable command for that
-  extension (and on a TTY offers to run it for you). Gateway is a special case: its enable hint
-  always routes to `hack gateway enable` rather than a `hack config set` invocation.
-
-## Built-in Extensions
-
-- Unsupported experimental:
-  - `hack x gateway token-create|token-list|token-revoke`
-  - `hack x supervisor job-create|job-list|job-show|job-tail|job-attach|job-cancel|shell`
-  - `hack x cloudflare ...`
-  - `hack x tailscale ...`
-
-GitHub, Linear, and Tickets are intentionally not part of the shipped built-in extension set.
-
-## Dispatch Model
-
-```bash
-hack x <namespace> <command> [args...]
-```
-
-Use `hack x <namespace> help` to list commands for an enabled extension, or `hack x list` to list
-all registered extensions (enabled and disabled) with their namespaces.
-
-## Experimental Boundary
-
-Remote/gateway/supervisor/cloud-provider functionality is still in the repo, but it is not part of
-the default local-first product contract.
-
-- Do not depend on it for first-run onboarding.
-- Do not expect hosted Hack services or browser auth flows.
-- Treat bugs here as experimental unless they break the core local runtime.
-- These commands are hidden from default `hack --help` output; list them with `hack help --all`.
-  Invoking one prints a one-line experimental/unsupported warning.
+Do not depend on any of these for onboarding or default workflows. Bugs here are
+treated as experimental unless they break the core local runtime. For the
+supported product, read [Core concepts](core.md) and the [CLI overview](cli.md);
+for the state models of the retained supervisor, see
+[the supervisor statechart](supervisor-job-statechart.md).

@@ -264,6 +264,7 @@ import {
   resolvePreferredHostDnsTarget,
   resolverHasNameserver,
 } from "./doctor-utils.ts";
+import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import {
   buildDoctorRecoveryGuidance,
   buildRecoveryWorkflowLines,
@@ -639,6 +640,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   });
   const native = resolveNativeRuntimeSelection();
   if (native) {
+    noteNativeBackendBeta({ json });
     return await handleNativeDoctor({
       runtime: native,
       startDir: resolveDoctorStartDir(args.options.path),

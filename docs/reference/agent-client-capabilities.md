@@ -136,8 +136,8 @@ owner, and none of them replaces the others. Users choose one per client.
 
 | Layout | What it contains | Authoritative owner | Installed and updated by |
 | --- | --- | --- | --- |
-| Native plugin (`plugins/hack`) | Client manifests, eight skills, Claude primer hooks and Cursor rule; opt-in `plugins/hack-mcp` separately declares `hack mcp serve` | `scripts/generate-agent-plugins.ts`, rendering from `src/agents/instruction-source.ts` and the skill renderers in `src/agents/` | The client's plugin manager. Hack commands never install or update it. |
-| Standalone setup | Project AGENTS.md/CLAUDE.md snippets, Cursor rules, shared skills, Claude primer hooks, MCP entries | `src/agents/instruction-source.ts` and its renderers, written by `hack setup` and `hack mcp install` | Explicit `hack setup` and `hack mcp install` commands in a chosen scope |
+| Native plugin (`plugins/hack`) | Client manifests and eight skills, with no hooks, rules or MCP server; opt-in `plugins/hack-mcp` separately declares `hack mcp serve` | `scripts/generate-agent-plugins.ts`, rendering from `src/agents/instruction-source.ts` and the skill renderers in `src/agents/` | The client's plugin manager. Hack commands never install or update it. |
+| Standalone setup | The standalone Codex skill and MCP entries. Instruction snippets, Cursor rules and primer hooks are retired and no longer written. | `src/agents/instruction-source.ts` and its renderers, written by `hack setup codex`, `hack setup mcp` and `hack mcp install` | Those explicit commands, in a chosen scope |
 | MCP bundle | Native MCP adapter, owner and backend executables with a content-derived identity | `src/mcp/bundle.ts` (packaging and verification) | `hack mcp install --bundle ... --cli ...` writes the client entry; the bundle is never modified after selection |
 
 Decisions:
@@ -161,8 +161,8 @@ artifacts must not set them:
 - permission modes, tool allowlists, approval policies and sandbox modes
 - output styles
 
-Hack-shipped hooks may run only `hack agent prime`.
-`tests/agent-plugin-generation.test.ts` enforces this for the generated guidance
+Hack ships no hooks: the `hack` plugin is skills-only and the automatic primer is
+retired. `tests/agent-plugin-generation.test.ts` enforces these limits for the generated guidance
 surfaces: `plugins/hack`, `.claude-plugin`, `.cursor-plugin`, `.agents` (including
 the skills it links to), and the agent configuration in `examples/basic/.claude`,
 `.codex` and `.cursor`. It parses JSON, JSON Lines, TOML, YAML and markdown

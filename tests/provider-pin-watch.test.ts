@@ -295,6 +295,9 @@ describe("provider pin watch", () => {
       /@s|<|>|!\[|`|\|/
     );
     expect(cell("ping @someone")).toContain("@\u200dsomeone");
+    expect(cell("fixes #123 and moby/moby#45 see [x](https://e.vil)")).toBe(
+      "fixes #\u200d123 and moby/moby#\u200d45 see [x] (https://e.vil)"
+    );
     const url =
       "https://github.com/o/r/security/advisories/GHSA-aaaa-bbbb-cccc";
     expect(link("GHSA-aaaa-bbbb-cccc", url, ghsa)).toBe(

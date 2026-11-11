@@ -463,14 +463,15 @@ export function delta(
 }
 
 /**
- * Upstream text in our public issue: one table cell, no mentions (`@` gets a zero-width
- * joiner), no HTML or images, no code spans.
+ * Upstream text in our public issue: one table cell, no mentions or issue references (`@` and
+ * `#` get a zero-width joiner), no HTML, images, inline links or code spans.
  */
 export const cell = (value: string) =>
   value
     .replace(/[|\n\r`<>]/g, " ")
     .replace(/!\[/g, "[")
-    .replace(/@/g, "@\u200d");
+    .replace(/\]\(/g, "] (")
+    .replace(/[@#]/g, "$&\u200d");
 
 /** A link only to GitHub, by an ID of the expected form; otherwise the bare, cleaned text. */
 export function link(label: string, url: string, pattern: RegExp): string {

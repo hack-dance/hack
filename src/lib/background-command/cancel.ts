@@ -102,7 +102,8 @@ export async function cancelCommand(opts: {
         supervisorSignalled: false,
         childGroupSignalled: false,
         childExited: true,
-        containerProcess,
+        containerProcess:
+          recordedContainerProcess(priorEnd) ?? containerProcess,
       },
       refused: [],
     };
@@ -200,6 +201,18 @@ async function supervisorFinishingStop(opts: {
   return (
     alive !== null && identityMatches({ expected: opts.owner, snapshot: alive })
   );
+}
+
+/** The container result an end recorded, when it recorded a known one. */
+function recordedContainerProcess(
+  ended: EventEnvelope
+): "stopped" | "not_confirmed" | "not_applicable" | undefined {
+  const value = ended.payload.containerProcess;
+  return value === "stopped" ||
+    value === "not_confirmed" ||
+    value === "not_applicable"
+    ? value
+    : undefined;
 }
 
 /** `cancelling` only while a live supervisor is finishing right now. */

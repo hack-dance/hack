@@ -198,7 +198,8 @@ export async function runBackgroundSupervisor(opts: {
       outcome: "unknown",
       reason: "supervisor_error",
       stoppedBySupervisor: running,
-      ...(containerProcess ? { containerProcess } : {}),
+      // Nothing confirmed what ran in the container or native guest ended.
+      containerProcess: containerProcess ?? "not_confirmed",
       detail: error instanceof Error ? error.name : "error",
     }).catch(() => 1);
   }
@@ -818,12 +819,14 @@ export function endedPayload(opts: {
       ? { containerProcess: opts.containerProcess }
       : {}),
     ...(!opts.containerProcess &&
-    (opts.stopping || (opts.backend === "native" && outcome !== "succeeded"))
+    (opts.stopping || (opts.backend === "native" && opts.signal))
       ? {
-          // The client process group was stopped, or a native client ended
-          // other than cleanly: stopping the host client does not stop the
-          // command in the container or native guest, and nothing here
-          // confirms it ended. The end then holds its admission slot.
+          // The client was stopped (cancel, timeout) or, on native, killed:
+          // stopping the host client does not stop the command in the
+          // container or native guest, and nothing here confirms it ended.
+          // The end then holds its admission slot. A native client that
+          // exits by itself passes on the guest command's exit code, so a
+          // nonzero exit is the command's own end and holds nothing.
           containerProcess: "not_confirmed",
         }
       : {}),

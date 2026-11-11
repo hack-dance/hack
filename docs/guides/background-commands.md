@@ -325,10 +325,15 @@ when the command ends, so `liveOutput` and `stallDetection` are reported
 `unavailable`; nothing is simulated. Hack resolves no values in the launcher
 there, so nothing is redacted. Cancelling or timing out stops the host-side
 `hack` process only; the native engine does not stop the command in the guest
-when its client goes away, and nothing confirms that it ended. Every native
-end other than `succeeded` therefore records `containerProcess:
-"not_confirmed"` and keeps its admission slot until the command's timeout
-window closes.
+when its client goes away, and nothing confirms that it ended. A native end
+that Hack stopped (cancel, timeout) or whose client was killed by a signal
+therefore records `containerProcess: "not_confirmed"` and keeps its admission
+slot until the command's timeout window closes. A native client that exits by
+itself passes on the guest command's exit code, so a nonzero exit is the
+command's own end and holds nothing. The remaining gap: if the `hack` client
+itself fails (for example it loses the engine connection) while the guest
+command still runs, that end is reported as the command failing and frees
+its slot.
 
 ## Errors
 

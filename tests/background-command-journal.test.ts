@@ -1265,7 +1265,7 @@ describe("request keys before runtime checks", () => {
 });
 
 describe("unconfirmed container stops hold admission", () => {
-  test("a native end other than succeeded is not_confirmed: stopping the host client does not stop the guest", () => {
+  test("a native end that was stopped or killed is not_confirmed; a native nonzero exit is the guest command's own end", () => {
     const base = {
       truncated: false,
       suppressed: false,
@@ -1280,9 +1280,17 @@ describe("unconfirmed container stops hold admission", () => {
       }).containerProcess
     ).toBe("not_confirmed");
     expect(
+      endedPayload({
+        ...base,
+        stopping: null,
+        exitCode: null,
+        signal: "SIGKILL",
+      }).containerProcess
+    ).toBe("not_confirmed");
+    expect(
       endedPayload({ ...base, stopping: null, exitCode: 1, signal: null })
         .containerProcess
-    ).toBe("not_confirmed");
+    ).toBeUndefined();
     expect(
       endedPayload({ ...base, stopping: null, exitCode: 0, signal: null })
         .containerProcess

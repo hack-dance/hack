@@ -513,31 +513,31 @@ test("the example config test refuses a lifecycle script that does not exist", a
 test("refreshing a stale indented include restores the file and keeps the layout", async () => {
   const file = "line one\n\n  indented line\nlast\n";
   const readFile = async (path: string) =>
-    path === "ex/file.txt" ? file : null;
+    path === "examples/file.txt" ? file : null;
   const markdown = [
     "1. Step:",
     "",
-    "   <!-- include: ex/file.txt -->",
+    "   <!-- include: examples/file.txt -->",
     "   ```text",
     "   stale",
     "   ```",
     "",
-    "<!-- include: ex/missing.txt -->",
+    "<!-- include: examples/missing.txt -->",
     "```text",
     "kept as is",
     "```",
     "",
   ].join("\n");
   expect(await docIncludeIssues({ markdown, readFile })).toEqual([
-    "line 3 (ex/file.txt): include-out-of-date",
-    "line 8 (ex/missing.txt): include-file-missing",
+    "line 3 (examples/file.txt): include-out-of-date",
+    "line 8 (examples/missing.txt): include-file-missing",
   ]);
   const refreshed = await refreshDocIncludes({ markdown, readFile });
   expect(refreshed).toBe(
     [
       "1. Step:",
       "",
-      "   <!-- include: ex/file.txt -->",
+      "   <!-- include: examples/file.txt -->",
       "   ```text",
       "   line one",
       "",
@@ -545,7 +545,7 @@ test("refreshing a stale indented include restores the file and keeps the layout
       "   last",
       "   ```",
       "",
-      "<!-- include: ex/missing.txt -->",
+      "<!-- include: examples/missing.txt -->",
       "```text",
       "kept as is",
       "```",
@@ -553,7 +553,7 @@ test("refreshing a stale indented include restores the file and keeps the layout
     ].join("\n")
   );
   expect(await docIncludeIssues({ markdown: refreshed, readFile })).toEqual([
-    "line 11 (ex/missing.txt): include-file-missing",
+    "line 11 (examples/missing.txt): include-file-missing",
   ]);
   // Refreshing is idempotent.
   expect(await refreshDocIncludes({ markdown: refreshed, readFile })).toBe(

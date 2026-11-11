@@ -1,36 +1,28 @@
 # Global settings
 
-This page is part of [Extensions & reference](../reference.md).
-For the default local product story, start with [Core docs](../core.md).
-
-Global settings live at `~/.hack/hack.config.json`. Use the CLI instead of editing by hand:
+Machine-wide settings live in `~/.hack/hack.config.json`. Use the CLI instead of
+editing the file by hand:
 
 ```bash
-hack config get --global controlPlane.gateway.allowWrites
-hack config set --global controlPlane.gateway.allowWrites true
+hack config get --global sessions.mux
+hack config set --global sessions.mux tmux
 ```
 
 Automatic settings updates, including `hack env backend use`, create a missing
-global config but refuse to replace an existing unreadable file, malformed JSON,
-or a non-object JSON value. An empty file is invalid JSON. Repair the reported file
-before retrying; the failed update preserves its contents.
+global config but refuse to replace an existing unreadable file, malformed JSON or
+a non-object JSON value. An empty file is invalid JSON. Repair the reported file
+before retrying; a failed update preserves its contents.
 
 Common settings:
 
-- `controlPlane.gateway.bind` (default `127.0.0.1`)
-- `controlPlane.gateway.port` (default `7788`)
-- `controlPlane.gateway.allowWrites` (default `false`)
-- `controlPlane.cluster.defaultNodeId` (default remote execution node)
-- `controlPlane.cluster.staleAfterMs` (health threshold)
-- `controlPlane.cluster.offlineAfterMs` (health threshold)
-- `controlPlane.extensions["dance.hack.tailscale"].config.authKey` (reusable private bootstrap key)
-- `sessions.mux` (default `auto`; `auto|tmux|zellij|none`)
-- `controlPlane.extensions["dance.hack.cloudflare"].config.hostname`
-- `controlPlane.tui.logs.maxEntries` (TUI log buffer cap, default `2000`)
-- `controlPlane.tui.logs.maxLines` (rendered log lines cap, default `400`)
-- `controlPlane.tui.logs.historyTailStep` (history page size, default `200`)
-- `controlPlane.usage.watchIntervalMs` (default `2000`)
-- `controlPlane.usage.historySize` (sample history for `hack usage --watch`, default `24`)
+- `sessions.mux` (default `auto`; `auto|tmux|zellij|none`) — multiplexer for `hack session`.
+- `controlPlane.tui.logs.maxEntries` (default `2000`) — log buffer cap in `hack tui`.
+- `controlPlane.tui.logs.maxLines` (default `400`) — rendered log lines cap.
+- `controlPlane.tui.logs.historyTailStep` (default `200`) — history page size.
+- `controlPlane.usage.watchIntervalMs` (default `2000`) — sample interval for `hack usage --watch`.
+- `controlPlane.usage.historySize` (default `24`) — sample history for `hack usage --watch`.
 
-Gateway enablement is project-scoped; `hack gateway enable` updates the project config and
-starts the global gateway server when at least one project opts in.
+Project-level settings live in `.hack/hack.config.json` and override global ones
+where both apply. Settings for the unsupported gateway, cluster and cloud-provider
+extensions also live here under `controlPlane.*`; see
+[unsupported retained surfaces](../extensions.md).

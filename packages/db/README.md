@@ -1,5 +1,9 @@
 # @hack/db
 
+Retained internal package: a Drizzle + Postgres layer used by the retired hosted
+services. It is not a dependency of the supported CLI and is not part of any
+default workflow.
+
 Shared database package for Hack services/apps using Drizzle + Neon/Postgres.
 
 ## Commands

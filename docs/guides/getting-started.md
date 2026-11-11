@@ -74,7 +74,7 @@ hack down
 
 ## Exploring v5
 
-The native v5 candidate is experimental and has a separate installation and
-project-adoption flow. Installing a prerelease does not migrate a project or prove
-runtime parity. Keep your stable environment available and follow
-[dogfooding v5 alongside v4](v5-dogfooding.md).
+v5 keeps these commands and the Compose default, and adds a native backend (beta)
+for Apple Silicon macOS.
+Prereleases install beside stable Hack through `hack-next`. Read
+[Upgrade to v5](upgrade-to-v5.md), then [install a prerelease](candidate-install.md).

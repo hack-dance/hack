@@ -75,6 +75,7 @@ import {
 } from "../lib/runtime-projects.ts";
 import { exec } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
+import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
 
 const optDetails = defineOption({
@@ -496,6 +497,8 @@ async function runNativeStatus(opts: {
   readonly ps?: typeof nativeProjectPs;
   readonly authored?: typeof tryNativeComposeCommand;
 }): Promise<number> {
+  // Once, whichever native observer answers (HACK-2026).
+  noteNativeBackendBeta({ json: opts.json });
   // A native-authored project (`.hack/hack.project.json`) has its own observer,
   // and legacy project discovery below refuses its inputs. Dispatch it first,
   // exactly as `hack ps` does.

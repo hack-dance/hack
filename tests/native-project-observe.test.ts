@@ -738,3 +738,33 @@ test("startup completion preserves a substituted observation marker", async () =
     "replacement owned by another writer\n"
   );
 });
+
+test("internal readiness admission reads only closed goals from the owned receipt; ordinary ps output stays unchanged", async () => {
+  const opts = await fixture();
+  for (const readiness of [
+    "completed",
+    "started",
+    "healthy",
+    "unknown",
+    undefined,
+  ] as const) {
+    const observed = snapshot();
+    const reply = {
+      ...observed,
+      receipt: { ...observed.receipt, readiness: { web: readiness } },
+    };
+    const ordinary = await nativeProjectPs({
+      ...opts,
+      invoke: async () => reply,
+    });
+    expect(ordinary.items[0]).not.toHaveProperty("readiness");
+    const internal = await nativeProjectPs({
+      ...opts,
+      includeReadiness: true,
+      invoke: async () => reply,
+    });
+    expect(internal.items[0]?.readiness).toBe(
+      readiness === "unknown" ? undefined : readiness
+    );
+  }
+});

@@ -48,10 +48,17 @@ export function classifyNativeAlreadyRunning(
   for (const item of result.items) {
     if (
       item.state === "running" &&
-      (item.health === null || item.health === "healthy")
+      item.readiness !== "completed" &&
+      (item.readiness === "healthy"
+        ? item.health === "healthy"
+        : item.health === null || item.health === "healthy")
     ) {
       started.push(item.service);
-    } else if (item.state === "exited" && item.exitCode === 0) {
+    } else if (
+      item.readiness === "completed" &&
+      item.state === "exited" &&
+      item.exitCode === 0
+    ) {
       completed.push(item.service);
     } else {
       down.push(item.service);
@@ -80,7 +87,7 @@ export function nativePartiallyRunningRefusal(
 ): HackCliError {
   return new HackCliError({
     code: "E_STARTUP_INCOMPLETE",
-    message: `Native project is already running, but these services are not up: ${down.join(", ")}. Native up cannot start part of a running project: run hack restart, or hack down and then hack up. Inspect them with hack ps and hack logs SERVICE --no-follow. Nothing was started or stopped.`,
+    message: `Native project is already running, but these services are not up: ${down.join(", ")}. Native up cannot start part of a running project: run hack restart. Nothing was started or stopped.`,
   });
 }
 

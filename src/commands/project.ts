@@ -6339,6 +6339,7 @@ async function answerNativeAlreadyRunning(opts: {
     const state = classifyNativeAlreadyRunning(
       await nativeProjectPs({
         runtime: opts.native,
+        includeReadiness: true,
         scope: {
           projectRoot: project.projectRoot,
           projectDir: project.projectDir,

@@ -413,6 +413,9 @@ state launches a start as before. When the graph is live but some services are
 not up (stopped, failed or unhealthy), `hack up -d` refuses with
 `E_STARTUP_INCOMPLETE`, names them, and points to `hack restart`: native `up`
 cannot start part of a running project. Nothing is started or stopped.
+Completion is accepted only when the runtime receipt requires the service to
+complete and its current observation is exit `0`. A long-running service that
+exits `0`, or an exited service with an unknown readiness goal, is still down.
 
 Restart starts a new foreground generation; `restart --detach` remains unsupported.
 Without these flags, `hack up` stays attached and Ctrl-C requests ordinary stop.

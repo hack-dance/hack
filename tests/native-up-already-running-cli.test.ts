@@ -51,6 +51,7 @@ type Observation = {
   readonly state: string;
   readonly health?: string;
   readonly code?: number;
+  readonly readiness?: "started" | "healthy" | "completed";
 };
 
 /** A project with a saved run whose graph the stub runtime reports as given. */
@@ -105,6 +106,12 @@ exit 1
         namespace: run.namespace,
         plan_id: run.planId,
         phase: opts.phase,
+        readiness: Object.fromEntries(
+          Object.entries(opts.services).map(([name, item]) => [
+            name,
+            item.readiness ?? "started",
+          ])
+        ),
         // A foreground-owned graph: its owner can be asked for its status.
         relay_startup: {},
         resources: Object.fromEntries(
@@ -154,6 +161,10 @@ exit 1
         HACK_NATIVE_SHARED_SOURCE: "1",
         HACK_NO_INTERACTIVE: "1",
         HACK_LOGGER: "console",
+        XDG_CONFIG_HOME: join(root, "xdg-config"),
+        XDG_STATE_HOME: join(root, "xdg-state"),
+        XDG_CACHE_HOME: join(root, "xdg-cache"),
+        XDG_DATA_HOME: join(root, "xdg-data"),
       },
     }),
     calls: async () =>
@@ -204,7 +215,7 @@ test(
       services: {
         web: { state: "running", health: "healthy" },
         db: { state: "running" },
-        seed: { state: "exited", code: 0 },
+        seed: { state: "exited", code: 0, readiness: "completed" },
       },
       owner: LIVE_OWNER,
     });
@@ -248,7 +259,7 @@ test(
       phase: "ready-observed",
       services: {
         web: { state: "running", health: "healthy" },
-        db: { state: "exited", code: 137 },
+        db: { state: "exited", code: 0, readiness: "started" },
         worker: { state: "running", health: "unhealthy" },
       },
       owner: LIVE_OWNER,
@@ -282,6 +293,7 @@ test("only a live, ready graph whose owner answers counts as already running", (
     state: observation.state,
     health: observation.health ?? null,
     exitCode: observation.code ?? null,
+    readiness: observation.readiness,
   });
   const observed = {
     backend: "native" as const,
@@ -308,7 +320,12 @@ test("only a live, ready graph whose owner answers counts as already running", (
     { ...observed, phase: "starting" },
     { ...observed, items: [] },
     // Only finished one-shots and nothing running is not a running project.
-    { ...observed, items: [item("seed", { state: "exited", code: 0 })] },
+    {
+      ...observed,
+      items: [
+        item("seed", { state: "exited", code: 0, readiness: "completed" }),
+      ],
+    },
   ]) {
     expect(classifyNativeAlreadyRunning(other)).toEqual({ kind: "launch" });
   }
@@ -320,7 +337,22 @@ test("only a live, ready graph whose owner answers counts as already running", (
         item("api", { state: "running", health: "healthy" }),
         item("job", { state: "exited", code: 2 }),
         item("gone", { state: "absent" }),
+        item("clean-exit", { state: "exited", code: 0, readiness: "started" }),
+        item("unknown-role", { state: "exited", code: 0 }),
+        item("unfinished-job", { state: "running", readiness: "completed" }),
+        item("unknown-health", { state: "running", readiness: "healthy" }),
       ],
     })
-  ).toEqual({ kind: "partial", down: ["gone", "job", "web"] });
+  ).toEqual({
+    kind: "partial",
+    down: [
+      "clean-exit",
+      "gone",
+      "job",
+      "unfinished-job",
+      "unknown-health",
+      "unknown-role",
+      "web",
+    ],
+  });
 });

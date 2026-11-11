@@ -649,7 +649,7 @@ export async function removeDaemonFilesIfStale(opts: {
   if (
     current !== null &&
     opts.observedPidIsDaemon !== false &&
-    isProcessRunning({ pid: current })
+    (await isProcessAlive({ pid: current }))
   ) {
     return newer;
   }

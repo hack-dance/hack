@@ -913,32 +913,7 @@ test.skipIf(process.platform !== "linux")(
   async () => {
     // Codex review: under a non-reaping init a stopped hackd stays a zombie;
     // kill(pid, 0) still succeeds and its identity cannot be read.
-    // `sh` starts a short child, then execs a sleep that never reaps it.
-    const parent = Bun.spawn(["/bin/sh", "-c", "sleep 0 & exec sleep 30"], {
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    children.push(parent);
-    let zombie: number | null = null;
-    for (let i = 0; i < 100 && zombie === null; i++) {
-      await Bun.sleep(20);
-      const text = await Bun.file(
-        `/proc/${parent.pid}/task/${parent.pid}/children`
-      )
-        .text()
-        .catch(() => "");
-      const pid = Number.parseInt(text.trim(), 10);
-      const stat = Number.isSafeInteger(pid)
-        ? await Bun.file(`/proc/${pid}/stat`)
-            .text()
-            .catch(() => "")
-        : "";
-      if (stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z")) {
-        zombie = pid;
-      }
-    }
-    expect(zombie).not.toBeNull();
-    const pid = zombie as number;
+    const pid = await spawnZombie();
     expect(process.kill(pid, 0)).toBe(true);
     expect(await isProcessAlive({ pid })).toBe(false);
     expect(
@@ -956,6 +931,70 @@ test.skipIf(process.platform !== "linux")(
       })
     ).toEqual({ kind: "exited" });
     expect(signals).toEqual([]);
+  },
+  10_000
+);
+
+/**
+ * A real zombie: `sh` starts a short child, then execs a `sleep` that never
+ * reaps it. Returns the zombie's pid; the parent is cleaned up with the
+ * other children.
+ */
+async function spawnZombie(): Promise<number> {
+  const parent = Bun.spawn(["/bin/sh", "-c", "sleep 0 & exec sleep 30"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  children.push(parent);
+  for (let i = 0; i < 100; i++) {
+    await Bun.sleep(20);
+    const text = await Bun.file(
+      `/proc/${parent.pid}/task/${parent.pid}/children`
+    )
+      .text()
+      .catch(() => "");
+    const pid = Number.parseInt(text.trim(), 10);
+    const stat = Number.isSafeInteger(pid)
+      ? await Bun.file(`/proc/${pid}/stat`)
+          .text()
+          .catch(() => "")
+      : "";
+    if (stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z")) {
+      return pid;
+    }
+  }
+  throw new Error("no zombie appeared");
+}
+
+test.skipIf(process.platform !== "linux")(
+  "a zombie named by the pid file is stale for status and cleanup (real process)",
+  async () => {
+    // Codex review: after a forced stop under a non-reaping init, cleanup and
+    // status still called the zombie running, so restart said "already
+    // running" and left the stale files.
+    const pid = await spawnZombie();
+    expect(process.kill(pid, 0)).toBe(true);
+    const home = join(root, "home");
+    const daemonDir = join(home, ".hack", "daemon");
+    await mkdir(daemonDir, { recursive: true });
+    const pidPath = join(daemonDir, "hackd.pid");
+    const socketPath = join(daemonDir, "hackd.sock");
+    await writeFile(pidPath, `${pid}\n`);
+    await writeFile(socketPath, "");
+    const { readDaemonStatus } = await import("../src/daemon/status.ts");
+    const { resolveDaemonPaths } = await import("../src/daemon/paths.ts");
+    const status = await readDaemonStatus({
+      paths: resolveDaemonPaths({ home }),
+    });
+    expect(status.running).toBe(false);
+    expect(
+      await removeDaemonFilesIfStale({
+        pidPath,
+        socketPath,
+        observedPid: pid,
+        isAccepting: () => Promise.resolve(false),
+      })
+    ).toEqual({ removedPid: true, removedSocket: true, newerOwner: false });
   },
   10_000
 );

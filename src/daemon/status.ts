@@ -1,6 +1,6 @@
 import { pathExists } from "../lib/fs.ts";
 import type { DaemonPaths } from "./paths.ts";
-import { isProcessRunning, readDaemonPid } from "./process.ts";
+import { isProcessAlive, readDaemonPid } from "./process.ts";
 
 export interface DaemonStatus {
   readonly running: boolean;
@@ -50,7 +50,8 @@ export async function readDaemonStatus({
   const pid = await readDaemonPid({ pidPath: paths.pidPath });
   const socketExists = await pathExists(paths.socketPath);
   const logExists = await pathExists(paths.logPath);
-  const running = pid !== null && isProcessRunning({ pid });
+  // A zombie (exited, not yet reaped by a non-reaping init) is not running.
+  const running = pid !== null && (await isProcessAlive({ pid }));
 
   return {
     running,

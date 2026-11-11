@@ -1,6 +1,8 @@
-# Dogfooding v5 alongside v4
+# Qualify a project on v5 alongside v4
 
-Use the native candidate on an Apple Silicon Mac for explicitly qualified projects.
+The v5 prerelease runs on Compose by default through `hack`; the `hack-next`
+launcher selects the native backend so the candidate can be tested. Use the native
+candidate on an Apple Silicon Mac for explicitly qualified projects.
 Keep stable v4 available for existing work until each project's actual workflow
 passes. Publishing a prerelease or passing hosted CI does not establish application
 compatibility, lower resource use or whole-product readiness.
@@ -73,7 +75,7 @@ These commands do not establish that an arbitrary v4 project can run natively.
 | Secrets | Keep keys and private artifacts out of public evidence. The [paired rotation protocol](../security/env-secret-rotation.md) is a proposal/model, not a production rotation command |
 | Agent clients | Use the [capability matrix](../reference/agent-client-capabilities.md); discovery, hooks, MCP loading and UI behavior need distinct evidence for each client |
 | Performance and retention | Measure matched workloads and retained disk over repeated cycles; do not infer savings from native execution or a single idle sample |
-| Other platforms and retired surfaces | See the explicit [unsupported list](prereleases.md#unsupported-platforms-and-surfaces); these are not prerequisites for M5 dogfooding |
+| Other platforms and retired surfaces | See the explicit [unsupported list](prereleases.md#unsupported-platforms-and-surfaces); these are not prerequisites for qualifying a project |
 
 An unresolved required application failure keeps that project on v4. Record a
 value-free refusal and preserve its owned state for diagnosis. Use ordinary owned

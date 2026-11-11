@@ -42,7 +42,7 @@ read from the host on 2026-10-19:
 
 | Item | Value |
 | --- | --- |
-| Host | `m3-max`: Apple M3 Max, 16 logical CPUs, 128 GiB memory |
+| Host | Apple M3 Max, 16 logical CPUs, 128 GiB memory |
 | OS | macOS 27.0 |
 | Docker CLI | 29.4.0 |
 | Docker Compose | v5.1.2 |

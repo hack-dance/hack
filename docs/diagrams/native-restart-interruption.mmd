@@ -1,0 +1,20 @@
+sequenceDiagram
+  autonumber
+  participant T as Terminal
+  participant C as Runtime child
+  participant F as Restart frontend
+  T->>C: Group SIGINT or SIGTERM
+  T->>F: Same stop signal
+  alt Child exit observed first
+    C-->>F: Request rejects with stopSignal
+    Note over F: Previously abort was false and generic failure escaped
+  else Frontend handler observed first
+    F->>F: Abort stop signal
+    C-->>F: Request rejects
+  end
+  Note over F: Classify from abort OR child stopSignal
+  alt Preflight
+    F->>F: Cancel before cleanup, exit 130 or 143
+  else Down
+    F->>F: Report stopping, retain prepared intent and interrupted-stop guidance
+  end

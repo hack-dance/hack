@@ -16,7 +16,63 @@
  * line that is the same fence at the same indentation.
  */
 
+import { realpath } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
+
 const INCLUDE = /^(\s*)<!-- include: (\S+) -->\s*$/;
+
+/** Include markers may name only files under this repository directory. */
+export const INCLUDE_ROOT = "examples";
+
+/**
+ * True when an include path is a plain repository-relative path under
+ * {@link INCLUDE_ROOT}: no absolute path, no `.` or `..` segment, no
+ * backslash. Checked before any file is read, so a marker in an untrusted
+ * page cannot pull a file from elsewhere on the machine into the docs.
+ */
+export function isAllowedIncludePath(path: string): boolean {
+  if (isAbsolute(path) || path.includes("\\")) {
+    return false;
+  }
+  const segments = path.split("/");
+  return (
+    segments.length > 1 &&
+    segments[0] === INCLUDE_ROOT &&
+    segments.every(
+      (segment) => segment !== "" && segment !== "." && segment !== ".."
+    )
+  );
+}
+
+/**
+ * Read an allowed include file from a repository checkout. Returns null for
+ * a disallowed path, a missing file, or a path whose real location (after
+ * symlinks) is outside `<repoRoot>/examples`.
+ */
+export async function readRepoInclude(opts: {
+  readonly repoRoot: string;
+  readonly path: string;
+}): Promise<string | null> {
+  if (!isAllowedIncludePath(opts.path)) {
+    return null;
+  }
+  try {
+    const root = await realpath(join(opts.repoRoot, INCLUDE_ROOT));
+    const target = await realpath(join(opts.repoRoot, opts.path));
+    const inside = relative(root, target);
+    if (
+      inside === "" ||
+      inside.startsWith(`..${sep}`) ||
+      inside === ".." ||
+      isAbsolute(inside)
+    ) {
+      return null;
+    }
+    return await Bun.file(target).text();
+  } catch {
+    return null;
+  }
+}
 const FENCE = /^(\s*)(`{3,})(\S*)\s*$/;
 
 /** One include marker and the code block it governs. */
@@ -111,6 +167,10 @@ export async function docIncludeIssues(opts: {
   const issues: string[] = [];
   for (const include of parseDocIncludes(opts.markdown)) {
     const where = `line ${include.line} (${include.path})`;
+    if (!isAllowedIncludePath(include.path)) {
+      issues.push(`${where}: include-path-not-allowed`);
+      continue;
+    }
     if (include.body === null) {
       issues.push(`${where}: include-without-code-block`);
       continue;
@@ -138,7 +198,7 @@ export async function refreshDocIncludes(opts: {
   const lines = opts.markdown.split("\n");
   const includes = parseDocIncludes(opts.markdown).reverse();
   for (const include of includes) {
-    if (include.body === null) {
+    if (include.body === null || !isAllowedIncludePath(include.path)) {
       continue;
     }
     const file = await opts.readFile(include.path);

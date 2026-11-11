@@ -5,17 +5,21 @@
  *   bun scripts/refresh-doc-includes.ts docs/recipes/*.md          # check
  *   bun scripts/refresh-doc-includes.ts --write docs/recipes/*.md  # refresh
  *
- * Paths in include markers are relative to the repository root.
+ * Paths in include markers are relative to the repository root and must be
+ * under examples/; other paths are reported and never read.
  */
 import { join } from "node:path";
 
-import { docIncludeIssues, refreshDocIncludes } from "./lib/doc-includes.ts";
+import {
+  docIncludeIssues,
+  readRepoInclude,
+  refreshDocIncludes,
+} from "./lib/doc-includes.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 
 async function readRepoFile(path: string): Promise<string | null> {
-  const file = Bun.file(join(REPO_ROOT, path));
-  return (await file.exists()) ? await file.text() : null;
+  return await readRepoInclude({ repoRoot: REPO_ROOT, path });
 }
 
 const args = process.argv.slice(2);

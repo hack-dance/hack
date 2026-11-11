@@ -1,12 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
-import { cp, mkdtemp, readdir, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { YAML } from "bun";
 
 import {
   docIncludeIssues,
+  isAllowedIncludePath,
   parseDocIncludes,
+  readRepoInclude,
   refreshDocIncludes,
 } from "../scripts/lib/doc-includes.ts";
 import { isRecord } from "../src/lib/guards.ts";
@@ -71,6 +73,10 @@ async function readRecord(path: string): Promise<Record<string, unknown>> {
     throw new Error("expected a mapping");
   }
   return parsed;
+}
+
+async function readInclude(path: string): Promise<string | null> {
+  return await readRepoInclude({ repoRoot: REPO_ROOT, path });
 }
 
 async function readRepoFile(path: string): Promise<string | null> {
@@ -291,7 +297,7 @@ test("every include block in the recipe pages equals its example file", async ()
     expect(
       await docIncludeIssues({
         markdown: await Bun.file(page).text(),
-        readFile: readRepoFile,
+        readFile: readInclude,
       }),
       basename(page)
     ).toEqual([]);
@@ -418,20 +424,20 @@ test("negative controls: the example checks reject the mistakes they guard", asy
   const stale = page.replace("oven/bun:1.4.4-slim", "oven/bun:1.4.3-slim");
   expect(stale).not.toBe(page);
   expect(
-    await docIncludeIssues({ markdown: stale, readFile: readRepoFile })
+    await docIncludeIssues({ markdown: stale, readFile: readInclude })
   ).toEqual([
     `line ${composeInclude.line} (examples/recipes/deps-service/.hack/docker-compose.yml): include-out-of-date`,
   ]);
   expect(
     await docIncludeIssues({
       markdown: "<!-- include: examples/missing.yml -->\n```yaml\nx\n```\n",
-      readFile: readRepoFile,
+      readFile: readInclude,
     })
   ).toEqual(["line 1 (examples/missing.yml): include-file-missing"]);
   expect(
     await docIncludeIssues({
       markdown: "<!-- include: examples/missing.yml -->\ntext\n",
-      readFile: readRepoFile,
+      readFile: readInclude,
     })
   ).toEqual(["line 1 (examples/missing.yml): include-without-code-block"]);
 });
@@ -553,6 +559,59 @@ test("refreshing a stale indented include restores the file and keeps the layout
   expect(await refreshDocIncludes({ markdown: refreshed, readFile })).toBe(
     refreshed
   );
+});
+
+test("include markers can only name files under examples/", async () => {
+  expect(
+    isAllowedIncludePath("examples/configs/web-postgres/package.json")
+  ).toBe(true);
+  for (const path of [
+    "../outside.txt",
+    "examples/../../outside.txt",
+    "examples/./x",
+    "/etc/hostname",
+    "docs/recipes/README.md",
+    "examples",
+    "examples//x",
+    "examples\\x",
+  ]) {
+    expect(isAllowedIncludePath(path), path).toBe(false);
+  }
+
+  const markdown = [
+    "<!-- include: ../outside.txt -->",
+    "```text",
+    "kept",
+    "```",
+    "",
+  ].join("\n");
+  let reads = 0;
+  const readFile = async () => {
+    reads += 1;
+    return "secret";
+  };
+  expect(await docIncludeIssues({ markdown, readFile })).toEqual([
+    "line 1 (../outside.txt): include-path-not-allowed",
+  ]);
+  expect(await refreshDocIncludes({ markdown, readFile })).toBe(markdown);
+  expect(reads).toBe(0);
+
+  // A symlink under examples/ that points outside it is not read.
+  const root = await mkdtemp(join(tmpdir(), "hack-doc-include-"));
+  roots.push(root);
+  await mkdir(join(root, "examples"));
+  await Bun.write(join(root, "outside.txt"), "outside\n");
+  await Bun.write(join(root, "examples/inside.txt"), "inside\n");
+  await symlink(join(root, "outside.txt"), join(root, "examples/link.txt"));
+  expect(
+    await readRepoInclude({ repoRoot: root, path: "examples/inside.txt" })
+  ).toBe("inside\n");
+  expect(
+    await readRepoInclude({ repoRoot: root, path: "examples/link.txt" })
+  ).toBeNull();
+  expect(
+    await readRepoInclude({ repoRoot: root, path: "examples/../outside.txt" })
+  ).toBeNull();
 });
 
 composeConfigTest(

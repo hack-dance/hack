@@ -19,6 +19,8 @@ export async function spawnHackdLikeFixture(opts: {
    * `bun index.ts daemon start --foreground` runs from a checkout.
    */
   readonly relativeEntry?: boolean;
+  /** Launch as `bun run <entry> ...`, like the package `dev` script. */
+  readonly viaRun?: boolean;
 }): Promise<{
   readonly child: ReturnType<typeof Bun.spawn>;
   /** Accepts this fixture's entry file as "this checkout's" entry. */
@@ -33,16 +35,20 @@ export async function spawnHackdLikeFixture(opts: {
     'Bun.serve({ unix: process.env.FIXTURE_SOCKET ?? "", fetch() { return new Response("x"); } });\nawait Bun.write(process.env.FIXTURE_READY ?? "", "ready");\n'
   );
   const entry = opts.relativeEntry === true ? "hack-fixture.ts" : script;
-  const child = Bun.spawn([runtime, entry, "daemon", "start", "--foreground"], {
-    cwd: dir,
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-    env: {
-      FIXTURE_SOCKET: opts.socket,
-      FIXTURE_READY: opts.ready,
-    },
-  });
+  const run = opts.viaRun === true ? ["run"] : [];
+  const child = Bun.spawn(
+    [runtime, ...run, entry, "daemon", "start", "--foreground"],
+    {
+      cwd: dir,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: {
+        FIXTURE_SOCKET: opts.socket,
+        FIXTURE_READY: opts.ready,
+      },
+    }
+  );
   return {
     child,
     expectation: { entryFiles: new Set([script, await realpath(script)]) },

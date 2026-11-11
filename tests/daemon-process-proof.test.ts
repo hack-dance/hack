@@ -653,38 +653,41 @@ test("hack daemon restart replaces a stale pid file without signalling its pid",
 }, 20_000);
 
 test.skipIf(process.platform !== "linux")(
-  "a source daemon started with a relative entry is proven and stopped (real process)",
+  "a source daemon started with a relative entry, or through bun run, is proven and stopped (real process)",
   async () => {
-    const daemonRoot = join(root, "relative");
-    await mkdir(daemonRoot);
-    const socket = join(daemonRoot, "hackd.sock");
-    const ready = join(daemonRoot, "ready");
-    const { child, expectation } = await spawnHackdLikeFixture({
-      dir: root,
-      socket,
-      ready,
-      relativeEntry: true,
-    });
-    children.push(child);
-    for (let i = 0; i < 100 && !(await Bun.file(ready).exists()); i++) {
-      await Bun.sleep(20);
+    for (const viaRun of [false, true]) {
+      const daemonRoot = join(root, viaRun ? "relative-run" : "relative");
+      await mkdir(daemonRoot);
+      const socket = join(daemonRoot, "hackd.sock");
+      const ready = join(daemonRoot, "ready");
+      const { child, expectation } = await spawnHackdLikeFixture({
+        dir: root,
+        socket,
+        ready,
+        relativeEntry: true,
+        viaRun,
+      });
+      children.push(child);
+      for (let i = 0; i < 100 && !(await Bun.file(ready).exists()); i++) {
+        await Bun.sleep(20);
+      }
+      const proof = await proveOwnedDaemonProcess({
+        pid: child.pid,
+        daemonRoot,
+        expectation,
+      });
+      expect(proof.kind).toBe("owned");
+      if (proof.kind !== "owned") {
+        continue;
+      }
+      expect(proof.image.argv).toContain("hack-fixture.ts");
+      expect(
+        await terminateProvenDaemon({ proof, daemonRoot, expectation })
+      ).toEqual({ kind: "exited" });
+      await child.exited;
     }
-    const proof = await proveOwnedDaemonProcess({
-      pid: child.pid,
-      daemonRoot,
-      expectation,
-    });
-    expect(proof.kind).toBe("owned");
-    if (proof.kind !== "owned") {
-      return;
-    }
-    expect(proof.image.argv[1]).toBe("hack-fixture.ts");
-    expect(
-      await terminateProvenDaemon({ proof, daemonRoot, expectation })
-    ).toEqual({ kind: "exited" });
-    await child.exited;
   },
-  10_000
+  20_000
 );
 
 test("the identity rule uses the resolved executable and exact argv", () => {
@@ -736,6 +739,26 @@ test("the identity rule uses the resolved executable and exact argv", () => {
       executable: "/usr/bin/bun",
       argv: ["bun", "index.ts", ...daemonArgs],
       cwd: "/other",
+    })
+  ).toBe(false);
+  // Codex P2: `bun run <entry>` (the package `dev` script).
+  expect(
+    matches({
+      executable: "/usr/bin/bun",
+      argv: ["bun", "run", entry, ...daemonArgs],
+    })
+  ).toBe(true);
+  expect(
+    matches({
+      executable: "/usr/bin/bun",
+      argv: ["bun", "run", "index.ts", ...daemonArgs],
+      cwd: "/src/hack repo",
+    })
+  ).toBe(true);
+  expect(
+    matches({
+      executable: "/usr/bin/bun",
+      argv: ["bun", "run", "/other/index.ts", ...daemonArgs],
     })
   ).toBe(false);
   // Unknown cwd: a relative entry does not match.

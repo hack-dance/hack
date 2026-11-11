@@ -1207,5 +1207,15 @@ describe("unconfirmed container stops hold admission", () => {
         now: 1_000_001,
       })
     ).toBe(false);
+    // A clean exit never holds, even when the stop could not run.
+    expect(
+      holdsSlot({
+        meta,
+        ended: {
+          payload: { outcome: "succeeded", containerProcess: "not_confirmed" },
+        },
+        now: 1_000_001,
+      })
+    ).toBe(false);
   });
 });

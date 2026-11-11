@@ -163,17 +163,18 @@ output events. Hack then records `command.output_truncated`, stops storing
 output, and **the command keeps running** to its normal end, which records
 `truncated: true`. If the disk or quota fills while events are recorded,
 capture also stops and the command keeps running; its final record (written
-from space reserved at start) has `truncated: true` and
-`captureStopped: "no_space"`. On the Compose backend each output file is
-also capped at 64 MiB by a kernel file-size limit on the host-side
-`docker compose` client, so a burst between two supervisor polls cannot fill
-the disk. A client that writes more than that within one poll (200 ms) gets a
-"File too large" (EFBIG) error and exits: the command ends `failed`, output
-after that point is lost, and what ran in the container is then stopped
-like at any other end (see Inspect and cancel). Everything the client starts on the host inherits the same
-64 MiB file limit (with SIGXFSZ ignored). A command whose program does not
-exist ends `failed` with exit code 127. The native backend has no such cap. This differs from the foreground `hack.project.exec` and
-`hack.project.run` MCP tools, where reaching 8 MiB stops the command.
+from space reserved at start) has `truncated: true` and `captureStopped:
+"no_space"`. On the Compose backend each output file is also capped at 64 MiB
+by a kernel file-size limit on the host-side `docker compose` client, so a
+burst between two supervisor polls cannot fill the disk. A client that writes
+more than that within one poll (200 ms) gets a "File too large" (EFBIG) error
+and exits: the command ends `failed`, output after that point is lost, and
+what ran in the container is then stopped like at any other end (see Inspect
+and cancel). Everything the client starts on the host inherits the same 64 MiB
+file limit (with SIGXFSZ ignored). A command whose program does not exist ends
+`failed` with exit code 127. The native backend has no such cap. This differs
+from the foreground `hack.project.exec` and `hack.project.run` MCP tools,
+where reaching 8 MiB stops the command.
 
 ## Inspect and cancel
 
@@ -217,14 +218,18 @@ does not stop what runs in the container, so:
   environment the exec user cannot read (another user's, or a setuid
   program).
 
-An end whose container process is `not_confirmed` keeps its admission slot
-until the command's timeout window closes, so a start/cancel loop cannot run
-more than the limits allow. The hold survives retention: when the output
-expires first, the tombstone keeps the deadline. A Compose command finalized
-after its supervisor was lost also ends with `containerProcess:
-"not_confirmed"`, because nothing stopped what ran in the container. When the stop itself cannot be confirmed (for
-example the command's identity is unknown, see below), no final record is
-written and `outcome` is `unconfirmed`.
+An end other than `succeeded` whose container process is `not_confirmed` keeps
+its admission slot until the command's timeout window closes, so a
+start/cancel loop cannot run more than the limits allow. A `succeeded` end
+never holds a slot, even on an image where the stop cannot run; anything a
+succeeded command left running in the background is then not confirmed
+stopped, as with a foreground `hack exec`. The hold survives retention: when
+the output expires first, the tombstone keeps the deadline. A Compose command
+finalized after its supervisor was lost also ends with `containerProcess:
+"not_confirmed"`, because nothing stopped what ran in the container. When the
+stop itself cannot be confirmed (for example the command's identity is
+unknown, see below), no final record is written and `outcome` is
+`unconfirmed`.
 
 ## Ownership
 

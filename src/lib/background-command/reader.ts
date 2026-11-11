@@ -100,13 +100,17 @@ export async function loadJournal(opts: {
     (await isExpired(paths)) ||
     (await expireIfDue({ paths, meta, now: Date.now() }))
   ) {
-    throw new HackCliError({
-      code: "E_RESULT_EXPIRED",
-      message:
-        "This background command's result has expired and its output was removed.",
-    });
+    throw resultExpired();
   }
   return { paths, meta };
+}
+
+function resultExpired(): HackCliError {
+  return new HackCliError({
+    code: "E_RESULT_EXPIRED",
+    message:
+      "This background command's result has expired and its output was removed.",
+  });
 }
 
 export function commandNotFound(): HackCliError {
@@ -133,13 +137,20 @@ export async function readCurrentEvents(opts: {
     now: (opts.now ?? Date.now)(),
     observe: opts.observe,
   });
-  return assessment.kind === "owner_lost"
-    ? await recoverLostOwner({
-        ...opts.journal,
-        observe: opts.observe,
-        now: opts.now,
-      })
-    : events;
+  if (assessment.kind !== "owner_lost") {
+    return events;
+  }
+  const recovered = await recoverLostOwner({
+    ...opts.journal,
+    observe: opts.observe,
+    now: opts.now,
+  });
+  // Expired while recovery waited for the lock: report it as expired, not
+  // as a command that never started.
+  if (recovered.length === 0 && (await isExpired(opts.journal.paths))) {
+    throw resultExpired();
+  }
+  return recovered;
 }
 
 export function stateOf(events: readonly EventEnvelope[]): CommandState {

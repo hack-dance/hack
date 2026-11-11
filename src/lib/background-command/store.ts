@@ -236,14 +236,19 @@ async function holdsAdmission(opts: {
     : true;
 }
 
-/** An end whose container process is unconfirmed holds its slot until the timeout window closes. */
+/** An end other than `succeeded` whose container process is unconfirmed holds its slot until the timeout window closes. */
 export function holdsSlot(opts: {
   readonly meta: CommandMeta;
   readonly ended: { readonly payload: Record<string, unknown> };
   readonly now: number;
 }): boolean {
+  // A clean exit never holds: on an image where the stop cannot run (no
+  // `sh`, `/proc` or `tr`) every end is `not_confirmed`, and holding those
+  // would refuse new commands although none is running. What a succeeded
+  // command left in the background is the same gap as a foreground exec.
   return (
     opts.ended.payload.containerProcess === "not_confirmed" &&
+    opts.ended.payload.outcome !== "succeeded" &&
     opts.now < Date.parse(opts.meta.acceptedAt) + opts.meta.timeoutMs
   );
 }

@@ -17,7 +17,7 @@ does not fall back to Docker without telling you.
 
 | You want to | Native today |
 | --- | --- |
-| Start the whole project | `hack up`, in the foreground |
+| Start the whole project | `hack up` in the foreground. Prereleases after next.12 also accept `hack up -d` to run it in the background. |
 | Restart the whole project | `hack restart` |
 | Stop the project | `hack down`, and `hack down --recover` after a crash |
 | See what is running | `hack ps` |
@@ -37,6 +37,9 @@ The exact rules for each command are in
   running. Stop it and start it again.
 - Starting or restarting single services. Native starts and restarts the whole
   project.
+- UDP ports. Only TCP ports with an explicit host port are published.
+- Automatic restart for services that publish a port.
+- A one-command setup. Preparing the runtime is manual.
 
 ## Compose features that stay on Compose
 
@@ -56,6 +59,8 @@ Details and the exact checks:
 
 ## Other limits
 
+- **Shared machine.** All native projects run in one virtual machine. They are
+  separated the way Compose projects are, not by a machine each.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

@@ -52,8 +52,9 @@ refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and change nothing. See
 "$HOME/.hack-next/bin/hack-next" up --path /absolute/project
 ```
 
-Native `up` runs in the foreground and holds the project until you stop it. From a
-second terminal:
+Native `up` runs in the foreground and holds the project until you stop it.
+Prereleases after next.12 also accept `hack up -d` to run it in the background. From
+a second terminal:
 
 ```sh
 "$HOME/.hack-next/bin/hack-next" ps --path /absolute/project

@@ -9,9 +9,14 @@ project unless you choose native for it.
 Hack needs something to run your services in. Today that is Docker Compose, which
 needs a Docker app running on your machine.
 
-With the native backend, Hack does that job itself. It starts a small Linux virtual
-machine on your Mac and runs your services inside it. Hack owns that machine: it
-starts it, checks it, and cleans up after it.
+With the native backend, Hack runs your Compose project in a small Linux virtual
+machine that Hack owns. Docker runs inside that machine, so you do not need Docker
+Desktop or OrbStack on the Mac. Hack starts the machine, checks it, and cleans up
+after it.
+
+It is not a different container format. Your images and your Compose file are the
+same. All your native projects share one virtual machine, the way Compose projects
+share one Docker machine.
 
 Your project stays the same. The `.hack/` folder, the commands (`hack up`,
 `hack down`, `hack logs`) and your env and secrets are the same on both backends.
@@ -27,22 +32,38 @@ Your project stays the same. The `.hack/` folder, the commands (`hack up`,
   and Compose features. See [what works and known limits](limits.md).
 - **Not a migration.** Trying native does not convert your project or move your
   data. Your stable setup is left alone.
-- **Not proven faster or lighter.** We have not published measurements, so we make
-  no speed or resource claims.
+- **Not proven faster or lighter.** We have published no measurement that compares
+  native with Compose, so we make no speed, memory or battery claims.
+- **Not a wall between projects.** Native projects share one virtual machine.
 
 ## Why try it
 
-- **No Docker app to run.** You do not need Docker Desktop or another Docker engine
-  running on the Mac for a native project.
+What you get today:
+
+- **No Docker Desktop install or licence.** Hack brings what it needs.
+- **Ports stay on your machine.** A Compose port bound to every network interface
+  (`0.0.0.0`) is narrowed to your own machine, so a dev service is not open to the
+  network you are on.
+- **You can limit where containers connect.** An optional list names the hosts your
+  containers may reach.
+- **Risky container settings are refused.** For example, `privileged: true` does not
+  run.
+- **Images are checked when pulled.** Hack verifies each image against its digest, a
+  fingerprint of its exact contents.
+- **Crashes are handled in the open.** Hack detects a crashed run and cleans it up
+  with an explicit command. `hack down` keeps your data.
 - **Safe to try.** `hack-next` installs beside stable Hack with its own files. It
   does not edit your PATH, your stable `hack`, or `~/.hack`.
-- **Careful with your data.** Every run has one owner. Hack records what it creates
-  before it creates it, and confirms cleanup instead of assuming it.
-- **Clear refusals.** When a project uses something native does not support, Hack
-  says so before it starts anything. It names the feature and changes nothing. It
-  never falls back to Docker without telling you.
-- **Preview first.** `hack config validate` and `hack config plan` check a project
-  for native without starting it.
+
+What you give up today:
+
+- Following logs live.
+- Interactive shells in a container.
+- UDP ports.
+- Automatic restart for services that publish a port.
+- A one-command setup. Preparing the runtime is still manual.
+
+Use Compose if you need any of these.
 
 ## Who should try it
 

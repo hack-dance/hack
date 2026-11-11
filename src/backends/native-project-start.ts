@@ -403,6 +403,16 @@ const DEFAULTS: Dependencies = {
   downHooks: createNativeForegroundDownHooks,
   exitMonitorIntervalMs: 2000,
 };
+/** Names only: which referenced shell variables were not set. */
+function reportNativeEnvironmentNotices(
+  input: NativeProjectInput,
+  warn: (line: string) => void
+): void {
+  for (const line of input.environmentNotices ?? []) {
+    warn(line);
+  }
+}
+
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
   "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped.";
@@ -1841,10 +1851,7 @@ async function startNativeProjectAttempt(
     composeFile: opts.composeFile,
     envName: selection.envName,
   });
-  // Names only: which referenced shell variables were not set.
-  for (const line of input.environmentNotices ?? []) {
-    deps.warn(line);
-  }
+  reportNativeEnvironmentNotices(input, deps.warn);
   // Digest the selection now: later steps adapt the delivered values.
   const selectedEnvironment = opts.onEnvironmentReady
     ? withComposeServiceEnvFingerprints({

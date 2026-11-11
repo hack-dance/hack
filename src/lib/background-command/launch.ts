@@ -153,6 +153,12 @@ export type BackgroundStart = {
   };
   /** Values Hack already resolved for injection into this command. */
   readonly redactValues: readonly string[];
+  /**
+   * The launch argv without decisions Hack derived from runtime state (such
+   * as `--no-deps` when the stack happens to run), so a retried request key
+   * with the same inputs matches. Defaults to `child.argv`.
+   */
+  readonly requestIdentityArgv?: readonly string[];
   /** Selected env overlay; part of "the same request" for a request key. */
   readonly overlay: string | null;
 };
@@ -219,7 +225,7 @@ export async function startBackgroundCommand(
         stallAfterMs: settings.stallAfterMs,
         capture: settings.capture,
         // Compose project, files and profiles, or the foreground CLI argv.
-        childArgv: [...opts.child.argv],
+        childArgv: [...(opts.requestIdentityArgv ?? opts.child.argv)],
         overlay: opts.overlay,
       },
     },

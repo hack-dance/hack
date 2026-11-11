@@ -158,6 +158,13 @@ export async function startComposeBackgroundCommand(opts: {
     argv: [...options.cmdArgs],
     workdir: options.workdir ?? null,
     child: { argv, cwd: options.cwd, env: spawnEnv(options.env) },
+    requestIdentityArgv:
+      opts.compose.operation === "run"
+        ? buildComposeRunCommand({
+            options: { ...opts.compose.options, noDeps: false },
+            disableTty: true,
+          })
+        : argv,
     redactValues: opts.redactValues,
     overlay: opts.overlay,
   });

@@ -600,6 +600,39 @@ describe("background command processes", () => {
   );
 
   test(
+    "a stop also ends descendants that ignore SIGTERM, by verified identity",
+    async () => {
+      const launched = await launch({
+        argv: [
+          "sh",
+          "-c",
+          "trap '' TERM; (trap '' TERM; exec sleep 30) & echo $! > grandchild.pid; wait",
+        ],
+        timeoutMs: 1000,
+      });
+      const read = await readUntilEnded({
+        journal: launched.journal as LoadedJournal,
+      });
+      expect(read.outcome).toBe("timed_out");
+      const grandchild = Number(
+        (await readFile(join(fixture.root, "grandchild.pid"), "utf8")).trim()
+      );
+      expect(grandchild).toBeGreaterThan(1);
+      const deadline = Date.now() + 5000;
+      let alive = true;
+      while (alive && Date.now() < deadline) {
+        alive =
+          (await observeIdentities([grandchild]))?.has(grandchild) ?? true;
+        if (alive) {
+          await Bun.sleep(100);
+        }
+      }
+      expect(alive).toBe(false);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
     "reaching the capture limit stops capture but the command keeps running to its end",
     async () => {
       const launched = await launch({

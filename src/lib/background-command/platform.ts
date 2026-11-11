@@ -127,15 +127,30 @@ export async function observeIdentities(
  */
 export const IDENTITY_PS_ENV = Object.freeze({ LC_ALL: "C", TZ: "UTC0" });
 
+/**
+ * Every process currently in a process group, with pid and birth. Only
+ * meaningful while the group's leader is known to exist (not yet reaped), so
+ * the group id cannot have been reused. Null when `ps` is unavailable.
+ */
+export async function observeProcessGroup(
+  processGroupId: number
+): Promise<ProcessIdentity[] | null> {
+  const rows = await readIdentityRows(null);
+  return rows
+    ? rows
+        .filter((row) => row.processGroupId === processGroupId)
+        .map((row) => ({ pid: row.pid, birth: row.birth }))
+    : null;
+}
+
 async function readIdentityRows(
-  pids: readonly number[]
+  pids: readonly number[] | null
 ): Promise<ReturnType<typeof parseObservedProcesses> | null> {
   try {
     const result = await exec(
       [
         "ps",
-        "-p",
-        pids.join(","),
+        ...(pids ? ["-p", pids.join(",")] : ["-A"]),
         "-o",
         "pid=,ppid=,pgid=,etime=,time=,rss=,lstart=",
       ],

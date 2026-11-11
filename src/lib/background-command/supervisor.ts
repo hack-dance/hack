@@ -23,9 +23,13 @@ import { pumpStream } from "./output-pump.ts";
 import { encodeSecrets } from "./output-scanner.ts";
 import {
   closeDescriptor,
+  identityMatches,
   observeIdentities,
+  observeProcessGroup,
   openAppendOnlyOutput,
+  type ProcessIdentity,
   readOwnIdentity,
+  signalProcess,
   signalProcessGroup,
 } from "./platform.ts";
 import { withJournalLock } from "./recovery.ts";
@@ -320,7 +324,7 @@ async function superviseChild(opts: {
     }
   );
   let stopping: StopReason | null = null;
-  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const stopper = new GroupStopper(proc);
   while (!exited) {
     await Bun.sleep(TICK_MS);
     const reason: StopReason | null = stopping
@@ -328,11 +332,7 @@ async function superviseChild(opts: {
       : await stopReason({ ...opts, now: performance.now() });
     if (reason) {
       stopping = reason;
-      signalProcessGroup(proc.pid, "SIGTERM");
-      killTimer = setTimeout(
-        () => signalProcessGroup(proc.pid, "SIGKILL"),
-        STOP_GRACE_MS
-      );
+      await stopper.stop();
     }
     await capture.poll(false);
     if (!(stopping || exited)) {
@@ -340,11 +340,15 @@ async function superviseChild(opts: {
     }
   }
   const exitCode = await proc.exited;
-  clearTimeout(killTimer);
-  if (stopping) {
-    // Descendants must not outlive a forced stop.
-    signalProcessGroup(proc.pid, "SIGKILL");
+  // A cancel that arrived while output was being captured (the canceller
+  // also signals the group directly) is still a cancel, not a failure.
+  if (
+    !stopping &&
+    (opts.stopRequested() || (await cancelRequested(opts.paths)))
+  ) {
+    stopping = "cancelled";
   }
+  await stopper.finish();
   await capture.poll(true);
   return endedPayload({
     stopping,
@@ -355,6 +359,76 @@ async function superviseChild(opts: {
     backend: opts.meta.backend,
     noSpace: capture.noSpace,
   });
+}
+
+/** True until Bun has reaped the child: its pid (and group id) cannot be reused. */
+function unreaped(proc: Bun.Subprocess): boolean {
+  return proc.exitCode === null && proc.signalCode === null;
+}
+
+/**
+ * Stops the child's process group. The group id is the child's pid, which is
+ * safe to signal only while the child is unreaped. Group members seen then
+ * are remembered by pid and birth; after the child is reaped, only members
+ * that still match are killed, one by one, so a reused id is never signalled.
+ */
+class GroupStopper {
+  private readonly proc: Bun.Subprocess;
+  private readonly members = new Map<number, ProcessIdentity>();
+  private killTimer: ReturnType<typeof setTimeout> | undefined;
+  private stopped = false;
+
+  constructor(proc: Bun.Subprocess) {
+    this.proc = proc;
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    await this.remember();
+    if (unreaped(this.proc)) {
+      signalProcessGroup(this.proc.pid, "SIGTERM");
+    }
+    this.killTimer = setTimeout(() => {
+      this.remember()
+        .then(() => {
+          if (unreaped(this.proc)) {
+            signalProcessGroup(this.proc.pid, "SIGKILL");
+          }
+        })
+        .catch(() => undefined);
+    }, STOP_GRACE_MS);
+  }
+
+  /** After exit: descendants must not outlive a forced stop. */
+  async finish(): Promise<void> {
+    clearTimeout(this.killTimer);
+    if (!this.stopped) {
+      return;
+    }
+    const remembered = [...this.members.values()].filter(
+      (member) => member.pid !== this.proc.pid
+    );
+    if (remembered.length === 0) {
+      return;
+    }
+    const snapshot = await observeIdentities(
+      remembered.map((member) => member.pid)
+    );
+    for (const member of remembered) {
+      if (snapshot && identityMatches({ expected: member, snapshot })) {
+        signalProcess(member.pid, "SIGKILL");
+      }
+    }
+  }
+
+  private async remember(): Promise<void> {
+    if (!unreaped(this.proc)) {
+      return;
+    }
+    for (const member of (await observeProcessGroup(this.proc.pid)) ?? []) {
+      this.members.set(member.pid, member);
+    }
+  }
 }
 
 async function stopReason(opts: {

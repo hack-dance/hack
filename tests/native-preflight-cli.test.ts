@@ -436,10 +436,18 @@ test(
     expect(codes(routing.report, "runtime")).toEqual([
       "invalid_routing_labels",
     ]);
+    // So is a project file the review reads for a dependency cache.
+    const registry = await fixture({ services: { web: { image: IMAGE } } });
+    await registry.reviewStops("registry_template_invalid");
+    const refused = await preflight(registry, { ...registry.native, ...GRANT });
+    expect(refused.code).toBe(1);
+    expect(codes(refused.report, "runtime")).toEqual([
+      "registry_template_invalid",
+    ]);
     // A failure of the runtime itself is not a verdict on the project. That
     // covers the stub's default "not running" and any code this version does
     // not know as a project problem.
-    for (const code of [null, "plan_budget", "serialization_failed"]) {
+    for (const code of [null, "source_changed", "serialization_failed"]) {
       const down = await fixture({ services: { web: { image: IMAGE } } });
       if (code) {
         await down.reviewStops(code);

@@ -136,6 +136,7 @@ export async function runNativePreflightCommand(opts: {
   }
   let adaptationFile: string | undefined;
   let adaptationCandidates: readonly (string | undefined)[] = [undefined];
+  let adaptationSelected = true;
   try {
     const selection = await resolveNativeAdaptationSelection({
       env,
@@ -147,6 +148,7 @@ export async function runNativePreflightCommand(opts: {
       requestedEnvName: undefined,
     });
   } catch {
+    adaptationSelected = false;
     settings.push({
       ...SETTINGS_BLOCKER,
       code: "native_adaptation_invalid",
@@ -171,6 +173,7 @@ export async function runNativePreflightCommand(opts: {
     settings,
     adaptationFile,
     adaptationCandidates,
+    adaptationSelected,
     // An invalid configuration is already reported; do not report its hosts too.
     internalHosts: cfg.parseError ? {} : internalHosts,
     internalHostSources,

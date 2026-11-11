@@ -38,6 +38,7 @@ import {
 } from "./native-project-start.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeStopError,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -213,7 +214,21 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   },
   unsupported_mount_option: {
     message: "A mount uses an option native does not accept.",
-    fix: "Use source:target with an optional :ro or :rw.",
+    fix: "Use source:target with an optional :ro or :rw. The host-only hints cached, delegated, consistent, z and Z are also accepted and ignored.",
+  },
+  registry_template_invalid: {
+    message:
+      "The project's npm registry configuration is outside what native accepts for a dependency cache.",
+    fix: "Keep only registry URLs and token environment references in the project's npm configuration.",
+  },
+  registry_template_unsafe: {
+    message:
+      "The project's npm registry configuration is a link or is too large to read safely.",
+    fix: "Make it a regular file under 16 KiB, not a symbolic or hard link.",
+  },
+  plan_budget: {
+    message: "The reviewed plan for this project is over the size limit.",
+    fix: "Reduce the Compose file: fewer services, shorter commands or less inline environment.",
   },
   invalid_routing_labels: {
     message: "The service's caddy routing labels are not in the reviewed form.",
@@ -420,13 +435,13 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
       "extra_hosts entries reach the host only through a reviewed host dependency binding.",
     fix: "Nothing to do if a dependency file is selected for this environment; otherwise select one with HACK_NATIVE_DEPENDENCIES.",
   },
-  // The next three are reported only by a runtime that accepts these settings
-  // with a warning; other runtimes refuse them under the codes above.
   mount_host_hint_ignored: {
     message:
       "A mount carries a host-only hint (cached, delegated, consistent, z or Z), which is ignored.",
     fix: "Nothing to do.",
   },
+  // The next two are reported only by a runtime that accepts these settings
+  // with a warning; other runtimes refuse them under the codes above.
   labels_not_applied: {
     message:
       "Metadata labels on the service are not applied to native containers.",
@@ -484,7 +499,10 @@ export const REVIEW_STOP_CODES: ReadonlySet<string> = new Set([
   "invalid_user",
   "missing_services",
   "missing_source",
+  "plan_budget",
   "profile_budget",
+  "registry_template_invalid",
+  "registry_template_unsafe",
   "service_budget",
   "source_budget",
   "source_escape",
@@ -552,10 +570,7 @@ export const REVIEW_FAILURE_CODES: ReadonlySet<string> = new Set([
   "native_graph_environment",
   "native_graph_subset",
   "normalized_compose_input",
-  "plan_budget",
   "registry_changed",
-  "registry_template_invalid",
-  "registry_template_unsafe",
   "serialization_failed",
   "source_archive",
   "source_changed",
@@ -1121,6 +1136,10 @@ async function collectNativeRuntimeFindings(opts: {
       ],
     });
   } catch (error: unknown) {
+    // A request stopped by Ctrl-C or SIGTERM is an interruption, not a review.
+    if (isNativeRuntimeStopError(error)) {
+      throw error;
+    }
     return reviewFailure(error);
   } finally {
     if (directory !== undefined) {
@@ -1257,6 +1276,12 @@ export type NativePreflightOptions = {
   readonly settings: readonly NativePreflightFinding[];
   /** The adaptation file for the effective env, as native start selects it. */
   readonly adaptationFile: string | undefined;
+  /**
+   * False when the adaptation selection itself could not be read (already
+   * reported in `settings`). The document is then unadapted, so it is not
+   * reviewed, as with an adaptation file that is refused.
+   */
+  readonly adaptationSelected: boolean;
   /** Every adaptation a start could apply, for the Compose-backend pre-check. */
   readonly adaptationCandidates: readonly (string | undefined)[];
   /** Project-wide extra hosts, or null when they cannot be read. */
@@ -1301,7 +1326,7 @@ export async function collectNativePreflight(
       })),
       ...bridgeFindings(adapted.document.services)
     );
-    if (!adapted.document.adaptationValid) {
+    if (!(adapted.document.adaptationValid && opts.adaptationSelected)) {
       // Reviewing the unadapted document would only add findings the
       // adaptation is there to remove.
       runtime = {

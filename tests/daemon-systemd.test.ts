@@ -1823,3 +1823,29 @@ test("every user-unit load directory is checked, including empty and missing one
     "did not report"
   );
 });
+
+test("a loaded drop-in's whole ancestor chain is checked", async () => {
+  // Codex review: an owner-controlled drop-in under a world-writable,
+  // non-sticky ancestor passed the loaded-paths check.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const shared = join(root, "shared");
+  const dropInDir = join(shared, "user", "systemd", "user", "hackd.service.d");
+  await mkdir(dropInDir, { recursive: true });
+  for (const dir of ["user", "user/systemd", "user/systemd/user"]) {
+    await chmod(join(shared, dir), 0o755);
+  }
+  await chmod(dropInDir, 0o755);
+  const dropIn = join(dropInDir, "override.conf");
+  await writeFile(dropIn, "");
+  await chmod(dropIn, 0o644);
+  await chmod(shared, 0o777);
+  fake.dropInPaths = dropIn;
+  expect(
+    await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
+  ).toContain(shared);
+  await chmod(shared, 0o755);
+  expect(
+    await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
+  ).toBeNull();
+});

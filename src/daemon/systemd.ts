@@ -1232,19 +1232,14 @@ export async function checkSystemdLoadedUnitPaths(opts: {
     if (path.length === 0) {
       continue;
     }
+    // The file, every directory above it up to `/`, and every symlink hop.
     const error =
-      (await checkOwnerControlledPath({
-        path: dirname(path),
-        uid,
-        directory: true,
-        allowRoot: true,
-      })) ??
       (await checkOwnerControlledPath({
         path,
         uid,
         directory: false,
         allowRoot: true,
-      }));
+      })) ?? (await checkReplaceableChain({ path, uid, hackHome: null }));
     if (error !== null) {
       return `Not starting ${SYSTEMD_UNIT_NAME}: its drop-in ${error}. Review and remove it, then run: systemctl --user daemon-reload`;
     }

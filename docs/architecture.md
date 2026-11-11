@@ -391,16 +391,21 @@ unit:
   the `hack` found on `PATH` at install time. Symlinks are kept as they are, so a
   stable link such as `~/.local/bin/hack` keeps working when an upgrade moves the
   real binary;
-- restarts hackd after a crash (`Restart=on-failure`), but not after
-  `hack daemon stop`;
+- restarts hackd after a crash (`Restart=on-failure`), at most five times a
+  minute, but not after `hack daemon stop`. After a crash loop,
+  `hack daemon start` clears the failed state before starting it again;
+- keeps systemd's default `KillMode=control-group`: stopping or restarting the
+  service also stops the processes hackd started;
 - sends stderr to the journal (`journalctl --user -u hackd.service`); hackd's own
   log stays in `~/.hack/daemon/hackd.log`.
 
 Hack owns the whole unit file. Put local settings, such as `DOCKER_HOST` for
 rootless Docker, in a drop-in (`systemctl --user edit hackd`). If the recorded
-program no longer exists, `hack daemon start` rewrites the unit. Any other
-difference shows up as drift in `hack daemon status` and `hack doctor`, and
-`hack daemon install` fixes it.
+program no longer exists, `hack daemon start` rewrites the unit. Any other edit
+to the file shows up as drift in `hack daemon status` and `hack doctor`, and
+`hack daemon install` fixes it. A unit that runs a different `hack` that still
+exists, such as one found earlier on another shell's `PATH`, is not drift.
+`hack daemon install` always writes the `hack` found on the current `PATH`.
 
 A systemd user manager runs only while you have a login session, unless linger is
 on. `hack daemon install` and `hack daemon status` report linger. When it is off,
@@ -415,8 +420,10 @@ writes nothing, starts hackd directly instead and exits 1.
 `hack daemon status` reports who manages hackd: `managed_by` (`launchd`,
 `systemd` or `null`) and a `service` object in `--json`, and a `systemd:` line in
 the text output on Linux. The text and JSON give the same next step. On Linux,
-`hack doctor` adds a `daemon service` check that warns when the unit is missing,
-has drifted, is disabled, or linger is off. `hack doctor --fix` offers
+`hack doctor` adds a `daemon service` check. It warns when the unit is missing,
+has drifted or is disabled (fix: `hack daemon install`); when the unit has failed,
+or the running hackd was started directly rather than by systemd (fix:
+`hack daemon restart`); or when linger is off. `hack doctor --fix` offers
 `hack daemon install` only interactively, because it writes outside the project
 and enables a login service. It skips the install without a TTY, and also skips it
 under the same conditions that skip the hackd repair. The unit belongs to the

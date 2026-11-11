@@ -29,11 +29,13 @@ export interface DaemonServiceSummary {
 }
 
 const INSTALL_COMMAND = "hack daemon install";
+const RESTART_COMMAND = "hack daemon restart";
+const JOURNAL_COMMAND = "journalctl --user -u hackd.service -n 50";
 
 /**
  * Summarizes the systemd user service. Problems are reported in priority
  * order, one at a time: unavailable manager, missing unit, drift, disabled
- * unit, then linger.
+ * unit, a failed unit, a hackd that systemd does not run, then linger.
  */
 export function summarizeSystemdService(opts: {
   readonly status: SystemdServiceStatus;
@@ -92,7 +94,8 @@ export function summarizeSystemdService(opts: {
     return {
       ...base,
       nextStep: INSTALL_COMMAND,
-      summary: "the unit differs from what this hack would install",
+      summary:
+        "the unit file differs from what hack writes (edited, or written by another hack version)",
       severity: "warn",
     };
   }
@@ -101,6 +104,26 @@ export function summarizeSystemdService(opts: {
       ...base,
       nextStep: INSTALL_COMMAND,
       summary: "installed but not enabled: hackd will not start at login",
+      severity: "warn",
+    };
+  }
+  if (status.activeState === "failed") {
+    return {
+      ...base,
+      nextStep: RESTART_COMMAND,
+      summary: `hackd.service failed; see: ${JOURNAL_COMMAND}`,
+      severity: "warn",
+    };
+  }
+  if (opts.daemonRunning && !ownsDaemon) {
+    // hackd was started directly (for example while the user bus was
+    // unavailable), so systemd's copy exited at login. This hackd stops at
+    // logout; a restart hands it to systemd.
+    return {
+      ...base,
+      nextStep: RESTART_COMMAND,
+      summary:
+        "installed, but the running hackd was started directly, not by systemd, and stops at logout",
       severity: "warn",
     };
   }

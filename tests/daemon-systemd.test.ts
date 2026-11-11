@@ -273,7 +273,6 @@ test("install rewrites a drifted unit and reports the drift first", async () => 
 
   const before = await readSystemdServiceStatus({
     unitPath,
-    expectedUnitText: unitText(),
     deps: fake.deps,
   });
   expect(before?.drift).toBe("content");
@@ -287,11 +286,23 @@ test("install rewrites a drifted unit and reports the drift first", async () => 
   expect(fake.calls).toContain("systemctl --user daemon-reload");
   const after = await readSystemdServiceStatus({
     unitPath,
-    expectedUnitText: unitText(),
     deps: fake.deps,
   });
   expect(after?.drift).toBe("none");
   expect(after?.enabled).toBe(true);
+});
+
+test("a unit for another existing hack is not drift", async () => {
+  const fake = fakeSystemd();
+  const other = join(root, "bin", "hack-other");
+  await writeFile(other, "#!/bin/sh\n");
+  await chmod(other, 0o755);
+  const otherUnit = renderSystemdUnit({ hackBinPath: other });
+  await mkdir(join(root, "config", "systemd", "user"), { recursive: true });
+  await writeFile(unitPath, otherUnit ?? "");
+  const status = await readSystemdServiceStatus({ unitPath, deps: fake.deps });
+  expect(status?.drift).toBe("none");
+  expect(status?.program).toBe(other);
 });
 
 test("a unit whose program was moved reports program-missing", async () => {
@@ -300,7 +311,6 @@ test("a unit whose program was moved reports program-missing", async () => {
   await rm(program);
   const status = await readSystemdServiceStatus({
     unitPath,
-    expectedUnitText: null,
     deps: fake.deps,
   });
   expect(status?.drift).toBe("program-missing");
@@ -377,9 +387,7 @@ test("a denied process never calls the runner", async () => {
     ...fake.deps,
     env: { ...fake.deps.env, HACK_SYSTEMD_DISABLE: "1" },
   };
-  expect(
-    await readSystemdServiceStatus({ unitPath, expectedUnitText: null, deps })
-  ).toBeNull();
+  expect(await readSystemdServiceStatus({ unitPath, deps })).toBeNull();
   expect(
     (await installSystemdUnit({ unitPath, unitText: unitText(), deps })).ok
   ).toBe(false);
@@ -439,6 +447,29 @@ test("the summary names one next step in priority order and detects ownership", 
   expect(summarize(baseStatus({ enabled: false })).nextStep).toBe(
     "hack daemon install"
   );
+  expect(
+    summarize(
+      baseStatus({ active: false, activeState: "failed", mainPid: null }),
+      4242
+    )
+  ).toMatchObject({ severity: "warn", nextStep: "hack daemon restart" });
+  // A directly started hackd is running and systemd is not running it.
+  expect(
+    summarize(
+      baseStatus({ active: false, activeState: "inactive", mainPid: null }),
+      4242
+    )
+  ).toMatchObject({
+    severity: "warn",
+    nextStep: "hack daemon restart",
+    ownsDaemon: false,
+  });
+  // A failed unit outranks linger.
+  expect(
+    summarize(
+      baseStatus({ activeState: "failed", active: false, linger: false })
+    ).nextStep
+  ).toBe("hack daemon restart");
   expect(summarize(baseStatus({ linger: false }))).toMatchObject({
     severity: "warn",
     nextStep: "loginctl enable-linger",

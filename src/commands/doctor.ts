@@ -61,6 +61,7 @@ import {
 } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
+import { resolveSystemdUnitPath } from "../daemon/systemd.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
 import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import {
@@ -5102,8 +5103,7 @@ async function maybeInstallDaemonService(): Promise<void> {
     return;
   }
   const ok = await doctorConfirm({
-    message:
-      "Install hackd as a systemd user service (hack daemon install)?\nIt writes ~/.config/systemd/user/hackd.service and starts hackd at login.",
+    message: `Install hackd as a systemd user service (hack daemon install)?\nIt writes ${resolveSystemdUnitPath()} and starts hackd at login.`,
     initialValue: true,
     destructive: true,
   });

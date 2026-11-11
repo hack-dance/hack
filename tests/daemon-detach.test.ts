@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -24,6 +25,7 @@ import { probeDaemonApi } from "../src/daemon/client.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const DAEMON_COMMAND = "daemon start --foreground";
+const PS_LINE = /^(\d+)\s+(.*)$/;
 
 type Fixture = {
   readonly root: string;
@@ -49,7 +51,9 @@ afterEach(async () => {
 });
 
 async function createFixture(): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "hack-daemon-detach-"));
+  // Under /tmp, not the macOS per-user TMPDIR: hackd's socket paths must fit
+  // the 104-byte sun_path limit there.
+  const root = await mkdtemp(join(await realpath("/tmp"), "hack-dd-"));
   const home = join(root, "home");
   const bin = join(root, "bin");
   await mkdir(home, { recursive: true });
@@ -111,25 +115,42 @@ function killGroup(pgid: number, signal: NodeJS.Signals): void {
   }
 }
 
-/** `ps` columns for one pid: process group, session and command line. */
+/**
+ * Process group (all platforms, through `ps -o pgid=`) and session (Linux
+ * only, from `/proc/<pid>/stat`; BSD `ps` has no `sid` keyword) for one pid.
+ */
 async function readProcessIdentity(
   pid: number
-): Promise<{ pgid: number; sid: number; args: string } | null> {
-  const proc = Bun.spawn(["ps", "-o", "pgid=,sid=,args=", "-p", String(pid)], {
+): Promise<{ pgid: number; sid: number | null; args: string } | null> {
+  const proc = Bun.spawn(["ps", "-o", "pgid=,args=", "-p", String(pid)], {
     stdout: "pipe",
     stderr: "ignore",
   });
   const text = (await new Response(proc.stdout).text()).trim();
   await proc.exited;
-  const match = text.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+  const match = text.match(PS_LINE);
   if (!match) {
     return null;
   }
   return {
     pgid: Number(match[1]),
-    sid: Number(match[2]),
-    args: match[3] ?? "",
+    sid: await readLinuxSessionId(pid),
+    args: match[2] ?? "",
   };
+}
+
+async function readLinuxSessionId(pid: number): Promise<number | null> {
+  if (process.platform !== "linux") {
+    return null;
+  }
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    // Fields after the parenthesized command: state ppid pgrp session ...
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return Number(fields[3]);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -214,7 +235,9 @@ test.skipIf(process.platform === "win32")(
     expect(identity?.args).toContain(DAEMON_COMMAND);
     // Own session and process group, led by hackd itself.
     expect(identity?.pgid).toBe(daemonPid);
-    expect(identity?.sid).toBe(daemonPid);
+    if (process.platform === "linux") {
+      expect(identity?.sid).toBe(daemonPid);
+    }
     expect(identity?.pgid).not.toBe(launcherPgid);
 
     killGroup(launcherPgid, "SIGKILL");

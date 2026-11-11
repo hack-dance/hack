@@ -52,7 +52,6 @@ export async function resolveSystemdStatus(
   opts: {
     readonly deps?: SystemdDeps;
     readonly platform?: NodeJS.Platform;
-    readonly resolveExpected?: typeof resolveExpectedSystemdUnit;
   } = {}
 ): Promise<{
   readonly status: SystemdServiceStatus;
@@ -65,10 +64,8 @@ export async function resolveSystemdStatus(
   if (!resolveSystemdAccess({ env: deps.env }).allowed) {
     return null;
   }
-  const expected = await (opts.resolveExpected ?? resolveExpectedSystemdUnit)();
   const status = await readSystemdServiceStatus({
     unitPath: resolveSystemdUnitPath({ env: deps.env }),
-    expectedUnitText: expected?.unitText ?? null,
     deps,
   });
   return status ? { status, deps } : null;
@@ -79,7 +76,6 @@ export async function resolveSystemdSummary(opts: {
   readonly paths: DaemonPaths;
   readonly deps?: SystemdDeps;
   readonly platform?: NodeJS.Platform;
-  readonly resolveExpected?: typeof resolveExpectedSystemdUnit;
 }): Promise<DaemonServiceSummary | null> {
   const resolved = await resolveSystemdStatus(opts);
   if (!resolved) {
@@ -113,7 +109,6 @@ export async function startViaSystemdIfInstalled(
   }
   const status = await readSystemdServiceStatus({
     unitPath,
-    expectedUnitText: null,
     deps,
   });
   if (!status) {
@@ -149,6 +144,12 @@ export async function startViaSystemdIfInstalled(
     logger.warn({
       message: `Repaired ${SYSTEMD_UNIT_NAME}: its program no longer existed; it now runs ${expected.hackBinPath}`,
     });
+  }
+  // After a crash loop systemd refuses `start` ("start request repeated too
+  // quickly") until the failed state is cleared. Clearing is harmless when
+  // the unit is not failed.
+  if (status.activeState === "failed") {
+    await systemdServiceAction({ action: "reset-failed", deps });
   }
   const started = await systemdServiceAction({ action: "start", deps });
   if (!started.ok) {
@@ -186,7 +187,6 @@ export async function stopViaSystemdIfOwned(opts: {
   }
   const status = await readSystemdServiceStatus({
     unitPath,
-    expectedUnitText: null,
     deps,
   });
   if (!(status?.active && status.mainPid === opts.pid)) {
@@ -260,7 +260,6 @@ export async function installDaemonSystemdService(
   const unitPath = resolveSystemdUnitPath({ env: deps.env });
   const before = await readSystemdServiceStatus({
     unitPath,
-    expectedUnitText: expected.unitText,
     deps,
   });
   const installed = await installSystemdUnit({
@@ -305,6 +304,9 @@ export async function installDaemonSystemdService(
     installed.changed && before?.active
       ? ("restart" as const)
       : ("start" as const);
+  if (before?.activeState === "failed") {
+    await systemdServiceAction({ action: "reset-failed", deps });
+  }
   const started = await systemdServiceAction({ action, deps });
   if (!started.ok) {
     logger.error({

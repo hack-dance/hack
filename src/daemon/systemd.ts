@@ -31,7 +31,10 @@ import {
  *   the unit; any other difference is reported as drift and fixed by
  *   `hack daemon install`.
  * - `Restart=on-failure`: a crash restarts hackd; `hack daemon stop` (a clean
- *   stop through systemctl) does not.
+ *   stop through systemctl) does not. Start limits stop a crash loop.
+ * - The default `KillMode=control-group` is kept on purpose: stopping or
+ *   restarting the service also stops processes hackd started (supervisor
+ *   jobs, shells), so none outlive the service that owns them.
  * - Every `systemctl`/`loginctl` call goes through a {@link ServiceCommandRunner}
  *   so tests use a fake. The default runner re-checks
  *   {@link resolveSystemdAccess} before it spawns anything.
@@ -247,6 +250,10 @@ export function renderSystemdUnit(opts: {
     "# Local changes are replaced on the next install; use `systemctl --user edit hackd` for overrides.",
     "[Unit]",
     "Description=hack local daemon (hackd)",
+    // Bounds a crash loop (or a program that is gone at login) to five
+    // starts a minute instead of one every RestartSec, forever.
+    "StartLimitIntervalSec=60",
+    "StartLimitBurst=5",
     "",
     "[Service]",
     "Type=simple",
@@ -385,11 +392,7 @@ export function describeSystemdUnavailable(opts: {
   }
 }
 
-export type SystemdUnitDrift =
-  | "none"
-  | "content"
-  | "program-missing"
-  | "unknown";
+export type SystemdUnitDrift = "none" | "content" | "program-missing";
 
 export interface SystemdServiceStatus {
   readonly unitPath: string;
@@ -416,8 +419,6 @@ export interface SystemdServiceStatus {
  */
 export async function readSystemdServiceStatus(opts: {
   readonly unitPath: string;
-  /** What `hack daemon install` would write now; null if unresolvable. */
-  readonly expectedUnitText: string | null;
   readonly deps: SystemdDeps;
   readonly exists?: (path: string) => Promise<boolean>;
 }): Promise<SystemdServiceStatus | null> {
@@ -431,7 +432,6 @@ export async function readSystemdServiceStatus(opts: {
   const drift = await computeDrift({
     unitText,
     program,
-    expectedUnitText: opts.expectedUnitText,
     exists,
   });
 
@@ -477,10 +477,16 @@ export async function readSystemdServiceStatus(opts: {
   };
 }
 
+/**
+ * Drift is judged against the unit this version of hack renders for the
+ * unit's own program, not for the `hack` on the caller's PATH. Two shells
+ * whose PATHs resolve different (existing) `hack` binaries therefore agree
+ * that the unit is current, instead of each reporting the other's unit as
+ * drifted and rewriting it back and forth (with a restart each time).
+ */
 async function computeDrift(opts: {
   readonly unitText: string | null;
   readonly program: string | null;
-  readonly expectedUnitText: string | null;
   readonly exists: (path: string) => Promise<boolean>;
 }): Promise<SystemdUnitDrift> {
   if (opts.unitText === null) {
@@ -489,10 +495,8 @@ async function computeDrift(opts: {
   if (opts.program === null || !(await opts.exists(opts.program))) {
     return "program-missing";
   }
-  if (opts.expectedUnitText === null) {
-    return "unknown";
-  }
-  return opts.unitText === opts.expectedUnitText ? "none" : "content";
+  const rendered = renderSystemdUnit({ hackBinPath: opts.program });
+  return rendered === opts.unitText ? "none" : "content";
 }
 
 /** Parses `systemctl show` `Key=Value` lines. */
@@ -611,7 +615,7 @@ export async function installSystemdUnit(opts: {
 
 /** Runs `systemctl --user <action> hackd.service`. */
 export async function systemdServiceAction(opts: {
-  readonly action: "start" | "restart" | "stop";
+  readonly action: "start" | "restart" | "stop" | "reset-failed";
   readonly deps: SystemdDeps;
 }): Promise<
   { readonly ok: true } | { readonly ok: false; readonly error: string }

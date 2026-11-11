@@ -208,7 +208,8 @@ test it.
 
 On a Linux host with Docker Engine: the overlays, the proxy start and stop,
 host tools through the proxy (on `127.0.0.1`, and on the bridge address with
-the `host`-scope value), the production guard, and the read-only connection. The container-to-proxy hop could not be tested on that host: its
+the `host`-scope value), the production guard, and the read-only connection.
+The container-to-proxy hop could not be tested on that host: its
 firewall drops traffic from containers to the host. It was not tested on
 macOS.
 

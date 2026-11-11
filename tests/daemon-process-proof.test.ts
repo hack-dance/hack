@@ -43,6 +43,29 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+/**
+ * Runs `fn` with these process.env values, restoring each key afterwards.
+ * Saves and restores one key at a time, so no copy of the runner's
+ * environment or HOME is made.
+ */
+async function withCliEnv(
+  values: Readonly<Record<string, string>>,
+  fn: () => Promise<void>
+): Promise<void> {
+  const keys = Object.keys(values);
+  const previous = keys.map((key) => process.env[key]);
+  for (const key of keys) {
+    process.env[key] = values[key];
+  }
+  try {
+    await fn();
+  } finally {
+    keys.forEach((key, index) => {
+      restoreEnv(key, previous[index]);
+    });
+  }
+}
+
 function spawnSleeper(): ReturnType<typeof Bun.spawn> {
   const child = Bun.spawn(["sleep", "30"], {
     stdout: "ignore",
@@ -360,20 +383,11 @@ test("hack daemon stop leaves a non-hackd pid alone and removes the stale pid fi
   const daemonDir = join(home, ".hack", "daemon");
   await mkdir(daemonDir, { recursive: true });
   await writeFile(join(daemonDir, "hackd.pid"), `${sleeper.pid}\n`);
-  const saved = {
-    HOME: process.env.HOME,
-    HACK_LOGGER: process.env.HACK_LOGGER,
-  };
-  process.env.HOME = home;
-  process.env.HACK_LOGGER = "console";
-  try {
+  await withCliEnv({ HOME: home, HACK_LOGGER: "console" }, async () => {
     const { runCli } = await import("../src/cli/run.ts");
     expect(await runCli(["daemon", "stop"])).toBe(0);
     expect(await Bun.file(join(daemonDir, "hackd.pid")).exists()).toBe(false);
-  } finally {
-    restoreEnv("HOME", saved.HOME);
-    restoreEnv("HACK_LOGGER", saved.HACK_LOGGER);
-  }
+  });
   await Bun.sleep(100);
   expect(sleeper.exitCode).toBeNull();
   expect(process.kill(sleeper.pid, 0)).toBe(true);
@@ -461,29 +475,19 @@ test("hack daemon restart replaces a stale pid file without signalling its pid",
   // file, then start spawns a daemon. HACK_MCP_COMMAND points that spawn at
   // /bin/false, so no real hackd starts (and start reports not ready).
   await writeFile(join(daemonDir, "hackd.pid"), `${sleeper.pid}\n`);
-  const saved = {
-    HOME: process.env.HOME,
-    HACK_LOGGER: process.env.HACK_LOGGER,
-    HACK_DAEMON_AUTOSTART_DISABLE: process.env.HACK_DAEMON_AUTOSTART_DISABLE,
-    HACK_MCP_COMMAND: process.env.HACK_MCP_COMMAND,
-  };
-  process.env.HOME = home;
-  process.env.HACK_LOGGER = "console";
-  process.env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
-  process.env.HACK_MCP_COMMAND = "/bin/false";
-  try {
-    const { runCli } = await import("../src/cli/run.ts");
-    expect(await runCli(["daemon", "restart"])).toBe(1);
-    expect(await Bun.file(join(daemonDir, "hackd.pid")).exists()).toBe(false);
-  } finally {
-    restoreEnv("HOME", saved.HOME);
-    restoreEnv("HACK_LOGGER", saved.HACK_LOGGER);
-    restoreEnv(
-      "HACK_DAEMON_AUTOSTART_DISABLE",
-      saved.HACK_DAEMON_AUTOSTART_DISABLE
-    );
-    restoreEnv("HACK_MCP_COMMAND", saved.HACK_MCP_COMMAND);
-  }
+  await withCliEnv(
+    {
+      HOME: home,
+      HACK_LOGGER: "console",
+      HACK_DAEMON_AUTOSTART_DISABLE: "1",
+      HACK_MCP_COMMAND: "/bin/false",
+    },
+    async () => {
+      const { runCli } = await import("../src/cli/run.ts");
+      expect(await runCli(["daemon", "restart"])).toBe(1);
+      expect(await Bun.file(join(daemonDir, "hackd.pid")).exists()).toBe(false);
+    }
+  );
   expect(sleeper.exitCode).toBeNull();
   expect(process.kill(sleeper.pid, 0)).toBe(true);
 }, 20_000);

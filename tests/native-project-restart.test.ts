@@ -28,6 +28,7 @@ import {
   withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
 import { NativeStartupCanceledError } from "../src/backends/native-project-start.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   expectClosedRefusal,
@@ -2408,6 +2409,37 @@ test("HACK-1953: a stop lost to the interrupt keeps the prepared intent and name
   expect(error.message).not.toContain("Run hack up");
   expect(f.pending()).toMatchObject({ phase: "prepared" });
   expect(f.events).toEqual(["preflight", "intent", "stopping"]);
+});
+
+test.each([
+  "SIGINT",
+  "SIGTERM",
+] as const)("HACK-2035: %s child exit before frontend abort classifies both restart phases", async (stopSignal) => {
+  for (const phase of ["preflight", "down"] as const) {
+    const f = stopFixture("never");
+    const failure = new NativeRuntimeRequestError({
+      message: "request interrupted",
+      stopSignal,
+    });
+    const result = restartNativeProject({
+      ...f.options,
+      [phase]: async () => {
+        // No abort is delivered until the classification has finished.
+        throw failure;
+      },
+    });
+    if (phase === "preflight") {
+      expect(await result).toBe(stopSignal === "SIGTERM" ? 143 : 130);
+      expect(f.events).toEqual(["stopped"]);
+      expect(f.pending()).toBeNull();
+    } else {
+      await expectClosedRefusal(result, "Run hack restart to finish it");
+      expect(f.events).toEqual(["preflight", "intent", "stopping"]);
+      expect(f.pending()).toMatchObject({ phase: "prepared" });
+    }
+    f.interrupt(stopSignal === "SIGTERM" ? 143 : 130);
+    expect(f.disposed()).toBeGreaterThan(0);
+  }
 });
 
 test("HACK-1953: a stop that fails without an interrupt keeps its own error and the intent", async () => {

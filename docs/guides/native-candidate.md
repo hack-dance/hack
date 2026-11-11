@@ -1678,8 +1678,12 @@ requires ownership inspection rather than automatic removal.
 Ctrl-C while restart stops the previous run lets that stop finish: the stop's
 runtime requests run in their own process group, so the terminal's interrupt
 reaches only the restart. It then exits 130 as a stopped project with data
-retained, and a plain `up` resumes it. If the stop cannot be confirmed (for
-example the restart itself was killed, or a down hook failed), the saved intent
+retained, and a plain `up` resumes it. A preflight runtime child ended by SIGINT
+or SIGTERM cancels before cleanup with exit 130 or 143, even if its exit is
+observed before the frontend signal handler runs. A stop request child ended
+by either signal reports `stopping` and the interrupted-stop guidance, retaining
+the prepared intent and exit 1 because cleanup is unconfirmed. If the stop cannot
+be confirmed (for example the restart itself was killed, or a down hook failed), the saved intent
 stays and `up` refuses with `use hack restart`. Run `hack restart` then: it
 resumes the exact saved run, owner and plan, stopping the previous run if it is
 still active or confirming from fresh native observations that its own owner

@@ -5,7 +5,7 @@ import { parseShard } from "../tests/e2e/shard.ts";
 
 /** Publish only known scenario names, numeric durations and pass/fail statuses.
  * Raw diagnostics and failure reasons never cross into the job summary.
- * Missing/skipped outcomes fail closed; job status also covers setup/cleanup.
+ * Missing/skipped outcomes fail closed; explicit step outcomes cover cleanup.
  */
 export function shardSummary(opts: {
   readonly shard: string;
@@ -69,7 +69,7 @@ if (import.meta.main) {
       names: shardScenarioNames(selection),
       log: (await log.exists()) ? await log.text() : "",
       elapsedSeconds: Date.now() / 1000 - started,
-      succeeded: process.env.E2E_JOB_STATUS === "success",
+      succeeded: process.env.E2E_SUCCEEDED === "true",
     })
   );
 }

@@ -9,12 +9,17 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  # Unrelated label events get their own group and cannot cancel an active trial.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action != 'labeled' || github.event.label.name == 'docker-e2e-trial') && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
     name: Trial change scope
+    if: >-
+      ${{ github.event_name != 'pull_request' ||
+          (contains(github.event.pull_request.labels.*.name, 'docker-e2e-trial') &&
+           (github.event.action != 'labeled' || github.event.label.name == 'docker-e2e-trial')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

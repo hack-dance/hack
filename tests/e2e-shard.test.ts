@@ -29,6 +29,7 @@ const LONG_SCENARIOS = [
 ];
 
 type Workflow = {
+  readonly concurrency?: { readonly group?: string };
   readonly on: {
     readonly push?: { readonly branches?: readonly string[] };
     readonly pull_request?: { readonly types?: readonly string[] } | null;
@@ -49,8 +50,10 @@ type Workflow = {
       };
       readonly steps: readonly {
         readonly name?: string;
+        readonly id?: string;
         readonly uses?: string;
         readonly shell?: string;
+        readonly "continue-on-error"?: boolean;
         readonly run?: string;
         readonly env?: Record<string, string>;
         readonly with?: Record<string, string>;
@@ -267,6 +270,19 @@ describe("docker-e2e CI fan-in", () => {
       "${{ inputs.shard }}/${{ inputs.count }}"
     );
     expect(run?.shell).toBe("bash");
+    expect(run?.id).toBe("e2e");
+    const smoke = steps.find((step) => step.id === "smoke");
+    expect(smoke?.name).toBe(
+      "Smoke container resource metadata without optional fields"
+    );
+    const summary = steps.find(
+      (step) =>
+        step.name === "Summarize shard elapsed time and scenario results"
+    );
+    expect(summary?.["continue-on-error"]).toBe(true);
+    expect(summary?.env?.E2E_SUCCEEDED).toBe(
+      "${{ steps.e2e.outcome == 'success' && (inputs.shard != inputs.extra-shard || steps.smoke.outcome == 'success') }}"
+    );
     expect(run?.run).toContain(
       'HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker --shard="$HACK_E2E_SHARD"'
     );
@@ -319,6 +335,18 @@ describe("docker-e2e CI fan-in", () => {
       "labeled",
     ]);
     expect(trialWorkflow.on).toHaveProperty("workflow_dispatch");
+    expect(trialWorkflow.jobs.changes?.if).toContain(
+      "contains(github.event.pull_request.labels.*.name, 'docker-e2e-trial')"
+    );
+    expect(trialWorkflow.jobs.changes?.if).toContain(
+      "github.event.action != 'labeled' || github.event.label.name == 'docker-e2e-trial'"
+    );
+    expect(trialWorkflow.concurrency?.group).toContain(
+      "github.event.action != 'labeled' || github.event.label.name == 'docker-e2e-trial'"
+    );
+    expect(trialWorkflow.concurrency?.group).toContain(
+      "format('run-{0}', github.run_id)"
+    );
     expect(workflow.on).toHaveProperty("workflow_dispatch");
     expect(trialWorkflow.jobs.changes?.steps.at(-1)).toEqual(
       workflow.jobs.changes?.steps.at(-1)

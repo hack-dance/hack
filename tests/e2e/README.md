@@ -824,8 +824,9 @@ A non-gating `docker-e2e trial shard i/6` matrix runs the same 48 default
 scenarios and supplemental checks alongside the four-shard matrix on the same
 revision. A shared local composite action keeps both layouts aligned. The trial runs on
 `next`/`main` pushes, manual dispatch, and pull requests labeled
-`docker-e2e-trial`, always subject to the existing suite scope gate. Labeling
-an open PR starts a run; subsequent updates retain the opt-in.
+`docker-e2e-trial`, always subject to the existing suite scope gate. Adding the trial label
+to an open PR starts a run; subsequent updates retain the opt-in. Unrelated label
+events skip scope classification and cannot cancel an active trial.
 
 The trial uses standard `ubuntu-24.04` runners with `fail-fast: false` and
 job-level `continue-on-error: true`. It runs in a separate workflow, so its jobs are absent from the CI run consumed
@@ -839,6 +840,8 @@ a network scenario.
 
 Each job summary reports shard elapsed seconds and allowlisted scenario names,
 durations and pass/fail only. Missing or skipped scenario results report failure.
+Explicit E2E and supplemental smoke outcomes prevent cleanup failures from
+reporting a pass. Summary publishing itself is advisory and cannot fail a shard.
 For comparisons, use the jobs' `startedAt`/`completedAt` values from
 `gh run view <id> --json jobs`: report each shard duration, elapsed time from
 the first shard start to the last shard end, and summed runner-minutes. This

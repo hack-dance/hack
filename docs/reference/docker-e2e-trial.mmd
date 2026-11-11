@@ -4,8 +4,10 @@ flowchart TD
     scope -->|Yes| four[Four hosted shards]
     scope -->|No| skip[Docker scope skip]
     four --> aggregate[Docker aggregate]
-    four --> release[Exact-head prerelease gate]
-    aggregate --> release
+    four --> evidence[Required Docker evidence]
+    aggregate --> evidence
+    evidence -->|Exact-head next push| prerelease[Prerelease gate]
+    evidence -->|Exact-head main push| release[Release prepare gate]
     event -->|Push, PR or dispatch| opt{Push, dispatch or PR label?}
     opt -->|Yes| trialscope{Trial suite in scope?}
     trialscope -->|Yes| six[Six hosted trial shards]
@@ -23,5 +25,5 @@ flowchart TD
       metrics
     end
     class four,six live
-    class release ok
+    class prerelease,release ok
     class skip idle

@@ -136,6 +136,35 @@ test("structured startup failure exposes its code without stderr values", async 
   expect(failure).not.toContain("synthetic-private-detail");
 });
 
+test("an application failure during dependency startup names its service", async () => {
+  // The runtime's reply when an initializer exits non-zero while host
+  // dependency relays are attached: a formatted (non-fixed) message and the
+  // validated service.
+  const reply = JSON.stringify({
+    code: "graph_startup_application_failed",
+    message:
+      "Owned graph service deps exited with code 3; no further services will start.",
+    service: "deps",
+  });
+  const opts = await fixture(
+    `console.error(${JSON.stringify(reply)}); process.exit(2);`
+  );
+  let failure = "";
+  try {
+    await serveNativeProjectGraph({
+      ...opts,
+      onReady: async () => {
+        throw new Error("must not become ready");
+      },
+    });
+  } catch (error) {
+    failure = String(error);
+  }
+  expect(failure).toContain("(graph_startup_application_failed)");
+  expect(failure).toContain("Service: deps.");
+  expect(failure).not.toContain("validation failed");
+});
+
 test("a startup failure passes failed services' bounded output only to its callback", async () => {
   const reply = JSON.stringify({
     code: "graph_startup_application_failed",

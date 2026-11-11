@@ -2108,17 +2108,59 @@ and the frontend never persists the resolved PIDs. Restart preflight resolves th
 same owners against the running instance; a cleaned retry validates the intent
 only and resolves owners after its hooks.
 
-Startup allows up to 60 seconds total for persistent hooks to create all selected
-listeners, with cancellable waits and bounded read-only discovery requests. It
-retries only native endpoint-identity refusals; malformed selections and other
-failures stop immediately. A refusal is one `E_CONFIG_INVALID` line that names the
+Startup waits for persistent hooks to create each discovered listener
+(`host_executable`, `host_lifecycle` or `host_shared_helper`), with cancellable
+waits and bounded read-only discovery requests. Each binding may wait up to its
+`host_wait_seconds`, an integer from 1 through 900 that defaults to 60. Every
+binding's wait is measured from the moment the `up.before` hooks return, and
+independent listeners are discovered at the same time, so a slow binding never
+shortens another one, whatever their order in the selection. When several entries
+share one listener, it is discovered once and the longest wait among them applies. A fixed `host_pid` entry is never
+waited for and refuses `host_wait_seconds`. For example, a hook that opens
+tunnels taking about three minutes needs:
+
+```json
+{
+  "version": 2,
+  "dependencies": [{
+    "binding": "search",
+    "guest_port": 443,
+    "aliases": ["search.example.com"],
+    "host_executable": "/usr/local/bin/tunnel",
+    "host_port": 8443,
+    "host_wait_seconds": 240
+  }]
+}
+```
+
+While a listener is still missing, foreground `up` prints `Waiting for host
+listener BINDING (service SERVICE, host port PORT): N s of LIMIT s…` on the first
+retry and then every ten seconds.
+
+Discovery retries only native endpoint-identity refusals; malformed selections and
+other failures stop immediately, and stop the discoveries still waiting. A refusal is one `E_CONFIG_INVALID` line that names the
 reason and the affected entry by position, service, binding, aliases, guest port and
 host port, each shown only after it validates. For example, a listener that never
 appears on the selected port reports `no listener owned by host_executable answered
-on host_port before the discovery deadline`. Host PIDs, executable paths and the
-contents of unrecognized fields are never printed. A listener must pass the complete ownership checks
-before any VM or graph effects. Restart preflight does not wait or stop the graph
-when its current selection cannot be verified.
+on host_port before the discovery deadline`, followed by how long it waited, the
+names of the persistent `up.before` hooks and lifecycle processes that ran, and the
+`host_wait_seconds` default and maximum. A missing listener does not stop the
+other bindings: startup keeps resolving them, each against its own wait, and when
+more than one is still missing the single refusal lists every one of them with its
+wait, in selection order. Host PIDs, executable paths, hook commands and the contents of
+unrecognized fields are never printed.
+
+A `host_executable` listener needs a running parent process: native review pins
+at least one supervisor link and refuses a parent at PID 1. A listener started
+with `nohup … &`, `ssh -f` or another daemonizing fork from a shell that then exits
+is adopted by launchd, so discovery refuses it at once, without retrying or
+starting the VM: `the listener on host_port has no supervising parent process (its
+parent is PID 1, …)`. Start it under a parent that stays running, for example a
+persistent `up.before` hook that `exec`s or `wait`s for it.
+
+A listener must pass the complete ownership checks before any VM or graph effects.
+Restart preflight does not wait or stop the graph when its current selection cannot
+be verified.
 
 For an already ready foreground graph, `graph refresh-dependencies --run-id RUN
 --json` asks its authenticated live owner to refresh stale admitted listeners.
@@ -2660,6 +2702,14 @@ the machine settings path with your home shown as `~`. With `--json`, the check'
 | `compose_profiles_ignored` | `COMPOSE_PROFILES` is set in the environment, but native selects profiles only from `--profile`. Managed `COMPOSE_PROFILES` values are not inspected. |
 | `aws_region_without_profile` | `HACK_NATIVE_AWS_REGION` is set without `HACK_NATIVE_AWS_PROFILE` and is ignored. |
 | `unread_project_settings_files` | `.hack/native/` holds files other than `adaptation*.json`; Hack does not read them. |
+
+When a host dependency selection is configured (`HACK_NATIVE_DEPENDENCIES` or the
+machine `dependencies` or `dependenciesByEnv` setting) and the project has persistent `up.before` hooks or
+`lifecycle.processes`, the check also notes the listener wait: native `up` waits
+for each discovered binding up to its `host_wait_seconds` (default 60 s, at most
+900 s) after the hooks. `nativeSettings.dependencyWait` holds `persistentHooks`,
+`defaultSeconds` and `maxSeconds`. The note does not change the check's status, and
+the selection file is not read.
 
 An invalid settings file makes the check an error with the same closed line native
 `up` prints. Each adaptation file (the base and every `adaptation.<env>.json`) is

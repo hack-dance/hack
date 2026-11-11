@@ -317,7 +317,6 @@ export async function acceptCommand(opts: {
         message: `This Hack home already has ${HOME_ACTIVE_LIMIT} active background commands. Wait for one to end or cancel one, then retry.`,
       });
     }
-    await enforceRetainedQuota({ root, now: now.getTime() });
     const meta: CommandMeta = {
       formatVersion: JOURNAL_FORMAT_VERSION,
       writerVersion: HACK_VERSION,
@@ -327,8 +326,10 @@ export async function acceptCommand(opts: {
       fingerprint,
       ...input,
     };
-    // Checked before the journal exists: nothing is created for a refusal.
+    // Checked before the quota sweep and before the journal exists: a
+    // refused start neither creates nor expires anything.
     const metaText = boundedRecordText(meta);
+    await enforceRetainedQuota({ root, now: now.getTime() });
     const paths = journalPaths({ root, commandId: meta.commandId });
     await mkdir(paths.dir, { mode: 0o700 });
     await createPrivateFileExclusive({ path: paths.meta, text: metaText });

@@ -1,26 +1,19 @@
 import { createHash } from "node:crypto";
-import {
-  access,
-  chmod,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import {
   type ComposeBackendFeature,
+  classifyComposeBackendReading,
   RESERVED_OWNERSHIP_LABEL_PREFIXES,
-  readComposeBackendReading,
-  readNativeComposeDocument,
 } from "../lib/native-compose-backend-features.ts";
 import { projectEnvConfigExists } from "../lib/project-env-config.ts";
 import { admitNativeHttpProbe } from "./native-http-probe-admission.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import { admitNativeProjectBuild } from "./native-project-builds.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
+import { readNativeComposeBytes } from "./native-project-input.ts";
 import {
   applyNativeInternalHostAliases,
   type NativeHostAliasSource,
@@ -587,7 +580,6 @@ const SERVICE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 /** A review field path: dotted Compose keys and list indexes, no authored text. */
 const FIELD = /^[A-Za-z0-9_.[\]-]{1,256}$/;
-const COMPOSE_LIMIT = 256 * 1024;
 const DIGEST = /^[a-f0-9]{64}$/;
 
 function finding(
@@ -778,12 +770,37 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
+/**
+ * Reads the Compose file with the bounds native start applies
+ * (`readCompose` in `native-project-input.ts`): a regular file opened without
+ * following a link and without blocking, not empty, at most 256 KiB, and
+ * unchanged while it was read. Anything else is `null`, so a FIFO cannot hang
+ * the preflight and an oversized file is never loaded.
+ */
+export async function readNativePreflightCompose(
+  path: string
+): Promise<Buffer | null> {
+  return await readNativeComposeBytes(path).catch(() => null);
+}
+
+/** The YAML document, or `undefined` when the bytes are not valid UTF-8 YAML. */
+export function parseNativePreflightCompose(bytes: Buffer): unknown {
+  try {
+    return Bun.YAML.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+    );
+  } catch {
+    return;
+  }
+}
+
 /** What the CLI's admission would judge: the adapted Compose document. */
 type AdaptedProject = {
   readonly findings: NativePreflightFinding[];
   /** Absent when the Compose file cannot be read. */
   readonly document?: {
     readonly originalSha256: string;
+    readonly originalCompose: unknown;
     /** The public document native start would review, as JSON. */
     readonly normalizedComposeJson: string;
     readonly services: Readonly<Record<string, unknown>>;
@@ -800,6 +817,7 @@ type AdaptedProject = {
  * from before that step is kept so later checks still run.
  */
 async function adaptForPreflight(opts: {
+  readonly composeBytes: Buffer | null;
   readonly composeFile: string;
   readonly adaptationFile: string | undefined;
   readonly internalHosts: Readonly<Record<string, string>> | null;
@@ -808,13 +826,11 @@ async function adaptForPreflight(opts: {
   readonly effectiveEnvName: string | null;
 }): Promise<AdaptedProject> {
   const blocker = { severity: "blocker", gate: "cli" } as const;
-  const compose = await readNativeComposeDocument(opts.composeFile);
-  const bytes = await readFile(opts.composeFile).catch(() => null);
-  if (
-    !(isRecord(compose) && isRecord(compose.services)) ||
-    bytes === null ||
-    bytes.byteLength > COMPOSE_LIMIT
-  ) {
+  // One bounded read: the parsed document and the digest come from the same bytes.
+  const bytes = opts.composeBytes;
+  const compose =
+    bytes === null ? undefined : parseNativePreflightCompose(bytes);
+  if (bytes === null || !(isRecord(compose) && isRecord(compose.services))) {
     return {
       findings: [
         finding(
@@ -896,6 +912,7 @@ async function adaptForPreflight(opts: {
     findings,
     document: {
       originalSha256: input.originalSha256,
+      originalCompose: compose,
       normalizedComposeJson: input.normalizedComposeJson,
       services:
         isRecord(adapted) && isRecord(adapted.services) ? adapted.services : {},
@@ -919,10 +936,13 @@ async function collectNativeCliFindings(opts: {
   const found: NativePreflightFinding[] = [];
   const blocker = { severity: "blocker", gate: "cli" } as const;
   try {
-    const reading = await readComposeBackendReading(opts.composeFile, {
-      adaptationCandidates: opts.adaptationCandidates,
-      buildsEnabled: opts.buildsEnabled,
-    });
+    const reading = await classifyComposeBackendReading(
+      opts.adapted.originalCompose,
+      {
+        adaptationCandidates: opts.adaptationCandidates,
+        buildsEnabled: opts.buildsEnabled,
+      }
+    );
     for (const feature of reading.features) {
       found.push(
         finding({ ...blocker, code: feature }, FEATURE_FINDINGS[feature])
@@ -1269,6 +1289,8 @@ function routeFindings(opts: {
 
 /** Inputs the command layer resolves; nothing here is a secret value. */
 export type NativePreflightOptions = {
+  /** One bounded snapshot shared by project-name lookup, parsing and digest. */
+  readonly composeBytes: Buffer | null;
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly composeFile: string;

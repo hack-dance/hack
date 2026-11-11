@@ -1,6 +1,8 @@
 import {
   collectNativePreflight,
   type NativePreflightFinding,
+  parseNativePreflightCompose,
+  readNativePreflightCompose,
   renderNativePreflightReport,
 } from "../backends/native-preflight.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
@@ -21,6 +23,7 @@ import {
 import { CliUsageError } from "../cli/command.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
+import { getString, isRecord } from "../lib/guards.ts";
 import { findProjectContext, readProjectConfig } from "../lib/project.ts";
 import { resolveProjectEnvSelection } from "../lib/project-env-config.ts";
 import { ProjectInputSelectionError } from "../lib/project-input-selection.ts";
@@ -39,6 +42,10 @@ function selectedRuntime(
   } catch {
     return "incomplete";
   }
+}
+
+function composeName(document: unknown): string | null {
+  return isRecord(document) ? (getString(document, "name") ?? null) : null;
 }
 
 const SETTINGS_BLOCKER = { severity: "blocker", gate: "cli" } as const;
@@ -78,6 +85,11 @@ export async function runNativePreflightCommand(opts: {
     );
   }
   const settings: NativePreflightFinding[] = [];
+  const composeBytes = await readNativePreflightCompose(project.composeFile);
+  const compose =
+    composeBytes === null
+      ? undefined
+      : parseNativePreflightCompose(composeBytes);
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {
     settings.push({
@@ -107,32 +119,40 @@ export async function runNativePreflightCommand(opts: {
   let sharedSource = false;
   let hasHostDependencies = false;
   let hasDefaultDependencyFile = false;
-  let settingsReadable = true;
-  try {
-    const host = await resolveNativeHostSettings({
-      env,
-      projectName: await resolveComposeProjectName({ project, cfg }),
-      projectRoot: project.projectRoot,
-    });
-    sharedSource = host.sharedSource;
-    hasDefaultDependencyFile = host.dependencyFile !== undefined;
-    hasHostDependencies =
-      selectNativeEnvFile({
-        selection: {
-          file: host.dependencyFile,
-          fileByEnv: host.dependencyFileByEnv,
-        },
-        envName: effectiveEnv,
-      }) !== undefined;
-  } catch {
-    settingsReadable = false;
-    settings.push({
-      ...SETTINGS_BLOCKER,
-      code: "native_settings_invalid",
-      message:
-        "The native machine settings for this project, or a native setting in the environment, could not be read.",
-      fix: "Run hack doctor for the native settings check. The settings file must be private to you (directory 0700, file 0600) and list this project root.",
-    });
+  // An unreadable Compose file is reported as `compose_file_unreadable`; the
+  // settings lookup needs its project name, so it is skipped then.
+  let settingsReadable = false;
+  if (composeBytes !== null) {
+    try {
+      const host = await resolveNativeHostSettings({
+        env,
+        projectName: await resolveComposeProjectName({
+          project,
+          cfg,
+          composeName: composeName(compose),
+        }),
+        projectRoot: project.projectRoot,
+      });
+      settingsReadable = true;
+      sharedSource = host.sharedSource;
+      hasDefaultDependencyFile = host.dependencyFile !== undefined;
+      hasHostDependencies =
+        selectNativeEnvFile({
+          selection: {
+            file: host.dependencyFile,
+            fileByEnv: host.dependencyFileByEnv,
+          },
+          envName: effectiveEnv,
+        }) !== undefined;
+    } catch {
+      settings.push({
+        ...SETTINGS_BLOCKER,
+        code: "native_settings_invalid",
+        message:
+          "The native machine settings for this project, or a native setting in the environment, could not be read.",
+        fix: "Run hack doctor for the native settings check. The settings file must be private to you (directory 0700, file 0600) and list this project root.",
+      });
+    }
   }
   let adaptationFile: string | undefined;
   let adaptationCandidates: readonly (string | undefined)[] = [undefined];
@@ -167,6 +187,7 @@ export async function runNativePreflightCommand(opts: {
     internalHostSources = resolved ? resolved.sources : {};
   }
   const report = await collectNativePreflight({
+    composeBytes,
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
     composeFile: project.composeFile,

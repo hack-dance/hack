@@ -7,6 +7,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -149,7 +150,8 @@ type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function cli(
   f: Fixture,
   args: readonly string[],
-  env: Record<string, string> = {}
+  env: Record<string, string> = {},
+  timeoutMs = SPAWN_TIMEOUT_MS - 5000
 ) {
   const child = Bun.spawn(
     [process.execPath, entrypoint, "--path", f.project, ...args],
@@ -157,12 +159,20 @@ async function cli(
       cwd: f.root,
       env: privateCliEnv({
         root: f.root,
-        env: { HACK_NO_INTERACTIVE: "1", HACK_LOGGER: "console", ...env },
+        env: {
+          HACK_NO_INTERACTIVE: "1",
+          HACK_LOGGER: "console",
+          XDG_CONFIG_HOME: join(f.root, "user-home", ".config"),
+          XDG_STATE_HOME: join(f.root, "xdg-state"),
+          XDG_CACHE_HOME: join(f.root, "xdg-cache"),
+          XDG_DATA_HOME: join(f.root, "xdg-data"),
+          ...env,
+        },
       }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      timeout: SPAWN_TIMEOUT_MS - 5000,
+      timeout: timeoutMs,
     }
   );
   const [stdout, stderr, code] = await Promise.all([
@@ -894,4 +904,52 @@ test(
     );
   },
   SPAWN_TIMEOUT_MS
+);
+
+test(
+  "a Compose path that is a FIFO, a link, empty or oversized is reported, never read unbounded",
+  async () => {
+    const replace = async (
+      prepare: (path: string, f: Fixture) => Promise<void>
+    ) => {
+      const f = await fixture({ services: { web: { image: IMAGE } } });
+      const path = join(f.projectDir, "docker-compose.yml");
+      await rm(path);
+      await prepare(path, f);
+      const started = Date.now();
+      const result = await cli(
+        f,
+        ["doctor", "--native-preflight", "--json"],
+        GRANT,
+        5000
+      );
+      // A blocking read of a FIFO with no writer would never return.
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(result.code).toBe(1);
+      const { data: report } = JSON.parse(result.stdout) as {
+        data: NativePreflightReport;
+      };
+      expect(codes(report, "cli")).toEqual(["compose_file_unreadable"]);
+    };
+    await replace(async (path) => {
+      const made = Bun.spawnSync(["mkfifo", path]);
+      expect(made.exitCode).toBe(0);
+    });
+    await replace(async (path, f) => {
+      const target = join(f.root, "elsewhere.yml");
+      await writeFile(
+        target,
+        JSON.stringify({ services: { web: { image: IMAGE } } })
+      );
+      await symlink(target, path);
+    });
+    await replace(async (path) => {
+      await writeFile(path, "");
+    });
+    await replace(async (path) => {
+      // One byte over the 256 KiB bound, and valid YAML.
+      await writeFile(path, `services: {}\n#${"x".repeat(256 * 1024)}\n`);
+    });
+  },
+  SPAWN_TIMEOUT_MS * 2
 );

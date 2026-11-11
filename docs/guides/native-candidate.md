@@ -206,6 +206,10 @@ each with a plain sentence and a fix. It judges what `hack up` judges: the
 Compose document after the selected native adaptation and the project-wide
 extra hosts are applied, reviewed with the profiles you pass.
 
+The Compose input must be a nonempty regular file of at most 256 KiB, not a
+symbolic link. Unreadable, changing or oversized input is reported as
+`compose_file_unreadable`; the check never waits for a FIFO writer.
+
 It changes nothing in the project and starts nothing: no VM, no image pull, no
 lifecycle hook. It accepts only `--path`, `--profile` and `--json`. The report
 never prints authored values. A finding names a closed code, a service and a

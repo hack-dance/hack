@@ -1,8 +1,10 @@
 name: Provider pin watch
 
 # HACK-2078. Weekly: compare packages/runtime-core/provider-pins.json with upstream
-# releases and keep one issue, "Provider pins behind upstream", up to date. It never
-# changes a pin. Scheduled runs use the default branch's copy of this file.
+# releases and published security advisories, and keep one issue, "Provider pins behind
+# upstream" (label provider-pin-watch), up to date. It never changes a pin. Scheduled runs
+# use the default branch's copy of this file, so the weekly run starts once it is on main;
+# workflow_dispatch works from any branch that has it.
 on:
   schedule:
     - cron: "23 7 * * 1"
@@ -23,6 +25,7 @@ jobs:
   watch:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # A dry-run dispatch writes nothing but still holds issues: write; one job keeps this simple.
     permissions:
       contents: read
       issues: write
@@ -32,7 +35,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.4.4"
+          bun-version-file: package.json
       # No dependency install: the script uses only Bun and Node built-ins.
       - name: Compare pins with upstream releases
         env:

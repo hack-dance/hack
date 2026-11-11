@@ -487,12 +487,15 @@ pinned package preparation, ownership, resource admission, lifecycle commands, a
 The default private build includes native HTTP graph probes (local `_docs/docs/plans/v5/native-http-probe-20260915.md`)
 and requires Zig 0.15.2 plus a host C compiler.
 [Provider pins](provider-pins.json) record the exact package inputs; the engine runs inside the VM.
-A weekly workflow (`.github/workflows/provider-pin-watch.yml`, `scripts/provider-pin-watch.ts`)
-compares these pins with upstream releases and keeps one issue, "Provider pins behind upstream",
-listing each newer release and which watched interfaces its notes mention (libkrun, vsock,
-virtiofs, balloon or reclaim, disks and templates, the flags and `SMOLVM_*` variables the
-runtime passes, security advisories). It labels the issue `security` when a note mentions an
-advisory and never changes a pin; bumps are qualified by hand.
+A weekly workflow (`.github/workflows/provider-pin-watch.yml`, `scripts/provider-pin-watch.ts`;
+weekly once it is on `main`, by dispatch before that) compares these pins with upstream releases
+and published security advisories. It keeps one issue, "Provider pins behind upstream" (label
+`provider-pin-watch`), listing each newer release, which watched SmolVM interfaces its notes
+mention (libkrun, vsock, virtiofs, balloon or reclaim, disks and templates, the `machine`
+subcommands, flags and `SMOLVM_*` variables the runtime passes; a test keeps that list and the
+runtime source in step), and every advisory whose vulnerable range contains a pinned version.
+The issue carries the `security` label exactly while such an advisory exists. It never changes a
+pin; bumps are qualified by hand.
 The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine

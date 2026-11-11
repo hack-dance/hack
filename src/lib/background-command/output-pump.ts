@@ -1,10 +1,7 @@
 import { constants } from "node:fs";
 import { type FileHandle, open } from "node:fs/promises";
 import { OUTPUT_EVENT_MAX_BYTES, type OutputStream } from "./journal.ts";
-import { scanOutput } from "./output-scanner.ts";
-
-/** Bounds one scan's work (bytes x redaction values) and so cancel latency. */
-const READ_SLICE_BYTES = 256 * 1024;
+import { scanOutput, scanSliceBytes } from "./output-scanner.ts";
 
 export type PumpResult = {
   /** File offset up to which output events now exist. */
@@ -73,7 +70,14 @@ export async function pumpStream(opts: {
   try {
     for (;;) {
       state.size = (await handle.stat()).size;
-      const slice = await readSlice({ handle, state, final: opts.final });
+      const slice = await readSlice({
+        handle,
+        state,
+        final: opts.final,
+        // Bounds one scan's work (bytes x redaction values) and so the delay
+        // it adds to cancel and timeout handling.
+        sliceBytes: scanSliceBytes(opts.redact ? opts.secrets.length : 0),
+      });
       if (!slice) {
         break;
       }
@@ -121,6 +125,7 @@ async function readSlice(opts: {
   readonly handle: FileHandle;
   readonly state: PumpState;
   readonly final: boolean;
+  readonly sliceBytes: number;
 }): Promise<{ readonly bytes: Uint8Array; readonly final: boolean } | null> {
   const { state } = opts;
   const readFrom = state.from + state.carry.length;
@@ -129,7 +134,7 @@ async function readSlice(opts: {
   }
   const end = Math.max(
     readFrom,
-    Math.min(state.size, readFrom + READ_SLICE_BYTES)
+    Math.min(state.size, readFrom + opts.sliceBytes)
   );
   const fresh = new Uint8Array(end - readFrom);
   const { bytesRead } = await opts.handle.read(

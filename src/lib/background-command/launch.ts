@@ -16,6 +16,7 @@ import {
   readEvents,
   reconcileTail,
 } from "./journal.ts";
+import { encodeSecrets, REDACTION_VALUES_LIMIT } from "./output-scanner.ts";
 import { describeStdin, readSessionId, spawnInNewSession } from "./platform.ts";
 import { stateOf } from "./reader.ts";
 import { withJournalLock } from "./recovery.ts";
@@ -30,7 +31,10 @@ import {
   expiresAt,
   lookupRequest,
 } from "./store.ts";
-import { BACKGROUND_SUPERVISOR_ARGUMENT } from "./supervisor.ts";
+import {
+  BACKGROUND_SUPERVISOR_ARGUMENT,
+  REDACT_MIN_BYTES,
+} from "./supervisor.ts";
 
 /** Set by `hack mcp serve` on its children so admission counts per MCP session. */
 export const CALLER_ENV = "HACK_COMMAND_CALLER";
@@ -202,6 +206,9 @@ export async function startBackgroundCommand(
     ...configs,
   });
   const native = opts.backend === "native";
+  if (settings.capture === "full") {
+    assertRedactionValuesBounded(opts.redactValues);
+  }
   // Refuse before anything is persisted when the supervisor could not start.
   assertComposeSpawnEnvFits({ env: opts.child.env, baseEnv: {} });
   const caller = await resolveCaller();
@@ -471,4 +478,19 @@ export function withoutBunRuntimeEnv(
     }
   }
   return env;
+}
+
+/**
+ * Full capture redacts every resolved value; matching costs bytes x values,
+ * so a command with more distinct values than `REDACTION_VALUES_LIMIT` is
+ * refused before anything is accepted rather than stalling its supervisor.
+ */
+function assertRedactionValuesBounded(values: readonly string[]): void {
+  const count = encodeSecrets({ values, minLength: REDACT_MIN_BYTES }).length;
+  if (count > REDACTION_VALUES_LIMIT) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: `This command's environment has ${count} distinct values to redact; full capture supports at most ${REDACTION_VALUES_LIMIT}. Use --capture metadata (no output is stored) or run it in the foreground.`,
+    });
+  }
 }

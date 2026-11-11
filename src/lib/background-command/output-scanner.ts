@@ -276,6 +276,27 @@ function mergeSortedIntervals(
   return merged;
 }
 
+/**
+ * Most distinct redaction values a full-capture command may have: matching
+ * costs bytes x values, so an unbounded count could stall the supervisor.
+ */
+export const REDACTION_VALUES_LIMIT = 1024;
+
+/** Target byte steps for one scan (slice length x values): about 0.1 s. */
+const SCAN_WORK_STEPS = 16 * 1024 * 1024;
+
+/**
+ * Slice length for one scan: smaller as the number of values grows, so one
+ * scan's synchronous work (and the delay it adds to cancel and timeout
+ * handling) stays bounded. Between 16 KiB and 256 KiB.
+ */
+export function scanSliceBytes(secretCount: number): number {
+  return Math.min(
+    256 * 1024,
+    Math.max(16 * 1024, Math.floor(SCAN_WORK_STEPS / Math.max(1, secretCount)))
+  );
+}
+
 /** Encode redaction values; values shorter than `minLength` bytes are skipped. */
 export function encodeSecrets(opts: {
   readonly values: readonly string[];

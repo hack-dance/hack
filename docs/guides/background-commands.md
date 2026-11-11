@@ -314,6 +314,12 @@ values printed after the supervisor was lost (such output is withheld from reads
 with `withheld: "redaction_unavailable"`). Hack never loads or decrypts secrets
 only to redact. Treat stored output as sensitive.
 
+- Full capture supports at most 1,024 distinct values to redact (values of
+  6 bytes or more from the command's environment). A command with more is
+  refused before it starts; use `--capture metadata` or run it in the
+  foreground. Output is scanned in slices that shrink as the number of values
+  grows, so one scan never stalls cancel or timeout handling.
+
 ## Audit
 
 Starts, final outcomes (whoever writes them) and cancels are appended to

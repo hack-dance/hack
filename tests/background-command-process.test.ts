@@ -755,6 +755,27 @@ describe("background command processes", () => {
   );
 
   test(
+    "full capture with more distinct redaction values than the limit is refused before anything starts",
+    async () => {
+      const refused = await launch({
+        argv: ["true"],
+        redactValues: Array.from(
+          { length: 1025 },
+          (_, index) => `value-${index}-padded`
+        ),
+      });
+      expect(refused.envelope.ok).toBe(false);
+      expect(refused.envelope.error?.code).toBe("E_USAGE");
+      // Refused before acceptance: no journal (here, not even the store).
+      const entries = await Array.fromAsync(
+        new Bun.Glob("cmd_*").scan({ cwd: fixture.store, onlyFiles: false })
+      ).catch(() => []);
+      expect(entries).toHaveLength(0);
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
     "stdin is closed: a command that reads it ends at once; input from a file is refused before anything starts",
     async () => {
       const launched = await launch({

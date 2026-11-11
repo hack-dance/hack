@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   encodeSecrets,
   findMatches,
+  REDACTION_VALUES_LIMIT,
   scanOutput,
+  scanSliceBytes,
   utf8SafeCut,
 } from "../src/lib/background-command/output-scanner.ts";
 import { StallTracker } from "../src/lib/background-command/stall.ts";
@@ -260,6 +262,14 @@ describe("scanOutput", () => {
     ).toEqual([{ start: 0, length: 262_144 }]);
     // Loose bound: the restart-by-one-byte search took seconds here.
     expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  test("slices shrink as redaction values grow, so one scan's work stays bounded", () => {
+    expect(scanSliceBytes(0)).toBe(256 * 1024);
+    expect(scanSliceBytes(64)).toBe(256 * 1024);
+    expect(scanSliceBytes(256)).toBe(64 * 1024);
+    expect(scanSliceBytes(REDACTION_VALUES_LIMIT)).toBe(16 * 1024);
+    expect(scanSliceBytes(1_000_000)).toBe(16 * 1024);
   });
 
   test("bytes past the capture budget are not scanned", () => {

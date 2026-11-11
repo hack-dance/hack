@@ -562,6 +562,7 @@ fn an_interrupted_witness_write_keeps_the_committed_witness_and_is_recovered() {
     let directory = home.witness_path().parent().unwrap().to_path_buf();
     for leftover in ["provider-trees.json.tmp", "provider-trees.pending"] {
         fs::write(directory.join(leftover), b"{\"partial\":").unwrap();
+        fs::set_permissions(directory.join(leftover), fs::Permissions::from_mode(0o600)).unwrap();
     }
     assert_eq!(fs::read(home.witness_path()).unwrap(), committed);
     assert_eq!(home.proofs().unwrap(), 0);

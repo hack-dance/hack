@@ -1446,19 +1446,22 @@ Two limits on when the witness is used (decided for HACK-2092; the owner can rev
 
 - **Qualified filesystems only.** The witness is accepted only when all three trees are on a
   filesystem whose change-time behaviour was qualified: APFS today, checked with `statfs`
-  on each tree root rather than assumed. APFS keeps nanosecond ctime that user space cannot
+  throughout each tree rather than assumed. Any device change within a tree disables the
+  witness, including a mount of another APFS volume. APFS keeps nanosecond ctime that user space cannot
   set back, and stores through a shared mapping update it (both observed on Apple Silicon
   with SmolVM 1.34.1). On any other filesystem, or when the type cannot be read, every start
   proves the trees by content and no witness is written.
 - **Bound to the runtime build.** The witness names the build that recorded it: the runtime
-  version plus its executable's file identity (device, inode, size, modification and change
-  times). An in-place upgrade of the bundle therefore proves by content once, then records a
-  witness for the new build.
+  version plus a hash of source and build options embedded at compile time, including dirty
+  source inputs. Replacing the executable on disk does not change an already running image's
+  identity. A build with different inputs proves by content once, then records its witness.
 
 The witness is read without blocking, so a FIFO or other special file at its path is
 refused like any unsafe receipt and the trees are proven by content. It is written through a
 temporary under the lifecycle lease and replaces the committed witness only by rename; a
-temporary left by an interrupted write is removed by the next write under the lease.
+temporary left by an interrupted write is removed by the next write under the lease only
+when it is a regular file owned by this user, mode 0600, with one link. Any other entry is
+left in place and prevents publication; full content hashing remains available.
 
 Both proofs guard against drift (damage, cleanup tools, interrupted writers), not a
 same-user adversary who knows the scheme: the content anchors and the witness are writable

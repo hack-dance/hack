@@ -1,5 +1,6 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
+    build_runtime_identity();
     build_loopback_identity();
     println!("cargo:rerun-if-changed=guest/stream-relay.c");
     if env::var_os("CARGO_FEATURE_NATIVE_STREAM_RELAY").is_some() {
@@ -41,6 +42,70 @@ fn main() {
         .status()
         .expect("launch Zig");
     assert!(status.success(), "guest environment launcher build failed");
+}
+
+/// Embed the source inputs, including uncommitted edits, in the running image. Reading the
+/// executable pathname at runtime would instead identify a replacement installed over it.
+fn build_runtime_identity() {
+    use sha2::{Digest, Sha256};
+    use std::{fs, path::Path};
+
+    fn hash_path(hash: &mut Sha256, path: &Path) {
+        println!("cargo:rerun-if-changed={}", path.display());
+        let name = path.to_str().expect("build input path");
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        if path.is_dir() {
+            hash.update(b"directory");
+            let mut entries = fs::read_dir(path)
+                .expect("read build input directory")
+                .map(|entry| entry.expect("read build input entry").path())
+                .collect::<Vec<_>>();
+            entries.sort();
+            for entry in entries {
+                hash_path(hash, &entry);
+            }
+        } else {
+            hash.update(b"file");
+            let bytes = fs::read(path).expect("read build input");
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+    }
+
+    let mut hash = Sha256::new();
+    for path in [
+        "src",
+        "guest",
+        "host",
+        "build.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "../config-compiler/src",
+        "../config-compiler/Cargo.toml",
+    ] {
+        hash_path(&mut hash, Path::new(path));
+    }
+    let mut options = env::vars()
+        .filter(|(key, _)| {
+            key.starts_with("CARGO_FEATURE_")
+                || matches!(
+                    key.as_str(),
+                    "TARGET" | "PROFILE" | "OPT_LEVEL" | "DEBUG" | "CARGO_ENCODED_RUSTFLAGS"
+                )
+        })
+        .collect::<Vec<_>>();
+    options.sort();
+    for (key, value) in options {
+        hash.update((key.len() as u64).to_le_bytes());
+        hash.update(key.as_bytes());
+        hash.update((value.len() as u64).to_le_bytes());
+        hash.update(value.as_bytes());
+    }
+    println!(
+        "cargo:rustc-env=HACK_RUNTIME_BUILD_ID={:x}",
+        hash.finalize()
+    );
 }
 
 fn build_stream_relay() {

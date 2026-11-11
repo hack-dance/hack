@@ -76,8 +76,8 @@ pub(super) const ENGINE: &str = "engine";
 pub(super) const ROOTFS: &str = "rootfs";
 
 const DOMAIN: &[u8] = b"hack.provider-tree.metadata.v1\0";
-/// 2: bound to the runtime build that recorded it.
-const VERSION: u32 = 2;
+/// 3: bound to an identifier embedded in the running image, not its pathname.
+const VERSION: u32 = 3;
 /// Filesystems whose change-time behaviour was qualified for the metadata check: APFS keeps
 /// nanosecond ctime that user space cannot set back (observed on Apple Silicon with SmolVM
 /// 1.34.1). On any other filesystem every start proves the trees by content.
@@ -119,22 +119,15 @@ fn temporary(candidate: &Candidate) -> PathBuf {
         .join("run/smolvm/provider-trees.json.tmp")
 }
 
-/// The running runtime build: its version and its executable's file identity (device, inode,
-/// size, modification and change times). Replacing the executable in place changes it.
-fn runtime_build(candidate: &Candidate) -> Result<String, CandidateError> {
-    let m = fs::metadata(&candidate.executable).map_err(state::io)?;
-    Ok(format!(
-        "{}+{}:{}:{}:{}:{}.{}:{}.{}",
+/// The running image's version and build-input hash, embedded at compile time. Replacing
+/// the executable pathname cannot make an old process claim the replacement's identity.
+fn runtime_build() -> String {
+    format!(
+        "{}+{}:{}",
         crate::CANDIDATE_VERSION,
         env!("CARGO_PKG_VERSION"),
-        m.dev(),
-        m.ino(),
-        m.len(),
-        m.mtime(),
-        m.mtime_nsec(),
-        m.ctime(),
-        m.ctime_nsec()
-    ))
+        env!("HACK_RUNTIME_BUILD_ID")
+    )
 }
 
 #[cfg(test)]
@@ -178,11 +171,52 @@ fn filesystem_type(path: &Path) -> Option<String> {
     }
 }
 
-/// Whether every one of `roots` is on a filesystem qualified for the metadata check. Callers
-/// accept a witness only when this holds for all the trees they witness.
+/// Whether every entry is on its root's device and a qualified filesystem. Symlink targets
+/// are not followed, just as in the content proof. An unreadable or bounded-out walk grants
+/// no witness; callers still run the full content proof.
 pub(super) fn qualified(roots: &[&Path]) -> bool {
+    qualified_with(roots, &mut |path, metadata| {
+        Some((metadata.dev(), filesystem_type(path)?))
+    })
+}
+
+fn qualified_with(
+    roots: &[&Path],
+    observe: &mut impl FnMut(&Path, &fs::Metadata) -> Option<(u64, String)>,
+) -> bool {
+    fn visit(
+        path: &Path,
+        device: u64,
+        count: &mut usize,
+        observe: &mut impl FnMut(&Path, &fs::Metadata) -> Option<(u64, String)>,
+    ) -> Option<()> {
+        *count += 1;
+        if *count > MAX_ENTRIES {
+            return None;
+        }
+        let metadata = fs::symlink_metadata(path).ok()?;
+        if metadata.dev() != device {
+            return None;
+        }
+        if metadata.file_type().is_symlink() {
+            return Some(());
+        }
+        let (observed_device, kind) = observe(path, &metadata)?;
+        if observed_device != device || !QUALIFIED_FILESYSTEMS.contains(&kind.as_str()) {
+            return None;
+        }
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).ok()? {
+                visit(&entry.ok()?.path(), device, count, observe)?;
+            }
+        }
+        Some(())
+    }
     roots.iter().all(|root| {
-        filesystem_type(root).is_some_and(|name| QUALIFIED_FILESYSTEMS.contains(&name.as_str()))
+        let Ok(metadata) = fs::symlink_metadata(root) else {
+            return false;
+        };
+        metadata.is_dir() && visit(root, metadata.dev(), &mut 0, observe).is_some()
     })
 }
 
@@ -278,7 +312,7 @@ pub(super) fn witnessed(
     tree: &str,
 ) -> Option<Proven> {
     let witness: Witness = state::read(&path(candidate)).ok()?;
-    let build = runtime_build(candidate).ok()?;
+    let build = runtime_build();
     (witness.version == VERSION && witness.build == build && witness.process == *process)
         .then(|| witness.trees.get(tree).cloned())
         .flatten()
@@ -317,9 +351,9 @@ pub(super) fn record_boot(
 /// or proven again while it runs.
 ///
 /// The committed witness stays in place until the new one replaces it by rename. The
-/// temporary has a fixed name and is written only under the lease, so a temporary left by an
-/// interrupted write (or an older build's `provider-trees.pending`) belongs to no live writer
-/// and is removed first.
+/// temporary has a fixed name and is written only under the lease. A leftover is removed
+/// only if its type, owner, mode and link count match our private temporary contract. A
+/// foreign entry disables publication and is left in place.
 pub(super) fn record(
     candidate: &Candidate,
     _lease: &state::Lock,
@@ -330,8 +364,24 @@ pub(super) fn record(
     use std::os::unix::fs::OpenOptionsExt;
     let target = path(candidate);
     let temporary = temporary(candidate);
-    for leftover in [temporary.clone(), target.with_extension("pending")] {
-        match fs::remove_file(&leftover) {
+    let leftovers = [temporary.clone(), target.with_extension("pending")];
+    for leftover in &leftovers {
+        match fs::symlink_metadata(leftover) {
+            Ok(metadata) => {
+                if !metadata.is_file()
+                    || metadata.uid() != unsafe { libc::geteuid() }
+                    || metadata.mode() & 0o7777 != 0o600
+                    || metadata.nlink() != 1
+                {
+                    return Err(invalid("Foreign witness temporary; leaving it in place."));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(state::io(error)),
+        }
+    }
+    for leftover in &leftovers {
+        match fs::remove_file(leftover) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(state::io(error)),
@@ -339,7 +389,7 @@ pub(super) fn record(
     }
     let bytes = serde_json::to_vec_pretty(&Witness {
         version: VERSION,
-        build: runtime_build(candidate)?,
+        build: runtime_build(),
         process: process.clone(),
         trees,
     })
@@ -537,6 +587,106 @@ mod tests {
         // A later failed boot leaves the earlier witness, which names another process.
         record_boot(&candidate, &lease, false, Some(&process(43)), trees());
         assert!(witnessed(&candidate, &process(43), SMOLVM).is_none());
+    }
+
+    #[test]
+    fn replacing_the_executable_path_does_not_change_the_running_images_witness() {
+        let (home, mut candidate, lease) = home("image-identity");
+        candidate.executable = home.0.join("runtime");
+        fs::write(&candidate.executable, b"old image").unwrap();
+        let booted = process(41);
+        let trees = || BTreeMap::from([(SMOLVM.to_owned(), proven('a', 'c'))]);
+        record(&candidate, &lease, &booted, trees()).unwrap();
+        let before: Witness = state::read(&path(&candidate)).unwrap();
+        fs::write(home.0.join("replacement"), b"new image").unwrap();
+        fs::rename(home.0.join("replacement"), &candidate.executable).unwrap();
+        assert_eq!(
+            witnessed(&candidate, &booted, SMOLVM),
+            Some(proven('a', 'c'))
+        );
+        record(&candidate, &lease, &booted, trees()).unwrap();
+        let after: Witness = state::read(&path(&candidate)).unwrap();
+        assert_eq!(before.build, after.build);
+        assert!(after.build.ends_with(env!("HACK_RUNTIME_BUILD_ID")));
+        let mut other = after;
+        other.build.push_str("-another-build");
+        fs::remove_file(path(&candidate)).unwrap();
+        state::write(&path(&candidate), &other).unwrap();
+        assert!(witnessed(&candidate, &booted, SMOLVM).is_none());
+    }
+
+    #[test]
+    fn a_filesystem_boundary_anywhere_in_a_tree_disqualifies_it() {
+        let tree = Tree::new("filesystem-boundary");
+        let nested = tree.0.join("lib/empty");
+        let roots = [tree.0.as_path()];
+        assert!(qualified_with(&roots, &mut |_, m| Some((
+            m.dev(),
+            "apfs".into()
+        ))));
+        for kind in ["device", "type", "unknown"] {
+            assert!(
+                !qualified_with(&roots, &mut |path, m| {
+                    if path == nested {
+                        match kind {
+                            "device" => Some((m.dev().wrapping_add(1), "apfs".into())),
+                            "type" => Some((m.dev(), "nfs".into())),
+                            _ => None,
+                        }
+                    } else {
+                        Some((m.dev(), "apfs".into()))
+                    }
+                }),
+                "{kind}"
+            );
+        }
+        // The full metadata/content proof remains available when no witness is qualified.
+        tree.digest();
+    }
+
+    #[test]
+    fn foreign_entries_at_either_temporary_name_survive_and_prevent_publication() {
+        for name in ["provider-trees.json.tmp", "provider-trees.pending"] {
+            for kind in ["regular", "hardlink", "symlink", "fifo"] {
+                let (home, candidate, lease) = home("foreign-temporary");
+                let temporary = path(&candidate).parent().unwrap().join(name);
+                match kind {
+                    "regular" => {
+                        fs::write(&temporary, b"foreign").unwrap();
+                        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).unwrap();
+                    }
+                    "hardlink" => {
+                        fs::set_permissions(
+                            home.0.join("smolvm-bin"),
+                            fs::Permissions::from_mode(0o600),
+                        )
+                        .unwrap();
+                        fs::hard_link(home.0.join("smolvm-bin"), &temporary).unwrap();
+                    }
+                    "symlink" => symlink(home.0.join("smolvm-bin"), &temporary).unwrap(),
+                    _ => {
+                        let name = std::ffi::CString::new(temporary.as_os_str().as_encoded_bytes())
+                            .unwrap();
+                        // SAFETY: the path is NUL-terminated and lies in this test's private root.
+                        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                    }
+                }
+                let before = fs::symlink_metadata(&temporary).unwrap();
+                assert!(
+                    record(&candidate, &lease, &process(41), BTreeMap::new()).is_err(),
+                    "{name}: {kind}"
+                );
+                let after = fs::symlink_metadata(&temporary).unwrap();
+                assert_eq!(
+                    (before.dev(), before.ino(), before.mode(), before.nlink()),
+                    (after.dev(), after.ino(), after.mode(), after.nlink())
+                );
+                assert!(!path(&candidate).exists());
+                if kind == "regular" {
+                    assert_eq!(fs::read(&temporary).unwrap(), b"foreign");
+                }
+            }
+        }
     }
 
     #[test]

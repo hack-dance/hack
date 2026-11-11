@@ -398,6 +398,9 @@ async function createCloudSecretStore(input: {
   const adapter = await createCloudProviderAdapter({
     provider,
     projectName: input.projectName,
+    // Relative store and key paths belong to the project, like the
+    // encrypted_file backend and the read-only listing (HACK-2001).
+    projectDir: input.projectDir,
     secretsConfig: input.secretsConfig,
     allowKeyProvisioning: input.allowKeyProvisioning,
   });

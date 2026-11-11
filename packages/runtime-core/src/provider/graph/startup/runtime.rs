@@ -117,6 +117,16 @@ fn stage_refused(code: &'static str) -> CandidateError {
         "Graph dependency startup validation failed; configuration values omitted.",
     )
 }
+/// An owned service failed while dependency relays were attached. The stage code
+/// stays `graph_startup_application_failed`; the message and service name the
+/// failed service (exit code, death or health) instead of a validation failure.
+fn application_failed(name: &str, observation: Observation) -> CandidateError {
+    crate::project::execution::failed_service_error(
+        "graph_startup_application_failed",
+        name,
+        observation,
+    )
+}
 // Fresh and restored graphs both provision a new container generation. Retained
 // stopped/ready receipts cannot authorize listener attachment.
 fn validate_start_phase(resource_phase: &str, graph_phase: &str) -> Result<(), CandidateError> {
@@ -779,7 +789,9 @@ impl Driver for HostRelayRuntime {
                     // service's value-free failure before automatic cleanup removes it.
                     startup_failure::record(receipt, name, observation)?;
                     state::write(&root.join("state.json"), receipt)?;
-                    return Err(stage_refused("graph_startup_application_failed"));
+                    // Name the failed service, as a graph without dependency
+                    // bindings does, rather than a dependency validation failure.
+                    return Err(application_failed(name, observation));
                 }
                 if let Err(error) = verify_exited_listener(receipt.readiness.get(name), &observed) {
                     if error.code == "graph_startup_listener_unexpected_exit"
@@ -1556,6 +1568,27 @@ mod route_tests {
         dependencies[1].service = "unrequested".into();
         assert!(HostRelayRuntime::validate_inputs(&dependencies, &inputs).is_err());
         assert!(!candidate.state_root.exists());
+    }
+}
+
+#[cfg(test)]
+mod application_failure_tests {
+    use super::*;
+    #[test]
+    fn an_application_failure_names_the_service_not_dependency_validation() {
+        let error = application_failed("deps", Observation::Exited { code: 3 });
+        assert_eq!(error.code, "graph_startup_application_failed");
+        assert_eq!(error.service.as_deref(), Some("deps"));
+        let message = error.message.to_string();
+        assert!(message.contains("deps exited with code 3"), "{message}");
+        assert!(!message.contains("validation"), "{message}");
+        let dead = application_failed("deps", Observation::Dead);
+        assert!(dead.message.to_string().contains("dead or OOM-killed"));
+        // An invalid service identifier is never echoed as the service.
+        assert_eq!(
+            application_failed("bad name", Observation::Dead).service,
+            None
+        );
     }
 }
 

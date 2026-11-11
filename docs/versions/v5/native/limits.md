@@ -66,8 +66,9 @@ Details and the exact checks:
   mount a named volume at that path, for example `redis-data:/data`. Without one
   the project refuses with `graph_image_volume_uncovered`. A bind mount or a
   read-only mount there does not count.
-- **Stopping with Ctrl-C.** In this prerelease, Ctrl-C does not stop a foreground
-  project cleanly when it publishes ports. Use `hack down` from another terminal.
+- **Stopping with Ctrl-C.** In this prerelease, Ctrl-C may not stop a foreground
+  project cleanly when it publishes ports. Use `hack down` from another terminal,
+  and `hack down --recover` if it reports that the owner is gone.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

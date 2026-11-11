@@ -35,7 +35,7 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 ## Native backend (beta)
 
 A second way to run the same project on an Apple Silicon Mac. Hack starts its own
-small Linux virtual machine instead of using a Docker app. It is opt-in, and Compose
+Linux virtual machine instead of using a Docker app. It is opt-in, and Compose
 stays the default.
 
 - [Overview](native/overview.md): what it is, what it is not, and why to try it.

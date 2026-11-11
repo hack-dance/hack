@@ -36,16 +36,26 @@ A `hack-next` install keeps each version in its own folder. The two paths you ne
 are the native program and its private home:
 
 ```sh
-V=5.0.0-next.13
+V=5.0.0-next.13   # the version you installed; `hack-next --manager status` shows it
 NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
 NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 ```
 
 Download the exact archives named in `provider-pins.json`, which sits beside
-`hack-native` in the bundle. Then download the four Alpine packages listed under
-[network tool packages](../../guides/native-candidate.md#manual-candidate-upgrade-and-rollback). Their hashes are in that table, not in
-`provider-pins.json`. Hack refuses the packages unless the folder and files are
-private to you, which is not how a download leaves them:
+`hack-native` in the bundle. Then download these four packages from the Alpine
+v3.19 `main` repository for `aarch64`, with exactly these names:
+
+- `iptables-1.8.10-r3.apk`
+- `libmnl-1.0.5-r2.apk`
+- `libnftnl-1.2.6-r0.apk`
+- `libxtables-1.8.10-r3.apk`
+
+Their hashes are listed in [the native reference](../../guides/native-candidate.md#manual-candidate-upgrade-and-rollback), under network-tool preparation, not in `provider-pins.json`.
+
+Put them in a folder under your home folder, not under `/tmp`: Hack refuses a path
+that passes through a symbolic link, and `/tmp` is one on macOS. Hack also refuses
+the packages unless the folder and files are private to you, which is not how a
+download leaves them:
 
 ```sh
 chmod 700 /absolute/private/pinned-apks
@@ -95,8 +105,9 @@ Native `up` runs in the foreground and holds the project until you stop it. Add
 ```
 
 Stop the project with `hack down` from another terminal, as above. In this
-prerelease, Ctrl-C does not stop a foreground project cleanly when it publishes
-ports. A fix is in progress.
+prerelease, Ctrl-C may not stop a foreground project cleanly when it publishes
+ports. If you already pressed Ctrl-C, run `hack down`, and `hack down --recover` if
+it reports that the owner is gone.
 
 Then check the application itself: sign in, load a page that reads data, restart,
 and confirm the data is still there. A green status alone does not prove the

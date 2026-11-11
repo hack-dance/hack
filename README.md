@@ -169,7 +169,7 @@ See [agent integrations](docs/integrations.md).
 Everything above is the supported core. You choose whether to use the items below.
 
 **Native backend (beta, Apple Silicon macOS).** A second way to run the same
-project. Hack starts its own small Linux virtual machine and runs Docker inside it,
+project. Hack starts its own Linux virtual machine and runs Docker inside it,
 so you do not need Docker Desktop or OrbStack. Your `.hack/` folder and your
 commands stay the same. It comes only through the separate `hack-next` channel, not
 in the stable archives or the Homebrew formula, and it supports part of what Compose

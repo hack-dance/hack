@@ -1291,13 +1291,15 @@ Three consequences of the private delivery:
   by another field of the same service. `PORT: ${PORT}` with
   `command: ... --port ${PORT:-3000}` is refused with `execution_environment_owner`,
   whose text says "Hack-managed"; here it means the value came from your shell.
-- All private values of one service, counting managed env and delivered
-  credentials, must fit in 32 KiB as JSON, in at most 256 variables, and at most 32
+- All private values of one service, counting managed env and delivered credential
+  values, must fit in 32 KiB as JSON, in at most 256 variables, and at most 32
   services that run may receive any. `hack up` refuses a project over these limits
   and names the service. Services the selected profiles leave out are not counted.
+  Delivered credential files share the same 32 KiB; only the runtime counts those,
+  and its refusal does not name the service.
 
-`hack exec` does not read your shell for these entries, so a command started with
-it does not receive these values. The containers keep the values they started with
+`hack exec` and a one-off `hack run` do not read your shell for these entries, so a
+command started with either does not receive these values. The containers keep the values they started with
 until the next `hack up` or `hack restart`.
 
 ## Registry image acquisition without Docker

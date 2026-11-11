@@ -30,8 +30,41 @@ virtual machine, or change DNS or certificate trust. Newer prereleases are on th
 ## 2. Prepare the runtime
 
 The native backend needs its virtual machine software set up once per installed
-version. This step is manual today. Follow the provider setup steps in
-[the native reference](../../guides/native-candidate.md#manual-candidate-upgrade-and-rollback).
+version. This step is manual today.
+
+A `hack-next` install keeps each version in its own folder. The two paths you need
+are the native program and its private home:
+
+```sh
+V=5.0.0-next.13
+NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
+NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
+```
+
+Download the exact archives named in `provider-pins.json`, which sits beside
+`hack-native` in the bundle. Then download the four Alpine packages listed under
+[network tool packages](../../guides/native-candidate.md#manual-candidate-upgrade-and-rollback). Their hashes are in that table, not in
+`provider-pins.json`. Hack refuses the packages unless the folder and files are
+private to you, which is not how a download leaves them:
+
+```sh
+chmod 700 /absolute/private/pinned-apks
+chmod 600 /absolute/private/pinned-apks/*.apk
+```
+
+Then prepare the runtime and check that this Mac can run it:
+
+```sh
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime prepare --archive /absolute/smolvm-archive.tar.gz
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime prepare-engine --archive /absolute/docker-archive.tgz
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime prepare-network-tools --directory /absolute/private/pinned-apks
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime probe --profile development --json
+```
+
+Pass `--profile development` to `runtime probe`. Without it the probe checks a
+stricter research profile and can report "not admitted" on a Mac that runs projects
+fine. The [native reference](../../guides/native-candidate.md#manual-candidate-upgrade-and-rollback) explains
+each command.
 
 ## 3. Check the project
 
@@ -60,6 +93,10 @@ Native `up` runs in the foreground and holds the project until you stop it. Add
 "$HOME/.hack-next/bin/hack-next" logs api --no-follow --path /absolute/project
 "$HOME/.hack-next/bin/hack-next" down --path /absolute/project
 ```
+
+Stop the project with `hack down` from another terminal, as above. In this
+prerelease, Ctrl-C does not stop a foreground project cleanly when it publishes
+ports. A fix is in progress.
 
 Then check the application itself: sign in, load a page that reads data, restart,
 and confirm the data is still there. A green status alone does not prove the

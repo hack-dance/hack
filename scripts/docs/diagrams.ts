@@ -85,13 +85,14 @@ export interface DiagramAsset {
 }
 
 /**
- * Replace every Mermaid fence in a staged page with its rendered images. Rendering
- * failures keep the source block and print the renderer's message under it; the
- * build still fails in check mode because the staged text would then differ.
+ * Replace every Mermaid fence in a staged page with its rendered images. A diagram
+ * Pele rejects fails the build with the page and the renderer's message, so an
+ * unrendered block never reaches the published site.
  */
 export async function embedDiagrams(
   markdown: string,
-  assets: Map<string, string>
+  assets: Map<string, string>,
+  page: string
 ): Promise<string> {
   const blocks = [...markdown.matchAll(fence)];
   if (blocks.length === 0) {
@@ -101,30 +102,31 @@ export async function embedDiagrams(
   for (const match of blocks) {
     const source = match[2] ?? "";
     const id = hash(source);
-    let replacement: string;
+    let rendered: { light: string; dark: string };
     try {
-      const { light, dark } = await renderDiagram(source);
-      assets.set(`${id}.light.svg`, light);
-      assets.set(`${id}.dark.svg`, dark);
-      const alt = diagramTitle(source).replaceAll('"', "&quot;");
-      replacement = [
-        `<figure className="diagram">`,
-        `  <img alt="${alt}" className="diagram-light" src="${diagramsRoute}/${id}.light.svg" />`,
-        `  <img alt="${alt}" className="diagram-dark" src="${diagramsRoute}/${id}.dark.svg" />`,
-        "</figure>",
-        "",
-        "<details>",
-        "<summary>Diagram source</summary>",
-        "",
-        match[0],
-        "",
-        "</details>",
-      ].join("\n");
+      rendered = await renderDiagram(source);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`diagram render error: ${message.split("\n")[0]}`);
-      replacement = `${match[0]}\n\nDiagram render error: ${message.split("\n")[0]}`;
+      throw new Error(
+        `Diagram render error in ${page}: ${message.split("\n")[0]}`
+      );
     }
+    assets.set(`${id}.light.svg`, rendered.light);
+    assets.set(`${id}.dark.svg`, rendered.dark);
+    const alt = diagramTitle(source).replaceAll('"', "&quot;");
+    const replacement = [
+      `<figure className="diagram">`,
+      `  <img alt="${alt}" className="diagram-light" src="${diagramsRoute}/${id}.light.svg" />`,
+      `  <img alt="${alt}" className="diagram-dark" src="${diagramsRoute}/${id}.dark.svg" />`,
+      "</figure>",
+      "",
+      "<details>",
+      "<summary>Diagram source</summary>",
+      "",
+      match[0],
+      "",
+      "</details>",
+    ].join("\n");
     result = result.replace(match[0], replacement);
   }
   return result;

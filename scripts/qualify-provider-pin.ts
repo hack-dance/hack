@@ -568,6 +568,8 @@ const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 const PROVIDER_HOME = join(".hack-local", "run", "smolvm", "home");
 
 export class Qualification {
+  /** Read boundary for testing a stale diagnostic snapshot racing with child exit. */
+  readStartupOutput = startupOutput;
   readonly evidence: string;
   readonly main: string;
   readonly aux: string;
@@ -1233,14 +1235,19 @@ export class Qualification {
     }
     const deadline = started + 900_000;
     while (performance.now() < deadline) {
-      const stderr = startupOutput(join(this.evidence, `${label}.stderr`));
+      const stderrPath = join(this.evidence, `${label}.stderr`);
+      const stderr = this.readStartupOutput(stderrPath);
       if (
         this.foreground.exitCode !== null ||
         this.foreground.signalCode !== null
       ) {
+        // The child may write its diagnostic after the live snapshot above. Observe
+        // completion, then classify the final output rather than that stale snapshot.
+        await this.foreground.exited;
+        const finalStderr = this.readStartupOutput(stderrPath);
         if (
           /\bprovider_busy\b|Another candidate operation holds the provider lock/.test(
-            stderr
+            finalStderr
           )
         ) {
           this.record(`known_product_bug_provider_busy_${label}`, {

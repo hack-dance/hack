@@ -423,6 +423,33 @@ esac
     }
   });
 
+  test("startup classifies final stderr after exit even when the live snapshot was stale", async () => {
+    const { root, run, done } = fixture();
+    const read = run.readStartupOutput;
+    let staleSnapshot = false;
+    run.readStartupOutput = (path) => {
+      const text = read(path);
+      if (
+        !staleSnapshot &&
+        run.foreground?.exitCode !== null &&
+        text.includes("provider_busy")
+      ) {
+        staleSnapshot = true;
+        return "";
+      }
+      return text;
+    };
+    try {
+      writeFileSync(join(root, "provider-busy"), "");
+      await expect(run.upForeground("up", "up")).rejects.toThrow(
+        "KNOWN_PRODUCT_BUG provider_busy"
+      );
+      expect(staleSnapshot).toBe(true);
+    } finally {
+      done();
+    }
+  });
+
   test("a successful restart releases the exited previous handle from cleanup tracking", async () => {
     const { run, done } = fixture();
     try {

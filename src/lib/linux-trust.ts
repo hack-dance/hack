@@ -157,6 +157,9 @@ export function linuxSystemTrustCommands(opts: {
           opts.certPath,
           opts.sha256,
         ],
+        // update-ca-trust(8): after changing trust sources, extract again so
+        // /etc/ssl/certs/ca-certificates.crt and friends include the anchor.
+        ["update-ca-trust", "extract"],
       ];
     default:
       return [];

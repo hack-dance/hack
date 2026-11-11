@@ -225,6 +225,7 @@ function createFakeHost(init: {
       refresh("/var/lib/ca-certificates/ca-bundle.pem");
     } else if (argv[0] === "update-ca-trust") {
       refresh("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem");
+      refresh("/etc/ssl/certs/ca-certificates.crt");
     }
     return 0;
   };
@@ -283,12 +284,12 @@ function createFakeHost(init: {
           content
         );
       } else if (argv[3] === "hack-trust") {
+        // Like p11-kit: store the anchor; the extract step refreshes bundles.
         const bundle = "/etc/ssl/certs/ca-certificates.crt";
         state.files.set(
           `anchor:${bundle}`,
           `${state.files.get(`anchor:${bundle}`) ?? ""}${content}`
         );
-        refresh(bundle);
       }
       return 0;
     },
@@ -378,6 +379,7 @@ describe("system trust commands", () => {
       })
     ).toEqual([
       ["sh", "-c", VERIFIED_TRUST_ANCHOR_SCRIPT, "hack-trust", STAGED, sha],
+      ["update-ca-trust", "extract"],
     ]);
   });
 
@@ -433,13 +435,13 @@ describe("applyLinuxSystemTrust", () => {
   test.each([
     ["ubuntu", "update-ca-certificates"],
     ["fedora", "update-ca-trust"],
-    ["arch", "trust"],
+    ["arch", "trust update-ca-trust"],
     ["opensuse", "update-ca-certificates"],
-  ] as const)("%s: confirmed run trusts the staged CA", async (name, tool) => {
+  ] as const)("%s: confirmed run trusts the staged CA", async (name, tools) => {
     const ca = await validated(CURRENT_CA_PEM);
     const { host, state } = createFakeHost({
       osRelease: OS_RELEASE[name],
-      commands: [tool],
+      commands: tools.split(" "),
     });
     const shown: string[] = [];
     const outcome = await applyLinuxSystemTrust({
@@ -461,7 +463,7 @@ describe("applyLinuxSystemTrust", () => {
   test("Arch: a previous Caddy root still in the bundle is reported", async () => {
     const { host } = createFakeHost({
       osRelease: OS_RELEASE.arch,
-      commands: ["trust"],
+      commands: ["trust", "update-ca-trust"],
       files: { "anchor:/etc/ssl/certs/ca-certificates.crt": OLD_CA_PEM },
     });
     const outcome = await applyLinuxSystemTrust({
@@ -591,7 +593,11 @@ describe("applyLinuxSystemTrust", () => {
         confirm: yes,
       })
     ).toMatchObject({ status: "manual", code: "linux_trust_distro_unknown" });
-    const missing = createFakeHost({ osRelease: OS_RELEASE.arch });
+    // Arch needs both trust and update-ca-trust; trust alone is not enough.
+    const missing = createFakeHost({
+      osRelease: OS_RELEASE.arch,
+      commands: ["trust"],
+    });
     expect(
       await applyLinuxSystemTrust({
         host: missing.host,

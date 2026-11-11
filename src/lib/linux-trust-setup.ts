@@ -107,11 +107,12 @@ export type LinuxSystemTrustOutcome =
       readonly bundlePath: string;
     };
 
-const REFRESH_TOOL: Readonly<Record<LinuxDistroFamily, string>> = {
-  debian: "update-ca-certificates",
-  fedora: "update-ca-trust",
-  suse: "update-ca-certificates",
-  arch: "trust",
+/** Every tool a family's root commands need. */
+const REQUIRED_TOOLS: Readonly<Record<LinuxDistroFamily, readonly string[]>> = {
+  debian: ["update-ca-certificates"],
+  fedora: ["update-ca-trust"],
+  suse: ["update-ca-certificates"],
+  arch: ["trust", "update-ca-trust"],
 };
 
 const TOOL_PACKAGE: Readonly<Record<LinuxDistroFamily, string>> = {
@@ -176,16 +177,17 @@ export async function applyLinuxSystemTrust(opts: {
   if (already) {
     return already;
   }
-  const tool = REFRESH_TOOL[family];
-  if ((await host.resolveCommand(tool)) === null) {
-    return {
-      status: "manual",
-      code: "linux_trust_tool_missing",
-      family,
-      steps: [
-        `${tool} is not installed. Install the ${TOOL_PACKAGE[family]} package, then rerun hack global trust.`,
-      ],
-    };
+  for (const tool of REQUIRED_TOOLS[family]) {
+    if ((await host.resolveCommand(tool)) === null) {
+      return {
+        status: "manual",
+        code: "linux_trust_tool_missing",
+        family,
+        steps: [
+          `${tool} is not installed. Install the ${TOOL_PACKAGE[family]} package, then rerun hack global trust.`,
+        ],
+      };
+    }
   }
   const commands = linuxSystemTrustCommands({
     family,

@@ -41,7 +41,7 @@ certificate's subject and SHA-256 fingerprint.
    | --- | --- |
    | Debian, Ubuntu | `install … /usr/local/share/ca-certificates/hack-caddy-local-ca.crt`, then `update-ca-certificates` |
    | Fedora, RHEL, CentOS, Rocky, AlmaLinux | `install … /etc/pki/ca-trust/source/anchors/hack-caddy-local-ca.crt`, then `update-ca-trust extract` |
-   | Arch and derivatives | `trust anchor --store <ca>` |
+   | Arch and derivatives | `trust anchor --store <ca>`, then `update-ca-trust extract` |
    | openSUSE, SLES | `install … /etc/pki/trust/anchors/hack-caddy-local-ca.crt`, then `update-ca-certificates` |
 
    Hack shows the commands first and runs them only after you answer yes in a
@@ -100,7 +100,8 @@ file, so the old root is no longer trusted. On Arch, `trust anchor --store` adds
 the new root next to the old one. After it adds a root, Hack lists every other
 Caddy root still in the system bundle by SHA-256 fingerprint; remove one with
 `trust list` (find the entry with that fingerprint) and
-`sudo trust anchor --remove 'pkcs11:…'` using the URI it prints.
+`sudo trust anchor --remove 'pkcs11:…'` using the URI it prints, then
+`sudo update-ca-trust extract`.
 
 ## Remove what Hack added
 
@@ -111,7 +112,7 @@ Hack has no untrust command yet. To remove its changes by hand:
 | Debian, Ubuntu | `sudo rm /usr/local/share/ca-certificates/hack-caddy-local-ca.crt && sudo update-ca-certificates --fresh` |
 | Fedora, RHEL | `sudo rm /etc/pki/ca-trust/source/anchors/hack-caddy-local-ca.crt && sudo update-ca-trust extract` |
 | openSUSE, SLES | `sudo rm /etc/pki/trust/anchors/hack-caddy-local-ca.crt && sudo update-ca-certificates` |
-| Arch | `trust list`, then `sudo trust anchor --remove 'pkcs11:…'` for the Caddy root's URI |
+| Arch | `trust list`, then `sudo trust anchor --remove 'pkcs11:…'` for the Caddy root's URI, then `sudo update-ca-trust extract` |
 | Each NSS database | `certutil -d sql:<database dir> -D -n "Hack Caddy Local CA"` (repeat until it reports no such entry) |
 
 The anchor files and nickname are fixed names, so these commands also remove an

@@ -221,6 +221,29 @@ describe("detectLinuxResolver", () => {
         .resolver.kind
     ).toBe("networkmanager-dnsmasq");
 
+    // /run is parsed after /usr/lib even when the vendor name sorts later.
+    const runFiles = new Map([
+      ["/etc/resolv.conf", "nameserver 127.0.0.1\n"],
+      [
+        "/usr/lib/NetworkManager/conf.d/90-vendor.conf",
+        "[main]\ndns=systemd-resolved\n",
+      ],
+      ["/run/NetworkManager/conf.d/10-runtime.conf", "[main]\ndns=dnsmasq\n"],
+    ]);
+    const runDirs = new Map([
+      ["/usr/lib/NetworkManager/conf.d", ["90-vendor.conf"]],
+      ["/run/NetworkManager/conf.d", ["10-runtime.conf"]],
+    ]);
+    const runtime = createFakeHost({
+      resolvedActive: false,
+      files: runFiles,
+      dirs: runDirs,
+    });
+    expect(
+      (await inspectLinuxDns({ host: runtime.host, domains: DOMAINS })).resolver
+        .kind
+    ).toBe("networkmanager-dnsmasq");
+
     // An /etc snippet is parsed after NetworkManager.conf and wins.
     const etcFiles = new Map(files);
     etcFiles.set(

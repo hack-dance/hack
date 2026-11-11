@@ -75,14 +75,17 @@ const NM_CONF_DIRS = [
   "/run/NetworkManager/conf.d",
   "/etc/NetworkManager/conf.d",
 ] as const;
+const NM_VENDOR_CONF_DIR = "/usr/lib/NetworkManager/conf.d";
+const NM_RUN_CONF_DIR = "/run/NetworkManager/conf.d";
 const NM_ETC_CONF_DIR = "/etc/NetworkManager/conf.d";
 
 async function readNetworkManagerConf(
   host: LinuxDnsHost
 ): Promise<string | null> {
   // NetworkManager.conf(5): a snippet name in /etc shadows /run, which
-  // shadows /usr/lib. Vendor (/usr/lib) and /run snippets are parsed before
-  // NetworkManager.conf, /etc snippets after it; later values win.
+  // shadows /usr/lib. Parse order: /usr/lib snippets, then /run snippets,
+  // then NetworkManager.conf, then /etc snippets, each directory sorted by
+  // name on its own; later values win.
   const byName = new Map<string, string>();
   for (const dir of NM_CONF_DIRS) {
     for (const name of await host.listDir(dir)) {
@@ -91,13 +94,17 @@ async function readNetworkManagerConf(
       }
     }
   }
-  const names = [...byName.keys()].sort();
-  const before = names.filter((name) => byName.get(name) !== NM_ETC_CONF_DIR);
-  const after = names.filter((name) => byName.get(name) === NM_ETC_CONF_DIR);
+  const snippetsIn = (dir: string) =>
+    [...byName.entries()]
+      .filter(([, owner]) => owner === dir)
+      .map(([name]) => name)
+      .sort()
+      .map((name) => `${dir}/${name}`);
   const paths = [
-    ...before.map((name) => `${byName.get(name)}/${name}`),
+    ...snippetsIn(NM_VENDOR_CONF_DIR),
+    ...snippetsIn(NM_RUN_CONF_DIR),
     NM_CONF,
-    ...after.map((name) => `${NM_ETC_CONF_DIR}/${name}`),
+    ...snippetsIn(NM_ETC_CONF_DIR),
   ];
   const parts: string[] = [];
   for (const path of paths) {

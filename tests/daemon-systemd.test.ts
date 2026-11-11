@@ -2076,3 +2076,27 @@ test("drop-in checks skip entries systemd does not load", async () => {
   await chmod(join(dropInDir, "real.conf"), 0o666);
   expect(await checkSystemdUnitDropIns({ unitPath })).toContain("real.conf");
 });
+
+test("a dangling symlink load directory is followed to where it points", async () => {
+  // Codex review: data/systemd/user -> <shared>/not-created-yet was treated
+  // as missing and its lexical parent checked instead of the target's.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const shared = join(root, "shared-target");
+  await mkdir(shared);
+  await chmod(shared, 0o1777);
+  const linkParent = join(root, "data", "systemd");
+  await mkdir(linkParent, { recursive: true });
+  for (const dir of ["data", "data/systemd"]) {
+    await chmod(join(root, dir), 0o755);
+  }
+  const link = join(linkParent, "user");
+  await symlink(join(shared, "not-created-yet"), link);
+  fake.unitSearchPath = `${join(root, "config", "systemd", "user")} ${link}`;
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toContain(
+    `${shared} lets other users create`
+  );
+  // Pointing into a protected directory instead: accepted.
+  await chmod(shared, 0o755);
+  expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toBeNull();
+});

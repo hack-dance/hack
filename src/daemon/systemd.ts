@@ -1347,62 +1347,136 @@ async function checkReplaceableChain(opts: {
   /** Check the last component itself but do not follow it when it is a link. */
   readonly stopAtLink?: boolean;
 }): Promise<string | null> {
+  const walk = await walkReplaceableChain(opts);
+  return "error" in walk ? walk.error : null;
+}
+
+/**
+ * {@link checkReplaceableChain}, also reporting where the walk ended. With
+ * `allowMissing`, a component that does not exist ends the walk instead of
+ * failing it: `existing` is then the deepest physical directory reached,
+ * after every link on the way (dangling ones included) was followed and
+ * checked, and `complete` is false.
+ */
+async function walkReplaceableChain(opts: {
+  readonly path: string;
+  readonly uid: number;
+  readonly hackHome: string | null;
+  readonly stopAtLink?: boolean;
+  readonly allowMissing?: boolean;
+}): Promise<
+  | { readonly error: string }
+  | { readonly existing: string; readonly complete: boolean }
+> {
   if (!isAbsolute(opts.path)) {
-    return `${opts.path} is not an absolute path`;
+    return { error: `${opts.path} is not an absolute path` };
   }
   // Walk the path the way the kernel does: one component at a time from
   // `/`, following each symlink where it is met and applying `..` to the
   // physical directory reached so far (never collapsing `..` lexically
   // first, which can name a different file). Every entry visited, links
-  // included, is checked; `cur` is always a symlink-free directory.
-  const checked = new Set<string>();
-  const check = async (entry: string): Promise<string | null> => {
-    if (checked.has(entry)) {
-      return null;
-    }
-    checked.add(entry);
-    return await checkServicePathEntry({
-      path: entry,
-      uid: opts.uid,
-      hackHome: opts.hackHome,
-    });
+  // included, is checked; `state.cur` is always a symlink-free directory.
+  const state: ChainWalk = {
+    opts,
+    checked: new Set<string>(),
+    queue: opts.path.split("/"),
+    cur: "/",
+    hops: 0,
   };
-  const rootError = await check("/");
+  const rootError = await checkChainEntry(state, "/");
   if (rootError !== null) {
-    return rootError;
+    return { error: rootError };
   }
-  const queue = opts.path.split("/");
-  let cur = "/";
-  let hops = 0;
-  while (queue.length > 0) {
-    const component = queue.shift() as string;
-    if (component === "" || component === ".") {
-      continue;
+  while (state.queue.length > 0) {
+    const step = await walkChainStep(state);
+    if (step !== null) {
+      return step;
     }
-    if (component === "..") {
-      cur = dirname(cur);
-      continue;
-    }
-    const next = cur === "/" ? `/${component}` : `${cur}/${component}`;
-    const error = await check(next);
-    if (error !== null) {
-      return error;
-    }
-    const link = await readSymlinkTarget(next);
-    if (link === null || (opts.stopAtLink === true && queue.length === 0)) {
-      cur = next;
-      continue;
-    }
-    hops += 1;
-    if (hops > MAX_SERVICE_PATH_HOPS) {
-      return `${opts.path} has too many symlink hops to check`;
-    }
-    if (link.startsWith("/")) {
-      cur = "/";
-    }
-    queue.unshift(...link.split("/"));
   }
+  return { existing: state.cur, complete: true };
+}
+
+type ChainWalk = {
+  readonly opts: {
+    readonly path: string;
+    readonly uid: number;
+    readonly hackHome: string | null;
+    readonly stopAtLink?: boolean;
+    readonly allowMissing?: boolean;
+  };
+  readonly checked: Set<string>;
+  readonly queue: string[];
+  cur: string;
+  hops: number;
+};
+
+async function checkChainEntry(
+  state: ChainWalk,
+  entry: string
+): Promise<string | null> {
+  if (state.checked.has(entry)) {
+    return null;
+  }
+  state.checked.add(entry);
+  return await checkServicePathEntry({
+    path: entry,
+    uid: state.opts.uid,
+    hackHome: state.opts.hackHome,
+  });
+}
+
+/** One component of {@link walkReplaceableChain}; a result ends the walk. */
+async function walkChainStep(
+  state: ChainWalk
+): Promise<
+  | { readonly error: string }
+  | { readonly existing: string; readonly complete: boolean }
+  | null
+> {
+  const component = state.queue.shift() as string;
+  if (component === "" || component === ".") {
+    return null;
+  }
+  if (component === "..") {
+    state.cur = dirname(state.cur);
+    return null;
+  }
+  const next =
+    state.cur === "/" ? `/${component}` : `${state.cur}/${component}`;
+  if (state.opts.allowMissing === true && !(await entryExists(next))) {
+    return { existing: state.cur, complete: false };
+  }
+  const error = await checkChainEntry(state, next);
+  if (error !== null) {
+    return { error };
+  }
+  const link = await readSymlinkTarget(next);
+  if (
+    link === null ||
+    (state.opts.stopAtLink === true && state.queue.length === 0)
+  ) {
+    state.cur = next;
+    return null;
+  }
+  state.hops += 1;
+  if (state.hops > MAX_SERVICE_PATH_HOPS) {
+    return { error: `${state.opts.path} has too many symlink hops to check` };
+  }
+  if (link.startsWith("/")) {
+    state.cur = "/";
+  }
+  state.queue.unshift(...link.split("/"));
   return null;
+}
+
+/** Any directory entry, a dangling symlink included. */
+async function entryExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const MAX_SERVICE_PATH_HOPS = 64;
@@ -1509,24 +1583,25 @@ async function checkUnitLoadDirectory(opts: {
   readonly path: string;
   readonly uid: number;
 }): Promise<string | null> {
-  let existing = resolve(opts.path);
-  while (!(await pathExists(existing)) && existing !== dirname(existing)) {
-    existing = dirname(existing);
-  }
-  const chain = await checkReplaceableChain({
-    path: existing,
+  // Walk in filesystem order: a load directory that is a dangling link
+  // into a shared place is followed to where it points, and the walk stops
+  // at the first component that does not exist.
+  const walk = await walkReplaceableChain({
+    path: opts.path,
     uid: opts.uid,
     hackHome: null,
+    allowMissing: true,
   });
-  if (chain !== null) {
-    return chain;
+  if ("error" in walk) {
+    return walk.error;
   }
+  const existing = walk.existing;
   // The sticky bit stops others replacing existing entries, not creating
   // new ones: neither a missing load directory's parent, nor a load or
   // drop-in directory (where a new drop-in would be picked up), may be
   // writable by group or others.
   const creatable = await lettingOthersCreate(existing);
-  if (existing !== resolve(opts.path)) {
+  if (!walk.complete) {
     return creatable === null
       ? null
       : `${existing} lets other users create ${resolve(opts.path)} (${creatable}); run: chmod go-w ${existing}, or create ${resolve(opts.path)} yourself`;

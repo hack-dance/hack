@@ -339,3 +339,17 @@ export function lifecycleScriptPaths(config: unknown): string[] {
   }
   return paths;
 }
+
+/** Lifecycle script paths of a project's config that do not exist on disk. */
+export async function missingLifecycleScripts(opts: {
+  readonly projectDir: string;
+  readonly config: unknown;
+}): Promise<string[]> {
+  const missing: string[] = [];
+  for (const script of lifecycleScriptPaths(opts.config)) {
+    if (!(await Bun.file(join(opts.projectDir, script)).exists())) {
+      missing.push(script);
+    }
+  }
+  return missing;
+}

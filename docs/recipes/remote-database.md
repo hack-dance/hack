@@ -189,7 +189,16 @@ On Linux:
 - make the proxy listen on the bridge address, with a machine-local override:
   `hack env add --env staging --local DB_PROXY_LISTEN_HOST 172.17.0.1`
   (check yours with `ip -4 addr show docker0`), and
-- allow that port from Docker networks in your firewall.
+- allow that port from Docker networks in your firewall, and
+- point host tools at the same address. `hack host exec` rewrites
+  `host.docker.internal` to `127.0.0.1`, where the proxy no longer listens.
+  Store a `host`-scope value; it applies only to commands on your machine:
+
+  ```sh
+  <secret-source> | hack env add --env staging DATABASE_URL --service host --secret --local --value-stdin
+  ```
+
+  with a connection string that uses `172.17.0.1:15432`.
 
 Docker Desktop on macOS routes `host.docker.internal` to your machine itself,
 so the default `127.0.0.1` listener is expected to work there. We did not
@@ -198,8 +207,8 @@ test it.
 ## What was tested
 
 On a Linux host with Docker Engine: the overlays, the proxy start and stop,
-host tools through the proxy, the production guard, and the read-only
-connection. The container-to-proxy hop could not be tested on that host: its
+host tools through the proxy (on `127.0.0.1`, and on the bridge address with
+the `host`-scope value), the production guard, and the read-only connection. The container-to-proxy hop could not be tested on that host: its
 firewall drops traffic from containers to the host. It was not tested on
 macOS.
 

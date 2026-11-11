@@ -7,6 +7,7 @@ import { YAML } from "bun";
 import {
   docIncludeIssues,
   parseDocIncludes,
+  refreshDocIncludes,
 } from "../scripts/lib/doc-includes.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import {
@@ -23,6 +24,7 @@ import {
   lifecycleScriptPaths,
   listRecipeExamples,
   lockfileIssues,
+  missingLifecycleScripts,
   pinnedDependencies,
 } from "./helpers/recipe-examples.ts";
 
@@ -173,12 +175,13 @@ test("each example config passes the project schema and the runtime parser", asy
     const parsed = await readProjectConfig(context);
     expect(parsed.parseError, dir).toBeUndefined();
     expect(parsed.name, dir).toBe(String(config.name));
-    for (const script of lifecycleScriptPaths(config)) {
-      expect(
-        await Bun.file(join(REPO_ROOT, dir, script)).exists(),
-        script
-      ).toBe(true);
-    }
+    expect(
+      await missingLifecycleScripts({
+        projectDir: join(REPO_ROOT, dir),
+        config,
+      }),
+      dir
+    ).toEqual([]);
   }
 });
 
@@ -431,6 +434,125 @@ test("negative controls: the example checks reject the mistakes they guard", asy
       readFile: readRepoFile,
     })
   ).toEqual(["line 1 (examples/missing.yml): include-without-code-block"]);
+});
+
+test("negative controls: every remaining Compose, env and script rule can fail", () => {
+  const rules = { configName: "demo", devHost: "demo.hack.local" };
+  expect(
+    composeIssues({
+      compose: { name: "other", services: {} },
+      ...rules,
+    })
+  ).toEqual(["compose-name-differs-from-config", "no-services"]);
+  expect(
+    composeIssues({
+      compose: {
+        name: "demo",
+        services: {
+          web: {
+            image: "nginx",
+            depends_on: ["missing"],
+            labels: { caddy: "demo.hack.local" },
+            networks: ["hack-dev"],
+          },
+        },
+        networks: { "hack-dev": {} },
+      },
+      ...rules,
+    })
+  ).toEqual([
+    "web: image-without-tag",
+    "web: depends-on-unknown-service",
+    "hack-dev-not-external",
+  ]);
+  expect(
+    depsPatternIssues({ services: { web: { image: "node:24" } } })
+  ).toEqual(["no-deps-service"]);
+  expect(
+    envFileIssues({
+      fileName: "hack.env.qa.yaml",
+      document: { version: 2, environment: "qa" },
+      serviceNames: [],
+    })
+  ).toEqual(["env-version", "env-values-missing"]);
+  expect(
+    envFileIssues({ fileName: "env.qa.yaml", document: {}, serviceNames: [] })
+  ).toEqual(["unexpected-env-file-name"]);
+  expect(
+    envFileIssues({
+      fileName: "hack.env.qa.yaml",
+      document: [],
+      serviceNames: [],
+    })
+  ).toEqual(["env-file-not-a-mapping"]);
+  expect(
+    lifecycleScriptPaths({
+      lifecycle: {
+        up: { before: [{ command: "sh scripts/missing.sh" }, "echo hi"] },
+        processes: [{ name: "proxy", command: "bun scripts/proxy.ts --flag" }],
+      },
+    })
+  ).toEqual(["scripts/missing.sh", "scripts/proxy.ts"]);
+});
+
+test("the example config test refuses a lifecycle script that does not exist", async () => {
+  const { project } = await copyExample("examples/recipes/cli-login");
+  await rm(join(project, "scripts/edge-login.sh"));
+  const config = await readRecord(join(project, ".hack/hack.config.json"));
+  expect(
+    await missingLifecycleScripts({ projectDir: project, config })
+  ).toEqual(["scripts/edge-login.sh"]);
+});
+
+test("refreshing a stale indented include restores the file and keeps the layout", async () => {
+  const file = "line one\n\n  indented line\nlast\n";
+  const readFile = async (path: string) =>
+    path === "ex/file.txt" ? file : null;
+  const markdown = [
+    "1. Step:",
+    "",
+    "   <!-- include: ex/file.txt -->",
+    "   ```text",
+    "   stale",
+    "   ```",
+    "",
+    "<!-- include: ex/missing.txt -->",
+    "```text",
+    "kept as is",
+    "```",
+    "",
+  ].join("\n");
+  expect(await docIncludeIssues({ markdown, readFile })).toEqual([
+    "line 3 (ex/file.txt): include-out-of-date",
+    "line 8 (ex/missing.txt): include-file-missing",
+  ]);
+  const refreshed = await refreshDocIncludes({ markdown, readFile });
+  expect(refreshed).toBe(
+    [
+      "1. Step:",
+      "",
+      "   <!-- include: ex/file.txt -->",
+      "   ```text",
+      "   line one",
+      "",
+      "     indented line",
+      "   last",
+      "   ```",
+      "",
+      "<!-- include: ex/missing.txt -->",
+      "```text",
+      "kept as is",
+      "```",
+      "",
+    ].join("\n")
+  );
+  expect(await docIncludeIssues({ markdown: refreshed, readFile })).toEqual([
+    "line 11 (ex/missing.txt): include-file-missing",
+  ]);
+  // Refreshing is idempotent.
+  expect(await refreshDocIncludes({ markdown: refreshed, readFile })).toBe(
+    refreshed
+  );
 });
 
 composeConfigTest(

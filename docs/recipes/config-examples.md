@@ -362,7 +362,7 @@ networks:
 ## Static site with a build watcher
 
 `bun build --watch` rebuilds the site into the `site` volume when a source file changes. Caddy serves that volume read-only.
-Edit `src/index.html` and reload: the watcher rebuilds within a second or two. Nothing is written into your checkout.
+Edit `src/index.html` and reload: the watcher rebuilds within a second or two. Nothing is written into your checkout. Right after `hack up`, the first build may not be done yet; reload if you get a 404.
 
 <!-- include: examples/configs/static-site/.hack/hack.config.json -->
 ```json

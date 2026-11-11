@@ -131,7 +131,16 @@ it works:
 
 The app starts before the migrations run, so it must cope with an older
 schema for a moment. A failing hook makes `hack up` fail, but leaves the
-containers running. Prefer the one-shot service.
+containers running.
+
+The `hack run` inside the hook does not inherit `--env` or `--branch` from
+`hack up`. It uses the default overlay and this checkout's instance. After
+`hack up -d --env qa`, the hook's `hack run` gets the base values, not `qa`.
+A linked worktree still gets its own branch instance automatically. If you
+start with `--env` or `--branch`, prefer the one-shot service.
+
+We ran this hook with the stand-in tool, and checked the `--env` behavior
+with a hook that prints a value.
 
 ## In each branch instance
 
@@ -143,7 +152,7 @@ instance automatically:
 git worktree add ../app-feature-tags -b feature-tags
 cd ../app-feature-tags
 # add migrations/003_add_tags.sql
-hack up -d       # "Linked worktree detected → using branch instance feature-tags"
+hack up -d       # prints: Linked worktree detected → using branch instance "feature-tags" ...
 ```
 
 The worktree's database gets migrations 001 to 003. The primary checkout's

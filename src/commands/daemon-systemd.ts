@@ -536,19 +536,63 @@ export async function installDaemonSystemdService(
     });
     return 1;
   }
-  const ready = await hooks.waitForReady(READY_TIMEOUT_MS);
-  if (ready) {
-    logger.success({ message: "hackd running under systemd" });
-  } else {
-    logger.warn({
-      message: `hackd did not report ready yet | Check: hack daemon status, ${JOURNAL_HINT}`,
-    });
-  }
-
+  const ready = await reportInstalledDaemonReady({ hooks, unitPath, deps });
   reportLinger({
     linger: await readLingerStatus(deps),
   });
   return ready ? 0 : 1;
+}
+
+/**
+ * Waits for hackd and checks that systemd runs it. A ready socket is not
+ * proof: a directly started hackd that was left running (its identity could
+ * not be proven) also answers, and the unit's own copy then exits at once.
+ * Returns true only when systemd runs the ready hackd.
+ */
+async function reportInstalledDaemonReady(opts: {
+  readonly hooks: SystemdCommandHooks;
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+}): Promise<boolean> {
+  if (!(await opts.hooks.waitForReady(READY_TIMEOUT_MS))) {
+    logger.warn({
+      message: `hackd did not report ready yet | Check: hack daemon status, ${JOURNAL_HINT}`,
+    });
+    return false;
+  }
+  const owner = await readRunningDaemonOwner(opts);
+  if (owner.bySystemd) {
+    logger.success({ message: "hackd running under systemd" });
+    return true;
+  }
+  logger.warn({
+    message: `${SYSTEMD_UNIT_NAME} is installed and enabled, but the running hackd${owner.pid ? ` (pid ${owner.pid})` : ""} was not started by systemd and stops at logout | Run: hack daemon restart`,
+  });
+  return false;
+}
+
+/** Who runs the hackd in the pid file now: systemd's unit, or not. */
+async function readRunningDaemonOwner(opts: {
+  readonly hooks: SystemdCommandHooks;
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+}): Promise<{ readonly pid: number | null; readonly bySystemd: boolean }> {
+  const daemon = await readDaemonStatus({ paths: opts.hooks.paths });
+  if (!(daemon.running && daemon.pid !== null)) {
+    return { pid: null, bySystemd: false };
+  }
+  const status = await readSystemdServiceStatus({
+    unitPath: opts.unitPath,
+    deps: opts.deps,
+  });
+  const bySystemd =
+    status !== null &&
+    (await systemdRunsPid({
+      status,
+      pid: daemon.pid,
+      isPidInUnit: opts.hooks.isPidInUnit,
+    }));
+  return { pid: daemon.pid, bySystemd };
 }
 
 /**

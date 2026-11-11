@@ -1015,3 +1015,27 @@ test("install hands over only a proven hackd and leaves a systemd-run one alone"
   });
   expect(stopped).toEqual([process.pid]);
 });
+
+test("install fails when the ready hackd is not the one systemd runs", async () => {
+  const fake = fakeSystemd({ mainPid: 999_999 });
+  // A directly started hackd (this runner's pid) whose identity cannot be
+  // proven is left running; it answers, but systemd does not run it.
+  await writePidFile(process.pid);
+  const stopped: number[] = [];
+  const code = await installDaemonSystemdService({
+    ...installHooks(fake, stopped),
+    isPidInUnit: () => Promise.resolve(false),
+    proveDaemon: () =>
+      Promise.resolve({ kind: "refused", reason: "identity-unknown" } as const),
+  });
+  expect(code).toBe(1);
+  expect(stopped).toEqual([]);
+
+  // When systemd runs the ready hackd, install succeeds.
+  expect(
+    await installDaemonSystemdService({
+      ...installHooks(fake, stopped),
+      isPidInUnit: () => Promise.resolve(true),
+    })
+  ).toBe(0);
+});

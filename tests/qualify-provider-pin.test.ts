@@ -403,7 +403,11 @@ case "$1" in
     if [ ! -e '${root}/ready-'"$n" ]; then touch '${root}/early-ps'; exit 79; fi
     printf '{"ok":true,"data":{"status":"observed","phase":"ready-observed","run":"%032x","items":[{"service":"web","container":"c-%s"}]}}' "$n" "$n" ;;
   up|restart)
-    if [ "$2" = -d ]; then exit 0; fi
+    if [ "$2" = -d ]; then
+      n=$(cat '${root}/gen' 2>/dev/null || echo 0)
+      touch '${root}/ready-'"$n"
+      exit 0
+    fi
     if [ "$1" = restart ] && [ -e '${root}/restart-fails' ]; then exit 23; fi
     if [ -e '${root}/provider-busy' ]; then echo '[provider_busy] Another candidate operation holds the provider lock' >&2; exit 23; fi
     n=$(( $(cat '${root}/gen' 2>/dev/null || echo 0) + 1 )); echo "$n" > '${root}/gen'

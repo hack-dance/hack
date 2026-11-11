@@ -1,0 +1,9 @@
+flowchart TD
+  S[Status request] --> P[Project rows]
+  P --> C[Caddy address lookup]
+  C --> D{Docker on PATH?}
+  D -->|No| N[Return null]
+  D -->|Yes| E[Existing Docker lookup]
+  N --> O[Omit optional address]
+  O --> K[Keep project details]
+  K --> X[Exit zero]

@@ -1301,6 +1301,8 @@ export async function checkSystemdUnitTrusted(opts: {
 export async function checkSystemdLoadedUnitPaths(opts: {
   readonly unitPath: string;
   readonly deps: SystemdDeps;
+  /** Hack's own directories (for the service PATH check). */
+  readonly hackHome?: string | null;
   /** Defaults to this process's uid. */
   readonly uid?: number;
 }): Promise<string | null> {
@@ -1308,6 +1310,20 @@ export async function checkSystemdLoadedUnitPaths(opts: {
   const loadPaths = await checkSystemdUnitLoadPaths({ deps: opts.deps, uid });
   if (loadPaths !== null) {
     return loadPaths;
+  }
+  const servicePath = await readSystemdServicePathDirectories({
+    deps: opts.deps,
+  });
+  const pathError =
+    "error" in servicePath
+      ? servicePath.error
+      : await checkServicePathDirectories({
+          dirs: servicePath.dirs,
+          hackHome: opts.hackHome ?? null,
+          uid,
+        });
+  if (pathError !== null) {
+    return `Not starting ${SYSTEMD_UNIT_NAME}: ${pathError}`;
   }
   const show = await opts.deps.run("systemctl", [
     "--user",
@@ -1725,6 +1741,98 @@ export async function parseSystemdPathList(
     }
   }
   return { paths: pieces };
+}
+
+/** The PATH directories the rendered unit gives hackd, `%h` expanded. */
+export function renderedServicePathDirectories(opts: {
+  readonly hackBinPath: string;
+  readonly home: string;
+}): readonly string[] {
+  return [
+    dirname(opts.hackBinPath),
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    resolve(opts.home, ".local/bin"),
+    resolve(opts.home, ".bun/bin"),
+    resolve(opts.home, ".hack/bin"),
+  ];
+}
+
+/** systemd's default PATH for a user service without `PATH=`. */
+const SYSTEMD_DEFAULT_PATH = [
+  "/usr/local/sbin",
+  "/usr/local/bin",
+  "/usr/sbin",
+  "/usr/bin",
+];
+
+/**
+ * hackd runs helpers (`docker`, `git`, ...) through its PATH, so another
+ * account that can add a program to any PATH directory, or create a missing
+ * one, has it run as this user at the next start (HACK-2052). Each directory
+ * is walked in filesystem order (every entry on the way checked), and the
+ * directory, or for a missing one the deepest existing directory, must not
+ * be writable by group or others, sticky or not.
+ */
+export async function checkServicePathDirectories(opts: {
+  readonly dirs: readonly string[];
+  /** Hack's own directories: group/other write is removed there, not refused. */
+  readonly hackHome: string | null;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  for (const dir of opts.dirs) {
+    if (!isAbsolute(dir)) {
+      return `the hackd.service PATH has a directory that is not absolute (${dir || "empty"})`;
+    }
+    const walk = await walkReplaceableChain({
+      path: dir,
+      uid,
+      hackHome: opts.hackHome === null ? null : resolve(opts.hackHome),
+      allowMissing: true,
+    });
+    if ("error" in walk) {
+      return `the hackd.service PATH directory ${dir} is not safe: ${walk.error}`;
+    }
+    const writable = await lettingOthersCreate(walk.existing);
+    if (writable !== null) {
+      return `other users can ${walk.complete ? "add programs to" : "create"} the hackd.service PATH directory ${dir} (${walk.existing}, ${writable}); run: chmod go-w ${walk.existing}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The PATH directories of hackd.service as systemd will start it
+ * (`Environment=` from the unit and drop-ins), or systemd's default when
+ * the unit sets none.
+ */
+export async function readSystemdServicePathDirectories(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<{ readonly dirs: readonly string[] } | { readonly error: string }> {
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    SYSTEMD_UNIT_NAME,
+    "--property=Environment",
+  ]);
+  if (show.exitCode !== 0) {
+    return {
+      error: `systemd did not report the hackd.service environment (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`,
+    };
+  }
+  let path: string | null = null;
+  const environment = parseSystemdProperties(show.stdout).Environment ?? "";
+  for (const match of environment.matchAll(ENV_WORD)) {
+    const word = match[1] ?? match[2] ?? "";
+    if (word.startsWith("PATH=")) {
+      path = word.slice("PATH=".length);
+    }
+  }
+  return { dirs: path === null ? SYSTEMD_DEFAULT_PATH : path.split(":") };
 }
 
 function errorMessage(error: unknown): string {

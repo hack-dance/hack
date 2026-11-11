@@ -1,4 +1,5 @@
 import { rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
@@ -15,6 +16,7 @@ import { readDaemonStatus } from "../daemon/status.ts";
 import {
   assessExecutableDurability,
   checkServiceExecutableTrusted,
+  checkServicePathDirectories,
   checkSystemdLoadedUnitPaths,
   checkSystemdUnitTrusted,
   defaultSystemdDeps,
@@ -28,6 +30,7 @@ import {
   readLingerStatus,
   readSystemdServiceStatus,
   readSystemdUnitHackHome,
+  renderedServicePathDirectories,
   resolveExpectedSystemdUnit,
   resolveSystemdAccess,
   resolveSystemdUnitPath,
@@ -41,6 +44,7 @@ import {
 } from "../daemon/systemd.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { ensureDir, pathExists, readTextFile } from "../lib/fs.ts";
+import { normalizeHomeDir } from "../lib/home-dir.ts";
 import { logger } from "../ui/logger.ts";
 
 /**
@@ -177,7 +181,11 @@ export async function startViaSystemdIfInstalled(
     await systemdServiceAction({ action: "reset-failed", deps });
   }
   const loaded =
-    (await checkSystemdLoadedUnitPaths({ unitPath, deps })) ??
+    (await checkSystemdLoadedUnitPaths({
+      unitPath,
+      deps,
+      hackHome: dirname(hooks.paths.root),
+    })) ??
     (await checkUnitProgramTrusted({
       unitPath,
       hackHome: dirname(hooks.paths.root),
@@ -595,9 +603,10 @@ export async function installDaemonSystemdService(
   }
 
   const unitPath = resolveSystemdUnitPath({ env: deps.env });
-  const program = await checkServiceExecutableTrusted({
-    path: expected.hackBinPath,
+  const program = await checkInstallPrograms({
+    hackBinPath: expected.hackBinPath,
     hackHome: dirname(hooks.paths.root),
+    deps,
   });
   if (program !== null) {
     logger.error({ message: program });
@@ -668,7 +677,14 @@ export async function installDaemonSystemdService(
   if (before?.activeState === "failed") {
     await systemdServiceAction({ action: "reset-failed", deps });
   }
-  if (!(await runInstalledUnit({ action, unitPath, deps }))) {
+  if (
+    !(await runInstalledUnit({
+      action,
+      unitPath,
+      deps,
+      hackHome: dirname(hooks.paths.root),
+    }))
+  ) {
     return 1;
   }
   // The running service now has the new config (restarted, or started
@@ -682,6 +698,32 @@ export async function installDaemonSystemdService(
 }
 
 /**
+ * Before install writes or enables anything: the program the unit will run
+ * and every directory on the PATH it gives hackd must be safe from other
+ * accounts ({@link checkServiceExecutableTrusted},
+ * {@link checkServicePathDirectories}).
+ */
+async function checkInstallPrograms(opts: {
+  readonly hackBinPath: string;
+  readonly hackHome: string;
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  return (
+    (await checkServiceExecutableTrusted({
+      path: opts.hackBinPath,
+      hackHome: opts.hackHome,
+    })) ??
+    (await checkServicePathDirectories({
+      dirs: renderedServicePathDirectories({
+        hackBinPath: opts.hackBinPath,
+        home: normalizeHomeDir(opts.deps.env.HOME) ?? homedir(),
+      }),
+      hackHome: opts.hackHome,
+    }))
+  );
+}
+
+/**
  * Starts or restarts the installed unit once the files systemd loads for it
  * pass {@link checkSystemdLoadedUnitPaths}. False (reported) otherwise.
  */
@@ -689,10 +731,12 @@ async function runInstalledUnit(opts: {
   readonly action: "start" | "restart";
   readonly unitPath: string;
   readonly deps: SystemdDeps;
+  readonly hackHome: string;
 }): Promise<boolean> {
   const loaded = await checkSystemdLoadedUnitPaths({
     unitPath: opts.unitPath,
     deps: opts.deps,
+    hackHome: opts.hackHome,
   });
   if (loaded !== null) {
     logger.error({ message: loaded });

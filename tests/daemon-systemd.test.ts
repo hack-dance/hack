@@ -28,6 +28,7 @@ import {
 import {
   assessExecutableDurability,
   checkServiceExecutableTrusted,
+  checkServicePathDirectories,
   checkSystemdLoadedUnitPaths,
   checkSystemdUnitDirectoryChain,
   checkSystemdUnitDropIns,
@@ -180,6 +181,9 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
         stdout: "",
         stderr: "Failed to get properties: Connection timed out",
       });
+    }
+    if (verb === "show" && args.includes("--property=Environment")) {
+      return Promise.resolve(ok(`Environment=${state.unitEnvironment}\n`));
     }
     if (
       verb === "show" &&
@@ -2121,4 +2125,71 @@ test("a dangling drop-in directory link is followed, not treated as absent", asy
   await chmod(shared, 0o755);
   expect(await checkSystemdUnitDropIns({ unitPath })).toBeNull();
   expect(await checkSystemdUnitLoadPaths({ deps: fake.deps })).toBeNull();
+});
+
+test("every directory on the service PATH is checked at install and start", async () => {
+  // Codex security review: hackd runs `docker` and other helpers through
+  // PATH; a writable ~/.local/bin let another account plant one.
+  const hackHome = join(root, ".hack");
+  const own = join(root, "home-bin");
+  await mkdir(own);
+  await chmod(own, 0o755);
+  expect(
+    await checkServicePathDirectories({ dirs: [own, "/usr/bin"], hackHome })
+  ).toBeNull();
+
+  // A writable PATH directory, sticky or not: refused, unchanged.
+  const shared = join(root, "shared-bin");
+  await mkdir(shared);
+  await chmod(shared, 0o1777);
+  expect(
+    await checkServicePathDirectories({ dirs: [own, shared], hackHome })
+  ).toContain("add programs to");
+  expect((await stat(shared)).mode & 0o7777).toBe(0o1777);
+
+  // A missing PATH directory others could create: refused.
+  expect(
+    await checkServicePathDirectories({
+      dirs: [join(shared, "later")],
+      hackHome,
+    })
+  ).toContain("create");
+
+  // Inside HACK_HOME (Hack's own): group write removed instead.
+  const hackBin = join(hackHome, "bin");
+  await mkdir(hackBin, { recursive: true });
+  await chmod(hackHome, 0o775);
+  await chmod(hackBin, 0o775);
+  expect(
+    await checkServicePathDirectories({ dirs: [hackBin], hackHome })
+  ).toBeNull();
+  expect((await stat(hackBin)).mode & 0o777).toBe(0o755);
+
+  // A relative entry is refused.
+  expect(
+    await checkServicePathDirectories({ dirs: ["bin"], hackHome })
+  ).toContain("not absolute");
+
+  // Start reads the effective PATH from systemd and refuses a writable one.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  fake.unitEnvironment = `"PATH=${shared}:/usr/bin" HACK_NO_INTERACTIVE=1`;
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+
+  // Install refuses before writing when the rendered PATH is unsafe
+  // ($HOME/.local/bin under a writable home).
+  await rm(unitPath);
+  await chmod(root, 0o777);
+  try {
+    const code = await installDaemonSystemdService({
+      ...installHooks(fake, []),
+      ignoredOptions: [],
+    });
+    expect(code).toBe(1);
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+  } finally {
+    await chmod(root, 0o700);
+  }
 });

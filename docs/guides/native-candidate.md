@@ -404,6 +404,16 @@ frontend and Rust foreground owners in a background session, returning after
 readiness and up-after hooks. The frontend keeps host lifecycle processes and
 down hooks alive. From any terminal, use `hack ps`, `hack logs`, `hack exec`,
 `hack restart` or `hack down` through the existing authenticated controls.
+When the project is already up, `hack up -d` starts nothing and succeeds, as it
+does on Compose: it prints `Project is already running.` and exits `0`, and with
+`--json` returns the same result shape as a start, with `alreadyRunning: true`
+and the running and completed services. That answer is given only for a ready
+graph whose foreground owner answers and whose runtime it verified; any other
+state launches a start as before. When the graph is live but some services are
+not up (stopped, failed or unhealthy), `hack up -d` refuses with
+`E_STARTUP_INCOMPLETE`, names them, and points to `hack restart`: native `up`
+cannot start part of a running project. Nothing is started or stopped.
+
 Restart starts a new foreground generation; `restart --detach` remains unsupported.
 Without these flags, `hack up` stays attached and Ctrl-C requests ordinary stop.
 Detached startup has no terminal stdin and suppresses hook/owner output rather

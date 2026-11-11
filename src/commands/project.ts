@@ -382,6 +382,11 @@ import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
 import {
+  classifyNativeAlreadyRunning,
+  nativePartiallyRunningRefusal,
+  reportNativeAlreadyRunning,
+} from "./native-up-already-running.ts";
+import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
 } from "./project-down-safety.ts";
@@ -6297,6 +6302,85 @@ async function restartNativeImageProject({
   });
 }
 
+/**
+ * Answers a detached native `up` for a project that is already up
+ * (HACK-2102): `0` when every service is running, a named refusal when some
+ * are not, and `null` to launch as before. One read-only observation, the one
+ * `hack ps` makes. Any failure to observe launches as before, so this never
+ * hides the reason a real start would report.
+ */
+async function answerNativeAlreadyRunning(opts: {
+  readonly ctx: CliContext;
+  readonly args: UpArgs;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+}): Promise<number | null> {
+  const { args, ctx } = opts;
+  const json = args.options.json === true;
+  const startedAtMs = Date.now();
+  let observed: {
+    readonly state: ReturnType<typeof classifyNativeAlreadyRunning>;
+    readonly projectName: string;
+    readonly branch: string | null;
+  };
+  try {
+    const project = await resolveProjectForArgs({
+      ctx,
+      pathOpt: args.options.path,
+      projectOpt: args.options.project,
+      touchRegistration: false,
+    });
+    const branch = await resolveEffectiveBranchForCommand({
+      project,
+      branchOption: args.options.branch,
+      noticeToStderr: json,
+    });
+    const state = classifyNativeAlreadyRunning(
+      await nativeProjectPs({
+        runtime: opts.native,
+        scope: {
+          projectRoot: project.projectRoot,
+          projectDir: project.projectDir,
+          nativeHome: opts.native.home,
+          branch,
+        },
+      })
+    );
+    if (state.kind === "launch") {
+      return null;
+    }
+    observed = {
+      state,
+      projectName: await resolveComposeProjectName({
+        project,
+        cfg: await readProjectConfig(project),
+      }),
+      branch,
+    };
+  } catch {
+    return null;
+  }
+  if (observed.state.kind === "partial") {
+    throw nativePartiallyRunningRefusal(observed.state.down);
+  }
+  if (observed.state.kind === "running") {
+    reportNativeAlreadyRunning({
+      json,
+      project: observed.projectName,
+      branch: observed.branch,
+      composeProject: resolveLifecycleComposeProjectName({
+        projectName: observed.projectName,
+        branch: observed.branch,
+      }),
+      started: observed.state.started,
+      completed: observed.state.completed,
+      startedAtMs,
+    });
+  }
+  return 0;
+}
+
 async function handleUp({
   ctx,
   args,
@@ -6310,10 +6394,8 @@ async function handleUp({
     // Once per `hack up`, whichever native start path follows (HACK-2026).
     noteNativeBackendBeta({ json: args.options.json === true });
   }
-  if (
-    (args.options.detach || args.options.json) &&
-    resolveNativeRuntimeSelection()
-  ) {
+  const native = resolveNativeRuntimeSelection();
+  if ((args.options.detach || args.options.json) && native) {
     refuseUnsupportedNativeUpOptions({
       restart: false,
       target: args.options.target,
@@ -6330,6 +6412,14 @@ async function handleUp({
       if (value !== undefined) {
         childArgs.push(`--${name}=${value}`);
       }
+    }
+    const alreadyRunning = await answerNativeAlreadyRunning({
+      ctx,
+      args,
+      native,
+    });
+    if (alreadyRunning !== null) {
+      return alreadyRunning;
     }
     return await startNativeDetachedUp({
       cwd: ctx.cwd,
@@ -6353,7 +6443,6 @@ async function handleUp({
   if (authored !== null) {
     return authored;
   }
-  const native = resolveNativeRuntimeSelection();
   if (native) {
     return await handleNativeUp({ ctx, args, native });
   }

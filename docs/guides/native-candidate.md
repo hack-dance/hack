@@ -189,6 +189,80 @@ finalization checks still apply. Fresh and already branch-scoped graphs keep
 their normal branch namespace. This compatibility path does not authorize
 adopting an unrelated branch or project.
 
+## Check a project before you start it
+
+`hack up` on the native backend checks a Compose project in two places and stops
+at the first refusal of each: the CLI's own admission, then the runtime review.
+To see everything at once, run the preflight:
+
+```sh
+hack doctor --native-preflight            # in the project, or with --path <root>
+hack doctor --native-preflight --json
+```
+
+It lists every blocker and every note for the project's
+`.hack/docker-compose.yml`, each with a plain sentence and a fix. It is
+read-only: it starts no VM, pulls no image, runs no lifecycle hook and writes
+nothing. It accepts only `--path` and `--json`. The exit status is `0` when no
+blocker was found and `1` otherwise.
+
+The report never prints authored values. A finding names a closed code, a
+service and a field; environment values, label keys and values, paths and image
+names are left out.
+
+The runtime review half needs a native runtime, so run the preflight from the
+`hack-next` launcher for the full list. Stable `hack`, or any shell without
+native selection, still runs the CLI's checks and reports the review as
+`skipped`. The review needs no running VM.
+
+With `--json` the report is the `data` of the standard result envelope:
+
+```json
+{
+  "report_version": 1,
+  "backend": "native",
+  "compose_file": ".hack/docker-compose.yml",
+  "ready": false,
+  "runtime_review": { "status": "completed" },
+  "blockers": [
+    {
+      "severity": "blocker",
+      "gate": "cli",
+      "code": "env_file",
+      "service": "web",
+      "field": "env_file",
+      "message": "The service uses env_file, which native does not read.",
+      "fix": "Move its variables into Hack managed env with hack env set --service, or run hack doctor --migrate-env-config."
+    }
+  ],
+  "warnings": []
+}
+```
+
+- `ready` is true only when there is no blocker and the runtime review
+  completed.
+- `gate` is `cli` or `runtime`: which of the two checks reported the finding.
+- `runtime_review.status` is `completed`, `stopped`, `skipped` or `unavailable`.
+  `stopped` means the review met a problem it cannot continue past, such as an
+  anonymous volume or a mount outside the project; its `code` names it, the
+  finding is listed as a blocker, and more findings can appear once it is fixed.
+  `unavailable` means the selected runtime did not answer.
+- Codes are stable. The CLI's codes are `compose_file_unreadable`,
+  `external_network`, `external_volume`, `reserved_label`, `unsupported_build`,
+  `foreign_platform`, `native_adaptation_invalid`, `native_settings_invalid`,
+  `invalid_service_name`, `invalid_service`, `build_requires_opt_in`,
+  `unsupported_build_form`, `env_file`, `missing_image`,
+  `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
+  `unsupported_label`, `invalid_http_probe`, `dotenv_without_managed_env` and
+  `shared_source_grant_required`. Runtime findings use the review's own
+  diagnostic codes, for example `privileged_service` or `invalid_mount`. A code
+  this version has no sentence for is still listed, by its code and field.
+
+The preflight is a report, not an admission decision: `hack up` still runs its
+own checks, and a clean report starts nothing. It does not cover what only a
+start can find, such as an image that cannot be pulled, a source tree over the
+size limit, or a host port that is already in use.
+
 ## Compose projects that stay on the Compose backend
 
 In v5, an unchanged Compose project (`.hack/hack.config.json` with

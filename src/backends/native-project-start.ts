@@ -405,7 +405,7 @@ const DEFAULTS: Dependencies = {
 };
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
-  "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped.";
+  "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped. Run `hack doctor --native-preflight` to list every blocker with its fix.";
 /** Known configuration refusal: a stable code and a closed message, no stack. */
 function refused(): Error {
   return new HackCliError({
@@ -530,6 +530,55 @@ function composeServices(
   return services;
 }
 
+/** Why native service preparation refuses one service; closed names, no values. */
+export const NATIVE_SERVICE_PREPARATION_PROBLEMS = [
+  "invalid_service",
+  "missing_image",
+  "extra_hosts_without_dependencies",
+  "unsupported_logging",
+  "invalid_restart",
+  "unsupported_label",
+] as const;
+export type NativeServicePreparationProblem =
+  (typeof NATIVE_SERVICE_PREPARATION_PROBLEMS)[number];
+
+/**
+ * Every reason {@link prepareNativeProjectServices} refuses one service. The
+ * start path refuses on the first non-empty answer; the native preflight
+ * report lists them all, so both read this one rule.
+ */
+export function nativeServicePreparationProblems(opts: {
+  readonly name: string;
+  readonly service: unknown;
+  readonly hasHostDependencies: boolean;
+  /** Services whose Compose `build` was admitted. */
+  readonly builds: ReadonlySet<string>;
+}): NativeServicePreparationProblem[] {
+  const value = opts.service;
+  if (!isRecord(value)) {
+    return ["invalid_service"];
+  }
+  const problems: NativeServicePreparationProblem[] = [];
+  if (!imageOrAdmittedBuild(opts.name, value, opts.builds)) {
+    problems.push("missing_image");
+  }
+  if (value.extra_hosts !== undefined && !opts.hasHostDependencies) {
+    problems.push("extra_hosts_without_dependencies");
+  }
+  if (value.logging !== undefined) {
+    problems.push("unsupported_logging");
+  }
+  // Restart policies are admitted (or refused with a fixed reason) by the
+  // runtime graph, which owns stop/restart interaction; only the type is checked here.
+  if (value.restart !== undefined && typeof value.restart !== "string") {
+    problems.push("invalid_restart");
+  }
+  if (!hasOnlyNativeSupportedLabels(value.labels)) {
+    problems.push("unsupported_label");
+  }
+  return problems;
+}
+
 /**
  * `builds` names the services whose Compose `build` was admitted
  * (`admitNativeProjectBuilds`); only those may omit `image` until they are built.
@@ -546,13 +595,13 @@ export function prepareNativeProjectServices(
   const result: Record<string, Record<string, unknown>> = {};
   for (const [name, value] of Object.entries(compose.services)) {
     if (
-      !(isRecord(value) && imageOrAdmittedBuild(name, value, builds)) ||
-      (value.extra_hosts !== undefined && !hasHostDependencies) ||
-      value.logging !== undefined ||
-      // Restart policies are admitted (or refused with a fixed reason) by the
-      // runtime graph, which owns stop/restart interaction; only the type is checked here.
-      (value.restart !== undefined && typeof value.restart !== "string") ||
-      !hasOnlyNativeSupportedLabels(value.labels)
+      !isRecord(value) ||
+      nativeServicePreparationProblems({
+        name,
+        service: value,
+        hasHostDependencies,
+        builds,
+      }).length > 0
     ) {
       throw refused();
     }

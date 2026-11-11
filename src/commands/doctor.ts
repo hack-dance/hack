@@ -258,6 +258,7 @@ import {
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
+import { runNativePreflightCommand } from "./doctor-native-preflight.ts";
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
@@ -381,6 +382,13 @@ const doctorOptions = [
   optBrowserUrl,
   optBrowserResult,
   optBranch,
+  defineOption({
+    name: "nativePreflight",
+    type: "boolean",
+    long: "--native-preflight",
+    description:
+      "List everything that would stop this project from starting on the native backend, with a fix for each; read-only, with --path and --json",
+  } as const),
   defineOption({
     name: "nativeCleanup",
     type: "string",
@@ -613,9 +621,40 @@ async function maybeRunNativeMappingRecovery(
   return null;
 }
 
+/** `--native-preflight` is its own read-only mode: it runs no other check. */
+async function runNativePreflightMode(
+  args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
+): Promise<number> {
+  const o = args.options;
+  if (
+    o.fix ||
+    o.migrateEnvConfig ||
+    o.acceptTrackedEnvChanges ||
+    o.domainMigration ||
+    o.browserUrl ||
+    o.browserResult ||
+    o.branch !== undefined ||
+    o.nativeCleanup !== undefined ||
+    o.nativeRunMapping !== undefined ||
+    o.expectSelection !== undefined ||
+    o.acceptLegacyDeviceRebind
+  ) {
+    throw new CliUsageError(
+      "--native-preflight accepts only --path and --json; it changes nothing and runs no other check."
+    );
+  }
+  return await runNativePreflightCommand({
+    startDir: resolveDoctorStartDir(o.path),
+    json: o.json === true,
+  });
+}
+
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  if (args.options.nativePreflight) {
+    return await runNativePreflightMode(args);
+  }
   const adopted = await preflightDoctorProject({
     startDir: resolveDoctorStartDir(args.options.path),
   });

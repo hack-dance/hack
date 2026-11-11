@@ -45,7 +45,7 @@ case "$1" in
     if [ -f "$state/enabled" ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi
     if alive; then echo ActiveState=active; echo "MainPID=$(cat "$pidfile")"; else echo ActiveState=inactive; echo MainPID=0; fi
     exit 0 ;;
-  daemon-reload) exit 0 ;;
+  daemon-reload|reset-failed) exit 0 ;;
   enable) : > "$state/enabled"; exit 0 ;;
   start|restart)
     if [ "$1" = start ] && alive; then exit 0; fi

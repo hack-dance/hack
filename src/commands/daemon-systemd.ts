@@ -8,6 +8,7 @@ import {
   defaultSystemdDeps,
   describeSystemdUnavailable,
   installSystemdUnit,
+  isPidInSystemdUnit,
   LINGER_ENABLE_COMMAND,
   probeSystemdUserManager,
   readLingerStatus,
@@ -86,6 +87,10 @@ export async function resolveSystemdSummary(opts: {
     status: resolved.status,
     daemonPid: daemon.pid,
     daemonRunning: daemon.running,
+    daemonInUnit:
+      daemon.running && daemon.pid !== null
+        ? await isPidInSystemdUnit({ pid: daemon.pid })
+        : null,
   });
 }
 
@@ -120,10 +125,20 @@ export async function startViaSystemdIfInstalled(
     });
     return null;
   }
-  if (status.drift === "program-missing") {
-    const expected = await (
-      hooks.resolveExpected ?? resolveExpectedSystemdUnit
-    )();
+  // Rewrite the unit before starting when its program is gone, or when the
+  // `hack` this CLI resolves is a different program: otherwise systemd would
+  // start an old, incompatible hackd that `hack daemon start` then replaces,
+  // on every start (the loop `repairLaunchdProgramIfInvalid` prevents on
+  // macOS). This runs only when hackd is about to start, never against a
+  // running daemon; status and doctor stay independent of PATH.
+  const expected = await (
+    hooks.resolveExpected ?? resolveExpectedSystemdUnit
+  )();
+  const programChanged =
+    expected !== null &&
+    status.drift !== "program-missing" &&
+    expected.hackBinPath !== status.program;
+  if (status.drift === "program-missing" || programChanged) {
     if (!expected) {
       logger.error({
         message: `${SYSTEMD_UNIT_NAME} runs a program that no longer exists (${status.program ?? "unreadable ExecStart"}) and no installed hack was found to replace it | Put hack on PATH, then run: hack daemon install`,
@@ -142,7 +157,9 @@ export async function startViaSystemdIfInstalled(
       return 1;
     }
     logger.warn({
-      message: `Repaired ${SYSTEMD_UNIT_NAME}: its program no longer existed; it now runs ${expected.hackBinPath}`,
+      message: programChanged
+        ? `Updated ${SYSTEMD_UNIT_NAME} to run ${expected.hackBinPath} (it ran ${status.program ?? "another program"})`
+        : `Repaired ${SYSTEMD_UNIT_NAME}: its program no longer existed; it now runs ${expected.hackBinPath}`,
     });
   }
   // After a crash loop systemd refuses `start` ("start request repeated too
@@ -189,7 +206,11 @@ export async function stopViaSystemdIfOwned(opts: {
     unitPath,
     deps,
   });
-  if (!(status?.active && status.mainPid === opts.pid)) {
+  const owned =
+    status?.active === true &&
+    (status.mainPid === opts.pid ||
+      (await isPidInSystemdUnit({ pid: opts.pid })) === true);
+  if (!owned) {
     return false;
   }
   const stopped = await systemdServiceAction({ action: "stop", deps });

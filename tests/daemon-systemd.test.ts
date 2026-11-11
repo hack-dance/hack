@@ -9,6 +9,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { startViaSystemdIfInstalled } from "../src/commands/daemon-systemd.ts";
+import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import { summarizeSystemdService } from "../src/daemon/service-summary.ts";
 import {
   buildDaemonRepairMessage,
@@ -17,6 +19,7 @@ import {
 import {
   extractSystemdExecProgram,
   installSystemdUnit,
+  isPidInSystemdUnit,
   probeSystemdUserManager,
   readSystemdServiceStatus,
   renderSystemdUnit,
@@ -54,6 +57,7 @@ type Fake = {
   deps: SystemdDeps;
   enabled: boolean;
   active: boolean;
+  failed: boolean;
 };
 
 let root: string;
@@ -81,6 +85,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     calls,
     enabled: false,
     active: opts.active ?? false,
+    failed: false,
     deps: undefined as unknown as SystemdDeps,
   };
   const ok = (stdout = ""): ServiceCommandResult => ({
@@ -115,7 +120,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
         ok(
           [
             "LoadState=loaded",
-            `ActiveState=${state.active ? "active" : "inactive"}`,
+            `ActiveState=${state.failed ? "failed" : state.active ? "active" : "inactive"}`,
             `UnitFileState=${state.enabled ? "enabled" : "disabled"}`,
             `MainPID=${state.active ? (opts.mainPid ?? 4242) : 0}`,
           ].join("\n")
@@ -131,7 +136,17 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
         state.active = false;
       }
     }
+    if (verb === "reset-failed") {
+      state.failed = false;
+    }
     if (verb === "start" || verb === "restart") {
+      if (state.failed) {
+        return Promise.resolve({
+          exitCode: 1,
+          stdout: "",
+          stderr: "Job failed: start request repeated too quickly",
+        });
+      }
       state.active = true;
     }
     if (verb === "stop") {
@@ -568,4 +583,96 @@ test("status text and JSON name the same next step", () => {
       dockerReachable: true,
     })
   ).toContain(`Run: ${stopped.nextStep}`);
+});
+
+function startHooks(fake: Fake, hackBinPath = program) {
+  return {
+    paths: resolveDaemonPaths({ home: root }),
+    deps: fake.deps,
+    waitForReady: () => Promise.resolve(true),
+    resolveExpected: () => {
+      const text = renderSystemdUnit({ hackBinPath });
+      return Promise.resolve(text ? { hackBinPath, unitText: text } : null);
+    },
+  };
+}
+
+test("start rewrites a unit that runs another existing hack, then starts it", async () => {
+  const fake = fakeSystemd();
+  const old = join(root, "bin", "hack-old");
+  await writeFile(old, "#!/bin/sh\n");
+  await chmod(old, 0o755);
+  await installSystemdUnit({
+    unitPath,
+    unitText: renderSystemdUnit({ hackBinPath: old }) ?? "",
+    deps: fake.deps,
+  });
+  fake.calls.length = 0;
+
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect(await readFile(unitPath, "utf8")).toBe(unitText());
+  const reload = fake.calls.indexOf("systemctl --user daemon-reload");
+  const start = fake.calls.indexOf("systemctl --user start hackd.service");
+  expect(reload).toBeGreaterThanOrEqual(0);
+  expect(start).toBeGreaterThan(reload);
+});
+
+test("start leaves a current unit alone and only starts it", async () => {
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+  expect(fake.calls).toContain("systemctl --user start hackd.service");
+});
+
+test("start clears a failed unit before starting it", async () => {
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  fake.failed = true;
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  const reset = fake.calls.indexOf(
+    "systemctl --user reset-failed hackd.service"
+  );
+  const start = fake.calls.indexOf("systemctl --user start hackd.service");
+  expect(reset).toBeGreaterThanOrEqual(0);
+  expect(start).toBeGreaterThan(reset);
+  expect(fake.active).toBe(true);
+});
+
+test("start without an installed unit returns null and calls nothing", async () => {
+  const fake = fakeSystemd();
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBeNull();
+  expect(fake.calls).toEqual([]);
+});
+
+test("cgroup membership identifies hackd under a wrapper MainPID", async () => {
+  const cgroup = (text: string | null) => () => Promise.resolve(text);
+  expect(
+    await isPidInSystemdUnit({
+      pid: 1,
+      readText: cgroup(
+        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/hackd.service\n"
+      ),
+    })
+  ).toBe(true);
+  expect(
+    await isPidInSystemdUnit({
+      pid: 1,
+      readText: cgroup("0::/user.slice/user-1000.slice/session-3.scope\n"),
+    })
+  ).toBe(false);
+  expect(
+    await isPidInSystemdUnit({ pid: 1, readText: cgroup(null) })
+  ).toBeNull();
+
+  const owned = summarizeSystemdService({
+    status: baseStatus({ mainPid: 100 }),
+    daemonPid: 101,
+    daemonRunning: true,
+    daemonInUnit: true,
+  });
+  expect(owned.ownsDaemon).toBe(true);
+  expect(owned.severity).toBe("ok");
 });

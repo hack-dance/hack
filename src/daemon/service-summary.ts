@@ -41,13 +41,14 @@ export function summarizeSystemdService(opts: {
   readonly status: SystemdServiceStatus;
   readonly daemonPid: number | null;
   readonly daemonRunning: boolean;
+  /**
+   * The pid-file hackd runs in hackd.service's cgroup (Linux). It covers a
+   * `hack` wrapper that runs hackd as a child, so `MainPID` is the wrapper.
+   */
+  readonly daemonInUnit?: boolean | null;
 }): DaemonServiceSummary {
   const { status } = opts;
-  const ownsDaemon =
-    status.active &&
-    status.mainPid !== null &&
-    opts.daemonRunning &&
-    status.mainPid === opts.daemonPid;
+  const ownsDaemon = systemdOwnsDaemon(opts);
   const base = {
     manager: "systemd" as const,
     available: status.availability.available,
@@ -145,6 +146,21 @@ export function summarizeSystemdService(opts: {
     summary: `installed, enabled, ${state}`,
     severity: "ok",
   };
+}
+
+/** Whether systemd runs the hackd recorded in the pid file. */
+function systemdOwnsDaemon(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly daemonPid: number | null;
+  readonly daemonRunning: boolean;
+  readonly daemonInUnit?: boolean | null;
+}): boolean {
+  if (!(opts.status.active && opts.daemonRunning)) {
+    return false;
+  }
+  const mainPidMatches =
+    opts.status.mainPid !== null && opts.status.mainPid === opts.daemonPid;
+  return mainPidMatches || opts.daemonInUnit === true;
 }
 
 /** The launchd equivalent; reported only, never a warning (macOS unchanged). */

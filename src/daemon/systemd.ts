@@ -499,6 +499,29 @@ async function computeDrift(opts: {
   return rendered === opts.unitText ? "none" : "content";
 }
 
+const CGROUP_UNIT_SUFFIX = `/${SYSTEMD_UNIT_NAME}`;
+
+/**
+ * Whether `pid` runs in hackd.service's cgroup, read from
+ * `/proc/<pid>/cgroup`. This holds for hackd even when `MainPID` is a
+ * wrapper script that runs it as a child. Null when it cannot be read (not
+ * Linux, process gone).
+ */
+export async function isPidInSystemdUnit(opts: {
+  readonly pid: number;
+  readonly readText?: (path: string) => Promise<string | null>;
+}): Promise<boolean | null> {
+  const text = await (opts.readText ?? readTextFile)(
+    `/proc/${opts.pid}/cgroup`
+  );
+  if (text === null) {
+    return null;
+  }
+  return text
+    .split("\n")
+    .some((line) => line.trimEnd().endsWith(CGROUP_UNIT_SUFFIX));
+}
+
 /** Parses `systemctl show` `Key=Value` lines. */
 export function parseSystemdProperties(text: string): Record<string, string> {
   const out: Record<string, string> = {};

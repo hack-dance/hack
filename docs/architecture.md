@@ -400,12 +400,14 @@ unit:
   log stays in `~/.hack/daemon/hackd.log`.
 
 Hack owns the whole unit file. Put local settings, such as `DOCKER_HOST` for
-rootless Docker, in a drop-in (`systemctl --user edit hackd`). If the recorded
-program no longer exists, `hack daemon start` rewrites the unit. Any other edit
-to the file shows up as drift in `hack daemon status` and `hack doctor`, and
-`hack daemon install` fixes it. A unit that runs a different `hack` that still
-exists, such as one found earlier on another shell's `PATH`, is not drift.
-`hack daemon install` always writes the `hack` found on the current `PATH`.
+rootless Docker, in a drop-in (`systemctl --user edit hackd`). Before it starts
+hackd, `hack daemon start` rewrites the unit when the recorded program no longer
+exists, or when the `hack` found on the current `PATH` is a different program, so
+systemd never keeps starting an old, incompatible hackd after an upgrade. It does
+this only when hackd is not running. Any other edit to the file shows up as drift
+in `hack daemon status` and `hack doctor`, and `hack daemon install` fixes it. A
+unit that runs a different `hack` that still exists is not reported as drift, so
+shells with different `PATH`s do not each rewrite the unit.
 
 A systemd user manager runs only while you have a login session, unless linger is
 on. `hack daemon install` and `hack daemon status` report linger. When it is off,

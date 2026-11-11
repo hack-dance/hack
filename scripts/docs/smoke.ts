@@ -111,6 +111,8 @@ for (const [old, target] of [
 const repositoryRoot = new URL("../../", import.meta.url).pathname;
 const mermaidFence = /^(?:```|~~~)mermaid[ \t]*$/gm;
 const diagramImage = /<img\b[^>]*>/g;
+const expandControl =
+  /<button\b[^>]*aria-label="Open diagram full size: [^"]*"[^>]*class="diagram-expand"|<button\b[^>]*class="diagram-expand"[^>]*aria-label="Open diagram full size: [^"]*"/g;
 const diagramSource = /src="(\/diagrams\/[a-f0-9]+\.(light|dark)\.svg)"/;
 let diagramBlocks = 0;
 const diagramFiles = new Set<string>();
@@ -135,7 +137,8 @@ for (const version of ["v4", "v5"] as const) {
     }
     const route = `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
     const shown = { light: 0, dark: 0 };
-    for (const tag of (await read(route)).match(diagramImage) ?? []) {
+    const html = await read(route);
+    for (const tag of html.match(diagramImage) ?? []) {
       const source = diagramSource.exec(tag);
       const variant = source?.[2] as "light" | "dark" | undefined;
       if (
@@ -150,6 +153,13 @@ for (const version of ["v4", "v5"] as const) {
     if (shown.light !== blocks || shown.dark !== blocks) {
       throw new Error(
         `${route}: ${blocks} Mermaid blocks but ${shown.light} light and ${shown.dark} dark diagram images`
+      );
+    }
+    // Each image carries the control that opens it full size.
+    const controls = (html.match(expandControl) ?? []).length;
+    if (controls !== blocks * 2) {
+      throw new Error(
+        `${route}: ${blocks * 2} diagram images but ${controls} full-size controls`
       );
     }
     diagramBlocks += blocks;
@@ -174,6 +184,48 @@ for (const file of diagramFiles) {
 }
 console.log(
   `Diagram smoke passed: ${diagramBlocks} Mermaid blocks shown as ${diagramFiles.size} served SVGs.`
+);
+
+// Recipe pages contain copy-paste examples, so check their rendered links too:
+// a multiline Markdown link can escape the preparation step's line-based rewrite.
+const recipeLinks = new Map<string, string>();
+const recipeEntryPoints = new Set([
+  "index",
+  "env",
+  "reference/configuration-fields",
+]);
+const v5Slugs = new Set(
+  [...versions.v5.entries, ...versions.v5.editorial].map((page) => page.slug)
+);
+for (const slug of v5Slugs) {
+  if (!(slug.startsWith("recipes/") || recipeEntryPoints.has(slug))) {
+    continue;
+  }
+  const route = `/docs/v5${slug === "index" ? "" : `/${slug}`}`;
+  const html = await read(route);
+  if (html.includes("language-mermaid")) {
+    throw new Error(`Unrendered Mermaid source: ${route}`);
+  }
+  for (const match of html.matchAll(/href="([^"<>]+)"/g)) {
+    const url = new URL(match[1] ?? "", new URL(route, base));
+    if (
+      (url.origin === base.origin || url.origin === "https://hack.foo") &&
+      (url.pathname === "/docs/v5" || url.pathname.startsWith("/docs/v5/"))
+    ) {
+      recipeLinks.set(`${url.pathname}${url.hash}`, route);
+    }
+  }
+}
+for (const [target, source] of recipeLinks) {
+  const url = new URL(target, base);
+  const html = await read(url.pathname);
+  const id = decodeURIComponent(url.hash.slice(1)).replaceAll("&", "&amp;");
+  if (id && !html.includes(`id="${id}"`)) {
+    throw new Error(`Missing recipe link anchor: ${source} -> ${target}`);
+  }
+}
+console.log(
+  `Recipe smoke passed: ${recipeLinks.size} local links and anchors.`
 );
 
 // v5 pages that moved into the native section keep their old routes, with and

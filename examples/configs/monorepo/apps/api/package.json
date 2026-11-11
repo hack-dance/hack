@@ -1,0 +1,13 @@
+{
+  "name": "api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts"
+  },
+  "dependencies": {
+    "@acme/shared": "workspace:*",
+    "hono": "4.10.4"
+  }
+}

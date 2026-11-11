@@ -1,0 +1,46 @@
+name: static-site
+services:
+  deps:
+    image: oven/bun:1.4.4-slim
+    working_dir: /app
+    command: ["bun", "install", "--frozen-lockfile"]
+    volumes:
+      - ..:/app
+      - node_modules:/app/node_modules
+
+  # Rebuilds into the shared "site" volume whenever a source file changes.
+  build:
+    image: oven/bun:1.4.4-slim
+    working_dir: /app
+    command: ["bun", "run", "watch"]
+    volumes:
+      - ..:/app
+      - node_modules:/app/node_modules:ro
+      - site:/site
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+
+  # Serves the built files. It only reads the volume.
+  web:
+    image: caddy:2.10-alpine
+    command: ["caddy", "file-server", "--root", "/site", "--listen", ":8080"]
+    volumes:
+      - site:/site:ro
+    depends_on:
+      - build
+    labels:
+      caddy: static-site.hack.local
+      caddy.reverse_proxy: "{{upstreams 8080}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - default
+
+volumes:
+  node_modules: {}
+  site: {}
+
+networks:
+  hack-dev:
+    external: true

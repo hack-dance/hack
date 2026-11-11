@@ -121,28 +121,113 @@ a:focus-visible {
   background: var(--color-fd-background);
   color: inherit;
 }
+/* Rendered diagrams. One Mermaid block renders a light and a dark frame; the
+   frame for the active theme is shown. */
+.diagram-frame {
+  position: relative;
+  display: block;
+  margin: 1.5rem 0 0.75rem;
+}
+.diagram-frame-dark,
+.dark .diagram-frame-light {
+  display: none;
+}
+.dark .diagram-frame-dark {
+  display: block;
+}
 img.diagram {
   display: block;
   width: 100%;
   max-width: 100%;
   height: auto;
-  margin: 1.5rem 0 0.75rem;
+  margin: 0;
   border: 1px solid var(--color-fd-border);
   border-radius: 0.75rem;
   background: #f3efe3;
 }
-.dark img.diagram {
+img.diagram.diagram-dark {
   background: #11100e;
 }
-/* One Mermaid block renders two images; show the one for the active theme. */
-img.diagram.diagram-dark {
-  display: none;
+.diagram-expand,
+.diagram-dialog-bar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 0.5rem;
+  background: var(--color-fd-background);
+  color: var(--color-fd-foreground);
+  cursor: pointer;
 }
-.dark img.diagram.diagram-dark {
+.diagram-expand {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  opacity: 0.85;
+}
+.diagram-expand:hover,
+.diagram-expand:focus-visible {
+  opacity: 1;
+}
+.diagram-expand:focus-visible,
+.diagram-dialog-bar button:focus-visible,
+.diagram-dialog-stage:focus-visible {
+  outline: 2px solid var(--color-fd-primary);
+  outline-offset: 2px;
+}
+.diagram-dialog-bar button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+.diagram-dialog {
+  /* `inset` with automatic size fills the viewport without running under a
+     classic page scrollbar, which `100vw` would. */
+  inset: 0;
+  width: auto;
+  max-width: none;
+  height: auto;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: #f3efe3;
+  color: #1f1d1a;
+}
+.diagram-dialog-dark {
+  background: #11100e;
+  color: #f3efe3;
+}
+.diagram-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.diagram-dialog-bar {
+  display: flex;
+  flex: none;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--color-fd-border);
+}
+.diagram-dialog-bar output {
+  min-width: 3.5rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.diagram-dialog-close {
+  margin-left: auto;
+}
+.diagram-dialog-stage {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem;
+  touch-action: pan-x pan-y pinch-zoom;
+}
+img.diagram-full {
   display: block;
-}
-.dark img.diagram.diagram-light {
-  display: none;
+  margin: 0 auto;
 }
 details > summary {
   cursor: pointer;

@@ -1,0 +1,269 @@
+import { describe, expect, test } from "bun:test";
+import {
+  composeEnvValuesToRedact,
+  composePsTextFallbackAllowed,
+  engineErrorLine,
+  parseComposePsJson,
+  readComposePs,
+  readComposePsResult,
+  sensitiveInheritedValues,
+} from "../src/lib/compose-ps-result.ts";
+
+function failure(
+  stderr: string,
+  exitCode = 1,
+  stdout = "",
+  inheritedEnv: Record<string, string> = {}
+) {
+  const read = readComposePsResult({
+    result: { exitCode, stdout, stderr },
+    inheritedEnv,
+  });
+  if (read.ok) {
+    throw new Error("expected a failure");
+  }
+  return read.error;
+}
+
+describe("readComposePsResult", () => {
+  test("classifies a denied Docker socket as E_PERMISSION with the engine line", () => {
+    const error = failure(
+      "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock\nmore\n"
+    );
+    expect(error.code).toBe("E_PERMISSION");
+    expect(error.message).toContain("docker group");
+    expect(error.message).toEndWith(
+      "Engine said: permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
+    );
+    expect(composePsTextFallbackAllowed(error)).toBe(false);
+  });
+
+  test("a denied Compose input is E_PERMISSION without the socket advice or its text", () => {
+    const error = failure("open /tmp/x/compose.yml: permission denied");
+    expect(error.code).toBe("E_PERMISSION");
+    expect(error.message).not.toContain("docker group");
+    expect(error.message).not.toContain("compose.yml");
+    expect(error.message).toContain("output is omitted");
+  });
+
+  test.each([
+    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+    "failed to connect to the docker API at unix:///run/user/1000/docker.sock; check if the path is correct and if the daemon is running: dial unix /run/user/1000/docker.sock: connect: no such file or directory",
+    "error during connect: Get http://127.0.0.1:2375/v1.47/containers/json: dial tcp 127.0.0.1:2375: connect: connection refused",
+  ])("classifies an unreachable engine as E_DOCKER_UNAVAILABLE: %s", (line) => {
+    const error = failure(line);
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).toContain(`Engine said: ${line}`);
+    expect(composePsTextFallbackAllowed(error)).toBe(false);
+  });
+
+  test("a timed-out read (exit 124) is E_DOCKER_UNAVAILABLE and says it timed out", () => {
+    const error = failure("", 124);
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).toContain("did not finish within");
+    expect(error.message).not.toContain("not reachable");
+  });
+
+  test("Compose warnings printed first do not replace the cause", () => {
+    const cause =
+      "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock";
+    const error = failure(
+      [
+        'time="2026-01-01T00:00:00Z" level=warning msg="<project>/.hack/docker-compose.yml: the attribute `version` is obsolete"',
+        'WARN[0000] The "SAMPLE" variable is not set. Defaulting to a blank string.',
+        "warning: sample",
+        cause,
+      ].join("\n")
+    );
+    expect(error.code).toBe("E_PERMISSION");
+    expect(error.message).toEndWith(`Engine said: ${cause}`);
+  });
+
+  test("Compose text is never quoted: an interpolated value cannot leak (Codex security review)", () => {
+    // A repository `${VAR}` expanded by Compose into a validation error.
+    const error = failure(
+      'services.web.ports contains an invalid type: "sample-inherited-secret"',
+      15,
+      '{"Service":"web","Command":"sample-command"}'
+    );
+    expect(error.code).toBe("E_COMPOSE_FAILED");
+    expect(error.message).not.toContain("sample-inherited-secret");
+    expect(error.message).not.toContain("sample-command");
+    expect(error.message).not.toContain("Engine said");
+  });
+
+  test.each([
+    "services.web include: dial tcp: lookup sample-expanded-host: no such host",
+    "open <project>/sample-expanded-path: connection refused",
+    "sample-expanded-value: error during connect: connection refused",
+  ])("an unreachable marker inside Compose text classifies but is not quoted: %s", (line) => {
+    const error = failure(line);
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).not.toContain("sample-expanded");
+    expect(error.message).not.toContain("Engine said");
+  });
+
+  test("a socket-permission marker inside Compose text classifies but is not quoted", () => {
+    const error = failure(
+      "sample-expanded-value: permission denied reading docker.sock path"
+    );
+    expect(error.code).toBe("E_PERMISSION");
+    expect(error.message).toContain("docker group");
+    expect(error.message).not.toContain("sample-expanded-value");
+    expect(error.message).not.toContain("Engine said");
+  });
+
+  test("secret-looking inherited values are redacted even from a recognized engine line", () => {
+    const error = failure(
+      "Cannot connect to the Docker daemon at tcp://sample-key-material:2376. Is the docker daemon running?",
+      1,
+      "",
+      { HACK_ENV_SECRET_KEY: "sample-key-material", HOME: "<home>" }
+    );
+    expect(error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(error.message).toContain("tcp://[REDACTED]:2376");
+    expect(error.message).not.toContain("sample-key-material");
+  });
+
+  test("any other failure is E_COMPOSE_FAILED, omits the text and allows the text fallback", () => {
+    const error = failure(
+      "\u001b[31mno configuration file provided\u001b[0m",
+      14
+    );
+    expect(error.code).toBe("E_COMPOSE_FAILED");
+    expect(error.message).toStartWith("docker compose ps failed (exit 14). ");
+    expect(error.message).not.toContain("no configuration file provided");
+    expect(composePsTextFallbackAllowed(error)).toBe(true);
+  });
+
+  test("unparsable output is E_COMPOSE_OUTPUT_INVALID and is not echoed", () => {
+    const read = readComposePsResult({
+      result: {
+        exitCode: 0,
+        stdout: '{"Service":"web"}\nweb  running  SECRET_TEXT\n',
+        stderr: "",
+      },
+    });
+    expect(read.ok).toBe(false);
+    if (!read.ok) {
+      expect(read.error.code).toBe("E_COMPOSE_OUTPUT_INVALID");
+      expect(read.error.message).not.toContain("SECRET_TEXT");
+      expect(composePsTextFallbackAllowed(read.error)).toBe(true);
+    }
+  });
+
+  test("empty output is an empty listing", () => {
+    expect(
+      readComposePsResult({ result: { exitCode: 0, stdout: "\n", stderr: "" } })
+    ).toEqual({ ok: true, entries: [] });
+  });
+});
+
+describe("parseComposePsJson", () => {
+  test("reads JSON lines and the older single-array form", () => {
+    expect(parseComposePsJson('{"Service":"a"}\n{"Service":"b"}\n')).toEqual([
+      { Service: "a" },
+      { Service: "b" },
+    ]);
+    expect(parseComposePsJson('[{"Service":"a"},{"Service":"b"}]')).toEqual([
+      { Service: "a" },
+      { Service: "b" },
+    ]);
+  });
+
+  test.each(["[1]", '"text"', "null", "{"])("refuses %s", (line) => {
+    expect(parseComposePsJson(line)).toBeNull();
+  });
+});
+
+describe("engineErrorLine", () => {
+  const any = () => true;
+
+  test("redacts URL credentials and named values, then bounds the length", () => {
+    const line = engineErrorLine({
+      stderr: `error during connect: tcp://user:pa@55@host:2376 token=sample-env-value ${"x".repeat(400)}`,
+      matches: any,
+      redactValues: ["sample-env-value", "abc"],
+    });
+    expect(line).toStartWith(
+      "error during connect: tcp://[REDACTED]@host:2376 token=[REDACTED] "
+    );
+    expect(line).not.toContain("pa@55");
+    expect(line).not.toContain("55@");
+    expect(line).not.toContain("sample-env-value");
+    expect(line?.length).toBe(240);
+    expect(line).toEndWith("…");
+  });
+
+  test("picks the first matching non-warning stderr line, else null", () => {
+    expect(
+      engineErrorLine({
+        stderr: "WARN[0000] connection refused\nother\nconnection refused here",
+        matches: (line) => line.includes("connection refused"),
+      })
+    ).toBe("connection refused here");
+    expect(
+      engineErrorLine({ stderr: "unrelated", matches: (l) => l === "x" })
+    ).toBeNull();
+    expect(engineErrorLine({ stderr: " \n", matches: any })).toBeNull();
+  });
+});
+
+test("sensitiveInheritedValues selects secret-looking names only", () => {
+  expect(
+    sensitiveInheritedValues({
+      env: {
+        HACK_ENV_DB: "a",
+        HACK_ENV_SECRET_KEY: "b",
+        GITHUB_TOKEN: "c",
+        DB_PASSWORD: "d",
+        HOME: "<home>",
+        DOCKER_HOST: "unix:///tmp/docker.sock",
+        UNSET: undefined,
+      },
+    }).sort()
+  ).toEqual(["a", "b", "c", "d"]);
+});
+
+test("composeEnvValuesToRedact keeps only values Hack added or changed", () => {
+  expect(
+    composeEnvValuesToRedact({
+      env: { HOME: "<home>", HACK_ENV_TOKEN: "added", PATH: "changed" },
+      inherited: { HOME: "<home>", PATH: "/usr/bin" },
+    }).sort()
+  ).toEqual(["added", "changed"]);
+  expect(composeEnvValuesToRedact({ env: undefined })).toEqual([]);
+});
+
+function spawnError(code: string): Error {
+  return Object.assign(new Error(`${code}: spawn failed`), { code });
+}
+
+test("readComposePs rethrows a spawn failure when docker is on PATH (for example a missing cwd)", async () => {
+  const error = spawnError("ENOENT");
+  await expect(
+    readComposePs({
+      run: () => Promise.reject(error),
+      dockerOnPath: () => true,
+    })
+  ).rejects.toBe(error);
+  const other = new Error("unrelated");
+  await expect(
+    readComposePs({
+      run: () => Promise.reject(other),
+      dockerOnPath: () => false,
+    })
+  ).rejects.toBe(other);
+});
+
+test("readComposePs reports a missing docker CLI as E_DOCKER_UNAVAILABLE", async () => {
+  const read = await readComposePs({
+    run: () => Promise.reject(spawnError("ENOENT")),
+    dockerOnPath: () => false,
+  });
+  expect(read.ok).toBe(false);
+  if (!read.ok) {
+    expect(read.error.code).toBe("E_DOCKER_UNAVAILABLE");
+    expect(read.error.message).toContain("not installed or not on PATH");
+  }
+});

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schemas.hack.local/hack.config.schema.json",
+  "name": "host-dev-server",
+  "dev_host": "host-dev-server.hack.local",
+  "lifecycle": {
+    "up": {
+      "before": [{ "name": "install", "command": "bun install --frozen-lockfile" }]
+    },
+    "processes": [{ "name": "dev", "command": "bun run dev" }]
+  }
+}

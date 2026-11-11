@@ -32,6 +32,14 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 - [Use a cloud agent or another host](guides/cloud-environments.md)
 - [Try the native backend (beta)](../guides/native-candidate.md)
 
+## Recipes
+
+[Recipes](recipes/overview.md) has complete Compose projects for
+[common app configurations](recipes/config-examples.md),
+[environment overlays](recipes/environments.md), dependencies, migrations,
+tunnels and cleanup. Their footers identify the example source revision, and
+each page distinguishes the compatibility audit from its original execution notes.
+
 ## Native backend (beta)
 
 A second way to run the same project on an Apple Silicon Mac. Hack starts its own

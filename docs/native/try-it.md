@@ -15,7 +15,7 @@ run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.12/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -30,8 +30,51 @@ virtual machine, or change DNS or certificate trust. Newer prereleases are on th
 ## 2. Prepare the runtime
 
 The native backend needs its virtual machine software set up once per installed
-version. This step is manual today. Follow the provider setup steps in
-[the native reference](../guides/native-candidate.md#manual-candidate-upgrade-and-rollback).
+version. This step is manual today.
+
+A `hack-next` install keeps each version in its own folder. The two paths you need
+are the native program and its private home:
+
+```sh
+V=5.0.0-next.13   # the version you installed; `hack-next --manager status` shows it
+NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
+NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
+```
+
+Download the exact archives named in `provider-pins.json`, which sits beside
+`hack-native` in the bundle. Then download these four packages from the Alpine
+v3.19 `main` repository for `aarch64`, with exactly these names:
+
+- `iptables-1.8.10-r3.apk`
+- `libmnl-1.0.5-r2.apk`
+- `libnftnl-1.2.6-r0.apk`
+- `libxtables-1.8.10-r3.apk`
+
+Their hashes are in the table under [network tool packages](../guides/native-candidate.md#network-tool-packages), not in `provider-pins.json`.
+
+Put them in a folder under your home folder, not under `/tmp`: Hack refuses a path
+that passes through a symbolic link, and `/tmp` is one on macOS. Hack also refuses
+the packages unless the folder and files are private to you, which is not how a
+download leaves them:
+
+```sh
+chmod 700 /absolute/private/pinned-apks
+chmod 600 /absolute/private/pinned-apks/*.apk
+```
+
+Then prepare the runtime and check that this Mac can run it:
+
+```sh
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime prepare --archive /absolute/smolvm-archive.tar.gz
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime prepare-engine --archive /absolute/docker-archive.tgz
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime prepare-network-tools --directory /absolute/private/pinned-apks
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime probe --profile development --json
+```
+
+Pass `--profile development` to `runtime probe`. Without it the probe checks a
+stricter research profile and can report "not admitted" on a Mac that runs projects
+fine. The [native reference](../guides/native-candidate.md#manual-candidate-upgrade-and-rollback) explains
+each command.
 
 ## 3. Check the project
 
@@ -52,15 +95,19 @@ refuse with `E_NATIVE_PROJECT_UNSUPPORTED` and change nothing. See
 "$HOME/.hack-next/bin/hack-next" up --path /absolute/project
 ```
 
-Native `up` runs in the foreground and holds the project until you stop it.
-Prereleases after next.12 also accept `hack up -d` to run it in the background. From
-a second terminal:
+Native `up` runs in the foreground and holds the project until you stop it. Add
+`-d` to run it in the background instead. From a second terminal, or after `up -d`:
 
 ```sh
 "$HOME/.hack-next/bin/hack-next" ps --path /absolute/project
 "$HOME/.hack-next/bin/hack-next" logs api --no-follow --path /absolute/project
 "$HOME/.hack-next/bin/hack-next" down --path /absolute/project
 ```
+
+Stop the project with `hack down` from another terminal, as above. In this
+prerelease, Ctrl-C may not stop a foreground project cleanly when it publishes
+ports. If you already pressed Ctrl-C, run `hack down`, and `hack down --recover` if
+it reports that the owner is gone. A fix is in progress.
 
 Then check the application itself: sign in, load a page that reads data, restart,
 and confirm the data is still there. A green status alone does not prove the

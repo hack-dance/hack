@@ -18,6 +18,7 @@ import {
   withNativeRestartLock,
 } from "./native-project-run.ts";
 import { NativeStartupCanceledError } from "./native-project-start.ts";
+import { NativeRuntimeRequestError } from "./native-runtime-client.ts";
 
 /**
  * Stop requests of a native restart until its new foreground `up` installs its
@@ -194,12 +195,12 @@ async function restartUnderLock(
   };
   return await opts.deps.lock(opts.scope, async (release) => {
     const { run, intent, current } = await selectRestart(context);
-    const canceledBeforeCleanup = () => {
+    const canceledBeforeCleanup = (exit = opts.stop.interruptedExit()) => {
       opts.progress?.({
         phase: "stopped",
         summary: intent ? CANCELED_PENDING : CANCELED_BEFORE_CLEANUP,
       });
-      return opts.stop.interruptedExit();
+      return exit;
     };
     try {
       await opts.preflight(run, {
@@ -210,8 +211,9 @@ async function restartUnderLock(
       // Preflight stops nothing; a request it lost to this interrupt (for
       // example a runtime child that shared the terminal's process group)
       // ends the restart as canceled, not as a failure.
-      if (opts.stop.signal.aborted && intent?.phase !== "cleaned") {
-        return canceledBeforeCleanup();
+      const interruptedExit = restartInterruptedExit(error, opts.stop);
+      if (interruptedExit !== undefined && intent?.phase !== "cleaned") {
+        return canceledBeforeCleanup(interruptedExit);
       }
       throw error;
     }
@@ -294,7 +296,8 @@ async function cleanOldRun(opts: {
       // The stop's outcome is uncertain, so the prepared intent stays. It is
       // the exact selection the next `hack restart` resumes (whether the old
       // owner is still running or has stopped itself), never a fresh start.
-      if (context.stop.signal.aborted) {
+      if (restartInterruptedExit(error, context.stop) !== undefined) {
+        context.reportStopping();
         throw new ClosedCliError(INTERRUPTED_STOP);
       }
       throw error;
@@ -327,6 +330,20 @@ async function cleanOldRun(opts: {
     timeoutMs: 150_000,
   });
   return selected;
+}
+
+/** The frontend's first observed stop wins; a child can report its signal before that handler runs. */
+function restartInterruptedExit(
+  error: unknown,
+  stop: NativeRestartStopSignals
+): number | undefined {
+  if (stop.signal.aborted) {
+    return stop.interruptedExit();
+  }
+  if (error instanceof NativeRuntimeRequestError && error.stopSignal) {
+    return error.stopSignal === "SIGTERM" ? 143 : 130;
+  }
+  return undefined;
 }
 
 /** Start the new run, or end as a stopped project when a stop request came first. */

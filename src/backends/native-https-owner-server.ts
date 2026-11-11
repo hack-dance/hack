@@ -73,6 +73,16 @@ export interface NativeHttpsOwnerServerDependencies {
    * ownership observation. Production passes none.
    */
   readonly afterPublish?: (socketPath: string) => Promise<void>;
+  /**
+   * Test seam: runs after `endpoint.json` is published and before the owner
+   * records that it is running. Production passes none.
+   */
+  readonly afterEndpoint?: () => Promise<void>;
+  /**
+   * Test seam: a request arrived before startup settled and now waits for the
+   * startup outcome. Production passes none.
+   */
+  readonly requestAwaitingStartup?: () => Promise<void>;
 }
 
 function verifyCleanGraphObservations(
@@ -236,6 +246,13 @@ export async function serveNativeHttpsOwner(opts: {
   let socketIdentity: { dev: number; ino: number } | undefined;
   let frontend: Frontend | undefined;
   let frontendFailed = false;
+  // Clients find the control socket only through endpoint.json, but that file
+  // is visible before startup records "running". A request in that window waits
+  // here for the startup outcome instead of being refused as not running.
+  let settleStartup: () => void = () => undefined;
+  const startupSettled = new Promise<void>((resolve) => {
+    settleStartup = resolve;
+  });
   let finish: () => void = () => undefined;
   let fail: (error: Error) => void = () => undefined;
   const completed = new Promise<void>((resolve, reject) => {
@@ -513,6 +530,10 @@ export async function serveNativeHttpsOwner(opts: {
     request: NativeHttpsOwnerRequest,
     progress: ReleaseProgress
   ) => {
+    if (state === "starting") {
+      await opts.dependencies.requestAwaitingStartup?.();
+      await startupSettled;
+    }
     if (state !== "running" || frontendFailed) {
       throw nativeHttpsOwnerRefused();
     }
@@ -675,10 +696,12 @@ export async function serveNativeHttpsOwner(opts: {
       socket: socketPath,
       ...socketIdentity,
     });
+    await opts.dependencies.afterEndpoint?.();
     if (frontendFailed) {
       throw nativeHttpsOwnerRefused();
     }
     state = "running";
+    settleStartup();
     process.on("SIGTERM", onSignal);
     process.on("SIGINT", onSignal);
     startupTimer = setTimeout(() => {
@@ -715,6 +738,8 @@ export async function serveNativeHttpsOwner(opts: {
     await failOwner();
     throw nativeHttpsOwnerRefused();
   } finally {
+    // A request queued during a failed startup is refused only after failOwner.
+    settleStartup();
     if (startupTimer) {
       clearTimeout(startupTimer);
     }

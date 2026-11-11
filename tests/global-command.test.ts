@@ -24,6 +24,7 @@ import {
   GLOBAL_MANAGED_ENV_SCHEMA_FILENAME,
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../src/constants.ts";
+import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -39,6 +40,7 @@ const DAEMON_AUTOSTART_DENY_ENV = [
 const originalDenyEnv = new Map<string, string | undefined>();
 const execCalls: string[][] = [];
 const runCalls: string[][] = [];
+let runExitResponder: ((cmd: readonly string[]) => number | null) | null = null;
 let execMockResponder:
   | ((
       cmd: readonly string[]
@@ -63,7 +65,7 @@ const shellMock = await registerScopedModuleMock({
     },
     run: async (cmd: readonly string[]) => {
       runCalls.push([...cmd]);
-      return 0;
+      return runExitResponder?.(cmd) ?? 0;
     },
     findExecutableInPath: (name?: string) =>
       name === "hack" ? "/usr/local/bin/hack" : "/usr/bin/mkcert",
@@ -98,6 +100,7 @@ beforeEach(async () => {
   execCalls.length = 0;
   runCalls.length = 0;
   execMockResponder = null;
+  runExitResponder = null;
 });
 
 afterEach(async () => {
@@ -640,4 +643,88 @@ test("global status --json returns summary payload", async () => {
   expect(parsed.summary.caddy_ok).toBe(true);
   expect(parsed.summary.logging_ok).toBe(true);
   expect(parsed.summary.networks_ok).toBe(true);
+});
+
+async function writeInstallStubs(): Promise<void> {
+  await writeExecutable(join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "gum"));
+  await writeExecutable(join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "mutagen"));
+  const bundle = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    "libexec",
+    "mutagen-agents.tar.gz"
+  );
+  await mkdir(dirname(bundle), { recursive: true });
+  await writeFile(bundle, "stub");
+}
+
+test(
+  "global install renders the proxy ports from proxy.bind_address (HACK-2055)",
+  async () => {
+    await writeInstallStubs();
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ proxy: { bind_address: "127.0.0.1" } })}\n`
+    );
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "install"])).toBe(0);
+    const compose = await Bun.file(
+      join(
+        tempDir!,
+        GLOBAL_HACK_DIR_NAME,
+        GLOBAL_CADDY_DIR_NAME,
+        GLOBAL_CADDY_COMPOSE_FILENAME
+      )
+    ).text();
+    expect(compose).toContain('      - "127.0.0.1:80:80"');
+    expect(compose).toContain('      - "127.0.0.1:443:443"');
+  },
+  { timeout: 20_000 }
+);
+
+test("global up names the listener holding :443 when the proxy cannot start (HACK-2055)", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  await writeComposeFile(
+    join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME,
+      GLOBAL_LOGGING_COMPOSE_FILENAME
+    )
+  );
+  runExitResponder = (cmd) =>
+    cmd.includes(caddyCompose) && cmd.includes("up") ? 1 : null;
+  execMockResponder = (cmd) =>
+    cmd[0] === "ss"
+      ? {
+          exitCode: 0,
+          stdout:
+            'LISTEN 0 4096 10.8.0.2:443 0.0.0.0:* users:(("vpn-client",pid=4242,fd=7))\n',
+          stderr: "",
+        }
+      : null;
+  const errors: string[] = [];
+  const errorSpy = spyOn(process.stderr, "write").mockImplementation(
+    (chunk: string | Uint8Array) => {
+      errors.push(String(chunk));
+      return true;
+    }
+  );
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up"])).toBe(1);
+  } finally {
+    errorSpy.mockRestore();
+  }
+  const text = errors.join("\n");
+  expect(text).toContain("10.8.0.2:443 vpn-client (pid 4242)");
+  expect(text).toContain("proxy.bind_address");
 });

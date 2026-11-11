@@ -80,6 +80,31 @@ test("global default_domain is validated before writing", async () => {
   );
 });
 
+test("global proxy.bind_address is validated before writing (HACK-2055)", async () => {
+  const { runCli } = await import("../src/cli/run.ts");
+  const path = process.env.HACK_GLOBAL_CONFIG_PATH ?? "";
+  expect(
+    await runCli([
+      "config",
+      "set",
+      "--global",
+      "proxy.bind_address",
+      "127.0.0.1",
+    ])
+  ).toBe(0);
+  expect(JSON.parse(await readFile(path, "utf8")).proxy.bind_address).toBe(
+    "127.0.0.1"
+  );
+  for (const bad of ["localhost", "127.0.0.1:443"]) {
+    expect(
+      await runCli(["config", "set", "--global", "proxy.bind_address", bad])
+    ).not.toBe(0);
+  }
+  expect(JSON.parse(await readFile(path, "utf8")).proxy.bind_address).toBe(
+    "127.0.0.1"
+  );
+});
+
 test("project config rejects the global-only default_domain key", async () => {
   const repoRoot = join(
     requireFixtureRoot(tempDir, "config-command fixture"),

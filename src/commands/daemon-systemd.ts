@@ -44,6 +44,8 @@ export interface SystemdCommandHooks {
   /** Stops a directly started hackd by pid and removes its pid/socket files. */
   readonly stopDirect: (pid: number) => Promise<void>;
   readonly waitForReady: (timeoutMs: number) => Promise<boolean>;
+  /** Defaults to {@link isPidInSystemdUnit}; tests pin cgroup membership. */
+  readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
   /** Defaults to {@link resolveExpectedSystemdUnit}; tests pin the program. */
   readonly resolveExpected?: typeof resolveExpectedSystemdUnit;
 }
@@ -208,11 +210,7 @@ export async function stopViaSystemdIfOwned(opts: {
     unitPath,
     deps,
   });
-  const owned =
-    status?.active === true &&
-    (status.mainPid === opts.pid ||
-      (await isPidInSystemdUnit({ pid: opts.pid })) === true);
-  if (!owned) {
+  if (!(status && (await systemdRunsPid({ status, pid: opts.pid })))) {
     return false;
   }
   const stopped = await systemdServiceAction({ action: "stop", deps });
@@ -223,6 +221,28 @@ export async function stopViaSystemdIfOwned(opts: {
     return false;
   }
   return true;
+}
+
+/**
+ * The single "does systemd run this hackd" rule for stop and install: the
+ * unit is active and the pid is its `MainPID`, or (for a `hack` wrapper that
+ * keeps hackd as a child) the pid runs in the unit's cgroup.
+ */
+async function systemdRunsPid(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly pid: number;
+  readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
+}): Promise<boolean> {
+  if (!opts.status.active) {
+    return false;
+  }
+  if (opts.status.mainPid === opts.pid) {
+    return true;
+  }
+  const inUnit = await (
+    opts.isPidInUnit ?? ((pid: number) => isPidInSystemdUnit({ pid }))
+  )(opts.pid);
+  return inUnit === true;
 }
 
 function assertSystemdAccess(deps: SystemdDeps): void {
@@ -315,8 +335,18 @@ export async function installDaemonSystemdService(
   // A directly started hackd holds the socket and pid file; systemd's copy
   // would exit at once. Stop it so the service owns the daemon.
   const daemon = await readDaemonStatus({ paths: hooks.paths });
-  const managedPid = before?.active ? before.mainPid : null;
-  if (daemon.running && daemon.pid !== null && daemon.pid !== managedPid) {
+  if (
+    daemon.running &&
+    daemon.pid !== null &&
+    !(
+      before &&
+      (await systemdRunsPid({
+        status: before,
+        pid: daemon.pid,
+        isPidInUnit: hooks.isPidInUnit,
+      }))
+    )
+  ) {
     logger.info({
       message: `Stopping directly started hackd (pid ${daemon.pid}) so systemd can manage it`,
     });

@@ -9,7 +9,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startViaSystemdIfInstalled } from "../src/commands/daemon-systemd.ts";
+import {
+  installDaemonSystemdService,
+  startViaSystemdIfInstalled,
+} from "../src/commands/daemon-systemd.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import { summarizeSystemdService } from "../src/daemon/service-summary.ts";
 import {
@@ -699,4 +702,38 @@ test("cgroup membership identifies hackd under a wrapper MainPID", async () => {
   });
   expect(owned.ownsDaemon).toBe(true);
   expect(owned.severity).toBe("ok");
+});
+
+test("install leaves a systemd-run hackd under a wrapper MainPID alone", async () => {
+  // The pid file names a live process (this test runner); systemd's MainPID
+  // is a different pid (a wrapper), but the pid runs in the unit's cgroup.
+  const fake = fakeSystemd({ active: true, mainPid: 999_999 });
+  const paths = resolveDaemonPaths({ home: root });
+  await mkdir(paths.root, { recursive: true });
+  await writeFile(paths.pidPath, `${process.pid}\n`);
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const stopped: number[] = [];
+  const hooks = {
+    ...startHooks(fake),
+    paths,
+    ignoredOptions: [],
+    startDetached: () => Promise.resolve(0),
+    stopDirect: (pid: number) => {
+      stopped.push(pid);
+      return Promise.resolve();
+    },
+  };
+
+  await installDaemonSystemdService({
+    ...hooks,
+    isPidInUnit: () => Promise.resolve(true),
+  });
+  expect(stopped).toEqual([]);
+
+  // Outside the unit's cgroup it is a directly started hackd and is handed over.
+  await installDaemonSystemdService({
+    ...hooks,
+    isPidInUnit: () => Promise.resolve(false),
+  });
+  expect(stopped).toEqual([process.pid]);
 });

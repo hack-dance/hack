@@ -170,7 +170,7 @@ release's `manager.py`, which refuses the new layout by design rather than
 selecting files it cannot verify. Before upgrading such a channel, stop its
 runtimes, download and review the newer tag's installer, run its `upgrade-manager`
 against the existing root, then run `upgrade`. See
-[upgrade and return to a retained candidate](candidate-install.md#upgrade-and-return-to-a-retained-candidate).
+[upgrade, roll back and return to stable](candidate-install.md#upgrade-roll-back-and-return-to-stable).
 A fresh `--root` does not need this step.
 
 Channels created by the `5.0.0-next.3`, `next.4` or `next.5` installer share one

@@ -142,7 +142,12 @@ async function readIdentityRows(
       { stdin: "ignore", timeoutMs: 2000, env: { ...IDENTITY_PS_ENV } }
     );
     // ps exits 1 when none of the pids exist: that is "all gone", not unknown.
-    if (result.exitCode !== 0 && result.stdout.trim().length > 0) {
+    // An option or usage error also exits 1 with empty stdout, but says so
+    // on stderr: that is "cannot tell", never "gone".
+    if (
+      result.exitCode !== 0 &&
+      (result.stdout.trim().length > 0 || result.stderr.trim().length > 0)
+    ) {
       return null;
     }
     return result.exitCode === 0 || result.exitCode === 1

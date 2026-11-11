@@ -31,6 +31,17 @@ import { withJournalLock } from "./recovery.ts";
 import { StallTracker } from "./stall.ts";
 import { appendCommandAudit } from "./store.ts";
 
+const NO_SPACE = new Error("no space for command events");
+
+function isNoSpaceError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error.code === "ENOSPC" || error.code === "EDQUOT")
+  );
+}
+
 /** Hidden entrypoint of the hack binary: `hack <this> <commandId>`. */
 export const BACKGROUND_SUPERVISOR_ARGUMENT =
   "--internal-background-command-supervisor";
@@ -153,7 +164,8 @@ export async function runBackgroundSupervisor(opts: {
     // An internal failure must not be reported as the command's result, and
     // must not leave the command running with nobody enforcing its timeout.
     // Until Bun has reaped it, the pid cannot have been reused.
-    if (proc.exitCode === null && proc.signalCode === null) {
+    const running = proc.exitCode === null && proc.signalCode === null;
+    if (running) {
       signalProcessGroup(proc.pid, "SIGKILL");
     }
     return await finish({
@@ -161,6 +173,7 @@ export async function runBackgroundSupervisor(opts: {
       truncated: capture.truncated,
       outcome: "unknown",
       reason: "supervisor_error",
+      stoppedBySupervisor: running,
       detail: error instanceof Error ? error.name : "error",
     }).catch(() => 1);
   }
@@ -335,6 +348,7 @@ async function superviseChild(opts: {
     truncated: capture.truncated,
     suppressed: opts.meta.capture === "metadata",
     backend: opts.meta.backend,
+    noSpace: capture.noSpace,
   });
 }
 
@@ -370,6 +384,8 @@ type StreamState = {
  */
 class OutputCapture {
   truncated = false;
+  /** The disk or quota filled while recording events; capture stopped. */
+  noSpace = false;
   private captured = 0;
   private outputEvents = 0;
   private readonly streams: Record<OutputStream, StreamState> = {
@@ -416,7 +432,7 @@ class OutputCapture {
   async checkStall(nowMono: number): Promise<void> {
     const stalled = this.opts.stall.check(nowMono);
     if (stalled?.type === "command.stalled") {
-      await this.opts.writer.write("command.stalled", {
+      await this.record("command.stalled", {
         idleMs: stalled.idleMs,
         lastOutputAt: stalled.lastOutputAt,
       });
@@ -439,7 +455,7 @@ class OutputCapture {
       output: true,
     });
     if (resumed) {
-      await this.opts.writer.write(resumed.type, {
+      await this.record(resumed.type, {
         idleMs: Math.round(resumed.idleMs),
       });
     }
@@ -469,20 +485,36 @@ class OutputCapture {
     final: boolean
   ): Promise<void> {
     const state = this.streams[stream];
-    const result = await pumpStream({
-      path: outputPath(this.opts.paths, stream),
-      stream,
-      from: state.emittedTo,
-      carry: state.carry,
-      final,
-      secrets: this.opts.secrets,
-      captureRemaining: CAPTURE_LIMIT_BYTES - this.captured,
-      eventsRemaining: OUTPUT_EVENT_LIMIT - this.outputEvents,
-      redact: true,
-      emit: async (range) => {
-        await this.opts.writer.write("command.output", range);
-      },
-    });
+    let result: Awaited<ReturnType<typeof pumpStream>>;
+    try {
+      result = await pumpStream({
+        path: outputPath(this.opts.paths, stream),
+        stream,
+        from: state.emittedTo,
+        carry: state.carry,
+        final,
+        secrets: this.opts.secrets,
+        captureRemaining: CAPTURE_LIMIT_BYTES - this.captured,
+        eventsRemaining: OUTPUT_EVENT_LIMIT - this.outputEvents,
+        redact: true,
+        emit: async (range) => {
+          if (!(await this.record("command.output", range))) {
+            throw NO_SPACE;
+          }
+          // Track progress per event, so a failure later in this batch never
+          // discards bytes an event already covers.
+          state.emittedTo = range.offset + range.length;
+        },
+      });
+    } catch (error: unknown) {
+      if (error !== NO_SPACE) {
+        throw error;
+      }
+      this.truncated = true;
+      await this.discardPastLimit("stdout");
+      await this.discardPastLimit("stderr");
+      return;
+    }
     state.emittedTo = result.emittedTo;
     state.carry = result.carry;
     state.lastEmitMono = now;
@@ -490,12 +522,37 @@ class OutputCapture {
     this.outputEvents += result.events;
     if (result.budgetReached) {
       this.truncated = true;
-      await this.opts.writer.write("command.output_truncated", {
+      await this.record("command.output_truncated", {
         capturedBytes: this.captured,
         limitBytes: CAPTURE_LIMIT_BYTES,
       });
       await this.discardPastLimit("stdout");
       await this.discardPastLimit("stderr");
+    }
+  }
+
+  /**
+   * Append an event other than the final record. A full disk or quota stops
+   * capture (recorded as `truncated` with `captureStopped: "no_space"` in the
+   * final record) but never the command. False when nothing was written.
+   */
+  private async record(
+    type: Parameters<JournalWriter["write"]>[0],
+    payload: Record<string, unknown>
+  ): Promise<boolean> {
+    if (this.noSpace) {
+      return false;
+    }
+    try {
+      await this.opts.writer.write(type, payload);
+      return true;
+    } catch (error: unknown) {
+      if (!isNoSpaceError(error)) {
+        throw error;
+      }
+      this.noSpace = true;
+      this.truncated = true;
+      return false;
     }
   }
 
@@ -517,6 +574,7 @@ export function endedPayload(opts: {
   readonly truncated: boolean;
   readonly suppressed: boolean;
   readonly backend: "compose" | "native";
+  readonly noSpace?: boolean;
 }): Record<string, unknown> {
   let outcome: string;
   if (opts.stopping) {
@@ -530,6 +588,7 @@ export function endedPayload(opts: {
     signal: opts.signal,
     truncated: opts.truncated,
     suppressed: opts.suppressed,
+    ...(opts.noSpace ? { captureStopped: "no_space" } : {}),
     ...(opts.stopping
       ? {
           // The client process group was stopped; a process started inside a

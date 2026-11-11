@@ -187,7 +187,28 @@ async function countActive(opts: {
       observe: opts.observe,
     });
     if (assessment.kind === "owner_lost") {
-      events = await recoverLostOwner({ paths, meta, observe: opts.observe });
+      events = await recoverLostOwner({
+        paths,
+        meta,
+        observe: opts.observe,
+        enforceTimeout: true,
+      });
+      const end = endedEvent(events);
+      if (end?.payload.reason === "orphan_timeout") {
+        await appendCommandAudit({
+          root: opts.root,
+          entry: {
+            event: "end",
+            commandId: meta.commandId,
+            operation: meta.operation,
+            projectId: meta.projectId,
+            instanceId: meta.instanceId,
+            service: meta.service,
+            caller: meta.caller,
+            outcome: "timed_out",
+          },
+        });
+      }
       if (endedEvent(events)) {
         continue;
       }

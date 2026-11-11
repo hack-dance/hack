@@ -11,7 +11,10 @@ import {
   selfInvocation,
   startBackgroundCommand,
 } from "../lib/background-command/launch.ts";
+import { HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
+import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
+import { selectNativeComposeProject } from "../lib/native-compose-selection.ts";
 import {
   type ProjectContext,
   readProjectConfig,
@@ -275,4 +278,34 @@ export function buildForegroundCliArgs(opts: {
     opts.service,
     ...opts.cmdArgs,
   ];
+}
+
+/**
+ * Authored (`.hack/hack.project.json`) and adopted projects run `exec` and
+ * `run` through their own dispatch, which has no background mode yet. Refuse
+ * `--detach` for them, so it is never accepted and then run in the
+ * foreground.
+ */
+export async function refuseDetachForAuthoredProject(opts: {
+  readonly cwd: string;
+  readonly path?: string;
+  readonly project?: string;
+  /** Test seams. */
+  readonly selectAuthored?: typeof selectNativeComposeProject;
+  readonly selectAdopted?: typeof selectLegacyComposeAdoptedRoot;
+}): Promise<void> {
+  const selection = { cwd: opts.cwd, path: opts.path, project: opts.project };
+  const authored = await (opts.selectAuthored ?? selectNativeComposeProject)(
+    selection
+  );
+  const adopted =
+    authored ??
+    (await (opts.selectAdopted ?? selectLegacyComposeAdoptedRoot)(selection));
+  if (authored || adopted) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message:
+        "--detach is not supported yet for projects with native or adopted configuration; run the command in the foreground.",
+    });
+  }
 }

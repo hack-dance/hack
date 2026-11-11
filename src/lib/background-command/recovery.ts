@@ -107,6 +107,11 @@ export async function recoverLostOwner(opts: {
   readonly observe?: ObserveIdentities;
   /** Test seam: group signalling. */
   readonly signalGroup?: (pgid: number, signal: NodeJS.Signals) => boolean;
+  /**
+   * Stop a verified orphan that ran past its timeout. Only the start path
+   * (admission) sets this; reads never signal processes.
+   */
+  readonly enforceTimeout?: boolean;
 }): Promise<EventEnvelope[]> {
   const now = opts.now ?? Date.now;
   return await withJournalLock(opts.paths, async () => {
@@ -131,6 +136,7 @@ export async function recoverLostOwner(opts: {
       final: !assessment.childAlive,
     });
     const overdue =
+      opts.enforceTimeout === true &&
       assessment.childAlive &&
       now() - Date.parse(opts.meta.acceptedAt) >= opts.meta.timeoutMs;
     const childGone =
@@ -141,10 +147,20 @@ export async function recoverLostOwner(opts: {
           observe: opts.observe,
           signalGroup: opts.signalGroup,
         })));
+    if (overdue && childGone) {
+      // Output that landed before the stop.
+      await announceUnsupervisedOutput({
+        paths: opts.paths,
+        meta: opts.meta,
+        events: await readEvents(opts.paths),
+        writer,
+        final: true,
+      });
+    }
     if (childGone) {
       await writer.write("command.ended", {
         outcome: overdue ? "timed_out" : "unknown",
-        reason: assessment.reason,
+        reason: overdue ? "orphan_timeout" : assessment.reason,
         exitCode: null,
         signal: null,
         durationMs: Math.max(0, now() - Date.parse(opts.meta.acceptedAt)),

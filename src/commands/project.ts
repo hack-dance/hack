@@ -382,6 +382,7 @@ import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
 import {
   backgroundCommandOptions,
+  refuseDetachForAuthoredProject,
   runOrStartComposeCommand,
   startNativeBackgroundCommand,
 } from "./background-command-start.ts";
@@ -9371,10 +9372,18 @@ async function startNativeBackgroundIfRequested(opts: {
   /** The ordinary authored/adopted dispatch, run when this does not apply. */
   readonly otherwise: () => Promise<number | null>;
 }): Promise<number | null> {
-  if (!opts.background || process.env.HACK_RUNTIME_BACKEND !== "native") {
+  if (!opts.background) {
     return await opts.otherwise();
   }
   const { args } = opts;
+  if (process.env.HACK_RUNTIME_BACKEND !== "native") {
+    await refuseDetachForAuthoredProject({
+      cwd: opts.ctx.cwd,
+      path: args.options.path,
+      project: args.options.project,
+    });
+    return await opts.otherwise();
+  }
   const project = await resolveProjectForArgs({
     ctx: opts.ctx,
     pathOpt: args.options.path,

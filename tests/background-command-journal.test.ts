@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { refuseDetachForAuthoredProject } from "../src/commands/background-command-start.ts";
 import { cancelCommand } from "../src/lib/background-command/cancel.ts";
 import {
   type CommandMeta,
@@ -706,7 +707,7 @@ describe("review regressions", () => {
     expect(ended[0]?.payload.reason).toBe("cancel_unconfirmed");
   });
 
-  test("a reader stops an overdue orphaned child it can verify, then records timed_out", async () => {
+  test("admission stops an overdue orphaned child it can verify, then records timed_out; reads never do", async () => {
     const accepted = new Date(Date.now() - 120_000);
     const { meta, paths } = await acceptCommand({
       input: input({ timeoutMs: 60_000 }),
@@ -725,9 +726,22 @@ describe("review regressions", () => {
     await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
     const alive: ObservedIdentity[] = [child];
     const killed: number[] = [];
+    // A read never signals.
+    const readOnly = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(alive),
+      signalGroup: () => {
+        throw new Error("a read must not signal");
+      },
+    });
+    expect(readOnly.some((event) => event.type === "command.ended")).toBe(
+      false
+    );
     const events = await recoverLostOwner({
       paths,
       meta,
+      enforceTimeout: true,
       observe: fakeObserve(alive),
       signalGroup: (pgid) => {
         killed.push(pgid);
@@ -738,7 +752,7 @@ describe("review regressions", () => {
     expect(killed).toEqual([500_002]);
     expect(events.at(-1)?.payload).toMatchObject({
       outcome: "timed_out",
-      reason: "supervisor_lost",
+      reason: "orphan_timeout",
     });
   });
 
@@ -760,5 +774,28 @@ describe("review regressions", () => {
       loadJournal({ commandId: meta.commandId, root, inScope: () => true }),
       "E_RESULT_EXPIRED"
     );
+  });
+});
+
+describe("--detach on authored and adopted projects", () => {
+  test("is refused instead of running in the foreground", async () => {
+    await expectCode(
+      refuseDetachForAuthoredProject({
+        cwd: root,
+        selectAuthored: async () => ({ kind: "native", projectRoot: root }),
+        selectAdopted: async () => null,
+      }),
+      "E_USAGE"
+    );
+    await expectCode(
+      refuseDetachForAuthoredProject({
+        cwd: root,
+        selectAuthored: async () => null,
+        selectAdopted: async () => root,
+      }),
+      "E_USAGE"
+    );
+    // A legacy project (neither) proceeds; the real selectors find nothing here.
+    await refuseDetachForAuthoredProject({ cwd: root });
   });
 });

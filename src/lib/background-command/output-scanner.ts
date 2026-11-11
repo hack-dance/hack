@@ -217,10 +217,11 @@ export function scanOutput(input: ScanInput): ScanResult {
   // rather than values x runs.
   let union: { start: number; length: number }[] = [];
   for (const secret of secrets) {
-    const from = Math.max(
-      0,
-      Math.min(scanned.length, input.scannedPrefix ?? 0) - (secret.length - 1)
-    );
+    const from = searchStart({
+      scannedPrefix: input.scannedPrefix ?? 0,
+      scannedLength: scanned.length,
+      valueLength: secret.length,
+    });
     const found = findMatches(scanned.subarray(from), secret).map((match) => ({
       start: match.start + from,
       length: match.length,
@@ -254,6 +255,21 @@ export function scanOutput(input: ScanInput): ScanResult {
     cursor = next;
   }
   return { redactions, ranges, budgetReached };
+}
+
+/**
+ * Where a value's search starts: the first position from which a match
+ * could reach a byte after the already-searched prefix. Exported for tests.
+ */
+export function searchStart(opts: {
+  readonly scannedPrefix: number;
+  readonly scannedLength: number;
+  readonly valueLength: number;
+}): number {
+  return Math.max(
+    0,
+    Math.min(opts.scannedLength, opts.scannedPrefix) - (opts.valueLength - 1)
+  );
 }
 
 /**

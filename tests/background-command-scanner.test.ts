@@ -5,6 +5,7 @@ import {
   REDACTION_VALUES_LIMIT,
   scanOutput,
   scanSliceBytes,
+  searchStart,
   utf8SafeCut,
 } from "../src/lib/background-command/output-scanner.ts";
 import { StallTracker } from "../src/lib/background-command/stall.ts";
@@ -285,7 +286,6 @@ describe("scanOutput", () => {
       `${carry}${big.slice(-2)} done ${"z".repeat(16_000)}`
     );
     const scan = (scannedPrefix: number) => {
-      const started = performance.now();
       const result = scanOutput({
         bytes,
         offset: 0,
@@ -295,7 +295,7 @@ describe("scanOutput", () => {
         maxRangeBytes: 16_384,
         scannedPrefix,
       });
-      return { result, ms: performance.now() - started };
+      return { result };
     };
     const full = scan(0);
     const bounded = scan(encoder.encode(carry).length);
@@ -304,8 +304,27 @@ describe("scanOutput", () => {
     expect(bounded.result.redactions).toEqual([
       { offset: 4, length: encoder.encode(big).length },
     ]);
-    // Relative, not absolute: the carry is ~8x the new bytes here.
-    expect(bounded.ms).toBeLessThan(full.ms / 2);
+    // Each value is searched only from where a match could reach a new
+    // byte: a short value skips nearly the whole carry; the big value starts
+    // just far enough back to finish across the boundary.
+    const carryBytes = encoder.encode(carry).length;
+    expect(
+      searchStart({
+        scannedPrefix: carryBytes,
+        scannedLength: bytes.length,
+        valueLength: 17,
+      })
+    ).toBe(carryBytes - 16);
+    expect(
+      searchStart({
+        scannedPrefix: carryBytes,
+        scannedLength: bytes.length,
+        valueLength: encoder.encode(big).length,
+      })
+    ).toBe(carryBytes - (encoder.encode(big).length - 1));
+    expect(
+      searchStart({ scannedPrefix: 0, scannedLength: 10, valueLength: 6 })
+    ).toBe(0);
   });
 
   test("bytes past the capture budget are not scanned", () => {

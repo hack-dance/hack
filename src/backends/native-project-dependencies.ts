@@ -14,6 +14,7 @@ import {
 } from "./native-project-selection.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeStopError,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -924,6 +925,9 @@ function ownedDiscoveryRefusal(opts: {
   readonly hooks: readonly string[] | undefined;
 }): Error {
   const error = opts.error;
+  if (isNativeRuntimeStopError(error)) {
+    return error;
+  }
   if (
     error instanceof NativeRuntimeRequestError &&
     error.nativeCode === "host_endpoint_owner"
@@ -1115,6 +1119,9 @@ function createDependencyResolution(
     try {
       discovered = await pending;
     } catch (error) {
+      if (isNativeRuntimeStopError(error)) {
+        throw error;
+      }
       const reason = discoveryReason(error);
       throw reason === MISSING_LISTENER_REASON
         ? missingListenerRefusal({
@@ -1154,6 +1161,9 @@ function createDependencyResolution(
           hostPort: Number(entry.host_port),
         });
       } catch (error) {
+        if (isNativeRuntimeStopError(error)) {
+          throw error;
+        }
         throw refused(
           discoveryReason(error) ??
             "the selected host_pid does not own an exclusive loopback listener on host_port",
@@ -1181,6 +1191,9 @@ export async function readNativeHostDependencies(
     return await readSelectedHostDependencies({ ...opts, path: opts.path });
   } catch (error) {
     // Own and owner refusals keep their closed, value-free text.
+    if (isNativeRuntimeStopError(error)) {
+      throw error;
+    }
     if (
       error instanceof Error &&
       (OWN_REFUSALS.has(error) || isNativeDependencyOwnerRefusal(error))

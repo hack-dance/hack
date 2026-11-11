@@ -24,7 +24,7 @@ from the release you want and run it:
 
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.12/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -60,7 +60,7 @@ next command without it runs native again. Unset the variable before native test
 
 On Compose, the prerelease shares project state with stable v4. Do not run both
 against the same home at the same time, including their daemons. The
-[prerelease install page](native/install.md#backends-and-homes) gives
+[prerelease install page](../guides/candidate-install.md#stop-stable-hackd-before-a-compose-run) gives
 the exact order: stop the stable daemon first, then run the prerelease.
 
 The rest of these docs write `hack` for the v5 CLI. During the prerelease, in the

@@ -27,6 +27,7 @@ import {
 } from "../src/daemon/status.ts";
 import {
   assessExecutableDurability,
+  checkSystemdLoadedUnitPaths,
   checkSystemdUnitDropIns,
   checkSystemdUnitFile,
   ensureOwnerWritableOnlyDirectories,
@@ -87,6 +88,10 @@ type Fake = {
   unitEnvironment: string;
   /** `EnvironmentFiles=` as `systemctl show` prints it ("" for none). */
   environmentFiles: string;
+  /** `FragmentPath=` (defaults to the managed unit path). */
+  fragmentPath: string | null;
+  /** `DropInPaths=` as `systemctl show` prints it. */
+  dropInPaths: string;
 };
 
 let root: string;
@@ -121,6 +126,8 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     needsReload: false,
     unitEnvironment: "PATH=/usr/bin:/bin HACK_NO_INTERACTIVE=1",
     environmentFiles: "",
+    fragmentPath: null,
+    dropInPaths: "",
     deps: undefined as unknown as SystemdDeps,
   };
   const ok = (stdout = ""): ServiceCommandResult => ({
@@ -176,6 +183,8 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
             `UnitFileState=${state.enabled ? "enabled" : "disabled"}`,
             `MainPID=${state.active ? (opts.mainPid ?? 4242) : 0}`,
             `NeedDaemonReload=${state.needsReload ? "yes" : "no"}`,
+            `FragmentPath=${state.fragmentPath ?? unitPath}`,
+            `DropInPaths=${state.dropInPaths}`,
           ].join("\n")
         )
       );
@@ -1544,4 +1553,46 @@ test("start runs only a unit file this user controls", async () => {
   fake.calls.length = 0;
   expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
   expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+});
+
+test("start checks the files systemd actually loads, in every load path", async () => {
+  // Codex security review: systemd merges drop-ins from every user-unit load
+  // path ($XDG_DATA_HOME too); only the manager's own list is complete.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const own = process.getuid?.() ?? 0;
+  const dataDropIns = join(root, "data", "systemd", "user", "hackd.service.d");
+  await mkdir(dataDropIns, { recursive: true });
+  const dropIn = join(dataDropIns, "payload.conf");
+  await writeFile(dropIn, "[Service]\nExecStart=\nExecStart=/bin/true\n");
+  fake.dropInPaths = dropIn;
+
+  // Another account's drop-in (modelled with the uid the check compares to).
+  expect(
+    await checkSystemdLoadedUnitPaths({
+      unitPath,
+      deps: fake.deps,
+      uid: own + 1,
+    })
+  ).toContain("owned by another user");
+
+  // A drop-in directory others can write: write removed, then it starts.
+  await chmod(dataDropIns, 0o777);
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect((await stat(dataDropIns)).mode & 0o777).toBe(0o755);
+
+  // A fragment other than the managed unit: refused, not started.
+  fake.dropInPaths = "";
+  fake.fragmentPath = join(root, "data", "systemd", "user", "hackd.service");
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+
+  // systemd cannot say: refused.
+  fake.fragmentPath = null;
+  fake.showFails = true;
+  expect(
+    await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
+  ).toContain("did not report");
 });

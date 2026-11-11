@@ -1022,6 +1022,8 @@ async function checkOwnerControlledPath(opts: {
   readonly path: string;
   readonly uid: number;
   readonly directory: boolean;
+  /** Also accept root-owned (system configuration such as /etc/systemd/user). */
+  readonly allowRoot?: boolean;
 }): Promise<string | null> {
   let real: string;
   let info: Awaited<ReturnType<typeof stat>>;
@@ -1035,7 +1037,8 @@ async function checkOwnerControlledPath(opts: {
   if (opts.directory ? !info.isDirectory() : !info.isFile()) {
     return `${shown} is not a ${opts.directory ? "directory" : "regular file"}`;
   }
-  if (opts.uid >= 0 && info.uid !== opts.uid) {
+  const rootOwned = opts.allowRoot === true && info.uid === 0;
+  if (opts.uid >= 0 && info.uid !== opts.uid && !rootOwned) {
     return `${shown} is owned by another user (uid ${info.uid})`;
   }
   if ((info.mode & 0o022) === 0) {
@@ -1155,6 +1158,62 @@ export async function checkSystemdUnitTrusted(opts: {
   return (
     (await checkSystemdUnitFile(opts)) ?? (await checkSystemdUnitDropIns(opts))
   );
+}
+
+/**
+ * What systemd will actually load for hackd.service, checked right before
+ * a start or restart (HACK-2052). systemd merges drop-ins from every
+ * user-unit load path (`$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, runtime and
+ * system directories), so only the manager's own `FragmentPath` and
+ * `DropInPaths` are complete. The fragment must be the unit Hack manages,
+ * and every drop-in, and the directory holding it, must be owned by this
+ * user or root and not writable by others. Unknown (systemctl fails) is
+ * refused like an untrusted path.
+ */
+export async function checkSystemdLoadedUnitPaths(opts: {
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    SYSTEMD_UNIT_NAME,
+    "--property=FragmentPath,DropInPaths",
+  ]);
+  if (show.exitCode !== 0) {
+    return `Not starting ${SYSTEMD_UNIT_NAME}: systemd did not report which files it loads (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`;
+  }
+  const props = parseSystemdProperties(show.stdout);
+  const fragment = props.FragmentPath ?? "";
+  if (resolve(fragment) !== resolve(opts.unitPath)) {
+    return `Not starting ${SYSTEMD_UNIT_NAME}: systemd loads it from ${fragment || "an unknown file"}, not ${opts.unitPath}. Review that file, then run: hack daemon install`;
+  }
+  for (const path of (props.DropInPaths ?? "").split(WHITESPACE)) {
+    if (path.length === 0) {
+      continue;
+    }
+    const error =
+      (await checkOwnerControlledPath({
+        path: dirname(path),
+        uid,
+        directory: true,
+        allowRoot: true,
+      })) ??
+      (await checkOwnerControlledPath({
+        path,
+        uid,
+        directory: false,
+        allowRoot: true,
+      }));
+    if (error !== null) {
+      return `Not starting ${SYSTEMD_UNIT_NAME}: its drop-in ${error}. Review and remove it, then run: systemctl --user daemon-reload`;
+    }
+  }
+  return null;
 }
 
 function errorMessage(error: unknown): string {

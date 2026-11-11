@@ -43,7 +43,8 @@ shift
 case "$1" in
   show)
     if [ "$2" = "--property=Version" ]; then echo "Version=255"; exit 0; fi
-    if [ -f "$unit" ]; then echo LoadState=loaded; else echo LoadState=not-found; fi
+    if [ -f "$unit" ]; then echo LoadState=loaded; echo "FragmentPath=$unit"; else echo LoadState=not-found; fi
+    echo DropInPaths=
     if [ -f "$state/enabled" ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi
     if alive; then echo ActiveState=active; echo "MainPID=$(cat "$main")"; else echo ActiveState=inactive; echo MainPID=0; fi
     exit 0 ;;

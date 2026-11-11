@@ -14,6 +14,7 @@ import {
 import { readDaemonStatus } from "../daemon/status.ts";
 import {
   assessExecutableDurability,
+  checkSystemdLoadedUnitPaths,
   checkSystemdUnitTrusted,
   defaultSystemdDeps,
   describeSystemdUnavailable,
@@ -172,6 +173,11 @@ export async function startViaSystemdIfInstalled(
   // the unit is not failed.
   if (status.activeState === "failed") {
     await systemdServiceAction({ action: "reset-failed", deps });
+  }
+  const loaded = await checkSystemdLoadedUnitPaths({ unitPath, deps });
+  if (loaded !== null) {
+    logger.error({ message: loaded });
+    return 1;
   }
   const started = await systemdServiceAction({ action: "start", deps });
   if (!started.ok) {
@@ -626,6 +632,11 @@ export async function installDaemonSystemdService(
     configChanged && before?.active ? ("restart" as const) : ("start" as const);
   if (before?.activeState === "failed") {
     await systemdServiceAction({ action: "reset-failed", deps });
+  }
+  const loaded = await checkSystemdLoadedUnitPaths({ unitPath, deps });
+  if (loaded !== null) {
+    logger.error({ message: loaded });
+    return 1;
   }
   const started = await systemdServiceAction({ action, deps });
   if (!started.ok) {

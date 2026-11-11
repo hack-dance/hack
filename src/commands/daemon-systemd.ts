@@ -14,7 +14,7 @@ import {
 import { readDaemonStatus } from "../daemon/status.ts";
 import {
   assessExecutableDurability,
-  checkSystemdUnitDropIns,
+  checkSystemdUnitTrusted,
   defaultSystemdDeps,
   describeSystemdUnavailable,
   installSystemdUnit,
@@ -152,9 +152,10 @@ export async function startViaSystemdIfInstalled(
     });
     return null;
   }
-  const dropIns = await checkSystemdUnitDropIns({ unitPath });
-  if (dropIns !== null) {
-    logger.error({ message: dropIns });
+  // Never start a unit (or drop-in) another account could have written.
+  const untrusted = await checkSystemdUnitTrusted({ unitPath });
+  if (untrusted !== null) {
+    logger.error({ message: untrusted });
     return 1;
   }
   const prepared = await prepareSystemdUnitForStart({

@@ -1,4 +1,12 @@
-import { chmod, mkdir, readdir, realpath, rm, stat } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readdir,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 
@@ -915,6 +923,11 @@ export async function installSystemdUnit(opts: {
     opts.unitText,
     { createMode: 0o644 }
   );
+  // An unchanged file is not rewritten: it must already be this user's.
+  const unitFile = await checkSystemdUnitFile({ unitPath: opts.unitPath });
+  if (unitFile !== null) {
+    return { ok: false, error: unitFile };
+  }
   if (changed || opts.forceReload === true) {
     const reload = await opts.deps.run("systemctl", [
       "--user",
@@ -1091,6 +1104,57 @@ async function checkDropInEntries(opts: {
     }
   }
   return null;
+}
+
+/**
+ * The unit file systemd will run, and the directories above it, must be
+ * this user's and not writable by others: a shared-group member who could
+ * plant or edit `hackd.service` would have its `ExecStart` run as this user
+ * (HACK-2052). The unit must be a regular file, not a symlink (Hack writes
+ * a regular file; anything else was put there by someone else). Write
+ * access is removed from what this user owns; anything else is refused.
+ * Drop-ins are checked by {@link checkSystemdUnitDropIns}.
+ */
+export async function checkSystemdUnitFile(opts: {
+  readonly unitPath: string;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
+}): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const unitDir = dirname(opts.unitPath);
+  for (const dir of [dirname(dirname(unitDir)), dirname(unitDir), unitDir]) {
+    const error = await checkOwnerWritableOnlyDirectory({ dir, uid });
+    if (error !== null) {
+      return `Not using ${SYSTEMD_UNIT_NAME}: ${error}`;
+    }
+  }
+  let info: Awaited<ReturnType<typeof lstat>>;
+  try {
+    info = await lstat(opts.unitPath);
+  } catch (error: unknown) {
+    return `Not using ${SYSTEMD_UNIT_NAME}: could not inspect ${opts.unitPath}: ${errorMessage(error)}`;
+  }
+  if (!info.isFile()) {
+    return `Not using ${SYSTEMD_UNIT_NAME}: ${opts.unitPath} is not a regular file (a symlink or other entry Hack did not write). Review and remove it, then run: hack daemon install`;
+  }
+  const error = await checkOwnerControlledPath({
+    path: opts.unitPath,
+    uid,
+    directory: false,
+  });
+  return error === null
+    ? null
+    : `Not using ${SYSTEMD_UNIT_NAME}: ${error}. Review and remove it, then run: hack daemon install`;
+}
+
+/** {@link checkSystemdUnitFile}, then {@link checkSystemdUnitDropIns}. */
+export async function checkSystemdUnitTrusted(opts: {
+  readonly unitPath: string;
+  readonly uid?: number;
+}): Promise<string | null> {
+  return (
+    (await checkSystemdUnitFile(opts)) ?? (await checkSystemdUnitDropIns(opts))
+  );
 }
 
 function errorMessage(error: unknown): string {

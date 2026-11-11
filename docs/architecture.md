@@ -453,7 +453,9 @@ the umask and removes group or other write from ones you own, and it refuses
 the enabled unit runs code as you at the next login. For the same reason,
 `install` and `start` check `hackd.service.d/` and `service.d/`: every drop-in
 there must be a file you own that others cannot write, or they refuse to use the
-unit until you review it. Put local settings, such as
+unit until you review it. `start` (and autostart) also runs the unit only when
+`hackd.service` is a regular file you own that others cannot write, in
+directories that pass the same check; a symlinked unit is refused. Put local settings, such as
 `DOCKER_HOST` for rootless Docker, in a drop-in (`systemctl --user edit hackd`).
 `install` writes the `hack` it was run from, and warns when that path is in a
 temporary directory, a package cache or a source checkout.

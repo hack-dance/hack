@@ -28,6 +28,7 @@ import {
 import {
   assessExecutableDurability,
   checkSystemdUnitDropIns,
+  checkSystemdUnitFile,
   ensureOwnerWritableOnlyDirectories,
   extractSystemdExecProgram,
   installSystemdUnit,
@@ -1511,4 +1512,36 @@ test("install and start refuse a drop-in they cannot vouch for", async () => {
   });
   expect(install.ok).toBe(false);
   expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+});
+
+test("start runs only a unit file this user controls", async () => {
+  // Codex security review: a planted or editable hackd.service would run
+  // its ExecStart as this user.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  const userDir = join(root, "config", "systemd", "user");
+  const own = process.getuid?.() ?? 0;
+
+  // Owned by another user (modelled with the uid the check compares to).
+  expect(await checkSystemdUnitFile({ unitPath, uid: own + 1 })).toContain(
+    "owned by another user"
+  );
+
+  // This user's unit and directory, writable by the group: fixed, started.
+  await chmod(unitPath, 0o664);
+  await chmod(userDir, 0o775);
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect((await stat(unitPath)).mode & 0o777).toBe(0o644);
+  expect((await stat(userDir)).mode & 0o777).toBe(0o755);
+  expect(fake.calls).toContain("systemctl --user start hackd.service");
+
+  // A symlinked unit is not one Hack wrote: refused, not started.
+  const elsewhere = join(root, "planted.service");
+  await writeFile(elsewhere, unitText());
+  await rm(unitPath);
+  await symlink(elsewhere, unitPath);
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
 });

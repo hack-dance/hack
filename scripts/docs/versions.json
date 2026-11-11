@@ -1152,29 +1152,29 @@
       },
       {
         "file": "docs/guides/candidate-install.md",
-        "slug": "guides/candidate-install",
-        "title": "Native prerelease install",
+        "slug": "native/install",
+        "title": "Install the prerelease",
         "snapshot": "docs/versions/v5/originals/next12/docs/guides/candidate-install.md",
         "sha256": "006c1c3689a9d61226ab515a8088dca7506b5f16b7f726890127776c9abf5022"
       },
       {
         "file": "docs/guides/native-candidate.md",
-        "slug": "guides/native-candidate",
-        "title": "Native backend (beta)",
+        "slug": "native/full-reference",
+        "title": "Full reference",
         "snapshot": "docs/versions/v5/originals/next12/docs/guides/native-candidate.md",
         "sha256": "4003ad523eb47de2929db84f83590764d19d7c34306a51fc3a49b95f70cde8f6"
       },
       {
         "file": "docs/reference/native-config-import.md",
-        "slug": "reference/native-config-import",
-        "title": "Native config import",
+        "slug": "native/config-import",
+        "title": "Config import",
         "snapshot": "docs/versions/v5/originals/next12/docs/reference/native-config-import.md",
         "sha256": "a91021b91b3a87593fe16979c0e30b131add0c3c67e7dda72e7629c6480b0ac2"
       },
       {
         "file": "docs/reference/native-authored-commands.md",
-        "slug": "reference/native-authored-commands",
-        "title": "Native authored commands",
+        "slug": "native/authored-commands",
+        "title": "Command contract",
         "snapshot": "docs/versions/v5/originals/next12/docs/reference/native-authored-commands.md",
         "sha256": "46a6a60da4baaa3a3bc26a062016e6206fd481cad097e1fd51935f42aca52aa2"
       },
@@ -4045,12 +4045,28 @@
         "title": "Core concepts"
       },
       {
-        "slug": "guides/candidate-install",
-        "title": "Native prerelease install"
+        "slug": "native/install",
+        "title": "Install the prerelease"
       },
       {
         "slug": "architecture",
         "title": "Architecture"
+      },
+      {
+        "slug": "native/overview",
+        "title": "Overview"
+      },
+      {
+        "slug": "native/try-it",
+        "title": "Try it"
+      },
+      {
+        "slug": "native/limits",
+        "title": "What works and known limits"
+      },
+      {
+        "slug": "native/reference",
+        "title": "Reference map"
       }
     ]
   }

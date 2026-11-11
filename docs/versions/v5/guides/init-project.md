@@ -36,7 +36,7 @@ drift. Review each repair before `hack doctor --fix`.
 
 Native execution needs more than `hack init`: a prepared provider pool, an
 explicitly adapted project and a private native home. Read
-[Try the native backend](../../guides/native-candidate.md) first. `hack config validate`,
+[Try the native backend](../native/try-it.md) first. `hack config validate`,
 `config plan` and `config import --dry-run` preview native configuration without
 starting anything; see [Native config import](../../reference/native-config-import.md).
 Installing v5 does not convert a Compose project or move its data.

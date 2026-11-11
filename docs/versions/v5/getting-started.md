@@ -2,7 +2,7 @@
 
 Complete [Install](install.md) first. These steps use the default Docker Compose
 backend. For the native backend (beta), read
-[Try the native backend](../guides/native-candidate.md) after this page.
+[Try the native backend](native/try-it.md) after this page.
 
 ## Initialize one project
 

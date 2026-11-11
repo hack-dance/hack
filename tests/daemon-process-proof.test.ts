@@ -18,6 +18,7 @@ import {
   findOrphanDaemonProcesses,
   isHackDaemonImage,
   isHackDaemonProcess,
+  isProcessAlive,
   type OwnedDaemonProof,
   proveOwnedDaemonProcess,
   readDaemonPid,
@@ -906,3 +907,55 @@ test("parseProcArgs2 reads argc arguments after the padded executable path", () 
   expect(parseProcArgs2(buffer)).toEqual(["bun", "index.ts", "daemon"]);
   expect(parseProcArgs2(new Uint8Array([5, 0, 0, 0, 0]))).toBeNull();
 });
+
+test.skipIf(process.platform !== "linux")(
+  "an exited but unreaped hackd (zombie) counts as stopped (real process)",
+  async () => {
+    // Codex review: under a non-reaping init a stopped hackd stays a zombie;
+    // kill(pid, 0) still succeeds and its identity cannot be read.
+    // `sh` starts a short child, then execs a sleep that never reaps it.
+    const parent = Bun.spawn(["/bin/sh", "-c", "sleep 0 & exec sleep 30"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    children.push(parent);
+    let zombie: number | null = null;
+    for (let i = 0; i < 100 && zombie === null; i++) {
+      await Bun.sleep(20);
+      const text = await Bun.file(
+        `/proc/${parent.pid}/task/${parent.pid}/children`
+      )
+        .text()
+        .catch(() => "");
+      const pid = Number.parseInt(text.trim(), 10);
+      const stat = Number.isSafeInteger(pid)
+        ? await Bun.file(`/proc/${pid}/stat`)
+            .text()
+            .catch(() => "")
+        : "";
+      if (stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z")) {
+        zombie = pid;
+      }
+    }
+    expect(zombie).not.toBeNull();
+    const pid = zombie as number;
+    expect(process.kill(pid, 0)).toBe(true);
+    expect(await isProcessAlive({ pid })).toBe(false);
+    expect(
+      await proveOwnedDaemonProcess({ pid, daemonRoot: root, probe: probe() })
+    ).toEqual({ kind: "refused", reason: "not-running" });
+    const signals: string[] = [];
+    expect(
+      await terminateProvenDaemon({
+        proof: ownedProof(pid),
+        daemonRoot: root,
+        probe: probe({ image: () => Promise.resolve(null) }),
+        sendSignal: (_pid, signal) => {
+          signals.push(signal);
+        },
+      })
+    ).toEqual({ kind: "exited" });
+    expect(signals).toEqual([]);
+  },
+  10_000
+);

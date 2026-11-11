@@ -5,6 +5,7 @@ import { readTextFile, writeTextFile } from "../lib/fs.ts";
 import { readObservedProcesses } from "../lib/host-command-observation.ts";
 import { exec, findExecutableInPath } from "../lib/shell.ts";
 import {
+  isLinuxZombie,
   type ProcessImage,
   readLinuxProcessStartTicks,
   readProcessImage,
@@ -56,6 +57,19 @@ export function isProcessRunning({ pid }: { readonly pid: number }): boolean {
   }
 }
 
+/**
+ * True when `pid` exists and has not exited. A Linux zombie (exited, not yet
+ * reaped by a parent such as a non-reaping container init) has exited:
+ * `kill(pid, 0)` alone would call it running.
+ */
+export async function isProcessAlive({
+  pid,
+}: {
+  readonly pid: number;
+}): Promise<boolean> {
+  return isProcessRunning({ pid }) && !(await isLinuxZombie(pid));
+}
+
 export async function waitForProcessExit({
   pid,
   timeoutMs,
@@ -67,12 +81,12 @@ export async function waitForProcessExit({
 }): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!isProcessRunning({ pid })) {
+    if (!(await isProcessAlive({ pid }))) {
       return true;
     }
     await sleep({ ms: pollMs });
   }
-  return !isProcessRunning({ pid });
+  return !(await isProcessAlive({ pid }));
 }
 
 function sleep({ ms }: { readonly ms: number }): Promise<void> {
@@ -391,14 +405,17 @@ async function proveOwnedDaemonProcessOnce(opts: {
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) {
     return { kind: "refused", reason: "invalid-pid" };
   }
-  if (!isProcessRunning({ pid })) {
+  // A zombie (exited, not yet reaped) is not running.
+  if (!(await isProcessAlive({ pid }))) {
     return { kind: "refused", reason: "not-running" };
   }
   const birth = await probe.birth(pid);
   if (birth === null) {
     return {
       kind: "refused",
-      reason: isProcessRunning({ pid }) ? "identity-unknown" : "not-running",
+      reason: (await isProcessAlive({ pid }))
+        ? "identity-unknown"
+        : "not-running",
     };
   }
   const image = await probe.image(pid);
@@ -407,7 +424,9 @@ async function proveOwnedDaemonProcessOnce(opts: {
     // pid file. Refuse without a conclusion.
     return {
       kind: "refused",
-      reason: isProcessRunning({ pid }) ? "identity-unknown" : "not-running",
+      reason: (await isProcessAlive({ pid }))
+        ? "identity-unknown"
+        : "not-running",
     };
   }
   if (!isHackDaemonImage({ image, expectation: opts.expectation })) {
@@ -516,12 +535,12 @@ export async function terminateProvenDaemon(opts: {
   const recheck = async (): Promise<
     "same" | "gone" | "changed" | "identity-unknown"
   > => {
-    if (!isProcessRunning({ pid })) {
+    if (!(await isProcessAlive({ pid }))) {
       return "gone";
     }
     const birth = await probe.birth(pid);
     if (birth === null) {
-      return isProcessRunning({ pid }) ? "identity-unknown" : "gone";
+      return (await isProcessAlive({ pid })) ? "identity-unknown" : "gone";
     }
     if (birth !== proof.birth) {
       // A different process now has the pid: the proven one exited.
@@ -568,7 +587,7 @@ export async function terminateProvenDaemon(opts: {
       );
     } catch {
       // ESRCH: it exited between the check and the signal.
-      if (!isProcessRunning({ pid })) {
+      if (!(await isProcessAlive({ pid }))) {
         return { kind: "exited" };
       }
       return notConfirmed("still-running");

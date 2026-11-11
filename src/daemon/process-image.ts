@@ -291,3 +291,20 @@ export async function readLinuxProcessStartTicks(
   const ticks = rest[19];
   return ticks && DIGITS.test(ticks) ? ticks : null;
 }
+
+/**
+ * True when `pid` is a zombie on Linux (`/proc/<pid>/stat` state `Z`): it
+ * has exited and only waits for its parent to reap it. `kill(pid, 0)` still
+ * succeeds for it, but it holds no sockets and runs nothing. False when the
+ * state cannot be read (other platforms).
+ */
+export async function isLinuxZombie(pid: number): Promise<boolean> {
+  if (process.platform !== "linux") {
+    return false;
+  }
+  const stat = await readTextFile(`/proc/${pid}/stat`);
+  if (stat === null) {
+    return false;
+  }
+  return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] === "Z";
+}

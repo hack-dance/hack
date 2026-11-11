@@ -15,7 +15,7 @@ exact release tag over HTTPS, review it, then run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.12/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh

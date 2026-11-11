@@ -237,6 +237,21 @@ async function readSnapshot(
   return raw;
 }
 
+const bootstrapDownload =
+  /(releases\/download\/v5\.0\.0-next\.)\d+(\/hack-next-install\.sh)/g;
+
+/**
+ * A snapshot is taken at the release commit, before that release's tag exists,
+ * so its bootstrap download can still name the previous prerelease. Published
+ * pages point the bootstrap at the prerelease the version is pinned to.
+ */
+export function pinnedBootstrapText(text: string, label: string): string {
+  const prerelease = /next\.(\d+)/.exec(label)?.[1];
+  return prerelease
+    ? text.replace(bootstrapDownload, `$1${prerelease}$2`)
+    : text;
+}
+
 function publishedCliText(text: string, version: "v4" | "v5"): string {
   let curated = curateCliReference(text, { version });
   if (version === "v5") {
@@ -356,6 +371,7 @@ async function stageVersion(
     if (entry.slug === "reference/cli") {
       text = publishedCliText(text, version);
     }
+    text = pinnedBootstrapText(text, manifest.label);
     const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
     const provenance = entry.editorial
       ? `Editorial source: ${entry.snapshot}; based on ${entry.source.revision}${editorialProvenanceLabel(entry.source)}`

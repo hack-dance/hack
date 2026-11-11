@@ -1319,7 +1319,7 @@ export class Qualification {
       const foregrounds = await this.alive(this.strays, this.exitWaitMs);
       const evidence = {
         foregrounds_running: foregrounds.map((child) => this.identity(child)),
-        providers_running: this.runningProviders(),
+        providers_running: await this.lingeringProviders(),
       };
       this.record(key, evidence);
       if (
@@ -1343,6 +1343,20 @@ export class Qualification {
     return this.homes().flatMap((home) =>
       this.providerPids(home).map((pid) => `${basename(home)}:${pid}`)
     );
+  }
+
+  /**
+   * Provider processes still running after up to `exitWaitMs`: `runtime down` waits only for
+   * the receipt's VM process, and a helper of the same tree may take a moment longer.
+   */
+  async lingeringProviders(): Promise<string[]> {
+    const deadline = performance.now() + this.exitWaitMs;
+    let running = this.runningProviders();
+    while (running.length > 0 && performance.now() < deadline) {
+      await Bun.sleep(500);
+      running = this.runningProviders();
+    }
+    return running;
   }
 
   /** The current foreground; a method so flow narrowing does not pin an earlier value. */
@@ -1692,7 +1706,7 @@ export class Qualification {
     // Pools asked to stop must be gone: one still running fails the run and is listed.
     let left: string[];
     try {
-      left = this.runningProviders();
+      left = await this.lingeringProviders();
     } catch (error) {
       left = [
         `not shown: ${error instanceof Error ? error.message : String(error)}`,
@@ -1723,7 +1737,7 @@ export class Qualification {
         console.log(`FAIL ${line}`);
       }
       console.log(
-        `${this.failed.length} check(s) failed (--keep-going); evidence in ${this.evidence}.`
+        `${this.failed.length} check(s) failed${this.options.keepGoing ? " (--keep-going)" : ""}; evidence in ${this.evidence}.`
       );
       return 1;
     }

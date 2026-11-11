@@ -645,6 +645,163 @@ test("global status --json returns summary payload", async () => {
   expect(parsed.summary.networks_ok).toBe(true);
 });
 
+test(
+  "global up recreates a proxy that runs with no network while a project holds its IP (HACK-2056)",
+  async () => {
+    const caddyCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_CADDY_DIR_NAME,
+      GLOBAL_CADDY_COMPOSE_FILENAME
+    );
+    await writeStaticCaddyCompose(caddyCompose);
+    await writeComposeFile(
+      join(
+        tempDir!,
+        GLOBAL_HACK_DIR_NAME,
+        GLOBAL_LOGGING_DIR_NAME,
+        GLOBAL_LOGGING_COMPOSE_FILENAME
+      )
+    );
+
+    // Fake Docker: caddy reports Up but is attached to no network, and a
+    // project container holds caddy's reserved address. The proxy is only
+    // reattached once the stack is taken down and brought up again.
+    let proxyDown = false;
+    let proxyUpAfterDown = false;
+    let projectReassigned = false;
+    const proxyInspect = () =>
+      JSON.stringify([
+        {
+          Name: "/hack-dev-proxy-caddy-1",
+          Config: { Labels: { "com.docker.compose.service": "caddy" } },
+          State: { Running: true },
+          NetworkSettings: {
+            Networks: proxyUpAfterDown
+              ? { [DEFAULT_INGRESS_NETWORK]: { IPAddress: DEFAULT_CADDY_IP } }
+              : {},
+          },
+        },
+      ]);
+    execMockResponder = (cmd) => {
+      const line = cmd.join(" ");
+      if (line.includes(caddyCompose) && line.includes("ps --format json")) {
+        return proxyDown && !proxyUpAfterDown
+          ? { exitCode: 0, stdout: "", stderr: "" }
+          : {
+              exitCode: 0,
+              stdout: `${JSON.stringify({ ID: "caddy1", Service: "caddy" })}\n`,
+              stderr: "",
+            };
+      }
+      if (line === "docker inspect caddy1") {
+        return { exitCode: 0, stdout: proxyInspect(), stderr: "" };
+      }
+      if (line === `docker network inspect ${DEFAULT_INGRESS_NETWORK}`) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              Containers: projectReassigned
+                ? {}
+                : {
+                    abc: {
+                      Name: "example-web-1",
+                      IPv4Address: `${DEFAULT_CADDY_IP}/16`,
+                    },
+                  },
+            },
+          ]),
+          stderr: "",
+        };
+      }
+      if (line.startsWith("docker network connect")) {
+        projectReassigned = true;
+      }
+      return null;
+    };
+    runExitResponder = (cmd) => {
+      if (cmd.includes(caddyCompose) && cmd.includes("down")) {
+        proxyDown = true;
+      }
+      if (cmd.includes(caddyCompose) && cmd.includes("up") && proxyDown) {
+        proxyUpAfterDown = true;
+      }
+      return null;
+    };
+
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up"])).toBe(0);
+
+    const downIndex = runCalls.findIndex(
+      (call) => call.includes(caddyCompose) && call.includes("down")
+    );
+    const upIndex = runCalls.findIndex(
+      (call) => call.includes(caddyCompose) && call.includes("up")
+    );
+    expect(downIndex).toBeGreaterThanOrEqual(0);
+    expect(upIndex).toBeGreaterThan(downIndex);
+    expect(projectReassigned).toBe(true);
+  },
+  { timeout: 20_000 }
+);
+
+test("global status --json reports a proxy with no network (HACK-2056)", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeStaticCaddyCompose(caddyCompose);
+  execMockResponder = (cmd) => {
+    const line = cmd.join(" ");
+    if (line.includes(caddyCompose) && line.includes("ps --format json")) {
+      return {
+        exitCode: 0,
+        stdout: `${JSON.stringify({ ID: "caddy1", Service: "caddy", Status: "Up 2 hours" })}\n`,
+        stderr: "",
+      };
+    }
+    if (line === "docker inspect caddy1") {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify([
+          {
+            Name: "/hack-dev-proxy-caddy-1",
+            Config: { Labels: { "com.docker.compose.service": "caddy" } },
+            State: { Running: true },
+            NetworkSettings: { Networks: {} },
+          },
+        ]),
+        stderr: "",
+      };
+    }
+    return null;
+  };
+  const chunks: string[] = [];
+  const stdoutSpy = spyOn(process.stdout, "write").mockImplementation(
+    (chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    }
+  );
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "status", "--json"])).toBe(0);
+  } finally {
+    stdoutSpy.mockRestore();
+  }
+  const payload = JSON.parse(chunks.join(""));
+  expect(payload.summary.proxy_network_ok).toBe(false);
+  expect(payload.summary.ok).toBe(false);
+  expect(payload.proxy_network.issues[0]).toMatchObject({
+    service: "caddy",
+    problem: "no_network",
+    expected_ip: DEFAULT_CADDY_IP,
+  });
+});
+
 async function writeInstallStubs(): Promise<void> {
   await writeExecutable(join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "gum"));
   await writeExecutable(join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "mutagen"));

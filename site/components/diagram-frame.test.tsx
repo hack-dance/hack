@@ -1,10 +1,6 @@
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
-
-// Register the DOM before React loads.
-GlobalRegistrator.register();
-
+// The DOM is registered by the preload in site/bunfig.toml, before React loads.
 import { expect, mock, test } from "bun:test";
-import { act, createElement } from "react";
+import { act, createElement, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 // next/image needs the Next.js runtime; a plain <img> keeps the same props.
@@ -12,8 +8,6 @@ mock.module("next/image", () => ({
   default: ({ unoptimized: _unoptimized, ...rest }: Record<string, unknown>) =>
     createElement("img", rest),
 }));
-
-(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
 test("the control opens a modal dialog, zoom works, and closing removes it", async () => {
   const { DiagramFrame } = await import("./diagram-frame");
@@ -50,6 +44,15 @@ test("the control opens a modal dialog, zoom works, and closing removes it", asy
   expect(dialog).not.toBeNull();
   expect(dialog.parentElement).toBe(document.body); // portal, not inside the paragraph
   expect(dialog.open).toBe(true);
+  // Opening moves focus to the Close control.
+  expect(document.activeElement?.getAttribute("aria-label")).toBe(
+    "Close full size diagram"
+  );
+  // A close event that arrives while the dialog is open changes nothing.
+  act(() => {
+    dialog.dispatchEvent(new Event("close"));
+  });
+  expect(document.querySelector("dialog.diagram-dialog")).toBe(dialog);
   expect(dialog.classList.contains("diagram-dialog-light")).toBe(true);
   const full = dialog.querySelector("img.diagram-full") as HTMLImageElement;
   expect(full.getAttribute("src")).toBe("/diagrams/abc123.light.svg");
@@ -106,4 +109,39 @@ test("the control opens a modal dialog, zoom works, and closing removes it", asy
   act(() => {
     root.unmount();
   });
+});
+
+test("the dialog stays open under StrictMode's repeated effects", async () => {
+  const { DiagramFrame } = await import("./diagram-frame");
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  act(() => {
+    root.render(
+      createElement(
+        StrictMode,
+        null,
+        createElement(DiagramFrame, {
+          alt: "Strict flow",
+          height: 100,
+          src: "/diagrams/def456.dark.svg",
+          variant: "dark",
+          width: 400,
+        })
+      )
+    );
+  });
+  act(() => {
+    (host.querySelector("button.diagram-expand") as HTMLButtonElement).click();
+  });
+  // Let any queued close event from a repeated effect be delivered.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const dialog = document.querySelector(
+    "dialog.diagram-dialog-dark"
+  ) as HTMLDialogElement;
+  expect(dialog?.open).toBe(true);
+  act(() => {
+    root.unmount();
+  });
+  expect(document.querySelectorAll("dialog").length).toBe(0);
 });

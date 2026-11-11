@@ -75,23 +75,28 @@ function DiagramDialog({
 }: DiagramProps & { readonly onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [step, setStep] = useState(0);
+  const closeControl = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const element = dialog.current;
     if (element && !element.open) {
       element.showModal();
+      closeControl.current?.focus();
     }
-    return () => {
-      if (element?.open) {
-        element.close();
-      }
-    };
+    // No cleanup: unmounting removes the dialog from the top layer. Calling
+    // close() here would queue a `close` event that, under StrictMode's
+    // repeated effect, arrives after the dialog has reopened.
   }, []);
   const zoom = zoomSteps[step] ?? 1;
   return createPortal(
     <dialog
       aria-label={alt}
       className={`diagram-dialog diagram-dialog-${variant}`}
-      onClose={onClose}
+      onClose={(event) => {
+        // Ignore a stale close event that arrives while the dialog is open.
+        if (!event.currentTarget.open) {
+          onClose();
+        }
+      }}
       ref={dialog}
     >
       <div className="diagram-dialog-bar">
@@ -124,11 +129,11 @@ function DiagramDialog({
         </button>
         <button
           aria-label="Close full size diagram"
-          autoFocus
           className="diagram-dialog-close"
           // Close through the element, as Escape does: the dialog's `close`
           // event then runs `onClose` once, while it is still in the document.
           onClick={() => dialog.current?.close()}
+          ref={closeControl}
           type="button"
         >
           <X aria-hidden="true" size={18} />

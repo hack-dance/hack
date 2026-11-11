@@ -182,10 +182,13 @@ img.diagram.diagram-dark {
   opacity: 0.4;
 }
 .diagram-dialog {
-  width: 100vw;
-  max-width: 100vw;
-  height: 100dvh;
-  max-height: 100dvh;
+  /* `inset` with automatic size fills the viewport without running under a
+     classic page scrollbar, which `100vw` would. */
+  inset: 0;
+  width: auto;
+  max-width: none;
+  height: auto;
+  max-height: none;
   margin: 0;
   padding: 0;
   border: 0;

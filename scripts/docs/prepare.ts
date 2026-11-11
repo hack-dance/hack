@@ -62,11 +62,13 @@ export function rewriteTarget(target: string, source: string): string {
   if (routes.has(absolute)) {
     return `${routes.get(absolute)}${fragment}`;
   }
-  if (!activeFiles.includes(local)) {
+  const isFile = activeFiles.includes(local);
+  const isDirectory = activeFiles.some((path) => path.startsWith(`${local}/`));
+  if (!(isFile || isDirectory)) {
     throw new Error(`Missing public source at pinned revision: ${local}`);
   }
   const encoded = local.split("/").map(encodeURIComponent).join("/");
-  return `https://github.com/hack-dance/hack/blob/${activeRevision}/${encoded}${fragment}`;
+  return `https://github.com/hack-dance/hack/${isFile ? "blob" : "tree"}/${activeRevision}/${encoded}${fragment}`;
 }
 
 async function rewriteLinks(content: string, source: string): Promise<string> {
@@ -335,6 +337,11 @@ async function stageVersion(
     await readSnapshot(entry.snapshot, entry.sha256);
     routes.set(
       resolvePublicSource(entry.file),
+      documentRoute(version, entry.slug)
+    );
+    // Editorial links address site slugs even after a snapshot replaces a fork.
+    routes.set(
+      resolvePublicSource(`docs/site/${entry.slug}.md`),
       documentRoute(version, entry.slug)
     );
   }

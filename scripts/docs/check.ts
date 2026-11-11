@@ -23,6 +23,9 @@ for (const target of [
   "../.hack-local/evidence.md",
   "../test-execution/log.md",
   "missing-public-document.md",
+  "../example",
+  "../examples/not-a-tracked-directory",
+  "site/not-a-manifest-page.md",
 ]) {
   let rejected = false;
   try {
@@ -40,6 +43,22 @@ if (
   throw new Error("Canonical doc links must use site routes");
 }
 console.log("Public link boundaries and canonical route rewriting passed.");
+
+if (
+  (await rewriteTarget("../examples", source)) !==
+  `https://github.com/hack-dance/hack/tree/${versions.v4.revision}/examples`
+) {
+  throw new Error("Tracked directory links must use pinned repository trees");
+}
+console.log("Tracked directory links and untracked-prefix refusals passed.");
+if (
+  (await rewriteTarget(
+    "reference/cli.md",
+    resolve(repositoryRoot, "docs/site/index.md")
+  )) !== "/docs/v4/reference/cli"
+) {
+  throw new Error("Editorial links must survive replacement by snapshots");
+}
 
 // Manifest inputs are independently validated before realpath/Bun.file can read them.
 for (const file of [

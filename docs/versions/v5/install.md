@@ -1,6 +1,5 @@
 # Install
 
-
 v5 is in prerelease. Stable Hack today is the v4 line, installed with Homebrew or
 the release installer. v5 prereleases install beside it through a separate
 channel, `hack-next`, so you can try v5 without touching your stable setup. When

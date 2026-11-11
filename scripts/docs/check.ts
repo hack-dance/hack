@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { agentCompatibilityCommands, curateCliReference } from "./curate-cli";
+import { assertPinnedInstallers } from "./installer-pin";
 import {
   pinnedBootstrapText,
   prepare,
@@ -337,21 +338,13 @@ if (!prerelease) {
 }
 // Installer artifacts and version variables must all select the release pin.
 const stagedV5 = resolve(repositoryRoot, "site/content/docs/v5");
-const anyInstaller =
-  /releases\/download\/v5\.0\.0-next\.(\d+)\/(?:hack-next-install\.sh|hack-next-manager-darwin-arm64|INSTALLER-SHA256SUMS)(?=$|[\s"'`\\])/g;
-const exampleVersion = /^V=5\.0\.0-next\.(\d+)\b/gm;
+const installerTag = `v5.0.0-next.${prerelease}`;
 for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedV5 })) {
-  const staged = await Bun.file(resolve(stagedV5, file)).text();
-  for (const match of [
-    ...staged.matchAll(anyInstaller),
-    ...staged.matchAll(exampleVersion),
-  ]) {
-    if (match[1] !== prerelease) {
-      throw new Error(
-        `Published v5 page installs next.${match[1]}, not the pinned next.${prerelease}: ${file}`
-      );
-    }
-  }
+  assertPinnedInstallers({
+    text: await Bun.file(resolve(stagedV5, file)).text(),
+    tag: installerTag,
+    source: `Published v5 page ${file}`,
+  });
 }
 // The live install examples must name the same prerelease, so the repository
 // docs and the site never tell a reader to install different versions.
@@ -361,18 +354,34 @@ for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: liveDocs })) {
   if (file.startsWith("versions/")) {
     continue;
   }
-  const live = await Bun.file(resolve(liveDocs, file)).text();
-  for (const match of [
-    ...live.matchAll(anyInstaller),
-    ...live.matchAll(exampleVersion),
-  ]) {
-    if (match[1] !== prerelease) {
-      throw new Error(
-        `docs/${file} installs next.${match[1]}, not the pinned next.${prerelease}`
-      );
-    }
+  assertPinnedInstallers({
+    text: await Bun.file(resolve(liveDocs, file)).text(),
+    tag: installerTag,
+    source: `docs/${file}`,
+  });
+}
+for (const text of [
+  "releases/download/v5.0.0-next.1/hack-next-install.sh",
+  "releases/download/v4.2.4/hack-next-install.sh?download=1",
+  "releases/download/unexpected/hack-next-manager-darwin-arm64)",
+  "releases/download/v5.0.0-next.1/INSTALLER-SHA256SUMS",
+  "V=5.0.0-next.1 # installed version",
+]) {
+  let rejected = false;
+  try {
+    assertPinnedInstallers({
+      text,
+      tag: installerTag,
+      source: "negative control",
+    });
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error(`Stale installer control accepted: ${text}`);
   }
 }
+
 if (
   pinnedBootstrapText(
     "releases/download/v5.0.0-next.1/hack-next-install.sh",

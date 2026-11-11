@@ -14,7 +14,6 @@ changed and what was retired.
 Start with [Install](install.md), then [Getting started](getting-started.md).
 [What's new in 5.0](../guides/v5-release-notes.md) summarizes the release.
 
-
 ## Understand the project
 
 - [Global settings](../guides/global-settings.md): machine-wide configuration and proxy bind addresses.

@@ -1460,6 +1460,42 @@ describe("second-review blockers", () => {
     expect((shown.ended as { outcome: string }).outcome).toBe("succeeded");
   });
 
+  test("a final record whose ordinary fsync reports a full disk stands, is marked, and the marker expires with the output", async () => {
+    const { meta, paths } = await acceptCommand({
+      input: input({ retentionMs: 1000 }),
+      root,
+    });
+    const failingSync = (code: string) => async () => {
+      throw Object.assign(new Error("fsync failed"), { code });
+    };
+    // Another fsync error is not a full disk: no marker.
+    const other = await acceptCommand({ input: input(), root });
+    await new JournalWriter(
+      other.paths,
+      other.meta,
+      1,
+      undefined,
+      failingSync("EIO")
+    ).write("command.ended", { outcome: "succeeded", exitCode: 0 });
+    expect(await lstat(other.paths.endUnsynced).catch(() => null)).toBeNull();
+    const ended = await new JournalWriter(
+      paths,
+      meta,
+      1,
+      undefined,
+      failingSync("EDQUOT")
+    ).write("command.ended", { outcome: "succeeded", exitCode: 0 });
+    const events = await readEvents(paths);
+    expect(events.at(-1)).toEqual(ended);
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    const shown = await inspectCommand({ journal, observe: fakeObserve() });
+    expect(shown.endDurability).toBe("not_confirmed");
+    expect((shown.ended as { outcome: string }).outcome).toBe("succeeded");
+    // Retention removes the marker with the rest of the payload.
+    await pruneExpired({ root, now: Date.now() + 5000 });
+    expect(await lstat(paths.endUnsynced).catch(() => null)).toBeNull();
+  });
+
   test("the file-based fallback lock takes a newly created journal's lock and excludes", async () => {
     const { paths } = await acceptCommand({ input: input(), root });
     // Acceptance created the empty flock file; the fallback must not read it

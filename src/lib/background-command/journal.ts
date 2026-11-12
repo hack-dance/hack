@@ -691,17 +691,21 @@ export class JournalWriter {
   readonly meta: CommandMeta;
   private seq: number;
   private readonly append: AppendLine;
+  private readonly syncEvents: SyncPath;
 
   constructor(
     paths: JournalPaths,
     meta: CommandMeta,
     lastSeq: number,
-    append: AppendLine = appendLine
+    append: AppendLine = appendLine,
+    /** Test seam: the fsync after `command.ended`. */
+    syncEvents: SyncPath = syncPath
   ) {
     this.paths = paths;
     this.meta = meta;
     this.seq = lastSeq;
     this.append = append;
+    this.syncEvents = syncEvents;
   }
 
   get lastSeq(): number {
@@ -729,8 +733,17 @@ export class JournalWriter {
       await this.append(this.paths.events, line);
     }
     this.seq += 1;
+    // The final record is published once appended; a full disk reported
+    // only at fsync never takes it back, it is marked instead (as in
+    // `reconcileTail`). Other fsync errors are ignored: the line is written.
     if (type === "command.ended") {
-      await syncFile(this.paths.events);
+      try {
+        await this.syncEvents(this.paths.events);
+      } catch (error: unknown) {
+        if (isNoSpace(error)) {
+          await markEndUnsynced(this.paths);
+        }
+      }
     }
     return envelope;
   }
@@ -766,16 +779,18 @@ export async function syncDurably(opts: {
   }
 }
 
-async function syncFile(path: string): Promise<void> {
+/** Seam for tests: fsync a file by path. */
+export type SyncPath = (path: string) => Promise<void>;
+
+/** fsync a file by path; a file that cannot be opened is skipped. */
+const syncPath: SyncPath = async (path) => {
   const handle = await open(path, constants.O_RDONLY).catch(() => null);
   try {
     await handle?.sync();
-  } catch {
-    // Best effort; the line is already written.
   } finally {
     await handle?.close();
   }
-}
+};
 
 export function endedEvent(
   events: readonly EventEnvelope[]

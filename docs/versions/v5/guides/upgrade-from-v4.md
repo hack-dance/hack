@@ -2,7 +2,8 @@
 
 This is a working upgrade checklist, not a completed migration report. It was
 audited against `next` at `26a142921c` and the v4.3.0 reference on `main` at
-`b36275575c`. The site itself is pinned to **next.15**. Sections about newer
+`b36275575c`, with the merged Linux daemon service update at `5e017fddd3`.
+The site itself is pinned to **next.15**. Sections about newer
 source builds do not mean those features ship in next.15. Real-machine results
 are **to be confirmed in the dogfood run**.
 
@@ -182,14 +183,24 @@ the [Linux DNS setup source](https://github.com/hack-dance/hack/blob/26a142921c9
 and [Linux trust guide](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-certificate-trust.md).
 They postdate next.15. DNS host integration is bounded to a rootful Linux Docker
 bridge/systemd-resolved setup; trust has separate host and browser handling.
-Review the printed privileged steps and confirm them yourself. The Linux daemon
-service change is **not merged at this audit**: `daemon install` still refuses
-non-macOS. Its service setup and upgrade are **to be confirmed in the dogfood run**.
+Review the printed privileged steps and confirm them yourself.
+
+Linux login-service support has also merged, at `5e017fddd3`. After choosing a
+durable v5 installation, `hack daemon install` enables and starts the systemd
+user unit `hackd.service`; `hack daemon uninstall` stops, disables and removes
+it. Keep this outside the side-by-side trial: do not retarget the stable service
+to an experimental executable. `daemon start` by itself detaches from the
+terminal but does not survive logout or reboot. The user service needs a working
+`systemctl --user` session; without one, install writes no unit, starts directly
+and exits 1. Linger is reported, never enabled automatically. Without linger,
+the user service stops after the last logout and does not start at boot.
+Real-machine service setup and upgrade are **to be confirmed in the dogfood run**.
 
 Sources: [stable installation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/README.md#install),
 [release asset generation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/scripts/build-release.ts),
 [next.15 artifact contract](https://github.com/hack-dance/hack/blob/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/docs/guides/candidate-install.md),
-[daemon service platform gate](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/daemon.ts).
+[Linux service and detached-start contract](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/docs/architecture.md#keeping-hackd-running),
+[service regression tests](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/tests/daemon-systemd-cli.test.ts).
 Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/project.ts),
 [env resolution](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/env.ts),
 [session env resolution](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/session.ts).
@@ -239,9 +250,12 @@ Sources: [migration and refusal audit](https://github.com/hack-dance/hack/blob/2
 
 ### Daemon, old lock and missing checkouts
 
-Installing another CLI does not replace an already running daemon. The current
-`daemon start` replaces a reachable incompatible daemon; `daemon restart` is the
-explicit replacement path. Keep this separate from a side-by-side candidate
+Installing another CLI does not replace an already running daemon. For an
+unmanaged daemon, `daemon start` replaces a reachable incompatible daemon;
+`daemon restart` is the explicit replacement path. With the newer Linux systemd
+service, a unit pointing at a different existing executable needs explicit
+`daemon install`: restarting that unit would run its old executable again.
+Keep this separate from a side-by-side candidate
 trial: the launcher disables daemon autostart, and stable `hackd` stays stopped
 while the candidate shares its home. Capture macOS service respawn and the exact
 old-daemon transition: **to be confirmed in the dogfood run**.
@@ -265,6 +279,7 @@ before choosing an apply. Missing Docker skips only the container half, not
 registry pruning. Keep the registry backup for rollback.
 
 Sources: [daemon compatibility](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/daemon.ts),
+[Linux service replacement](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/docs/architecture.md#keeping-hackd-running),
 [registry lock contract](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/lib/projects-registry-lock.ts),
 [lock regressions](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/tests/projects-registry-lock.test.ts),
 [prune command](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/projects.ts).
@@ -286,6 +301,8 @@ Sources: [explicit setup](https://github.com/hack-dance/hack/blob/26a142921c9b9a
 
 This compares the generated [v4.3.0 reference on main](https://github.com/hack-dance/hack/blob/b36275575c6bf75f35090ea7b762a45d77924470/docs/reference/cli.md)
 with the [current next reference](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/reference/cli.md).
+The [Linux service reference update](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/docs/reference/cli.md)
+adds Linux install/uninstall and marks the launchd flags as macOS-only.
 No command heading disappears in that comparison. A retained name can still
 refuse, be hidden from ordinary help, or change option behavior. The site's
 curated reference deliberately omits unsupported surfaces.
@@ -299,6 +316,7 @@ curated reference deliberately omits unsupported surfaces.
 | Discovery and env | New `project target`, `project task`, `env get`, `env hydrate`, `--value-stdin` and `setup migrate` surfaces are explicit; check the exact reference before adopting them. |
 | Doctor | New domain-migration, native-preflight, native-cleanup and native-run-mapping modes have separate inspection/repair contracts. `--accept-tracked-env-changes` is explicit consent for migration, not an ordinary diagnostic flag. |
 | Global setup | New `global dns preview/activate/deactivate` handles scoped native DNS. `global trust` adds Linux host/NSS trust; `global logs-reset` also resets Alloy read positions. |
+| Linux daemon | `install`/`uninstall` now manage a systemd user unit. Status JSON adds `managed_by` and `service`; Doctor adds a `daemon service` check. An incompatible service using another existing executable needs `daemon install`, not repeated restarts. |
 | Secret deletion | `secrets delete --yes` supplies deletion consent without a TTY or with `HACK_NO_INTERACTIVE`; review scripts that previously expected an implicit confirmation. |
 | Native commands | Native `down`/`restart` recovery flags, data deletion and followed-log selection are backend-specific; do not copy them into a Compose rollback. |
 | Agent setup | Candidate MCP setup adds explicit `--bundle`, `--cli` and `--runtime-directory` selection. `setup sync`, automatic client hooks/instruction injection and `agent prime` refuse; use explicit setup/onboarding. |
@@ -310,6 +328,8 @@ Sources for behavior beyond the generated tables: [parser/error handling](https:
 [help visibility](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/cli/help.ts),
 [release-scope summary](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/v5-release-notes.md),
 [preflight result contract](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/doctor-native-preflight.ts).
+The Linux daemon additions are specified in the
+[merged service contract](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/docs/architecture.md#keeping-hackd-running).
 The complete 4.2.1 automation/exit/JSON transcript is **to be confirmed in the dogfood run**.
 
 ## 6. Try native, then return to Compose
@@ -360,6 +380,9 @@ alone does not restore its env inputs.
    `"$HOME/.hack-next/bin/hack-next" --manager stable` after its quiescence checks
    pass. This deselects the candidate and retains its bundles/homes; it does not
    restore shared Compose files or application data.
+   If a current-source Linux trial installed a v5 user service, uninstall it
+   with that v5 CLI before restoring v4. v4 has no Linux service-install command;
+   keep any pre-existing custom unit's separately recorded restore procedure.
 3. Preserve the post-trial working tree and global state in a separate private
    copy. Restore the saved project files, ignored env/key files, registry and
    global configuration to their recorded locations. Never overwrite unrelated
@@ -375,15 +398,34 @@ alone does not restore its env inputs.
    (
      set -eu
      STAMP=$(date +%Y%m%dT%H%M%S)
+     test -d "$PROJECT/.hack"
+     test ! -L "$PROJECT/.hack"
+     test -d "$BACKUP/project-hack"
+     test ! -L "$BACKUP/project-hack"
+     test -x "$BACKUP/hack-v4"
+     test ! -L "$BACKUP/hack-v4"
+     for FILE in projects.json hack.config.json; do
+       test -f "$BACKUP/hack-home/$FILE"
+       test ! -L "$BACKUP/hack-home/$FILE"
+     done
+     for FILE in .gitignore .hack.secret.key; do
+       test ! -L "$BACKUP/project-$FILE"
+       test ! -L "$BACKUP/project-$FILE.absent"
+       if [ -f "$BACKUP/project-$FILE" ]; then
+         test ! -e "$BACKUP/project-$FILE.absent"
+       else
+         test -f "$BACKUP/project-$FILE.absent"
+       fi
+       test ! -e "$BACKUP/post-trial-$FILE-$STAMP"
+     done
      test ! -e "$BACKUP/post-trial-project-hack-$STAMP"
+     test ! -e "$BACKUP/post-trial-home-$STAMP"
      git -C "$PROJECT" status --short --ignored > "$BACKUP/git-after-$STAMP.txt"
      cp -Rp "$HOME/.hack" "$BACKUP/post-trial-home-$STAMP"
      mv "$PROJECT/.hack" "$BACKUP/post-trial-project-hack-$STAMP"
      cp -Rp "$BACKUP/project-hack" "$PROJECT/.hack"
      for FILE in .gitignore .hack.secret.key; do
-       test -f "$BACKUP/project-$FILE" || test -f "$BACKUP/project-$FILE.absent"
        if [ -e "$PROJECT/$FILE" ] || [ -L "$PROJECT/$FILE" ]; then
-         test ! -e "$BACKUP/post-trial-$FILE-$STAMP"
          mv "$PROJECT/$FILE" "$BACKUP/post-trial-$FILE-$STAMP"
        fi
        if [ -f "$BACKUP/project-$FILE" ]; then

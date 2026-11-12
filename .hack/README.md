@@ -50,6 +50,10 @@ absolute compatible executable. Native host output does not substitute for the
 container's separate `dist`. Focused `test <paths>` still runs without this suite
 prerequisite; compiler-dependent paths require their own prepared compiler.
 
+The test task preserves `TMPDIR` and `HACK_SYSTEMD_DISABLE` through Turbo. For
+host checks, choose an owned fixture root with no ancestor `.hack` directory:
+private `HOME` alone does not stop project discovery walking above a fixture.
+
 Use host-native qualification for macOS Hypervisor/SmolVM/libkrun behavior, routing
 and trust, idle reclamation, and full-runtime resource measurements. A Linux unit
 suite or container benchmark does not establish those properties. Portable benchmark

@@ -316,6 +316,95 @@ pub(in crate::provider::graph) mod tests {
     }
 
     #[test]
+    fn a_running_pools_rootfs_witness_skips_the_content_proof_only_while_it_holds() {
+        use crate::provider::{artifact, tree_witness};
+        // Qualified filesystem at the statfs boundary (the runner's temp volume may not be).
+        tree_witness::fake_filesystem_type(Some("apfs"));
+        let fixture = Fixture::new();
+        let candidate = &fixture.candidate;
+        let mut owner = Owner::load(candidate).unwrap();
+        let rootfs = candidate.state_root.join("run/smolvm/rootfs");
+        // Retained witnesses require both prepared provider trees as well as the rootfs.
+        // This fixture otherwise has SmolVM's templates and a synthetic guest base,
+        // but no engine tree.
+        let provider_trees = [
+            artifact::tree_root(candidate, &artifact::SMOLVM),
+            artifact::tree_root(candidate, &artifact::ENGINE),
+        ];
+        for tree in &provider_trees {
+            state::private_directory(tree).unwrap();
+            fs::write(tree.join("fixture"), b"synthetic provider").unwrap();
+        }
+        assert!(lifecycle::witness_qualified(candidate));
+        let marker = lifecycle::rootfs_marker(&owner).unwrap();
+        let proofs = |owner: &Owner| {
+            let before = tree_witness::content_proofs();
+            let result = lifecycle::verify_retained_rootfs(candidate, owner);
+            (result, tree_witness::content_proofs() - before)
+        };
+        // Stopped, or running without a witness: proven by content.
+        assert_eq!(proofs(&owner).1, 1);
+        owner.phase = "running".into();
+        let (result, count) = proofs(&owner);
+        result.unwrap();
+        assert_eq!(count, 1);
+        // A witness of this provider for this rootfs and pin: nothing is hashed.
+        let lease = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+        tree_witness::record(
+            candidate,
+            &lease,
+            owner.process.as_ref().unwrap(),
+            std::collections::BTreeMap::from([(
+                tree_witness::ROOTFS.to_owned(),
+                tree_witness::Proven {
+                    metadata: tree_witness::metadata_digest(&rootfs, Some(&marker)).unwrap(),
+                    content: owner.rootfs_digest.clone().unwrap(),
+                },
+            )]),
+        )
+        .unwrap();
+        drop(lease);
+        let (result, count) = proofs(&owner);
+        result.unwrap();
+        assert_eq!(count, 0);
+        // Missing SmolVM templates refuse before the rootfs check. A missing engine
+        // tree disables its witness and requires a content proof of the unchanged rootfs.
+        for (tree, expected, expected_proofs) in [
+            (&provider_trees[0], Err("provider_state"), 0),
+            (&provider_trees[1], Ok(()), 1),
+        ] {
+            let held = tree.with_extension("held");
+            fs::rename(tree, &held).unwrap();
+            assert!(!lifecycle::witness_qualified(candidate));
+            let (result, count) = proofs(&owner);
+            assert_eq!(result.map_err(|error| error.code), expected);
+            assert_eq!(count, expected_proofs);
+            fs::rename(held, tree).unwrap();
+            let (result, count) = proofs(&owner);
+            result.unwrap();
+            assert_eq!(count, 0);
+        }
+        // A stopped pool never uses the witness.
+        let mut stopped = owner.clone();
+        stopped.phase = "stopped".into();
+        assert_eq!(proofs(&stopped).1, 1);
+        // Another pin, or a changed file, goes back to the content proof, which refuses.
+        let mut repinned = owner.clone();
+        repinned.rootfs_digest = Some("0".repeat(64));
+        let (result, count) = proofs(&repinned);
+        assert_eq!(
+            (result.unwrap_err().code, count),
+            ("artifact_digest_mismatch", 1)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(rootfs.join("public-base"), b"changed base!!!!!!!!!").unwrap();
+        let (result, count) = proofs(&owner);
+        assert_eq!(
+            (result.unwrap_err().code, count),
+            ("artifact_digest_mismatch", 1)
+        );
+    }
+    #[test]
     fn stopped_preflight_returns_only_eligibility_without_guest_or_state_effects() {
         let fixture = Fixture::new();
         let owner_path = fixture.candidate.state_root.join("run/smolvm/owner.json");

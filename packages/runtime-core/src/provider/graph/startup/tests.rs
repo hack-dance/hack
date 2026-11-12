@@ -106,6 +106,7 @@ fn receipt() -> Receipt {
 }
 fn startup() -> Startup {
     Startup {
+        control_generation: None,
         control_only: false,
         guest_root: None,
         control_root: PathBuf::from("/private/tmp/owned-relay"),
@@ -594,4 +595,25 @@ fn low_port_binding_requires_the_explicit_lowered_capability_profile() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn next13_writer_receipt_keeps_legacy_control_identity_and_pending_enrollment() {
+    let receipt: Receipt = serde_json::from_str(include_str!(
+        "../../../../../../tests/fixtures/native-next13/ready-pending.json"
+    ))
+    .unwrap();
+    assert_eq!(receipt.phase, "ready-observed");
+    let startup = receipt.relay_startup.as_ref().unwrap();
+    assert!(startup.valid(&receipt));
+    assert_eq!(startup.control_generation, None);
+    assert_eq!(
+        receipt.relay_cleanup.as_ref().unwrap().phase(),
+        cleanup_enrollment::Phase::Pending
+    );
+    assert_eq!(
+        receipt.resources["container:web"].loopback_ports[0].host_port,
+        18080
+    );
+    assert_eq!(receipt.resources["volume:data"].phase, "created");
 }

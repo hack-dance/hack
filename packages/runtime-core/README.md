@@ -859,6 +859,26 @@ durability, crash/power-loss safety, framework concurrency or application readin
 
 ## Foreground graph dependency owner (candidate macOS path)
 
+Compose foreground graph owners run outside the terminal process group even
+without hooks; `process::publisher_command` gives each host port/route publisher
+its own group. Terminal group SIGINT cannot retire a publisher ahead of the
+owner's authenticated cleanup. Portable process tests exercise a real group
+signal; a macOS cross-check is compilation evidence, not real-VM acceptance.
+
+Same-boot dead-owner cleanup also accepts the unchanged ready receipt and Pending
+relay enrollment left when an older publisher exited before cleanup. The old
+coordinator must be EffectStarted for the exact dead owner, graph, operation,
+effect and saved bridge/environment inventories. Recovery pins its bytes in a
+new version3/4 intent (present/absent relay respectively); version1/2 recovery
+records remain unchanged. After an audited immediate successor boot, the frontend
+selects `recover-cleanup` followed by publication retirement. Its new version2
+intent pins the legacy Ready/Pending coordinator; ordinary version1 predecessor
+recovery records remain unchanged. The old coordinator is retained without an ACK or
+admission replay. Publisher shutdown keeps the native PID/birth/UID/executable
+and socket/inode proofs; guest effects follow confirmed publisher exit, held
+dead-owner witnesses and independently rechecked inventories. Changed evidence
+refuses. This does not add VM-loss detection or infer authority for an unrecorded boot.
+
 If an interrupted foreground owner leaves private dependency socket paths after
 the provider has stopped, normal `hack up` still refuses to adopt or replace them.
 `hack-local runtime dependency-socket-recovery --json` selects only owned, unlistened
@@ -1430,6 +1450,57 @@ provider default (one quiet minute) because it has not been measured on this run
 yet, and pinning an unmeasured value could do worse than upstream's. The provider pin
 qualification script measures idle footprint at 0, 3 and 10 minutes; pin it
 explicitly once those numbers are recorded.
+
+### Starting a pool that is already running
+
+`runtime up` on a pool that is already running and owned by this home (every warm frontend
+`up` and `restart`) takes a named fast path, `lifecycle::running_start`. It allocates
+nothing, so it skips the host admission windows, which guard memory, swapout, thermal and
+disk headroom for a VM allocation (four one-second sampling pauses for Development, two
+fifteen-second pauses for Research). Under the startup lease it re-checks the receipt, the
+provider identity, disk identity and size, the request (bridges, dependency sockets,
+network, project share and translation), the owner registry, dependency sockets, network
+tools and the provider configuration. One behaviour changes: a running Research pool used to
+be sampled on the fresh-pool budget and could be refused on a busy host; it is now reported
+like any running pool.
+
+Provider trees are proven by content once per boot. A successful boot records a witness
+(`run/smolvm/provider-trees.json`) bound to its provider process: for the SmolVM tree, the
+engine tree and the guest rootfs copy, a metadata digest taken around the content proof and
+the content digest it was proven against. Later commands of that running pool, including
+retained preflight, accept a tree whose metadata digest and content anchor are unchanged
+(paths, types, modes, owners, inodes, link counts, sizes, modification and status-change
+times, symlink targets) and prove it by content again on any difference. A stopped pool, a
+new boot and `runtime repair-provider-tree` always prove by content. Warm starts now also
+check the guest rootfs copy, which the running path never did.
+
+Two limits on when the witness is used (decided for HACK-2092; the owner can revisit them):
+
+- **Qualified filesystems only.** The witness is accepted only when all three trees are on a
+  filesystem whose change-time behaviour was qualified: APFS today, checked with `statfs`
+  at each tree root, with device checks in the metadata walk. Any device change within a
+  tree disables the witness, including a mount of another APFS volume. APFS keeps nanosecond
+  ctime that user space cannot set back, and stores through a shared mapping update it
+  (both observed on Apple Silicon with SmolVM 1.34.1). On any other filesystem, or when the
+  type cannot be read, every start proves the trees by content and no witness is written.
+- **Bound to the runtime build.** The witness names the build that recorded it: the runtime
+  version plus a hash of source, compiler identity and build options embedded at compile
+  time, including dirty source inputs. Replacing the executable on disk does not change an
+  already running image's identity. A build with different inputs proves by content once,
+  then records its witness.
+
+The witness is read without blocking, so a FIFO or other special file at its path is
+refused like any unsafe receipt and the trees are proven by content. It is written through a
+temporary under the lifecycle lease and replaces the committed witness only by rename; a
+temporary left by an interrupted write is removed by the next write under the lease only
+when it is a regular file owned by this user, mode 0600, with one link. Any other entry is
+left in place and prevents publication; full content hashing remains available.
+
+Both proofs guard against drift (damage, cleanup tools, interrupted writers), not a
+same-user adversary who knows the scheme: the content anchors and the witness are writable
+by the same user. `tree_witness` lists what the metadata check gives up relative to the
+content proof (writes that keep size and ctime, such as raw device writes, clock changes,
+shared-mapping stores not yet reflected in ctime, and filesystems without fine ctime).
 
 ### Extending a stopped pool's approved hosts
 
@@ -2176,3 +2247,81 @@ prove fresh requests succeed on the original port and hostname. Also replace an
 owned container with a foreign/copied-label container and occupy a host port
 after retirement: no forwarding may reach the replacement, and the busy bridge
 must remain retired. Stop must disarm policies and leave no publisher or relay.
+
+### Legacy published-port cleanup acceptance
+
+The opt-in tests under
+`provider::graph::foreground::native_test::same_boot_absent_relay::legacy_enrollment`
+construct the legacy Ready/Pending state through the actual failed cleanup:
+they signal only their exact publisher child and observe its exit with WNOWAIT,
+so the unreaped publisher makes native stop fail before its owner exits. Both
+SIGINT-cleaned endpoints and SIGKILL-left socket/identity files are exercised.
+A separate live-orphan variant pauses cleanup before retiring the publisher and
+kills only its owned owner process. They
+exercise same-boot recovery, a retry after publisher exit but before registry
+publication, the audited successor-boot path, retained volume contents and a new
+graph reusing the released port/bridge. No old receipt or coordinator is fabricated.
+Both boot paths also interrupt the publication registry after its pending bytes
+are synchronized but before rename. The predecessor path additionally interrupts
+after the stopped receipt commits and before the recovery-intent completion
+digest, then verifies that cleanup resumes before publication retirement. It also
+interrupts after the completion digest commits and before dependency release;
+the dependency-free fixture verifies publication retirement across that boundary.
+It does not exercise a held dependency reservation. The macOS reservation-file
+unit tests cover that tail and its capacity reuse/refusal checks. The completion
+digest proves guest cleanup, not this host-side tail.
+They need a caller-prepared disposable capacity-one pool, a matching all-feature
+CLI, a pinned BusyBox image with `sh`, `httpd` and `sleep`, an exclusive host port
+and an external 300-second watchdog. Set `HACK_LOCAL_TEST_ROOT`,
+`HACK_LOCAL_TEST_BINARY`, `HACK_LOCAL_TEST_IMAGE` and `HACK_LOCAL_TEST_PORT` as for
+other isolated native fixtures. The tests retain their generated data receipts
+for inspection; stop the disposable pool after qualification. They are ignored
+on ordinary test runs and do not qualify recovery until executed on Apple Silicon.
+
+
+### Foreground lifetime and retained owner control generations
+
+The native foreground event queue watches the exact frontend parent and every
+retained publisher Child. SIGHUP is handled by both frontend and owner as a
+retaining stop request, including restored/restarted owners. Frontend loss requests ordinary retaining cleanup.
+A non-reaping child-exit check takes no provider lease, so healthy publishers do
+not contend with launch or status. Publisher exit is reaped promptly; before
+reaping, the owner pins the exact
+native birth and any committed/pending registry generation. Its exact exit proof
+is retained in memory across a failed registry write and durably recorded before
+cleanup. A readable different birth at a reused PID proves the recorded publisher
+gone, without authorizing a signal to the replacement; unreadable birth refuses.
+
+Each new owner process derives a control generation from its native PID, birth
+time and UID. Executable-path changes do not change that lifetime identity. The startup receipt binds that generation to its control directory.
+Retained restore therefore cannot reuse the predecessor's unfinished coordinator,
+even on the same guest boot. Missing generation selects the unchanged legacy
+run/boot directory. Pre-admission recovery derives the new directory from the
+exact recorded dead process, falling back to the legacy directory for old owners.
+Neither path overwrites or acknowledges an old coordinator.
+
+After graph recovery, frontend `down --recover` also recovers its captured dead
+frontend finalization under the existing exact-attempt lock and side-effect
+proofs. It exits zero with data retained and permits plain `up`. An external down
+also produces the confirmed-stop closing line in the original foreground.
+
+
+A publisher-only exit is reported as a bounded, run-bound frontend notice once
+its exact direct child has been reaped. It leaves the project's compute running
+and the authenticated owner available for `hack down`; it does not trigger a
+long guest cleanup or automatically recreate the publisher. `owner-status`
+reports retained port children as down, and ps/status preserve service rows and
+show that publication state. The frontend decodes notices after readiness,
+including multiple frames in a chunk and partial frames across chunks. Notices
+and status are presentation, not cleanup or replacement authority. Notice delivery
+is best-effort: a frontend may close its stdout pipe before the owner reaps an
+exited publisher. A failed notice must not prevent authenticated retaining cleanup;
+native identity and journal failures still refuse. Healthy
+siblings still require their current publication proof.
+
+When a retained provider process names an earlier versioned executable, lifecycle
+verification first checks the matching prepared-provider record. A confirmed pin
+mismatch reports `provider_pin_changed`, rather than interpreting that path as a
+changed PID file. This diagnostic grants no cross-version recovery authority;
+use the release that started the pool for recovery and stop, then prepare a fresh
+home for the current pin.

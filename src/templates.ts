@@ -12,6 +12,7 @@ import {
   DEFAULT_SCHEMAS_HOST,
   GLOBAL_ALLOY_FILENAME,
   GLOBAL_CADDY_COMPOSE_FILENAME,
+  GLOBAL_CADDY_PROJECT_NAME,
   GLOBAL_COREDNS_FILENAME,
   GLOBAL_GRAFANA_DASHBOARD_FILENAME,
   GLOBAL_GRAFANA_DASHBOARDS_DIR,
@@ -36,7 +37,7 @@ export function renderGlobalCaddyCompose(opts?: {
   const useStaticCaddyIp = opts?.useStaticCaddyIp === true;
   const bindAddress = opts?.bindAddress ?? null;
   return [
-    "name: hack-dev-proxy",
+    `name: ${GLOBAL_CADDY_PROJECT_NAME}`,
     "services:",
     "  caddy:",
     "    image: lucaslorentz/caddy-docker-proxy:2.10.0-alpine",

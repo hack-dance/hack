@@ -668,6 +668,7 @@ function baseStatus(
     program: "/usr/local/bin/hack",
     drift: "none",
     linger: true,
+    stateError: null,
     ...overrides,
   };
 }
@@ -3656,5 +3657,75 @@ linuxTest(
     fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
     fake.activeState = "inactive";
     expect(await uninstall()).toMatchObject({ ok: true, notInstalled: true });
+  }
+);
+
+linuxTest(
+  "a failed unit-state read is refused by file-less stop and uninstall",
+  async () => {
+    // Second-family review: with the managed file gone, a failed or timed
+    // out `systemctl show` became "nothing to do": stop exited 0 with
+    // hackd "not running" while a Restart=on-failure was pending, and
+    // uninstall reported "not installed".
+    const fake = fakeSystemd();
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+    // Waiting for its automatic restart, but the unit query fails (the
+    // manager probe itself succeeds).
+    fake.activeState = "activating";
+    fake.showFails = true;
+    fake.calls.length = 0;
+    const stop = await stopViaSystemdIfInstalled({
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(stop.handled).toBe(false);
+    expect(stop.refused).toContain("could not report");
+    expect(stop.refused).toContain("timed out");
+    expect(stop.refused).toContain("systemctl --user stop hackd.service");
+    const removed = await uninstallSystemdUnit({
+      unitPath,
+      deps: fake.deps,
+      hackHome: join(root, ".hack"),
+    });
+    expect(removed.ok).toBe(false);
+    if (!removed.ok) {
+      expect(removed.error).toContain("could not report");
+      expect(removed.error).toContain("systemctl --user stop hackd.service");
+    }
+    expect(
+      fake.calls.filter((call) =>
+        / (stop|disable|daemon-reload)( |$)/.test(call)
+      )
+    ).toEqual([]);
+    // "Not found" from the query is an observed absence: nothing to do.
+    const run = fake.deps.run;
+    const notFound: SystemdDeps = {
+      ...fake.deps,
+      run: (command, args) =>
+        command === "systemctl" &&
+        args.some((arg) => arg.startsWith("--property=LoadState,"))
+          ? Promise.resolve({
+              exitCode: 1,
+              stdout: "",
+              stderr: "Unit hackd.service could not be found.",
+            })
+          : run(command, args),
+    };
+    fake.showFails = false;
+    expect(
+      await stopViaSystemdIfInstalled({
+        pid: null,
+        hackHome: join(root, ".hack"),
+        deps: notFound,
+      })
+    ).toEqual({ handled: false, ownedPid: false, failed: null, refused: null });
+    expect(
+      await uninstallSystemdUnit({
+        unitPath,
+        deps: notFound,
+        hackHome: join(root, ".hack"),
+      })
+    ).toMatchObject({ ok: true, notInstalled: true });
   }
 );

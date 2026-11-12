@@ -467,8 +467,16 @@ export async function stopViaSystemdIfInstalled(opts: {
     return none;
   }
   if (!status.installed) {
-    // Without a file here an unknown state proves nothing either way, and
-    // nothing Hack installed is involved: leave it as before.
+    // A failed read is not evidence that nothing runs: a pending
+    // Restart=on-failure may remain, so it is refused, not reported as
+    // stopped (HACK-2052). An observed inactive or not-found unit is
+    // nothing to do.
+    if (status.stateError !== null) {
+      return {
+        ...none,
+        refused: `Not stopping ${SYSTEMD_UNIT_NAME}: there is no unit file at ${unitPath}, but systemd could not report whether it still runs or will restart (${status.stateError}). Check: systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it by hand, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
+      };
+    }
     if (
       status.activeState === null ||
       !MANAGER_STOPPABLE_STATES.has(status.activeState)

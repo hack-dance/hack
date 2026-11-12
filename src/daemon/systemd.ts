@@ -517,7 +517,8 @@ const NOT_BOOTED_WITH_SYSTEMD =
   /not been booted with systemd|not booted with systemd/i;
 const NO_USER_BUS =
   /connect to (the )?bus|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR/i;
-const UNIT_MISSING = /not loaded|does not exist|not found|No such file/i;
+const UNIT_MISSING =
+  /not loaded|does not exist|not found|could not be found|No such file/i;
 
 /**
  * What a unit's `ExecStart=` runs, as far as this parser can tell.
@@ -707,6 +708,13 @@ export interface SystemdServiceStatus {
   readonly drift: SystemdUnitDrift;
   /** null when unknown (loginctl missing or failed). */
   readonly linger: boolean | null;
+  /**
+   * Why the unit's state could not be read (the unit-specific `systemctl
+   * show` failed or timed out), else null. A unit systemd does not know is
+   * not an error: `show` reports it as `not-found`/`inactive`. Callers must
+   * not read a null `activeState` with an error here as "not running".
+   */
+  readonly stateError: string | null;
 }
 
 /**
@@ -748,6 +756,7 @@ export async function readSystemdServiceStatus(opts: {
       program,
       drift,
       linger,
+      stateError: null,
     };
   }
 
@@ -759,6 +768,7 @@ export async function readSystemdServiceStatus(opts: {
     "--property=LoadState,ActiveState,UnitFileState,MainPID,NeedDaemonReload",
   ]);
   const props = show.exitCode === 0 ? parseSystemdProperties(show.stdout) : {};
+  const stateError = describeStateError({ show, props });
   const mainPidRaw = Number.parseInt(props.MainPID ?? "", 10);
   return {
     unitPath: opts.unitPath,
@@ -773,7 +783,28 @@ export async function readSystemdServiceStatus(opts: {
     program,
     drift,
     linger,
+    stateError,
   };
+}
+
+/**
+ * Why the unit-specific `systemctl show` did not report a state, or null.
+ * systemd reports a unit it does not know as `not-found`/`inactive` with
+ * exit 0; a "not found" failure from an older systemctl is no error either.
+ */
+function describeStateError(opts: {
+  readonly show: ServiceCommandResult;
+  readonly props: Readonly<Record<string, string>>;
+}): string | null {
+  const { show } = opts;
+  if (show.exitCode !== 0) {
+    return UNIT_MISSING.test(show.stderr)
+      ? null
+      : `systemctl --user show ${SYSTEMD_UNIT_NAME} failed: ${firstLine(show.stderr) || `exit code ${show.exitCode}`}`;
+  }
+  return opts.props.ActiveState === undefined
+    ? `systemctl --user show ${SYSTEMD_UNIT_NAME} reported no ActiveState`
+    : null;
 }
 
 /**
@@ -2597,8 +2628,15 @@ async function refuseLoadedUnitWithoutFile(opts: {
     unitPath: opts.unitPath,
     deps: opts.deps,
   });
+  if (!status?.availability.available) {
+    return null;
+  }
+  // A failed read is not evidence that nothing runs (a pending restart
+  // may remain): refuse it like a loaded unit (HACK-2052).
+  if (status.stateError !== null) {
+    return `Not uninstalling ${SYSTEMD_UNIT_NAME}: there is no unit file at ${opts.unitPath}, but systemd could not report whether it still runs or will restart (${status.stateError}). Check: systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it by hand, run: systemctl --user stop ${SYSTEMD_UNIT_NAME} (and, if its file still exists elsewhere: systemctl --user disable ${SYSTEMD_UNIT_NAME}, then systemctl --user daemon-reload)`;
+  }
   if (
-    !status?.availability.available ||
     status.activeState === null ||
     !MANAGER_STOPPABLE_STATES.has(status.activeState)
   ) {

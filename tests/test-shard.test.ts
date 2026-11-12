@@ -938,6 +938,75 @@ describe("test shard per-file bun test process", () => {
     return root;
   }
 
+  async function suitePreloadFixture(rejectingSuite?: string): Promise<string> {
+    const root = await bunFixture();
+    for (const suite of FIXTURE_SUITES) {
+      const cwd = join(root, suite.cwd);
+      await writeFile(
+        join(cwd, "bunfig.toml"),
+        '[test]\npreload = ["./preload.ts"]\n'
+      );
+      await writeFile(
+        join(cwd, "preload.ts"),
+        [
+          'import { afterEach } from "bun:test";',
+          'import { writeFileSync } from "node:fs";',
+          `globalThis[Symbol.for("suite-preload")] = "${suite.id}";`,
+          "afterEach(() => {",
+          `  writeFileSync(new URL("./guard-receipt", import.meta.url), "${suite.id}");`,
+          suite.id === rejectingSuite
+            ? '  throw new Error("fixture preload guard failed");'
+            : "",
+          "});",
+        ].join("\n")
+      );
+      await writeFile(
+        join(cwd, "tests/preload.test.ts"),
+        [
+          'import { expect, test } from "bun:test";',
+          'import { writeFileSync } from "node:fs";',
+          'test("suite preload ran before the test", () => {',
+          `  expect(globalThis[Symbol.for("suite-preload")]).toBe("${suite.id}");`,
+          '  writeFileSync(new URL("./body-receipt", import.meta.url), "passed");',
+          "});",
+        ].join("\n")
+      );
+    }
+    return root;
+  }
+
+  for (const suite of FIXTURE_SUITES) {
+    for (const rejects of [false, true]) {
+      test(`${suite.id} suite preload ${rejects ? "guard failure fails the file" : "runs before the test and after its body"}`, async () => {
+        const root = await suitePreloadFixture(rejects ? suite.id : undefined);
+        const file = join(suite.cwd, "tests/preload.test.ts");
+        const { state, ended } = await runFixture({
+          files: [file],
+          runFile: bunTestFile({
+            repoRoot: root,
+            suites: FIXTURE_SUITES,
+            quiet: true,
+          }),
+        });
+        // The assertion in the body must pass before a teardown failure counts.
+        expect(
+          await Bun.file(join(root, suite.cwd, "tests/body-receipt")).text()
+        ).toBe("passed");
+        expect(
+          await Bun.file(join(root, suite.cwd, "guard-receipt")).text()
+        ).toBe(suite.id);
+        expect(ended).toBe("complete");
+        expect(state.results).toHaveLength(1);
+        expect(state.results[0]).toMatchObject({
+          file,
+          outcome: rejects ? "fail" : "pass",
+          exitCode: rejects ? 1 : 0,
+          filesRan: 1,
+        });
+      }, 30_000);
+    }
+  }
+
   test("reports exit status and exactly one file from the suite directory", async () => {
     const root = await bunFixture();
     const run = bunTestFile({

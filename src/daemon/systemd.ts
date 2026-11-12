@@ -788,9 +788,37 @@ export async function readSystemdServiceStatus(opts: {
 }
 
 /**
+ * A failed unit query whose only diagnostic names hackd.service itself as
+ * absent ("Unit hackd.service could not be found.", with an optional
+ * "Failed to get properties:" prefix), and nothing else. Anything broader
+ * (a missing bus socket, "No such file or directory", a runner's
+ * "systemctl not found", a timeout) does not establish that the unit is
+ * gone, so it is not matched (HACK-2142).
+ */
+const NAMED_UNIT_ABSENT =
+  /^(?:Failed to get properties: )?Unit hackd\.service (?:could not be found|not found|not loaded)\.?$/;
+/** Runner exits that mean the query never ran or never finished. */
+const QUERY_NOT_RUN_EXIT_CODES = new Set([124, 126, 127]);
+
+function isNamedUnitAbsent(show: ServiceCommandResult): boolean {
+  if (QUERY_NOT_RUN_EXIT_CODES.has(show.exitCode)) {
+    return false;
+  }
+  const lines = show.stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return (
+    lines.length > 0 && lines.every((line) => NAMED_UNIT_ABSENT.test(line))
+  );
+}
+
+/**
  * Why the unit-specific `systemctl show` did not report a state, or null.
  * systemd reports a unit it does not know as `not-found`/`inactive` with
- * exit 0; a "not found" failure from an older systemctl is no error either.
+ * exit 0; a failure whose only diagnostic names hackd.service as absent
+ * ({@link isNamedUnitAbsent}) is no error either. Every other failure
+ * (bus, tool discovery, timeout, anything else) is kept.
  */
 function describeStateError(opts: {
   readonly show: ServiceCommandResult;
@@ -798,7 +826,7 @@ function describeStateError(opts: {
 }): string | null {
   const { show } = opts;
   if (show.exitCode !== 0) {
-    return UNIT_MISSING.test(show.stderr)
+    return isNamedUnitAbsent(show)
       ? null
       : `systemctl --user show ${SYSTEMD_UNIT_NAME} failed: ${firstLine(show.stderr) || `exit code ${show.exitCode}`}`;
   }

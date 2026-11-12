@@ -361,8 +361,10 @@ is loaded from another directory), `stop` refuses and prints the
 `systemctl --user` commands to review and stop it, instead of reporting hackd as
 stopped. `uninstall` does the same in that case instead of reporting
 that nothing was installed. If systemd cannot report the unit's state at all (the query
-fails or times out), both refuse in the same way: only a unit systemd reports
-as inactive or not found counts as nothing to do. `start` and `stop` act on the unit only when its effective environment
+fails, times out, loses the user bus, or `systemctl` cannot be run), both refuse
+in the same way. Only a unit systemd reports as inactive or not found, or a
+failed query whose only message names `hackd.service` itself as absent
+("Unit hackd.service could not be found."), counts as nothing to do. `start` and `stop` act on the unit only when its effective environment
 serves the shell's Hack home. A unit that serves another Hack home is left alone:
 `start` starts this home's hackd directly (its socket, pid file and lock live in
 this home's `daemon/` directory), and `stop` stops only this home's own hackd.

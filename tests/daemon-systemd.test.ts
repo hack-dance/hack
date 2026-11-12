@@ -3729,3 +3729,81 @@ linuxTest(
     ).toMatchObject({ ok: true, notInstalled: true });
   }
 );
+
+linuxTest(
+  "only a diagnostic naming hackd.service as absent counts as no unit (HACK-2142)",
+  async () => {
+    // Second-family review: the broad "not found" / "No such file" match
+    // read a lost bus or a missing systemctl as "the unit does not exist",
+    // so file-less stop and uninstall reported nothing to do.
+    const fake = fakeSystemd();
+    fake.activeState = "activating";
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+    const withQuery = (result: ServiceCommandResult): SystemdDeps => ({
+      ...fake.deps,
+      run: (command, args) =>
+        command === "systemctl" &&
+        args.some((arg) => arg.startsWith("--property=LoadState,"))
+          ? Promise.resolve(result)
+          : fake.deps.run(command, args),
+    });
+    const stop = (deps: SystemdDeps) =>
+      stopViaSystemdIfInstalled({
+        pid: null,
+        hackHome: join(root, ".hack"),
+        deps,
+      });
+    const uninstall = (deps: SystemdDeps) =>
+      uninstallSystemdUnit({ unitPath, deps, hackHome: join(root, ".hack") });
+    for (const failure of [
+      {
+        exitCode: 1,
+        stdout: "",
+        stderr: "Failed to connect to bus: No such file or directory",
+      },
+      // The runner's own report when systemctl vanished between calls.
+      { exitCode: 127, stdout: "", stderr: "systemctl not found" },
+      // A named-unit line next to another error proves nothing either.
+      {
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          "Unit hackd.service could not be found.\nFailed to connect to bus: No such file or directory",
+      },
+    ]) {
+      const deps = withQuery(failure);
+      fake.calls.length = 0;
+      const stopped = await stop(deps);
+      expect(stopped.refused).toContain("could not report");
+      expect(stopped.refused).toContain("systemctl --user stop hackd.service");
+      const removed = await uninstall(deps);
+      expect(removed.ok).toBe(false);
+      if (!removed.ok) {
+        expect(removed.error).toContain("could not report");
+      }
+      expect(
+        fake.calls.filter((call) =>
+          / (stop|disable|daemon-reload)( |$)/.test(call)
+        )
+      ).toEqual([]);
+    }
+    // The real missing-unit diagnostic (with or without the prefix) stays a
+    // successful no-op.
+    for (const stderr of [
+      "Unit hackd.service could not be found.",
+      "Failed to get properties: Unit hackd.service not found.",
+    ]) {
+      const deps = withQuery({ exitCode: 1, stdout: "", stderr });
+      expect(await stop(deps)).toEqual({
+        handled: false,
+        ownedPid: false,
+        failed: null,
+        refused: null,
+      });
+      expect(await uninstall(deps)).toMatchObject({
+        ok: true,
+        notInstalled: true,
+      });
+    }
+  }
+);

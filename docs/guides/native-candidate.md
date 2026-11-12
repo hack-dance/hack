@@ -294,7 +294,14 @@ With `--json` the report is the `data` of the standard result envelope:
   no sentence for is still listed, by its code and field.
 
 The preflight is a report, not an admission decision: `hack up` still runs its
-own checks, and a clean report starts nothing. It does not cover:
+own checks, and a clean report starts nothing. Foreground and detached `up`
+also run the shared file-local start checks on the selected, adapted Compose
+input before hooks, image acquisition or VM boot. A known static blocker such
+as UDP publication refuses without starting a cold pool. Admitted builds use
+review-only image placeholders for this check; startup still builds or selects
+the real image and repeats its review before graph admission. Missing or invalid
+static-review metadata refuses before boot and names the preflight command.
+The standalone preflight does not cover:
 
 - A project with native project inputs: a native project file
   (`.hack/hack.project.json`) or a Compose file adopted into generated native
@@ -468,7 +475,8 @@ bridge to the container's target port, after the graph is ready. The rules:
 
 - Only TCP with an explicit host port is published. UDP, an engine-assigned host
   port (a bare `"3000"`), and IPv6 loopback (`::1`) publication are refused with
-  `graph_port_publication`; keep those projects on the Compose backend.
+  `graph_port_publication` before VM boot, including detached `up`; keep those
+  projects on the Compose backend.
 - One graph publishes at most 16 ports. Routes and published ports share the
   pool's 32 application bridge sockets.
 - Two active services, two graphs in the same pool, or a graph and any other

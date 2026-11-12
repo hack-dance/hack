@@ -35,9 +35,9 @@ import {
   isNativeRuntimeStopError,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
-  nativeFailureDetail,
 } from "./native-runtime-client.ts";
 import { NATIVE_START_REFUSAL_ENTRIES } from "./native-start-refusal-entries.ts";
+import { readNativeStartRefusals } from "./native-start-refusals.ts";
 
 /**
  * Native preflight: everything that would stop a Compose project from starting
@@ -1064,25 +1064,13 @@ function runtimeStartFindings(
   value: unknown,
   services: readonly string[]
 ): NativePreflightFinding[] | null {
-  if (!Array.isArray(value) || value.length > 4096) {
+  const refusals = readNativeStartRefusals(value, services);
+  if (refusals === null) {
     return null;
   }
   const findings: NativePreflightFinding[] = [];
-  for (const refusal of value) {
-    if (
-      !(
-        isRecord(refusal) &&
-        typeof refusal.code === "string" &&
-        CODE.test(refusal.code)
-      )
-    ) {
-      return null;
-    }
-    const detail = nativeFailureDetail(refusal);
-    const service =
-      detail.service && services.includes(detail.service)
-        ? detail.service
-        : undefined;
+  for (const refusal of refusals) {
+    const service = refusal.service;
     const field = NATIVE_START_REFUSAL_ENTRIES[refusal.code];
     findings.push(
       finding(
@@ -1095,7 +1083,7 @@ function runtimeStartFindings(
         },
         {
           message:
-            detail.message ??
+            refusal.message ??
             `Native startup refuses this configuration (${refusal.code}).`,
           fix: USE_COMPOSE,
         }

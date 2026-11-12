@@ -159,6 +159,7 @@ import {
   requireCapturedNativeSourceWithinLimit,
   requireNativeSourceWithinLimit,
 } from "./native-project-source-size.ts";
+import { requireNativeStaticStartReview } from "./native-project-start-preflight.ts";
 import { reportNativeRestartPolicyNotices } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
@@ -357,6 +358,7 @@ type Dependencies = {
   /** Value-free operator notices (for example credential expiry); stderr by default. */
   warn: (line: string) => void;
   review: typeof withNativeProjectReview;
+  staticReview: typeof requireNativeStaticStartReview;
   selectReview: typeof selectNativeProjectReviewIdentity;
   retainedImages: typeof selectNativeRetainedImages;
   serve: typeof serveNativeProjectGraph;
@@ -390,6 +392,7 @@ const DEFAULTS: Dependencies = {
     process.stderr.write(`${line}\n`);
   },
   review: withNativeProjectReview,
+  staticReview: requireNativeStaticStartReview,
   selectReview: selectNativeProjectReviewIdentity,
   retainedImages: selectNativeRetainedImages,
   serve: serveNativeProjectGraph,
@@ -1993,6 +1996,16 @@ async function startNativeProjectAttempt(
     selectedDependencyFile !== undefined,
     buildServices
   );
+  await deps.staticReview({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    composeFile: opts.composeFile,
+    input,
+    profiles,
+    buildServices,
+    invoke: deps.invoke,
+    signal: opts.signal,
+  });
   // A graph that captures source (bind mounts or a dependency cache) measures it
   // before hooks, image work or runtime start, so an oversized project refuses with
   // its size and largest paths. An image-only graph never reads source content.

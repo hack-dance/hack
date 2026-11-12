@@ -100,6 +100,7 @@ async function fixture(withEnvironment = true) {
   const dependencies: NonNullable<
     Parameters<typeof startNativeProject>[0]["dependencies"]
   > = {
+    staticReview: async () => {},
     prepareStorage: async () => {},
     retainedImages: async () => new Map(),
     load: async () => null,

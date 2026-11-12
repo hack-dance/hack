@@ -108,6 +108,9 @@ exit 1
           start_refusals: startRefusals,
           plan: {
             namespace: NAMESPACE,
+            compose_sha256: createHash("sha256")
+              .update(JSON.stringify(compose))
+              .digest("hex"),
             services: {},
             ...plan,
             enrollment_compatible: !diagnostics.some(
@@ -529,6 +532,7 @@ test(
     expect(refused.output).toContain("E_PERMISSION");
     // A clean project has no CLI blocker and native up goes on to the runtime.
     const clean = await fixture({ services: { web: { image: IMAGE } } });
+    await clean.review([], { services: { web: { active: true } } });
     const env = { ...clean.native, ...GRANT };
     expect(codes((await preflight(clean, env)).report, "cli")).toEqual([]);
     await scriptSourceShare(clean);
@@ -1024,6 +1028,14 @@ test(
       services: { web: { image: IMAGE, ports: ["8787:3000/udp"] } },
     });
     await scriptSourceShare(f);
+    await f.review([], { services: { web: { active: true } } }, "both", [
+      {
+        code: "graph_port_publication",
+        message_fixed: true,
+        message: UDP_REASON,
+        service: "web",
+      },
+    ]);
     await f.reply("runtime-up.err", {
       code: "graph_port_publication",
       message_fixed: true,
@@ -1038,6 +1050,7 @@ test(
       expect(result.output).toContain(UDP_REASON);
       expect(result.output).not.toContain(PRIVATE);
       expect(result.output).not.toContain("startup was not confirmed");
+      expect(await f.calls()).not.toContain("runtime up");
       if (flags.includes("--json")) {
         expect(JSON.parse(result.stdout)).toMatchObject({
           ok: false,

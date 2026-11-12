@@ -2021,7 +2021,6 @@ export async function checkCoreDnsForwarding(): Promise<CheckResult> {
 export async function checkCaddyLocalCa(): Promise<CheckResult> {
   const paths = getGlobalPaths();
   const identity = await inspectCaddyCaIdentity({
-    composeFile: paths.caddyCompose,
     certPath: paths.caddyCaCert,
   });
   return {

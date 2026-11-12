@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -117,4 +126,25 @@ test("gateway auth accepts query token when allowed", async () => {
   if (!denied.ok) {
     expect(denied.reason).toBe("missing");
   }
+});
+
+test("the token store is never written through a planted link (HACK-2142)", async () => {
+  // Reviewer: Bun.write follows a symlink, so a link planted in a once
+  // group-writable gateway/ had its target overwritten by the token JSON.
+  rootDir = await mkdtemp(join(tmpdir(), "hack-gateway-"));
+  const gateway = join(rootDir, "gateway");
+  await mkdir(gateway, { recursive: true });
+  const victim = join(rootDir, "victim.txt");
+  await writeFile(victim, "keep\n");
+  await symlink(victim, join(gateway, "tokens.json"));
+  await expect(createGatewayToken({ rootDir, label: "phone" })).rejects.toThrow(
+    "not a plain file"
+  );
+  expect(await readFile(victim, "utf8")).toBe("keep\n");
+  // A normal store is written owner-only, with no temp file left behind.
+  await rm(join(gateway, "tokens.json"));
+  await createGatewayToken({ rootDir, label: "phone" });
+  expect((await stat(join(gateway, "tokens.json"))).mode & 0o777).toBe(0o600);
+  expect(await readdir(gateway)).toEqual(["tokens.json"]);
+  expect((await listGatewayTokens({ rootDir })).length).toBe(1);
 });

@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { readTextFile, writeTextFile } from "../../../lib/fs.ts";
+import { readTextFile } from "../../../lib/fs.ts";
 import { getString, isRecord } from "../../../lib/guards.ts";
 
 export type GatewayTokenRecord = {
@@ -66,7 +66,49 @@ export async function writeGatewayTokenStore(opts: {
   // Owner-only from creation: hackd appends here (HACK-2142).
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const path = resolveGatewayTokensPath({ rootDir: opts.rootDir });
-  await writeTextFile(path, `${JSON.stringify(opts.store, null, 2)}\n`);
+  await writeOwnerOnlyReplacing({
+    path,
+    text: `${JSON.stringify(opts.store, null, 2)}\n`,
+  });
+}
+
+/**
+ * Replaces `path` without writing through it (HACK-2142): an existing entry
+ * must be this user's plain file (not a link, not hard-linked elsewhere),
+ * else the write is refused; the text goes to a new owner-only file
+ * (exclusive create) that is renamed over it, so a link planted after the
+ * check is replaced, never followed.
+ */
+async function writeOwnerOnlyReplacing(opts: {
+  readonly path: string;
+  readonly text: string;
+}): Promise<void> {
+  const uid = process.getuid?.() ?? -1;
+  const existing = await lstat(opts.path).catch(() => null);
+  if (
+    existing !== null &&
+    (existing.isSymbolicLink() ||
+      !existing.isFile() ||
+      existing.nlink > 1 ||
+      (uid >= 0 && existing.uid !== uid))
+  ) {
+    throw new Error(
+      `${opts.path} is not a plain file of this user's (a link, a hard link or another user's entry); review and remove it`
+    );
+  }
+  const temp = `${opts.path}.${process.pid}.${randomUUID()}.tmp`;
+  const handle = await open(temp, "wx", 0o600);
+  try {
+    await handle.writeFile(opts.text);
+  } finally {
+    await handle.close();
+  }
+  try {
+    await rename(temp, opts.path);
+  } catch (error: unknown) {
+    await rm(temp, { force: true });
+    throw error;
+  }
 }
 
 /**

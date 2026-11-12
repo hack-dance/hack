@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-block" viewBox="0 0 521 602" width="521" height="602" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_r:var(--pele-radius,4px);--_tw:var(--pele-title-weight,bold);--_fm:var(--pele-font-mono,Geist Mono);font:15px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,Geist)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="block" data-theme="dark"><style><![CDATA[/* Hack Dance house theme for Pele 1.9.x: ink on cream (fleet palette B). Light by default; dark via [data-theme=dark].
+   Colour only for meaning (house classes). Never resize label text: Pele sized label boxes for its own font size. */
+.pele {
+  --pele-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --pele-font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --pele-bg: #f3efe3;
+  --pele-fg: #1d1d1b;
+  --pele-muted: #3d3c37;
+  --pele-line: #3d3c37;
+  --pele-surface: #fbf9f1;
+  --pele-surface-alt: #e8e4d8;
+  --pele-border: #66625a;
+  --pele-accent: #1d1d1b;
+  --pele-critical: #c2461f;
+  --pele-error: #c2461f;
+  --pele-radius: 8px;
+  --pele-title-weight: 600;
+  --pele-heading-weight: 600;
+  --pele-bold-weight: 600;
+  --pele-series-1: #5b3df5;
+  --pele-series-2: #0e9f8a;
+  --pele-series-3: #e08a00;
+  --pele-series-4: #d6345a;
+  --pele-series-5: #2f7de1;
+  --pele-series-6: #8a5cf6;
+  --pele-series-7: #4f9d2d;
+  --pele-series-8: #a0674b;
+  /* semantic state tints (house classes) */
+  --hd-live: #4b4790;
+  --hd-live-bg: #e6e4f0;
+  --hd-wait: #34506e;
+  --hd-wait-bg: #d3dbe5;
+  --hd-ok: #3a7a2e;
+  --hd-ok-bg: #e2ebd9;
+  --hd-fail: #c2461f;
+  --hd-fail-bg: #f5e0d6;
+  --hd-idle: #8a8576;
+  --hd-idle-bg: #e8e4d8;
+  background: var(--pele-bg);
+}
+.pele[data-theme="dark"],
+[data-theme="dark"] .pele {
+  --pele-bg: #11100e;
+  --pele-fg: #ede8d9;
+  --pele-muted: #c9c3b2;
+  --pele-line: #c9c3b2;
+  --pele-surface: #191815;
+  --pele-surface-alt: #1b1a17;
+  --pele-border: #8f897a;
+  --pele-accent: #ede8d9;
+  --pele-critical: #ff7a52;
+  --pele-error: #ff7a52;
+  --pele-series-1: #9a86ff;
+  --pele-series-2: #3fd1b8;
+  --pele-series-3: #ffb547;
+  --pele-series-4: #ff6b8b;
+  --pele-series-5: #6aa8ff;
+  --pele-series-6: #c4a5ff;
+  --pele-series-7: #8fd16a;
+  --pele-series-8: #d29b7f;
+  --hd-live: #a39ce0;
+  --hd-live-bg: #24223a;
+  --hd-wait: #9db4cf;
+  --hd-wait-bg: #22303d;
+  --hd-ok: #7cc25e;
+  --hd-ok-bg: #1c2a17;
+  --hd-fail: #ff7a52;
+  --hd-fail-bg: #33190f;
+  --hd-idle: #7a7466;
+  --hd-idle-bg: #1b1a17;
+}
+/* polish */
+.pele .pele-edge path {
+  stroke-width: 1.4px;
+  stroke-linecap: round;
+}
+.pele .pele-edge-label rect {
+  fill: var(--pele-bg);
+}
+.pele .pele-edge-label text {
+  fill: var(--pele-muted);
+}
+.pele .pele-cluster-label,
+.pele .pele-title {
+  letter-spacing: 0.01em;
+}
+.pele .pele-node > rect,
+.pele .pele-node > path,
+.pele .pele-node > polygon,
+.pele .pele-node > circle,
+.pele .pele-node > ellipse {
+  stroke-width: 1.2px;
+}
+/* house semantic classes: in Mermaid write `classDef live stroke-width:1.6px` + `class X live` */
+.pele .live > rect,
+.pele .live > path,
+.pele .live > polygon,
+.pele .live > circle,
+.pele .live > ellipse {
+  fill: var(--hd-live-bg) !important;
+  stroke: var(--hd-live) !important;
+}
+.pele .wait > rect,
+.pele .wait > path,
+.pele .wait > polygon,
+.pele .wait > circle,
+.pele .wait > ellipse {
+  fill: var(--hd-wait-bg) !important;
+  stroke: var(--hd-wait) !important;
+}
+.pele .ok > rect,
+.pele .ok > path,
+.pele .ok > polygon,
+.pele .ok > circle,
+.pele .ok > ellipse {
+  fill: var(--hd-ok-bg) !important;
+  stroke: var(--hd-ok) !important;
+}
+.pele .fail > rect,
+.pele .fail > path,
+.pele .fail > polygon,
+.pele .fail > circle,
+.pele .fail > ellipse {
+  fill: var(--hd-fail-bg) !important;
+  stroke: var(--hd-fail) !important;
+}
+.pele .idle > rect,
+.pele .idle > path,
+.pele .idle > polygon,
+.pele .idle > circle,
+.pele .idle > ellipse {
+  fill: var(--hd-idle-bg) !important;
+  stroke: var(--hd-idle) !important;
+  stroke-dasharray: 4 3;
+}
+.pele .live .pele-label {
+  fill: var(--hd-live);
+  font-weight: 600;
+}
+.pele .wait .pele-label {
+  fill: var(--hd-wait);
+  font-weight: 600;
+}
+.pele .ok .pele-label {
+  fill: var(--hd-ok);
+  font-weight: 600;
+}
+.pele .fail .pele-label {
+  fill: var(--hd-fail);
+  font-weight: 600;
+}
+.pele .idle .pele-label {
+  fill: var(--hd-idle);
+}
+]]></style><text class="pele-title" font-weight="var(--_tw)" text-anchor="middle" xml:space="preserve"><tspan x="260.5" y="40.75">Local project components</tspan></text><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge" data-id="1-cli-daemon"><path d="M173.39,82.5L339.77,82.5"/><path class="pele-marker" d="M346.77,82.5L338.77,85.86L338.77,79.14Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="1-cli-choose"><path d="M98.69,106L98.69,170"/><path class="pele-marker" d="M98.69,177L95.33,169L102.05,169Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="1-choose-compose"><path d="M98.69,224L98.69,288"/><path class="pele-marker" d="M98.69,295L95.33,287L102.05,287Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="1-choose-native"><path d="M421.46,224L421.46,288"/><path class="pele-marker" d="M421.46,295L418.1,287L424.82,287Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="1-compose-services"><path d="M98.69,342L98.69,406"/><path class="pele-marker" d="M98.69,413L95.33,405L102.05,405Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="1-native-services"><path d="M421.46,342L421.46,406"/><path class="pele-marker" d="M421.46,413L418.1,405L424.82,405Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="1-proxy-services"><path d="M98.69,531L98.69,467"/><path class="pele-marker" d="M98.69,460L102.05,468L95.33,468Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="1-dns-proxy"><path d="M346.77,554.5L180.39,554.5"/><path class="pele-marker" d="M173.39,554.5L181.39,551.14L181.39,557.86Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-nodes"><g class="pele-node pele-shape-rect" data-id="cli" transform="translate(98.69,82.5)"><rect x="-74.69" y="-23.5" width="149.39" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Hack CLI</text></g><g class="pele-node pele-shape-rect" data-id="daemon" transform="translate(421.46,82.5)"><rect x="-74.69" y="-23.5" width="149.39" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Daemon cache</text></g><g class="pele-node pele-shape-rect" data-id="choose" transform="translate(260.08,200.5)"><rect x="-236.08" y="-23.5" width="472.16" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Choose one engine</text></g><g class="pele-node pele-shape-rect" data-id="compose" transform="translate(98.69,318.5)"><rect x="-74.69" y="-23.5" width="149.39" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Compose default</text></g><g class="pele-node pele-shape-rect" data-id="native" transform="translate(421.46,318.5)"><rect x="-74.69" y="-23.5" width="149.39" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Native VM beta</text></g><g class="pele-node pele-shape-rect" data-id="services" transform="translate(260.08,436.5)"><rect x="-236.08" y="-23.5" width="472.16" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Project services</text></g><g class="pele-node pele-shape-rect" data-id="proxy" transform="translate(98.69,554.5)"><rect x="-74.69" y="-23.5" width="149.39" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Caddy proxy</text></g><g class="pele-node pele-shape-rect" data-id="dns" transform="translate(421.46,554.5)"><rect x="-74.69" y="-23.5" width="149.39" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Local DNS</text></g></g><g class="pele-edge-labels" font-size="13"><g class="pele-edge-label" data-id="1-cli-daemon"><rect x="217.06" y="72.5" width="86.03" height="20" rx="3" fill="var(--_bg)"/><text x="260.08" y="87.05" text-anchor="middle">cached views</text></g><g class="pele-edge-label" data-id="1-choose-compose"><rect x="75.18" y="249.5" width="47.03" height="20" rx="3" fill="var(--_bg)"/><text x="98.69" y="264.05" text-anchor="middle">default</text></g><g class="pele-edge-label" data-id="1-choose-native"><rect x="401.56" y="249.5" width="39.8" height="20" rx="3" fill="var(--_bg)"/><text x="421.46" y="264.05" text-anchor="middle">opt in</text></g><g class="pele-edge-label" data-id="1-proxy-services"><rect x="77.72" y="485.5" width="41.94" height="20" rx="3" fill="var(--_bg)"/><text x="98.69" y="500.05" text-anchor="middle">HTTP</text></g><g class="pele-edge-label" data-id="1-dns-proxy"><rect x="215.26" y="544.5" width="89.64" height="20" rx="3" fill="var(--_bg)"/><text x="260.08" y="559.05" text-anchor="middle">proxy address</text></g></g></svg>

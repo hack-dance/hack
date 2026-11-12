@@ -1,0 +1,22 @@
+---
+title: Local project components
+---
+block-beta
+  columns 3
+  cli["Hack CLI"] space daemon["Daemon cache"]
+  space:3
+  choose["Choose one engine"]:3
+  space:3
+  compose["Compose default"] space native["Native VM beta"]
+  space:3
+  services["Project services"]:3
+  space:3
+  proxy["Caddy proxy"] space dns["Local DNS"]
+  cli -- "cached views" --> daemon
+  cli --> choose
+  choose -- "default" --> compose
+  choose -- "opt in" --> native
+  compose --> services
+  native --> services
+  proxy -- "HTTP" --> services
+  dns -- "proxy address" --> proxy

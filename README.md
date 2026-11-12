@@ -32,7 +32,17 @@ Hack treats these as one problem. It manages the project's whole environment, no
 only its ports. A project has one identity. Hack uses it to route
 `api.myapp.hack.local`, decrypt the project's secrets, start its helper processes,
 label its logs, and keep its branch instances apart. Under the hood it uses Docker
-Compose for services and Caddy for local DNS and trusted TLS.
+Compose for services, local DNS helpers for names, and Caddy for trusted TLS.
+
+The CLI runs services through one selected engine, can read cached views from the
+daemon, and shares DNS and a proxy across projects; the native VM is an opt-in
+Apple Silicon macOS beta through `hack-next`.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/project.dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="./docs/assets/readme/project.light.svg" />
+  <img alt="CLI and daemon, alternative engines, project services, DNS and proxy" src="./docs/assets/readme/project.light.svg" />
+</picture>
 
 | The job | A common workaround | With Hack |
 | --- | --- | --- |
@@ -121,6 +131,16 @@ If something looks wrong, run `hack doctor` and read what it reports. Then run
 [Getting started](docs/guides/getting-started.md) walks through each step.
 
 ## Core commands
+
+After global setup, `init` writes config, `up --detach` starts services, `open`
+opens their URL, `logs --no-follow` reads output, and `down` stops the project while keeping
+its data.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/first-run.dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="./docs/assets/readme/first-run.light.svg" />
+  <img alt="Init, start, open, inspect logs, then stop" src="./docs/assets/readme/first-run.light.svg" />
+</picture>
 
 ```bash
 hack up --detach                     # start the project (hack down stops it)

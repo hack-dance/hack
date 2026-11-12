@@ -1,0 +1,8 @@
+---
+title: First project workflow
+---
+flowchart LR
+  Init["hack init"] --> Up["hack up --detach"]
+  Up --> Open["hack open"]
+  Open --> Logs["hack logs --no-follow"]
+  Logs --> Down["hack down"]

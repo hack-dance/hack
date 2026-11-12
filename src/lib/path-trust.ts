@@ -188,14 +188,14 @@ async function checkServicePathEntry(opts: {
     return `${opts.path} could not be inspected: ${error instanceof Error ? error.message : String(error)}`;
   }
   // Ownership first, links included: in a sticky directory the owner of a
-  // link can still replace it. A regular file in a root-owned directory is
-  // the package manager's (setuid tools owned by system accounts): only its
-  // mode matters there.
+  // link can still replace it. A regular file in a root-owned directory
+  // nobody else can write is the package manager's (setuid tools owned by
+  // system accounts): only its mode matters there.
   if (
     opts.uid >= 0 &&
     info.uid !== opts.uid &&
     info.uid !== 0 &&
-    !(info.isFile() && (await isRootOwned(dirname(opts.path))))
+    !(info.isFile() && (await isProtectedSystemDir(dirname(opts.path))))
   ) {
     return `${opts.path} is owned by another user (uid ${info.uid})`;
   }
@@ -232,9 +232,17 @@ export async function lettingOthersCreate(dir: string): Promise<string | null> {
   return (mode & 0o022) === 0 ? null : `mode ${(mode & 0o7777).toString(8)}`;
 }
 
-async function isRootOwned(dir: string): Promise<boolean> {
+/**
+ * A root-owned directory nobody else can write (sticky or not): only there
+ * does a file's foreign owner mean "the package manager set it". In `/tmp`
+ * (root-owned, 1777) a file's owner controls it.
+ */
+async function isProtectedSystemDir(dir: string): Promise<boolean> {
   try {
-    return (await lstat(dir)).uid === 0;
+    const info = await lstat(dir);
+    return (
+      info.isDirectory() && info.uid === 0 && (Number(info.mode) & 0o022) === 0
+    );
   } catch {
     return false;
   }

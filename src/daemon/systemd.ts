@@ -1675,7 +1675,10 @@ async function checkPathDirectoryPrograms(opts: {
   let systemDir: boolean;
   try {
     entries = await readdir(opts.dir);
-    systemDir = (await stat(opts.dir)).uid === 0;
+    const dirInfo = await stat(opts.dir);
+    // Root-owned and writable by nobody else (never /tmp-like): the
+    // package manager's directory.
+    systemDir = dirInfo.uid === 0 && (dirInfo.mode & 0o022) === 0;
   } catch (error: unknown) {
     return `entries that could not be read (${errorMessage(error)})`;
   }

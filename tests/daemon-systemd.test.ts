@@ -2751,3 +2751,42 @@ linuxTest(
     expect(await Bun.file(unitPath).exists()).toBe(false);
   }
 );
+
+linuxTest(
+  "another account's program in a sticky root-owned directory is not trusted",
+  async () => {
+    // Codex review: the package-manager owner exception also accepted a
+    // foreign-owned file in /tmp (root-owned, 1777), whose owner controls it.
+    // Real cross-user files cannot be made here; /tmp itself is the
+    // root-owned sticky directory, and the uid the check compares to models
+    // the other account.
+    const own = process.getuid?.() ?? 0;
+    const program = join(root, "tmp-hack");
+    await writeFile(program, "#!/bin/sh\n");
+    await chmod(program, 0o755);
+    // root is a mkdtemp directory: owned by this user, so a foreign uid fails
+    // the owner check there; what matters is that the exception does not
+    // apply to /tmp-like directories.
+    const tmpProgram = join(tmpdir(), `hack-sticky-${process.pid}`);
+    await writeFile(tmpProgram, "#!/bin/sh\n");
+    await chmod(tmpProgram, 0o755);
+    try {
+      const tmpInfo = await stat(tmpdir());
+      if (tmpInfo.uid === 0 && (tmpInfo.mode & 0o1000) !== 0) {
+        expect(
+          await checkServiceExecutableTrusted({
+            path: tmpProgram,
+            uid: own + 1,
+          })
+        ).toContain("owned by another user");
+      }
+      // In a protected root-owned directory the exception still applies.
+      expect(
+        await checkServiceExecutableTrusted({ path: "/bin/sh", uid: own + 1 })
+      ).toBeNull();
+    } finally {
+      await rm(tmpProgram, { force: true });
+    }
+    expect(program).toBeTruthy();
+  }
+);

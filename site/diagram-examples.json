@@ -1,0 +1,162 @@
+[
+  {
+    "type": "Block",
+    "keyword": "block-beta",
+    "source": "block-beta\n  columns 2\n  cli[\"CLI\"] engine[\"Engine\"]\n  cli --> engine\n"
+  },
+  {
+    "type": "C4",
+    "keyword": "C4Context",
+    "source": "C4Context\n  Person(dev, \"Developer\")\n  System(cli, \"CLI\", \"Local runtime\")\n  Rel(dev, cli, \"Runs commands\")\n"
+  },
+  {
+    "type": "Class",
+    "keyword": "classDiagram",
+    "source": "classDiagram\n  Project --> Service : owns\n"
+  },
+  {
+    "type": "Entity relationship",
+    "keyword": "erDiagram",
+    "source": "erDiagram\n  PROJECT ||--o{ SERVICE : owns\n"
+  },
+  {
+    "type": "Event modeling",
+    "keyword": "eventmodeling",
+    "source": "eventmodeling\n  tf 01 ui Console\n  tf 02 cmd Start\n  tf 03 evt Started\n"
+  },
+  {
+    "type": "Flowchart",
+    "keyword": "flowchart",
+    "source": "flowchart TD\n  A[Read config] --> B[Start services]\n"
+  },
+  {
+    "type": "Gantt",
+    "keyword": "gantt",
+    "source": "gantt\n  dateFormat YYYY-MM-DD\n  section Example\n  Prepare :a, 2026-01-01, 1d\n  Check :after a, 1d\n"
+  },
+  {
+    "type": "Git graph",
+    "keyword": "gitGraph",
+    "source": "gitGraph\n  commit\n  branch review\n  checkout review\n  commit\n"
+  },
+  {
+    "type": "Kanban",
+    "keyword": "kanban",
+    "source": "kanban\n  todo[Todo]\n    task[Read config]\n  done[Done]\n    checked[Check config]\n"
+  },
+  {
+    "type": "Mindmap",
+    "keyword": "mindmap",
+    "source": "mindmap\n  root((Project))\n    Services\n    Settings\n"
+  },
+  {
+    "type": "Packet",
+    "keyword": "packet-beta",
+    "source": "packet-beta\n  0-7: \"Header\"\n  8-15: \"Payload\"\n"
+  },
+  {
+    "type": "Pie",
+    "keyword": "pie",
+    "source": "pie title Synthetic counts\n  \"Group A\" : 2\n  \"Group B\" : 1\n"
+  },
+  {
+    "type": "Quadrant chart",
+    "keyword": "quadrantChart",
+    "source": "quadrantChart\n  x-axis Low scope --> High scope\n  y-axis Low effort --> High effort\n  quadrant-1 Review\n  quadrant-2 Explore\n  quadrant-3 Begin\n  quadrant-4 Plan\n  Example: [0.3, 0.6]\n"
+  },
+  {
+    "type": "Requirement",
+    "keyword": "requirementDiagram",
+    "source": "requirementDiagram\n  requirement safe {\n    id: 1\n    text: Keep data\n  }\n  element cli {\n    type: tool\n  }\n  cli - satisfies -> safe\n"
+  },
+  {
+    "type": "Sankey",
+    "keyword": "sankey-beta",
+    "source": "sankey-beta\n  Input,Output,2\n  Input,Other,1\n"
+  },
+  {
+    "type": "Sequence",
+    "keyword": "sequenceDiagram",
+    "source": "sequenceDiagram\n  autonumber\n  participant CLI\n  participant Engine\n  CLI->>Engine: Start\n  Engine-->>CLI: Result\n"
+  },
+  {
+    "type": "State",
+    "keyword": "stateDiagram-v2",
+    "source": "stateDiagram-v2\n  direction TB\n  [*] --> Idle\n  Idle --> Running: start\n  Running --> Idle: stop\n"
+  },
+  {
+    "type": "Timeline",
+    "keyword": "timeline",
+    "source": "timeline\n  Install : Add CLI\n  Configure : Read settings\n  Run : Start services\n"
+  },
+  {
+    "type": "User journey",
+    "keyword": "journey",
+    "source": "journey\n  title Synthetic journey\n  section Example\n    Read config: 3: Developer\n    Start services: 4: Developer\n"
+  },
+  {
+    "type": "XY chart",
+    "keyword": "xychart-beta",
+    "source": "xychart-beta\n  title \"Synthetic counts\"\n  x-axis [A, B]\n  y-axis \"Count\" 0 --> 3\n  bar [1, 2]\n"
+  },
+  {
+    "type": "Agentflow",
+    "keyword": "agentflow-beta",
+    "source": "agentflow-beta TB\n  flow agent[\"Agent\"]\n    task[\"Read config\"]@{ shape: task }\n    tool[\"CLI\"]@{ shape: tool }\n    task --> tool\n  end\n"
+  },
+  {
+    "type": "Architecture",
+    "keyword": "architecture-beta",
+    "source": "architecture-beta\n  group host[Host]\n  service cli[CLI] in host\n  service engine[Engine] in host\n  cli:B --> T:engine\n  align column cli engine\n"
+  },
+  {
+    "type": "Cynefin",
+    "keyword": "cynefin-beta",
+    "source": "cynefin-beta\n  clear\n    \"Read instructions\"\n  complicated\n    \"Inspect implementation\"\n  complex\n    \"Try experiment\"\n  chaotic\n    \"Contain failure\"\n  confusion\n    \"Ask owner\"\n"
+  },
+  {
+    "type": "Ishikawa",
+    "keyword": "ishikawa-beta",
+    "source": "ishikawa-beta\n  Route fails\n  DNS\n    Wrong address\n  Proxy\n    Missing route\n"
+  },
+  {
+    "type": "Radar",
+    "keyword": "radar-beta",
+    "source": "radar-beta\n  axis a[\"A\"], b[\"B\"], c[\"C\"]\n  curve example[\"Synthetic\"]{1, 2, 3}\n  max 3\n  min 0\n"
+  },
+  {
+    "type": "Railroad",
+    "keyword": "railroad-ebnf-beta",
+    "source": "railroad-ebnf-beta\n  command = \"hack\" \"logs\" [ service ] ;\n"
+  },
+  {
+    "type": "Swimlane",
+    "keyword": "swimlane-beta",
+    "source": "swimlane-beta TB\n  subgraph CLI\n    Read[Read config]\n  end\n  subgraph Engine\n    Start[Start services]\n  end\n  Read --> Start\n"
+  },
+  {
+    "type": "Tree view",
+    "keyword": "treeView-beta",
+    "source": "treeView-beta\n  .hack/\n    hack.config.json\n    docker-compose.yml\n"
+  },
+  {
+    "type": "Treemap",
+    "keyword": "treemap-beta",
+    "source": "treemap-beta\n  \"Synthetic group\"\n    \"A\": 2\n    \"B\": 1\n"
+  },
+  {
+    "type": "Use case",
+    "keyword": "usecase-beta",
+    "source": "usecase-beta\n  direction LR\n  actor dev(\"Developer\")\n  systemBoundary \"CLI\"\n    Start(\"Start services\")\n  end\n  dev --> Start\n"
+  },
+  {
+    "type": "Venn",
+    "keyword": "venn-beta",
+    "source": "venn-beta\n  set Config\n  set Runtime\n  union Config,Runtime[\"Project\"]\n"
+  },
+  {
+    "type": "Wardley map",
+    "keyword": "wardley-beta",
+    "source": "wardley-beta\n  anchor User [0.9, 0.4]\n  component CLI [0.6, 0.5]\n  component Engine [0.2, 0.8]\n  User -> CLI\n  CLI -> Engine\n"
+  }
+]

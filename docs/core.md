@@ -103,6 +103,6 @@ Use the [CLI overview](cli.md) to choose a command and the
 
 Docker Compose is the default backend and the one every example on this page uses.
 v5 adds a native backend (beta) for Apple Silicon macOS, available through the
-`hack-next` channel and selected with `HACK_RUNTIME_BACKEND=native`, that runs explicitly prepared projects without Docker
+`hack-next` channel and selected with `HACK_RUNTIME_BACKEND=native`, that runs explicitly prepared projects without Docker Desktop or OrbStack
 and supports a bounded command subset. See [Upgrade to v5](guides/upgrade-to-v5.md)
 and [the native backend overview](native/README.md).

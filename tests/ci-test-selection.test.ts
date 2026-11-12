@@ -28,6 +28,8 @@ const sources = {
   "tests/opaque.test.ts": 'const path = "dynamic"; import(path);',
   "tests/helper.ts": 'export const source = Bun.file("generated.json");',
   "tests/generated.test.ts": 'import {source} from "./helper.ts";',
+  "packages/db/drizzle.config.ts": "export const config = {};",
+  "src/client.config.ts": "export const config = {};",
 } as const;
 const tests = Object.keys(sources).filter((file) => file.endsWith(".test.ts"));
 function select(changed: readonly string[] | null) {
@@ -59,6 +61,8 @@ describe("conservative dependency selection", () => {
     [],
     ["bun.lock"],
     ["package.json"],
+    ["packages/db/drizzle.config.ts"],
+    ["src/client.config.ts"],
     ["tsconfig.json"],
     [".github/workflows/ci.yml"],
     ["scripts/helper.ts"],

@@ -17,8 +17,10 @@ export const ALWAYS_RUN_TESTS: Readonly<Record<string, string>> = {
   "tests/ci-test-selection.test.ts": "Selection must verify itself on every PR",
 };
 
-const MODULE_PATH = /^(?:src\/|tests\/|packages\/db\/).+\.[cm]?[jt]sx?$/;
+const MODULE_PATH =
+  /^(?:src\/|tests\/|packages\/db\/(?:src|tests)\/).+\.[cm]?[jt]sx?$/;
 const NON_GRAPH_PATH = /(?:^|\/)(?:fixtures?|__fixtures__|e2e|models)(?:\/|$)/;
+const CONFIG_MODULE = /(?:^|\/)(?:[^/]+\.)?config\.[cm]?[jt]sx?$/;
 const DOC_PATH =
   /^(?:docs\/.+\.md|(?:README|CHANGELOG|SECURITY|PACKAGING)\.md|LICENSE)$/;
 const CONTRACT_PATH =
@@ -142,6 +144,7 @@ export function selectTests(opts: SelectionInputs): TestSelection {
     if (
       !MODULE_PATH.test(path) ||
       NON_GRAPH_PATH.test(path) ||
+      CONFIG_MODULE.test(path) ||
       read(path) === undefined
     ) {
       return full(`non-graph or deleted input: ${path}`);

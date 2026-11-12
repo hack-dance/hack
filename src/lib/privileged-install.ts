@@ -8,7 +8,7 @@
  *    ancestor up to `/`, is a link or is not root-owned without group/world
  *    write (it creates a missing directory itself, root-owned, 0755, after
  *    checking the existing ancestors);
- * 2. creates its temporary file with `mktemp` inside that directory, so the
+ * 2. creates its temporary file exclusively inside that directory, so the
  *    file is root-owned and no other user can replace or redirect it;
  * 3. reads at most one byte more than declared from stdin, within a time
  *    limit, and refuses any length other than the declared one (longer
@@ -64,11 +64,17 @@ export function renderStdinInstallScript(opts?: {
     'chain "$e" || exit 65',
     '[ -d "$dir" ] || install -d -o root -g root -m 0755 -- "$dir"',
     'chain "$dir" || exit 65',
-    'tmp="$(mktemp -- "$dir/.hack-install.XXXXXXXX")"',
-    `trap 'rm -f -- "$tmp"' EXIT`,
-    // dash skips the EXIT trap when a signal kills it; make every signal a
-    // normal exit so the temporary file is always removed.
-    "trap 'exit 130' HUP INT TERM",
+    // Traps first, so no signal can arrive after the file exists but before
+    // cleanup is armed. dash skips the EXIT trap when a signal kills it, so
+    // every signal becomes a normal exit (stopping the reader if it runs).
+    "tmp=; reader=",
+    `trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT`,
+    `trap '[ -z "$reader" ] || kill "$reader" 2>/dev/null; exit 130' HUP INT TERM`,
+    // The name is set before the file exists, and noclobber makes the
+    // create exclusive. Only root can write in this directory (checked
+    // above), so a per-process name is enough and nothing can pre-empt it.
+    'tmp="$dir/.hack-install.$$"',
+    'set -C; : > "$tmp"; set +C',
     // One byte past the declared count, so longer input is seen and refused.
     // The read runs in the background on a copy of stdin (an asynchronous
     // list would otherwise read /dev/null) and the shell waits for it: a
@@ -76,7 +82,6 @@ export function renderStdinInstallScript(opts?: {
     // and the EXIT trap removes the temporary file.
     "exec 3<&0",
     `timeout -k 1 ${seconds} head -c "$((n + 1))" <&3 > "$tmp" & reader=$!`,
-    `trap 'kill "$reader" 2>/dev/null; exit 130' HUP INT TERM`,
     'wait "$reader" || exit 66',
     '[ "$(wc -c < "$tmp")" -eq "$n" ] || exit 66',
     'printf "%s  %s\\n" "$sum" "$tmp" | sha256sum -c --status || exit 67',

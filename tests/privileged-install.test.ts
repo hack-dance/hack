@@ -111,7 +111,10 @@ describe("stdinInstallStep", () => {
     expect(STDIN_INSTALL_SCRIPT).toContain(
       'head -c "$((n + 1))" <&3 > "$tmp" & reader=$!'
     );
-    expect(STDIN_INSTALL_SCRIPT).toContain('mktemp -- "$dir/.hack-install.');
+    // Cleanup is armed before the temporary file exists.
+    expect(STDIN_INSTALL_SCRIPT.indexOf('trap \'[ -z "$tmp" ]')).toBeLessThan(
+      STDIN_INSTALL_SCRIPT.indexOf('set -C; : > "$tmp"')
+    );
   });
 });
 

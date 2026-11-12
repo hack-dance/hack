@@ -464,9 +464,14 @@ async function foreignFilesReplaced(opts: {
   const notes: string[] = [];
   for (const file of opts.plan.files) {
     const existing = await opts.host.readFile(file.path);
-    if (existing !== null && readLinuxDnsMarker(existing).kind !== "known") {
+    const marker = existing === null ? null : readLinuxDnsMarker(existing);
+    if (marker?.kind === "none") {
       notes.push(
         `${file.path} exists without Hack's marker (Hack did not write it); installing replaces it.`
+      );
+    } else if (marker?.kind === "unknown-format") {
+      notes.push(
+        `${file.path} was written by a newer Hack (format=${marker.format}); installing replaces it with this Hack's version.`
       );
     }
   }

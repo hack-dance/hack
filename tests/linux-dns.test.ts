@@ -1263,6 +1263,24 @@ describe("review round two", () => {
       `${LINUX_DNS_UNIT_PATH} exists without Hack's marker`
     );
     expect(notes.join("\n")).not.toContain(LINUX_DNS_UDEV_RULE_PATH);
+
+    const newer = configuredFiles();
+    newer.set(
+      LINUX_DNS_UNIT_PATH,
+      "# Managed by hack (hack global install), format=9. Remove with: hack global down\n[Unit]\n"
+    );
+    const second = createFakeHost({ files: newer });
+    const newerNotes: string[] = [];
+    await applyLinuxDns({
+      host: second.host,
+      domains: DOMAINS,
+      canPrompt: true,
+      show: (plan) => newerNotes.push(...(plan.notes ?? [])),
+      confirm: async () => false,
+    });
+    expect(newerNotes.join("\n")).toContain(
+      "written by a newer Hack (format=9)"
+    );
   });
 
   test("a pending daemon-reload is not configured even when the link matches", async () => {

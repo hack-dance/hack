@@ -13,6 +13,7 @@
 import { createHash, X509Certificate } from "node:crypto";
 import { inspectMacCaEligibility } from "./mac-ca-trust.ts";
 import { STDIN_INSTALL_SCRIPT } from "./privileged-install.ts";
+import { VETTED_HELPER_PATH } from "./vetted-env.ts";
 
 export type LinuxDistroFamily = "debian" | "arch" | "fedora" | "suse";
 
@@ -151,16 +152,27 @@ export function linuxSystemTrustCommands(opts: {
   readonly certPath: string;
   readonly sha256: string;
   readonly byteLength: number;
+  readonly sudoPath: string;
 }): readonly (readonly string[])[] {
+  const clean = [
+    "/usr/bin/env",
+    "-i",
+    `PATH=${VETTED_HELPER_PATH}`,
+    "LANG=C",
+    "LC_ALL=C",
+  ];
+  const privileged = [...clean, opts.sudoPath, ...clean];
   return [
     [
+      ...clean,
       "/bin/sh",
       "-c",
-      'exec sudo "$@" < "$0"',
+      'exec "$@" < "$0"',
       opts.certPath,
+      ...privileged,
       ...linuxSystemTrustInstallArgv(opts),
     ],
-    ["sudo", ...linuxSystemTrustRefreshArgv(opts.family)],
+    [...privileged, ...linuxSystemTrustRefreshArgv(opts.family)],
   ];
 }
 
@@ -298,6 +310,31 @@ export function renderShellCommand(argv: readonly string[]): string {
 }
 
 /**
+ * Clear loader variables with shell builtins before starting env(1) itself.
+ * A subshell keeps the user's shell unchanged; env -i then supplies the full
+ * fixed environment for the vetted sudo and root helper.
+ */
+export function renderLinuxManualTrustCommand(argv: readonly string[]): string {
+  const loaderKeys = [
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_DEBUG",
+    "LD_DEBUG_OUTPUT",
+    "LD_PROFILE",
+    "LD_ORIGIN_PATH",
+    "LD_HWCAP_MASK",
+    "GLIBC_TUNABLES",
+    "GCONV_PATH",
+    "LOCPATH",
+    "NLSPATH",
+    "BASH_ENV",
+    "ENV",
+  ];
+  return `( unset ${loaderKeys.join(" ")} || exit; ${renderShellCommand(argv)} )`;
+}
+
+/**
  * Manual steps when the family is unknown, rendered from the same argument
  * arrays and quoting as the supported families (a path with spaces or shell
  * syntax stays one literal argument).
@@ -306,6 +343,7 @@ export function renderUnknownDistroTrustSteps(opts: {
   readonly certPath: string;
   readonly sha256: string;
   readonly byteLength: number;
+  readonly sudoPath: string;
 }): readonly string[] {
   const steps: string[] = [
     "Unknown distribution (no matching ID or ID_LIKE in /etc/os-release). Run the commands for your distribution family:",
@@ -323,8 +361,9 @@ export function renderUnknownDistroTrustSteps(opts: {
       certPath: opts.certPath,
       sha256: opts.sha256,
       byteLength: opts.byteLength,
+      sudoPath: opts.sudoPath,
     })) {
-      steps.push(`    ${renderShellCommand(command)}`);
+      steps.push(`    ${renderLinuxManualTrustCommand(command)}`);
     }
   }
   return steps;

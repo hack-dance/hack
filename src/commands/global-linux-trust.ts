@@ -16,7 +16,7 @@ import {
 import { readTextFile } from "../lib/fs.ts";
 import { canPrompt, confirmSafe } from "../lib/interactivity.ts";
 import {
-  renderShellCommand,
+  renderLinuxManualTrustCommand,
   type ValidatedCa,
   validateCaddyRootPem,
 } from "../lib/linux-trust.ts";
@@ -31,7 +31,7 @@ import { createTrustedDockerExec } from "../lib/trusted-docker.ts";
 import { logger } from "../ui/logger.ts";
 
 function renderSudo(argv: readonly string[]): string {
-  return renderShellCommand(argv);
+  return renderLinuxManualTrustCommand(argv);
 }
 
 /** Effects the command needs besides the trust host; injectable for tests. */

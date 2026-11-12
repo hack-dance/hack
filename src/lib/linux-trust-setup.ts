@@ -56,6 +56,8 @@ export type LinuxTrustHost = {
   readonly makeDir: (path: string) => Promise<boolean>;
   /** Absolute path of an executable (PATH, then sbin/bin), or `null`. */
   readonly resolveCommand: (name: string) => Promise<string | null>;
+  /** The same vetted absolute sudo used by automatic execution. */
+  readonly resolveSudo: () => Promise<string | null>;
   /**
    * Unprivileged command (certutil) by absolute path. A spawn failure is
    * returned as exit 127, never thrown.
@@ -161,7 +163,19 @@ export async function applyLinuxSystemTrust(opts: {
   const family = detectLinuxDistroFamily(
     await host.readFile("/etc/os-release")
   );
+  const sudoPath = await host.resolveSudo();
+  const sudoUnavailable = {
+    status: "manual",
+    code: "linux_trust_tool_missing",
+    family,
+    steps: [
+      "No root-owned, non-writable setuid sudo is available. Verify your distribution's sudo installation, then rerun hack global trust.",
+    ],
+  } as const;
   if (family === null) {
+    if (sudoPath === null) {
+      return sudoUnavailable;
+    }
     return {
       status: "manual",
       code: "linux_trust_distro_unknown",
@@ -170,6 +184,7 @@ export async function applyLinuxSystemTrust(opts: {
         certPath: opts.manualCertPath,
         sha256: ca.pemSha256,
         byteLength: Buffer.byteLength(ca.pem),
+        sudoPath,
       }),
     };
   }
@@ -191,6 +206,9 @@ export async function applyLinuxSystemTrust(opts: {
   if (already) {
     return already;
   }
+  if (sudoPath === null) {
+    return sudoUnavailable;
+  }
   for (const tool of REQUIRED_TOOLS[family]) {
     if ((await host.resolveCommand(tool)) === null) {
       return {
@@ -208,6 +226,7 @@ export async function applyLinuxSystemTrust(opts: {
     certPath: opts.manualCertPath,
     sha256: ca.pemSha256,
     byteLength: Buffer.byteLength(ca.pem),
+    sudoPath,
   });
   const pending = {
     status: "pending",
@@ -218,6 +237,7 @@ export async function applyLinuxSystemTrust(opts: {
       certPath: opts.manualCertPath,
       sha256: ca.pemSha256,
       byteLength: Buffer.byteLength(ca.pem),
+      sudoPath,
     }),
   } as const;
   // No root command runs without an interactive yes, and none at all when

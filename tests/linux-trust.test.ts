@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, X509Certificate } from "node:crypto";
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,6 +21,7 @@ import {
   linuxSystemTrustInstallArgv,
   NSS_CA_NICKNAME,
   parseNssTrustFlags,
+  renderLinuxManualTrustCommand,
   renderShellCommand,
   renderUnknownDistroTrustSteps,
   type ValidatedCa,
@@ -290,6 +298,7 @@ function createFakeHost(init: {
       }
       return true;
     },
+    resolveSudo: async () => "/usr/bin/sudo",
     resolveCommand: async (name) =>
       state.commands.has(name) ? `/usr/bin/${name}` : null,
     exec: async (argv, input) => {
@@ -376,58 +385,90 @@ describe("CA validation (finding 1)", () => {
 });
 
 describe("system trust commands", () => {
-  test("each family gets its own anchor location and refresh step", () => {
-    const sha = sha256(CURRENT_CA_PEM);
-    expect(
-      linuxSystemTrustCommands({
+  test.each([
+    [
+      "debian",
+      "/usr/local/share/ca-certificates/hack-caddy-local-ca.crt",
+      ["update-ca-certificates"],
+    ],
+    [
+      "fedora",
+      "/etc/pki/ca-trust/source/anchors/hack-caddy-local-ca.crt",
+      ["update-ca-trust", "extract"],
+    ],
+    [
+      "arch",
+      "/var/lib/hack/trust/caddy-local-ca.crt",
+      ["update-ca-trust", "extract"],
+    ],
+  ] as const)("%s uses the approved sudo, anchor and refresh", (family, anchor, refresh) => {
+    const commands = linuxSystemTrustCommands({
+      family,
+      certPath: STAGED,
+      sha256: sha256(CURRENT_CA_PEM),
+      byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+      sudoPath: "/usr/bin/sudo",
+    });
+    expect(commands[0]).toContain(anchor);
+    expect(commands[0]).toContain("/usr/bin/sudo");
+    expect(commands[0]).not.toContain("sudo");
+    expect(commands[1]?.slice(-refresh.length)).toEqual([...refresh]);
+    expect(commands[1]).toContain("/usr/bin/sudo");
+  });
+
+  test("manual commands ignore a PATH sudo wrapper and clear inherited options", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hack-manual-trust-"));
+    try {
+      const poison = join(dir, "poison");
+      await mkdir(poison);
+      const bad = join(dir, "bad");
+      const log = join(dir, "calls");
+      await writeFile(
+        join(poison, "sudo"),
+        `#!/bin/sh\nprintf bad > ${renderShellCommand([bad])}\n`,
+        { mode: 0o755 }
+      );
+      const approved = join(dir, "approved-sudo");
+      await writeFile(
+        approved,
+        [
+          "#!/bin/sh",
+          '[ "$PATH" = /usr/sbin:/usr/bin:/sbin:/bin ] || exit 9',
+          '[ -z "${NODE_OPTIONS+x}" ] || exit 10',
+          `printf call >> ${renderShellCommand([log])}`,
+          "",
+        ].join("\n"),
+        { mode: 0o755 }
+      );
+      const certPath = join(dir, "ca.crt");
+      await writeFile(certPath, CURRENT_CA_PEM);
+      for (const argv of linuxSystemTrustCommands({
         family: "debian",
-        certPath: STAGED,
-        sha256: sha,
+        certPath,
+        sha256: sha256(CURRENT_CA_PEM),
         byteLength: Buffer.byteLength(CURRENT_CA_PEM),
-      })
-    ).toEqual([
-      [
-        "/bin/sh",
-        "-c",
-        'exec sudo "$@" < "$0"',
-        STAGED,
-        ...linuxSystemTrustInstallArgv({
-          family: "debian",
-          sha256: sha,
-          byteLength: Buffer.byteLength(CURRENT_CA_PEM),
-        }),
-      ],
-      ["sudo", "update-ca-certificates"],
-    ]);
-    expect(
-      linuxSystemTrustCommands({
-        family: "fedora",
-        certPath: STAGED,
-        sha256: sha,
-        byteLength: Buffer.byteLength(CURRENT_CA_PEM),
-      }).at(-1)
-    ).toEqual(["sudo", "update-ca-trust", "extract"]);
-    expect(
-      linuxSystemTrustCommands({
-        family: "arch",
-        certPath: STAGED,
-        sha256: sha,
-        byteLength: Buffer.byteLength(CURRENT_CA_PEM),
-      })
-    ).toEqual([
-      [
-        "/bin/sh",
-        "-c",
-        'exec sudo "$@" < "$0"',
-        STAGED,
-        ...linuxSystemTrustInstallArgv({
-          family: "arch",
-          sha256: sha,
-          byteLength: Buffer.byteLength(CURRENT_CA_PEM),
-        }),
-      ],
-      ["sudo", "update-ca-trust", "extract"],
-    ]);
+        sudoPath: approved,
+      })) {
+        const child = Bun.spawn(
+          [
+            "/bin/sh",
+            "-c",
+            `export LD_PRELOAD=/nonexistent/hack-test.so; ${renderLinuxManualTrustCommand(argv)}`,
+          ],
+          {
+            env: { PATH: poison, NODE_OPTIONS: "untrusted" },
+            stdout: "ignore",
+            stderr: "pipe",
+          }
+        );
+        expect(await new Response(child.stderr).text()).toBe("");
+        expect(await child.exited).toBe(0);
+      }
+      expect(await Bun.file(bad).exists()).toBe(false);
+      expect(await Bun.file(log).text()).toBe("callcall");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("unknown-distro steps use the same arrays and quoting (finding 5)", () => {
@@ -437,14 +478,16 @@ describe("system trust commands", () => {
       certPath,
       sha256: sha,
       byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+      sudoPath: "/usr/bin/sudo",
     }).join("\n");
     for (const command of linuxSystemTrustCommands({
       family: "debian",
       certPath,
       sha256: sha,
       byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+      sudoPath: "/usr/bin/sudo",
     })) {
-      expect(steps).toContain(renderShellCommand(command));
+      expect(steps).toContain(renderLinuxManualTrustCommand(command));
     }
     expect(steps).toContain("'/tmp/a dir/$(touch pwned);x.crt'");
     expect(steps).not.toContain(" /tmp/a dir/");
@@ -481,6 +524,35 @@ describe("system trust commands", () => {
 });
 
 describe("applyLinuxSystemTrust", () => {
+  test.each([
+    OS_RELEASE.ubuntu,
+    OS_RELEASE.alpine,
+  ])("no vetted sudo means no runnable manual commands", async (osRelease) => {
+    const { host, state } = createFakeHost({
+      osRelease,
+      commands: ["update-ca-certificates"],
+    });
+    const outcome = await applyLinuxSystemTrust({
+      host: { ...host, resolveSudo: async () => null },
+      ca: await validated(CURRENT_CA_PEM),
+      manualCertPath: EXPORT,
+      canPrompt: false,
+      show: noShow,
+      confirm: yes,
+    });
+    expect(outcome).toMatchObject({
+      status: "manual",
+      code: "linux_trust_tool_missing",
+    });
+    if (outcome.status !== "manual") {
+      throw new Error("expected manual guidance");
+    }
+    expect(outcome.steps.join("\n")).toContain(
+      "Verify your distribution's sudo installation"
+    );
+    expect(state.privileged).toEqual([]);
+  });
+
   test.each([
     ["ubuntu", "update-ca-certificates"],
     ["fedora", "update-ca-trust"],

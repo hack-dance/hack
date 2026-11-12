@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { readTextFile } from "./fs.ts";
 import type { LinuxTrustHost } from "./linux-trust-setup.ts";
-import { runTrustedSudo } from "./privileged-sudo.ts";
+import { resolveTrustedSudo, runTrustedSudo } from "./privileged-sudo.ts";
 import { exec } from "./shell.ts";
 import { vettedHelperEnv } from "./vetted-env.ts";
 
@@ -124,6 +124,7 @@ export function createLinuxTrustHost(opts?: {
       }
     },
     resolveCommand: async (name) => await resolveExecutable(name),
+    resolveSudo: async () => await resolveTrustedSudo(),
     exec: async (argv, input) => {
       try {
         const res = await exec(argv, {

@@ -62,6 +62,9 @@ interpreter, locale-path and tool-selection variables are not inherited.
    p11-kit. Printed manual commands open the export as your user before sudo;
    changed bytes fail the size or digest check. A failed or unverified system
    step stops the command before NSS or the host bundle is written.
+   Printed manual commands use the same vetted absolute sudo path, fixed system
+   PATH and C locale as the automatic path. If no sudo qualifies, Hack reports
+   the missing tool without printing runnable root commands.
 3. **NSS databases** for Chrome, Chromium and Firefox (no root). With `certutil`
    installed, Hack runs it by its resolved absolute path and adds the CA as a
    trusted TLS issuer (trust attributes `C,,`), nickname `Hack Caddy Local CA`,

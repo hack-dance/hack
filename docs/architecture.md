@@ -458,7 +458,8 @@ and refuse while an `ExecStop`/`ExecStopPost` hook is loaded, because stopping
 runs it (systemd runs stop hooks even after `systemctl kill`); remove it and run `systemctl --user daemon-reload` first. A
 unit whose `hack` was removed can still be stopped and uninstalled. `install`
 also refuses to enable a unit that a drop-in points at another `HACK_HOME`. Before it
-writes anything, `install` also refuses to replace a running unit that serves
+writes anything, `install` also refuses to replace a unit systemd is running
+(wherever it was loaded from) that serves
 another Hack home, or whose Hack home it cannot read, since its restart would
 stop that daemon. hackd runs helpers such as `docker` and `git` through its
 `PATH`, so every directory on the service's `PATH` (the one Hack writes at install,

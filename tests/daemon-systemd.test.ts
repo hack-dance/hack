@@ -3321,3 +3321,24 @@ linuxTest(
     ).toBe(true);
   }
 );
+
+linuxTest(
+  "install checks systemd's running unit even with no unit file at this path",
+  async () => {
+    // Reviewer: another home's running unit loaded from another directory
+    // (no file at this shell's unit path) slipped past the guard, then was
+    // shadowed by the new file and restarted.
+    const fake = fakeSystemd({ active: true });
+    fake.active = true;
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1 HACK_HOME=/srv/other-home";
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+    expect(await installDaemonSystemdService(installHooks(fake, []))).toBe(1);
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    // A state systemd cannot report: refused, pointing at systemctl status.
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+    fake.showFails = true;
+    expect(await installDaemonSystemdService(installHooks(fake, []))).toBe(1);
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+  }
+);

@@ -724,11 +724,13 @@ async function readInstallStartingPoint(opts: {
 }
 
 /**
- * Before install rewrites or reloads anything: a unit that is running (or
- * about to run) hackd must serve this Hack home, read from the config
- * systemd has loaded now (HACK-2052). Rewriting first would drop another
- * home's `HACK_HOME`, pass the later check, and restart (stop) that home's
- * daemon. Unknown is refused too. Null, or the refusal with how to go on.
+ * Before install rewrites or reloads anything: a unit that systemd runs (or
+ * is about to run), wherever it was loaded from, must serve this Hack home,
+ * read from the config systemd has loaded now (HACK-2052). Rewriting first
+ * would drop another home's `HACK_HOME` (or shadow a unit loaded from
+ * another directory), pass the later check, and restart (stop) that home's
+ * daemon. An unreadable home, or a state systemd could not report, is
+ * refused too. Null, or the refusal with how to go on.
  */
 async function refuseForeignRunningUnit(opts: {
   readonly before: SystemdServiceStatus | null;
@@ -736,11 +738,13 @@ async function refuseForeignRunningUnit(opts: {
   readonly deps: SystemdDeps;
 }): Promise<string | null> {
   const { before } = opts;
-  if (
-    !before?.installed ||
-    (before.activeState !== null &&
-      !MANAGER_STOPPABLE_STATES.has(before.activeState))
-  ) {
+  if (!before?.availability.available) {
+    return null;
+  }
+  if (before.activeState === null) {
+    return `Not replacing ${SYSTEMD_UNIT_NAME}: systemd could not report its state, so whether it runs hackd for another Hack home is unknown. Check: systemctl --user status ${SYSTEMD_UNIT_NAME}, then run hack daemon install again`;
+  }
+  if (!MANAGER_STOPPABLE_STATES.has(before.activeState)) {
     return null;
   }
   const unitHome = await readSystemdUnitHackHome({ deps: opts.deps });

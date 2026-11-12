@@ -8,7 +8,7 @@ on:
     tags-ignore:
       - "v*"
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
 
 concurrency:
   # PR updates supersede earlier runs. Pushes need unique groups: even with
@@ -53,15 +53,72 @@ jobs:
       - uses: oven-sh/setup-bun@v1
         with:
           bun-version: "1.4.4"
-      - name: Install selector dependencies
-        run: bun install --frozen-lockfile
       - name: Classify changed paths
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
           PR_FULL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full') }}
-        run: bun scripts/ci-change-scope.ts --event="$EVENT_NAME"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This guard is independent of the selector and its fallback list.
+          full=false
+          base=""
+          if [ "$EVENT_NAME" != "pull_request" ] || [ "$PR_FULL" = "true" ]; then
+            full=true
+          else
+            parents=$(git rev-list --parents -n 1 HEAD) || parents=""
+            read -r tip base head extra <<< "$parents"
+            if [ -z "$base" ] || [ -z "$head" ] || [ -n "$extra" ] ||
+               ! git diff --name-only --no-renames -z "$base" HEAD > "$RUNNER_TEMP/ci-paths"; then
+              full=true
+            else
+              while IFS= read -r -d '' path; do
+                case "$path" in
+                  scripts/*|.github/*|tests/preload.ts|tests/helpers/*|src/lib/guards.ts|src/lib/cli-result.ts|\
+                  package.json|*/package.json|bun.lock|*/bun.lock|bun.lockb|*/bun.lockb|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|\
+                  bunfig.toml|*/bunfig.toml|tsconfig*.json|*/tsconfig*.json|mise.toml)
+                    full=true ;;
+                esac
+              done < "$RUNNER_TEMP/ci-paths"
+            fi
+            # Bootstrap safely when the base predates dependency selection.
+            if ! git show "$base:scripts/ci-change-scope.ts" 2>/dev/null | grep -- '--repo-root=' > /dev/null; then full=true; fi
+          fi
+          if [ "$full" = "true" ]; then
+            compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"macos-latest","platform":"darwin","arch":"arm64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"},{"os":"macos-15-intel","platform":"darwin","arch":"x64"}]'
+            native=true
+            shards='[1,2,3,4,5,6,7,8]'
+            draft=false
+            if [ "$EVENT_NAME" = "pull_request" ] && [ "$PR_DRAFT" = "true" ]; then
+              draft=true; compiler='[]'; native=false; shards='[4,5,6,7,8]'
+            fi
+            cat >> "$GITHUB_OUTPUT" <<EOF
+          scope=full
+          compiler_hosts=$compiler
+          compiler_rust=true
+          runtime_core=$native
+          suite=true
+          test_layout=pooled
+          test_focus=
+          docs_site=true
+          draft=$draft
+          test_files=
+          test_shards=$shards
+          selection_mode=full
+          docker_suite=true
+          EOF
+            echo 'Full suite: push, protected input, unavailable diff, or selector bootstrap.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Only base code and base dependencies execute; the merge tree is data.
+            policy="$RUNNER_TEMP/ci-policy"
+            mkdir "$policy"
+            git archive "$base" | tar -x -C "$policy"
+            cd "$policy"
+            bun --no-env-file install --cwd "$policy" --frozen-lockfile --ignore-scripts
+            bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE"
+          fi
 
   config-compiler:
     name: Config compiler (${{ matrix.os }})

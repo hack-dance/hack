@@ -1,6 +1,7 @@
 /** PR-only policy layered over the existing coarse change-scope classifier. */
 import { COMPILER_HOSTS, planScope, scopeOutputs } from "./ci-change-scope.ts";
 import { selectTests, type TestSelection } from "./ci-test-selection.ts";
+import { requiresWorkflowFull } from "./ci-workflow-guard.ts";
 import { classifyTestPools } from "./test-shard-plan.ts";
 
 export type PullRequestPlan = ReturnType<typeof scopeOutputs> & {
@@ -46,24 +47,22 @@ export async function planPullRequest(opts: {
   /** Selection seam for policy tests. */
   readonly selection?: TestSelection;
 }): Promise<PullRequestPlan> {
+  const full = opts.full || requiresWorkflowFull(opts.changed);
   const selection =
     opts.selection ??
     selectTests({
       repoRoot: opts.repoRoot,
       changed: opts.changed,
-      full: opts.full,
+      full,
     });
-  const coarse =
-    opts.full || opts.changed === null
-      ? scopeOutputs("full")
-      : planScope(opts.changed);
+  const coarse = full ? scopeOutputs("full") : planScope(opts.changed ?? []);
   const pools = await classifyTestPools({
     repoRoot: opts.repoRoot,
     files: selection.files,
   });
   const macos = !opts.draft && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
-  const allJobs = opts.full || !opts.changed?.length;
+  const allJobs = full;
   const nativeHosts = allJobs || opts.changed?.some(touchesCompilerHost);
   const compiler = opts.draft
     ? "[]"

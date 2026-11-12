@@ -31,6 +31,19 @@ const sources = {
   "tests/generated.test.ts": 'import {source} from "./helper.ts";',
   "packages/db/drizzle.config.ts": "export const config = {};",
   "src/client.config.ts": "export const config = {};",
+  // Present files ensure these tests exercise their own rule, not deletion.
+  "bun.lock": "{}",
+  "package.json": "{}",
+  "tsconfig.json": "{}",
+  ".github/workflows/ci.yml": "name: fixture",
+  "scripts/helper.ts": "export {};",
+  "tests/fixtures/input.ts": "export {};",
+  "tests/e2e/run.ts": "export {};",
+  "tests/models/input.ts": "export {};",
+  "tests/__fixtures__/input.ts": "export {};",
+  "packages/config-compiler/src/lib.rs": "",
+  "docs/examples/compose.yml": "services: {}",
+  "unknown.txt": "fixture",
 } as const;
 const tests = Object.keys(sources).filter((file) => file.endsWith(".test.ts"));
 function select(changed: readonly string[] | null) {
@@ -69,6 +82,8 @@ describe("conservative dependency selection", () => {
     ["scripts/helper.ts"],
     ["tests/fixtures/input.ts"],
     ["tests/e2e/run.ts"],
+    ["tests/models/input.ts"],
+    ["tests/__fixtures__/input.ts"],
     ["packages/config-compiler/src/lib.rs"],
     ["src/deleted.ts"],
     ["docs/examples/compose.yml"],
@@ -90,6 +105,65 @@ describe("conservative dependency selection", () => {
         full: true,
       }).mode
     ).toBe("full");
+  });
+  test("the hand-maintained always-run rule is independent of reader and contract rules", () => {
+    const file = "tests/ci-change-scope.test.ts";
+    expect(
+      selectTests({
+        repoRoot: "/fixture",
+        changed: ["docs/a.md"],
+        tests: [file],
+        sources: { [file]: "export {};" },
+      }).files
+    ).toEqual([file]);
+  });
+  test.each([
+    'const data = Bun.file("docs/a.md");',
+    'import {open as load} from "node:fs/promises"; load("docs/a.md");',
+  ])("source readers remain always-run without contract names: %s", (source) => {
+    expect(
+      selectTests({
+        repoRoot: "/fixture",
+        changed: ["docs/a.md"],
+        tests: ["tests/a.test.ts"],
+        sources: { "tests/a.test.ts": source },
+      }).files
+    ).toEqual(["tests/a.test.ts"]);
+  });
+  test.each([
+    'const entry = "../index.ts";',
+    "const entry = `${root}/index.ts`;",
+    'const binary = "../dist/hack";',
+    'const binary = join(root, "dist", "hack");',
+    'Bun.spawn(["fixture"]);',
+    'import {spawn as launch} from "node:child_process"; launch(["fixture"]);',
+    'export {spawn as run} from "node:child_process";',
+    'const {spawn: run} = Bun; run(["fixture"]);',
+    'const cp = await import("node:child_process"); cp.exec("fixture");',
+    'require("node:child_process").exec("fixture");',
+    'const runtime = Bun; const {spawn: run} = runtime; run(["fixture"]);',
+    'exec("fixture");',
+    'fork("fixture");',
+    'new Worker("fixture");',
+    'const Thread=Worker; new Thread("fixture");',
+    'import {Worker as Thread} from "node:worker_threads"; new Thread("fixture");',
+    'import {$ as shell} from "bun"; shell`fixture`;',
+    "Bun.$`fixture`;",
+    'Bun["$"]`fixture`;',
+  ])("source indirection makes its transitive callers depend on all changes: %s", (source) => {
+    const result = selectTests({
+      repoRoot: "/fixture",
+      changed: ["src/unrelated.ts"],
+      tests: ["tests/a.test.ts", "tests/b.test.ts"],
+      sources: {
+        "src/unrelated.ts": "export {};",
+        "src/launch.ts": source,
+        "src/barrel.ts": 'export * from "./launch.ts";',
+        "tests/a.test.ts": 'import "../src/barrel.ts";',
+        "tests/b.test.ts": "export {};",
+      },
+    });
+    expect(result.files).toEqual(["tests/a.test.ts"]);
   });
   test("suite preloads and their transitive helpers affect every test without explicit edges", () => {
     const implicit = {
@@ -136,6 +210,57 @@ describe("conservative dependency selection", () => {
     });
     expect(result.mode).toBe("full");
     expect(result.files).toEqual([...tests].sort());
+  });
+  test("a production process launcher imported by a preload depends on all changes", () => {
+    expect(
+      selectTests({
+        repoRoot: "/fixture",
+        tests,
+        sources: {
+          ...sources,
+          "bunfig.toml": '[test]\npreload="./tests/preload.ts"',
+          "tests/preload.ts": 'import "../src/launcher.ts";',
+          "src/launcher.ts": 'Bun.spawn(["fixture"]);',
+        },
+        changed: ["docs/a.md"],
+      }).mode
+    ).toBe("full");
+  });
+  test.each([
+    "[test",
+    "[test]\npreload=42",
+    "[test]\npreload=[42]",
+    '[test]\npreload="../outside.ts"',
+  ])("invalid preload configuration independently selects all files: %s", (config) => {
+    expect(
+      selectTests({
+        repoRoot: "/fixture",
+        tests,
+        sources: { ...sources, "bunfig.toml": config },
+        changed: ["docs/a.md"],
+      }).mode
+    ).toBe("full");
+  });
+  test.each([
+    undefined,
+    'import "./missing.ts";',
+    'const path="dynamic"; import(path);',
+  ])("opaque preload inputs independently select all files: %s", (source) => {
+    const input: Record<string, string> = {
+      ...sources,
+      "bunfig.toml": '[test]\npreload="./tests/preload.ts"',
+    };
+    if (source !== undefined) {
+      input["tests/preload.ts"] = source;
+    }
+    expect(
+      selectTests({
+        repoRoot: "/fixture",
+        tests,
+        sources: input,
+        changed: ["docs/a.md"],
+      }).mode
+    ).toBe("full");
   });
   test("the Bun builtin is a known preload input rather than an opaque package", () => {
     const result = selectTests({

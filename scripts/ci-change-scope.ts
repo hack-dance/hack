@@ -296,7 +296,11 @@ export async function main(argv: readonly string[]): Promise<number> {
     console.error("ci-change-scope: --event=<GitHub event name> is required.");
     return 2;
   }
-  const repoRoot = resolve(import.meta.dir, "..");
+  // CI executes this policy from the base archive against the merge tree's data.
+  const rootArgument = argv.find((arg) => arg.startsWith("--repo-root="));
+  const repoRoot = rootArgument
+    ? resolve(rootArgument.slice("--repo-root=".length))
+    : resolve(import.meta.dir, "..");
   const { fullPushPlan, planPullRequest } = await import("./ci-pr-plan.ts");
   let outputs = fullPushPlan();
   let reason = `event ${event} always runs the full matrix`;

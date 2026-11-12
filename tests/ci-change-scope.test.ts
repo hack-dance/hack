@@ -240,6 +240,30 @@ describe("pull request diff", () => {
     git(root, ["merge", "--quiet", "--no-ff", "--no-edit", "topic"]);
     expect(pullRequestPaths(root)).toEqual(["docs/topic.md"]);
     expect(changeScope(pullRequestPaths(root) ?? [])).toBe("docs");
+    await mkdir(join(root, "tests"), { recursive: true });
+    await mkdir(join(root, "packages/db"), { recursive: true });
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        resolve(repoRoot, "scripts/ci-change-scope.ts"),
+        "--event=pull_request",
+        `--repo-root=${root}`,
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          GITHUB_OUTPUT: "",
+          GITHUB_STEP_SUMMARY: "",
+          PR_DRAFT: "false",
+          PR_FULL: "false",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.stdout.toString()).toContain("scope=docs\n");
   });
 
   test("the CLI requires an event and reports full scope outside pull requests", () => {
@@ -277,8 +301,9 @@ describe("CI workflow wiring", () => {
       String((step as { uses?: string }).uses).startsWith("actions/checkout")
     );
     expect(checkout?.with?.["fetch-depth"]).toBe(2);
-    expect(changes?.steps?.at(-1)?.run).toBe(
-      'bun scripts/ci-change-scope.ts --event="$EVENT_NAME"'
+    expect(changes?.steps?.at(-1)?.run).toContain('git archive "$base"');
+    expect(changes?.steps?.at(-1)?.run).toContain(
+      '--repo-root="$GITHUB_WORKSPACE"'
     );
   });
 

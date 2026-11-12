@@ -40,6 +40,22 @@ docs, CLI reference, environment matrices or generated files must remain in this
 set. Add an explicit exception whenever a new observation cannot be recognized
 by the source-reader rules.
 
+Tests also always run when an imported source module refers to the CLI entry
+point or built binary, launches a process, uses Bun shell execution or creates
+a worker. These runtime edges can observe the whole CLI without importing it.
+Aliases of the standard process, worker and Bun shell APIs are conservative.
+
+On PRs, CI executes policy code and dependencies from the base commit, with the
+merge checkout supplied only as data. A separate shell rule in the workflow
+forces the full set for policy/scripts, workflows, suite helpers, lockfiles,
+package manifests and selector configuration. Pushes always use this full path.
+If the base predates the selector, the bootstrap also runs the full set. Draft
+suppression and failing draft fan-ins still apply to a forced full selection.
+No PR install script executes while computing scope. The base archive supplies
+the working directory, Bun configuration and dependency lockfile for the policy.
+Retargeting (`edited`) recomputes scope; other PR metadata edits also cancel
+any in-progress PR run and start a new run.
+
 Config, lockfiles, manifests, workflows, scripts, fixtures, scenario/model data,
 Rust/guest inputs, unknown paths and deleted modules select the full unit set.
 An empty or unavailable diff does too. Documentation Markdown still runs the
@@ -62,7 +78,7 @@ input gates, separate from the unit import graph.
 
 ## Historical replay
 
-Run `bun scripts/ci-selection-replay.ts --repository=owner/repository --count=30 --read-logs`.
+Run `bun run ci:selection-replay -- --repository=owner/repository --count=30 --read-logs --plant-failures`.
 It prints one JSON record per merged PR: revision, changed paths, full/selected
 reason, selected files and platform pools, ready/draft policy, run/attempt counts,
 known failed files, hidden failures and evidence gaps. No historical code runs:
@@ -89,6 +105,24 @@ annotations with named file outcomes and assertions emitted before cancellation.
 A cancelled file without a failure record has an unknown outcome; it is not
 counted as a test pass or an observed failure. Logs are never printed. Unit fixtures deliberately
 omit a failed file to prove both log and annotation detectors reject it.
+
+`--plant-failures` independently follows static relative runtime imports/exports
+from an omitted test and adds a virtual failing edit to a source dependency,
+preferring a transitive edge. It recomputes selection with only the source path
+added to the diff; the test itself stays unchanged. The expected failing test
+must be selected or covered by a full fallback, otherwise the replay exits 1.
+A subset without a source witness is inconclusive (exit 2). Full plans use an already covered
+test edit and provide no reverse-import evidence. Historical code never executes.
+The report names the expected failing test, edited dependency, edge depth,
+original coverage and resulting mode. This synthetic check exercises selection
+edges; it does not execute the planted failure or prove every runtime dependency.
+Historical subset counts and real failures within those subsets must accompany
+the zero-hidden-failure result; full fallbacks alone provide no selection proof.
+The replay mirrors the workflow's protected-input guard but models the deployed
+policy, rather than treating every pre-deployment base as a bootstrap full run.
+Transient GitHub read errors (timeouts, connection resets and HTTP 502/503/504)
+have at most three attempts, each bounded to 60 seconds. Authentication, quota,
+missing resources and output-guard refusals fail immediately; no raw logs print.
 
 Every push to `next` and `main` still runs every unit file, every native compiler
 host and the full Docker set. The prerelease workflow still requires a successful

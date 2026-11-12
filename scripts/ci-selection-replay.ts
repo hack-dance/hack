@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { posix } from "node:path";
+import ts from "typescript";
 import { isRecord } from "../src/lib/guards.ts";
 /**
  * Read-only replay of merged PR test selections, including every CI run attempt.
@@ -8,7 +10,12 @@ import { isRecord } from "../src/lib/guards.ts";
  */
 import { COMPILER_HOSTS, planScope } from "./ci-change-scope.ts";
 import { touchesCandidate, touchesCompilerHost } from "./ci-pr-plan.ts";
-import { selectTests, type TestSelection } from "./ci-test-selection.ts";
+import {
+  type SelectionInputs,
+  selectTests,
+  type TestSelection,
+} from "./ci-test-selection.ts";
+import { requiresWorkflowFull } from "./ci-workflow-guard.ts";
 import {
   classifyTestPools,
   isTestFilePath,
@@ -21,6 +28,163 @@ export type ReplayVerdict = {
   readonly unknown: boolean;
   readonly unattributedFailure?: boolean;
 };
+
+/**
+ * Independent, deliberately narrow witness finder: follow static relative runtime
+ * imports/exports in snapshot text, without consulting the selector's graph.
+ * Prefer a transitive source edge so a direct-test-only selector cannot pass.
+ */
+function dependencyWitness(opts: {
+  readonly tests: readonly string[];
+  readonly sources: Readonly<Record<string, string>>;
+  readonly selection: TestSelection;
+}): { file: string; edited: string; depth: number } {
+  let direct: { file: string; edited: string; depth: number } | undefined;
+  for (const file of opts.tests) {
+    if (opts.selection.files.includes(file)) {
+      continue;
+    }
+    const seen = new Set<string>();
+    const queue = [{ path: file, depth: 0 }];
+    while (queue.length) {
+      const entry = queue.pop();
+      if (!entry || seen.has(entry.path)) {
+        continue;
+      }
+      seen.add(entry.path);
+      const source = opts.sources[entry.path];
+      if (source === undefined) {
+        continue;
+      }
+      if (
+        entry.path.startsWith("src/") &&
+        !requiresWorkflowFull([entry.path])
+      ) {
+        const witness = { file, edited: entry.path, depth: entry.depth };
+        if (entry.depth > 1) {
+          return witness;
+        }
+        direct ??= witness;
+      }
+      const ast = ts.createSourceFile(
+        entry.path,
+        source,
+        ts.ScriptTarget.Latest,
+        true
+      );
+      for (const node of ast.statements) {
+        if (
+          !(
+            ((ts.isImportDeclaration(node) && !node.importClause?.isTypeOnly) ||
+              (ts.isExportDeclaration(node) && !node.isTypeOnly)) &&
+            node.moduleSpecifier &&
+            ts.isStringLiteralLike(node.moduleSpecifier) &&
+            node.moduleSpecifier.text.startsWith(".")
+          )
+        ) {
+          continue;
+        }
+        const bindings = ts.isImportDeclaration(node)
+          ? node.importClause?.namedBindings
+          : node.exportClause;
+        if (
+          bindings &&
+          (ts.isNamedImports(bindings) || ts.isNamedExports(bindings)) &&
+          bindings.elements.length > 0 &&
+          bindings.elements.every((element) => element.isTypeOnly)
+        ) {
+          continue;
+        }
+        const base = posix.join(
+          posix.dirname(entry.path),
+          node.moduleSpecifier.text
+        );
+        const candidates = [base, base.replace(/\.js$/, ".ts")].flatMap(
+          (path) =>
+            [
+              "",
+              ".ts",
+              ".tsx",
+              ".js",
+              ".jsx",
+              ".mts",
+              ".cts",
+              "/index.ts",
+              "/index.js",
+            ].map((extension) => `${path}${extension}`)
+        );
+        const target = candidates.find((path) =>
+          Object.hasOwn(opts.sources, path)
+        );
+        if (target) {
+          queue.push({ path: target, depth: entry.depth + 1 });
+        }
+      }
+    }
+  }
+  if (!direct) {
+    throw new Error(
+      "subset has no omitted test with a source dependency witness"
+    );
+  }
+  return direct;
+}
+
+/** Virtually edit an omitted test's source dependency to fail; no code executes. */
+export function replayPlantedFailure(opts: {
+  readonly inputs: SelectionInputs & {
+    readonly tests: readonly string[];
+    readonly sources: Readonly<Record<string, string>>;
+  };
+  readonly selection: TestSelection;
+  readonly select?: typeof selectTests;
+}) {
+  const witness =
+    opts.selection.mode === "selected"
+      ? dependencyWitness({ ...opts.inputs, selection: opts.selection })
+      : { file: opts.inputs.tests[0], edited: opts.inputs.tests[0], depth: 0 };
+  const { file, edited, depth } = witness;
+  if (!(file && edited) || opts.inputs.sources[edited] === undefined) {
+    throw new Error("no test source for planted failure");
+  }
+  const selection = (opts.select ?? selectTests)({
+    ...opts.inputs,
+    changed:
+      opts.inputs.changed === null ? null : [...opts.inputs.changed, edited],
+    sources: {
+      ...opts.inputs.sources,
+      [edited]: `${opts.inputs.sources[edited]}\nthrow new Error("planted replay failure");\n`,
+    },
+  });
+  const verdict = replayFailures({
+    log: `[test shard 1/8] (1/1) FAIL ${file} in 0s`,
+    selection,
+  });
+  return {
+    file,
+    edited,
+    depth,
+    kind: opts.selection.mode === "selected" ? "dependency" : "full-fallback",
+    previouslySelected: opts.selection.files.includes(file),
+    mode: selection.mode,
+    covered: verdict.hidden.length === 0,
+    hidden: verdict.hidden,
+  };
+}
+
+/** Missing synthetic evidence is inconclusive, rather than a hidden failure. */
+export function replayPlantOutcome(
+  opts: Parameters<typeof replayPlantedFailure>[0]
+) {
+  try {
+    return { planted: replayPlantedFailure(opts), unknown: [] as string[] };
+  } catch {
+    return {
+      planted: undefined,
+      unknown: ["no usable planted-failure source witness"],
+    };
+  }
+}
 
 function replayLogLine(raw: string): string {
   return raw
@@ -156,7 +320,7 @@ export function replayJobAdmitted(opts: {
   readonly changed: readonly string[];
 }): boolean | null {
   const coarse = planScope(opts.changed);
-  const full = coarse.scope === "full";
+  const full = requiresWorkflowFull(opts.changed) || coarse.scope === "full";
   if (opts.name.startsWith("Candidate core (")) {
     return full || opts.changed.some(touchesCandidate);
   }
@@ -183,18 +347,55 @@ export function replayJobAdmitted(opts: {
   return null;
 }
 
-function command(args: readonly string[], stdin?: Uint8Array): string {
-  const result = Bun.spawnSync([...args], {
-    stdin: stdin ?? "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    timeout: 60_000,
-    maxBuffer: 256 * 1024 * 1024,
-  });
-  if (result.exitCode !== 0) {
-    throw new Error(`read command failed: ${args[0]}`);
+type ReadResult = {
+  readonly exitCode: number | null;
+  readonly signalCode?: string | null;
+  readonly stdout: Uint8Array;
+  readonly stderr: Uint8Array;
+};
+
+/** Retry only transient read failures; auth, quota and output guards fail immediately. */
+export function replayReadCommand(opts: {
+  readonly args: readonly string[];
+  readonly run: () => ReadResult;
+}): string {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const result = opts.run();
+    if (result.exitCode === 0) {
+      return Buffer.from(result.stdout).toString();
+    }
+    const error = Buffer.from(result.stderr).toString();
+    const refused =
+      /HTTP 4\d\d|allow-escape-sequences|refus|denied|authentication|rate limit/i.test(
+        error
+      );
+    const transient =
+      !refused &&
+      (result.signalCode === "SIGTERM" ||
+        /HTTP 50[234]|TLS handshake timeout|i\/o timeout|context deadline exceeded|connection reset|temporary failure|timed out/i.test(
+          error
+        ));
+    if (opts.args[0] !== "gh" || !transient || attempt === 3) {
+      throw new Error(
+        `read command failed: ${opts.args[0]} (${transient ? "transient read exhausted" : "non-transient read failure"}; ${attempt} attempt(s))`
+      );
+    }
   }
-  return result.stdout.toString();
+  throw new Error("unreachable read retry state");
+}
+
+function command(args: readonly string[], stdin?: Uint8Array): string {
+  return replayReadCommand({
+    args,
+    run: () =>
+      Bun.spawnSync([...args], {
+        stdin: stdin ?? "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 60_000,
+        maxBuffer: 256 * 1024 * 1024,
+      }),
+  });
 }
 function api(path: string): unknown {
   return JSON.parse(command(["gh", "api", path]));
@@ -401,7 +602,10 @@ function inspectReplayJob(opts: {
     string,
     { changed: readonly string[]; selection: TestSelection }
   >;
-}): ReplayVerdict & { readonly checkout?: string } {
+}): ReplayVerdict & {
+  readonly checkout?: string;
+  readonly selectionMode?: string;
+} {
   try {
     if (opts.skipEvidence || !opts.readLogs) {
       return { failed: [], hidden: [], unknown: true };
@@ -457,7 +661,7 @@ function inspectReplayJob(opts: {
           repoRoot: "/snapshot",
           ...historical,
           changed,
-          full: false,
+          full: requiresWorkflowFull(changed),
         }),
       };
       opts.historyCache.set(key, history);
@@ -471,6 +675,7 @@ function inspectReplayJob(opts: {
         hidden: admitted === false ? [`job: ${name}`] : [],
         unknown: admitted === null,
         checkout: revision,
+        selectionMode: selection.mode,
       };
     }
     // A merge-time label might not have existed on this attempt. Audit the
@@ -486,6 +691,7 @@ function inspectReplayJob(opts: {
       hidden: failed.filter((file) => !selection.files.includes(file)),
       unknown: failed.length === 0 || fromLog.unattributedFailure === true,
       checkout: revision,
+      selectionMode: selection.mode,
     };
     // A cancelled file has an unknown outcome, not an observed failure. Its
     // complete available log still exposes assertions that failed before it stopped.
@@ -503,6 +709,7 @@ function inspectReplayJob(opts: {
 export async function main(args: readonly string[]): Promise<number> {
   const skipLogs = args.includes("--skip-logs");
   const readLogs = args.includes("--read-logs");
+  const plantFailures = args.includes("--plant-failures");
   const historyCache = new Map<
     string,
     { changed: readonly string[]; selection: TestSelection }
@@ -547,14 +754,22 @@ export async function main(args: readonly string[]): Promise<number> {
       .split("\0")
       .filter(Boolean);
     const full =
-      Array.isArray(pr.labels) &&
-      pr.labels.some((label) => isRecord(label) && label.name === "ci:full");
+      requiresWorkflowFull(changed) ||
+      (Array.isArray(pr.labels) &&
+        pr.labels.some((label) => isRecord(label) && label.name === "ci:full"));
     const selection = selectTests({
       repoRoot: "/snapshot",
       ...state,
       changed,
       full,
     });
+    const planting = plantFailures
+      ? replayPlantOutcome({
+          inputs: { repoRoot: "/snapshot", ...state, changed, full },
+          selection,
+        })
+      : { planted: undefined, unknown: [] };
+    const { planted } = planting;
     const pools = await classifyTestPools({
       repoRoot: "/snapshot",
       files: selection.files,
@@ -569,7 +784,7 @@ export async function main(args: readonly string[]): Promise<number> {
         field(run, "created_at") <= field(pr, "mergedAt")
     );
     const hidden: string[] = [];
-    const unknown: string[] = [];
+    const unknown: string[] = [...planting.unknown];
     const failures: string[] = [];
     const history: Record<string, unknown>[] = [];
     let attempts = 0;
@@ -594,6 +809,7 @@ export async function main(args: readonly string[]): Promise<number> {
             attempt,
             job: field(job, "name"),
             checkout: verdict.checkout ?? null,
+            selectionMode: verdict.selectionMode ?? null,
             failed: verdict.failed,
             hidden: verdict.hidden,
             unknown: verdict.unknown,
@@ -611,7 +827,7 @@ export async function main(args: readonly string[]): Promise<number> {
     if (runs.length === 0) {
       unknown.push("no PR CI history found");
     }
-    if (hidden.length) {
+    if (hidden.length || planted?.covered === false) {
       bugs++;
     }
     if (unknown.length) {
@@ -643,14 +859,16 @@ export async function main(args: readonly string[]): Promise<number> {
         runs: runs.length,
         attempts,
         history,
+        planted,
         failed: [...new Set(failures)],
         hidden: [...new Set(hidden)],
         unknown,
-        verdict: hidden.length
-          ? "BUG"
-          : unknown.length
-            ? "INCONCLUSIVE"
-            : "no known hidden failure",
+        verdict:
+          hidden.length || planted?.covered === false
+            ? "BUG"
+            : unknown.length
+              ? "INCONCLUSIVE"
+              : "no known hidden failure",
       })
     );
   }

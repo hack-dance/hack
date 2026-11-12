@@ -28,6 +28,112 @@ const CONTRACT_PATH =
 /** Reads/subprocesses in test support can observe arbitrary repository files. */
 const OPAQUE_TEST_SOURCE =
   /\b(?:readFile(?:Sync)?|readdir(?:Sync)?|Bun\s*\.\s*file|Bun\s*\.\s*Glob|spawn(?:Sync)?|execFile(?:Sync)?|execSync|require)\b|\bBun\s*\[|=\s*Bun\b/;
+const PROCESS_CALLS = new Set([
+  "spawn",
+  "spawnSync",
+  "exec",
+  "execSync",
+  "execFile",
+  "execFileSync",
+  "fork",
+]);
+const CLI_REFERENCE =
+  /\bindex\.ts\b|\bdist[/\\](?:hack|index)\b|\bhack-(?:native|runtime-candidate|local)\b/;
+
+/** Process/CLI indirection can read any source without an import edge. */
+function hasUnboundedDependency(node: ts.Node): boolean {
+  const assigned = ts.isVariableDeclaration(node)
+    ? node.initializer
+    : ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      ? node.right
+      : undefined;
+  if (assigned && ts.isIdentifier(assigned) && assigned.text === "Bun") {
+    return true;
+  }
+  if (ts.isIdentifier(node) && node.text === "Worker") {
+    return true;
+  }
+  if (
+    ts.isTemplateExpression(node) &&
+    CLI_REFERENCE.test(
+      [
+        node.head.text,
+        ...node.templateSpans.map((span) => span.literal.text),
+      ].join("")
+    )
+  ) {
+    return true;
+  }
+  if (ts.isStringLiteralLike(node) && CLI_REFERENCE.test(node.text)) {
+    return true;
+  }
+  if (ts.isImportDeclaration(node)) {
+    return importsProcessAPI(node);
+  }
+  if (ts.isPropertyAccessExpression(node)) {
+    return (
+      node.name.text === "$" ||
+      (node.name.text !== "exec" && PROCESS_CALLS.has(node.name.text))
+    );
+  }
+  if (
+    ts.isElementAccessExpression(node) &&
+    ts.isStringLiteralLike(node.argumentExpression)
+  ) {
+    return (
+      node.argumentExpression.text === "$" ||
+      PROCESS_CALLS.has(node.argumentExpression.text)
+    );
+  }
+  if (ts.isCallExpression(node)) {
+    if (
+      ts.isIdentifier(node.expression) &&
+      PROCESS_CALLS.has(node.expression.text)
+    ) {
+      return true;
+    }
+    return CLI_REFERENCE.test(
+      node.arguments
+        .filter(ts.isStringLiteralLike)
+        .map((argument) => argument.text)
+        .join("/")
+    );
+  }
+  return (
+    ts.isNewExpression(node) &&
+    ((ts.isIdentifier(node.expression) && node.expression.text === "Worker") ||
+      (ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "Worker"))
+  );
+}
+
+function importsProcessAPI(node: ts.ImportDeclaration): boolean {
+  if (
+    !ts.isStringLiteral(node.moduleSpecifier) ||
+    node.importClause?.isTypeOnly
+  ) {
+    return false;
+  }
+  if (
+    /^(?:node:)?(?:child_process|worker_threads)$/.test(
+      node.moduleSpecifier.text
+    )
+  ) {
+    return true;
+  }
+  const bindings = node.importClause?.namedBindings;
+  return (
+    node.moduleSpecifier.text === "bun" &&
+    !!bindings &&
+    ts.isNamedImports(bindings) &&
+    bindings.elements.some(
+      (binding) =>
+        !binding.isTypeOnly &&
+        (binding.propertyName ?? binding.name).text === "$"
+    )
+  );
+}
 const EXTENSIONS = [
   "",
   ".ts",
@@ -277,11 +383,16 @@ export function selectTests(opts: SelectionInputs): TestSelection {
     const dependencies = new Set<string>();
     let opaque = false;
     let aliasedReader = false;
+    let unbounded = false;
     function add(expression: ts.Node | undefined): void {
       if (!(expression && ts.isStringLiteralLike(expression))) {
         opaque = true;
         return;
       }
+      // Module specifiers cover import, export, import() and require() aliases.
+      unbounded ||= /^(?:node:)?(?:child_process|worker_threads)$/.test(
+        expression.text
+      );
       const target = localTarget(file, expression.text);
       if (target === undefined) {
         opaque = true;
@@ -290,6 +401,7 @@ export function selectTests(opts: SelectionInputs): TestSelection {
       }
     }
     function visit(node: ts.Node): void {
+      unbounded ||= hasUnboundedDependency(node);
       if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
         aliasedReader ||= readsFsImport(node);
         if (node.moduleSpecifier) {
@@ -315,10 +427,11 @@ export function selectTests(opts: SelectionInputs): TestSelection {
       dependencies: [...dependencies],
       opaque,
       sourceCheck:
-        (file.startsWith("tests/") ||
+        unbounded ||
+        ((file.startsWith("tests/") ||
           file.startsWith("scripts/") ||
           file.startsWith("packages/db/tests/")) &&
-        (OPAQUE_TEST_SOURCE.test(source) || aliasedReader),
+          (OPAQUE_TEST_SOURCE.test(source) || aliasedReader)),
     };
     modules.set(file, result);
     return result;
@@ -340,7 +453,7 @@ export function selectTests(opts: SelectionInputs): TestSelection {
       return full(`suite preload dependency changed: ${file}`);
     }
     const input = module(file);
-    if (input.opaque) {
+    if (input.opaque || (file.startsWith("src/") && input.sourceCheck)) {
       return full(`suite preload dependency is opaque: ${file}`);
     }
     preloadQueue.push(...input.dependencies);

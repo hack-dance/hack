@@ -6,8 +6,175 @@ import {
   replayCheckoutRevision,
   replayFailures,
   replayJobAdmitted,
+  replayPlantedFailure,
+  replayPlantOutcome,
+  replayReadCommand,
 } from "../scripts/ci-selection-replay.ts";
 import { selectTests } from "../scripts/ci-test-selection.ts";
+
+test.each([
+  "HTTP 502: Bad Gateway",
+  "HTTP 503",
+  "HTTP 504",
+  "TLS handshake timeout",
+  "i/o timeout",
+])("transient historical reads retry within a fixed bound: %s", (error) => {
+  let attempts = 0;
+  expect(
+    replayReadCommand({
+      args: ["gh", "api", "fixture"],
+      run: () => {
+        attempts++;
+        return {
+          exitCode: attempts === 2 ? 0 : 1,
+          stdout: Buffer.from("evidence"),
+          stderr: Buffer.from(error),
+        };
+      },
+    })
+  ).toBe("evidence");
+  expect(attempts).toBe(2);
+});
+test.each([
+  "HTTP 401",
+  "HTTP 403 rate limit",
+  "HTTP 404",
+  "refusing terminal escape sequences; use --allow-escape-sequences",
+  "HTTP 403: timed out",
+  "refusing command after timed out read",
+])("auth, quota, missing evidence and output guards are never retried: %s", (error) => {
+  let attempts = 0;
+  expect(() =>
+    replayReadCommand({
+      args: ["gh", "api", "fixture"],
+      run: () => {
+        attempts++;
+        return {
+          exitCode: 1,
+          stdout: Buffer.from(""),
+          stderr: Buffer.from(error),
+        };
+      },
+    })
+  ).toThrow("non-transient read failure; 1 attempt(s)");
+  expect(attempts).toBe(1);
+});
+test("timed-out reads exhaust three attempts and preserve a failure verdict", () => {
+  let attempts = 0;
+  expect(() =>
+    replayReadCommand({
+      args: ["gh", "api", "fixture"],
+      run: () => {
+        attempts++;
+        return {
+          exitCode: 1,
+          signalCode: "SIGTERM",
+          stdout: Buffer.from(""),
+          stderr: Buffer.from(""),
+        };
+      },
+    })
+  ).toThrow("transient read exhausted; 3 attempt(s)");
+  expect(attempts).toBe(3);
+});
+test("local Git errors are not retried as network reads", () => {
+  let attempts = 0;
+  expect(() =>
+    replayReadCommand({
+      args: ["git", "show", "fixture"],
+      run: () => {
+        attempts++;
+        return {
+          exitCode: 1,
+          stdout: Buffer.from(""),
+          stderr: Buffer.from("timed out"),
+        };
+      },
+    })
+  ).toThrow("1 attempt(s)");
+  expect(attempts).toBe(1);
+});
+
+test("planted failures edit a transitive source dependency, and direct-test-only selection is rejected", () => {
+  const inputs = {
+    repoRoot: "/snapshot",
+    sources: {
+      "src/leaf.ts": "export const value = 1;",
+      "src/barrel.ts": 'export * from "./leaf.ts";',
+      "tests/a.test.ts": 'import {value} from "../src/barrel.ts";',
+      "tests/b.test.ts": "export {};",
+    },
+    tests: ["tests/a.test.ts", "tests/b.test.ts"],
+    changed: ["docs/a.md"],
+  };
+  const selection = selectTests(inputs);
+  expect(replayPlantedFailure({ inputs, selection })).toMatchObject({
+    file: "tests/a.test.ts",
+    edited: "src/leaf.ts",
+    depth: 2,
+    kind: "dependency",
+    previouslySelected: false,
+    covered: true,
+    mode: "selected",
+  });
+  expect(
+    replayPlantedFailure({
+      inputs,
+      selection,
+      select: (counterfactual) => {
+        expect(counterfactual.changed).toEqual(["docs/a.md", "src/leaf.ts"]);
+        expect(counterfactual.sources?.["tests/a.test.ts"]).toBe(
+          inputs.sources["tests/a.test.ts"]
+        );
+        return {
+          mode: "selected",
+          reason:
+            "broken selector keeps direct test changes but drops import edges",
+          files: inputs.tests.filter((file) =>
+            counterfactual.changed?.includes(file)
+          ),
+        };
+      },
+    })
+  ).toMatchObject({ covered: false, hidden: ["tests/a.test.ts"] });
+  const full = selectTests({ ...inputs, full: true });
+  expect(
+    replayPlantedFailure({ inputs: { ...inputs, full: true }, selection: full })
+  ).toMatchObject({
+    previouslySelected: true,
+    kind: "full-fallback",
+    mode: "full",
+    covered: true,
+  });
+});
+test("planted dependency evidence refuses a subset with no runtime source witness", () => {
+  const inputs = {
+    repoRoot: "/snapshot",
+    sources: {
+      "src/types.ts": "export type Value = number;",
+      "tests/a.test.ts": 'import type {Value} from "../src/types.ts";',
+    },
+    tests: ["tests/a.test.ts"],
+    changed: ["docs/a.md"],
+  };
+  expect(() =>
+    replayPlantedFailure({ inputs, selection: selectTests(inputs) })
+  ).toThrow("subset has no omitted test with a source dependency witness");
+  expect(
+    replayPlantOutcome({ inputs, selection: selectTests(inputs) })
+  ).toEqual({
+    planted: undefined,
+    unknown: ["no usable planted-failure source witness"],
+  });
+});
+test("the package replay entry point preserves flags and the pinned runtime gate", async () => {
+  const manifest = await Bun.file(
+    new URL("../package.json", import.meta.url)
+  ).json();
+  expect(manifest.scripts["ci:selection-replay"]).toBe(
+    "bun run check:bun-version && bun scripts/ci-selection-replay.ts"
+  );
+});
 
 test("historical failure selection uses the tested merge tree, including tests added on the base", () => {
   const head = "a".repeat(40);
@@ -107,6 +274,14 @@ test("structured annotations find runner failures and do not rely on stack frame
 });
 
 test("dedicated native job replay uses the same input and host gates", () => {
+  for (const name of [
+    "Candidate core (macos-latest)",
+    "Config compiler (macos-15-intel)",
+  ]) {
+    expect(
+      replayJobAdmitted({ name, changed: ["src/lib/cli-result.ts"] })
+    ).toBe(true);
+  }
   expect(
     replayJobAdmitted({
       name: "Candidate core (macos-latest)",
@@ -116,19 +291,19 @@ test("dedicated native job replay uses the same input and host gates", () => {
   expect(
     replayJobAdmitted({
       name: "Candidate core (macos-latest)",
-      changed: ["src/lib/cli-result.ts"],
+      changed: ["src/lib/value.ts"],
     })
   ).toBe(false);
   expect(
     replayJobAdmitted({
       name: "Config compiler (ubuntu-latest)",
-      changed: ["src/lib/cli-result.ts"],
+      changed: ["src/lib/value.ts"],
     })
   ).toBe(true);
   expect(
     replayJobAdmitted({
       name: "Config compiler (macos-15-intel)",
-      changed: ["src/lib/cli-result.ts"],
+      changed: ["src/lib/value.ts"],
     })
   ).toBe(false);
   expect(
@@ -140,7 +315,7 @@ test("dedicated native job replay uses the same input and host gates", () => {
   expect(
     replayJobAdmitted({
       name: "linux-process-lifetime",
-      changed: ["src/lib/cli-result.ts"],
+      changed: ["src/lib/value.ts"],
     })
   ).toBe(true);
 });

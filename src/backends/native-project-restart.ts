@@ -36,8 +36,15 @@ export function nativeRestartStopSignals() {
     }
     controller.abort();
   };
+  const hangup = () => {
+    if (!controller.signal.aborted) {
+      interruptedExit = 129;
+    }
+    controller.abort();
+  };
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", terminate);
+  process.on("SIGHUP", hangup);
   let disposed = false;
   return {
     signal: controller.signal,
@@ -47,6 +54,7 @@ export function nativeRestartStopSignals() {
         disposed = true;
         process.off("SIGINT", interrupt);
         process.off("SIGTERM", terminate);
+        process.off("SIGHUP", hangup);
       }
     },
   };

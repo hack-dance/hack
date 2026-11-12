@@ -451,7 +451,10 @@ fn retained_publisher_exit_wakes_owner_and_retired_watch_does_not() {
     let mut first = spawn();
     events.watch_child(&first).unwrap();
     first.kill().unwrap();
-    assert!(events.wait().is_err());
+    assert_eq!(
+        events.wait_until(None).unwrap(),
+        signals::Wake::PublisherExit
+    );
     events.unwatch_child(&first).unwrap();
     first.wait().unwrap();
     let mut retired = spawn();

@@ -1,0 +1,26 @@
+---
+title: The first five minutes
+---
+sequenceDiagram
+  autonumber
+  actor you as You
+  participant hack as Hack
+  participant engine as Compose engine
+  participant browser as Browser
+  you->>hack: hack init
+  hack->>hack: Write .hack/ config
+  you->>hack: hack up --detach
+  hack->>engine: Start project services
+  engine-->>hack: Services running
+  Note over hack,engine: Shared proxy registers routes
+  you->>hack: hack open
+  hack->>browser: Open HTTPS address
+  browser->>engine: HTTPS through proxy
+  you->>hack: hack logs
+  hack->>engine: Follow service logs
+  engine-->>hack: Service output
+  hack-->>you: Stream output
+  Note over you,hack: Stop following with Ctrl-C
+  you->>hack: hack down
+  hack->>engine: Stop project services
+  Note over hack,engine: Data stays retained

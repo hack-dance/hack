@@ -1,5 +1,6 @@
 //! Owned foreground publisher children. Graph journals, never child PIDs, authorize
 //! publication retirement. Caller must retain this set across partial failures.
+use super::super::owner_loop::PublisherReadiness;
 use super::{Candidate, CandidateError, Receipt, signals};
 use crate::provider::{graph, publication};
 use std::{
@@ -240,7 +241,7 @@ impl Publishers {
                 exit_proof: None,
                 exit_pending: false,
             });
-            self.await_published(candidate, signals, deadline)?;
+            self.await_published(candidate, signals, deadline, PublisherReadiness::Startup)?;
         }
         Ok(())
     }
@@ -250,20 +251,43 @@ impl Publishers {
         candidate: &Candidate,
         signals: &signals::Events,
         deadline: Instant,
+        scope: PublisherReadiness,
     ) -> Result<(), CandidateError> {
-        let owned = self.children.last().ok_or_else(refused)?;
-        signals.watch_child(&owned.child)?;
+        let selected = self.children.len().checked_sub(1).ok_or_else(refused)?;
+        signals.watch_child(&self.children[selected].child)?;
         loop {
             check_deadline(signals, deadline)?;
-            if self.reap_exited(candidate)? {
-                return Err(refused());
-            }
-            let owned = self.children.last().ok_or_else(refused)?;
-            if published(candidate, owned).is_ok() {
+            if self.publication_ready_with(candidate, selected, scope, published)? {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The publication observer is fixed to `published` in production. Tests
+    /// replace only that read boundary, retaining real native child reaping.
+    fn publication_ready_with(
+        &mut self,
+        candidate: &Candidate,
+        selected: usize,
+        scope: PublisherReadiness,
+        observe: impl FnOnce(&Candidate, &Owned) -> Result<(), CandidateError>,
+    ) -> Result<bool, CandidateError> {
+        let any_down = self.reap_exited(candidate)?;
+        let owned = self.children.get(selected).ok_or_else(refused)?;
+        if scope.blocked_by_exit(owned.down(), any_down) {
+            return Err(refused());
+        }
+        Ok(observe(candidate, owned).is_ok())
+    }
+
+    fn replacement_port_busy(&self, selected: usize) -> Result<bool, CandidateError> {
+        let owned = self.children.get(selected).ok_or_else(refused)?;
+        Ok(owned.exited.is_some()
+            && owned.port.is_some_and(|port| {
+                publication::require_loopback_port_free(port)
+                    .is_err_and(|error| error.code == "published_port_in_use")
+            }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -309,7 +333,7 @@ impl Publishers {
                 exit_proof: None,
                 exit_pending: false,
             });
-            self.await_published(candidate, signals, deadline)?;
+            self.await_published(candidate, signals, deadline, PublisherReadiness::Startup)?;
         }
         Ok(())
     }
@@ -475,6 +499,7 @@ impl Publishers {
             )
             .spawn()
             .map_err(|_| refused())?;
+            let replacement = self.children.len();
             self.children.push(Owned {
                 child,
                 run: run.into(),
@@ -487,21 +512,22 @@ impl Publishers {
                 exit_proof: None,
                 exit_pending: false,
             });
-            if let Err(error) = self.await_published(candidate, signals, deadline) {
+            if let Err(error) = self.await_published(
+                candidate,
+                signals,
+                deadline,
+                PublisherReadiness::Replacement,
+            ) {
                 // The listener can be taken after reservation. Never reuse this
                 // launch intent: fully retire it and retain unrelated children.
-                let exited = self.reap_exited(candidate)?;
-                let busy = exited
-                    && frontend.0.is_some_and(|port| {
-                        publication::require_loopback_port_free(port)
-                            .is_err_and(|e| e.code == "published_port_in_use")
-                    });
+                self.reap_exited(candidate)?;
+                let busy = self.replacement_port_busy(replacement)?;
                 if !busy {
                     return Err(error);
                 }
                 graph::release_bridge(candidate, run, selected.slot, &reservation)?;
                 self.reap_one_after_cleanup(
-                    self.children.len() - 1,
+                    replacement,
                     signals,
                     Instant::now() + Duration::from_secs(5),
                 )?;

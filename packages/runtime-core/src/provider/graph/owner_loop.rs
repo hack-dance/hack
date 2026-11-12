@@ -15,6 +15,19 @@ pub(super) enum Action {
     RefreshDependencies,
     Continue,
 }
+
+#[derive(Clone, Copy)]
+pub(super) enum PublisherReadiness {
+    Startup,
+    Replacement,
+}
+impl PublisherReadiness {
+    /// A new graph requires its whole set live; a replacement must not turn a
+    /// retained sibling's historical exit into a new startup/cleanup failure.
+    pub(super) fn blocked_by_exit(self, selected_down: bool, any_down: bool) -> bool {
+        selected_down || (matches!(self, Self::Startup) && any_down)
+    }
+}
 #[derive(Default)]
 pub(super) struct OwnerLoop {
     pub(super) cleanup_attempted: bool,
@@ -38,6 +51,22 @@ impl OwnerLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_readiness_ignores_sibling_exits_but_never_its_own() {
+        for selected in [false, true] {
+            for any in [false, true] {
+                assert_eq!(
+                    PublisherReadiness::Startup.blocked_by_exit(selected, any),
+                    selected || any
+                );
+                assert_eq!(
+                    PublisherReadiness::Replacement.blocked_by_exit(selected, any),
+                    selected
+                );
+            }
+        }
+    }
 
     #[test]
     fn publisher_exit_keeps_services_and_later_cleanup_available() {

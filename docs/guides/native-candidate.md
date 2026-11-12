@@ -3970,6 +3970,11 @@ keep following their admitted restart policies; an exited publisher's own servic
 generation cannot recreate that publisher or rearm its route probe.
 If one service has several publications, losing one pauses restart following for
 all that service's publications until an explicit restart; other services continue.
+Replacement readiness checks that replacement's own child and publication, so a
+retained sibling exit (pending or committed) does not stop unrelated services.
+Fresh startup still requires every publisher live. A replacement port conflict
+requires that replacement's committed exit and an occupied port; its own live
+listener is never classified as a conflict because another publisher exited.
 
 New macOS frontend finalization records include the process birth time. Retaining
 recovery can distinguish a reused PID without signalling its replacement. A

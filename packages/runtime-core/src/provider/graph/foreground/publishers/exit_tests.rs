@@ -18,6 +18,146 @@ impl Drop for ChildGuard {
         }
     }
 }
+struct PublishersGuard(Publishers);
+impl Drop for PublishersGuard {
+    fn drop(&mut self) {
+        for owned in &mut self.0.children {
+            if owned.child.try_wait().ok().flatten().is_none() {
+                let _ = owned.child.kill();
+            }
+            let _ = owned.child.wait();
+        }
+    }
+}
+
+/// Production readiness polling with real direct children. Only the checked
+/// publication observation is substituted; no Engine/guest readiness is claimed.
+#[test]
+fn sibling_readiness_survives_pending_and_committed_exits_without_a_false_port_conflict() {
+    let root = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("hpub-{}", graph::probes::token().unwrap()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .unwrap();
+    let fixture = graph::tests::Fixture(root);
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    let lease =
+        crate::provider::state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+    let first = fixture.0.join("first");
+    let second = fixture.0.join("second");
+    for root in [&first, &second] {
+        std::fs::DirBuilder::new().mode(0o700).create(root).unwrap();
+    }
+    let (mut dead, dead_port, _first_upstream) = native_publisher(&first);
+    let (mut sibling, sibling_port, _second_upstream) = native_publisher(&second);
+    let mut guard = PublishersGuard(Publishers {
+        owner: "a".repeat(32),
+        ..Default::default()
+    });
+    for (child, port, service, reservation) in [
+        (&mut dead, dead_port, "dead", "c".repeat(32)),
+        (&mut sibling, sibling_port, "sibling", "d".repeat(32)),
+    ] {
+        guard.0.children.push(Owned {
+            child: child.0.take().unwrap(),
+            run: "b".repeat(32),
+            reservation,
+            service: service.into(),
+            hostnames: Vec::new(),
+            port: Some(port),
+            target: Some(8080),
+            exited: None,
+            exit_proof: None,
+            exit_pending: false,
+        });
+    }
+    guard.0.children[0].child.kill().unwrap();
+    await_exit(&guard.0.children[0].child);
+    assert_selected_readiness(&candidate, &mut guard.0);
+    assert!(guard.0.children[0].exit_pending);
+    assert!(guard.0.children[0].exited.is_none());
+    // The replacement's own bound listener is not a conflict while it is alive.
+    assert!(!guard.0.replacement_port_busy(1).unwrap());
+    drop(lease);
+    assert_selected_readiness(&candidate, &mut guard.0);
+    assert!(guard.0.children[0].exited.is_some());
+    assert!(
+        !guard
+            .0
+            .publication_ready_with(&candidate, 1, PublisherReadiness::Replacement, |_, _| Err(
+                refused()
+            ))
+            .unwrap()
+    );
+    assert!(!guard.0.replacement_port_busy(1).unwrap());
+
+    let lease =
+        crate::provider::state::Lock::acquire_existing(&candidate.state_root.join("run/smolvm"))
+            .unwrap();
+    guard.0.children[1].child.kill().unwrap();
+    await_exit(&guard.0.children[1].child);
+    assert!(
+        guard
+            .0
+            .publication_ready_with(
+                &candidate,
+                1,
+                PublisherReadiness::Replacement,
+                |_, _| panic!("an exited selected child cannot grant readiness")
+            )
+            .is_err()
+    );
+    assert!(guard.0.children[1].exit_pending);
+    assert!(guard.0.children[1].exited.is_none());
+    let _occupied = std::net::TcpListener::bind(("127.0.0.1", sibling_port)).unwrap();
+    assert!(!guard.0.replacement_port_busy(1).unwrap());
+    drop(lease);
+    assert!(
+        guard
+            .0
+            .publication_ready_with(
+                &candidate,
+                1,
+                PublisherReadiness::Replacement,
+                |_, _| panic!("the replacement exited")
+            )
+            .is_err()
+    );
+    assert!(guard.0.children[1].exited.is_some());
+    assert!(guard.0.replacement_port_busy(1).unwrap());
+    guard.0.children[1].port = None;
+    assert!(!guard.0.replacement_port_busy(1).unwrap());
+    assert!(!candidate.state_root.join("run/graphs").exists());
+}
+
+fn await_exit(child: &Child) {
+    let end = Instant::now() + Duration::from_secs(5);
+    while !publication::child_exit_pending(child).unwrap() {
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_selected_readiness(candidate: &Candidate, publishers: &mut Publishers) {
+    assert!(
+        publishers
+            .publication_ready_with(candidate, 1, PublisherReadiness::Replacement, |_, owned| {
+                assert_eq!(owned.reservation, "d".repeat(32));
+                assert_eq!(owned.service, "sibling");
+                Ok(())
+            })
+            .unwrap()
+    );
+    assert!(
+        publishers
+            .publication_ready_with(candidate, 1, PublisherReadiness::Startup, |_, _| panic!(
+                "startup still requires every publisher live"
+            ))
+            .is_err()
+    );
+}
 
 /// A real native publisher exits, is reaped once and remains observable as down
 /// until an explicit stop. No Engine/VM or synthetic publisher stands in for it.
@@ -41,20 +181,10 @@ fn exited_publisher_waits_for_proof_without_blocking_or_claiming_it_live() {
     exercise(true, false, true);
 }
 
-fn exercise(announce: bool, broken_notice: bool, busy: bool) {
-    let path = std::fs::canonicalize("/tmp")
-        .unwrap()
-        .join(format!("hpub-{}", graph::probes::token().unwrap()));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&path)
-        .unwrap();
-    let fixture = graph::tests::Fixture(path);
-    let candidate = Candidate::discover(&fixture.0).unwrap();
-    drop(crate::provider::state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap());
-    let _upstream = UnixListener::bind(fixture.0.join("upstream")).unwrap();
+fn native_publisher(root: &Path) -> (ChildGuard, u16, UnixListener) {
+    let upstream = UnixListener::bind(root.join("upstream")).unwrap();
     std::fs::set_permissions(
-        fixture.0.join("upstream"),
+        root.join("upstream"),
         std::fs::Permissions::from_mode(0o700),
     )
     .unwrap();
@@ -63,9 +193,9 @@ fn exercise(announce: bool, broken_notice: bool, busy: bool) {
         "/stream-relay-host"
     )))
     .args(["--publish", "0"])
-    .arg(fixture.0.join("upstream"))
+    .arg(root.join("upstream"))
     .args(["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "10000", "--control"])
-    .arg(fixture.0.join("control"))
+    .arg(root.join("control"))
     .args(["--control-fd", "0"])
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -90,7 +220,22 @@ fn exercise(announce: bool, broken_notice: bool, busy: bool) {
     assert_eq!(unsafe { libc::poll(&mut poll, 1, 5000) }, 1);
     BufReader::new(output).read_line(&mut line).unwrap();
     let port: u16 = line.trim().strip_prefix("ready ").unwrap().parse().unwrap();
-    child.kill().unwrap();
+    (guard, port, upstream)
+}
+
+fn exercise(announce: bool, broken_notice: bool, busy: bool) {
+    let path = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("hpub-{}", graph::probes::token().unwrap()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .unwrap();
+    let fixture = graph::tests::Fixture(path);
+    let candidate = Candidate::discover(&fixture.0).unwrap();
+    drop(crate::provider::state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap());
+    let (mut guard, port, _upstream) = native_publisher(&fixture.0);
+    guard.0.as_mut().unwrap().kill().unwrap();
     let mut publishers = Publishers {
         owner: "a".repeat(32),
         announce: false,

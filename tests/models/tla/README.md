@@ -1384,7 +1384,7 @@ are verified. Publication archival itself is abstracted and may precede dependen
 release in the implementation. `ReleaseDependencies` is separate from guest completion: an
 interrupted release is retried during `retire_recovered_publisher` under the exact
 retired owner, completion digest, provider lease and any enrolled host-pin guard. A failed or stale proof preserves capacity and evidence.
-The positive configuration explores 106 states. The two guard-removal controls
+The positive configuration explores 110 states. The two guard-removal controls
 must violate `NoUnsafeCleanup` at `ReleaseBridge` and `NoInterruptRace` at
 `Interrupt`. The `NeverComplete` control must reach `Retire`, establishing that
 the positive guards permit completion. A fifth configuration removes the
@@ -1395,8 +1395,12 @@ check capacity reuse, idempotent retry, stale-process refusal and preserved byte
 when the caller fence fails. The predecessor VM fixture also pauses after the
 completion commit for its dependency-free project; it covers publication retry,
 not reservation release. The real-file reservation tests execute on macOS CI.
-Watch delivery plus stop initiation, and publisher exit plus exact child reaping,
-are atomic assumptions; native event/reaping tests exercise these boundaries.
+SIGHUP follows the same stop transition as SIGINT/SIGTERM. `PublisherCrash`
+enters `publisher-down`: services stay up until an explicit stop or frontend
+loss, while the reaped publisher is reported down. Publication notice emission
+and exact reaping are abstracted together; stream framing and ps port projection
+are implementation-test obligations. Watch delivery plus stop initiation and
+publisher exit plus exact child reaping are atomic assumptions; native event/reaping tests exercise these boundaries.
 No fairness/eventual recovery is claimed.
 Atomic journal steps, identity and exit observations are assumptions here; real
 process tests, legacy journal and opt-in published-port VM fixtures, source

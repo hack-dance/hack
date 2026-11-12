@@ -15,20 +15,21 @@ Init == /\ phase \in {"ready", "enrolled"} /\ owner \in BOOLEAN
         /\ version = 1 /\ selected = 0 /\ crashes = IF owner THEN 0 ELSE 1
         /\ unsafeCleanup = FALSE /\ interruptedPublisher = FALSE /\ reservation = TRUE
 
-Interrupt == /\ phase = "ready" /\ owner
+Interrupt == /\ phase \in {"ready", "publisher-down"} /\ owner
              /\ phase' = "enrolled"
              /\ publisher' = IF EnforceIsolation THEN publisher ELSE FALSE
              /\ interruptedPublisher' = ~EnforceIsolation
              /\ UNCHANGED <<owner, bridge, version, selected, crashes, unsafeCleanup, boot, selectedBoot, frontend, reservation>>
 \* Watch delivery and cleanup initiation are abstracted as one owner transition.
-FrontendLost == /\ phase = "ready" /\ owner /\ frontend
+FrontendLost == /\ phase \in {"ready", "publisher-down"} /\ owner /\ frontend
                 /\ frontend' = FALSE
                 /\ phase' = IF EnforceLifetimeWatch THEN "enrolled" ELSE phase
                 /\ UNCHANGED <<owner, publisher, bridge, version, selected, crashes,
                                 unsafeCleanup, interruptedPublisher, boot, selectedBoot, reservation>>
-\* Exact Child exit, try_wait and its pinned exit receipt are abstracted together.
+\* Exact Child exit, reaping and a publication-down notice are abstracted together.
+\* Compute stays live until an explicit stop or frontend loss requests cleanup.
 PublisherCrash == /\ phase = "ready" /\ owner /\ publisher
-                  /\ publisher' = FALSE /\ phase' = "enrolled"
+                  /\ publisher' = FALSE /\ phase' = "publisher-down"
                   /\ UNCHANGED <<owner, bridge, version, selected, crashes,
                                   unsafeCleanup, interruptedPublisher, boot, selectedBoot, frontend, reservation>>
 Crash == /\ owner /\ crashes = 0 /\ owner' = FALSE /\ crashes' = 1
@@ -38,7 +39,7 @@ RestartProvider == /\ boot = "original" /\ phase # "retired"
                    /\ boot' = "successor"
                    /\ UNCHANGED <<phase, owner, publisher, bridge, version, selected,
                                    crashes, unsafeCleanup, interruptedPublisher, selectedBoot, frontend, reservation>>
-Recover == /\ ~owner /\ phase \in {"ready", "enrolled", "intent", "bridge-retired"}
+Recover == /\ ~owner /\ phase \in {"ready", "publisher-down", "enrolled", "intent", "bridge-retired"}
            /\ (selected = 0 \/ selected = version)
            /\ phase' = "intent" /\ selected' = version /\ selectedBoot' = boot
            /\ UNCHANGED <<owner, publisher, bridge, version, crashes,
@@ -78,7 +79,7 @@ Retire == /\ phase = "stopped" /\ Proof
 Next == Interrupt \/ FrontendLost \/ PublisherCrash \/ Crash \/ RestartProvider \/ Recover \/ StopPublisher
         \/ ReplaceIdentity \/ ReleaseBridge \/ CleanupGuest \/ ReleaseDependencies \/ Retire
 Spec == Init /\ [][Next]_vars
-TypeOK == /\ phase \in {"ready", "enrolled", "intent", "bridge-retired", "stopped", "retired"}
+TypeOK == /\ phase \in {"ready", "publisher-down", "enrolled", "intent", "bridge-retired", "stopped", "retired"}
           /\ reservation \in BOOLEAN
           /\ owner \in BOOLEAN /\ publisher \in BOOLEAN /\ bridge \in BOOLEAN /\ frontend \in BOOLEAN
           /\ version \in 1..2 /\ selected \in 0..2 /\ crashes \in 0..1
@@ -87,7 +88,7 @@ TypeOK == /\ phase \in {"ready", "enrolled", "intent", "bridge-retired", "stoppe
           /\ selectedBoot \in {"none", "original", "successor"}
 NoUnsafeCleanup == ~unsafeCleanup
 NoInterruptRace == ~interruptedPublisher
-NoSilentOrphan == (~frontend /\ owner) => phase # "ready"
+NoSilentOrphan == (~frontend /\ owner) => phase \notin {"ready", "publisher-down"}
 NoPrematureRelease == ~bridge => ~publisher
 NoStrandedReservation == phase = "retired" => ~reservation
 NeverComplete == phase # "retired"

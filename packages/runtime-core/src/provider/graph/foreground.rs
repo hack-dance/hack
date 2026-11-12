@@ -352,11 +352,15 @@ fn serve_input<'a>(
                     automatic.deadline()
                 };
                 match signals.wait_until(wake)? {
-                    signals::Wake::Signal
-                    | signals::Wake::FrontendExit
-                    | signals::Wake::PublisherExit => {
+                    signals::Wake::Signal | signals::Wake::FrontendExit => {
                         cleanup_attempted = true;
                         return publishers.cleanup(candidate, &mut runtime, false);
+                    }
+                    signals::Wake::PublisherExit => {
+                        // Reap and report, but keep the graph observable and its
+                        // authenticated down control available. A dead publisher
+                        // is not authority to replace it or replay guest work.
+                        publishers.reap_exited(candidate)?;
                     }
                     // A watched refreshable listener exited: a stale notice
                     // without traffic. Its replacement may still be starting.
@@ -366,7 +370,9 @@ fn serve_input<'a>(
             }
             if queued.is_none() && supervise_restarts && Instant::now() >= restart_tick {
                 publication.verify()?;
-                publishers.supervise_restarts(candidate, &receipt.run, &signals)?;
+                if !publishers.has_exited() {
+                    publishers.supervise_restarts(candidate, &receipt.run, &signals)?;
+                }
                 restart_tick = Instant::now() + Duration::from_secs(1);
             }
             if queued.is_none() && runtime.drain_dependency_notifications()? {
@@ -527,7 +533,7 @@ fn serve_input<'a>(
                     );
                 }
                 // inspect releases its Engine lease before the fresh runtime check.
-                publishers.verify_live(candidate)?;
+                let publishers_live = publishers.observe_live(candidate)?;
                 let mut snapshot = super::inspect(candidate, &receipt.run)?;
                 let engine = Engine::connect(candidate)?;
                 let (current, root) = super::load(candidate, &engine, &receipt.run)?;
@@ -535,7 +541,7 @@ fn serve_input<'a>(
                 let checked =
                     startup::Driver::verify(&mut runtime, &engine, &mut snapshot.receipt, &root);
                 Ok::<_, CandidateError>(
-                    json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":checked.is_ok(),"runtime_error":checked.err().map(|error|error.code)}),
+                    json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":publishers_live && checked.is_ok(),"runtime_error":if !publishers_live {Some("publisher_exited")} else {checked.err().map(|error|error.code)},"publisher_ports":publishers.port_status()}),
                 )
             })();
             let value = match status {

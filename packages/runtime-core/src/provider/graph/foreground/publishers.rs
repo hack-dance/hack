@@ -8,6 +8,8 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+#[cfg(all(test, feature = "native-stream-relay"))]
+mod exit_tests;
 
 fn refused() -> CandidateError {
     CandidateError::new(
@@ -290,13 +292,19 @@ impl Publishers {
 
     /// Point-in-time publisher ownership, not guest health or TLS request proof.
     pub(super) fn verify_live(&mut self, candidate: &Candidate) -> Result<(), CandidateError> {
-        if self.reap_exited(candidate)? {
+        if !self.observe_live(candidate)? {
             return Err(refused());
         }
-        for owned in &mut self.children {
-            published(candidate, owned)?;
-        }
         Ok(())
+    }
+    pub(super) fn observe_live(&mut self, candidate: &Candidate) -> Result<bool, CandidateError> {
+        let exited = self.reap_exited(candidate)?;
+        for owned in &mut self.children {
+            if owned.exited.is_none() {
+                published(candidate, owned)?;
+            }
+        }
+        Ok(!exited)
     }
     pub(super) fn reap_exited(&mut self, candidate: &Candidate) -> Result<bool, CandidateError> {
         let mut exited = false;
@@ -310,10 +318,30 @@ impl Publishers {
                     &mut owned.child,
                     &mut owned.exit_proof,
                 )?;
+                if owned.exited.is_some() {
+                    use std::io::Write;
+                    let notice = serde_json::json!({"kind":"graph_publisher_exit","run":owned.run,"port":owned.port});
+                    let mut stdout = std::io::stdout().lock();
+                    serde_json::to_writer(&mut stdout, &notice).map_err(|_| refused())?;
+                    writeln!(stdout)
+                        .and_then(|_| stdout.flush())
+                        .map_err(|_| refused())?;
+                }
             }
             exited |= owned.exited.is_some();
         }
         Ok(exited)
+    }
+
+    pub(super) fn has_exited(&self) -> bool {
+        self.children.iter().any(|owned| owned.exited.is_some())
+    }
+
+    /// Presentation only; each entry belongs to this owner's retained child.
+    pub(super) fn port_status(&self) -> Vec<serde_json::Value> {
+        self.children.iter().filter_map(|owned| owned.port.map(|port| {
+            serde_json::json!({"port":port,"state":if owned.exited.is_some() {"down"} else {"observed"}})
+        })).collect()
     }
 
     /// The foreground owner alone follows engine restart generations. Fully

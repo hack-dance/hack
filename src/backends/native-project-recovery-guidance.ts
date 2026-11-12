@@ -1,10 +1,14 @@
 import {
   type invokeNativeRuntime,
+  NATIVE_PROVIDER_PIN_MESSAGE,
   NativeRuntimeRequestError,
 } from "./native-runtime-client.ts";
 
 /** Name a usable next command without turning uncertainty into cleanup authority. */
 export function nativeRecoveryGuidance(code: string | undefined): string {
+  if (code === "provider_pin_changed") {
+    return NATIVE_PROVIDER_PIN_MESSAGE;
+  }
   if (code === "runtime_not_running") {
     return "Run hack ps --json to confirm that the native runtime is stopped.";
   }
@@ -26,7 +30,10 @@ export function withNativeRecoveryGuidance(
         throw error;
       }
       throw new NativeRuntimeRequestError({
-        message: `${error.message} ${nativeRecoveryGuidance(error.nativeCode)}`,
+        message:
+          error.nativeCode === "provider_pin_changed"
+            ? `Native runtime request failed (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`
+            : `${error.message} ${nativeRecoveryGuidance(error.nativeCode)}`,
         nativeCode: error.nativeCode,
         nativeCauseCode: error.nativeCauseCode,
         nativeMessage: error.nativeMessage,

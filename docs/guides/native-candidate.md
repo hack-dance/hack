@@ -885,7 +885,12 @@ changed: its volumes and prepared tree stay in place, and a build that pins the
 recorded release still runs it. `runtime probe` and `runtime repair-provider-tree`
 refuse the same way, and so does `runtime down` while the old provider runs, so stop a
 running pool (`hack down`, then `runtime down`) before installing a build with a new pin; a pool left running must be
-stopped with the build that started it. Prepare a new candidate home with the pinned
+stopped with the build that started it. For an incompatible stranded home, use the native executor from the release that
+started its pool to run `runtime down --json` on that home. Preserve the home for
+its retained data, then prepare a fresh home for the new build.
+A retained earlier provider path is diagnosed as `provider_pin_changed`, not as a
+changed PID file. Recovery across provider versions is not supported.
+Prepare a new candidate home with the pinned
 archives instead; there is no in-place provider upgrade.
 
 Preparation keeps each archive it extracted (`providers/smolvm-installing/release.tar.gz`
@@ -3866,3 +3871,12 @@ acknowledgements, or turns an uncertain stop into success. It archives the old
 shutdown observations before replacing only the proven retired entries. If repair
 refuses, preserve the native home and follow the existing owned recovery process;
 do not delete `shutdown.json` or drop current container evidence.
+
+
+For native foreground `up` and `restart`, closing the terminal (SIGHUP) requests
+the same retaining cleanup as Ctrl-C. The frontend waits for confirmed cleanup
+and exits 129; an owner whose frontend disappears also requests retaining cleanup.
+A publisher crash has a different effect: the owner reports the exit and keeps
+the services running, with that published port marked down in `ps` and `status`.
+Run `hack down` to stop the project with data retained. A publication notice is
+not evidence that cleanup completed, and no publisher is restarted automatically.

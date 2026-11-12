@@ -6,7 +6,16 @@ stateDiagram-v2
     [*] --> ready
     ready --> enrolled : Interrupt
     ready --> enrolled : FrontendLost [lifetime watch]
-    ready --> enrolled : PublisherCrash [exact Child reaped]
+    ready --> publisher_down : PublisherCrash [exact Child reaped]
+    publisher_down --> enrolled : Interrupt or SIGHUP
+    publisher_down --> enrolled : FrontendLost [lifetime watch]
+    publisher_down --> intent : Recover [owner absent]
+    state "publisher-down" as publisher_down
+    note left of publisher_down
+        Exit reported; published port down
+        Services stay running and observable
+        Run hack down for confirmed cleanup
+    end note
     enrolled --> enrolled : StopPublisher
     ready --> intent : Recover [owner absent]
     enrolled --> intent : Recover [owner absent]

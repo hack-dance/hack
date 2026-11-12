@@ -165,6 +165,44 @@ test("ps distinguishes a live foreground owner from historical ready containers"
     })
   ).toMatchObject({ status: "owner_unconfirmed" });
 });
+
+test("ps keeps current service rows and marks the reaped publisher's port down", async () => {
+  const opts = await fixture();
+  const current = snapshot(true);
+  const value = {
+    ...current,
+    receipt: {
+      ...current.receipt,
+      resources: {
+        "container:web": {
+          ...current.receipt.resources["container:web"],
+          loopback_ports: [{ host_port: 18_080, target: 8080 }],
+        },
+      },
+    },
+  };
+  const result = await nativeProjectPs({
+    ...opts,
+    invoke: async (request) =>
+      request.args[1] === "inspect"
+        ? value
+        : {
+            ok: true,
+            run: run.run,
+            plan: run.planId,
+            phase: "ready-observed",
+            foreground_alive: true,
+            runtime_verified: false,
+            runtime_error: "publisher_exited",
+            publisher_ports: [{ port: 18_080, state: "down" }],
+          },
+  });
+  expect(result).toMatchObject({
+    status: "runtime_degraded",
+    items: [{ service: "web", state: "running" }],
+    ports: [{ service: "web", port: 18_080, target: 8080, state: "down" }],
+  });
+});
 test("bounded logs verify current container before and after using exact CLI contract", async () => {
   const opts = await fixture();
   const calls: string[][] = [];

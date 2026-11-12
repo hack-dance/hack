@@ -15,10 +15,14 @@ const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 // Exercise the production frontend adapter with a minimal owner. Real native
 // publisher/group/control semantics run separately in Rust with stream-relay-host.
 test.each([
-  { restore: false, label: "up" },
-  { restore: true, label: "restart" },
-])("group Ctrl-C requests explicit owner cleanup ($label)", async ({
+  { restore: false, label: "up", signal: "SIGINT", code: 130 },
+  { restore: true, label: "restart", signal: "SIGINT", code: 130 },
+  { restore: false, label: "up", signal: "SIGHUP", code: 129 },
+  { restore: true, label: "restart", signal: "SIGHUP", code: 129 },
+])("group $signal requests explicit owner cleanup ($label)", async ({
   restore,
+  signal,
+  code,
 }) => {
   const root = await mkdtemp(join(tmpdir(), "native-group-stop-"));
   roots.push(root);
@@ -35,6 +39,7 @@ test.each([
     const deadline = setTimeout(() => stop(), 10000);
     process.on("SIGTERM", () => stop());
     process.on("SIGINT", () => process.exit(94));
+    process.on("SIGHUP", () => process.exit(94));
     const server = Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>new Response("ready")});
     const port = server.port;
     console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${"a".repeat(32)}"}));
@@ -53,13 +58,18 @@ test.each([
     "../src/backends/native-project-process.ts",
     import.meta.url
   ).pathname;
+  const stopSignals = new URL(
+    "../src/backends/native-project-foreground-stop.ts",
+    import.meta.url
+  ).pathname;
   await writeFile(
     launcher,
     `
     import { serveNativeProjectGraph } from ${JSON.stringify(adapter)};
     import { readFile } from "node:fs/promises";
-    const controller = new AbortController();
-    process.on("SIGINT", () => controller.abort());
+    import { nativeForegroundStopSignals } from ${JSON.stringify(stopSignals)};
+    const stop = nativeForegroundStopSignals({});
+    const controller = stop.controller;
     try { await serveNativeProjectGraph({
       runtime:{binary:${JSON.stringify(binary)},home:${JSON.stringify(root)}},
       projectRoot:${JSON.stringify(root)},run:"${"a".repeat(32)}",args:[],
@@ -68,7 +78,8 @@ test.each([
     }); } catch(error) { if (!controller.signal.aborted) throw error; }
     // The real frontend also checks cleanup independently after interruption.
     const proof = JSON.parse(await readFile(${JSON.stringify(receipt)}, "utf8"));
-    process.exit(proof.exit === 0 ? 130 : 95);
+    stop.dispose();
+    process.exit(proof.exit === 0 ? stop.interruptedExit() : 95);
   `
   );
   const child = Bun.spawn([process.execPath, launcher], {
@@ -103,7 +114,7 @@ test.each([
     reader.releaseLock();
     expect(new TextDecoder().decode(line.value).trim()).toBe("ready");
     // The negative PID is essential: signaling only the launcher hid this bug.
-    process.kill(-child.pid, "SIGINT");
+    process.kill(-child.pid, signal as NodeJS.Signals);
     const exit = await Promise.race([
       child.exited,
       new Promise<never>((_, reject) => {
@@ -115,7 +126,7 @@ test.each([
     ]);
     const errors = await new Response(child.stderr).text();
     expect(errors).toBe("");
-    expect(exit).toBe(130);
+    expect(exit).toBe(code);
     const proof = JSON.parse(await readFile(receipt, "utf8"));
     expect(proof.exit).toBe(0);
     expect(proof.action).toBe(restore ? "restart" : "up");

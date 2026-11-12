@@ -90,6 +90,7 @@ impl Events {
             change(listener.as_raw_fd() as usize, libc::EVFILT_READ),
             change(libc::SIGTERM as usize, libc::EVFILT_SIGNAL),
             change(libc::SIGINT as usize, libc::EVFILT_SIGNAL),
+            change(libc::SIGHUP as usize, libc::EVFILT_SIGNAL),
         ];
         // Register signal filters BEFORE installing handlers. Every signal caught by
         // our handler therefore also wakes kevent; the atomic flag covers coalescing.
@@ -108,7 +109,7 @@ impl Events {
             return Err(refused());
         }
         PENDING.store(false, Ordering::Release);
-        for signal in [libc::SIGTERM, libc::SIGINT] {
+        for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
             // SAFETY: sigaction is plain C storage; mask is initialized before use.
             let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
             // SAFETY: initialized output storage for saved disposition.

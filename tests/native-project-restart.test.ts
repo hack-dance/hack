@@ -11,7 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readNativeHostDependencies } from "../src/backends/native-project-dependencies.ts";
 import { nativeProjectDown } from "../src/backends/native-project-down.ts";
-import { restartNativeProject } from "../src/backends/native-project-restart.ts";
+import {
+  nativeRestartStopSignals,
+  restartNativeProject,
+} from "../src/backends/native-project-restart.ts";
 import {
   nativeRestartSelection,
   preflightNativeRestart,
@@ -35,6 +38,20 @@ import {
   expectCodedRefusal,
 } from "./helpers/closed-refusal.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
+import { withOwnedProcessListeners } from "./helpers/owned-process-listeners.ts";
+
+test("SIGHUP during restart preparation requests retaining cleanup and exit 129", async () => {
+  await withOwnedProcessListeners("SIGHUP", () => {
+    const stop = nativeRestartStopSignals();
+    try {
+      process.emit("SIGHUP");
+      expect(stop.signal.aborted).toBe(true);
+      expect(stop.interruptedExit()).toBe(129);
+    } finally {
+      stop.dispose();
+    }
+  });
+});
 
 const run = {
   run: "a".repeat(32),

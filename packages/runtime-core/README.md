@@ -2231,7 +2231,8 @@ on ordinary test runs and do not qualify recovery until executed on Apple Silico
 ### Foreground lifetime and retained owner control generations
 
 The native foreground event queue watches the exact frontend parent and every
-retained publisher Child. Frontend loss requests ordinary retaining cleanup.
+retained publisher Child. SIGHUP is handled by both frontend and owner as a
+retaining stop request, including restored/restarted owners. Frontend loss requests ordinary retaining cleanup.
 A non-reaping child-exit check takes no provider lease, so healthy publishers do
 not contend with launch or status. Publisher exit is reaped promptly; before
 reaping, the owner pins the exact
@@ -2252,3 +2253,21 @@ After graph recovery, frontend `down --recover` also recovers its captured dead
 frontend finalization under the existing exact-attempt lock and side-effect
 proofs. It exits zero with data retained and permits plain `up`. An external down
 also produces the confirmed-stop closing line in the original foreground.
+
+
+A publisher-only exit is reported as a bounded, run-bound frontend notice once
+its exact direct child has been reaped. It leaves the project's compute running
+and the authenticated owner available for `hack down`; it does not trigger a
+long guest cleanup or automatically recreate the publisher. `owner-status`
+reports retained port children as down, and ps/status preserve service rows and
+show that publication state. The frontend decodes notices after readiness,
+including multiple frames in a chunk and partial frames across chunks. Notices
+and status are presentation, not cleanup or replacement authority. Healthy
+siblings still require their current publication proof.
+
+When a retained provider process names an earlier versioned executable, lifecycle
+verification first checks the matching prepared-provider record. A confirmed pin
+mismatch reports `provider_pin_changed`, rather than interpreting that path as a
+changed PID file. This diagnostic grants no cross-version recovery authority;
+use the release that started the pool for recovery and stop, then prepare a fresh
+home for the current pin.

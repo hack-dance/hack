@@ -17,6 +17,10 @@ fn frontend_loss_wakes_owner_and_confirms_native_publisher_cleanup() {
     exercise("frontend");
 }
 #[test]
+fn hangup_wakes_owner_and_confirms_native_publisher_cleanup() {
+    exercise("hangup");
+}
+#[test]
 fn publisher_crash_wakes_owner_and_confirms_cleanup_before_frontend_exit() {
     exercise("publisher");
 }
@@ -96,6 +100,10 @@ fn lifetime_probe() {
     let crashed = std::env::var("HACK_OWNER_LIFETIME_CAUSE").as_deref() == Ok("publisher");
     if crashed {
         publisher.child.kill().unwrap();
+    }
+    if std::env::var("HACK_OWNER_LIFETIME_CAUSE").as_deref() == Ok("hangup") {
+        // SAFETY: signal only this fixture's own process, after Events owns it.
+        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGHUP) }, 0);
     }
     let wake = events.wait_until(Some(Instant::now() + Duration::from_secs(5)));
     // Clean our owned publisher even when the wake assertion fails.

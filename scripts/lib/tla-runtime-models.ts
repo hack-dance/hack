@@ -958,7 +958,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-publisher-stop",
     module: "PublisherStop",
-    states: 106,
+    states: 110,
     invariant: "NoUnsafeCleanup",
     action: "ReleaseBridge",
     fields: [

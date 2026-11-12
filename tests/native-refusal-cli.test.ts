@@ -138,6 +138,7 @@ exit 1
     project,
     projectDir,
     scope,
+    binary,
     compose,
     reply,
     fail,
@@ -934,6 +935,71 @@ test(
     expect(started.output).toContain("Project is ready");
     expect(started.output).toContain("owned cleanup confirmed");
     expect(await f.calls()).toContain("graph serve-restore");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "provider-version recovery refusal names the original release, whose down command works on the same home",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    await f.fail("graph inspect", {
+      code: "provider_pin_changed",
+      message: "Provider PID file changed",
+    });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain("different provider version");
+    expect(refused.output).toContain("release that started its pool");
+    expect(refused.output).toContain("runtime down --json");
+    expect(refused.output).not.toContain("PID file changed");
+    // Select the matching release's stub against the unchanged home. This is a
+    // CLI guidance check, not qualification of a cross-version provider migration.
+    await f.reply("graph inspect", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "running",
+      live_owner_recovery: null,
+    });
+    await f.reply("graph cleanup", {});
+    await f.finishOn("graph cleanup", stoppedGraph);
+    const recovered = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(recovered.code).toBe(0);
+    await f.reply("runtime down", { phase: "stopped" });
+    const stopped = Bun.spawn(
+      [
+        f.binary,
+        "--candidate-root",
+        f.scope.nativeHome,
+        "runtime",
+        "down",
+        "--json",
+      ],
+      {
+        cwd: f.root,
+        env: f.env(),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: SPAWN_TIMEOUT_MS - 5000,
+      }
+    );
+    expect(await stopped.exited).toBe(0);
+    expect(JSON.parse(await new Response(stopped.stdout).text())).toEqual({
+      phase: "stopped",
+    });
   },
   SPAWN_TIMEOUT_MS
 );

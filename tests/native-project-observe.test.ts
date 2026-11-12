@@ -174,6 +174,7 @@ test("ps keeps current service rows and marks the reaped publisher's port down",
     ...current,
     receipt: {
       ...current.receipt,
+      readiness: { web: "started" },
       resources: {
         "container:web": {
           ...current.receipt.resources["container:web"],
@@ -184,6 +185,7 @@ test("ps keeps current service rows and marks the reaped publisher's port down",
   };
   const result = await nativeProjectPs({
     ...opts,
+    includeReadiness: true,
     invoke: async (request) =>
       request.args[1] === "inspect"
         ? value
@@ -200,7 +202,7 @@ test("ps keeps current service rows and marks the reaped publisher's port down",
   });
   expect(result).toMatchObject({
     status: "runtime_degraded",
-    items: [{ service: "web", state: "running" }],
+    items: [{ service: "web", state: "running", readiness: "started" }],
     ports: [{ service: "web", port: 18_080, target: 8080, state: "down" }],
   });
 });
@@ -853,4 +855,34 @@ test("startup completion preserves a substituted observation marker", async () =
   expect(await readFile(path, "utf8")).toBe(
     "replacement owned by another writer\n"
   );
+});
+
+test("internal readiness admission reads only closed goals from the owned receipt; ordinary ps output stays unchanged", async () => {
+  const opts = await fixture();
+  for (const readiness of [
+    "completed",
+    "started",
+    "healthy",
+    "unknown",
+    undefined,
+  ] as const) {
+    const observed = snapshot();
+    const reply = {
+      ...observed,
+      receipt: { ...observed.receipt, readiness: { web: readiness } },
+    };
+    const ordinary = await nativeProjectPs({
+      ...opts,
+      invoke: async () => reply,
+    });
+    expect(ordinary.items[0]).not.toHaveProperty("readiness");
+    const internal = await nativeProjectPs({
+      ...opts,
+      includeReadiness: true,
+      invoke: async () => reply,
+    });
+    expect(internal.items[0]?.readiness).toBe(
+      readiness === "unknown" ? undefined : readiness
+    );
+  }
 });

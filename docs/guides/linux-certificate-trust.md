@@ -147,8 +147,11 @@ entry with the same name that something other than Hack added.
 
 Hack runs the system `sudo` itself (`/usr/bin/sudo` or `/bin/sudo`, which must be
 a root-owned setuid file in root-owned directories), never one found on your
-`PATH`, with a fixed system `PATH` for the root commands. If no such `sudo`
-exists, the root step fails and nothing changes.
+`PATH`. The fixed system `PATH` and C locale are reapplied after sudo, so its
+`secure_path` cannot select a different root helper. If no vetted `sudo` exists,
+system trust stays unchanged and Hack reports `linux_trust_tool_missing` without
+printing runnable root commands. User-level NSS and host trust setup can still
+continue, and the command can exit 0 if those steps succeed.
 
 Never send a password to an agent or put it in a command; `sudo` asks in your
 terminal.

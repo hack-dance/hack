@@ -13,7 +13,7 @@
 import { createHash, X509Certificate } from "node:crypto";
 import { inspectMacCaEligibility } from "./mac-ca-trust.ts";
 import { STDIN_INSTALL_SCRIPT } from "./privileged-install.ts";
-import { VETTED_HELPER_PATH } from "./vetted-env.ts";
+import { VETTED_HELPER_PATH, vettedRootCommand } from "./vetted-env.ts";
 
 export type LinuxDistroFamily = "debian" | "arch" | "fedora" | "suse";
 
@@ -161,7 +161,7 @@ export function linuxSystemTrustCommands(opts: {
     "LANG=C",
     "LC_ALL=C",
   ];
-  const privileged = [...clean, opts.sudoPath, ...clean];
+  const privileged = [...clean, opts.sudoPath];
   return [
     [
       ...clean,
@@ -170,9 +170,12 @@ export function linuxSystemTrustCommands(opts: {
       'exec "$@" < "$0"',
       opts.certPath,
       ...privileged,
-      ...linuxSystemTrustInstallArgv(opts),
+      ...vettedRootCommand(linuxSystemTrustInstallArgv(opts)),
     ],
-    [...privileged, ...linuxSystemTrustRefreshArgv(opts.family)],
+    [
+      ...privileged,
+      ...vettedRootCommand(linuxSystemTrustRefreshArgv(opts.family)),
+    ],
   ];
 }
 

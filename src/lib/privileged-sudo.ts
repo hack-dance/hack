@@ -15,7 +15,11 @@
 import { realpath, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { run } from "./shell.ts";
-import { VETTED_HELPER_PATH, vettedHelperEnv } from "./vetted-env.ts";
+import {
+  VETTED_HELPER_PATH,
+  vettedHelperEnv,
+  vettedRootCommand,
+} from "./vetted-env.ts";
 
 const SUDO_CANDIDATES = ["/usr/bin/sudo", "/bin/sudo"] as const;
 const ROOT_UID = 0;
@@ -137,14 +141,15 @@ export async function runTrustedSudo(
     return SUDO_UNAVAILABLE_EXIT;
   }
   const helperEnv = vettedHelperEnv();
+  const command = [sudo, ...vettedRootCommand(argv)];
   try {
     if (opts?.input !== undefined) {
-      return await (opts.inputRunner ?? spawnWithInput)([sudo, ...argv], {
+      return await (opts.inputRunner ?? spawnWithInput)(command, {
         input: opts.input,
         env: helperEnv.env,
       });
     }
-    return await (opts?.runner ?? run)([sudo, ...argv], {
+    return await (opts?.runner ?? run)(command, {
       stdin: "inherit",
       env: { ...helperEnv.env },
       unsetEnvKeys: helperEnv.unsetEnvKeys,

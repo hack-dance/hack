@@ -892,8 +892,12 @@ setup error messages omit full local paths. `setup_pin_unavailable` means a pinn
 URL returned 404 or 410: upstream no longer serves this pinned file; update Hack
 or use the offline form. Alpine repositories can retire package revisions. The
 weekly provider pin watch checks every pinned URL with bounded HEAD requests and
-reports unavailable files in its existing issue; it never changes pins or mirrors
-files. Availability checks do not verify archive contents.
+compares successful replies' `Content-Length` with `size_bytes`. Only 404 and 410
+mean a file is no longer served. Timeouts, other HTTP errors (403, 429 or 5xx),
+and a missing `Content-Length` are transient failures
+and never reopen a closed issue by themselves. Size mismatches and policy
+refusals are reported separately. The watch never changes pins or mirrors files;
+availability checks do not verify archive contents.
 The current pins do not record external signature/checksum files: the repository
 hashes decide acceptance, and the existing SmolVM prepare step also checks its
 code signature. The qualification script's optional upstream checksum comparison

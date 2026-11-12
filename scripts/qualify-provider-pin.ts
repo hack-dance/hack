@@ -6,7 +6,8 @@
  * engine and network-tool inputs its `provider-pins.json` names, inside one private root,
  * and checks in order:
  *
- *   1. archive: the SmolVM archive SHA-256 matches the bundle's pin (and upstream's
+ *   1. archive: every pinned input's exact length matches `size_bytes`; the SmolVM
+ *      archive SHA-256 matches the bundle's pin (and upstream's
  *      `checksums.sha256` when given), the archive's own `checksums.txt` matches its files,
  *      and `smolvm-bin` passes `codesign --verify --strict`.
  *   2. prepare: `runtime prepare`, `prepare-engine`, `prepare-network-tools` and `probe`
@@ -339,6 +340,7 @@ export interface Options {
   root: string;
   providerArchive: string;
   engineArchive: string;
+  builderArchive: string;
   networkTools: string;
   webImage: string;
   dbImage: string;
@@ -356,7 +358,7 @@ export interface Options {
 
 const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hack-v5 --home /abs/empty-private-root \\
   --provider-archive /abs/smolvm-<v>-darwin-arm64.tar.gz --engine-archive /abs/docker-<v>.tgz \\
-  --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
+  --builder-archive /abs/pinned-buildx --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
   [--upstream-checksums /abs/checksums.sha256] [--approved-host example.com --approved-host example.org] \\
   [--amd64-image repo@sha256:...] [--idle-minutes 0,3,10 | --skip-idle] \\
   [--profile development|research] [--keep-going] \\
@@ -460,6 +462,7 @@ export function parseOptions(argv: string[]): Options {
     root: absolute("--home") as string,
     providerArchive: absolute("--provider-archive") as string,
     engineArchive: absolute("--engine-archive") as string,
+    builderArchive: absolute("--builder-archive") as string,
     networkTools: absolute("--network-tools") as string,
     webImage: pinned("--web-image") as string,
     dbImage: pinned("--db-image") as string,
@@ -838,6 +841,13 @@ export class Qualification {
       readFileSync(join(this.options.bundle, "provider-pins.json"), "utf8")
     );
     this.pins = pins;
+    for (const file of qualificationInputSizes(this.options, pins)) {
+      this.check(
+        `${file.name} length matches size_bytes`,
+        file.actual === file.expected,
+        `${file.actual} bytes; pin ${file.expected}`
+      );
+    }
     const smolvm = pins.smolvm as Record<string, string>;
     const actual = sha256File(this.options.providerArchive);
     this.note(`INFO pinned SmolVM ${smolvm.version} ${smolvm.archive_sha256}`);
@@ -2474,6 +2484,55 @@ export function readyData(stdout: string): Record<string, unknown> | null {
   }
 }
 
+/** Check every supplied provider input, including the optional runtime builder's
+ * pin, before qualification extracts or prepares anything. A stale/missing exact
+ * length is a broken bump even when the new hash was updated correctly. */
+export function qualificationInputSizes(
+  options: Pick<
+    Options,
+    "providerArchive" | "engineArchive" | "builderArchive" | "networkTools"
+  >,
+  value: unknown
+): { name: string; expected: number; actual: number }[] {
+  const record = (input: unknown): Record<string, unknown> => {
+    if (typeof input !== "object" || input === null || Array.isArray(input)) {
+      throw new Error("Invalid provider size pin.");
+    }
+    return input as Record<string, unknown>;
+  };
+  const pins = record(value);
+  if (!Array.isArray(pins.network_tools)) {
+    throw new Error("Missing guest package size pins.");
+  }
+  const files = [
+    { pin: pins.smolvm, path: options.providerArchive },
+    { pin: pins.docker, path: options.engineArchive },
+    { pin: pins.buildx, path: options.builderArchive },
+    ...pins.network_tools.map((pin: unknown) => ({ pin, path: null })),
+  ];
+  return files.map(({ pin: input, path }) => {
+    const pin = record(input);
+    const expected = pin.size_bytes;
+    if (
+      typeof pin.url !== "string" ||
+      typeof expected !== "number" ||
+      !Number.isSafeInteger(expected) ||
+      expected <= 0
+    ) {
+      throw new Error("Missing or invalid size_bytes in provider pin.");
+    }
+    const name = basename(new URL(pin.url).pathname);
+    if (!/^[a-zA-Z0-9_.-]+$/.test(name) || name === "." || name === "..") {
+      throw new Error("Unsafe provider pin filename.");
+    }
+    const metadata = statSync(path ?? join(options.networkTools, name));
+    if (!metadata.isFile()) {
+      throw new Error(`${name}: expected a regular pinned file.`);
+    }
+    return { name, expected, actual: metadata.size };
+  });
+}
+
 function sha256File(path: string): string {
   const hash = createHash("sha256");
   const descriptor = openSync(path, "r");
@@ -2598,6 +2657,7 @@ export async function main(argv: string[]): Promise<number> {
     join(options.bundle, "provider-pins.json"),
     options.providerArchive,
     options.engineArchive,
+    options.builderArchive,
     options.networkTools,
   ]) {
     if (!existsSync(path)) {

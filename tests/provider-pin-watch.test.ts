@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import pinnedManifest from "../packages/runtime-core/provider-pins.json";
 import {
   type Advisory,
   affecting,
@@ -504,6 +505,21 @@ describe("provider pin watch", () => {
           body: init?.body ? JSON.parse(String(init.body)) : undefined,
         });
         const [status, value] = respond(method, url);
+        if (method === "HEAD") {
+          const pin = [
+            pinnedManifest.smolvm,
+            pinnedManifest.docker,
+            pinnedManifest.buildx,
+            ...pinnedManifest.network_tools,
+          ].find((entry) => entry.url === url);
+          if (!pin) {
+            throw new Error("Unexpected pinned file.");
+          }
+          return new Response(null, {
+            status,
+            headers: { "content-length": String(pin.size_bytes) },
+          });
+        }
         return new Response(JSON.stringify(value), { status });
       }) as typeof fetch;
       return { calls, fetcher };
@@ -720,7 +736,11 @@ describe("pinned download availability", () => {
             headers: { location: "/loop" },
           });
         }
-        return new Response(null, { status: 200 });
+        const pin = files.find((entry) => new URL(entry.url).pathname === path);
+        return new Response(null, {
+          status: 200,
+          headers: { "content-length": String(pin?.sizeBytes ?? 5) },
+        });
       },
     });
     const fetcher = ((input: string | URL | Request, init?: RequestInit) =>
@@ -737,6 +757,7 @@ describe("pinned download availability", () => {
           (path) => ({
             url: `https://source.test/${path}`,
             redirectHosts: ["mirror.test"],
+            sizeBytes: 5,
           })
         ),
         fetcher
@@ -771,4 +792,102 @@ describe("pinned download availability", () => {
       server.stop(true);
     }
   });
+});
+
+test("HEAD length and failure kinds distinguish broken pins from transient failures", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/gone") {
+        return new Response(null, { status: 410 });
+      }
+      if (path === "/missing") {
+        return new Response(null, { status: 404 });
+      }
+      if (path === "/busy") {
+        return new Response(null, { status: 503 });
+      }
+      return new Response(null, {
+        status: 200,
+        headers: { "content-length": path === "/wrong" ? "6" : "5" },
+      });
+    },
+  });
+  const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/timeout") {
+      throw new DOMException("synthetic timeout", "TimeoutError");
+    }
+    return fetch(new URL(url.pathname, server.url), init);
+  }) as typeof fetch;
+  try {
+    const checks = await checkPinnedUrls(
+      ["good", "wrong", "gone", "missing", "busy", "timeout"].map((path) => ({
+        url: `https://source.test/${path}`,
+        sizeBytes: 5,
+        redirectHosts: [],
+      })),
+      fetcher
+    );
+    expect(checks.map((file) => file.kind)).toEqual([
+      "available",
+      "invalid",
+      "no_longer_served",
+      "no_longer_served",
+      "transient",
+      "transient",
+    ]);
+    expect(checks[1]?.problem).toContain(
+      "Content-Length differs from pinned size_bytes (5)"
+    );
+    const current = [delta(smolvm, "1.34.1", [])];
+    const invalid = checks.filter((entry) => entry.kind === "invalid");
+    expect(invalid).toHaveLength(1);
+    expect(
+      plan(
+        current,
+        { number: 7, state: "closed", stateReason: "not_planned" },
+        "2026-11-12",
+        invalid
+      ).action
+    ).toBe("none");
+    for (const check of checks.filter((entry) => entry.kind === "transient")) {
+      expect(check.problem).not.toContain("no longer serves");
+      for (const stateReason of ["completed", "not_planned"]) {
+        expect(
+          plan(
+            current,
+            { number: 7, state: "closed", stateReason },
+            "2026-11-12",
+            [check]
+          ).action
+        ).toBe("none");
+      }
+      expect(plan(current, null, "2026-11-12", [check]).action).toBe("none");
+      expect(
+        plan(
+          current,
+          { number: 7, state: "open", stateReason: null },
+          "2026-11-12",
+          [check]
+        ).action
+      ).toBe("update");
+    }
+    for (const check of checks.filter(
+      (entry) => entry.kind === "no_longer_served"
+    )) {
+      expect(
+        plan(
+          current,
+          { number: 7, state: "closed", stateReason: "not_planned" },
+          "2026-11-12",
+          [check]
+        ).action
+      ).toBe("update");
+    }
+  } finally {
+    server.stop(true);
+  }
 });

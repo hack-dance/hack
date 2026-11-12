@@ -627,6 +627,7 @@ export function readPins(path: string): Map<string, string> {
 export interface PinnedFile {
   url: string;
   redirectHosts: readonly string[];
+  sizeBytes: number;
 }
 
 /** All downloadable pins, including guest packages that have no release feed. */
@@ -640,6 +641,9 @@ export function readPinnedFiles(path: string): PinnedFile[] {
       if (
         !isRecord(pin) ||
         typeof pin.url !== "string" ||
+        typeof pin.size_bytes !== "number" ||
+        !Number.isSafeInteger(pin.size_bytes) ||
+        pin.size_bytes <= 0 ||
         !Array.isArray(pin.redirect_hosts) ||
         !pin.redirect_hosts.every((host: unknown) => typeof host === "string")
       ) {
@@ -657,7 +661,11 @@ export function readPinnedFiles(path: string): PinnedFile[] {
           "Pinned URLs require HTTPS with no alternate authority."
         );
       }
-      return { url: pin.url, redirectHosts: pin.redirect_hosts };
+      return {
+        url: pin.url,
+        redirectHosts: pin.redirect_hosts,
+        sizeBytes: pin.size_bytes,
+      };
     }
   );
 }
@@ -666,6 +674,7 @@ export interface PinAvailability {
   name: string;
   host: string;
   problem: string | null;
+  kind: "available" | "no_longer_served" | "transient" | "invalid";
 }
 
 function pinnedUrlAllowed(url: URL, source: URL, pin: PinnedFile): boolean {
@@ -683,14 +692,17 @@ function pinnedUrlAllowed(url: URL, source: URL, pin: PinnedFile): boolean {
 async function pinnedUrlProblem(
   pin: PinnedFile,
   fetcher: typeof fetch
-): Promise<string | null> {
+): Promise<Pick<PinAvailability, "problem" | "kind">> {
   const source = new URL(pin.url);
   let url = source;
   const signal = AbortSignal.timeout(30_000);
   try {
     for (let redirects = 0; redirects <= 5; redirects++) {
       if (!pinnedUrlAllowed(url, source, pin)) {
-        return "redirect refused (host or scheme not pinned)";
+        return {
+          problem: "redirect refused (host or scheme not pinned)",
+          kind: "invalid",
+        };
       }
       const response = await fetcher(url, {
         method: "HEAD",
@@ -701,20 +713,48 @@ async function pinnedUrlProblem(
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get("location");
         if (!location || redirects === 5) {
-          return "redirect missing or limit exceeded";
+          return {
+            problem: "redirect missing or limit exceeded",
+            kind: "invalid",
+          };
         }
         url = new URL(location, url);
         continue;
       }
       if (response.status === 404 || response.status === 410) {
-        return `HTTP ${response.status}: upstream no longer serves this pinned file`;
+        return {
+          problem: `HTTP ${response.status}: upstream no longer serves this pinned file`,
+          kind: "no_longer_served",
+        };
       }
-      return response.status === 200 ? null : `HTTP ${response.status}`;
+      if (response.status !== 200) {
+        return {
+          problem: `HTTP ${response.status} (transient failure)`,
+          kind: "transient",
+        };
+      }
+      const length = response.headers.get("content-length");
+      if (length === null) {
+        return {
+          problem: "Content-Length unavailable; exact size not checked",
+          kind: "transient",
+        };
+      }
+      if (!/^\d+$/.test(length) || Number(length) !== pin.sizeBytes) {
+        return {
+          problem: `Content-Length differs from pinned size_bytes (${pin.sizeBytes})`,
+          kind: "invalid",
+        };
+      }
+      return { problem: null, kind: "available" };
     }
   } catch {
-    return "request timed out or failed";
+    return {
+      problem: "request timed out or failed (transient failure)",
+      kind: "transient",
+    };
   }
-  return "redirect limit exceeded";
+  return { problem: "redirect limit exceeded", kind: "invalid" };
 }
 
 /** Bounded, unauthenticated HEAD requests. Never download archives or forward the
@@ -729,7 +769,7 @@ export async function checkPinnedUrls(
     results.push({
       name: source.pathname.split("/").at(-1) ?? "pinned file",
       host: source.hostname,
-      problem: await pinnedUrlProblem(pin, fetcher),
+      ...(await pinnedUrlProblem(pin, fetcher)),
     });
   }
   return results;
@@ -901,7 +941,8 @@ export interface Plan {
 
 /**
  * What to do with the one issue. An issue a maintainer closed as not planned stays closed
- * until a new advisory affects a pin.
+ * until a new advisory affects a pin or a pinned URL returns 404/410. Transient
+ * failures never create or reopen an issue by themselves.
  */
 export function plan(
   deltas: Delta[],
@@ -910,9 +951,14 @@ export function plan(
   availability: readonly PinAvailability[] = []
 ): Plan {
   // An advisory whose range cannot be read is listed but never keeps the issue open.
-  const unavailable = availability.some((file) => file.problem !== null);
+  const unavailable = availability.some(
+    (file) => file.kind === "no_longer_served"
+  );
+  const invalid = availability.some((file) => file.kind === "invalid");
+  const transient = availability.some((file) => file.kind === "transient");
   const behind =
     unavailable ||
+    invalid ||
     deltas.some(
       (entry) =>
         entry.releases.length > 0 ||
@@ -924,7 +970,8 @@ export function plan(
   const body = renderBody(deltas, checkedAt, availability);
   if (!behind) {
     return {
-      action: existing?.state === "open" ? "close" : "none",
+      action:
+        existing?.state === "open" ? (transient ? "update" : "close") : "none",
       body,
       security: false,
     };

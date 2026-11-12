@@ -12,6 +12,7 @@ import {
   scopeOutputs,
   touchesDocsSite,
 } from "../scripts/ci-change-scope.ts";
+import { fullPushPlan } from "../scripts/ci-pr-plan.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
@@ -265,7 +266,7 @@ describe("pull request diff", () => {
 describe("CI workflow wiring", () => {
   test("the changes job exposes every scope output and checks out the merge parent", async () => {
     const changes = (await ciWorkflow()).jobs.changes;
-    const keys = Object.keys(scopeOutputs("full")).sort();
+    const keys = Object.keys(fullPushPlan()).sort();
     expect(Object.keys(changes?.outputs ?? {}).sort()).toEqual(keys);
     for (const key of keys) {
       expect(changes?.outputs?.[key]).toBe(
@@ -300,12 +301,11 @@ describe("CI workflow wiring", () => {
     for (const name of [
       "runtime-images",
       "docker-e2e-shard",
-      "test-shard",
       "linux-process-lifetime",
     ]) {
       expect(jobs[name]?.needs, name).toBe("changes");
       expect(jobs[name]?.if, name).toBe(
-        "${{ needs.changes.outputs.suite == 'true' }}"
+        "${{ needs.changes.outputs.docker_suite == 'true' && needs.changes.outputs.draft != 'true' }}"
       );
     }
     // `docs site` is a required check: the job always runs, and every step
@@ -326,8 +326,13 @@ describe("CI workflow wiring", () => {
         "${{ needs.changes.outputs.docs_site == 'true' }}"
       );
     }
-    // Jobs that do not depend on the scope keep running on every event.
-    for (const name of ["state-models", "secret-scan"]) {
+    expect(jobs["test-shard"]?.if).toBe(
+      "${{ needs.changes.outputs.suite == 'true' }}"
+    );
+    expect(jobs["state-models"]?.if).toBe(
+      "${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}"
+    );
+    for (const name of ["secret-scan"]) {
       expect(jobs[name]?.needs, name).toBeUndefined();
       expect(jobs[name]?.if, name).toBeUndefined();
     }

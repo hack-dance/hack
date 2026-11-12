@@ -8,6 +8,7 @@ on:
     tags-ignore:
       - "v*"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
 
 concurrency:
   # PR updates supersede earlier runs. Pushes need unique groups: even with
@@ -19,11 +20,10 @@ jobs:
   changes:
     # Pull-request change scope (scripts/ci-change-scope.ts, HACK-1960). Pushes
     # to next/main and an unavailable diff are always `full`: every job and every
-    # config compiler host. Pull requests run the config compiler on Linux only
-    # and skip the jobs that cannot see their change (docs-only, TypeScript-only
-    # and runtime-core-only scopes). Every run splits the bun shards into macOS
-    # and Linux pools (HACK-2028). The `test` and `docker-e2e` fan-ins still
-    # report on every run.
+    # config compiler host. PRs layer conservative dependency selection and
+    # draft policy over that scope (scripts/ci-pr-plan.ts). Ready PRs retain
+    # platform pools; drafts run selected files on Linux and cannot pass the
+    # required fan-in. The fan-ins report even when a scoped job does not run.
     name: Change scope
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -38,6 +38,11 @@ jobs:
       test_layout: ${{ steps.scope.outputs.test_layout }}
       test_focus: ${{ steps.scope.outputs.test_focus }}
       docs_site: ${{ steps.scope.outputs.docs_site }}
+      draft: ${{ steps.scope.outputs.draft }}
+      test_files: ${{ steps.scope.outputs.test_files }}
+      test_shards: ${{ steps.scope.outputs.test_shards }}
+      selection_mode: ${{ steps.scope.outputs.selection_mode }}
+      docker_suite: ${{ steps.scope.outputs.docker_suite }}
     steps:
       # A pull-request checkout is GitHub's merge commit; its first parent is
       # the base tip, so HEAD^1..HEAD is exactly the pull request's change.
@@ -48,17 +53,21 @@ jobs:
       - uses: oven-sh/setup-bun@v1
         with:
           bun-version: "1.4.4"
+      - name: Install selector dependencies
+        run: bun install --frozen-lockfile
       - name: Classify changed paths
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
+          PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
+          PR_FULL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full') }}
         run: bun scripts/ci-change-scope.ts --event="$EVENT_NAME"
 
   config-compiler:
     name: Config compiler (${{ matrix.os }})
     needs: changes
-    # Pull requests build and check on Linux x64 only; pushes and release
-    # builds (release.yml, prerelease.yml) cover every compiler release host.
+    # Relevant compiler/toolchain/CI changes check native hosts on ready PRs.
+    # Other code PRs retain Linux checks; full pushes cover every release host.
     if: ${{ needs.changes.outputs.compiler_hosts != '[]' }}
     strategy:
       matrix:
@@ -143,6 +152,7 @@ jobs:
 
   state-models:
     name: Runtime state models
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -201,8 +211,8 @@ jobs:
   runtime-core:
     name: Candidate core (${{ matrix.os }})
     needs: changes
-    # Skipped only for pull requests that change no Rust, toolchain or
-    # workflow file: the crate reads nothing outside packages/runtime-core.
+    # Ready PRs follow candidate/guest/launcher/toolchain/CI inputs. Drafts
+    # defer both hosts; full pushes always run both.
     if: ${{ needs.changes.outputs.runtime_core == 'true' }}
     strategy:
       matrix:
@@ -372,7 +382,7 @@ jobs:
 
   runtime-images:
     needs: changes
-    if: ${{ needs.changes.outputs.suite == 'true' }}
+    if: ${{ needs.changes.outputs.docker_suite == 'true' && needs.changes.outputs.draft != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -414,7 +424,7 @@ jobs:
     # One deterministic slice of the default e2e set per runner (tests/e2e/shard.ts).
     name: docker-e2e shard ${{ matrix.shard }}/4
     needs: changes
-    if: ${{ needs.changes.outputs.suite == 'true' }}
+    if: ${{ needs.changes.outputs.docker_suite == 'true' && needs.changes.outputs.draft != 'true' }}
     strategy:
       # Let every shard finish so one failure still reports the other scenarios.
       fail-fast: false
@@ -521,7 +531,7 @@ jobs:
 
   docker-e2e:
     # The single docker-e2e signal for the prerelease exact-head gate and branch checks.
-    # It always runs: cancelled-only results are non-failures, and shards skipped
+    # It always runs: incomplete evidence fails, and shards skipped
     # because the change scope excludes the suite pass; failures, a failed scope
     # and any other skip still fail. Prerelease gates separately require every shard.
     needs: [changes, docker-e2e-shard]
@@ -532,14 +542,19 @@ jobs:
     steps:
       - name: Reject failed or skipped docker-e2e shards
         env:
+          PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           SCOPE: ${{ needs.changes.outputs.scope }}
-          SUITE: ${{ needs.changes.outputs.suite }}
+          SUITE: ${{ needs.changes.outputs.docker_suite }}
           SHARD_RESULT: ${{ needs.docker-e2e-shard.result }}
         run: |
+          if [ "$PR_DRAFT" = "true" ]; then
+            echo "skipped: draft — full pull-request evidence is required before merge"
+            exit 1
+          fi
           if [ "$CHANGES_RESULT" = "cancelled" ]; then
-            echo "change scope was cancelled without failure; aggregate is non-failing"
-            exit 0
+            echo "change scope was cancelled; evidence is incomplete"
+            exit 1
           fi
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "change scope did not succeed (result: $CHANGES_RESULT)"
@@ -550,8 +565,8 @@ jobs:
             exit 0
           fi
           if [ "$SHARD_RESULT" = "cancelled" ]; then
-            echo "shards were cancelled without failure; aggregate is non-failing"
-            exit 0
+            echo "shards were cancelled; evidence is incomplete"
+            exit 1
           fi
           if [ "$SHARD_RESULT" != "success" ]; then
             echo "docker-e2e shards did not all succeed (result: $SHARD_RESULT)"
@@ -570,12 +585,13 @@ jobs:
       # Let every shard finish so one failure still reports the other files.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: ${{ fromJSON(needs.changes.outputs.test_shards) }}
     # `pooled` (pushes and pull requests, HACK-2028): shards 1-3 run the
-    # platform-sensitive files on macOS and shards 4-8 the rest on Linux
+    # selected platform-sensitive files on macOS and shards 4-8 the rest on Linux
     # (POOLED_MACOS_SHARDS in scripts/test-shard-plan.ts; the runner refuses a
-    # shard on the wrong host). Release and prerelease build hosts are unchanged.
-    runs-on: ${{ (needs.changes.outputs.test_layout == 'pooled' && matrix.shard > 3) && 'ubuntu-latest' || 'macos-15' }}
+    # shard on the wrong host). Drafts distribute all selected files over the
+    # five Linux shards. Full push and prerelease job names stay unchanged.
+    runs-on: ${{ (needs.changes.outputs.draft == 'true' || (needs.changes.outputs.test_layout == 'pooled' && matrix.shard > 3)) && 'ubuntu-latest' || 'macos-15' }}
     # Eight shards keep the slower GitHub-hosted macOS jobs below the existing
     # 30 min file-runner deadline; the 40 min job limit bounds a hung runner.
     timeout-minutes: 40
@@ -608,6 +624,8 @@ jobs:
         env:
           HACK_TEST_SHARD: ${{ matrix.shard }}/8
           HACK_TEST_LAYOUT: ${{ needs.changes.outputs.test_layout }}
+          HACK_TEST_SELECTION: ${{ needs.changes.outputs.test_files }}
+          HACK_TEST_DRAFT: ${{ needs.changes.outputs.draft }}
         run: bun scripts/test-shard.ts run --shard="$HACK_TEST_SHARD" --layout="$HACK_TEST_LAYOUT" --durations-out="$RUNNER_TEMP/test-shard-durations.json"
       - name: Preserve measured file durations
         # Per-file seconds only; refresh scripts/test-shard-durations.json with
@@ -620,17 +638,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Build CLI
-        if: matrix.shard == 8
+        if: matrix.shard == 8 && needs.changes.outputs.draft != 'true'
         run: bun run build
       - name: Build release smoke (no tests)
-        if: matrix.shard == 8
+        if: matrix.shard == 8 && needs.changes.outputs.draft != 'true'
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
 
   test-focus:
-    # Docs-only and runtime-core-only pull requests run, instead of the bun
-    # shards, every test file that names those sources (scripts/test-shard-plan.ts
-    # FOCUS_SOURCE). It always runs and passes as a no-op otherwise, because the
-    # prerelease gate requires every job of a push run to succeed without skips.
+    # Retain this exact-head required job while PR subsets move to test-shard.
+    # It passes as a no-op when no legacy focus is requested. The prerelease
+    # gate requires every push job to succeed without skips.
     name: test focus
     needs: changes
     runs-on: ubuntu-latest
@@ -673,7 +690,7 @@ jobs:
     # The required `test` check (repository ruleset) for `next` and `main`. It
     # always runs. When the change scope runs the suite, every bun shard must
     # succeed; when it runs a focus instead, the focused job must. A cancelled
-    # result is a non-failure, while a failure, a failed scope or any skip of
+    # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
     needs: [changes, test-shard, test-focus]
     if: ${{ always() }}
@@ -683,6 +700,7 @@ jobs:
     steps:
       - name: Reject failed or skipped test shards
         env:
+          PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           SCOPE: ${{ needs.changes.outputs.scope }}
           SUITE: ${{ needs.changes.outputs.suite }}
@@ -690,15 +708,19 @@ jobs:
           SHARD_RESULT: ${{ needs.test-shard.result }}
           FOCUS_RESULT: ${{ needs.test-focus.result }}
         run: |
+          if [ "$PR_DRAFT" = "true" ]; then
+            echo "skipped: draft — full pull-request evidence is required before merge"
+            exit 1
+          fi
           if [ "$CHANGES_RESULT" = "cancelled" ]; then
-            echo "change scope was cancelled without failure; aggregate is non-failing"
-            exit 0
+            echo "change scope was cancelled; evidence is incomplete"
+            exit 1
           fi
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "change scope did not succeed (result: $CHANGES_RESULT)"
             exit 1
           fi
-          if [ "$FOCUS_RESULT" != "success" ] && [ "$FOCUS_RESULT" != "cancelled" ]; then
+          if [ "$FOCUS_RESULT" != "success" ]; then
             echo "test focus did not succeed (result: $FOCUS_RESULT)"
             exit 1
           fi
@@ -711,8 +733,8 @@ jobs:
             echo "bun shards are out of scope ($SCOPE); gating on the focused tests ($TEST_FOCUS)"
           fi
           if [ "$SHARD_RESULT" = "cancelled" ]; then
-            echo "shards were cancelled without failure; aggregate is non-failing"
-            exit 0
+            echo "shards were cancelled; evidence is incomplete"
+            exit 1
           fi
           if [ "$SHARD_RESULT" != "success" ]; then
             echo "test shards did not all succeed (result: $SHARD_RESULT)"
@@ -721,7 +743,7 @@ jobs:
 
   linux-process-lifetime:
     needs: changes
-    if: ${{ needs.changes.outputs.suite == 'true' }}
+    if: ${{ needs.changes.outputs.docker_suite == 'true' && needs.changes.outputs.draft != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

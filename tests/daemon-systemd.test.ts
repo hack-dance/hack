@@ -3237,3 +3237,37 @@ linuxTest("a #! launcher's interpreter line is checked", async () => {
     "itself a script"
   );
 });
+
+linuxTest(
+  "install does not replace or restart a running unit of another Hack home",
+  async () => {
+    // Codex review: install rewrote the unit (dropping another home's
+    // HACK_HOME) before checking its home, then restarted that home's hackd.
+    const fake = fakeSystemd({ active: true });
+    const foreignUnit = unitText().replace(
+      "Environment=HACK_NO_INTERACTIVE=1",
+      "Environment=HACK_NO_INTERACTIVE=1\nEnvironment=HACK_HOME=/srv/other-home"
+    );
+    await mkdir(dirname(unitPath), { recursive: true, mode: 0o700 });
+    await writeFile(unitPath, foreignUnit, { mode: 0o600 });
+    fake.active = true;
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1 HACK_HOME=/srv/other-home";
+    fake.calls.length = 0;
+    expect(await installDaemonSystemdService(installHooks(fake, []))).toBe(1);
+    expect(await readFile(unitPath, "utf8")).toBe(foreignUnit);
+    expect(fake.calls).not.toContain("systemctl --user daemon-reload");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+    expect(fake.active).toBe(true);
+    // An environment that cannot be read is refused the same way.
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+    fake.passEnvironment = "HACK_HOME";
+    expect(await installDaemonSystemdService(installHooks(fake, []))).toBe(1);
+    expect(await readFile(unitPath, "utf8")).toBe(foreignUnit);
+    // This home's running unit is updated as before.
+    fake.passEnvironment = "";
+    fake.calls.length = 0;
+    await installDaemonSystemdService(installHooks(fake, []));
+    expect(await readFile(unitPath, "utf8")).toBe(unitText());
+    expect(fake.calls).toContain("systemctl --user restart hackd.service");
+  }
+);

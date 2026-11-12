@@ -604,18 +604,17 @@ export async function installDaemonSystemdService(
   }
 
   const unitPath = resolveSystemdUnitPath({ env: deps.env });
-  const program = await checkInstallPrograms({
+  const start = await readInstallStartingPoint({
     hackBinPath: expected.hackBinPath,
+    unitPath,
+    hackHome: dirname(hooks.paths.root),
     deps,
   });
-  if (program !== null) {
-    logger.error({ message: program });
+  if ("error" in start) {
+    logger.error({ message: start.error });
     return 1;
   }
-  const before = await readSystemdServiceStatus({
-    unitPath,
-    deps,
-  });
+  const { before } = start;
   const restartMarker = await noteRestartIfActiveUnitChanges({
     hooks,
     before,
@@ -689,6 +688,71 @@ export async function installDaemonSystemdService(
     linger: await readLingerStatus(deps),
   });
   return ready ? 0 : 1;
+}
+
+/**
+ * What install checks before it writes anything: the programs and PATH the
+ * new unit uses ({@link checkInstallPrograms}), then the unit as systemd
+ * has it now, which must not be another home's running unit
+ * ({@link refuseForeignRunningUnit}).
+ */
+async function readInstallStartingPoint(opts: {
+  readonly hackBinPath: string;
+  readonly unitPath: string;
+  readonly hackHome: string;
+  readonly deps: SystemdDeps;
+}): Promise<
+  { readonly before: SystemdServiceStatus | null } | { readonly error: string }
+> {
+  const program = await checkInstallPrograms({
+    hackBinPath: opts.hackBinPath,
+    deps: opts.deps,
+  });
+  if (program !== null) {
+    return { error: program };
+  }
+  const before = await readSystemdServiceStatus({
+    unitPath: opts.unitPath,
+    deps: opts.deps,
+  });
+  const foreign = await refuseForeignRunningUnit({
+    before,
+    hackHome: opts.hackHome,
+    deps: opts.deps,
+  });
+  return foreign === null ? { before } : { error: foreign };
+}
+
+/**
+ * Before install rewrites or reloads anything: a unit that is running (or
+ * about to run) hackd must serve this Hack home, read from the config
+ * systemd has loaded now (HACK-2052). Rewriting first would drop another
+ * home's `HACK_HOME`, pass the later check, and restart (stop) that home's
+ * daemon. Unknown is refused too. Null, or the refusal with how to go on.
+ */
+async function refuseForeignRunningUnit(opts: {
+  readonly before: SystemdServiceStatus | null;
+  readonly hackHome: string;
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  const { before } = opts;
+  if (
+    !before?.installed ||
+    (before.activeState !== null &&
+      !MANAGER_STOPPABLE_STATES.has(before.activeState))
+  ) {
+    return null;
+  }
+  const unitHome = await readSystemdUnitHackHome({ deps: opts.deps });
+  const ours = resolve(opts.hackHome);
+  if (unitHome.kind === "home" && unitHome.path === ours) {
+    return null;
+  }
+  const whose =
+    unitHome.kind === "home"
+      ? `it runs hackd for ${unitHome.path}, not ${ours}`
+      : `its Hack home could not be read (${unitHome.detail})`;
+  return `Not replacing the running ${SYSTEMD_UNIT_NAME}: ${whose}. Uninstall it from that Hack home, or stop it by hand (systemctl --user stop ${SYSTEMD_UNIT_NAME}), then run: hack daemon install`;
 }
 
 /**

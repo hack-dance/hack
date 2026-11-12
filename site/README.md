@@ -7,6 +7,12 @@ short editorial pages under `docs/versions/<version>/`.
 
 ## Develop and verify
 
+The [diagram type audit](diagram-types.md) records the syntax and light/dark
+legibility checked at Pele 1.9.0. README pictures use the same renderer but carry
+committed SVGs for GitHub; after changing their adjacent `.mmd` sources or the
+house theme, run `bun run docs:readme-diagrams`. `docs:check` re-renders and rejects
+stale pictures in either theme.
+
 Use the repository's pinned Bun. Site dependencies and `site/bun.lock` are
 independent of the CLI workspace; Next.js also needs Node.js 20.9 or newer.
 

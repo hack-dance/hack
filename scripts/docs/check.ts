@@ -9,9 +9,11 @@ import {
   resolvePublicSource,
   rewriteTarget,
 } from "./prepare";
+import { readmeDiagrams } from "./readme-diagrams";
 import { isVersionedSearchUrl } from "./version-boundary";
 import versions from "./versions.json";
 
+await readmeDiagrams({ check: true });
 await prepare(true);
 // Boundary checks: traversal, private evidence, untracked input must never become a link.
 const source = resolve(repositoryRoot, "docs/README.md");

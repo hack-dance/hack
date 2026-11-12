@@ -150,9 +150,11 @@ mod restore;
 pub(in crate::provider) mod retained_startup;
 #[cfg(target_os = "macos")]
 pub use retained_startup::preflight as retained_startup_preflight;
+mod log_follow;
 mod restore_history;
 mod routes;
 mod service_logs;
+pub use log_follow::{LogFollowOptions, follow_logs};
 mod shutdown;
 pub use service_logs::{
     ServiceLogOptions, ServiceLogResult, ServiceSelection, service_logs, service_selection,

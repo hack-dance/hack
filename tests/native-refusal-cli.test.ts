@@ -223,6 +223,66 @@ async function scriptUpThroughReview(
 
 const SHARED = { HACK_NATIVE_SHARED_SOURCE: "1" };
 
+test(
+  "detached static UDP refusal names its fix and reports no start through the source CLI",
+  async () => {
+    const f = await fixture(
+      JSON.stringify({
+        services: {
+          web: { image: `sha256:${"e".repeat(64)}`, ports: ["18080:80/udp"] },
+        },
+      })
+    );
+    const reason =
+      "Native publishes only TCP ports; keep UDP publication on the Compose backend.";
+    await f.reply("runtime check-project-share", {
+      source_admitted: true,
+      pool_initialized: false,
+    });
+    await f.reply("project plan", {
+      plan_id: "f".repeat(64),
+      plan: {
+        namespace: run.namespace,
+        compose_sha256: createHash("sha256").update(f.compose).digest("hex"),
+        enrollment_compatible: false,
+        services: { web: { active: true } },
+      },
+      start_refusals: [
+        {
+          code: "graph_port_publication",
+          message: reason,
+          message_fixed: true,
+          service: "web",
+        },
+      ],
+    });
+    const result = await cli({
+      fixture: f,
+      args: ["up", "-d", "--json"],
+      env: SHARED,
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("graph_port_publication");
+    expect(result.output).toContain("nothing was started");
+    expect(result.output).toContain(reason);
+    expect(result.output).not.toContain(
+      "retained owners and recovery evidence"
+    );
+    const calls = await f.calls();
+    expect(calls.filter((call) => call === "project plan")).toHaveLength(2);
+    expect(
+      calls.every((call) =>
+        [
+          "project source-size",
+          "project plan",
+          "runtime check-project-share",
+        ].includes(call)
+      )
+    ).toBe(true);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
 /** A mapping saved by a prior start, as `ps`, `up` and `restart` find it. */
 async function savedRun(f: Fixture) {
   await saveNativeProjectRun({ ...f.scope, run });

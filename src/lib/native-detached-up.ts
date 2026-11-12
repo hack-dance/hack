@@ -26,6 +26,7 @@ type StartupFailure = {
   readonly code: string;
   readonly message?: string;
   readonly service?: string;
+  readonly startupPhase?: "static-preflight";
 };
 let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -50,7 +51,7 @@ function isStartupFailure(value: unknown): value is StartupFailure {
   return (
     isRecord(value) &&
     Object.keys(value).every((key) =>
-      ["code", "message", "service"].includes(key)
+      ["code", "message", "service", "startupPhase"].includes(key)
     ) &&
     typeof value.code === "string" &&
     FAILURE_CODE.test(value.code) &&
@@ -59,7 +60,9 @@ function isStartupFailure(value: unknown): value is StartupFailure {
         FAILURE_MESSAGE.test(value.message))) &&
     (value.service === undefined ||
       (typeof value.service === "string" &&
-        FAILURE_SERVICE.test(value.service)))
+        FAILURE_SERVICE.test(value.service))) &&
+    (value.startupPhase === undefined ||
+      value.startupPhase === "static-preflight")
   );
 }
 
@@ -86,6 +89,12 @@ function startupFailureError(failure: StartupFailure): HackCliError {
       : ` Runtime: ${failure.message}`;
   } else if (failure.service) {
     detail = ` Service: ${failure.service}.`;
+  }
+  if (failure.startupPhase === "static-preflight") {
+    return new HackCliError({
+      code: "E_STARTUP_INCOMPLETE",
+      message: `Native detached startup refused (${failure.code}); nothing was started.${detail} Fix the reported configuration and retry; run hack doctor --native-preflight to list every static blocker.`,
+    });
   }
   return new HackCliError({
     code: "E_STARTUP_INCOMPLETE",

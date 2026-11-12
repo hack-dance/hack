@@ -403,7 +403,7 @@ hack logs [service] [options]
 | `--loki` | Force Loki backend (do not fall back to docker compose logs) |
 | `--services <csv>` | Filter Loki logs by service(s), comma-separated (e.g. api,www) |
 | `--query <logql>` | Raw LogQL selector/query (overrides auto selector built from project + services) |
-| `--since <time>` | Start time for Loki logs (RFC3339 or duration like 15m) |
+| `--since <time>` | Start time for Loki or native followed logs (RFC3339 or duration like 15m) |
 | `--until <time>` | End time for Loki logs (RFC3339 or duration like 15m) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

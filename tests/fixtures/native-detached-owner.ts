@@ -45,6 +45,7 @@ if (role === "launcher") {
   } catch (error) {
     process.exitCode = [
       "wrapped-failure",
+      "wrapped-static-failure",
       "provider-pin",
       "wrapped-provider-pin",
     ].includes(mode)
@@ -113,13 +114,16 @@ if (role === "launcher") {
         process.off("SIGTERM", terminate);
         return 1;
       }
-      if (mode === "wrapped-failure") {
+      if (["wrapped-failure", "wrapped-static-failure"].includes(mode)) {
         const failure = new NativeRuntimeRequestError({
           message: "synthetic-private-value",
           nativeCode: "graph_port_publication",
           nativeMessage:
             "Native publishes only TCP ports; keep UDP publication on the Compose backend.",
           nativeService: "web",
+          ...(mode === "wrapped-static-failure"
+            ? { nativeStartupPhase: "static-preflight" as const }
+            : {}),
         });
         await nativeDetachedUpFailure(
           retainNativeRuntimeFailure({
@@ -163,6 +167,13 @@ if (role === "launcher") {
           {
             kind: "failure",
             data: { code: "graph_port_publication", message: "p".repeat(401) },
+          },
+          {
+            kind: "failure",
+            data: {
+              code: "graph_port_publication",
+              startupPhase: "unknown-phase",
+            },
           },
         ]) {
           process.send?.(value);

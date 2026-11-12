@@ -5,6 +5,7 @@ import { nativeAuthoredExecOptions } from "../backends/native-authored-exec-opti
 import type { NativeAuthoredReceipt } from "../backends/native-authored-graph-protocol.ts";
 import { nativeAuthoredProjectExec } from "../backends/native-authored-project-exec.ts";
 import {
+  followNativeAuthoredProjectLogs,
   nativeAuthoredLogsOptions,
   nativeAuthoredProjectLogs,
 } from "../backends/native-authored-project-logs.ts";
@@ -60,7 +61,7 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, single-service logs, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
 }
 
@@ -68,8 +69,11 @@ function assertLogsOptions(options: NativeComposeCommandOptions): void {
   if (
     process.platform !== "darwin" ||
     options.operation !== "logs" ||
-    options.follow !== false ||
-    !nativeAuthoredLogsOptions(options.service, options.tail ?? 200) ||
+    !nativeAuthoredLogsOptions(
+      options.service,
+      options.tail ?? 200,
+      options.follow !== false
+    ) ||
     options.recover ||
     options.detach ||
     options.unsupportedOptions ||
@@ -97,6 +101,26 @@ async function runAuthoredLogs(input: {
   const service = options.service;
   if (typeof service !== "string") {
     return unsupported();
+  }
+  if (options.follow !== false) {
+    const root = await realpath(input.projectRoot);
+    return await followNativeAuthoredProjectLogs({
+      runtime,
+      scope: {
+        projectRoot: root,
+        projectDir: join(root, ".hack"),
+        nativeHome: runtime.home,
+        branch: options.instance ?? null,
+      },
+      service,
+      tail: options.tail,
+      since: options.since,
+      json: options.json,
+      project: options.project,
+    });
+  }
+  if (options.since !== undefined) {
+    throw new CliUsageError("Native --since currently requires --follow.");
   }
   const controller = new AbortController();
   const cancel = () => controller.abort();

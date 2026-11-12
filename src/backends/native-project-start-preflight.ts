@@ -66,6 +66,7 @@ export async function requireNativeStaticStartReview(opts: {
           nativeCode: first.code,
           nativeMessage: first.message,
           nativeService: first.service,
+          nativeStartupPhase: "static-preflight",
         });
       }
       if (plan.enrollment_compatible !== true) {

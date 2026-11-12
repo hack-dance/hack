@@ -37,6 +37,7 @@ import {
   parseTopMemory,
   providerProcesses,
   Qualification,
+  qualificationInputSizes,
   readJson,
   readyData,
   rootProblem,
@@ -58,6 +59,8 @@ const required = [
   "/inputs/smolvm.tar.gz",
   "--engine-archive",
   "/inputs/docker.tgz",
+  "--builder-archive",
+  "/inputs/buildx",
   "--network-tools",
   "/inputs/apks",
   "--web-image",
@@ -930,6 +933,86 @@ esac
       expect(run.strays).toEqual([previous as NonNullable<typeof previous>]);
     } finally {
       done();
+    }
+  });
+});
+
+describe("qualification exact input lengths", () => {
+  test("all seven size pins are measured and stale lengths refuse before extraction", () => {
+    const root = realpathSync(
+      mkdtempSync(join(tmpdir(), "qualification-size-"))
+    );
+    try {
+      const names = [
+        "smolvm.tgz",
+        "docker.tgz",
+        "buildx",
+        "one.apk",
+        "two.apk",
+        "three.apk",
+        "four.apk",
+      ];
+      const pin = (name: string, index: number) => {
+        const bytes = Buffer.alloc(index + 1, "x");
+        writeFileSync(join(root, name), bytes);
+        return {
+          url: `https://example.test/${name}`,
+          size_bytes: bytes.length,
+          archive_sha256: createHash("sha256").update(bytes).digest("hex"),
+          version: "1.0.0",
+        };
+      };
+      const all = names.map(pin);
+      const pins = {
+        smolvm: all[0],
+        docker: all[1],
+        buildx: all[2],
+        network_tools: all.slice(3),
+      };
+      const options = {
+        ...parseOptions(required),
+        root,
+        bundle: root,
+        providerArchive: join(root, "smolvm.tgz"),
+        engineArchive: join(root, "docker.tgz"),
+        builderArchive: join(root, "buildx"),
+        networkTools: root,
+      };
+      const measured = qualificationInputSizes(options, pins);
+      expect(measured).toHaveLength(7);
+      expect(measured.every((file) => file.actual === file.expected)).toBe(
+        true
+      );
+      for (const changed of all) {
+        changed.size_bytes += 1;
+        expect(
+          qualificationInputSizes(options, pins).filter(
+            (file) => file.actual !== file.expected
+          )
+        ).toHaveLength(1);
+        changed.size_bytes -= 1;
+      }
+      const stale = pins.smolvm;
+      if (!stale) {
+        throw new Error("fixture pin missing");
+      }
+      stale.size_bytes += 1; // Hash is still correct: stale length alone must block qualification.
+      writeFileSync(join(root, "provider-pins.json"), JSON.stringify(pins));
+      const run = new Qualification(options);
+      run.note = () => undefined;
+      let extracted = false;
+      run.exec = () => {
+        extracted = true;
+        throw new Error("must not extract");
+      };
+      expect(() => run.archive()).toThrow("length matches size_bytes");
+      expect(extracted).toBe(false);
+      stale.size_bytes = 0;
+      expect(() => qualificationInputSizes(options, pins)).toThrow(
+        "size_bytes"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

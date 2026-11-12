@@ -113,7 +113,8 @@ export const optSince = defineOption({
   type: "string",
   long: "--since",
   valueHint: "<time>",
-  description: "Start time for Loki logs (RFC3339 or duration like 15m)",
+  description:
+    "Start time for Loki or native followed logs (RFC3339 or duration like 15m)",
 } as const);
 
 export const optUntil = defineOption({

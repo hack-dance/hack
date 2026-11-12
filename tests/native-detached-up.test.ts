@@ -162,36 +162,59 @@ for (const mode of [
   }, 15_000);
 }
 
-test("detached failure keeps validated runtime detail through cleanup wrappers, never their text", async () => {
-  const root = await mkdtemp(join(tmpdir(), "native-detached-failure-"));
-  const launcher = Bun.spawn(
-    [process.execPath, fixture, "launcher", root, "wrapped-failure"],
-    {
-      env: fixtureEnv(root),
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
+for (const phase of ["static-preflight", "after-start"] as const) {
+  test(`detached ${phase} failure keeps validated runtime detail through cleanup wrappers, never their text`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "native-detached-failure-"));
+    const launcher = Bun.spawn(
+      [
+        process.execPath,
+        fixture,
+        "launcher",
+        root,
+        phase === "static-preflight"
+          ? "wrapped-static-failure"
+          : "wrapped-failure",
+      ],
+      {
+        env: fixtureEnv(root),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    try {
+      const [code, stdout, stderr] = await Promise.all([
+        launcher.exited,
+        new Response(launcher.stdout).text(),
+        new Response(launcher.stderr).text(),
+      ]);
+      expect(code).toBe(1);
+      expect(JSON.parse(stdout)).toMatchObject({
+        ok: false,
+        error: { message: expect.stringContaining("graph_port_publication") },
+      });
+      expect(stdout).toContain("Native publishes only TCP ports");
+      if (phase === "static-preflight") {
+        expect(stdout).toContain("nothing was started");
+        expect(stdout).toContain("keep UDP publication on the Compose backend");
+        expect(stdout).toContain("hack doctor --native-preflight");
+        expect(stdout).not.toContain("retained owners and recovery evidence");
+        expect(stdout).not.toContain("inspect hack ps");
+      } else {
+        expect(stdout).toContain("inspect hack ps before retrying");
+        expect(stdout).toContain(
+          "retained owners and recovery evidence are preserved"
+        );
+        expect(stdout).not.toContain("nothing was started");
+      }
+      expect(stdout + stderr).not.toContain("synthetic-private-value");
+      expect(stderr).toBe("");
+    } finally {
+      if (launcher.exitCode === null) {
+        launcher.kill("SIGTERM");
+        await launcher.exited;
+      }
+      await rm(root, { recursive: true, force: true });
     }
-  );
-  try {
-    const [code, stdout, stderr] = await Promise.all([
-      launcher.exited,
-      new Response(launcher.stdout).text(),
-      new Response(launcher.stderr).text(),
-    ]);
-    expect(code).toBe(1);
-    expect(JSON.parse(stdout)).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("graph_port_publication") },
-    });
-    expect(stdout).toContain("Native publishes only TCP ports");
-    expect(stdout + stderr).not.toContain("synthetic-private-value");
-    expect(stderr).toBe("");
-  } finally {
-    if (launcher.exitCode === null) {
-      launcher.kill("SIGTERM");
-      await launcher.exited;
-    }
-    await rm(root, { recursive: true, force: true });
-  }
-});
+  });
+}

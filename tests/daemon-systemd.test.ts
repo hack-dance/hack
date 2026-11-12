@@ -3417,3 +3417,34 @@ linuxTest(
     });
   }
 );
+
+linuxTest(
+  "a service without HOME belongs to the account's home, not the shell's",
+  async () => {
+    // Codex review: with UnsetEnvironment=HOME and no HACK_HOME, the unit's
+    // home fell back to the invoking shell's HOME; hackd uses the account's
+    // home from the password database.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.active = true;
+    fake.unsetEnvironment = "HOME";
+    const stop = (accountHome: () => string | null) =>
+      stopViaSystemdIfInstalled({
+        pid: null,
+        hackHome: join(root, ".hack"),
+        deps: { ...fake.deps, accountHome },
+      });
+    fake.calls.length = 0;
+    const other = await stop(() => "/srv/account");
+    expect(other.refused).toContain("/srv/account/.hack");
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    // An account home that cannot be read: unknown, refused.
+    expect((await stop(() => null)).refused).toContain("could not be read");
+    // The account's home is this shell's: stopped.
+    expect((await stop(() => root)).handled).toBe(true);
+  }
+);

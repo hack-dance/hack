@@ -11,7 +11,7 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import { GLOBAL_HACK_DIR_NAME } from "../constants.ts";
@@ -144,6 +144,11 @@ export interface SystemdDeps {
   readonly env: Env;
   readonly run: ServiceCommandRunner;
   readonly uid: number;
+  /**
+   * The account's home from the password database (never `$HOME`): what a
+   * service without HOME resolves. Defaults to `os.userInfo().homedir`.
+   */
+  readonly accountHome?: () => string | null;
 }
 
 /**
@@ -943,7 +948,7 @@ function splitEnvironmentWords(value: string): string[] {
  * The Hack home the unit's hackd uses: `HACK_HOME` from the service's
  * effective environment ({@link readSystemdServiceEnvironment}), else
  * `$HOME/.hack` with the service's `HOME` (or, when it has none, the
- * user's). Unknown when that environment cannot be established or the
+ * account's home from the password database). Unknown when that environment cannot be established or the
  * value is relative: callers then refuse rather than guess.
  */
 export async function readSystemdUnitHackHome(opts: {
@@ -960,14 +965,29 @@ export async function readSystemdUnitHackHome(opts: {
       ? { kind: "home", path: resolve(override) }
       : { kind: "unknown", detail: `HACK_HOME=${override} is relative` };
   }
+  // With no HOME in the service (unset by UnsetEnvironment=, or never
+  // set), hackd falls back to the account's home from the password
+  // database, not to the invoking shell's HOME.
   const home =
     normalizeHomeDir(env.HOME) ??
-    normalizeHomeDir(opts.deps.env.HOME) ??
-    normalizeHomeDir(homedir());
+    normalizeHomeDir((opts.deps.accountHome ?? readAccountHome)() ?? undefined);
   if (!home) {
-    return { kind: "unknown", detail: "no home directory" };
+    return {
+      kind: "unknown",
+      detail:
+        "the service has no HOME and the account's home could not be read",
+    };
   }
   return { kind: "home", path: resolve(home, GLOBAL_HACK_DIR_NAME) };
+}
+
+/** The account's home from the password database, or null. */
+function readAccountHome(): string | null {
+  try {
+    return userInfo().homedir;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -4272,9 +4272,9 @@ export async function writeLinuxHostTrustBundle(input: {
 }
 
 /**
- * Linux host trust setup: generates the combined bundle and the shell env
- * script, then adds the CA to the distribution trust store (confirmed sudo)
- * and to NSS browser databases. Returns false when an attempted step failed.
+ * Linux host trust setup: updates system/NSS stores, persists the verified
+ * CA, then generates the combined bundle and shell env from those bytes.
+ * Returns false when an attempted step failed.
  */
 export async function configureLinuxHostTlsTrust(input: {
   readonly certPath: string;
@@ -4301,19 +4301,25 @@ export async function configureLinuxHostTlsTrust(input: {
     // than writing an unverified certificate into them.
     return false;
   }
+  const verifiedCertPath = join(
+    dirname(resolveHackHostTrustBundlePath()),
+    "caddy-verified-authority.crt"
+  );
+  await ensureDir(dirname(verifiedCertPath));
+  await writeTextFileIfChanged(verifiedCertPath, trust.verifiedPem);
   // Use the verified bytes, not a re-read of the mutable export: a file
   // replaced during the prompt must not reach the host bundle.
   const bundlePath = await (
     input.writeBundle ??
     ((opts: { readonly certPath: string; readonly localCaPem: string }) =>
       writeLinuxHostTrustBundle(opts))
-  )({ certPath: input.certPath, localCaPem: trust.verifiedPem });
+  )({ certPath: verifiedCertPath, localCaPem: trust.verifiedPem });
   const scriptPath = resolveHackHostTrustEnvScriptPath();
   await ensureDir(dirname(scriptPath));
   await writeTextFile(
     scriptPath,
     renderHackHostTrustShellExports({
-      certPath: input.certPath,
+      certPath: verifiedCertPath,
       bundlePath,
     })
   );

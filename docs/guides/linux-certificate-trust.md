@@ -37,6 +37,9 @@ interpreter, locale-path and tool-selection variables are not inherited.
 ## What Hack updates
 
 1. **Hack's host trust bundle and shell env** for Bun, Node, curl and git (no root).
+   The verified CA is persisted as `~/.hack/caddy/pki/caddy-verified-authority.crt`.
+   The generated `NODE_EXTRA_CA_CERTS` and `HACK_LOCAL_CA_CERT` reference that
+   copy, including when no system CA bundle is available.
    Load it in the current shell with
    `source ~/.hack/caddy/pki/caddy-host-trust-env.sh` (the path is printed).
 2. **The distribution trust store** (root). Hack reads `ID` and `ID_LIKE` from

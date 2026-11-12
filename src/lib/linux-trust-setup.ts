@@ -130,6 +130,12 @@ const TOOL_PACKAGE: Readonly<Record<LinuxDistroFamily, string>> = {
   arch: "p11-kit",
 };
 
+function toolPackage(family: LinuxDistroFamily, tool: string): string {
+  return family === "arch" && tool === "update-ca-trust"
+    ? "ca-certificates-utils"
+    : TOOL_PACKAGE[family];
+}
+
 /**
  * Add the validated CA to the distribution trust store. `show` receives the
  * commands and the certificate's SHA-256 fingerprint before the prompt.
@@ -192,7 +198,7 @@ export async function applyLinuxSystemTrust(opts: {
         code: "linux_trust_tool_missing",
         family,
         steps: [
-          `${tool} is not installed. Install the ${TOOL_PACKAGE[family]} package, then rerun hack global trust.`,
+          `${tool} is not installed. Install the ${toolPackage(family, tool)} package, then rerun hack global trust.`,
         ],
       };
     }

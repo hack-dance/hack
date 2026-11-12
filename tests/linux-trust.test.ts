@@ -650,6 +650,18 @@ describe("applyLinuxSystemTrust", () => {
         confirm: yes,
       })
     ).toMatchObject({ status: "manual", code: "linux_trust_tool_missing" });
+    const missingRefresh = await applyLinuxSystemTrust({
+      host: missing.host,
+      ca: await validated(CURRENT_CA_PEM),
+      manualCertPath: EXPORT,
+      canPrompt: true,
+      show: noShow,
+      confirm: yes,
+    });
+    if (missingRefresh.status !== "manual") {
+      throw new Error("expected a missing-tool hint");
+    }
+    expect(missingRefresh.steps.join("\n")).toContain("ca-certificates-utils");
     expect([...unknown.state.privileged, ...missing.state.privileged]).toEqual(
       []
     );

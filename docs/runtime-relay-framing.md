@@ -55,9 +55,12 @@ Two exchanges (including one after VM restart) must pass; an oversized header mu
 produce RESET without opening a third upstream connection. The fixture is bounded
 and sequential; it does not qualify a production asynchronous or multiplexed relay.
 
-A native run against pinned SmolVM 1.14.3 passed these controls with recorded
+A native run against the then-pinned SmolVM 1.14.3 passed these controls with recorded
 networking disabled, no raw transport shutdown, and complete owned fixture cleanup.
-No throughput, latency or resource improvement is inferred. Owner/boot revocation,
+It has not been repeated on the current SmolVM 1.34.1 pin; the provider pin
+qualification script (`scripts/qualify-provider-pin.ts`) exercises the production
+dependency-socket relay instead. No throughput, latency or resource improvement is
+inferred. Owner/boot revocation,
 authentication, actual application aliases/TLS, bidirectional backpressure under load
 and matched workload benchmarks remain required gates.
 

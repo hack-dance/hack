@@ -487,6 +487,18 @@ pinned package preparation, ownership, resource admission, lifecycle commands, a
 The default private build includes native HTTP graph probes (local `_docs/docs/plans/v5/native-http-probe-20260915.md`)
 and requires Zig 0.15.2 plus a host C compiler.
 [Provider pins](provider-pins.json) record the exact package inputs; the engine runs inside the VM.
+A weekly workflow (`.github/workflows/provider-pin-watch.yml`, `scripts/provider-pin-watch.ts`;
+weekly once it is on `main`, by dispatch before that) compares these pins with upstream releases
+and published security advisories. It keeps one issue, "Provider pins behind upstream" (label
+`provider-pin-watch`), listing each newer release, which watched SmolVM interfaces its notes
+mention (libkrun, vsock, virtiofs, balloon or reclaim, disks and templates, the `machine`
+subcommands, flags and `SMOLVM_*` variables the runtime passes; a test keeps that list and the
+runtime source in step), and every security advisory the three upstream repositories published
+whose vulnerable range contains a pinned version and whose fix the pin has not reached. The
+issue carries the `security` label exactly while such an advisory exists. Not covered: advisories
+for components SmolVM bundles (libkrun, libkrunfw, the guest kernel and rootfs packages) or
+published only in the global advisory database. It never changes a pin; bumps are qualified by
+hand.
 The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine
@@ -640,6 +652,36 @@ identity and named data remain outside history retirement. Archive/export retain
 the bounded window rather than a complete lifetime log. Use the current candidate
 for migrated private state; older experimental candidates do not understand this
 history format. Stable v4 uses its separate state and is unaffected.
+
+## How a provider pin bump is qualified
+
+[`provider-pins.json`](provider-pins.json) pins SmolVM, the guest Docker engine and
+the BuildKit client by version and SHA-256. Bump about every four weeks, or sooner
+for a security fix, so each bump stays small enough to review against upstream notes.
+
+1. Read every upstream release note since the current pin and record, for each
+   provider interface the runtime uses (`machine` subcommands and flags, `SMOLVM_*`
+   variables, the machine database and running configuration, the agent protocol,
+   templates, the guest rootfs release), whether it changed and what was done.
+2. Update the pin, `artifact::{VERSION, ARCHIVE_SHA256}`, the expanded template
+   digests in `disk_template::PINNED` (decode the archive's `*.ext4.zst` with an
+   independent decoder and apply the `content_digest` definition), the network-tool
+   packages when the guest Alpine release moves, and the audit lists in
+   `config_audit.rs` for any new machine-record capability.
+3. On an Apple Silicon Mac, run [`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts)
+   once with a bundle built from the current pin (baseline) and once with the bump,
+   each in its own empty private root. It checks the archive and signature, prepare,
+   a prepared base built and verified (its overlay inventory), a pool without internet,
+   template expansion and digests, exact disk identity, restart, down and up, network
+   modes, the dependency-socket relay, Rosetta and a web-plus-database project, then
+   prints the timing and idle-footprint measurements to compare. What `down --recover`
+   does after a lost foreground, and how the pool recovers from an unclean provider
+   stop, are recorded in `qualification.json` but not asserted: exit 0 does not show
+   that recovery works, so read those recorded outcomes. With `--keep-going`, a failed
+   step's pools are stopped and shown gone before the next step; if that cannot be
+   shown, the remaining steps are skipped.
+4. A home prepared under one pin refuses another pin (`provider_pin_changed`);
+   say so in the release notes, because users prepare a fresh candidate home.
 
 ## Provider owner receipt compatibility
 
@@ -1374,6 +1416,20 @@ disk-size identity. Automatic trim remains disabled until safe disk reclamation
 is supported and qualified. This does not relax disk identity checks or repair
 previously shortened files, and does not change the separate memory-reclamation
 policy. Already running providers require an owned stop/start to receive the setting.
+
+### Memory reclamation
+
+Every launch also sets `SMOLVM_BALLOON_RECLAIM=1` and `SMOLVM_IDLE_RECLAIM` from the
+pool's recorded reclamation policy: by default `state::IDLE_RECLAIM_MINUTES` (2),
+the minutes of provider CPU idleness before SmolVM pulses the balloon to hand an
+idle guest's page cache back to the host. The value is explicit so a provider pin
+bump cannot change it silently; 2 matches the SmolVM default since 1.34.1. A
+disabled policy passes `0`. The guest agent's own page-cache trim
+(`SMOLVM_MEMORY_TRIM`, new in 1.34.1) is a deliberate exception: it is left at the
+provider default (one quiet minute) because it has not been measured on this runtime
+yet, and pinning an unmeasured value could do worse than upstream's. The provider pin
+qualification script measures idle footprint at 0, 3 and 10 minutes; pin it
+explicitly once those numbers are recorded.
 
 ### Extending a stopped pool's approved hosts
 

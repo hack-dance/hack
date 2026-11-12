@@ -1,5 +1,8 @@
 # Reference and contracts
 
+[Global settings](../../guides/global-settings.md) covers machine-wide settings,
+including the proxy's `proxy.bind_address` option.
+
 Start with the [CLI overview](../../cli.md) to choose a command and the
 [generated command reference](../../reference/cli.md) for usage and flags.
 [Command and output contracts](command-contracts.md) adds the deeper leaf sections,

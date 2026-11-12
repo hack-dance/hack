@@ -1579,6 +1579,8 @@ hack doctor [options]
 | `--browser-url https://app.hack` | HTTPS origin manually tested in the browser (no path or credentials) |
 | `--browser-result unknown|works|fails|permission-denied` | Your manual browser observation for --browser-url (default: unknown) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--native-preflight` | List everything that would stop this Compose project from starting on the native backend, with a fix for each; read-only, with --path, --profile and --json |
+| `--profile <name[,name...]>` | Compose profiles to review with --native-preflight (comma-separated) |
 | `--native-cleanup inspect` | Inspect one mapped native graph's pending cleanup without recovery or stop replay |
 | `--native-run-mapping inspect|repair|release` | Inspect a native run mapping, explicitly repair it after filesystem device renumbering, or release one another native home left after a clean stop |
 | `--expect-selection <64-hex>` | Require the exact run-mapping recovery inspection selection |

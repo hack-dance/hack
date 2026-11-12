@@ -230,6 +230,15 @@ combined trust bundle, sets the usual `SSL_CERT_FILE`-style variables, and adds
 same `https://*.hack.local` names as the host. If Caddy's IP changes,
 `hack status` and `hack doctor` warn and `hack restart` refreshes the mapping.
 
+Caddy and CoreDNS hold reserved addresses on `hack-dev` (`172.30.0.2` and
+`172.30.0.53`). Docker can report a proxy container as running while it is
+attached to no network, to another network, or at another address; a plain
+`docker compose up -d` leaves such a container as it is, and a project container
+can then take the reserved address. `hack doctor` (`proxy network`) and
+`hack global status` (`proxy_network` in `--json`) report it, and `hack global up`
+takes the proxy stack down, moves any project container off the reserved
+addresses, and starts the stack again.
+
 ```mermaid
 ---
 title: A request from one service to another

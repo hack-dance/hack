@@ -135,9 +135,12 @@ impl Fixture {
         })
     }
     fn base_command(&self) -> Command {
-        let bundle = self
-            .root
-            .join(".hack-local/providers/smolvm-1.14.3-darwin-arm64");
+        let pins: serde_json::Value =
+            serde_json::from_str(include_str!("../provider-pins.json")).expect("provider pins");
+        let version = pins["smolvm"]["version"].as_str().expect("SmolVM version");
+        let bundle = self.root.join(format!(
+            ".hack-local/providers/smolvm-{version}-darwin-arm64"
+        ));
         let mut child = Command::new(bundle.join("smolvm-bin"));
         child
             .env_clear()

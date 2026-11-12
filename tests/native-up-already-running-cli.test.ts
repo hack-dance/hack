@@ -134,7 +134,9 @@ exit 1
       observations: Object.fromEntries(
         Object.entries(opts.services).map(([name, observation]) => [
           `container:${name}`,
-          observation,
+          observation.state === "running"
+            ? { ...observation, health: observation.health ?? "none" }
+            : observation,
         ])
       ),
     })
@@ -342,6 +344,18 @@ test("only a live, ready graph whose owner answers counts as already running", (
     started: ["web"],
     completed: [],
   });
+  expect(
+    classifyNativeAlreadyRunning({
+      ...observed,
+      items: [
+        item("web", {
+          state: "running",
+          health: "none",
+          readiness: "started",
+        }),
+      ],
+    })
+  ).toEqual({ kind: "running", started: ["web"], completed: [] });
   // Anything short of a confirmed ready graph launches as before, so a start
   // that is genuinely unconfirmed still reports its own reason.
   for (const other of [
@@ -369,6 +383,11 @@ test("only a live, ready graph whose owner answers counts as already running", (
         item("unknown-role", { state: "exited", code: 0 }),
         item("unfinished-job", { state: "running", readiness: "completed" }),
         item("unknown-health", { state: "running", readiness: "healthy" }),
+        item("no-probe", {
+          state: "running",
+          health: "none",
+          readiness: "healthy",
+        }),
       ],
     })
   ).toEqual({
@@ -377,6 +396,7 @@ test("only a live, ready graph whose owner answers counts as already running", (
       "clean-exit",
       "gone",
       "job",
+      "no-probe",
       "unfinished-job",
       "unknown-health",
       "unknown-role",

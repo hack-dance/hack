@@ -66,7 +66,9 @@ export function classifyNativeAlreadyRunning(
       item.readiness !== "completed" &&
       (item.readiness === "healthy"
         ? item.health === "healthy"
-        : item.health === null || item.health === "healthy")
+        : item.health === null ||
+          item.health === "none" ||
+          item.health === "healthy")
     ) {
       started.push(item.service);
     } else if (

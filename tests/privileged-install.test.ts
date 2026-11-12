@@ -111,6 +111,8 @@ describe("stdinInstallStep", () => {
     expect(STDIN_INSTALL_SCRIPT).toContain(
       'head -c "$((n + 1))" <&3 > "$tmp" & reader=$!'
     );
+    // The signal handler never cancels the reader by pid (HACK-2136).
+    expect(STDIN_INSTALL_SCRIPT).not.toMatch(/\bkill\b/);
     // Cleanup is armed before the temporary file exists.
     expect(STDIN_INSTALL_SCRIPT.indexOf('trap \'[ -z "$tmp" ]')).toBeLessThan(
       STDIN_INSTALL_SCRIPT.indexOf('set -C; : > "$tmp"')
@@ -221,9 +223,11 @@ describe("root stdin install script", () => {
     const box = await sandbox();
     const target = join(box.dest, "hack.rules");
     const step = stdinInstallStep({ target, content: "approved\n" });
+    let close: (() => void) | undefined;
     const stalled = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new TextEncoder().encode("app"));
+        close = () => controller.close();
       },
     });
     const [, , , ...rest] = step.argv;
@@ -250,6 +254,12 @@ describe("root stdin install script", () => {
     expect(await proc.exited).not.toBe(0);
     expect(await leftovers(box.dest)).toEqual([]);
     expect(await Bun.file(target).exists()).toBe(false);
+    // The reader is not signalled; end of input is what stops it.
+    try {
+      close?.();
+    } catch {
+      // Bun already closed the stream when the child exited.
+    }
   });
 
   test("a signal after the reader is reaped only cleans up and never signals its pid", async () => {
@@ -289,6 +299,46 @@ describe("root stdin install script", () => {
     expect(trace).not.toMatch(/^\++ kill\b/m);
     expect(await leftovers(box.dest)).toEqual([]);
     expect(await Bun.file(target).exists()).toBe(false);
+  });
+
+  test("a signal between reaping the reader and the next command signals nothing", async () => {
+    // Deterministic wait/clear boundary: a `wait` function (functions take
+    // precedence over regular builtins in dash and bash) reaps the reader
+    // with the real builtin, then signals the script itself before control
+    // returns, so the handler runs while the reaped pid is still known.
+    const boundary =
+      'wait() { command wait "$@"; r=$?; kill -s TERM $$; return "$r"; }';
+    const shells = [Bun.which("dash"), Bun.which("bash")].filter(
+      (shell): shell is string => shell !== null
+    );
+    expect(shells.length).toBeGreaterThan(0);
+    for (const shell of shells) {
+      const box = await sandbox();
+      const target = join(box.dest, "hack.rules");
+      const step = stdinInstallStep({ target, content: "approved\n" });
+      const [, , , ...rest] = step.argv;
+      const proc = Bun.spawn(
+        [
+          shell,
+          "-xc",
+          `${boundary}; ${renderStdinInstallScript({ timeoutSeconds: 20 })}`,
+          ...rest,
+        ],
+        {
+          stdin: new Blob([step.input.slice()]),
+          stdout: "ignore",
+          stderr: "pipe",
+          env: { PATH: `${join(box.root, "bin")}:/usr/bin:/bin` },
+        }
+      );
+      expect(await proc.exited).toBe(130);
+      const trace = await new Response(proc.stderr).text();
+      // The boundary's own `kill -s TERM` is the only kill in the trace.
+      expect(trace).toMatch(/^\++ kill -s TERM \d+$/m);
+      expect(trace).not.toMatch(/^\++ kill (?!-s TERM)/m);
+      expect(await leftovers(box.dest)).toEqual([]);
+      expect(await Bun.file(target).exists()).toBe(false);
+    }
   });
 
   test("invalid arguments are refused before anything is created", async () => {

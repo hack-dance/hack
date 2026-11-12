@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -20,12 +21,26 @@ import {
 } from "../daemon/launchd.ts";
 import { type DaemonPaths, resolveDaemonPaths } from "../daemon/paths.ts";
 import {
+  type DaemonProcessRefusal,
+  type DaemonTermination,
+  describeDaemonProcessRefusal,
+  describeDaemonTermination,
   findOrphanDaemonProcesses,
-  removeFileIfExists,
-  terminateOrphanDaemonProcesses,
+  isHackDaemonProcess,
+  type OwnedDaemonProof,
+  proveOwnedDaemonProcess,
+  readDaemonPid,
+  removeDaemonFilesIfStale,
+  terminateProvenDaemon,
   waitForProcessExit,
 } from "../daemon/process.ts";
 import { runDaemon } from "../daemon/server.ts";
+import {
+  type DaemonServiceSummary,
+  serviceSummaryJson,
+  summarizeLaunchdService,
+} from "../daemon/service-summary.ts";
+import { spawnDetachedDaemon } from "../daemon/spawn.ts";
 import {
   buildDaemonRepairMessage,
   buildDaemonStatusReport,
@@ -34,13 +49,22 @@ import {
 } from "../daemon/status.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
-import { pathExists, readTextFile } from "../lib/fs.ts";
+import { readTextFile } from "../lib/fs.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import {
   buildDockerStatusProbe,
   detectDockerBackend,
 } from "../lib/runtime-guidance.ts";
 import { logger } from "../ui/logger.ts";
+import {
+  describeSystemdIncompatibleOwner,
+  installDaemonSystemdService,
+  resolveSystemdSummary,
+  startViaSystemdIfInstalled,
+  stopViaSystemdIfInstalled,
+  uninstallDaemonSystemdService,
+  withSystemdIncompatibleNextStep,
+} from "./daemon-systemd.ts";
 
 const optForeground = defineOption({
   name: "foreground",
@@ -116,33 +140,34 @@ const optRunAtLoad = defineOption({
   name: "run-at-load",
   type: "boolean",
   long: "--run-at-load",
-  description: "Start hackd automatically on login",
+  description: "Start hackd automatically on login (macOS launchd)",
 } as const);
 
 const optNoRunAtLoad = defineOption({
   name: "no-run-at-load",
   type: "boolean",
   long: "--no-run-at-load",
-  description: "Do not start hackd automatically on login",
+  description: "Do not start hackd automatically on login (macOS launchd)",
 } as const);
 
 const optGuiOnly = defineOption({
   name: "gui-only",
   type: "boolean",
   long: "--gui-only",
-  description: "Only run in GUI sessions (default)",
+  description: "Only run in GUI sessions (macOS launchd; default)",
 } as const);
 
 const optNoGuiOnly = defineOption({
   name: "no-gui-only",
   type: "boolean",
   long: "--no-gui-only",
-  description: "Run in all session types (including SSH)",
+  description: "Run in all session types, including SSH (macOS launchd)",
 } as const);
 
 const installSpec = defineCommand({
   name: "install",
-  summary: "Install hackd as a launchd service (macOS)",
+  summary:
+    "Install hackd as a login service (launchd on macOS, systemd user unit on Linux)",
   group: "Diagnostics",
   options: [optRunAtLoad, optNoRunAtLoad, optGuiOnly, optNoGuiOnly] as const,
   positionals: [],
@@ -151,7 +176,7 @@ const installSpec = defineCommand({
 
 const uninstallSpec = defineCommand({
   name: "uninstall",
-  summary: "Uninstall hackd launchd service (macOS)",
+  summary: "Uninstall the hackd login service (launchd or systemd)",
   group: "Diagnostics",
   options: [],
   positionals: [],
@@ -228,94 +253,321 @@ async function handleDaemonStart({
   const paths = resolveDaemonPaths({});
   const status = await readDaemonStatus({ paths });
 
-  if (status.running && status.pid !== null) {
-    const api = await checkDaemonApi({
+  // A pid that survived an unclean shutdown may now belong to another
+  // program; that is not a running hackd (systemd runs this at every boot).
+  const livePid = status.running ? status.pid : null;
+  const pidIsDaemon =
+    livePid !== null && (await isHackDaemonProcess({ pid: livePid }));
+  if (livePid !== null && pidIsDaemon) {
+    const running = await handleRunningDaemonAtStart({
+      pid: livePid,
       socketExists: status.socketExists,
       paths,
     });
-    if (api.reachable && !api.compatible) {
-      // An incompatible daemon (usually a pre-upgrade binary) must be
-      // replaced, not reported as success — leaving it running is how
-      // machines end up with doctor/status contradictions.
-      logger.warn({
-        message: `Replacing incompatible hackd (pid ${status.pid})`,
-      });
-      await stopDaemonProcess({ pid: status.pid, paths });
-    } else {
-      logger.success({
-        message: `hackd already running (pid ${status.pid})`,
-      });
-      return 0;
+    if (running !== null) {
+      return running;
     }
   }
 
-  // Daemons that outlived their pid file (e.g. a launchd-managed instance
-  // surviving a manual clear/restart) hold the API socket invisibly and
-  // make every freshly spawned daemon exit cleanly. Sweep them first.
-  const orphans = await findOrphanDaemonProcesses({
-    trackedPid: status.pid,
-    daemonRoot: paths.root,
-  });
-  if (orphans.length > 0) {
-    logger.warn({
-      message: `Stopping orphaned hackd process(es) not tracked by the pid file: ${orphans.join(", ")}`,
-    });
-    await terminateOrphanDaemonProcesses({ pids: orphans });
+  const sweep = await sweepOrphanDaemons({ trackedPid: status.pid, paths });
+  if (!sweep.allStopped) {
+    return 1;
   }
 
-  await removeFileIfExists({ path: paths.socketPath });
-  await removeFileIfExists({ path: paths.pidPath });
+  // An installed hackd.service owns the daemon on Linux. Start through it
+  // before touching the pid/socket files: systemd (a pending restart) or
+  // another starter may be writing them right now, and hackd replaces its
+  // own socket when it starts.
+  if (process.platform === "linux" && !args.options.foreground) {
+    const viaSystemd = await startViaSystemdIfInstalled({
+      paths,
+      waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+    });
+    if (viaSystemd !== null) {
+      return viaSystemd;
+    }
+  }
+
+  const raced = await clearStaleDaemonFilesBeforeStart({
+    paths,
+    stalePid: pidIsDaemon ? null : livePid,
+  });
+  if (raced !== null) {
+    return raced;
+  }
 
   if (args.options.foreground) {
     await runDaemon({ paths, foreground: true });
     return 0;
   }
 
+  const viaLaunchd = await startViaLaunchdIfLoaded({ paths });
+  if (viaLaunchd !== null) {
+    return viaLaunchd;
+  }
+
+  return await startDaemonDetached({ paths });
+}
+
+/**
+ * When launchd manages the daemon, start through launchd. Returns null when
+ * no launchd service is loaded (unchanged macOS behavior, moved out of
+ * `handleDaemonStart`).
+ */
+async function startViaLaunchdIfLoaded(opts: {
+  readonly paths: DaemonPaths;
+}): Promise<number | null> {
+  const { paths } = opts;
   // When launchd manages the daemon, start through launchd — spawning a
   // bare process next to a loaded agent means two process managers fight
   // over one socket and pid file.
   const launchdStatus = await resolveLaunchdStatus({ paths });
-  if (launchdStatus?.loaded) {
-    const repair = await repairLaunchdProgramIfInvalid({ paths });
-    if (repair === "repaired") {
-      logger.warn({
-        message:
-          "Repaired launchd service: its program path was invalid (stale or compiled-binary virtual path)",
-      });
-    }
-    // launchd owns the daemon: never spawn a bare process next to it —
-    // two process managers for one socket is how machines end up with
-    // start-then-exit flapping and stale-pid contradictions.
-    const kick = await kickstartLaunchdService();
-    if (!kick.ok) {
-      logger.error({
-        message: `launchd kickstart failed: ${kick.error ?? "unknown error"} | Check: hack daemon logs --tail 200`,
-      });
-      return 1;
-    }
-    const startedViaLaunchd = await waitForDaemonStart({
-      paths,
-      timeoutMs: 8000,
-    });
-    if (startedViaLaunchd) {
-      logger.success({ message: "hackd started (launchd)" });
-      return 0;
-    }
+  if (!launchdStatus?.loaded) {
+    return null;
+  }
+  const repair = await repairLaunchdProgramIfInvalid({ paths });
+  if (repair === "repaired") {
     logger.warn({
       message:
-        "launchd kickstarted hackd but it did not report ready yet | Check: hack daemon logs --tail 200",
+        "Repaired launchd service: its program path was invalid (stale or compiled-binary virtual path)",
+    });
+  }
+  // launchd owns the daemon: never spawn a bare process next to it —
+  // two process managers for one socket is how machines end up with
+  // start-then-exit flapping and stale-pid contradictions.
+  const kick = await kickstartLaunchdService();
+  if (!kick.ok) {
+    logger.error({
+      message: `launchd kickstart failed: ${kick.error ?? "unknown error"} | Check: hack daemon logs --tail 200`,
     });
     return 1;
   }
-
-  const invocation = await resolveHackInvocation();
-  const cmd = [...invocation.args, "daemon", "start", "--foreground"];
-  const proc = Bun.spawn([invocation.bin, ...cmd], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
+  const startedViaLaunchd = await waitForDaemonStart({
+    paths,
+    timeoutMs: 8000,
   });
-  proc.unref();
+  if (startedViaLaunchd) {
+    logger.success({ message: "hackd started (launchd)" });
+    return 0;
+  }
+  logger.warn({
+    message:
+      "launchd kickstarted hackd but it did not report ready yet | Check: hack daemon logs --tail 200",
+  });
+  return 1;
+}
+
+/**
+ * `hack daemon stop` could not prove the pid-file pid is this HACK_HOME's
+ * hackd. A pid that is not hackd at all (reused after an unclean shutdown)
+ * means the pid file is stale: like `start`, stop leaves that process alone,
+ * removes the file and succeeds, so `hack daemon restart` works. Anything
+ * else (another root's daemon, unknown identity) is left alone and fails.
+ */
+async function reportUnprovenStop(opts: {
+  readonly pid: number;
+  readonly reason: DaemonProcessRefusal;
+  readonly paths: DaemonPaths;
+}): Promise<number> {
+  if (opts.reason === "not-hackd" || opts.reason === "not-running") {
+    await removeDaemonFilesIfStale({
+      pidPath: opts.paths.pidPath,
+      socketPath: opts.paths.socketPath,
+      observedPid: opts.pid,
+      observedPidIsDaemon: false,
+    });
+    logger.info({
+      message: `Removed a stale hackd pid file (pid ${opts.pid} is not hackd); that process was left running`,
+    });
+    return 0;
+  }
+  logger.warn({
+    message: `Did not stop pid ${opts.pid} from the hackd pid file: ${describeDaemonProcessRefusal(opts.reason)} | Check: hack daemon status`,
+  });
+  return 1;
+}
+
+/**
+ * Daemons that outlived their pid file (e.g. a launchd-managed instance
+ * surviving a manual clear/restart) hold the API socket invisibly and make
+ * every freshly spawned daemon exit cleanly. Sweep them first.
+ *
+ * Only processes that pass the full identity proof are signalled, each
+ * re-proven immediately before every signal; anything else is reported with
+ * its pid and left alone. `allStopped` is false when a proven orphan could
+ * not be confirmed stopped: the caller must not go on as if the socket
+ * were free.
+ */
+async function sweepOrphanDaemons(opts: {
+  readonly trackedPid: number | null;
+  readonly paths: DaemonPaths;
+}): Promise<{ readonly allStopped: boolean; readonly stopped: number }> {
+  const scan = await findOrphanDaemonProcesses({
+    trackedPid: opts.trackedPid,
+    daemonRoot: opts.paths.root,
+  });
+  for (const refused of scan.refused) {
+    logger.info({
+      message: `Left pid ${refused.pid} running: it looks like a hack daemon start, but ${describeDaemonProcessRefusal(refused.reason)}`,
+    });
+  }
+  let allStopped = true;
+  let stopped = 0;
+  for (const orphan of scan.orphans) {
+    logger.warn({
+      message: `Stopping orphaned hackd process not tracked by the pid file: ${orphan.pid}`,
+    });
+    const termination = await terminateProvenDaemon({
+      proof: orphan,
+      daemonRoot: opts.paths.root,
+    });
+    if (termination.kind === "exited") {
+      stopped += 1;
+    } else {
+      allStopped = false;
+      logger.error({
+        message: `${describeDaemonTermination(orphan.pid, termination)} | Check: hack daemon status`,
+      });
+    }
+  }
+  return { allStopped, stopped };
+}
+
+/**
+ * Stops a proven hackd and, once its exit is confirmed, removes its files
+ * if still stale. Returns false (and reports) when the exit was not
+ * confirmed: callers must not continue as if hackd were stopped.
+ */
+export async function stopProvenDaemon(opts: {
+  readonly proof: OwnedDaemonProof;
+  readonly paths: DaemonPaths;
+  /** Defaults to {@link terminateProvenDaemon}; tests pin the outcome. */
+  readonly terminate?: (proof: OwnedDaemonProof) => Promise<DaemonTermination>;
+}): Promise<boolean> {
+  const termination = await (
+    opts.terminate ??
+    ((proof: OwnedDaemonProof) =>
+      terminateProvenDaemon({ proof, daemonRoot: opts.paths.root }))
+  )(opts.proof);
+  if (termination.kind !== "exited") {
+    logger.error({
+      message: `${describeDaemonTermination(opts.proof.pid, termination)} | Check: hack daemon status`,
+    });
+    return false;
+  }
+  await removeDaemonFilesIfStale({
+    pidPath: opts.paths.pidPath,
+    socketPath: opts.paths.socketPath,
+    observedPid: opts.proof.pid,
+  });
+  return true;
+}
+
+/**
+ * `hack daemon start` found a live pid. Returns an exit code when start is
+ * done (already running, or an incompatible systemd-run hackd that only
+ * `hack daemon install` can switch), or null after replacing an
+ * incompatible directly started hackd.
+ */
+async function handleRunningDaemonAtStart(opts: {
+  readonly pid: number;
+  readonly socketExists: boolean;
+  readonly paths: DaemonPaths;
+}): Promise<number | null> {
+  const api = await checkDaemonApi({
+    socketExists: opts.socketExists,
+    paths: opts.paths,
+  });
+  if (!(api.reachable && !api.compatible)) {
+    logger.success({ message: `hackd already running (pid ${opts.pid})` });
+    return 0;
+  }
+  // systemd runs this hackd from a unit that points at another `hack`:
+  // replacing it would only make systemd start the same old binary again.
+  // Say so instead (start never rewrites such a unit).
+  const systemdOwner =
+    process.platform === "linux"
+      ? await describeSystemdIncompatibleOwner({ pid: opts.pid })
+      : null;
+  if (systemdOwner !== null) {
+    logger.warn({ message: systemdOwner });
+    return 1;
+  }
+  // An incompatible daemon (usually a pre-upgrade binary) must be replaced,
+  // not reported as success — leaving it running is how machines end up
+  // with doctor/status contradictions.
+  const proof = await proveOwnedDaemonProcess({
+    pid: opts.pid,
+    daemonRoot: opts.paths.root,
+  });
+  if (proof.kind !== "owned") {
+    logger.warn({
+      message: `hackd is incompatible with this CLI, but pid ${opts.pid} was not replaced: ${describeDaemonProcessRefusal(proof.reason)} | Check: hack daemon status`,
+    });
+    return 1;
+  }
+  logger.warn({ message: `Replacing incompatible hackd (pid ${opts.pid})` });
+  if (!(await stopProvenDaemon({ proof, paths: opts.paths }))) {
+    return 1;
+  }
+  return null;
+}
+
+/**
+ * Removes the pid/socket files only while they are still stale: a
+ * concurrent start may have written new ones since status was read. When it
+ * finds a newer owner it waits for that daemon and returns an exit code;
+ * otherwise null.
+ */
+async function clearStaleDaemonFilesBeforeStart(opts: {
+  readonly paths: DaemonPaths;
+  /** A live pid already shown not to be hackd. */
+  readonly stalePid: number | null;
+}): Promise<number | null> {
+  const { paths } = opts;
+  const observedPid = await readDaemonPid({ pidPath: paths.pidPath });
+  const cleanup = await removeDaemonFilesIfStale({
+    pidPath: paths.pidPath,
+    socketPath: paths.socketPath,
+    observedPid,
+    observedPidIsDaemon: !(
+      opts.stalePid !== null && observedPid === opts.stalePid
+    ),
+  });
+  if (!cleanup.newerOwner) {
+    return null;
+  }
+  if (await waitForDaemonStart({ paths, timeoutMs: 8000 })) {
+    logger.success({ message: "hackd already started by another process" });
+    return 0;
+  }
+  logger.warn({
+    message:
+      "Another process is starting hackd but it did not report ready yet | Check: hack daemon status",
+  });
+  return 1;
+}
+
+/**
+ * Starts `hack daemon start --foreground` in its own session and process
+ * group (see {@link spawnDetachedDaemon}), so it survives the shell, agent
+ * or process group that ran `hack daemon start` (HACK-2052). hackd writes
+ * its own log file; its stdio is not connected to the caller.
+ */
+async function startDaemonDetached(opts: {
+  readonly paths: DaemonPaths;
+}): Promise<number> {
+  const { paths } = opts;
+  const invocation = await resolveHackInvocation();
+  spawnDetachedDaemon({
+    argv: [
+      invocation.bin,
+      ...invocation.args,
+      "daemon",
+      "start",
+      "--foreground",
+    ],
+  });
 
   const started = await waitForDaemonStart({ paths });
   if (!started) {
@@ -329,31 +581,6 @@ async function handleDaemonStart({
   return 0;
 }
 
-async function stopDaemonProcess(opts: {
-  readonly pid: number;
-  readonly paths: DaemonPaths;
-}): Promise<void> {
-  try {
-    process.kill(opts.pid, "SIGTERM");
-  } catch {
-    // Already gone.
-  }
-  const exited = await waitForProcessExit({
-    pid: opts.pid,
-    timeoutMs: 2000,
-    pollMs: 200,
-  });
-  if (!exited) {
-    try {
-      process.kill(opts.pid, "SIGKILL");
-    } catch {
-      // Already gone.
-    }
-  }
-  await removeFileIfExists({ path: opts.paths.pidPath });
-  await removeFileIfExists({ path: opts.paths.socketPath });
-}
-
 async function handleDaemonStop({
   args: _args,
 }: {
@@ -361,32 +588,81 @@ async function handleDaemonStop({
   readonly args: DaemonStopArgs;
 }): Promise<number> {
   const paths = resolveDaemonPaths({});
-  const status = await readDaemonStatus({ paths });
+  const initial = await readDaemonStatus({ paths });
 
+  // An installed hackd.service is stopped through systemd even when the pid
+  // file is missing or names a dead pid: that is how a pending
+  // Restart=on-failure restart gets cancelled.
+  const viaSystemd =
+    process.platform === "linux"
+      ? await stopViaSystemdIfInstalled({
+          pid: initial.running ? initial.pid : null,
+          hackHome: dirname(paths.root),
+        })
+      : { handled: false, ownedPid: false, failed: null, refused: null };
+  if (viaSystemd.refused !== null) {
+    logger.error({ message: viaSystemd.refused });
+    return 1;
+  }
+  if (viaSystemd.failed !== null) {
+    // Signalling hackd would not stop the manager, which can start it again
+    // (a pending Restart=on-failure). Report the failure instead.
+    logger.error({
+      message: `systemctl --user stop hackd.service failed: ${viaSystemd.failed}; hackd was not stopped | Check: systemctl --user status hackd.service`,
+    });
+    return 1;
+  }
+  if (viaSystemd.ownedPid && initial.pid !== null) {
+    await waitForProcessExit({
+      pid: initial.pid,
+      timeoutMs: 5000,
+      pollMs: 200,
+    });
+  }
+
+  const status = viaSystemd.handled
+    ? await readDaemonStatus({ paths })
+    : initial;
   if (!status.pid) {
-    logger.info({ message: "hackd is not running" });
+    logger.info({
+      message: viaSystemd.handled
+        ? "hackd stopped (systemd)"
+        : "hackd is not running",
+    });
     return 0;
   }
 
   if (!status.running) {
-    await removeFileIfExists({ path: paths.pidPath });
-    await removeFileIfExists({ path: paths.socketPath });
-    logger.info({ message: "Removed stale hackd pid/socket files" });
+    await removeDaemonFilesIfStale({
+      pidPath: paths.pidPath,
+      socketPath: paths.socketPath,
+      observedPid: status.pid,
+    });
+    logger.info({
+      message: viaSystemd.handled
+        ? "hackd stopped (systemd)"
+        : "Removed stale hackd pid/socket files",
+    });
     return 0;
   }
 
-  process.kill(status.pid, "SIGTERM");
-  const exited = await waitForProcessExit({
+  // A directly started hackd (or one systemd did not stop in time). Signal
+  // it only once it is proven to be this HACK_HOME's hackd: the pid file can
+  // name a reused pid.
+  const proof = await proveOwnedDaemonProcess({
     pid: status.pid,
-    timeoutMs: 2000,
-    pollMs: 200,
+    daemonRoot: paths.root,
   });
-  if (!exited) {
-    process.kill(status.pid, "SIGKILL");
+  if (proof.kind !== "owned") {
+    return await reportUnprovenStop({
+      pid: status.pid,
+      reason: proof.reason,
+      paths,
+    });
   }
-
-  await removeFileIfExists({ path: paths.pidPath });
-  await removeFileIfExists({ path: paths.socketPath });
+  if (!(await stopProvenDaemon({ proof, paths }))) {
+    return 1;
+  }
   logger.success({ message: "hackd stopped" });
   return 0;
 }
@@ -403,15 +679,24 @@ async function handleDaemonStatus({
     socketExists: status.socketExists,
     paths,
   });
-  const report = buildDaemonStatusReport({
+  const launchdStatus = await resolveLaunchdStatus({ paths });
+  const baseReport = buildDaemonStatusReport({
     pid: status.pid,
     processRunning: status.running,
     socketExists: status.socketExists,
     logExists: status.logExists,
     apiReachable: api.reachable,
     apiCompatible: api.compatible,
+    serviceLoaded: launchdStatus?.loaded === true,
   });
-  const launchdStatus = await resolveLaunchdStatus({ paths });
+  const report = await withSystemdIncompatibleNextStep({ report: baseReport });
+  const service = launchdStatus
+    ? summarizeLaunchdService({
+        status: launchdStatus,
+        daemonPid: status.pid,
+        daemonRunning: status.running,
+      })
+    : await resolveSystemdSummary({ paths });
   const dockerBackend = await detectDockerBackend();
   const dockerStatus = await buildDockerStatusProbe();
 
@@ -420,6 +705,7 @@ async function handleDaemonStatus({
       report,
       paths,
       launchdStatus,
+      service,
     });
     return report.status === "running" ? 0 : 1;
   }
@@ -427,6 +713,7 @@ async function handleDaemonStatus({
   return reportDaemonStatus({
     report,
     launchdStatus,
+    service,
     dockerBackendName: dockerBackend?.name ?? null,
     dockerReachable: dockerStatus.reachable,
   });
@@ -459,6 +746,7 @@ function outputDaemonStatusJson(opts: {
   readonly report: DaemonStatusReport;
   readonly paths: DaemonPaths;
   readonly launchdStatus: LaunchdServiceStatus | null;
+  readonly service: DaemonServiceSummary | null;
 }): void {
   const payload = {
     status: opts.report.status,
@@ -476,6 +764,8 @@ function outputDaemonStatusJson(opts: {
     socket_exists: opts.report.socketExists,
     log_path: opts.paths.logPath,
     log_exists: opts.report.logExists,
+    managed_by: opts.service?.ownsDaemon ? opts.service.manager : null,
+    service: serviceSummaryJson(opts.service),
     launchd: opts.launchdStatus
       ? {
           installed: opts.launchdStatus.installed,
@@ -493,6 +783,7 @@ function outputDaemonStatusJson(opts: {
 function reportDaemonStatus(opts: {
   readonly report: DaemonStatusReport;
   readonly launchdStatus: LaunchdServiceStatus | null;
+  readonly service: DaemonServiceSummary | null;
   readonly dockerBackendName: string | null;
   readonly dockerReachable: boolean;
 }): number {
@@ -502,6 +793,7 @@ function reportDaemonStatus(opts: {
       message: `hackd running (pid ${report.pid ?? "unknown"})`,
     });
     logLaunchdStatus({ launchdStatus, running: true });
+    logSystemdStatus({ service: opts.service });
     return 0;
   }
 
@@ -509,6 +801,7 @@ function reportDaemonStatus(opts: {
     logger.warn({
       message: `hackd starting (pid ${report.pid ?? "unknown"}): API not responding yet`,
     });
+    logSystemdStatus({ service: opts.service });
     return 1;
   }
 
@@ -517,6 +810,7 @@ function reportDaemonStatus(opts: {
       message: `hackd is running but incompatible with this CLI; run \`${report.nextStep}\``,
     });
     logLaunchdStatus({ launchdStatus, running: true });
+    logSystemdStatus({ service: opts.service });
     return 1;
   }
 
@@ -529,7 +823,29 @@ function reportDaemonStatus(opts: {
     }),
   });
   logLaunchdStatus({ launchdStatus, running: false });
+  logSystemdStatus({ service: opts.service });
   return 1;
+}
+
+/**
+ * Linux only: one line naming who manages hackd and, when something is
+ * wrong, the same `next_step` that `status --json` reports under `service`.
+ */
+function logSystemdStatus(opts: {
+  readonly service: DaemonServiceSummary | null;
+}): void {
+  const { service } = opts;
+  if (service?.manager !== "systemd") {
+    return;
+  }
+  const owner = service.ownsDaemon ? " (manages this hackd)" : "";
+  const fix = service.nextStep ? ` | Run: ${service.nextStep}` : "";
+  const message = `  systemd: ${service.summary}${owner}${fix}`;
+  if (service.severity === "warn") {
+    logger.warn({ message });
+  } else {
+    logger.info({ message });
+  }
 }
 
 function logLaunchdStatus(opts: {
@@ -604,35 +920,33 @@ async function handleDaemonClear({
     return 1;
   }
 
-  const orphans = await findOrphanDaemonProcesses({
-    trackedPid: status.pid,
-    daemonRoot: paths.root,
-  });
-  if (orphans.length > 0) {
-    logger.warn({
-      message: `Stopping orphaned hackd process(es): ${orphans.join(", ")}`,
-    });
-    await terminateOrphanDaemonProcesses({ pids: orphans });
+  const sweep = await sweepOrphanDaemons({ trackedPid: status.pid, paths });
+  if (!sweep.allStopped) {
+    return 1;
   }
 
-  const pidExists = await pathExists(paths.pidPath);
-  const socketExists = await pathExists(paths.socketPath);
-
-  if (!(pidExists || socketExists)) {
+  // Same stale-only rule as start and stop: a concurrent start may have
+  // written a new pid file and socket since status was read.
+  const cleanup = await removeDaemonFilesIfStale({
+    pidPath: paths.pidPath,
+    socketPath: paths.socketPath,
+    observedPid: status.pid,
+  });
+  if (cleanup.newerOwner) {
+    logger.warn({
+      message:
+        "hackd state changed while clearing (another process is starting hackd); left it in place | Check: hack daemon status",
+    });
+    return 1;
+  }
+  if (!(cleanup.removedPid || cleanup.removedSocket)) {
     logger.info({
       message:
-        orphans.length > 0
+        sweep.stopped > 0
           ? "Cleared orphaned hackd process(es); no stale files found"
           : "No stale hackd state found",
     });
     return 0;
-  }
-
-  if (pidExists) {
-    await removeFileIfExists({ path: paths.pidPath });
-  }
-  if (socketExists) {
-    await removeFileIfExists({ path: paths.socketPath });
   }
 
   logger.success({ message: "Cleared stale hackd state" });
@@ -657,7 +971,30 @@ async function handleDaemonRestart({
     raw: { argv: [], positionals: [] },
   };
 
-  await handleDaemonStop({ ctx, args: stopArgs });
+  // Restarting an incompatible hackd that systemd runs from another,
+  // still existing `hack` only starts the same version again.
+  const paths = resolveDaemonPaths({});
+  const status = await readDaemonStatus({ paths });
+  if (process.platform === "linux" && status.running && status.pid !== null) {
+    const api = await checkDaemonApi({
+      socketExists: status.socketExists,
+      paths,
+    });
+    const owner =
+      api.reachable && !api.compatible
+        ? await describeSystemdIncompatibleOwner({ pid: status.pid })
+        : null;
+    if (owner !== null) {
+      logger.warn({ message: owner });
+      return 1;
+    }
+  }
+  // A refused stop (the pid could not be proven to be this HACK_HOME's
+  // hackd) must not turn into "already running" success.
+  const stopped = await handleDaemonStop({ ctx, args: stopArgs });
+  if (stopped !== 0) {
+    return stopped;
+  }
   return await handleDaemonStart({ ctx, args: startArgs });
 }
 
@@ -685,8 +1022,25 @@ async function handleDaemonInstall({
   readonly ctx: CliContext;
   readonly args: DaemonInstallArgs;
 }): Promise<number> {
+  if (process.platform === "linux") {
+    const paths = resolveDaemonPaths({});
+    return await installDaemonSystemdService({
+      paths,
+      ignoredOptions: (
+        ["run-at-load", "no-run-at-load", "gui-only", "no-gui-only"] as const
+      )
+        .filter((name) => args.options[name] === true)
+        .map((name) => `--${name}`),
+      startDetached: () => startDaemonDetached({ paths }),
+      stopDirect: (proof) => stopProvenDaemon({ proof, paths }),
+      waitForReady: (timeoutMs) => waitForDaemonStart({ paths, timeoutMs }),
+    });
+  }
   if (process.platform !== "darwin") {
-    logger.warn({ message: "launchd integration is only available on macOS" });
+    logger.warn({
+      message:
+        "hack daemon install supports launchd (macOS) and systemd (Linux) only",
+    });
     return 1;
   }
   assertLaunchdAccess();
@@ -819,8 +1173,16 @@ async function handleDaemonUninstall({
   readonly ctx: CliContext;
   readonly args: DaemonUninstallArgs;
 }): Promise<number> {
+  if (process.platform === "linux") {
+    return await uninstallDaemonSystemdService({
+      daemonRoot: resolveDaemonPaths({}).root,
+    });
+  }
   if (process.platform !== "darwin") {
-    logger.warn({ message: "launchd integration is only available on macOS" });
+    logger.warn({
+      message:
+        "hack daemon uninstall supports launchd (macOS) and systemd (Linux) only",
+    });
     return 1;
   }
   assertLaunchdAccess();

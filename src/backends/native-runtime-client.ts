@@ -626,7 +626,13 @@ function validNativeAuthoredRecoveryDrainSelection(
   );
 }
 
+export const NATIVE_PROVIDER_PIN_MESSAGE =
+  "This native home was prepared with a different provider version than this build's pin. Use the native executor from the release that started its pool to run runtime down --json on this home. Preserve the home for its retained data and prepare a fresh home for this build; see docs/guides/native-candidate.md.";
+
 function nativeFailureMessage(failure: NativeFailure | undefined): string {
+  if (failure?.code === "provider_pin_changed") {
+    return `Native runtime request failed (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`;
+  }
   const code = failure
     ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})`
     : "";
@@ -651,7 +657,7 @@ function completionResponse(
       message: timedOut
         ? "Native runtime request timed out; inspect owned state before retrying."
         : nativeFailureMessage(failure),
-      nativeCode: timedOut ? undefined : failure?.code,
+      nativeCode: timedOut ? "native_request_timeout" : failure?.code,
       nativeCauseCode: timedOut ? undefined : failure?.causeCode,
       nativeMessage: timedOut ? undefined : failure?.message,
       nativeService: timedOut ? undefined : failure?.service,

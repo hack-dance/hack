@@ -1,11 +1,13 @@
 //! Same-boot owner-death recovery. This is deliberately independent of the
 //! previous-boot recovery contract and never manufactures a Coordinator ACK.
+use super::legacy_cleanup_enrollment as enrollment;
 use super::*;
 use crate::provider::relay_owner::publication::dead;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 mod relay;
 const FILE: &str = "live-owner-cleanup.json";
+const ENROLLED_VERSION_OFFSET: u8 = 2;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Intent {
@@ -18,6 +20,8 @@ struct Intent {
     environment: Value,
     bridges: bridges::cleanup::Selection,
     prior_bridges: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enrollment: Option<enrollment::Selection>,
     listeners_retired: bool,
     complete_sha256: Option<String>,
 }
@@ -131,9 +135,15 @@ fn no_pending(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
     dead_owner_cleanup::require_historical_recovery(root, receipt)
 }
 fn ready(receipt: &Receipt) -> Result<(), CandidateError> {
+    ready_startup(receipt)?;
+    if receipt.relay_cleanup.is_some() {
+        return Err(refused());
+    }
+    Ok(())
+}
+fn ready_startup(receipt: &Receipt) -> Result<(), CandidateError> {
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
     if receipt.phase != "ready-observed"
-        || receipt.relay_cleanup.is_some()
         || !startup.valid(receipt)
         || startup.services.values().any(|s| {
             !matches!(
@@ -164,9 +174,20 @@ fn validate(
     expected: &str,
     boot: &str,
 ) -> Result<(), CandidateError> {
-    ready(&intent.original)?;
+    if let Some(enrollment) = &intent.enrollment {
+        ready_startup(&intent.original)?;
+        enrollment.validate(&intent.original)?;
+    } else {
+        ready(&intent.original)?;
+    }
     intent.relay.validate()?;
-    if intent.version != intent.relay.version()
+    if intent.version
+        != intent.relay.version()
+            + if intent.enrollment.is_some() {
+                ENROLLED_VERSION_OFFSET
+            } else {
+                0
+            }
         || intent.boot != boot
         || boot.is_empty()
         || !hex(expected, 64)
@@ -240,7 +261,7 @@ fn archive_prior(root: &Path, current: &Receipt, expected: &str) -> Result<(), C
     if prior.original_sha256 == expected {
         return Ok(());
     }
-    ready(current)?;
+    ready_startup(current)?;
     if digest(current)? != expected || exists(&root.join("live-owner-cleanup.pending"))? {
         return Err(refused());
     }
@@ -350,7 +371,7 @@ pub fn recover_live_owner(
     let mut intent = if exists(&root.join(FILE))? {
         state::read::<Intent>(&root.join(FILE))?
     } else {
-        ready(&receipt)?;
+        ready_startup(&receipt)?;
         if digest(&receipt)? != expected {
             return Err(refused());
         }
@@ -358,6 +379,8 @@ pub fn recover_live_owner(
         for resource in receipt.resources.values() {
             inspect_resource(&engine, &receipt, resource)?;
         }
+        let enrollment =
+            enrollment::Selection::capture(&engine, &receipt, &root, &relay, foreground.process())?;
         let selected = relay::Selection::capture(&relay, foreground.process())?;
         let authority = digest(&(expected, foreground.fingerprint(), &selected))?;
         let verify = || {
@@ -366,11 +389,24 @@ pub fn recover_live_owner(
             relay.verify()?;
             relay::verify_receipt(&root, &receipt)
         };
-        bridges::cleanup::normalization::normalize(
-            candidate, &engine, &receipt, &root, &authority, &verify,
-        )?;
+        // An older owner may already have enrolled cleanup before its publisher
+        // stop failed. Keep that exact bridge selection, rather than capturing
+        // partially retired helpers as a new inventory.
+        let bridges = if enrollment.is_some() {
+            bridges::cleanup::read(&engine, &receipt, &root)?
+        } else {
+            bridges::cleanup::normalization::normalize(
+                candidate, &engine, &receipt, &root, &authority, &verify,
+            )?;
+            bridges::cleanup::capture(candidate, &engine, &receipt)?
+        };
         Intent {
-            version: selected.version(),
+            version: selected.version()
+                + if enrollment.is_some() {
+                    ENROLLED_VERSION_OFFSET
+                } else {
+                    0
+                },
             boot: engine.guest().boot_id().into(),
             original: receipt.clone(),
             original_sha256: expected.into(),
@@ -380,8 +416,13 @@ pub fn recover_live_owner(
                 candidate, &engine, &receipt, &root,
             )?)
             .map_err(|_| refused())?,
-            bridges: bridges::cleanup::capture(candidate, &engine, &receipt)?,
-            prior_bridges: prior_bridges(&engine, &root, &receipt)?,
+            bridges,
+            prior_bridges: if enrollment.is_some() {
+                None
+            } else {
+                prior_bridges(&engine, &root, &receipt)?
+            },
+            enrollment,
             listeners_retired: false,
             complete_sha256: None,
         }
@@ -391,6 +432,13 @@ pub fn recover_live_owner(
         return Err(refused());
     }
     intent.relay.verify(&relay, foreground.process())?;
+    enrollment::verify(
+        intent.enrollment.as_ref(),
+        &intent.original,
+        &intent.boot,
+        &relay,
+        foreground.process(),
+    )?;
     startup::require_dependency_rebind_recovery_complete(&root, &intent.original, &intent.boot)?;
     foreground.verify_retirement_ready()?;
     relay.verify()?;
@@ -403,10 +451,30 @@ pub fn recover_live_owner(
     save(&root, &intent)?;
     #[cfg(test)]
     fault_pause(&root, run, "live-owner-after-intent")?;
+    crate::provider::publication::retire_run(candidate, &receipt.owner, run, &|| {
+        engine.guest().verify()?;
+        foreground.verify_retirement_ready()?;
+        relay.verify()?;
+        enrollment::verify(
+            intent.enrollment.as_ref(),
+            &intent.original,
+            &intent.boot,
+            &relay,
+            foreground.process(),
+        )
+    })?;
     let verify = || {
         engine.guest().verify()?;
         foreground.verify_retirement_ready()?;
         relay.verify()?;
+        enrollment::verify(
+            intent.enrollment.as_ref(),
+            &intent.original,
+            &intent.boot,
+            &relay,
+            foreground.process(),
+        )?;
+        crate::provider::publication::require_run_absent(candidate, &intent.original.owner, run)?;
         if matches!(relay, dead::CleanupWitness::Absent(_)) {
             relay::verify_receipt(&root, &intent.original)?;
         }
@@ -504,6 +572,10 @@ fn finish_retirement(
         .absent_witness(candidate, receipt, &intent.boot, &process)?;
     let verify = || {
         engine.guest().verify()?;
+        if let Some(enrollment) = &intent.enrollment {
+            enrollment.verify_raw(&intent.original)?;
+        }
+        crate::provider::publication::require_run_absent(candidate, &receipt.owner, &receipt.run)?;
         if let Some(witness) = &absent {
             let current = foreground::transport::selected_retirement_process(
                 candidate,
@@ -737,6 +809,40 @@ mod tests {
         assert!(ready(&value).is_err());
     }
     #[test]
+    fn enrolled_recovery_versions_require_the_unchanged_legacy_pending_shape() {
+        let mut original = receipt();
+        original.relay_cleanup = Some(
+            serde_json::from_value(json!({
+                "version":1,"runtime":([1;16]),"boot":([2;16]),"operation":([3;16]),
+                "effect":([4;32]),"control_root":"/private/owned","phase":"pending"
+            }))
+            .unwrap(),
+        );
+        assert!(ready(&original).is_err());
+        let mut selected = completed(original.clone());
+        selected.enrollment = Some(
+            serde_json::from_value(
+                json!({"coordinator_sha256":"1".repeat(64),"fingerprint":"2".repeat(64)}),
+            )
+            .unwrap(),
+        );
+        selected.version = 3;
+        validate(&selected, &original, &digest(&original).unwrap(), "boot").unwrap();
+        selected.version = 1;
+        assert!(validate(&selected, &original, &digest(&original).unwrap(), "boot").is_err());
+        selected.relay = serde_json::from_value(json!({"absent":{"process":{
+            "pid":42,"start_micros":1,"uid":unsafe { libc::geteuid() },"executable":"/runtime"
+        },"witness_sha256":"3".repeat(64)}}))
+        .unwrap();
+        selected.version = 4;
+        validate(&selected, &original, &digest(&original).unwrap(), "boot").unwrap();
+        selected.version = 2;
+        assert!(validate(&selected, &original, &digest(&original).unwrap(), "boot").is_err());
+        selected.original.relay_cleanup.as_mut().unwrap().phase =
+            cleanup_enrollment::Phase::Confirmed;
+        assert!(validate(&selected, &original, &digest(&original).unwrap(), "boot").is_err());
+    }
+    #[test]
     fn ambiguous_mutations_are_preserved_without_effect() {
         let fixture = super::super::tests::Fixture::new();
         no_pending(&fixture.0, &receipt()).unwrap();
@@ -904,7 +1010,7 @@ mod tests {
             relay: serde_json::from_value(json!({"bytes":[],"record_id":[1,1]})).unwrap(),
             environment: json!([]),
             bridges: serde_json::from_value(json!({"version":1,"owner":original.owner,"boot":"boot","run":original.run,"plan":original.plan_id,"capacity":0,"serial":0,"selected":{}})).unwrap(),
-            prior_bridges: None, listeners_retired: true, complete_sha256: Some(digest(&stopped).unwrap()), original,
+            prior_bridges: None, enrollment: None, listeners_retired: true, complete_sha256: Some(digest(&stopped).unwrap()), original,
         }
     }
     #[test]

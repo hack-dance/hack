@@ -3,6 +3,7 @@
 //! to manufacture the absent endpoint. Fault controls affect only owned fixtures.
 use super::*;
 mod bridge_normalization;
+mod legacy_enrollment;
 use crate::provider::{identity::ProcessIdentity, relay_owner::publication::dead};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,12 +96,14 @@ fn owner_child() {
 #[test]
 #[ignore = "Only the isolated native parent fixture invokes this owned child"]
 fn recovery_child() {
-    graph::recover_live_owner(
-        &candidate(),
-        &run(),
-        &std::env::var("HACK_ABSENT_RELAY_RECEIPT").unwrap(),
-    )
-    .unwrap();
+    let candidate = candidate();
+    let run = run();
+    let expected = std::env::var("HACK_ABSENT_RELAY_RECEIPT").unwrap();
+    if graph::foreground_owner(&candidate, &run).unwrap()["dead_owner_recovery"].is_string() {
+        graph::recover_cleanup(&candidate, &run, &expected).unwrap();
+    } else {
+        graph::recover_live_owner(&candidate, &run, &expected).unwrap();
+    }
 }
 #[test]
 #[ignore = "Only the isolated native parent fixture invokes this owned child"]

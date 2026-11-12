@@ -899,7 +899,12 @@ changed: its volumes and prepared tree stay in place, and a build that pins the
 recorded release still runs it. `runtime probe` and `runtime repair-provider-tree`
 refuse the same way, and so does `runtime down` while the old provider runs, so stop a
 running pool (`hack down`, then `runtime down`) before installing a build with a new pin; a pool left running must be
-stopped with the build that started it. Prepare a new candidate home with the pinned
+stopped with the build that started it. For an incompatible stranded home, use the native executor from the release that
+started its pool to run `runtime down --json` on that home. Preserve the home for
+its retained data, then prepare a fresh home for the new build.
+A retained earlier provider path is diagnosed as `provider_pin_changed`, not as a
+changed PID file. Recovery across provider versions is not supported.
+Prepare a new candidate home with the pinned
 archives instead; there is no in-place provider upgrade.
 
 Preparation keeps each archive it extracted (`providers/smolvm-installing/release.tar.gz`
@@ -2569,9 +2574,9 @@ may ask for again after a failed attempt; nothing is stopped or started. `hack d
 selects this recovery on the same guest boot, and `hack doctor --native-cleanup
 inspect` reports such a run as `interrupted_startup_candidate` with a `dead` count.
 If the engine still cannot remove the container, `hack down` refuses and keeps the
-run. Once the graph is stopped with data retained, `hack down` names the
-`hack restart --recover-frontend --expect-finalization-attempt` command that
-finishes the failed `hack up`'s own finalization. A run restored from that
+run. Once the graph is stopped with data retained, `hack down` names
+`hack down --recover`, which verifies and retires the failed `hack up`'s
+recorded dead frontend attempt in the same command. A run restored from that
 retained data that fails again treats the earlier, finished recovery journal as
 history (`interrupted-start-cleanup-retired-<selection>.json`).
 Likewise, a pending guest helper, probe or environment deletion advances only
@@ -3533,15 +3538,35 @@ separately after restart.
 
 ### Explicit cleanup after a dead foreground owner
 
+![Foreground publisher shutdown and recovery](../reference/native-publisher-stop.svg)
+
+Foreground Compose `up` and `restart` isolate their graph owner from the
+terminal's process group, including projects without hooks. Each port publisher
+also has its own group. Ctrl-C asks the owner to stop through the frontend;
+publisher retirement must still prove exit before graph cleanup is confirmed.
+If the frontend is killed or its terminal closes, the owner observes its exact
+parent's exit and requests retaining cleanup, including authenticated publisher
+retirement. A publisher crash also wakes the owner: it reaps its direct child
+and persists the exact incarnation's exit proof before cleanup. Frontend death
+alone never proves that services stopped.
+
+`hack down --recover` uses the ordinary authenticated stop when the graph owner
+is still running, including when its frontend was lost. It does not treat a live
+owner as dead or bypass its cleanup checks.
+
 `hack up` and `hack restart` refuse a run whose foreground publication is still
 present and name the next step: a running owner must be stopped with Ctrl-C or
 `hack down`; an owner that exited while its services were running is stopped by
 `hack down --recover`. That command selects the run's exact receipt with the
 read-only `graph foreground-owner --run-id RUN --json` and then uses the
 same-boot `graph recover-live-owner` described below, retaining data and
-retiring the stale publication. If the frontend that owned the run also exited
-before confirming its cleanup, `hack down --recover` prints the exact
-`hack restart --recover-frontend --expect-finalization-attempt ATTEMPT` step.
+retiring the stale publication. If its recorded frontend also exited before
+confirming cleanup, the same command verifies the exact captured attempt,
+stopped graph, HTTPS ownership and lifecycle-process absence, then records
+frontend recovery. Success exits zero with data retained; plain `hack up` can
+start it again. Recovery remains distinct from the old frontend completing its
+own finalizers. Legacy finalization tokens without a recorded PID still require
+the existing explicit operator proof.
 
 An owner of a retained run that exited before the runtime admitted its restore
 is also retired by `hack down --recover`. The admission's first durable write
@@ -3569,8 +3594,33 @@ make them fail or strand a foreground publication.
 For a fully ready graph whose foreground owner died while its pool remains on the
 same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects
 only that graph. It requires matching dead foreground and relay-owner identities,
-unchanged receipt and resource inventories, and exclusive publication locks. The
-relay endpoint may also be absent after the managed owner exited: both relay files
+unchanged receipt and resource inventories, and exclusive publication locks.
+A ready graph left by an older build may already have a pending cleanup
+enrollment. Recovery binds that exact coordinator's raw bytes, operation, effect,
+graph and process incarnation to the saved bridge and environment inventories.
+It writes a distinct recovery intent and preserves the old coordinator; it
+never replays its admission or invents an acknowledgement. Recorded publishers
+are retired only through their original authenticated stop and native exit
+proof, before guest cleanup. Live or reused process identities, changed journals,
+partial publications and unknown inventories still refuse. Recovery resumes its
+own durable intent after an interruption and releases bridge capacity only after
+confirmed publisher/bridge-helper absence; compute absence is verified separately.
+If interruption leaves a synchronized publication-registry removal pending,
+recovery validates the existing single-entry journal and rechecks its recovery
+fence before completing the rename. Malformed journals, live publisher identities,
+changed entries and changed recovery evidence retain both registry files.
+
+If the pool already has an audited immediate successor boot, `down --recover`
+selects `graph recover-cleanup` and then retires the recovered publication. For a
+legacy Ready/Pending enrollment, that path pins the old boot's exact coordinator
+and dead process before any effect. It does not restart the pool, infer an
+arbitrary older boot or treat uncertain publisher exit as absence.
+After interruption, a stopped receipt alone does not complete recovery: `down
+--recover` resumes the selected cleanup until its exact completion digest is
+committed. Once committed, retries resume publication retirement without replaying
+guest cleanup, including an interrupted publication rename.
+
+The relay endpoint may also be absent after the managed owner exited: both relay files
 must be absent under the original held operation lock, and the exact dead
 foreground process and ready receipt must select the control root derived for
 this run, runtime owner, and current guest boot. Recovery persists that absence
@@ -3697,11 +3747,19 @@ has already restarted once, the same explicit command can select recovery on tha
 immediate successor boot. It requires the retained dead-owner identity, exact receipt
 hash, and bridge assignments belonging to the recorded previous boot. The recovery
 intent pins those assignments before effects and refuses replacements on retry.
+A remaining legacy device-rebound dependency reservation also requires the
+original recovery boot and host-pin witness. A further boot change refuses its
+release; no automatic recovery command for that state is implemented.
 Do not restart again to attempt this path: another boot rollover invalidates the
 previous-boot evidence. Old guest helper absence follows the verified boot transition;
 it is not recorded as a live helper acknowledgement.
 
-Recovery retains its own durable intent and completion evidence. It does not forge
+Recovery retains its own durable intent and completion evidence. A guest completion
+commit can precede host dependency-reservation release. Repeating `down --recover`
+finishes that release during publisher retirement, including after its publication
+paths have been archived. Success requires reservation absence under the exact
+retired owner, receipt and provider proofs; a changed proof retains evidence and
+refuses. It does not forge
 a relay acknowledgement. A normalized graph can explicitly retire its recovered
 publisher and select a fresh foreground restore using the retained data. Missing
 or replaced foreground evidence, pending graph journals, unfinished explicit page-cache release, changed
@@ -3907,3 +3965,12 @@ acknowledgements, or turns an uncertain stop into success. It archives the old
 shutdown observations before replacing only the proven retired entries. If repair
 refuses, preserve the native home and follow the existing owned recovery process;
 do not delete `shutdown.json` or drop current container evidence.
+
+
+For native foreground `up` and `restart`, closing the terminal (SIGHUP) requests
+the same retaining cleanup as Ctrl-C. The frontend waits for confirmed cleanup
+and exits 129; an owner whose frontend disappears also requests retaining cleanup.
+A publisher crash has a different effect: the owner reports the exit and keeps
+the services running, with that published port marked down in `ps` and `status`.
+Run `hack down` to stop the project with data retained. A publication notice is
+not evidence that cleanup completed, and no publisher is restarted automatically.

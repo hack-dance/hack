@@ -206,7 +206,7 @@ test.skipIf(process.platform === "win32")(
       [
         "/bin/sh",
         "-c",
-        `hack daemon start >/dev/null 2>&1; : > ${JSON.stringify(started)}; exec sleep 120`,
+        `hack daemon start >${JSON.stringify(join(f.root, "start.log"))} 2>&1; : > ${JSON.stringify(started)}; exec sleep 120`,
       ],
       {
         env: f.env,
@@ -229,7 +229,20 @@ test.skipIf(process.platform === "win32")(
       }
       return (await probeDaemonApi({ socketPath, timeoutMs: 500 })).reachable;
     }, 20_000);
-    expect(ready).toBe(true);
+    if (!ready) {
+      // Say why on CI (macOS has no local reproduction): what `hack daemon
+      // start` printed and what hackd logged.
+      const startLog = await readFile(join(f.root, "start.log"), "utf8").catch(
+        () => "(no start output)"
+      );
+      const hackdLog = await readFile(
+        join(daemonDir(f), "hackd.log"),
+        "utf8"
+      ).catch(() => "(no hackd.log)");
+      throw new Error(
+        `hackd did not become ready (pid ${pid}).\n--- hack daemon start ---\n${startLog.slice(-4000)}\n--- hackd.log ---\n${hackdLog.slice(-4000)}`
+      );
+    }
     // The unauthenticated API stays private to its owner (Codex security
     // review): the daemon directory is 0700 and the socket 0600.
     expect((await stat(daemonDir(f))).mode & 0o777).toBe(0o700);

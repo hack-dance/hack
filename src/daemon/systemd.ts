@@ -309,6 +309,23 @@ export async function assessExecutableDurability(opts: {
       };
 }
 
+/**
+ * Each directory and its resolved path: a resolved program path (macOS
+ * `/private/var/folders/...`) must still match a temp directory named
+ * through a symlink (`/var/folders/...`, `/tmp`).
+ */
+async function withRealPaths(dirs: readonly string[]): Promise<string[]> {
+  const out = new Set(dirs);
+  for (const dir of dirs) {
+    try {
+      out.add(await realpath(dir));
+    } catch {
+      // A temp directory that does not exist matches nothing anyway.
+    }
+  }
+  return [...out];
+}
+
 async function assessPathDurability(opts: {
   readonly path: string;
   readonly tempDirs?: readonly string[];
@@ -317,13 +334,12 @@ async function assessPathDurability(opts: {
 }): Promise<ExecutableDurability> {
   const exists = opts.exists ?? pathExists;
   const { path } = opts;
-  const temps = [
-    ...TEMP_ROOTS,
-    ...(opts.tempDirs ?? [process.env.TMPDIR ?? "", tmpdir()]),
-  ]
-    .map((dir) => dir.trim())
-    .filter((dir) => dir.length > 0 && isAbsolute(dir))
-    .map((dir) => resolve(dir));
+  const temps = await withRealPaths(
+    [...TEMP_ROOTS, ...(opts.tempDirs ?? [process.env.TMPDIR ?? "", tmpdir()])]
+      .map((dir) => dir.trim())
+      .filter((dir) => dir.length > 0 && isAbsolute(dir))
+      .map((dir) => resolve(dir))
+  );
   if (temps.some((dir) => path === dir || path.startsWith(`${dir}/`))) {
     return { durable: false, reason: "it is in a temporary directory" };
   }

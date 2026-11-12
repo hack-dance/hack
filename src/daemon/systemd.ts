@@ -813,8 +813,38 @@ export type SystemdUnitHackHome =
 
 const ENV_WORD = /"([^"]*)"|(\S+)/g;
 
+/**
+ * Variables that make the dynamic loader or an interpreter run code before
+ * (or instead of) the program Hack checked (HACK-2052): `LD_PRELOAD` and
+ * the like for the `hack` binary, `BASH_ENV`, `NODE_OPTIONS`, `BUN_OPTIONS`
+ * and the like for a `#!` launcher. Their contents cannot be vouched for,
+ * so a service that sets any of them is refused, not inspected.
+ */
+const CODE_LOADING_ENV_KEYS = [
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "LD_AUDIT",
+  "GCONV_PATH",
+  "BASH_ENV",
+  "ENV",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "BUN_OPTIONS",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PERL5LIB",
+  "PERL5OPT",
+  "RUBYOPT",
+  "RUBYLIB",
+] as const;
+
 /** The variables Hack reads from the service environment. */
-const SERVICE_ENV_KEYS = ["PATH", "HOME", "HACK_HOME"] as const;
+const SERVICE_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "HACK_HOME",
+  ...CODE_LOADING_ENV_KEYS,
+] as const;
 type ServiceEnvKey = (typeof SERVICE_ENV_KEYS)[number];
 
 function isServiceEnvKey(name: string): name is ServiceEnvKey {
@@ -822,7 +852,8 @@ function isServiceEnvKey(name: string): name is ServiceEnvKey {
 }
 
 /**
- * The values of PATH, HOME and HACK_HOME that hackd.service gets, built the
+ * The values of PATH, HOME, HACK_HOME and the code-loading variables
+ * ({@link CODE_LOADING_ENV_KEYS}) that hackd.service gets, built the
  * way systemd builds a user service's environment (HACK-2052): the user
  * manager's environment (`show-environment`, inherited by every service),
  * then the unit's `Environment=` (unit file and drop-ins, later wins), then
@@ -856,7 +887,7 @@ export async function readSystemdServiceEnvironment(opts: {
   const props = parseSystemdProperties(show.stdout);
   if ((props.EnvironmentFiles ?? "").length > 0) {
     return {
-      error: `${SYSTEMD_UNIT_NAME} reads an EnvironmentFile, whose PATH, HOME and HACK_HOME cannot be checked; move them into Environment= or remove the EnvironmentFile`,
+      error: `${SYSTEMD_UNIT_NAME} reads an EnvironmentFile, whose variables (PATH, HOME, HACK_HOME, loader settings) cannot be checked; move what it sets into Environment= or remove the EnvironmentFile`,
     };
   }
   // ExecSearchPath= (systemd 250+) sets the service's PATH, between the
@@ -2034,6 +2065,14 @@ export async function readSystemdServicePathDirectories(opts: {
   const read = await readSystemdServiceEnvironment({ deps: opts.deps });
   if ("error" in read) {
     return { error: read.error };
+  }
+  const loader = CODE_LOADING_ENV_KEYS.find(
+    (key) => (read.env[key] ?? "").length > 0
+  );
+  if (loader !== undefined) {
+    return {
+      error: `${SYSTEMD_UNIT_NAME} would run with ${loader} set (from the unit, a drop-in or the user manager's environment), which loads code Hack cannot check; remove it, or add UnsetEnvironment=${loader} with systemctl --user edit hackd`,
+    };
   }
   const path = read.env.PATH;
   return { dirs: path === undefined ? UNSET_PATH_LOOKUP : path.split(":") };

@@ -470,7 +470,10 @@ stop that daemon. hackd runs helpers such as `docker` and `git` through its
 `PATH`, so every directory on the service's `PATH` (the one Hack writes at install,
 and the effective one the service gets before each start, including a `PATH`
 inherited from the user manager) must not let other users
-add or create programs there either. Put local settings, such as
+add or create programs there either. A service environment that sets a variable which loads
+code before the checked program (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`,
+`NODE_OPTIONS`, `BUN_OPTIONS` and similar, from the unit, a drop-in or the user
+manager) is refused too; add `UnsetEnvironment=` for it in a drop-in. Put local settings, such as
 `DOCKER_HOST` for rootless Docker, in a drop-in (`systemctl --user edit hackd`).
 `install` writes the `hack` it was run from, and warns when that path is in a
 temporary directory, a package cache or a source checkout.

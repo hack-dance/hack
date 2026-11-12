@@ -3534,3 +3534,41 @@ linuxTest(
     expect(fake.active).toBe(false);
   }
 );
+
+linuxTest(
+  "a service environment that loads code is refused before enable and start",
+  async () => {
+    // Codex security review: LD_PRELOAD from a drop-in or the user manager's
+    // environment runs a library before Hack's checked program.
+    const fake = fakeSystemd();
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1 LD_PRELOAD=/srv/shared/x.so";
+    const install = await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    expect(install.ok).toBe(false);
+    if (!install.ok) {
+      expect(install.error).toContain("LD_PRELOAD");
+    }
+    expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
+    // From the user manager's environment: refused before start.
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+    fake.managerEnvironment = `HOME=${root}\nPATH=/usr/bin:/bin\nNODE_OPTIONS=--require=/srv/x.js\n`;
+    expect(
+      await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
+    ).toContain("NODE_OPTIONS");
+    // UnsetEnvironment= in a drop-in removes it: accepted.
+    fake.unsetEnvironment = "NODE_OPTIONS";
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toEqual({ dirs: ["/usr/bin", "/bin"] });
+    // PassEnvironment= of one cannot be read here: refused.
+    fake.unsetEnvironment = "";
+    fake.managerEnvironment = `HOME=${root}\nPATH=/usr/bin:/bin\n`;
+    fake.passEnvironment = "LD_PRELOAD";
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toMatchObject({ error: expect.stringContaining("PassEnvironment") });
+  }
+);

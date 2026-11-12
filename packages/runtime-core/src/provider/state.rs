@@ -176,9 +176,12 @@ pub fn read_bounded<T: serde::de::DeserializeOwned>(
     path: &Path,
     limit: u64,
 ) -> Result<T, CandidateError> {
+    // Non-blocking open, so a FIFO (or other special file) at a receipt path is refused by
+    // the regular-file check below instead of waiting for a writer. It has no effect on reads
+    // of a regular file.
     let mut f = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .map_err(io)?;
     let m = f.metadata().map_err(io)?;
@@ -792,6 +795,37 @@ impl Owner {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A FIFO at the operation lock or at a receipt is refused at once: both opens are
+    /// non-blocking, so neither waits for a writer. Each runs on a thread with a bound.
+    #[test]
+    fn a_fifo_at_the_lock_or_a_receipt_is_refused_without_blocking() {
+        let directory = crate::private_test_root(
+            &std::env::temp_dir().canonicalize().unwrap(),
+            "hack-state-fifo",
+        );
+        private_directory(&directory).unwrap();
+        for name in ["operation.lock", "receipt.json"] {
+            let path = std::ffi::CString::new(directory.join(name).as_os_str().as_encoded_bytes())
+                .unwrap();
+            // SAFETY: a NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let root = directory.clone();
+        std::thread::spawn(move || {
+            let lock = Lock::acquire_existing(&root).map(|_| ()).unwrap_err().code;
+            let receipt = read::<serde_json::Value>(&root.join("receipt.json"))
+                .unwrap_err()
+                .code;
+            let _ = sender.send((lock, receipt));
+        });
+        let (lock, receipt) = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a FIFO must not block the open");
+        assert_eq!((lock, receipt), ("foreign_state", "foreign_state"));
+        let _ = fs::remove_dir_all(&directory);
+    }
     #[test]
     fn interrupted_restart_retains_previous_boot_without_reusing_daemon_identity() {
         let mut owner: Owner = serde_json::from_value(serde_json::json!({

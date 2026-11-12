@@ -1451,6 +1451,57 @@ yet, and pinning an unmeasured value could do worse than upstream's. The provide
 qualification script measures idle footprint at 0, 3 and 10 minutes; pin it
 explicitly once those numbers are recorded.
 
+### Starting a pool that is already running
+
+`runtime up` on a pool that is already running and owned by this home (every warm frontend
+`up` and `restart`) takes a named fast path, `lifecycle::running_start`. It allocates
+nothing, so it skips the host admission windows, which guard memory, swapout, thermal and
+disk headroom for a VM allocation (four one-second sampling pauses for Development, two
+fifteen-second pauses for Research). Under the startup lease it re-checks the receipt, the
+provider identity, disk identity and size, the request (bridges, dependency sockets,
+network, project share and translation), the owner registry, dependency sockets, network
+tools and the provider configuration. One behaviour changes: a running Research pool used to
+be sampled on the fresh-pool budget and could be refused on a busy host; it is now reported
+like any running pool.
+
+Provider trees are proven by content once per boot. A successful boot records a witness
+(`run/smolvm/provider-trees.json`) bound to its provider process: for the SmolVM tree, the
+engine tree and the guest rootfs copy, a metadata digest taken around the content proof and
+the content digest it was proven against. Later commands of that running pool, including
+retained preflight, accept a tree whose metadata digest and content anchor are unchanged
+(paths, types, modes, owners, inodes, link counts, sizes, modification and status-change
+times, symlink targets) and prove it by content again on any difference. A stopped pool, a
+new boot and `runtime repair-provider-tree` always prove by content. Warm starts now also
+check the guest rootfs copy, which the running path never did.
+
+Two limits on when the witness is used (decided for HACK-2092; the owner can revisit them):
+
+- **Qualified filesystems only.** The witness is accepted only when all three trees are on a
+  filesystem whose change-time behaviour was qualified: APFS today, checked with `statfs`
+  at each tree root, with device checks in the metadata walk. Any device change within a
+  tree disables the witness, including a mount of another APFS volume. APFS keeps nanosecond
+  ctime that user space cannot set back, and stores through a shared mapping update it
+  (both observed on Apple Silicon with SmolVM 1.34.1). On any other filesystem, or when the
+  type cannot be read, every start proves the trees by content and no witness is written.
+- **Bound to the runtime build.** The witness names the build that recorded it: the runtime
+  version plus a hash of source, compiler identity and build options embedded at compile
+  time, including dirty source inputs. Replacing the executable on disk does not change an
+  already running image's identity. A build with different inputs proves by content once,
+  then records its witness.
+
+The witness is read without blocking, so a FIFO or other special file at its path is
+refused like any unsafe receipt and the trees are proven by content. It is written through a
+temporary under the lifecycle lease and replaces the committed witness only by rename; a
+temporary left by an interrupted write is removed by the next write under the lease only
+when it is a regular file owned by this user, mode 0600, with one link. Any other entry is
+left in place and prevents publication; full content hashing remains available.
+
+Both proofs guard against drift (damage, cleanup tools, interrupted writers), not a
+same-user adversary who knows the scheme: the content anchors and the witness are writable
+by the same user. `tree_witness` lists what the metadata check gives up relative to the
+content proof (writes that keep size and ctime, such as raw device writes, clock changes,
+shared-mapping stores not yet reflected in ctime, and filesystems without fine ctime).
+
 ### Extending a stopped pool's approved hosts
 
 `runtime network extend --allow-host pkg-npm.githubusercontent.com --json` adds

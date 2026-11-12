@@ -1,21 +1,19 @@
 import { constants } from "node:fs";
 import {
   access,
-  chmod,
+  lstat,
   mkdir,
-  mkdtemp,
   readdir,
   realpath,
-  rm,
   stat,
-  writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { readTextFile } from "./fs.ts";
 import type { LinuxTrustHost } from "./linux-trust-setup.ts";
 import { runTrustedSudo } from "./privileged-sudo.ts";
 import { exec } from "./shell.ts";
+import { vettedHelperEnv } from "./vetted-env.ts";
 
 const CERTUTIL_TIMEOUT_MS = 10_000;
 const FALLBACK_DIRS = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"] as const;
@@ -57,23 +55,6 @@ export async function resolveExecutable(
   return null;
 }
 
-/** A private (0700 dir, 0600 file) copy of `content`; `cleanup` removes it. */
-export async function stagePrivateCopy(opts: {
-  readonly content: string;
-  readonly fileName: string;
-}): Promise<{ readonly path: string; readonly cleanup: () => Promise<void> }> {
-  const dir = await mkdtemp(join(tmpdir(), "hack-trust-"));
-  await chmod(dir, 0o700);
-  const path = join(dir, opts.fileName);
-  await writeFile(path, opts.content, { mode: 0o600, flag: "wx" });
-  return {
-    path,
-    cleanup: async () => {
-      await rm(dir, { recursive: true, force: true });
-    },
-  };
-}
-
 /**
  * Real host boundary: reads files, runs `certutil` (by absolute path) as the
  * current user, and runs root steps as `sudo <argv>` with the terminal
@@ -104,6 +85,22 @@ export function createLinuxTrustHost(opts?: {
     },
     inspectPath: async (path) => {
       try {
+        const entry = await lstat(path);
+        if (entry.isSymbolicLink()) {
+          // Keep dangling links observable so initialization cannot follow one.
+          try {
+            await realpath(path);
+          } catch {
+            return {
+              realPath: path,
+              uid: entry.uid,
+              mode: entry.mode,
+              identity: `${entry.dev}:${entry.ino}`,
+              isDirectory: false,
+              isFile: false,
+            };
+          }
+        }
         const realPath = await realpath(path);
         const info = await stat(realPath);
         return {
@@ -111,6 +108,8 @@ export function createLinuxTrustHost(opts?: {
           uid: info.uid,
           mode: info.mode,
           isDirectory: info.isDirectory(),
+          isFile: info.isFile() && !entry.isSymbolicLink(),
+          identity: `${info.dev}:${info.ino}`,
         };
       } catch {
         return null;
@@ -125,10 +124,11 @@ export function createLinuxTrustHost(opts?: {
       }
     },
     resolveCommand: async (name) => await resolveExecutable(name),
-    exec: async (argv) => {
+    exec: async (argv, input) => {
       try {
         const res = await exec(argv, {
-          stdin: "ignore",
+          ...vettedHelperEnv(),
+          stdin: input === undefined ? "ignore" : new Blob([input]),
           timeoutMs: CERTUTIL_TIMEOUT_MS,
         });
         return { exitCode: res.exitCode, stdout: res.stdout };
@@ -136,6 +136,10 @@ export function createLinuxTrustHost(opts?: {
         return SPAWN_FAILED;
       }
     },
-    runPrivileged: async (argv) => await runTrustedSudo(argv),
+    runPrivileged: async (argv, input) =>
+      await runTrustedSudo(argv, {
+        input:
+          input === undefined ? undefined : new TextEncoder().encode(input),
+      }),
   };
 }

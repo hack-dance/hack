@@ -10,11 +10,12 @@
  *   group- or world-writable;
  * - inside directories (up to `/`) owned by root and not group- or
  *   world-writable.
- * The child gets a fixed system PATH and no loader/shell injection variables.
+ * The child gets the allowlisted environment from `vetted-env.ts`.
  */
 import { realpath, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { run } from "./shell.ts";
+import { VETTED_HELPER_PATH, vettedHelperEnv } from "./vetted-env.ts";
 
 const SUDO_CANDIDATES = ["/usr/bin/sudo", "/bin/sudo"] as const;
 const ROOT_UID = 0;
@@ -23,22 +24,7 @@ const GROUP_OR_WORLD_WRITE = 0o022;
 /** Exit code reported when no trustworthy sudo exists or it cannot start. */
 export const SUDO_UNAVAILABLE_EXIT = 126;
 
-export const PRIVILEGED_CHILD_PATH = "/usr/sbin:/usr/bin:/sbin:/bin";
-const UNSAFE_ENV_KEYS = [
-  "LD_PRELOAD",
-  "LD_LIBRARY_PATH",
-  "LD_AUDIT",
-  "BASH_ENV",
-  "ENV",
-  "SHELLOPTS",
-  "IFS",
-  "SUDO_ASKPASS",
-  // A preserved temp dir could put root's verified copy in a user-writable
-  // directory; root scripts name /tmp explicitly.
-  "TMPDIR",
-  "TMP",
-  "TEMP",
-] as const;
+export const PRIVILEGED_CHILD_PATH = VETTED_HELPER_PATH;
 
 export type FileFacts = {
   readonly uid: number;
@@ -111,24 +97,57 @@ export async function resolveTrustedSudo(
   return null;
 }
 
+/** Spawns `argv` with `input` on stdin and the terminal for output. */
+export type InputRunner = (
+  argv: readonly string[],
+  opts: {
+    readonly input: Uint8Array;
+    readonly env: Readonly<Record<string, string>>;
+  }
+) => Promise<number>;
+
+const spawnWithInput: InputRunner = async (argv, opts) => {
+  // sudo reads a password from /dev/tty, not stdin, so stdin can carry data.
+  const proc = Bun.spawn([...argv], {
+    stdin: new Blob([opts.input.slice()]),
+    stdout: "inherit",
+    stderr: "inherit",
+    env: { ...opts.env },
+  });
+  return await proc.exited;
+};
+
 /**
- * Run `<trusted sudo> <argv>` with the terminal attached and a sanitized
- * environment. Returns {@link SUDO_UNAVAILABLE_EXIT} when no trustworthy
- * sudo exists or it cannot be started; never throws.
+ * Run `<trusted sudo> <argv>` with the terminal attached and the vetted
+ * helper environment. With `input`, those bytes are the child's stdin (the
+ * terminal still serves sudo's prompt). Returns {@link SUDO_UNAVAILABLE_EXIT}
+ * when no trustworthy sudo exists or it cannot be started; never throws.
  */
 export async function runTrustedSudo(
   argv: readonly string[],
-  opts?: { readonly fs?: SudoFs; readonly runner?: typeof run }
+  opts?: {
+    readonly fs?: SudoFs;
+    readonly runner?: typeof run;
+    readonly input?: Uint8Array;
+    readonly inputRunner?: InputRunner;
+  }
 ): Promise<number> {
   const sudo = await resolveTrustedSudo(opts?.fs);
   if (sudo === null) {
     return SUDO_UNAVAILABLE_EXIT;
   }
+  const helperEnv = vettedHelperEnv();
   try {
+    if (opts?.input !== undefined) {
+      return await (opts.inputRunner ?? spawnWithInput)([sudo, ...argv], {
+        input: opts.input,
+        env: helperEnv.env,
+      });
+    }
     return await (opts?.runner ?? run)([sudo, ...argv], {
       stdin: "inherit",
-      env: { PATH: PRIVILEGED_CHILD_PATH },
-      unsetEnvKeys: UNSAFE_ENV_KEYS,
+      env: { ...helperEnv.env },
+      unsetEnvKeys: helperEnv.unsetEnvKeys,
     });
   } catch {
     return SUDO_UNAVAILABLE_EXIT;

@@ -12,6 +12,7 @@
  */
 import { createHash, X509Certificate } from "node:crypto";
 import { inspectMacCaEligibility } from "./mac-ca-trust.ts";
+import { STDIN_INSTALL_SCRIPT } from "./privileged-install.ts";
 
 export type LinuxDistroFamily = "debian" | "arch" | "fedora" | "suse";
 
@@ -111,59 +112,56 @@ export function linuxSystemBundlePath(family: LinuxDistroFamily): string {
   }
 }
 
-/**
- * Root copies the user-writable CA file into a root-owned 0700 directory it
- * creates under /tmp (named explicitly, never `TMPDIR`, so the copy cannot
- * sit in a directory the user can write), checks
- * the copy against the sha256 of the bytes Hack read and showed, and acts
- * only on that copy. A CA file replaced after the prompt fails the step
- * instead of becoming a trusted root.
- */
-const VERIFY_COPY =
-  'set -eu; umask 077; d=$(mktemp -d /tmp/hack-root.XXXXXXXX); trap \'rm -rf "$d"\' EXIT; t="$d/copy"; cat -- "$1" > "$t"; printf "%s  %s\\n" "$2" "$t" | sha256sum -c --status';
-export const VERIFIED_ANCHOR_INSTALL_SCRIPT = `${VERIFY_COPY}; install -D -o root -g root -m 0644 "$t" "$3"`;
-export const VERIFIED_TRUST_ANCHOR_SCRIPT = `${VERIFY_COPY}; trust anchor --store "$t"`;
+/** Fixed root-owned staging path for p11-kit's anchor reader. */
+export const ARCH_CA_STAGING_PATH = "/var/lib/hack/trust/caddy-local-ca.crt";
+export const VERIFIED_ANCHOR_INSTALL_SCRIPT = STDIN_INSTALL_SCRIPT;
+export const VERIFIED_TRUST_ANCHOR_SCRIPT = `${STDIN_INSTALL_SCRIPT}; trust anchor --store "$dest"`;
 
-/** Root commands that add the CA at `certPath` (digest `sha256`) to the trust store. */
+/** Root consumes only the exact validated bytes on stdin, under a size/time limit. */
+export function linuxSystemTrustInstallArgv(opts: {
+  readonly family: LinuxDistroFamily;
+  readonly sha256: string;
+  readonly byteLength: number;
+}): readonly string[] {
+  return [
+    "/bin/sh",
+    "-c",
+    opts.family === "arch"
+      ? VERIFIED_TRUST_ANCHOR_SCRIPT
+      : VERIFIED_ANCHOR_INSTALL_SCRIPT,
+    "hack-install",
+    String(opts.byteLength),
+    opts.sha256,
+    linuxAnchorPath(opts.family) ?? ARCH_CA_STAGING_PATH,
+    "0644",
+  ];
+}
+
+export function linuxSystemTrustRefreshArgv(
+  family: LinuxDistroFamily
+): readonly string[] {
+  return family === "arch" || family === "fedora"
+    ? ["update-ca-trust", "extract"]
+    : ["update-ca-certificates"];
+}
+
+/** Manual commands redirect the user file before sudo; root never opens it. */
 export function linuxSystemTrustCommands(opts: {
   readonly family: LinuxDistroFamily;
   readonly certPath: string;
   readonly sha256: string;
+  readonly byteLength: number;
 }): readonly (readonly string[])[] {
-  const anchor = linuxAnchorPath(opts.family);
-  const install = (target: string) => [
-    "sh",
-    "-c",
-    VERIFIED_ANCHOR_INSTALL_SCRIPT,
-    "hack-install",
-    opts.certPath,
-    opts.sha256,
-    target,
+  return [
+    [
+      "/bin/sh",
+      "-c",
+      'exec sudo "$@" < "$0"',
+      opts.certPath,
+      ...linuxSystemTrustInstallArgv(opts),
+    ],
+    ["sudo", ...linuxSystemTrustRefreshArgv(opts.family)],
   ];
-  switch (opts.family) {
-    case "debian":
-      return [install(anchor ?? ""), ["update-ca-certificates"]];
-    case "fedora":
-      return [install(anchor ?? ""), ["update-ca-trust", "extract"]];
-    case "suse":
-      return [install(anchor ?? ""), ["update-ca-certificates"]];
-    case "arch":
-      return [
-        [
-          "sh",
-          "-c",
-          VERIFIED_TRUST_ANCHOR_SCRIPT,
-          "hack-trust",
-          opts.certPath,
-          opts.sha256,
-        ],
-        // update-ca-trust(8): after changing trust sources, extract again so
-        // /etc/ssl/certs/ca-certificates.crt and friends include the anchor.
-        ["update-ca-trust", "extract"],
-      ];
-    default:
-      return [];
-  }
 }
 
 /** Normalized base64 bodies of every PEM certificate in `text`. */
@@ -188,10 +186,8 @@ export function bundleContainsCertificate(opts: {
 /** Every `certutil` call names the resolved absolute binary, never a bare name. */
 type CertutilDb = { readonly certutil: string; readonly dbDir: string };
 
-/** `certutil` argv that adds the CA as a trusted TLS issuer to one NSS db. */
-export function nssAddArgv(
-  opts: CertutilDb & { readonly certPath: string }
-): readonly string[] {
+/** Import the validated PEM from stdin; certutil never reopens a user path. */
+export function nssAddArgv(opts: CertutilDb): readonly string[] {
   return [
     opts.certutil,
     "-d",
@@ -201,8 +197,6 @@ export function nssAddArgv(
     NSS_TLS_ISSUER_TRUST,
     "-n",
     NSS_CA_NICKNAME,
-    "-i",
-    opts.certPath,
   ];
 }
 
@@ -311,6 +305,7 @@ export function renderShellCommand(argv: readonly string[]): string {
 export function renderUnknownDistroTrustSteps(opts: {
   readonly certPath: string;
   readonly sha256: string;
+  readonly byteLength: number;
 }): readonly string[] {
   const steps: string[] = [
     "Unknown distribution (no matching ID or ID_LIKE in /etc/os-release). Run the commands for your distribution family:",
@@ -327,8 +322,9 @@ export function renderUnknownDistroTrustSteps(opts: {
       family,
       certPath: opts.certPath,
       sha256: opts.sha256,
+      byteLength: opts.byteLength,
     })) {
-      steps.push(`    sudo ${renderShellCommand(command)}`);
+      steps.push(`    ${renderShellCommand(command)}`);
     }
   }
   return steps;

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, X509Certificate } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,8 +10,8 @@ import {
   detectLinuxDistroFamily,
   findOtherCaddyRoots,
   hasTlsIssuerTrust,
-  LINUX_ANCHOR_FILENAME,
   linuxSystemTrustCommands,
+  linuxSystemTrustInstallArgv,
   NSS_CA_NICKNAME,
   parseNssTrustFlags,
   renderShellCommand,
@@ -84,6 +84,7 @@ type FakeState = {
   commands: Set<string>;
   privileged: string[][];
   execs: string[][];
+  identities: Map<string, string>;
   /** NSS entries under Hack's nickname, by resolved db dir. */
   nss: Map<string, NssEntry[]>;
   failCertutil?: string;
@@ -134,9 +135,24 @@ function createFakeHost(init: {
     commands: new Set(init.commands ?? []),
     privileged: [],
     execs: [],
+    identities: new Map(),
     nss: new Map(Object.entries(init.nss ?? {})),
     failCertutil: init.failCertutil,
   };
+  for (const dir of [...state.dirs.keys()]) {
+    for (
+      let parent = dir.slice(0, dir.lastIndexOf("/")) || "/";
+      ;
+      parent = parent.slice(0, parent.lastIndexOf("/")) || "/"
+    ) {
+      if (!state.dirs.has(parent)) {
+        state.dirs.set(parent, []);
+      }
+      if (parent === "/") {
+        break;
+      }
+    }
+  }
   const resolve = (path: string): string => {
     for (const [from, to] of state.links) {
       if (path === from || path.startsWith(`${from}/`)) {
@@ -155,7 +171,8 @@ function createFakeHost(init: {
   const nssOp = (
     op: string | undefined,
     argv: readonly string[],
-    db: string
+    db: string,
+    input?: string
   ) => {
     const entries = state.nss.get(db) ?? [];
     switch (op) {
@@ -183,7 +200,7 @@ function createFakeHost(init: {
         }
         state.nss.set(db, [
           {
-            pem: state.files.get(argv.at(-1) ?? "") ?? "",
+            pem: input ?? "",
             flags: argv[5] ?? "",
           },
         ]);
@@ -200,7 +217,7 @@ function createFakeHost(init: {
         return { exitCode: 1, stdout: "" };
     }
   };
-  const certutil = (argv: readonly string[]) => {
+  const certutil = (argv: readonly string[], input?: string) => {
     const db = resolve((argv[2] ?? "").replace(SQL_PREFIX, ""));
     const op = argv[3];
     if (state.failCertutil === op) {
@@ -217,7 +234,7 @@ function createFakeHost(init: {
     if (!hasDb(db)) {
       return { exitCode: 255, stdout: "" };
     }
-    return nssOp(op, argv, db);
+    return nssOp(op, argv, db, input);
   };
   const plainRoot = (argv: readonly string[]) => {
     if (argv[0] === "update-ca-certificates") {
@@ -249,41 +266,56 @@ function createFakeHost(init: {
         uid: UID,
         mode: isDirectory ? 0o4_0700 : 0o10_0600,
       };
-      return { realPath, isDirectory, ...meta };
+      return {
+        realPath,
+        isDirectory,
+        isFile,
+        identity: state.identities.get(realPath) ?? realPath,
+        ...meta,
+      };
     },
     makeDir: async (path) => {
       const real = resolve(path);
-      if (!state.dirs.has(real)) {
-        state.dirs.set(real, []);
+      for (
+        let parent = real;
+        ;
+        parent = parent.slice(0, parent.lastIndexOf("/")) || "/"
+      ) {
+        if (!state.dirs.has(parent)) {
+          state.dirs.set(parent, []);
+        }
+        if (parent === "/") {
+          break;
+        }
       }
       return true;
     },
     resolveCommand: async (name) =>
       state.commands.has(name) ? `/usr/bin/${name}` : null,
-    exec: async (argv) => {
+    exec: async (argv, input) => {
       state.execs.push([...argv]);
       // Spawning needs the resolved binary; a bare name is not on PATH here.
       if (argv[0] !== CERTUTIL) {
         return { exitCode: 127, stdout: "" };
       }
-      return certutil(argv);
+      return certutil(argv, input);
     },
-    runPrivileged: async (argv) => {
+    runPrivileged: async (argv, input) => {
       state.privileged.push([...argv]);
-      if (argv[0] !== "sh") {
+      if (argv[0] !== "/bin/sh") {
         return plainRoot(argv);
       }
       // Mirror the verified scripts: act only on bytes matching the digest.
-      const content = state.files.get(argv[4] ?? "") ?? "";
-      if (sha256(content) !== argv[5]) {
+      const content = input ?? "";
+      if (
+        sha256(content) !== argv[5] ||
+        Buffer.byteLength(content) !== Number(argv[4])
+      ) {
         return 1;
       }
-      if (argv[3] === "hack-install") {
-        state.files.set(
-          `anchor:${bundleForAnchor(argv.at(-1) ?? "")}`,
-          content
-        );
-      } else if (argv[3] === "hack-trust") {
+      if (argv[2] === VERIFIED_ANCHOR_INSTALL_SCRIPT) {
+        state.files.set(`anchor:${bundleForAnchor(argv[6] ?? "")}`, content);
+      } else if (argv[2] === VERIFIED_TRUST_ANCHOR_SCRIPT) {
         // Like p11-kit: store the anchor; the extract step refreshes bundles.
         const bundle = "/etc/ssl/certs/ca-certificates.crt";
         state.files.set(
@@ -351,35 +383,50 @@ describe("system trust commands", () => {
         family: "debian",
         certPath: STAGED,
         sha256: sha,
+        byteLength: Buffer.byteLength(CURRENT_CA_PEM),
       })
     ).toEqual([
       [
-        "sh",
+        "/bin/sh",
         "-c",
-        VERIFIED_ANCHOR_INSTALL_SCRIPT,
-        "hack-install",
+        'exec sudo "$@" < "$0"',
         STAGED,
-        sha,
-        `/usr/local/share/ca-certificates/${LINUX_ANCHOR_FILENAME}`,
+        ...linuxSystemTrustInstallArgv({
+          family: "debian",
+          sha256: sha,
+          byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+        }),
       ],
-      ["update-ca-certificates"],
+      ["sudo", "update-ca-certificates"],
     ]);
     expect(
       linuxSystemTrustCommands({
         family: "fedora",
         certPath: STAGED,
         sha256: sha,
+        byteLength: Buffer.byteLength(CURRENT_CA_PEM),
       }).at(-1)
-    ).toEqual(["update-ca-trust", "extract"]);
+    ).toEqual(["sudo", "update-ca-trust", "extract"]);
     expect(
       linuxSystemTrustCommands({
         family: "arch",
         certPath: STAGED,
         sha256: sha,
+        byteLength: Buffer.byteLength(CURRENT_CA_PEM),
       })
     ).toEqual([
-      ["sh", "-c", VERIFIED_TRUST_ANCHOR_SCRIPT, "hack-trust", STAGED, sha],
-      ["update-ca-trust", "extract"],
+      [
+        "/bin/sh",
+        "-c",
+        'exec sudo "$@" < "$0"',
+        STAGED,
+        ...linuxSystemTrustInstallArgv({
+          family: "arch",
+          sha256: sha,
+          byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+        }),
+      ],
+      ["sudo", "update-ca-trust", "extract"],
     ]);
   });
 
@@ -389,13 +436,15 @@ describe("system trust commands", () => {
     const steps = renderUnknownDistroTrustSteps({
       certPath,
       sha256: sha,
+      byteLength: Buffer.byteLength(CURRENT_CA_PEM),
     }).join("\n");
     for (const command of linuxSystemTrustCommands({
       family: "debian",
       certPath,
       sha256: sha,
+      byteLength: Buffer.byteLength(CURRENT_CA_PEM),
     })) {
-      expect(steps).toContain(`sudo ${renderShellCommand(command)}`);
+      expect(steps).toContain(renderShellCommand(command));
     }
     expect(steps).toContain("'/tmp/a dir/$(touch pwned);x.crt'");
     expect(steps).not.toContain(" /tmp/a dir/");
@@ -447,7 +496,6 @@ describe("applyLinuxSystemTrust", () => {
     const outcome = await applyLinuxSystemTrust({
       host,
       ca,
-      stagedPath: STAGED,
       manualCertPath: EXPORT,
       canPrompt: true,
       show: (_commands, fingerprint) => shown.push(fingerprint),
@@ -469,7 +517,6 @@ describe("applyLinuxSystemTrust", () => {
     const outcome = await applyLinuxSystemTrust({
       host,
       ca: await validated(CURRENT_CA_PEM),
-      stagedPath: STAGED,
       manualCertPath: EXPORT,
       canPrompt: true,
       show: noShow,
@@ -491,7 +538,6 @@ describe("applyLinuxSystemTrust", () => {
     const outcome = await applyLinuxSystemTrust({
       host,
       ca: await validated(CURRENT_CA_PEM),
-      stagedPath: STAGED,
       manualCertPath: EXPORT,
       canPrompt: true,
       show: () => {
@@ -517,7 +563,6 @@ describe("applyLinuxSystemTrust", () => {
     const outcome = await applyLinuxSystemTrust({
       host,
       ca: await validated(CURRENT_CA_PEM),
-      stagedPath: STAGED,
       manualCertPath: EXPORT,
       canPrompt: false,
       show: () => {
@@ -548,7 +593,6 @@ describe("applyLinuxSystemTrust", () => {
     const outcome = await applyLinuxSystemTrust({
       host,
       ca: await validated(CURRENT_CA_PEM),
-      stagedPath: STAGED,
       manualCertPath: EXPORT,
       canPrompt: true,
       show: noShow,
@@ -558,14 +602,13 @@ describe("applyLinuxSystemTrust", () => {
     expect(state.privileged).toEqual([]);
   });
 
-  test("staged bytes replaced after the prompt are refused by root", async () => {
+  test("replaced staged bytes cannot affect root input", async () => {
     const { host, state } = createFakeHost({
       commands: ["update-ca-certificates"],
     });
     const outcome = await applyLinuxSystemTrust({
       host,
       ca: await validated(CURRENT_CA_PEM),
-      stagedPath: STAGED,
       manualCertPath: EXPORT,
       canPrompt: true,
       show: noShow,
@@ -574,9 +617,9 @@ describe("applyLinuxSystemTrust", () => {
         return true;
       },
     });
-    expect(outcome).toMatchObject({ status: "failed", exitCode: 1 });
+    expect(outcome).toMatchObject({ status: "trusted" });
     expect(state.files.has("anchor:/etc/ssl/certs/ca-certificates.crt")).toBe(
-      false
+      true
     );
   });
 
@@ -586,7 +629,6 @@ describe("applyLinuxSystemTrust", () => {
       await applyLinuxSystemTrust({
         host: unknown.host,
         ca: await validated(CURRENT_CA_PEM),
-        stagedPath: STAGED,
         manualCertPath: EXPORT,
         canPrompt: true,
         show: noShow,
@@ -602,7 +644,6 @@ describe("applyLinuxSystemTrust", () => {
       await applyLinuxSystemTrust({
         host: missing.host,
         ca: await validated(CURRENT_CA_PEM),
-        stagedPath: STAGED,
         manualCertPath: EXPORT,
         canPrompt: true,
         show: noShow,
@@ -614,41 +655,16 @@ describe("applyLinuxSystemTrust", () => {
     );
   });
 
-  test("the root anchor script installs approved bytes and refuses others", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "hack-linux-trust-install-"));
-    try {
-      const bin = join(dir, "bin");
-      await mkdir(bin);
-      await writeFile(
-        join(bin, "install"),
-        '#!/bin/sh\nfor a; do s="$t"; t="$a"; done; cp "$s" "$t"\n',
-        { mode: 0o755 }
-      );
-      const ca = join(dir, "ca.crt");
-      const target = join(dir, "anchor.crt");
-      await writeFile(ca, CURRENT_CA_PEM);
-      const env = { PATH: `${bin}:/usr/bin:/bin`, TMPDIR: dir };
-      const run = () =>
-        Bun.spawn(
-          [
-            "sh",
-            "-c",
-            VERIFIED_ANCHOR_INSTALL_SCRIPT,
-            "hack-install",
-            ca,
-            sha256(CURRENT_CA_PEM),
-            target,
-          ],
-          { env, stderr: "ignore" }
-        ).exited;
-      expect(await run()).toBe(0);
-      expect(await Bun.file(target).text()).toBe(CURRENT_CA_PEM);
-      await rm(target);
-      await writeFile(ca, OLD_CA_PEM);
-      expect(await run()).not.toBe(0);
-      expect(await Bun.file(target).exists()).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
+  test("root install argv never contains the user certificate path", () => {
+    for (const family of ["debian", "fedora", "suse", "arch"] as const) {
+      const argv = linuxSystemTrustInstallArgv({
+        family,
+        sha256: sha256(CURRENT_CA_PEM),
+        byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+      });
+      expect(argv).not.toContain(STAGED);
+      expect(argv).not.toContain(EXPORT);
+      expect(argv[4]).toBe(String(Buffer.byteLength(CURRENT_CA_PEM)));
     }
   });
 });
@@ -674,7 +690,6 @@ describe("applyLinuxNssTrust", () => {
     return await applyLinuxNssTrust({
       host,
       ca: await validated(CURRENT_CA_PEM),
-      stagedPath: STAGED,
     });
   }
 
@@ -885,6 +900,95 @@ describe("applyLinuxNssTrust", () => {
     expect(state.nss.has(dir)).toBe(false);
   });
 
+  test("a dangling key4.db link is refused before initialization", async () => {
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      dirs: { [userDb]: ["key4.db"] },
+    });
+    const inspect = host.inspectPath;
+    const outcome = await nss({
+      ...host,
+      inspectPath: async (path) =>
+        path === `${userDb}/key4.db`
+          ? {
+              realPath: path,
+              isDirectory: false,
+              isFile: false,
+              uid: UID,
+              mode: 0o12_0777,
+              identity: "link",
+            }
+          : inspect(path),
+    });
+    expect(outcome).toMatchObject({ databases: [{ status: "refused" }] });
+    expect(state.execs).toEqual([]);
+  });
+
+  test("a writable ancestor refuses the database", async () => {
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      dirs: { [userDb]: ["cert9.db"] },
+      meta: { [`${HOME}/.pki`]: { uid: UID, mode: 0o4_0777 } },
+    });
+    expect(await nss(host)).toMatchObject({
+      databases: [{ status: "refused" }],
+    });
+    expect(state.execs).toEqual([]);
+  });
+
+  test.each([
+    "directory",
+    "ancestor",
+  ])("replacement of a %s after export stops all writes", async (which) => {
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      dirs: { [userDb]: ["cert9.db"] },
+    });
+    const execute = host.exec;
+    const outcome = await nss({
+      ...host,
+      exec: async (argv, input) => {
+        const result = await execute(argv, input);
+        state.identities.set(
+          which === "directory" ? userDb : `${HOME}/.pki`,
+          "replaced"
+        );
+        return result;
+      },
+    });
+    expect(outcome).toMatchObject({ databases: [{ status: "failed" }] });
+    expect(
+      state.execs.some((a) => ["-A", "-M", "-D"].includes(a[3] ?? ""))
+    ).toBe(false);
+  });
+
+  test("an import that stores different bytes fails readback", async () => {
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      dirs: { [userDb]: ["cert9.db"] },
+    });
+    const execute = host.exec;
+    expect(
+      await nss({
+        ...host,
+        exec: async (argv, input) => {
+          const result = await execute(argv, input);
+          if (argv[3] === "-A") {
+            state.nss.set(userDb, [{ pem: OLD_CA_PEM, flags: "C,," }]);
+          }
+          return result;
+        },
+      })
+    ).toMatchObject({
+      databases: [
+        {
+          status: "failed",
+          reason: "stored certificate differs from the validated CA",
+        },
+      ],
+    });
+  });
+
   test.each([
     ["another user's directory", { uid: 1001, mode: 0o4_0700 }, "dir"],
     ["a group-writable directory", { uid: UID, mode: 0o4_0770 }, "dir"],
@@ -911,6 +1015,23 @@ describe("applyLinuxNssTrust", () => {
 });
 
 describe("real host boundary (finding 6)", () => {
+  test("dangling database links remain visible and cannot pass as files", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hack-trust-link-"));
+    try {
+      const link = join(dir, "key4.db");
+      await symlink(join(dir, "missing.db"), link);
+      const host = createLinuxTrustHost({ homeDir: dir });
+      expect(await host.inspectPath(link)).toMatchObject({
+        isFile: false,
+        isDirectory: false,
+      });
+      await writeFile(join(dir, "missing.db"), "db");
+      expect(await host.inspectPath(link)).toMatchObject({ isFile: false });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("resolveExecutable returns an executable absolute path and skips others", async () => {
     const dir = await mkdtemp(join(tmpdir(), "hack-linux-trust-bin-"));
     try {
@@ -950,6 +1071,7 @@ describe("configureLinuxSystemAndBrowserTrust (finding 1)", () => {
     readonly identity: CaddyCaIdentity;
     readonly canPrompt?: boolean;
     readonly afterValidate?: (state: FakeState) => void;
+    readonly failSystem?: boolean;
   }) {
     const { configureLinuxSystemAndBrowserTrust } = await import(
       "../src/commands/global-linux-trust.ts"
@@ -961,27 +1083,17 @@ describe("configureLinuxSystemAndBrowserTrust (finding 1)", () => {
     state.files.delete(STAGED);
     state.files.set(exportPath, opts.exported);
     const prompts: string[] = [];
-    const staged: string[] = [];
-    let cleaned = 0;
     const { ok } = await configureLinuxSystemAndBrowserTrust({
       certPath: exportPath,
       composeFile: `${HOME}/.hack/caddy/docker-compose.yml`,
       deps: {
-        host,
+        host: opts.failSystem
+          ? { ...host, runPrivileged: async () => 1 }
+          : host,
         readFile: async (path) => state.files.get(path) ?? null,
         inspectIdentity: async () => {
           opts.afterValidate?.(state);
           return opts.identity;
-        },
-        stage: async (content) => {
-          staged.push(content);
-          state.files.set(STAGED, content);
-          return {
-            path: STAGED,
-            cleanup: async () => {
-              cleaned += 1;
-            },
-          };
         },
         canPrompt: () => opts.canPrompt ?? true,
         confirm: async (message) => {
@@ -990,7 +1102,7 @@ describe("configureLinuxSystemAndBrowserTrust (finding 1)", () => {
         },
       },
     });
-    return { ok, state, prompts, staged, cleaned };
+    return { ok, state, prompts };
   }
 
   test("a valid export matching the running Caddy root is trusted; the prompt shows its fingerprint", async () => {
@@ -1003,8 +1115,17 @@ describe("configureLinuxSystemAndBrowserTrust (finding 1)", () => {
     expect(run.prompts[0]).toContain(
       new X509Certificate(CURRENT_CA_PEM).fingerprint256
     );
-    expect(run.staged).toEqual([CURRENT_CA_PEM]);
-    expect(run.cleaned).toBe(1);
+  });
+
+  test("system failure stops before any NSS command", async () => {
+    const run = await runCommand({
+      exported: CURRENT_CA_PEM,
+      identity: current,
+      failSystem: true,
+    });
+    expect(run.ok).toBe(false);
+    expect(run.state.execs).toEqual([]);
+    expect(run.state.nss.size).toBe(0);
   });
 
   test("the export changing after inspection does not change what is installed", async () => {
@@ -1041,7 +1162,6 @@ describe("configureLinuxSystemAndBrowserTrust (finding 1)", () => {
     const run = await runCommand({ exported, identity });
     expect(run.ok).toBe(false);
     expect(run.prompts).toEqual([]);
-    expect(run.staged).toEqual([]);
     expect(run.state.privileged).toEqual([]);
     expect(run.state.execs).toEqual([]);
   });

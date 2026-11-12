@@ -21,6 +21,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { type ExecOptions, type ExecResult, exec } from "./shell.ts";
+import { vettedHelperEnv } from "./vetted-env.ts";
 
 const DOCKER_CANDIDATES = [
   "/usr/bin/docker",
@@ -168,15 +169,20 @@ export function createTrustedDockerExec(opts?: {
     if (docker === null || socket === null) {
       return UNAVAILABLE;
     }
+    const helper = vettedHelperEnv();
     try {
       return await (opts?.execute ?? exec)([docker, ...cmd.slice(1)], {
         ...options,
         env: {
-          ...options?.env,
+          ...helper.env,
           DOCKER_HOST: `unix://${socket}`,
           DOCKER_CONFIG: FROZEN_DOCKER_CONFIG,
         },
-        unsetEnvKeys: [...(options?.unsetEnvKeys ?? []), ...ENGINE_SELECTORS],
+        unsetEnvKeys: [
+          ...(options?.unsetEnvKeys ?? []),
+          ...helper.unsetEnvKeys,
+          ...ENGINE_SELECTORS,
+        ],
       });
     } catch {
       return UNAVAILABLE;

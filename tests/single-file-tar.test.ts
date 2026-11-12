@@ -20,7 +20,15 @@ async function realTar(format: string): Promise<Uint8Array> {
   directories.push(directory);
   await writeFile(join(directory, "root.crt"), CURRENT_CA_PEM);
   const result = await exec(
-    ["tar", `--format=${format}`, "-C", directory, "-cf", "-", "root.crt"],
+    [
+      "tar",
+      `--format=${format === "gnu" && process.platform === "darwin" ? "gnutar" : format}`,
+      "-C",
+      directory,
+      "-cf",
+      "-",
+      "root.crt",
+    ],
     { stdin: "ignore", timeoutMs: 5000, maxStdoutBytes: 1_000_000 }
   );
   expect(result.exitCode).toBe(0);

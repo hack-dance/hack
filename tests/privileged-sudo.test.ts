@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-
 import {
   type FileFacts,
   PRIVILEGED_CHILD_PATH,
@@ -8,6 +7,7 @@ import {
   SUDO_UNAVAILABLE_EXIT,
   type SudoFs,
 } from "../src/lib/privileged-sudo.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const SUDO_FILE: FileFacts = {
   uid: 0,
@@ -106,32 +106,66 @@ describe("resolveTrustedSudo", () => {
 });
 
 describe("runTrustedSudo", () => {
-  test("runs the vetted absolute path with a fixed PATH and no loader variables", async () => {
+  test("runs the vetted absolute path with only the vetted environment", async () => {
+    const injected = ["LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "TMPDIR"];
+    const saved = new Map(injected.map((key) => [key, process.env[key]]));
+    for (const key of injected) {
+      process.env[key] = "/home/user/evil";
+    }
     const calls: { argv: readonly string[]; opts: unknown }[] = [];
-    const exit = await runTrustedSudo(["update-ca-certificates"], {
+    try {
+      const exit = await runTrustedSudo(["update-ca-certificates"], {
+        fs: fakeFs({ facts: goodTree }),
+        runner: (async (argv: readonly string[], opts: unknown) => {
+          calls.push({ argv, opts });
+          return 0;
+        }) as never,
+      });
+      expect(exit).toBe(0);
+    } finally {
+      for (const [key, value] of saved) {
+        restoreEnv(key, value);
+      }
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.argv).toEqual(["/usr/bin/sudo", "update-ca-certificates"]);
+    const opts = calls[0]?.opts as {
+      stdin: string;
+      env: Record<string, string>;
+      unsetEnvKeys: readonly string[];
+    };
+    expect(opts.stdin).toBe("inherit");
+    expect(opts.env.PATH).toBe(PRIVILEGED_CHILD_PATH);
+    expect(opts.unsetEnvKeys).toEqual(expect.arrayContaining(injected));
+    for (const key of injected) {
+      expect(opts.env[key]).toBeUndefined();
+    }
+  });
+
+  test("input goes to the child's stdin with the same vetted environment", async () => {
+    const calls: {
+      argv: readonly string[];
+      input: Uint8Array;
+      env: unknown;
+    }[] = [];
+    const exit = await runTrustedSudo(["sh", "-c", "cat"], {
       fs: fakeFs({ facts: goodTree }),
-      runner: (async (argv: readonly string[], opts: unknown) => {
-        calls.push({ argv, opts });
+      input: new TextEncoder().encode("bytes"),
+      inputRunner: async (argv, opts) => {
+        calls.push({ argv, input: opts.input, env: opts.env });
         return 0;
+      },
+      runner: (async () => {
+        throw new Error("input must use the input runner");
       }) as never,
     });
     expect(exit).toBe(0);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.argv).toEqual(["/usr/bin/sudo", "update-ca-certificates"]);
-    expect(calls[0]?.opts).toMatchObject({
-      stdin: "inherit",
-      env: { PATH: PRIVILEGED_CHILD_PATH },
+    expect(calls[0]?.argv).toEqual(["/usr/bin/sudo", "sh", "-c", "cat"]);
+    expect(new TextDecoder().decode(calls[0]?.input)).toBe("bytes");
+    expect(calls[0]?.env).toMatchObject({
+      PATH: PRIVILEGED_CHILD_PATH,
+      LC_ALL: "C",
     });
-    expect(
-      (calls[0]?.opts as { unsetEnvKeys: readonly string[] }).unsetEnvKeys
-    ).toEqual(
-      expect.arrayContaining([
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "BASH_ENV",
-        "TMPDIR",
-      ])
-    );
   });
 
   test("no trustworthy sudo: nothing runs", async () => {

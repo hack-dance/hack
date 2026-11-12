@@ -2,11 +2,10 @@
  * Apply Caddy's local root CA to the Linux trust stores. All effects go
  * through {@link LinuxTrustHost}; root steps run only after `confirm()`.
  *
- * Every writer receives a {@link ValidatedCa} plus the path of a private
- * copy of exactly those bytes (`stagedPath`), never the user-writable
- * export: what was validated and shown is what gets trusted.
+ * Every writer receives the validated certificate bytes on stdin. No writer
+ * reopens the user export after validation or confirmation.
  */
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   bundleContainsCertificate,
   detectLinuxDistroFamily,
@@ -15,6 +14,8 @@ import {
   type LinuxDistroFamily,
   linuxSystemBundlePath,
   linuxSystemTrustCommands,
+  linuxSystemTrustInstallArgv,
+  linuxSystemTrustRefreshArgv,
   nssAddArgv,
   nssCreateArgv,
   nssDeleteArgv,
@@ -22,6 +23,7 @@ import {
   nssListTrustArgv,
   nssModifyTrustArgv,
   parseNssTrustFlags,
+  pemCertificateBodies,
   renderUnknownDistroTrustSteps,
   type ValidatedCa,
 } from "./linux-trust.ts";
@@ -32,6 +34,8 @@ export type ResolvedPathInfo = {
   readonly uid: number;
   readonly mode: number;
   readonly isDirectory: boolean;
+  readonly isFile: boolean;
+  readonly identity: string;
 };
 
 export type LinuxTrustHost = {
@@ -57,10 +61,14 @@ export type LinuxTrustHost = {
    * returned as exit 127, never thrown.
    */
   readonly exec: (
-    argv: readonly string[]
+    argv: readonly string[],
+    input?: string
   ) => Promise<{ readonly exitCode: number; readonly stdout: string }>;
   /** Run `sudo <argv>` with the terminal attached; returns the exit code. */
-  readonly runPrivileged: (argv: readonly string[]) => Promise<number>;
+  readonly runPrivileged: (
+    argv: readonly string[],
+    input?: string
+  ) => Promise<number>;
 };
 
 export type LinuxTrustCode =
@@ -129,7 +137,6 @@ const TOOL_PACKAGE: Readonly<Record<LinuxDistroFamily, string>> = {
 export async function applyLinuxSystemTrust(opts: {
   readonly host: LinuxTrustHost;
   readonly ca: ValidatedCa;
-  readonly stagedPath: string;
   /**
    * Persistent CA path for commands the user runs later (pending or manual
    * outcomes). The private staged copy is deleted when the command returns;
@@ -144,7 +151,7 @@ export async function applyLinuxSystemTrust(opts: {
   ) => void;
   readonly confirm: () => Promise<boolean>;
 }): Promise<LinuxSystemTrustOutcome> {
-  const { host, ca, stagedPath } = opts;
+  const { host, ca } = opts;
   const family = detectLinuxDistroFamily(
     await host.readFile("/etc/os-release")
   );
@@ -156,6 +163,7 @@ export async function applyLinuxSystemTrust(opts: {
       steps: renderUnknownDistroTrustSteps({
         certPath: opts.manualCertPath,
         sha256: ca.pemSha256,
+        byteLength: Buffer.byteLength(ca.pem),
       }),
     };
   }
@@ -191,8 +199,9 @@ export async function applyLinuxSystemTrust(opts: {
   }
   const commands = linuxSystemTrustCommands({
     family,
-    certPath: stagedPath,
+    certPath: opts.manualCertPath,
     sha256: ca.pemSha256,
+    byteLength: Buffer.byteLength(ca.pem),
   });
   const pending = {
     status: "pending",
@@ -202,6 +211,7 @@ export async function applyLinuxSystemTrust(opts: {
       family,
       certPath: opts.manualCertPath,
       sha256: ca.pemSha256,
+      byteLength: Buffer.byteLength(ca.pem),
     }),
   } as const;
   // No root command runs without an interactive yes, and none at all when
@@ -213,8 +223,19 @@ export async function applyLinuxSystemTrust(opts: {
   if (!(await opts.confirm())) {
     return pending;
   }
-  for (const command of commands) {
-    const exitCode = await host.runPrivileged(command);
+  const rootCommands = [
+    linuxSystemTrustInstallArgv({
+      family,
+      sha256: ca.pemSha256,
+      byteLength: Buffer.byteLength(ca.pem),
+    }),
+    linuxSystemTrustRefreshArgv(family),
+  ];
+  for (const [index, command] of rootCommands.entries()) {
+    const exitCode = await host.runPrivileged(
+      command,
+      index === 0 ? ca.pem : undefined
+    );
     if (exitCode !== 0) {
       return {
         status: "failed",
@@ -331,7 +352,7 @@ export async function findNssDatabases(
 }
 
 type OwnershipCheck =
-  | { readonly ok: true }
+  | { readonly ok: true; readonly snapshot: string }
   | { readonly ok: false; readonly reason: string };
 
 function ownedAndPrivate(info: ResolvedPathInfo, uid: number): boolean {
@@ -378,8 +399,22 @@ export async function checkNssDbOwnership(opts: {
       reason: "directory is not owned by you or is group/world-writable",
     };
   }
-  if (!opts.requireDb) {
-    return { ok: true };
+  const ancestors: string[] = [];
+  for (let path = dir.realPath; ; path = dirname(path)) {
+    const info = await host.inspectPath(path);
+    if (
+      !(info?.isDirectory && [host.uid, 0].includes(info.uid)) ||
+      (info.mode & 0o022) !== 0
+    ) {
+      return {
+        ok: false,
+        reason: "database ancestor is missing or writable by another user",
+      };
+    }
+    ancestors.push(`${path}:${info.identity}`);
+    if (path === "/") {
+      break;
+    }
   }
   // The database files must live in that directory themselves: a cert9.db
   // or key4.db link that resolves elsewhere would let a write escape the
@@ -388,14 +423,14 @@ export async function checkNssDbOwnership(opts: {
     const expected = join(dir.realPath, name);
     const file = await host.inspectPath(expected);
     if (!file) {
-      if (name === "cert9.db") {
+      if (name === "cert9.db" && opts.requireDb) {
         return { ok: false, reason: "cert9.db is missing" };
       }
       continue;
     }
     if (
       file.realPath !== expected ||
-      file.isDirectory ||
+      !file.isFile ||
       !ownedAndPrivate(file, host.uid)
     ) {
       return {
@@ -404,7 +439,7 @@ export async function checkNssDbOwnership(opts: {
       };
     }
   }
-  return { ok: true };
+  return { ok: true, snapshot: ancestors.join("\n") };
 }
 
 /** NSS sql database files Hack writes through certutil. */
@@ -419,7 +454,6 @@ const NSS_DB_FILES = ["cert9.db", "key4.db"] as const;
 export async function applyLinuxNssTrust(opts: {
   readonly host: LinuxTrustHost;
   readonly ca: ValidatedCa;
-  readonly stagedPath: string;
 }): Promise<LinuxNssTrustOutcome> {
   const { host } = opts;
   const certutil = await host.resolveCommand("certutil");
@@ -439,15 +473,16 @@ export async function applyLinuxNssTrust(opts: {
   const userDb = legacyUserNssDb(host);
   const databases: NssDbOutcome[] = [];
   for (const dbDir of await findNssDatabases(host)) {
-    databases.push(
-      await trustOneNssDb({
-        host,
-        db: { certutil, dbDir },
-        ca: opts.ca,
-        stagedPath: opts.stagedPath,
-        createIfMissing: dbDir === userDb,
-      })
-    );
+    const outcome = await trustOneNssDb({
+      host,
+      db: { certutil, dbDir },
+      ca: opts.ca,
+      createIfMissing: dbDir === userDb,
+    });
+    databases.push(outcome);
+    if (outcome.status === "failed") {
+      break;
+    }
   }
   return { status: "done", databases };
 }
@@ -481,11 +516,92 @@ async function ensureUserDb(opts: {
     : { dbDir, status: "failed", reason: "certutil -N failed" };
 }
 
+async function prepareNssDirectory(opts: {
+  readonly host: LinuxTrustHost;
+  readonly dbDir: string;
+}): Promise<NssDbOutcome | null> {
+  const { host, dbDir } = opts;
+  if (!(await host.inspectPath(dbDir))) {
+    // Check the existing parent chain before recursive mkdir can follow it.
+    let parent = dirname(dbDir);
+    while (!(await host.inspectPath(parent)) && parent !== "/") {
+      parent = dirname(parent);
+    }
+    for (let path = parent; ; path = dirname(path)) {
+      const info = await host.inspectPath(path);
+      if (
+        !(info?.isDirectory && [host.uid, 0].includes(info.uid)) ||
+        (info.mode & 0o022) !== 0
+      ) {
+        return { dbDir, status: "refused", reason: "unsafe database ancestor" };
+      }
+      if (path === "/") {
+        break;
+      }
+    }
+    if (!(await host.makeDir(dbDir))) {
+      return {
+        dbDir,
+        status: "failed",
+        reason: "could not create the directory",
+      };
+    }
+  }
+  return null;
+}
+
 async function trustOneNssDb(opts: {
   readonly host: LinuxTrustHost;
   readonly db: NssDb;
   readonly ca: ValidatedCa;
-  readonly stagedPath: string;
+  readonly createIfMissing: boolean;
+}): Promise<NssDbOutcome> {
+  const { host, db } = opts;
+  const { dbDir } = db;
+  if (opts.createIfMissing) {
+    const prepared = await prepareNssDirectory({ host, dbDir });
+    if (prepared) {
+      return prepared;
+    }
+  }
+  const initial = await checkNssDbOwnership({ host, dbDir, requireDb: false });
+  if (!initial.ok) {
+    return { dbDir, status: "refused", reason: initial.reason };
+  }
+  const check = async (requireDb: boolean) => {
+    const current = await checkNssDbOwnership({ host, dbDir, requireDb });
+    if (!current.ok || current.snapshot !== initial.snapshot) {
+      throw new Error(
+        current.ok ? "database directory or ancestor changed" : current.reason
+      );
+    }
+  };
+  const guardedHost: LinuxTrustHost = {
+    ...host,
+    exec: async (argv, input) => {
+      const initializing = argv[3] === "-N";
+      await check(!initializing);
+      const result = await host.exec(argv, input);
+      await check(!initializing || result.exitCode === 0);
+      return result;
+    },
+  };
+  try {
+    return await trustCheckedNssDb({ ...opts, host: guardedHost });
+  } catch (error) {
+    return {
+      dbDir,
+      status: "failed",
+      reason: error instanceof Error ? error.message : "database check failed",
+    };
+  }
+}
+
+/** Each certutil operation is checked immediately before and after execution. */
+async function trustCheckedNssDb(opts: {
+  readonly host: LinuxTrustHost;
+  readonly db: NssDb;
+  readonly ca: ValidatedCa;
   readonly createIfMissing: boolean;
 }): Promise<NssDbOutcome> {
   const { host, db } = opts;
@@ -506,16 +622,21 @@ async function trustOneNssDb(opts: {
     present &&
     bundleContainsCertificate({ bundle: exported.stdout, certPem: opts.ca.pem })
   ) {
-    return await ensureTlsIssuerTrust({ host, db });
+    return await ensureTlsIssuerTrust({ host, db, ca: opts.ca });
   }
   if (present) {
     await deleteNicknameEntries({ host, db });
   }
-  const added = await host.exec(
-    nssAddArgv({ ...db, certPath: opts.stagedPath })
-  );
+  const added = await host.exec(nssAddArgv(db), opts.ca.pem);
   if (added.exitCode !== 0) {
     return { dbDir, status: "failed", reason: "certutil -A failed" };
+  }
+  if (!(await storedCertificateMatches({ host, db, ca: opts.ca }))) {
+    return {
+      dbDir,
+      status: "failed",
+      reason: "stored certificate differs from the validated CA",
+    };
   }
   const flags = await readTrustFlags({ host, db });
   if (!hasTlsIssuerTrust(flags)) {
@@ -557,12 +678,26 @@ async function readTrustFlags(opts: {
 async function ensureTlsIssuerTrust(opts: {
   readonly host: LinuxTrustHost;
   readonly db: NssDb;
+  readonly ca: ValidatedCa;
 }): Promise<NssDbOutcome> {
   const { host, db } = opts;
   if (hasTlsIssuerTrust(await readTrustFlags({ host, db }))) {
-    return { dbDir: db.dbDir, status: "trusted" };
+    return (await storedCertificateMatches(opts))
+      ? { dbDir: db.dbDir, status: "trusted" }
+      : {
+          dbDir: db.dbDir,
+          status: "failed",
+          reason: "stored certificate differs from the validated CA",
+        };
   }
   const modified = await host.exec(nssModifyTrustArgv(db));
+  if (!(await storedCertificateMatches(opts))) {
+    return {
+      dbDir: db.dbDir,
+      status: "failed",
+      reason: "stored certificate differs from the validated CA",
+    };
+  }
   const after = await readTrustFlags({ host, db });
   if (modified.exitCode !== 0 || !hasTlsIssuerTrust(after)) {
     return {
@@ -572,4 +707,17 @@ async function ensureTlsIssuerTrust(opts: {
     };
   }
   return { dbDir: db.dbDir, status: "trust_set" };
+}
+
+async function storedCertificateMatches(opts: {
+  readonly host: LinuxTrustHost;
+  readonly db: NssDb;
+  readonly ca: ValidatedCa;
+}): Promise<boolean> {
+  const exported = await opts.host.exec(nssExportArgv(opts.db));
+  return (
+    exported.exitCode === 0 &&
+    pemCertificateBodies(exported.stdout).length === 1 &&
+    bundleContainsCertificate({ bundle: exported.stdout, certPem: opts.ca.pem })
+  );
 }

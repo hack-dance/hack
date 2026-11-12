@@ -3,6 +3,10 @@
 `hack global trust` makes the host trust Caddy's local root CA, so
 `https://*.hack` and the other routed names open without warnings.
 
+![Linux trust flow](../diagrams/linux-trust.svg)
+
+[Diagram source](../diagrams/linux-trust.mmd).
+
 ## Which certificate
 
 Before it changes any trust store, Hack checks the exported CA
@@ -24,10 +28,11 @@ If any check fails, Hack changes nothing and says why
 rotated its root) or one Hack cannot confirm (Docker or the proxy is down) is
 refused. Run `hack global up`, then `hack global trust`.
 
-Hack then copies those inspected bytes into a private temporary file (0600 in a
-0700 directory) and gives only that copy to the trust tools, so a change to the
+Hack passes the inspected bytes to the trust tools on stdin. A change to the
 export while Hack is running cannot change what is trusted. The prompt shows the
-certificate's subject and SHA-256 fingerprint.
+certificate's subject and SHA-256 fingerprint. Docker, certutil and sudo receive
+a fixed system PATH, the C locale and only identity/terminal variables; loader,
+interpreter, locale-path and tool-selection variables are not inherited.
 
 ## What Hack updates
 
@@ -47,10 +52,13 @@ certificate's subject and SHA-256 fingerprint.
    Hack shows the commands first and runs them only after you answer yes in a
    terminal. If the CA is already in the family's extracted bundle, nothing runs.
    The install and `trust anchor` steps run through a small `sh -c` script: root
-   copies the staged CA into a root-owned temporary file and checks its SHA-256
-   against the bytes Hack inspected, so a file replaced after you answer is
-   refused. On an unknown distribution Hack prints the same commands, quoted, for
-   each family.
+   reads exactly the approved byte count from stdin under a time limit, checks
+   its SHA-256 and installs atomically inside a root-owned directory with checked
+   ancestors. Root never opens the user export. Arch first installs a root-owned
+   copy at `/var/lib/hack/trust/caddy-local-ca.crt`, then passes that path to
+   p11-kit. Printed manual commands open the export as your user before sudo;
+   changed bytes fail the size or digest check. A failed or unverified system
+   step stops the command before NSS or the host bundle is written.
 3. **NSS databases** for Chrome, Chromium and Firefox (no root). With `certutil`
    installed, Hack runs it by its resolved absolute path and adds the CA as a
    trusted TLS issuer (trust attributes `C,,`), nickname `Hack Caddy Local CA`,
@@ -78,7 +86,14 @@ certificate's subject and SHA-256 fingerprint.
    such as snap's `current` revision link and Flatpak's per-app tree, are
    followed. A database that resolves elsewhere (another user's profile, a
    shared directory) is skipped and reported. The `cert9.db` and `key4.db` files
-   themselves must be files in that directory, not links to somewhere else.
+   themselves must be regular files in that directory, including before
+   initialization; dangling links are refused. Each ancestor must be owned by
+   you or root and not group- or world-writable. Hack checks directory and
+   ancestor identities immediately before and after each certutil operation.
+   A change fails the command. These checks detect replacement; they cannot
+   prevent a same-user process from swapping and restoring paths between checks.
+   After import or a trust change, Hack reads the stored certificate back and
+   compares it with the validated CA.
 
 A run that cannot prompt (no TTY, `HACK_NO_INTERACTIVE=1` or `--no-interactive`)
 never runs `sudo`. It still prepares the host bundle and the NSS databases,
@@ -100,9 +115,14 @@ Rerun `hack global trust`. Debian, Fedora and openSUSE overwrite Hack's anchor
 file, so the old root is no longer trusted. On Arch, `trust anchor --store` adds
 the new root next to the old one. After it adds a root, Hack lists every other
 Caddy root still in the system bundle by SHA-256 fingerprint; remove one with
-`trust list` (find the entry with that fingerprint) and
-`sudo trust anchor --remove 'pkcs11:…'` using the URI it prints, then
-`sudo update-ca-trust extract`.
+`trust list --filter=ca-anchors` to list candidate PKCS#11 URIs. That listing
+does not include SHA-256 fingerprints. For each candidate URI, export it with
+`trust extract --filter='pkcs11:…' --format=pem-bundle candidate.pem` and run
+`openssl x509 -in candidate.pem -noout -fingerprint -sha256`. Compare that result
+with the printed stale fingerprint before running
+`sudo trust anchor --remove 'pkcs11:…'` with that exact URI, followed by
+`sudo update-ca-trust extract`. Labels and subjects alone do not identify the old
+root. Hack does not automatically enumerate or remove PKCS#11 objects.
 
 ## Remove what Hack added
 

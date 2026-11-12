@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-
 import type { ExecOptions } from "../src/lib/shell.ts";
 import {
   type BinaryFacts,
@@ -9,6 +8,7 @@ import {
   resolveSystemDockerSocket,
   resolveTrustedDocker,
 } from "../src/lib/trusted-docker.ts";
+import { vettedHelperEnv } from "../src/lib/vetted-env.ts";
 
 const DOCKER: BinaryFacts = {
   uid: 0,
@@ -118,11 +118,21 @@ describe("createTrustedDockerExec", () => {
       }) as never,
     });
     expect(
-      (await run(["docker", "ps", "-q"], { timeoutMs: 5000 })).stdout
+      (
+        await run(["docker", "ps", "-q"], {
+          timeoutMs: 5000,
+          env: {
+            LD_PRELOAD: "/untrusted.so",
+            PATH: "/untrusted",
+            DOCKER_HOST: "tcp://untrusted",
+          },
+        })
+      ).stdout
     ).toBe("ok");
     expect(calls[0]?.cmd).toEqual(["/usr/bin/docker", "ps", "-q"]);
     expect(calls[0]?.opts?.timeoutMs).toBe(5000);
     expect(calls[0]?.opts?.env).toEqual({
+      ...vettedHelperEnv().env,
       DOCKER_HOST: "unix:///run/docker.sock",
       DOCKER_CONFIG: FROZEN_DOCKER_CONFIG,
     });

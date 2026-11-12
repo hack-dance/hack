@@ -5,7 +5,7 @@
  *
  * Before any trust writer runs, the exported CA must be exactly one valid,
  * self-signed CA whose bytes equal the running Caddy root of this Hack home.
- * Writers then use a private copy of those inspected bytes.
+ * Writers receive those inspected bytes on stdin.
  */
 import { X509Certificate } from "node:crypto";
 import { note } from "@clack/prompts";
@@ -20,10 +20,7 @@ import {
   type ValidatedCa,
   validateCaddyRootPem,
 } from "../lib/linux-trust.ts";
-import {
-  createLinuxTrustHost,
-  stagePrivateCopy,
-} from "../lib/linux-trust-host.ts";
+import { createLinuxTrustHost } from "../lib/linux-trust-host.ts";
 import {
   applyLinuxNssTrust,
   applyLinuxSystemTrust,
@@ -34,7 +31,7 @@ import { createTrustedDockerExec } from "../lib/trusted-docker.ts";
 import { logger } from "../ui/logger.ts";
 
 function renderSudo(argv: readonly string[]): string {
-  return `sudo ${renderShellCommand(argv)}`;
+  return renderShellCommand(argv);
 }
 
 /** Effects the command needs besides the trust host; injectable for tests. */
@@ -45,10 +42,6 @@ export type LinuxTrustCommandDeps = {
     readonly composeFile: string;
     readonly certPath: string;
   }) => Promise<CaddyCaIdentity>;
-  readonly stage: (content: string) => Promise<{
-    readonly path: string;
-    readonly cleanup: () => Promise<void>;
-  }>;
   readonly canPrompt: () => boolean;
   readonly confirm: (message: string) => Promise<boolean>;
 };
@@ -63,8 +56,6 @@ function defaultDeps(): LinuxTrustCommandDeps {
         ...opts,
         exec: createTrustedDockerExec(),
       }),
-    stage: async (content) =>
-      await stagePrivateCopy({ content, fileName: "caddy-local-ca.crt" }),
     canPrompt,
     confirm: async (message) =>
       await confirmSafe({
@@ -142,32 +133,27 @@ export async function configureLinuxSystemAndBrowserTrust(opts: {
   if (!ca) {
     return { ok: false, verifiedPem: null };
   }
-  const staged = await deps.stage(ca.pem);
-  try {
-    const systemOk = await applySystem({
-      deps,
-      ca,
-      stagedPath: staged.path,
-      manualCertPath: opts.certPath,
-    });
-    const nssOk = await applyNss({ deps, ca, stagedPath: staged.path });
-    return { ok: systemOk && nssOk, verifiedPem: ca.pem };
-  } finally {
-    await staged.cleanup();
+  const systemOk = await applySystem({
+    deps,
+    ca,
+    manualCertPath: opts.certPath,
+  });
+  if (!systemOk) {
+    return { ok: false, verifiedPem: null };
   }
+  const nssOk = await applyNss({ deps, ca });
+  return { ok: systemOk && nssOk, verifiedPem: nssOk ? ca.pem : null };
 }
 
 async function applySystem(opts: {
   readonly deps: LinuxTrustCommandDeps;
   readonly ca: ValidatedCa;
-  readonly stagedPath: string;
   readonly manualCertPath: string;
 }): Promise<boolean> {
   const { deps, ca } = opts;
   const system = await applyLinuxSystemTrust({
     host: deps.host,
     ca,
-    stagedPath: opts.stagedPath,
     manualCertPath: opts.manualCertPath,
     canPrompt: deps.canPrompt(),
     show: (commands, fingerprint256) =>
@@ -187,7 +173,7 @@ async function applySystem(opts: {
       ),
   });
   reportSystem(system);
-  return system.status !== "failed";
+  return system.status !== "failed" && system.status !== "applied_unverified";
 }
 
 function reportSystem(system: LinuxSystemTrustOutcome): void {
@@ -245,12 +231,10 @@ const NSS_VERBS = {
 async function applyNss(opts: {
   readonly deps: LinuxTrustCommandDeps;
   readonly ca: ValidatedCa;
-  readonly stagedPath: string;
 }): Promise<boolean> {
   const nss = await applyLinuxNssTrust({
     host: opts.deps.host,
     ca: opts.ca,
-    stagedPath: opts.stagedPath,
   });
   if (nss.status === "certutil_missing") {
     logger.warn({ message: `${nss.hint} (code=${nss.code})` });

@@ -866,13 +866,13 @@ export async function readSystemdServiceEnvironment(opts: {
       error: `${SYSTEMD_UNIT_NAME} sets ExecSearchPath=, which Hack does not check; set PATH with Environment= instead`,
     };
   }
-  // `systemctl show` escapes quotes and backslashes inside a quoted value
-  // (`\"`, `\\`), which the word split here does not decode: an escape
+  // `systemctl show` escapes quotes, backslashes, `$` and backticks inside a
+  // quoted value, which the word split here does not decode: an escape
   // anywhere could shift where a PATH or HACK_HOME word starts.
   for (const setting of ["Environment", "UnsetEnvironment"] as const) {
     if ((props[setting] ?? "").includes("\\")) {
       return {
-        error: `${SYSTEMD_UNIT_NAME} has an ${setting}= value with an escape Hack does not read; remove the backslash or quote from that value`,
+        error: `${SYSTEMD_UNIT_NAME} has an ${setting}= value that systemd reports with an escape Hack does not read (the value contains a quote, backslash, $ or backtick); remove that character from the value or move the setting out of hackd.service`,
       };
     }
   }

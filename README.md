@@ -222,7 +222,10 @@ provider pin on an Apple Silicon Mac using an empty, private, canonical root.
 It previews without `--run`. Foreground startup waits for its own console-ready
 signal before a single `ps --json` confirmation, so qualification does not poll
 the provider lock during startup. A startup `provider_busy` failure stays a failed
-run and is labelled `KNOWN_PRODUCT_BUG provider_busy`, separately from pin failures.
+run and is labelled `KNOWN_PRODUCT_BUG provider_busy`, separately from pin failures,
+only when the terminal console error names `provider_busy` as its primary runtime
+code. Lock text in service output, error notes or a cause code cannot supply that
+label; other or unrecognized failures remain failed qualification steps.
 With `--keep-going`, recorded and thrown step failures both settle owned processes
 before advancing; unconfirmed cleanup skips later steps. Restart keeps the previous
 foreground tracked through replacement failure and its bounded exit wait.

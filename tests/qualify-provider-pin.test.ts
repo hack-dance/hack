@@ -779,7 +779,7 @@ esac
     const { root, run, done } = fixture();
     const work = join(root, "prepared-bases", ".work", "fixture");
     mkdirSync(work, { recursive: true, mode: 0o700 });
-    // Multicall coreutils dispatches by basename; the scanner owns the .work path.
+    // Multicall Coreutils dispatches by basename; detection uses the work path.
     const binary = join(work, "sleep");
     copyFileSync("/bin/sleep", binary);
     chmodSync(binary, 0o700);
@@ -794,7 +794,10 @@ esac
       await verifier.exited;
       expect(run.runningProviders()).toEqual([]);
     } finally {
-      verifier.kill("SIGKILL");
+      if (verifier.exitCode === null && verifier.signalCode === null) {
+        verifier.kill("SIGKILL");
+      }
+      await verifier.exited;
       done();
     }
   });

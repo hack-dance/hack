@@ -49,6 +49,7 @@ stays the default.
 
 - [Overview](native/overview.md): what it is, what it is not, and why to try it.
 - [Try it](native/try-it.md): install, run one project on native, switch back.
+- [Native preflight](native/preflight.md): list blockers before starting a Compose project on native.
 - [What works and known limits](native/limits.md)
 
 ## Work with an agent
@@ -64,3 +65,6 @@ Use the [CLI overview](../cli.md) to choose a command, the
 [reference index](reference/overview.md) for schemas and agent interfaces, and
 [Architecture](../architecture.md) for the runtime model. When something looks
 wrong, run `hack doctor` on the machine running Hack and follow its diagnosis.
+
+[Repair the shared proxy network](guides/proxy-network-repair.md) when Doctor
+finds a proxy container on the wrong network or address.

@@ -27,7 +27,7 @@ does not fall back to Docker without telling you.
 | Preview without starting | `hack config validate`, `hack config plan`, `hack config import --dry-run`, `hack config adopt --dry-run` |
 
 The exact rules for each command are in
-[native authored commands](../../reference/native-authored-commands.md).
+[native authored commands](../reference/native-authored-commands.md).
 
 ## Not supported yet
 
@@ -55,7 +55,7 @@ refuses with `E_NATIVE_PROJECT_UNSUPPORTED`, names the feature, and starts nothi
 | Platforms other than Linux arm64 | The virtual machine runs Linux arm64. `linux/amd64` works only for services you opt in to emulation. |
 
 Details and the exact checks:
-[Compose projects that stay on the Compose backend](../../guides/native-candidate.md#compose-projects-that-stay-on-the-compose-backend).
+[Compose projects that stay on the Compose backend](../guides/native-candidate.md#compose-projects-that-stay-on-the-compose-backend).
 
 ## Other limits
 
@@ -79,7 +79,7 @@ Details and the exact checks:
   faster or lighter than Compose.
 
 The full list is under
-[candidate capability limits](../../guides/prereleases.md#candidate-capability-limits).
+[candidate capability limits](../guides/prereleases.md#candidate-capability-limits).
 
 ## When something is refused
 

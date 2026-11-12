@@ -1,6 +1,6 @@
 # Dependency directories and caches
 
-The commands and configuration on this page were audited against `v5.0.0-next.13`.
+The commands and configuration on this page were audited against `v5.0.0-next.14`.
 The execution notes below come from the newer recipe source revision; the examples
 were not rerun with the pinned binary.
 
@@ -77,7 +77,7 @@ installer image by tag or digest.
 Ordinary cache labels do not stop two installers from writing the same volume
 at the same time. If your install output never depends on the instance and
 needs no credentials, you can opt into the stricter
-[locked installer protocol](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/docs/guides/dependency-cache-protocol.md), which adds
+[locked installer protocol](../../guides/dependency-cache-protocol.md), which adds
 a lock, a verifier and a ready marker.
 
 The how-to, with the commands we ran, is in

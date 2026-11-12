@@ -143,7 +143,7 @@ Docker. It is a beta:
 
 Start with a disposable project. See
 [candidate capability limits](prereleases.md#candidate-capability-limits),
-[the native backend guide](native-candidate.md),
+[the native backend overview](../native/README.md),
 [Native config import](../reference/native-config-import.md) and the staged plan in
 [Qualify a project on v5](v5-dogfooding.md).
 

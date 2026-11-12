@@ -1,6 +1,6 @@
 # Install dependencies in a deps service
 
-The commands and configuration on this page were audited against `v5.0.0-next.13`.
+The commands and configuration on this page were audited against `v5.0.0-next.14`.
 The execution notes below come from the newer recipe source revision; the examples
 were not rerun with the pinned binary.
 
@@ -194,7 +194,7 @@ lockfile and restarts, it gets a new volume; the other instances keep theirs.
   uses different machines.
 - The label selects a volume. It does not stop two installers from writing the
   same volume at once, and it does not prove the install is complete. For that,
-  see the opt-in [locked installer protocol](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/docs/guides/dependency-cache-protocol.md).
+  see the opt-in [locked installer protocol](../../guides/dependency-cache-protocol.md).
 - While instances share a volume, `hack run deps bun add ...` installs into the
   shared volume, so the other instances see the new package too. Change only
   the lockfile first, then restart; the new lockfile selects a new volume:

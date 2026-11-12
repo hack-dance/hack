@@ -115,6 +115,28 @@ prints the root commands, and reports a stable code:
 | `linux_trust_tool_missing` | The family's refresh tool is not installed |
 | `linux_trust_nss_certutil_missing` | `certutil` is missing; browsers were not updated |
 
+## Privileged manual commands
+
+For the rotation and removal commands below, first define this helper in your
+terminal. It uses the distribution's root-owned setuid `/usr/bin/sudo`, clears
+loader variables before starting a helper process, and restores the fixed
+environment after sudo. It does not look up sudo on your PATH.
+
+```sh
+hack_trust_root() (
+  unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG LD_DEBUG_OUTPUT \
+    LD_PROFILE LD_ORIGIN_PATH LD_HWCAP_MASK GLIBC_TUNABLES GCONV_PATH \
+    LOCPATH NLSPATH BASH_ENV ENV || return
+  /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+    /usr/bin/sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=C LC_ALL=C "$@"
+)
+```
+
+If that system sudo is unavailable, repair the distribution's sudo installation
+before using these privileged commands. The helper changes only its child
+environment; it does not change the current shell's environment.
+
 ## When Caddy rotates its root
 
 Rerun `hack global trust`. Debian, Fedora and openSUSE overwrite Hack's anchor
@@ -126,20 +148,21 @@ does not include SHA-256 fingerprints. For each candidate URI, export it with
 `trust extract --filter='pkcs11:…' --format=pem-bundle candidate.pem` and run
 `openssl x509 -in candidate.pem -noout -fingerprint -sha256`. Compare that result
 with the printed stale fingerprint before running
-`sudo trust anchor --remove 'pkcs11:…'` with that exact URI, followed by
-`sudo update-ca-trust extract`. Labels and subjects alone do not identify the old
+`hack_trust_root trust anchor --remove 'pkcs11:…'` with that exact URI, followed by
+`hack_trust_root update-ca-trust extract`. Labels and subjects alone do not identify the old
 root. Hack does not automatically enumerate or remove PKCS#11 objects.
 
 ## Remove what Hack added
 
-Hack has no untrust command yet. To remove its changes by hand:
+Hack has no untrust command yet. With `hack_trust_root` defined above, remove its
+changes by hand:
 
 | Store | Commands |
 | --- | --- |
-| Debian, Ubuntu | `sudo rm /usr/local/share/ca-certificates/hack-caddy-local-ca.crt && sudo update-ca-certificates --fresh` |
-| Fedora, RHEL | `sudo rm /etc/pki/ca-trust/source/anchors/hack-caddy-local-ca.crt && sudo update-ca-trust extract` |
-| openSUSE, SLES | `sudo rm /etc/pki/trust/anchors/hack-caddy-local-ca.crt && sudo update-ca-certificates` |
-| Arch | `trust list`, then `sudo trust anchor --remove 'pkcs11:…'` for the Caddy root's URI, then `sudo update-ca-trust extract` |
+| Debian, Ubuntu | `hack_trust_root rm /usr/local/share/ca-certificates/hack-caddy-local-ca.crt && hack_trust_root update-ca-certificates --fresh` |
+| Fedora, RHEL | `hack_trust_root rm /etc/pki/ca-trust/source/anchors/hack-caddy-local-ca.crt && hack_trust_root update-ca-trust extract` |
+| openSUSE, SLES | `hack_trust_root rm /etc/pki/trust/anchors/hack-caddy-local-ca.crt && hack_trust_root update-ca-certificates` |
+| Arch | `trust list`, then `hack_trust_root trust anchor --remove 'pkcs11:…'` for the Caddy root's verified URI, then `hack_trust_root update-ca-trust extract` |
 | Each NSS database | `certutil -d sql:<database dir> -D -n "Hack Caddy Local CA"` (repeat until it reports no such entry) |
 
 The anchor files and nickname are fixed names, so these commands also remove an

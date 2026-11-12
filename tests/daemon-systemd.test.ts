@@ -43,6 +43,7 @@ import {
   parseSystemdExecProgram,
   parseSystemdPathList,
   probeSystemdUserManager,
+  readSystemdServicePathDirectories,
   readSystemdServiceStatus,
   renderSystemdUnit,
   resolveSystemdAccess,
@@ -95,6 +96,10 @@ type Fake = {
   unitEnvironment: string;
   /** `EnvironmentFiles=` as `systemctl show` prints it ("" for none). */
   environmentFiles: string;
+  /** `UnsetEnvironment=` as `systemctl show` prints it. */
+  unsetEnvironment: string;
+  /** `PassEnvironment=` as `systemctl show` prints it. */
+  passEnvironment: string;
   /** `FragmentPath=` (defaults to the managed unit path). */
   fragmentPath: string | null;
   /** `DropInPaths=` as `systemctl show` prints it. */
@@ -153,6 +158,8 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     needsReload: false,
     unitEnvironment: "PATH=/usr/bin:/bin HACK_NO_INTERACTIVE=1",
     environmentFiles: "",
+    unsetEnvironment: "",
+    passEnvironment: "",
     fragmentPath: null,
     dropInPaths: "",
     unitSearchPath: null,
@@ -232,11 +239,19 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     }
     if (
       verb === "show" &&
-      args.includes("--property=Environment,EnvironmentFiles")
+      args.includes(
+        "--property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment"
+      )
     ) {
       return Promise.resolve(
         ok(
-          `Environment=${state.unitEnvironment}\nEnvironmentFiles=${state.environmentFiles}\n`
+          [
+            `Environment=${state.unitEnvironment}`,
+            `EnvironmentFiles=${state.environmentFiles}`,
+            `UnsetEnvironment=${state.unsetEnvironment}`,
+            `PassEnvironment=${state.passEnvironment}`,
+            "",
+          ].join("\n")
         )
       );
     }
@@ -430,7 +445,8 @@ linuxTest(
       "systemctl --user --no-pager show --property=Version",
       "systemctl --user --no-pager show --property=UnitPath",
       "systemctl --user daemon-reload",
-      "systemctl --user --no-pager show hackd.service --property=Environment,EnvironmentFiles",
+      "systemctl --user --no-pager show hackd.service --property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment",
+      "systemctl --user show-environment",
       "systemctl --user --no-pager show hackd.service --property=ExecCondition,ExecStartPre,ExecStart,ExecStartPost,ExecReload,ExecStop,ExecStopPost",
       "systemctl --user enable hackd.service",
     ]);
@@ -3009,5 +3025,143 @@ linuxTest(
     // Nothing was created.
     expect(await Bun.file(join(configHome, "systemd")).exists()).toBe(false);
     expect(fake.calls).toEqual([]);
+  }
+);
+
+linuxTest(
+  "the service PATH is the effective one, inherited from the user manager",
+  async () => {
+    // Second-family review: with no PATH in the unit, the manager's PATH
+    // (which the service inherits) was replaced by systemd's fixed default.
+    const fake = fakeSystemd();
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const shared = join(root, "shared-helpers");
+    await mkdir(shared);
+    await chmod(shared, 0o777);
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+    fake.managerEnvironment = `HOME=${root}\nPATH=${shared}:/usr/bin\n`;
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toEqual({ dirs: [shared, "/usr/bin"] });
+    expect(
+      await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
+    ).toContain(shared);
+    // The unit's own PATH wins over the manager's.
+    fake.unitEnvironment = '"PATH=/usr/bin:/bin"';
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toEqual({ dirs: ["/usr/bin", "/bin"] });
+    // UnsetEnvironment=PATH applies last: nothing sets PATH, so the lookup
+    // fallbacks are what hackd uses.
+    fake.unsetEnvironment = "PATH";
+    const unset = await readSystemdServicePathDirectories({ deps: fake.deps });
+    expect("dirs" in unset && unset.dirs).toContain("/usr/local/sbin");
+    expect("dirs" in unset && unset.dirs).not.toContain(shared);
+    // PassEnvironment=PATH copies a value not visible here: refused.
+    fake.unsetEnvironment = "";
+    fake.passEnvironment = "PATH";
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toMatchObject({ error: expect.stringContaining("PassEnvironment") });
+    // A manager PATH printed with escapes is not guessed at.
+    fake.passEnvironment = "";
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+    fake.managerEnvironment = `HOME=${root}\nPATH=$'/usr/bin:\\n/x'\n`;
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toMatchObject({ error: expect.stringContaining("quoting") });
+  }
+);
+
+linuxTest(
+  "an interpreter as the ExecStart program is refused, the unit left alone",
+  async () => {
+    // Second-family review: `ExecStart=/bin/bash daemon start --foreground`
+    // passed the exact-argv check, and bash runs a script named `daemon`.
+    const fake = fakeSystemd();
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    // The rendered unit (a hack-named `#!` shim) is accepted.
+    expect(await checkSystemdServicePrograms({ deps: fake.deps })).toBeNull();
+    const bash = Bun.which("bash") ?? "/bin/bash";
+    const withProgram = async (path: string) => {
+      await writeFile(
+        unitPath,
+        unitText().replace(
+          /^ExecStart=.*$/m,
+          () => `ExecStart=${path} daemon start --foreground`
+        )
+      );
+    };
+    await withProgram(bash);
+    const before = await readFile(unitPath, "utf8");
+    expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+      "does not recognize as a hack executable"
+    );
+    expect(await readFile(unitPath, "utf8")).toBe(before);
+    // Naming a link `hack` does not make the interpreter a hack executable.
+    const disguised = join(root, "bin", "hack-disguised");
+    await symlink(bash, disguised);
+    await withProgram(disguised);
+    expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+      "does not recognize as a hack executable"
+    );
+    // A hack-named link to a `#!` launcher (a package manager's) is the
+    // launcher itself, whose chain is checked.
+    const launcher = join(root, "bin", "cli.js");
+    await writeFile(launcher, "#!/usr/bin/env bun\n");
+    await chmod(launcher, 0o755);
+    const linked = join(root, "bin", "hack-linked");
+    await symlink(launcher, linked);
+    await withProgram(linked);
+    expect(await checkSystemdServicePrograms({ deps: fake.deps })).toBeNull();
+  }
+);
+
+linuxTest(
+  "stop reads the unit's Hack home after UnsetEnvironment",
+  async () => {
+    // Second-family review: `UnsetEnvironment=HACK_HOME` removed a HACK_HOME
+    // naming this shell's home, so hackd used `$HOME/.hack` of another HOME.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const stop = () =>
+      stopViaSystemdIfInstalled({
+        pid: null,
+        hackHome: join(root, ".hack"),
+        deps: fake.deps,
+      });
+    fake.active = true;
+    fake.unitEnvironment = `HACK_HOME=${join(root, ".hack")} HOME=/srv/other`;
+    fake.unsetEnvironment = "HACK_HOME";
+    fake.calls.length = 0;
+    const refused = await stop();
+    expect(refused.refused).toContain("/srv/other/.hack");
+    expect(refused.refused).toContain("systemctl --user stop hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    // `NAME=VALUE` unsets only that exact assignment.
+    fake.unsetEnvironment = "HACK_HOME=/srv/elsewhere";
+    expect((await stop()).handled).toBe(true);
+    // PassEnvironment=HOME cannot be read with certainty: refused, with
+    // the manual command.
+    fake.active = true;
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+    fake.unsetEnvironment = "";
+    fake.passEnvironment = "HOME";
+    const unknown = await stop();
+    expect(unknown.refused).toContain("could not be read");
+    expect(unknown.refused).toContain("systemctl --user stop hackd.service");
+    expect(fake.active).toBe(true);
   }
 );

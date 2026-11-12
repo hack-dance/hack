@@ -382,8 +382,10 @@ command to run yourself. On macOS the launchd service belongs to the default
 `hack daemon start` runs hackd in its own session and process group, with its
 output going only to `~/.hack/daemon/hackd.log`. hackd's local API has no
 authentication, so before it binds its sockets hackd makes `~/.hack/daemon`
-owner-only (`0700`), and it sets each socket to `0600`. It refuses to start when
-the directory cannot be made private. Closing the terminal, or an agent
+owner-only (`0700`), and it sets each socket to `0600`. It changes the mode only
+after checking that `daemon` is a real directory you own (not a link) under
+directories others cannot replace, and it refuses to start when the directory
+cannot be made private. Closing the terminal, or an agent
 harness killing the process group that ran the command, does not stop it. It does
 not survive logout or reboot. For that, install it as a login service with
 `hack daemon install`:
@@ -398,9 +400,13 @@ On Linux, once the unit is installed, `hack daemon start` and `hack daemon stop`
 go through `systemctl --user`, so a single manager owns the socket and pid file.
 `stop` goes through systemd even when the pid file is missing or stale, which also
 cancels a restart systemd has scheduled after a crash. `stop` does not touch
-a unit whose effective environment (unit file and drop-ins) sets a different
-`HACK_HOME` from the shell's, or whose environment it cannot read (for example an
-`EnvironmentFile=`): it exits 1 and prints `systemctl --user stop hackd.service`
+a unit whose effective environment serves a different Hack home from the shell's,
+or whose environment it cannot read with certainty (for example an
+`EnvironmentFile=` or a `PassEnvironment=` naming `HACK_HOME`, `HOME` or `PATH`).
+The effective environment is built the way systemd builds it: the user manager's
+environment, then the unit's `Environment=` (drop-ins included), then
+`UnsetEnvironment=` last. In those cases `stop` exits 1 and prints
+`systemctl --user stop hackd.service`
 for stopping it by hand. `start`, `stop` and `clear` remove stale pid and socket
 files only while they are still stale: the socket is removed only if, right
 before removal, the pid file is still the stale one, the socket is the same file
@@ -480,7 +486,10 @@ owned by a system account (below `UID_MIN`) is accepted only in a root-owned
 directory nobody else can write, as package managers install setuid tools.
 
 What systemd runs for the unit is an allowlist: exactly one `ExecStart` running
-`<hack> daemon start --foreground`, and no other `Exec*` setting. A drop-in that
+`<hack> daemon start --foreground`, and no other `Exec*` setting. The program
+must be a hack executable: named `hack` or `hack-*`, resolving to a file named
+the same way or to a `#!` launcher. Any other program, such as an interpreter
+that would run a script named `daemon`, is unknown, and the unit is left as it is. A drop-in that
 adds `ExecStartPre=`, `ExecStop=`, an interpreter wrapper or a second
 `ExecStart` makes `install` and `start` refuse. `hack daemon stop` and
 `hack daemon uninstall` refuse while an `ExecStop`/`ExecStopPost` hook is
@@ -489,7 +498,8 @@ loaded, because stopping runs it (systemd runs stop hooks even after
 unit whose `hack` was removed can still be stopped and uninstalled. `install`
 also refuses to enable a unit that a drop-in points at another `HACK_HOME`. hackd runs helpers such as `docker` and `git` through its
 `PATH`, so every directory on the service's `PATH` (the one Hack writes at install,
-and the effective one systemd reports before each start) must not let other users
+and the effective one the service gets before each start, including a `PATH`
+inherited from the user manager) must not let other users
 add or create programs there either. Put local settings, such as
 `DOCKER_HOST` for rootless Docker, in a drop-in (`systemctl --user edit hackd`).
 `install` writes the `hack` it was run from, and warns when that path is in a

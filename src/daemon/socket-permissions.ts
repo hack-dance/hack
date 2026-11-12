@@ -1,4 +1,5 @@
-import { chmod, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, type FileHandle, open } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { checkReplaceableChain } from "../lib/path-trust.ts";
@@ -21,21 +22,24 @@ import { checkReplaceableChain } from "../lib/path-trust.ts";
  * and not writable by others; group/other write is removed inside the Hack
  * home (its parent), and anything else refuses.
  *
+ * Nothing is changed before the directory is established as Hack's own
+ * (HACK-2052): the chain is checked first, then the directory is opened
+ * without following a link and must be a directory this user owns; only
+ * that open directory is made owner-only. A `daemon` link planted by
+ * another account, or one to a directory elsewhere, is refused unchanged.
+ *
  * Throws when the directory still grants group or other access afterwards
- * (for example a filesystem that ignores chmod) or a parent can be replaced,
- * so hackd does not serve its API from a shared place.
+ * (for example a filesystem that ignores chmod), a parent can be replaced,
+ * or the directory is not this user's own, so hackd does not serve its API
+ * from a shared place.
  */
 export async function secureDaemonDirectory(opts: {
   readonly root: string;
 }): Promise<void> {
-  try {
-    await chmod(opts.root, 0o700);
-  } catch {
-    // Checked below.
-  }
-  const chain = await checkReplaceableChain({
+  const uid = process.getuid?.() ?? -1;
+  const chain = checkReplaceableChain({
     path: opts.root,
-    uid: process.getuid?.() ?? -1,
+    uid,
     hackHome: dirname(opts.root),
   });
   if (chain !== null) {
@@ -43,11 +47,39 @@ export async function secureDaemonDirectory(opts: {
       `hackd state directory ${opts.root} is not safe from other users: ${chain}`
     );
   }
-  const mode = (await stat(opts.root)).mode & 0o777;
-  if ((mode & 0o077) !== 0) {
-    throw new Error(
-      `hackd state directory ${opts.root} is accessible to other users (mode ${mode.toString(8)}) and could not be made owner-only; fix its permissions (chmod 700) and start hackd again`
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      opts.root,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
     );
+  } catch (error: unknown) {
+    throw new Error(
+      `hackd state directory ${opts.root} is not a directory of its own (${error instanceof Error ? error.message : String(error)}); remove or rename it and start hackd again`
+    );
+  }
+  try {
+    const info = await handle.stat();
+    if (uid >= 0 && info.uid !== uid) {
+      throw new Error(
+        `hackd state directory ${opts.root} is owned by another user (uid ${info.uid}); remove or rename it and start hackd again`
+      );
+    }
+    if ((info.mode & 0o077) !== 0) {
+      try {
+        await handle.chmod(0o700);
+      } catch {
+        // Checked below.
+      }
+    }
+    const mode = (await handle.stat()).mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      throw new Error(
+        `hackd state directory ${opts.root} is accessible to other users (mode ${mode.toString(8)}) and could not be made owner-only; fix its permissions (chmod 700) and start hackd again`
+      );
+    }
+  } finally {
+    await handle.close();
   }
 }
 

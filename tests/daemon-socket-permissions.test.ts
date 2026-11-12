@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -74,4 +74,22 @@ test("the daemon directory's parents must not be replaceable by other users", as
   } finally {
     await chmod(home, 0o755);
   }
+});
+
+test("a daemon link to another directory is refused before any mode change", async () => {
+  // Second-family review: chmod(root) followed a planted `daemon` link and
+  // changed an unrelated directory before the trust check refused it.
+  const hackHome = join(root, "home", ".hack");
+  const unrelated = join(root, "unrelated");
+  await mkdir(hackHome, { recursive: true });
+  await chmod(join(root, "home"), 0o755);
+  await chmod(hackHome, 0o755);
+  await mkdir(unrelated);
+  await chmod(unrelated, 0o755);
+  const daemonRoot = join(hackHome, "daemon");
+  await symlink(unrelated, daemonRoot);
+  await expect(secureDaemonDirectory({ root: daemonRoot })).rejects.toThrow(
+    "not a directory of its own"
+  );
+  expect((await stat(unrelated)).mode & 0o777).toBe(0o755);
 });

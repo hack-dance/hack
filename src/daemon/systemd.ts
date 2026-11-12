@@ -1,8 +1,10 @@
 import { lstatSync, readdirSync, type Stats, statSync } from "node:fs";
 import {
   chmod,
+  type FileHandle,
   lstat,
   mkdir,
+  open,
   readdir,
   readlink,
   realpath,
@@ -10,7 +12,7 @@ import {
   stat,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import { GLOBAL_HACK_DIR_NAME } from "../constants.ts";
 import {
@@ -811,55 +813,140 @@ export type SystemdUnitHackHome =
 
 const ENV_WORD = /"([^"]*)"|(\S+)/g;
 
+/** The variables Hack reads from the service environment. */
+const SERVICE_ENV_KEYS = ["PATH", "HOME", "HACK_HOME"] as const;
+type ServiceEnvKey = (typeof SERVICE_ENV_KEYS)[number];
+
+function isServiceEnvKey(name: string): name is ServiceEnvKey {
+  return (SERVICE_ENV_KEYS as readonly string[]).includes(name);
+}
+
 /**
- * The Hack home the unit's hackd uses: `HACK_HOME` from the unit's
- * effective environment (unit file and drop-ins, as systemd reports it),
- * else `$HOME/.hack` with the unit's `HOME` or the user's. Unknown when
- * systemd cannot be asked, the unit reads an `EnvironmentFile=` (not
- * visible here), or the value is relative.
+ * The values of PATH, HOME and HACK_HOME that hackd.service gets, built the
+ * way systemd builds a user service's environment (HACK-2052): the user
+ * manager's environment (`show-environment`, inherited by every service),
+ * then the unit's `Environment=` (unit file and drop-ins, later wins), then
+ * `UnsetEnvironment=` applied last (`NAME` removes it, `NAME=VALUE` removes
+ * only that exact assignment). An absent key is not set in the service.
+ *
+ * Refused (an error) when the result cannot be established with certainty:
+ * systemd cannot be asked, the unit reads an `EnvironmentFile=` (its
+ * contents are not visible here), `PassEnvironment=` names one of these
+ * keys (it copies from the manager's own process environment), or a value
+ * for one of them uses quoting or escapes this parser does not decode.
  */
-export async function readSystemdUnitHackHome(opts: {
+export async function readSystemdServiceEnvironment(opts: {
   readonly deps: SystemdDeps;
-}): Promise<SystemdUnitHackHome> {
+}): Promise<
+  | { readonly env: Readonly<Partial<Record<ServiceEnvKey, string>>> }
+  | { readonly error: string }
+> {
   const show = await opts.deps.run("systemctl", [
     "--user",
     "--no-pager",
     "show",
     SYSTEMD_UNIT_NAME,
-    "--property=Environment,EnvironmentFiles",
+    "--property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment",
   ]);
   if (show.exitCode !== 0) {
     return {
-      kind: "unknown",
-      detail: `systemctl --user show failed: ${firstLine(show.stderr) || `exit code ${show.exitCode}`}`,
+      error: `systemd did not report the ${SYSTEMD_UNIT_NAME} environment (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`,
     };
   }
   const props = parseSystemdProperties(show.stdout);
   if ((props.EnvironmentFiles ?? "").length > 0) {
     return {
-      kind: "unknown",
-      detail: "the unit reads an EnvironmentFile",
+      error: `${SYSTEMD_UNIT_NAME} reads an EnvironmentFile, whose PATH, HOME and HACK_HOME cannot be checked; move them into Environment= or remove the EnvironmentFile`,
     };
   }
-  const env: Record<string, string> = {};
-  for (const match of (props.Environment ?? "").matchAll(ENV_WORD)) {
-    const word = match[1] ?? match[2] ?? "";
+  const passed = splitEnvironmentWords(props.PassEnvironment ?? "");
+  const passedKey = SERVICE_ENV_KEYS.find((key) => passed.includes(key));
+  if (passedKey !== undefined) {
+    return {
+      error: `${SYSTEMD_UNIT_NAME} sets PassEnvironment=${passedKey}, whose value cannot be read here; remove it`,
+    };
+  }
+  const manager = await readManagerEnvironment({ deps: opts.deps });
+  if ("error" in manager) {
+    return { error: manager.error };
+  }
+  const env: Partial<Record<ServiceEnvKey, string>> = {};
+  for (const key of SERVICE_ENV_KEYS) {
+    if (manager.unreadable.has(key)) {
+      return {
+        error: `the user manager's ${key} uses quoting Hack does not read`,
+      };
+    }
+    const value = manager.env[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  const error = applyUnitEnvironment({ env, props });
+  return error === null ? { env } : { error };
+}
+
+/**
+ * Applies the unit's `Environment=` and then its `UnsetEnvironment=` to
+ * `env` for the keys Hack reads. Null, or why an entry cannot be read.
+ */
+function applyUnitEnvironment(opts: {
+  readonly env: Partial<Record<ServiceEnvKey, string>>;
+  readonly props: Readonly<Record<string, string>>;
+}): string | null {
+  const { env, props } = opts;
+  const unreadable = (setting: string, word: string) =>
+    `${SYSTEMD_UNIT_NAME} has an ${setting}= entry Hack cannot read (${word})`;
+  for (const word of splitEnvironmentWords(props.Environment ?? "")) {
     const eq = word.indexOf("=");
-    if (eq > 0) {
-      env[word.slice(0, eq)] = word.slice(eq + 1);
+    const name = eq > 0 ? word.slice(0, eq) : "";
+    if (!isServiceEnvKey(name)) {
+      continue;
+    }
+    if (word.includes("\\")) {
+      return unreadable("Environment", word);
+    }
+    env[name] = word.slice(eq + 1);
+  }
+  for (const word of splitEnvironmentWords(props.UnsetEnvironment ?? "")) {
+    const eq = word.indexOf("=");
+    const name = eq < 0 ? word : word.slice(0, eq);
+    if (!isServiceEnvKey(name)) {
+      continue;
+    }
+    if (word.includes("\\")) {
+      return unreadable("UnsetEnvironment", word);
+    }
+    // `NAME=VALUE` removes only that exact assignment.
+    if (eq < 0 || env[name] === word.slice(eq + 1)) {
+      delete env[name];
     }
   }
-  // The unit's own Environment= wins; otherwise the user manager's
-  // environment (which every service inherits) may set HACK_HOME or HOME.
-  const inherited = await readManagerEnvironment({ deps: opts.deps });
-  if ("error" in inherited) {
-    return { kind: "unknown", detail: inherited.error };
+  return null;
+}
+
+/** The words of a `systemctl show` environment list (quotes removed). */
+function splitEnvironmentWords(value: string): string[] {
+  return [...value.matchAll(ENV_WORD)].map(
+    (match) => match[1] ?? match[2] ?? ""
+  );
+}
+
+/**
+ * The Hack home the unit's hackd uses: `HACK_HOME` from the service's
+ * effective environment ({@link readSystemdServiceEnvironment}), else
+ * `$HOME/.hack` with the service's `HOME` (or, when it has none, the
+ * user's). Unknown when that environment cannot be established or the
+ * value is relative: callers then refuse rather than guess.
+ */
+export async function readSystemdUnitHackHome(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<SystemdUnitHackHome> {
+  const read = await readSystemdServiceEnvironment({ deps: opts.deps });
+  if ("error" in read) {
+    return { kind: "unknown", detail: read.error };
   }
-  for (const key of ["HACK_HOME", "HOME"] as const) {
-    if (env[key] === undefined && inherited.env[key] !== undefined) {
-      env[key] = inherited.env[key];
-    }
-  }
+  const { env } = read;
   const override = (env.HACK_HOME ?? "").trim();
   if (override.length > 0) {
     return isAbsolute(override)
@@ -876,11 +963,17 @@ export async function readSystemdUnitHackHome(opts: {
   return { kind: "home", path: resolve(home, GLOBAL_HACK_DIR_NAME) };
 }
 
-/** `systemctl --user show-environment`: what every user service inherits. */
+/**
+ * `systemctl --user show-environment`: what every user service inherits.
+ * `unreadable` names variables printed with escapes this does not decode.
+ */
 async function readManagerEnvironment(opts: {
   readonly deps: SystemdDeps;
 }): Promise<
-  | { readonly env: Readonly<Record<string, string>> }
+  | {
+      readonly env: Readonly<Record<string, string>>;
+      readonly unreadable: ReadonlySet<string>;
+    }
   | { readonly error: string }
 > {
   const result = await opts.deps.run("systemctl", [
@@ -893,25 +986,35 @@ async function readManagerEnvironment(opts: {
     };
   }
   const env: Record<string, string> = {};
+  const unreadable = new Set<string>();
   for (const line of result.stdout.split("\n")) {
     const eq = line.indexOf("=");
-    if (eq > 0) {
-      env[line.slice(0, eq)] = unquoteShellValue(line.slice(eq + 1));
+    if (eq <= 0) {
+      continue;
+    }
+    const key = line.slice(0, eq);
+    const value = unquoteShellValue(line.slice(eq + 1));
+    if (value === null) {
+      unreadable.add(key);
+    } else {
+      env[key] = value;
     }
   }
-  return { env };
+  return { env, unreadable };
 }
 
 /**
  * `systemctl show-environment` prints values in shell quoting when they
- * need it (`$'...'` or `"..."`); plain values are printed as is.
+ * need it (`$'...'` or `"..."`); plain values are printed as is. Null for
+ * a `$'...'` value with escapes, which is not decoded here.
  */
-function unquoteShellValue(value: string): string {
+function unquoteShellValue(value: string): string | null {
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
     return value.slice(1, -1).replace(/\\(.)/g, "$1");
   }
   if (value.length >= 3 && value.startsWith("$'") && value.endsWith("'")) {
-    return value.slice(2, -1);
+    const inner = value.slice(2, -1);
+    return inner.includes("\\") ? null : inner;
   }
   return value;
 }
@@ -1689,12 +1792,16 @@ export function renderedServicePathDirectories(opts: {
   ];
 }
 
-/** systemd's default PATH for a user service without `PATH=`. */
-const SYSTEMD_DEFAULT_PATH = [
+/**
+ * Where programs are looked up when the service has no PATH at all:
+ * systemd's default search path and the C library's fallback (`/bin`).
+ */
+const UNSET_PATH_LOOKUP = [
   "/usr/local/sbin",
   "/usr/local/bin",
   "/usr/sbin",
   "/usr/bin",
+  "/bin",
 ];
 
 /**
@@ -1850,43 +1957,23 @@ function programFileProblem(opts: {
 }
 
 /**
- * The PATH directories of hackd.service as systemd will start it
- * (`Environment=` from the unit and drop-ins), or systemd's default when
- * the unit sets none. Refused when the unit reads an `EnvironmentFile=`.
+ * The PATH directories of hackd.service as systemd will start it: PATH
+ * from the service's effective environment
+ * ({@link readSystemdServiceEnvironment}: the user manager's environment,
+ * the unit's `Environment=`, then `UnsetEnvironment=`). Only when none of
+ * those sets it does hackd run without PATH; then the directories a
+ * program lookup falls back to (systemd's default and the C library's) are
+ * checked. Refused when that environment cannot be established.
  */
 export async function readSystemdServicePathDirectories(opts: {
   readonly deps: SystemdDeps;
 }): Promise<{ readonly dirs: readonly string[] } | { readonly error: string }> {
-  const show = await opts.deps.run("systemctl", [
-    "--user",
-    "--no-pager",
-    "show",
-    SYSTEMD_UNIT_NAME,
-    "--property=Environment,EnvironmentFiles",
-  ]);
-  if (show.exitCode !== 0) {
-    return {
-      error: `systemd did not report the hackd.service environment (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`,
-    };
+  const read = await readSystemdServiceEnvironment({ deps: opts.deps });
+  if ("error" in read) {
+    return { error: read.error };
   }
-  const props = parseSystemdProperties(show.stdout);
-  // An EnvironmentFile= can set PATH too, and its contents are not visible
-  // here: the PATH hackd gets cannot be established, so refuse.
-  if ((props.EnvironmentFiles ?? "").length > 0) {
-    return {
-      error:
-        "hackd.service reads an EnvironmentFile, so the PATH it gets cannot be checked; move PATH into Environment= or remove the EnvironmentFile",
-    };
-  }
-  let path: string | null = null;
-  const environment = props.Environment ?? "";
-  for (const match of environment.matchAll(ENV_WORD)) {
-    const word = match[1] ?? match[2] ?? "";
-    if (word.startsWith("PATH=")) {
-      path = word.slice("PATH=".length);
-    }
-  }
-  return { dirs: path === null ? SYSTEMD_DEFAULT_PATH : path.split(":") };
+  const path = read.env.PATH;
+  return { dirs: path === undefined ? UNSET_PATH_LOOKUP : path.split(":") };
 }
 
 /** Every property through which a unit (or a drop-in) runs a program. */
@@ -1980,9 +2067,63 @@ export async function checkSystemdServicePrograms(opts: {
   if (starts.length !== 1) {
     return `hackd.service has ${starts.length} ExecStart entries; expected exactly one`;
   }
-  return await checkServiceExecutableTrusted({
-    path: (starts[0] as SystemdExecEntry).path,
-  });
+  const path = (starts[0] as SystemdExecEntry).path;
+  return (
+    (await checkHackExecutableIdentity({ path })) ??
+    (await checkServiceExecutableTrusted({ path }))
+  );
+}
+
+/** `hack` or `hack-<suffix>`, the names Hack installs its executable as. */
+function isHackExecutableName(path: string): boolean {
+  const base = basename(path).toLowerCase();
+  return base === "hack" || base.startsWith("hack-");
+}
+
+/**
+ * The `ExecStart` program must itself be a hack executable (HACK-2052).
+ * Given `<interpreter> daemon start --foreground`, an interpreter (`bash`,
+ * `python3`) runs a script named `daemon` from the working directory,
+ * which no Hack installation or checkout ships and Hack never checks.
+ *
+ * Accepted: a program named `hack`/`hack-*` whose resolved file is either
+ * named the same way (a compiled binary, a Homebrew or `dist/hack` link)
+ * or a `#!` script (the local-development shim, a package manager's
+ * launcher): the kernel then runs the interpreter on that very file, whose
+ * chain {@link checkServiceExecutableTrusted} checks. Anything else is
+ * unknown: refused, and the unit is left as it is.
+ */
+export async function checkHackExecutableIdentity(opts: {
+  readonly path: string;
+}): Promise<string | null> {
+  const unknown = `${SYSTEMD_UNIT_NAME} runs ${opts.path}, which Hack does not recognize as a hack executable (an interpreter would run a script named "daemon" that Hack has not checked); leaving the unit as it is. Review it, then run: hack daemon install`;
+  if (!isHackExecutableName(opts.path)) {
+    return unknown;
+  }
+  let resolved: string;
+  try {
+    resolved = await realpath(opts.path);
+  } catch (error: unknown) {
+    return `${opts.path} could not be resolved: ${errorMessage(error)}`;
+  }
+  if (isHackExecutableName(resolved)) {
+    return null;
+  }
+  return (await startsWithShebang(resolved)) ? null : unknown;
+}
+
+async function startsWithShebang(path: string): Promise<boolean> {
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(path, "r");
+    const head = Buffer.alloc(2);
+    const { bytesRead } = await handle.read(head, 0, 2, 0);
+    return bytesRead === 2 && head.toString("latin1") === "#!";
+  } catch {
+    return false;
+  } finally {
+    await handle?.close();
+  }
 }
 
 /**

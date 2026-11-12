@@ -166,24 +166,10 @@ export async function startViaSystemdIfInstalled(
     logger.error({ message: untrusted });
     return 1;
   }
-  // The unit is a per-user singleton: starting (or repairing) it from a
-  // shell with another Hack home would start someone else's daemon, and
-  // this shell's would never become ready (HACK-2052). Another home's unit
-  // is left alone and this home's hackd is started directly (its socket,
-  // pid file and lock live in this home's daemon directory); a home that
-  // cannot be read is refused.
-  const unitHome = await checkUnitServesHome({
-    hackHome: dirname(hooks.paths.root),
-    deps,
-    action: "starting",
-  });
-  if (unitHome.kind === "foreign") {
-    logger.info({ message: `${unitHome.message}; starting hackd directly` });
-    return null;
-  }
-  if (unitHome.kind === "unknown") {
-    logger.error({ message: unitHome.message });
-    return 1;
+  const hackHome = dirname(hooks.paths.root);
+  const before = await startOnlyForThisHome({ hackHome, deps });
+  if (before !== "ours") {
+    return before;
   }
   const prepared = await prepareSystemdUnitForStart({
     status,
@@ -193,6 +179,12 @@ export async function startViaSystemdIfInstalled(
   });
   if (prepared !== null) {
     return prepared;
+  }
+  // Preparation may have completed a pending reload (or a repair), which
+  // loads what is on disk now: check the home systemd will start again.
+  const after = await startOnlyForThisHome({ hackHome, deps });
+  if (after !== "ours") {
+    return after;
   }
   // After a crash loop systemd refuses `start` ("start request repeated too
   // quickly") until the failed state is cleared. Clearing is harmless when
@@ -222,6 +214,34 @@ export async function startViaSystemdIfInstalled(
     message: `systemd started hackd but it did not report ready yet | Check: hack daemon logs --tail 200 and ${JOURNAL_HINT}`,
   });
   return 1;
+}
+
+/**
+ * The unit is a per-user singleton: starting (or repairing) it from a
+ * shell with another Hack home would start someone else's daemon, and this
+ * shell's would never become ready (HACK-2052). "ours" to go on; null when
+ * the unit serves another home, which is left alone while this home's hackd
+ * is started directly (its socket, pid file and lock live in this home's
+ * daemon directory); 1 when the home cannot be read (refused).
+ */
+async function startOnlyForThisHome(opts: {
+  readonly hackHome: string;
+  readonly deps: SystemdDeps;
+}): Promise<"ours" | null | 1> {
+  const unitHome = await checkUnitServesHome({
+    hackHome: opts.hackHome,
+    deps: opts.deps,
+    action: "starting",
+  });
+  if (unitHome.kind === "foreign") {
+    logger.info({ message: `${unitHome.message}; starting hackd directly` });
+    return null;
+  }
+  if (unitHome.kind === "unknown") {
+    logger.error({ message: unitHome.message });
+    return 1;
+  }
+  return "ours";
 }
 
 /**

@@ -3499,3 +3499,38 @@ linuxTest("start leaves another Hack home's unit alone", async () => {
   expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
   expect(fake.active).toBe(true);
 });
+
+linuxTest(
+  "start checks the Hack home again after completing a pending reload",
+  async () => {
+    // Codex review: the home was read from the old loaded config; the
+    // pending reload then loaded another home's setting, which was started.
+    const fake = fakeSystemd();
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.needsReload = true;
+    const run = fake.deps.run;
+    // What is on disk names another home; systemd sees it after reloading.
+    const deps: SystemdDeps = {
+      ...fake.deps,
+      run: async (command, args) => {
+        const result = await run(command, args);
+        if (command === "systemctl" && args.includes("daemon-reload")) {
+          fake.unitEnvironment =
+            "HACK_NO_INTERACTIVE=1 HACK_HOME=/srv/other-home";
+        }
+        return result;
+      },
+    };
+    fake.calls.length = 0;
+    expect(
+      await startViaSystemdIfInstalled({ ...startHooks(fake), deps })
+    ).toBeNull();
+    expect(fake.calls).toContain("systemctl --user daemon-reload");
+    expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+    expect(fake.active).toBe(false);
+  }
+);

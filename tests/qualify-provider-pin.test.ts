@@ -8,7 +8,10 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+<<<<<<< HEAD
   readdirSync,
+=======
+>>>>>>> origin/next
   readFileSync,
   realpathSync,
   rmSync,
@@ -27,7 +30,10 @@ import {
   INERT_RECORD_FIELDS,
   INERT_RUNNING_RESOURCES,
   inertField,
+<<<<<<< HEAD
   isExecutor,
+=======
+>>>>>>> origin/next
   main,
   type Options,
   parseCpuTime,
@@ -41,7 +47,10 @@ import {
   readyData,
   rootProblem,
   sourceTemplatePins,
+<<<<<<< HEAD
   warmPhases,
+=======
+>>>>>>> origin/next
 } from "../scripts/qualify-provider-pin.ts";
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
@@ -271,6 +280,7 @@ describe("provider pin qualification", () => {
     ).toEqual([10]);
   });
 
+<<<<<<< HEAD
   test("warm up -d phases come from executor process lifetimes", () => {
     const native = "/bundle/hack-native";
     const sample = (at: number, ...commands: string[]) => ({
@@ -350,6 +360,8 @@ describe("provider pin qualification", () => {
     );
   });
 
+=======
+>>>>>>> origin/next
   test("readiness requires an observed ready run", () => {
     const ready = { status: "observed", phase: "ready-observed", items: [] };
     expect(readyData(JSON.stringify({ ok: true, data: ready }))).toEqual(ready);
@@ -403,11 +415,14 @@ case "$1" in
     if [ ! -e '${root}/ready-'"$n" ]; then touch '${root}/early-ps'; exit 79; fi
     printf '{"ok":true,"data":{"status":"observed","phase":"ready-observed","run":"%032x","items":[{"service":"web","container":"c-%s"}]}}' "$n" "$n" ;;
   up|restart)
+<<<<<<< HEAD
     if [ "$2" = -d ]; then
       n=$(cat '${root}/gen' 2>/dev/null || echo 0)
       touch '${root}/ready-'"$n"
       exit 0
     fi
+=======
+>>>>>>> origin/next
     if [ "$1" = restart ] && [ -e '${root}/restart-fails' ]; then exit 23; fi
     if [ -e '${root}/provider-busy' ]; then echo '[provider_busy] Another candidate operation holds the provider lock' >&2; exit 23; fi
     n=$(( $(cat '${root}/gen' 2>/dev/null || echo 0) + 1 )); echo "$n" > '${root}/gen'
@@ -814,6 +829,7 @@ esac
     }
   });
 
+<<<<<<< HEAD
   test("a warm start too short to sample is recorded as unknown, not failed", async () => {
     const { root, run, done } = fixture();
     try {
@@ -841,6 +857,8 @@ esac
     }
   });
 
+=======
+>>>>>>> origin/next
   test("restart reports a previous foreground that never exits instead of waiting forever", async () => {
     const { root, run, done } = fixture();
     try {

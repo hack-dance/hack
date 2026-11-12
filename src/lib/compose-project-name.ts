@@ -15,8 +15,13 @@ import { defaultProjectSlugFromPath } from "./project.ts";
 export async function resolveComposeProjectName(opts: {
   readonly project: Pick<ProjectContext, "composeFile" | "projectRoot">;
   readonly cfg?: Pick<ProjectConfig, "name">;
+  /** Already parsed Compose name; null skips a file read when no name exists. */
+  readonly composeName?: string | null;
 }): Promise<string> {
-  const composeName = await readComposeProjectName(opts.project.composeFile);
+  const composeName =
+    opts.composeName === undefined
+      ? await readComposeProjectName(opts.project.composeFile)
+      : opts.composeName?.trim();
   if (composeName) {
     return composeName;
   }

@@ -138,6 +138,7 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -243,6 +244,7 @@ import {
   scopeRuntimeHygieneToProject,
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
+import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import {
@@ -258,12 +260,14 @@ import {
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
+import { runNativePreflightCommand } from "./doctor-native-preflight.ts";
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
   resolvePreferredHostDnsTarget,
   resolverHasNameserver,
 } from "./doctor-utils.ts";
+import { inspectProxyNetwork } from "./global-proxy-network.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import {
   buildDoctorRecoveryGuidance,
@@ -382,6 +386,21 @@ const doctorOptions = [
   optBrowserResult,
   optBranch,
   defineOption({
+    name: "nativePreflight",
+    type: "boolean",
+    long: "--native-preflight",
+    description:
+      "List everything that would stop this Compose project from starting on the native backend, with a fix for each; read-only, with --path, --profile and --json",
+  } as const),
+  defineOption({
+    name: "profile",
+    type: "string",
+    long: "--profile",
+    valueHint: "<name[,name...]>",
+    description:
+      "Compose profiles to review with --native-preflight (comma-separated)",
+  } as const),
+  defineOption({
     name: "nativeCleanup",
     type: "string",
     long: "--native-cleanup",
@@ -424,6 +443,9 @@ const doctorSpec = defineCommand({
   subcommands: [],
 } as const);
 
+/** Proxy containers that run without their ingress network (HACK-2056). */
+const PROXY_NETWORK_CHECK = "proxy network";
+
 /** Doctor check for a missing or outdated committed `.hack/.gitignore`. */
 const HACK_GITIGNORE_CHECK = "hack gitignore";
 
@@ -460,6 +482,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "gateway tokens",
       "grafana",
       "proxy ports",
+      PROXY_NETWORK_CHECK,
       "caddy local ca",
       "host tls trust",
       SUPERSEDED_ROOTS_CHECK,
@@ -613,9 +636,62 @@ async function maybeRunNativeMappingRecovery(
   return null;
 }
 
+/** The only options `--native-preflight` accepts beside itself. */
+const NATIVE_PREFLIGHT_OPTIONS = new Set([
+  "nativePreflight",
+  "path",
+  "json",
+  "profile",
+]);
+
+/** Comma-separated profile names, trimmed, unique, in the order given. */
+function preflightProfiles(value: string | undefined): string[] {
+  return [
+    ...new Set(
+      (value ?? "")
+        .split(",")
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0)
+    ),
+  ];
+}
+
+/**
+ * `--native-preflight` is its own read-only mode: it runs no other check. An
+ * allow-list, so an option added to doctor later is refused here until it is
+ * deliberately supported.
+ */
+async function runNativePreflightMode(
+  args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
+): Promise<number> {
+  const options: Readonly<Record<string, unknown>> = args.options;
+  const other = Object.entries(options).some(
+    ([name, value]) =>
+      !NATIVE_PREFLIGHT_OPTIONS.has(name) &&
+      value !== undefined &&
+      value !== false
+  );
+  if (other) {
+    throw new CliUsageError(
+      "--native-preflight accepts only --path, --profile and --json; it changes nothing and runs no other check."
+    );
+  }
+  return await runNativePreflightCommand({
+    startDir: resolveDoctorStartDir(args.options.path),
+    json: args.options.json === true,
+    profiles: preflightProfiles(args.options.profile),
+  });
+}
+
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  if (args.options.nativePreflight) {
+    return await runNativePreflightMode(args);
+  }
+  if (args.options.profile !== undefined) {
+    throw new CliUsageError("--profile applies only to --native-preflight.");
+  }
   const adopted = await preflightDoctorProject({
     startDir: resolveDoctorStartDir(args.options.path),
   });
@@ -884,6 +960,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   results.push(
     await runCheck(s, "proxy ports", () => checkProxyPortForwarding(), {
       timeoutMs: 5000,
+    })
+  );
+  results.push(
+    await runCheck(s, PROXY_NETWORK_CHECK, () => checkProxyNetwork(), {
+      timeoutMs: 12_000,
     })
   );
 
@@ -3933,6 +4014,7 @@ async function runDoctorFix(opts: {
     renderGlobalCaddyCompose({
       useStaticCoreDnsIp: useStaticIps,
       useStaticCaddyIp: useStaticIps,
+      bindAddress: await resolveProxyBindAddress(),
     })
   );
   await writeWithPromptIfDifferent(
@@ -5927,4 +6009,38 @@ async function runCheck(
     // A settled check must not keep the process alive until its deadline.
     clearTimeout(timer);
   }
+}
+
+async function checkProxyNetwork(): Promise<CheckResult> {
+  const composeFile = getGlobalPaths().caddyCompose;
+  if (!(await pathExists(composeFile))) {
+    return {
+      name: PROXY_NETWORK_CHECK,
+      status: "warn",
+      message: `Missing ${composeFile} (run: hack global install)`,
+    };
+  }
+  const issues = await inspectProxyNetwork({ composeFile });
+  if (issues === null) {
+    return {
+      name: PROXY_NETWORK_CHECK,
+      status: "warn",
+      message: "Unable to read the proxy containers from Docker",
+    };
+  }
+  if (issues.length === 0) {
+    return {
+      name: PROXY_NETWORK_CHECK,
+      status: "ok",
+      message: `Proxy containers are on ${DEFAULT_INGRESS_NETWORK}`,
+    };
+  }
+  return {
+    name: PROXY_NETWORK_CHECK,
+    status: "error",
+    message: [
+      ...issues.map(describeProxyNetworkIssue),
+      "fix: hack global up (recreates the proxy stack)",
+    ].join("\n"),
+  };
 }

@@ -31,11 +31,15 @@
  *   9. web plus database: service DNS, and a database write that survives every step.
  *  10. measurements: prepare time, cold and warm `up` to ready, `restart`, `down`, VM plus
  *      helper physical footprint at idle after 0, 3 and 10 minutes (3 is past the 2-minute
+<<<<<<< HEAD
  *      reclaim pulse), and idle CPU; then `--warm-runs` (default 5) warm `up -d` runs on the
  *      running pool, each split into phases from the executor's process lifetimes sampled
  *      every 50 ms: launcher until `graph retained-preflight`, the preflight, the gap, `runtime
  *      up`, and serve to ready. `--warm-only` runs steps 1-3 and these warm runs only, for a
  *      quick before/after comparison.
+=======
+ *      reclaim pulse), and idle CPU.
+>>>>>>> origin/next
  *  11. unclean stop, last and recorded only: SIGKILL to the provider VM, then what the
  *      foreground, `down --recover`, `runtime recover` and the next `up -d` do.
  *
@@ -336,6 +340,7 @@ export function providerProcesses(
   return rows.filter((row) => row.command.startsWith(prefix));
 }
 
+<<<<<<< HEAD
 /** One `ps` sample of this home's executor processes, at `at` seconds after the command began. */
 export interface PhaseSample {
   at: number;
@@ -435,6 +440,8 @@ export function isExecutor(
   );
 }
 
+=======
+>>>>>>> origin/next
 export interface Options {
   hack: string;
   native: string;
@@ -450,8 +457,11 @@ export interface Options {
   amd64Image: string | null;
   idleMinutes: number[];
   skipIdle: boolean;
+<<<<<<< HEAD
   warmRuns: number;
   warmOnly: boolean;
+=======
+>>>>>>> origin/next
   keepGoing: boolean;
   profile: "development" | "research";
   caddy: string | null;
@@ -464,7 +474,10 @@ const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hac
   --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
   [--upstream-checksums /abs/checksums.sha256] [--approved-host example.com --approved-host example.org] \\
   [--amd64-image repo@sha256:...] [--idle-minutes 0,3,10 | --skip-idle] \\
+<<<<<<< HEAD
   [--warm-runs 5] [--warm-only] \\
+=======
+>>>>>>> origin/next
   [--profile development|research] [--keep-going] \\
   [--caddy /abs/caddy --https-port 8443] [--run]`;
 
@@ -486,6 +499,7 @@ function idleMinutes(text: string): number[] {
   return idle;
 }
 
+<<<<<<< HEAD
 function wholeNumber(name: string, text: string, maximum: number): number {
   const value = Number(text);
   if (!(Number.isInteger(value) && value >= 0 && value <= maximum)) {
@@ -502,6 +516,9 @@ function profileOption(value: string): "development" | "research" {
 }
 
 const FLAGS = new Set(["--run", "--skip-idle", "--warm-only", "--keep-going"]);
+=======
+const FLAGS = new Set(["--run", "--skip-idle", "--keep-going"]);
+>>>>>>> origin/next
 
 /** Parse and validate arguments; throws with a usage line on any problem. */
 export function parseOptions(argv: string[]): Options {
@@ -558,12 +575,19 @@ export function parseOptions(argv: string[]): Options {
     );
   }
   const idle = idleMinutes(one("--idle-minutes", false) ?? "0,3,10");
+<<<<<<< HEAD
   const warmRuns = wholeNumber(
     "--warm-runs",
     one("--warm-runs", false) ?? "5",
     20
   );
   const profile = profileOption(one("--profile", false) ?? "development");
+=======
+  const profile = one("--profile", false) ?? "development";
+  if (profile !== "development" && profile !== "research") {
+    throw new Error("--profile must be development or research.");
+  }
+>>>>>>> origin/next
   const caddy = absolute("--caddy", false);
   const portText = one("--https-port", false);
   const httpsPort = portText === null ? null : Number(portText);
@@ -591,8 +615,11 @@ export function parseOptions(argv: string[]): Options {
     amd64Image: pinned("--amd64-image", false),
     idleMinutes: flags.has("--skip-idle") ? [] : idle,
     skipIdle: flags.has("--skip-idle"),
+<<<<<<< HEAD
     warmRuns,
     warmOnly: flags.has("--warm-only"),
+=======
+>>>>>>> origin/next
     keepGoing: flags.has("--keep-going"),
     profile,
     caddy,
@@ -1650,6 +1677,7 @@ export class Qualification {
     );
   }
 
+<<<<<<< HEAD
   /** The main pool's provider process as `pid@start`, from its receipt, or null. */
   providerIdentity(): string | null {
     try {
@@ -1667,6 +1695,11 @@ export class Qualification {
   observedReady(label = "ps-after-recover"): boolean {
     const ps = this.exec(
       label,
+=======
+  observedReady(): boolean {
+    const ps = this.exec(
+      "ps-after-recover",
+>>>>>>> origin/next
       [this.options.hack, "ps", "--path", this.project, "--json"],
       { cwd: this.project, timeout: 30, allowFailure: true }
     );
@@ -1963,11 +1996,15 @@ export class Qualification {
             "final_down_seconds",
             round(await this.down("down-final"))
           );
+<<<<<<< HEAD
           await this.warm();
+=======
+>>>>>>> origin/next
         },
       ],
       ["11 unclean stop (recorded)", false, () => this.uncleanStop(identity)],
     ];
+<<<<<<< HEAD
     // --warm-only: steps 1-3 and the warm `up -d` runs, for a quick before/after comparison.
     const selected: typeof steps = this.options.warmOnly
       ? [
@@ -1984,6 +2021,9 @@ export class Qualification {
         ]
       : steps;
     const failed = await this.runSteps(selected);
+=======
+    const failed = await this.runSteps(steps);
+>>>>>>> origin/next
     if (failed !== null) {
       return failed;
     }
@@ -2551,6 +2591,7 @@ export class Qualification {
     };
   }
 
+<<<<<<< HEAD
   /**
    * Warm `up -d` on the running pool, `warmRuns` times: total time and phases from this
    * home's executor processes sampled every 50 ms, then `down`. Prints each run and medians.
@@ -2662,6 +2703,8 @@ export class Qualification {
     }
   }
 
+=======
+>>>>>>> origin/next
   async idle(): Promise<void> {
     if (this.options.skipIdle) {
       this.note("INFO idle measurements skipped (--skip-idle)");

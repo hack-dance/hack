@@ -1,0 +1,3 @@
+[test]
+# Register the DOM before any test file, and so before React, loads.
+preload = ["./test-dom.ts"]

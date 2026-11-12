@@ -1,0 +1,11 @@
+name: tunnel
+services:
+  web:
+    image: oven/bun:1.4.4-slim
+    working_dir: /app
+    command: ["bun", "src/server.ts"]
+    volumes:
+      - ..:/app:ro
+    # The tunnel runs on the host, so the app is published on loopback only.
+    ports:
+      - "127.0.0.1:4310:3000"

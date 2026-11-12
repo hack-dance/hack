@@ -1,0 +1,55 @@
+name: python-postgres
+services:
+  # Builds the virtual environment inside Linux, in a named volume. pip skips
+  # packages that are already installed, so later starts are quick.
+  deps:
+    image: python:3.13-slim
+    working_dir: /app
+    command: ["sh", "-c", "python -m venv /venv && /venv/bin/pip install --disable-pip-version-check -r requirements.txt"]
+    volumes:
+      - ..:/app:ro
+      - venv:/venv
+
+  web:
+    image: python:3.13-slim
+    working_dir: /app
+    command: ["/venv/bin/python", "app.py"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ..:/app
+      - venv:/venv:ro
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    labels:
+      caddy: python-postgres.hack.local
+      caddy.reverse_proxy: "{{upstreams 8000}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - default
+
+  db:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "app", "-d", "app"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  venv: {}
+  db-data: {}
+
+networks:
+  hack-dev:
+    external: true

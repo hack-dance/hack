@@ -1,0 +1,64 @@
+name: monorepo
+# Bun (like pnpm) writes a node_modules directory into each workspace package
+# as well as the root. Each one gets a named volume, so nothing is written to
+# the host checkout and every container sees the same Linux install.
+x-install-volumes: &install-volumes
+  - ..:/app
+  - node_modules:/app/node_modules
+  - web_node_modules:/app/apps/web/node_modules
+  - api_node_modules:/app/apps/api/node_modules
+
+# Application services read dependencies; only the installer writes them.
+x-app-volumes: &app-volumes
+  - ..:/app
+  - node_modules:/app/node_modules:ro
+  - web_node_modules:/app/apps/web/node_modules:ro
+  - api_node_modules:/app/apps/api/node_modules:ro
+
+services:
+  deps:
+    image: oven/bun:1.4.4-slim
+    working_dir: /app
+    command: ["bun", "install", "--frozen-lockfile"]
+    volumes: *install-volumes
+
+  web:
+    image: oven/bun:1.4.4-slim
+    working_dir: /app/apps/web
+    command: ["bun", "run", "dev"]
+    volumes: *app-volumes
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+    labels:
+      caddy: monorepo.hack.local
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - default
+
+  api:
+    image: oven/bun:1.4.4-slim
+    working_dir: /app/apps/api
+    command: ["bun", "run", "dev"]
+    volumes: *app-volumes
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+    labels:
+      caddy: api.monorepo.hack.local
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      caddy.tls: internal
+    networks:
+      - hack-dev
+      - default
+
+volumes:
+  node_modules: {}
+  web_node_modules: {}
+  api_node_modules: {}
+
+networks:
+  hack-dev:
+    external: true

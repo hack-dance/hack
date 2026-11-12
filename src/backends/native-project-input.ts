@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
-  PROJECT_ENV_SECRET_KEY_ENV,
+  missingProjectEnvKeyHint,
   ProjectEnvKeyMissingError,
   resolveProjectEnvConfig,
   resolveProjectEnvSelection,
@@ -97,7 +97,7 @@ function composeFileRefused(): Error {
 function environmentRefused(error: unknown): Error {
   if (error instanceof ProjectEnvKeyMissingError) {
     return refused(
-      `Hack managed env has secret entries but the project env key is missing. Run "hack env add --secret ..." to generate it, restore the key file, or set ${PROJECT_ENV_SECRET_KEY_ENV}`,
+      `Hack managed env has secret entries but the project env key is missing. ${missingProjectEnvKeyHint()}`,
       "E_CONFIG_INVALID"
     );
   }
@@ -107,7 +107,8 @@ function environmentRefused(error: unknown): Error {
   );
 }
 
-async function readCompose(path: string): Promise<Buffer> {
+/** Bounded, nonblocking regular Compose snapshot shared by start and preflight. */
+export async function readNativeComposeBytes(path: string): Promise<Buffer> {
   const file = await open(
     path,
     constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW
@@ -299,7 +300,7 @@ export async function prepareNativeProjectInput(opts: {
   readonly envName?: string | null;
 }): Promise<NativeProjectInput> {
   try {
-    const bytes = await readCompose(opts.composeFile);
+    const bytes = await readNativeComposeBytes(opts.composeFile);
     let compose: unknown;
     try {
       compose = Bun.YAML.parse(

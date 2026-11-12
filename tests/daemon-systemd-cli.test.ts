@@ -45,6 +45,7 @@ case "$1" in
     if [ "$2" = "--property=Version" ]; then echo "Version=255"; exit 0; fi
     if [ "$2" = "--property=UnitPath" ]; then echo "UnitPath=$XDG_CONFIG_HOME/systemd/user"; exit 0; fi
     if [ -f "$unit" ]; then echo LoadState=loaded; echo "FragmentPath=$unit"; else echo LoadState=not-found; fi
+    if [ -f "$unit" ]; then p=$(sed -n 's/^ExecStart="\\([^"]*\\)".*/\\1/p' "$unit"); echo "ExecStart={ path=$p ; argv[]=$p daemon start --foreground ; ignore_errors=no }"; fi
     echo DropInPaths=
     if [ -f "$state/enabled" ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi
     if alive; then echo ActiveState=active; echo "MainPID=$(cat "$main")"; else echo ActiveState=inactive; echo MainPID=0; fi

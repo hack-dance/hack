@@ -982,12 +982,16 @@ export async function installSystemdUnit(opts: {
     deps: opts.deps,
   });
   const pathError =
-    "error" in servicePath
+    ("error" in servicePath
       ? servicePath.error
       : await checkServicePathDirectories({
           dirs: servicePath.dirs,
           hackHome: opts.hackHome ?? null,
-        });
+        })) ??
+    (await checkSystemdServicePrograms({
+      deps: opts.deps,
+      hackHome: opts.hackHome ?? null,
+    }));
   if (pathError !== null) {
     return {
       ok: false,
@@ -1354,13 +1358,17 @@ export async function checkSystemdLoadedUnitPaths(opts: {
     deps: opts.deps,
   });
   const pathError =
-    "error" in servicePath
+    ("error" in servicePath
       ? servicePath.error
       : await checkServicePathDirectories({
           dirs: servicePath.dirs,
           hackHome: opts.hackHome ?? null,
           uid,
-        });
+        })) ??
+    (await checkSystemdServicePrograms({
+      deps: opts.deps,
+      hackHome: opts.hackHome ?? null,
+    }));
   if (pathError !== null) {
     return `Not starting ${SYSTEMD_UNIT_NAME}: ${pathError}`;
   }
@@ -1405,7 +1413,8 @@ export async function checkSystemdLoadedUnitPaths(opts: {
  */
 export async function checkServiceExecutableTrusted(opts: {
   readonly path: string;
-  readonly hackHome: string;
+  /** Hack's own directories; null when none may be repaired. */
+  readonly hackHome: string | null;
   /** Defaults to this process's uid. */
   readonly uid?: number;
 }): Promise<string | null> {
@@ -1418,7 +1427,7 @@ export async function checkServiceExecutableTrusted(opts: {
   const error = await checkReplaceableChain({
     path: opts.path,
     uid,
-    hackHome: resolve(opts.hackHome),
+    hackHome: opts.hackHome === null ? null : resolve(opts.hackHome),
   });
   return error === null
     ? null
@@ -1673,6 +1682,93 @@ export async function readSystemdServicePathDirectories(opts: {
     }
   }
   return { dirs: path === null ? SYSTEMD_DEFAULT_PATH : path.split(":") };
+}
+
+/** Every property through which a unit (or a drop-in) runs a program. */
+const EXEC_PROPERTIES = [
+  "ExecCondition",
+  "ExecStartPre",
+  "ExecStart",
+  "ExecStartPost",
+  "ExecReload",
+  "ExecStop",
+  "ExecStopPost",
+] as const;
+const EXEC_ENTRY_PATH = /path=(.*?) ; argv\[\]=/g;
+
+/**
+ * The programs systemd will run for hackd.service, read from the manager
+ * (unit file and drop-ins): every `Exec*=` entry's `path=`. A drop-in can
+ * replace `ExecStart` or add `ExecStartPre=`, so the unit file alone is
+ * not enough (HACK-2052). Refused when systemd cannot say, when there is
+ * not exactly one `ExecStart`, or when an entry cannot be read.
+ */
+export async function readSystemdServicePrograms(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<
+  { readonly programs: readonly string[] } | { readonly error: string }
+> {
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    SYSTEMD_UNIT_NAME,
+    `--property=${EXEC_PROPERTIES.join(",")}`,
+  ]);
+  if (show.exitCode !== 0) {
+    return {
+      error: `systemd did not report the programs hackd.service runs (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`,
+    };
+  }
+  const programs: string[] = [];
+  let execStarts = 0;
+  for (const line of show.stdout.split("\n")) {
+    const eq = line.indexOf("=");
+    const key = eq > 0 ? line.slice(0, eq) : "";
+    const value = eq > 0 ? line.slice(eq + 1).trim() : "";
+    if (!(EXEC_PROPERTIES as readonly string[]).includes(key) || value === "") {
+      continue;
+    }
+    const paths = [...value.matchAll(EXEC_ENTRY_PATH)].map((m) => m[1] ?? "");
+    const entries = value.split("{").length - 1;
+    if (paths.length === 0 || paths.length !== entries) {
+      return { error: `systemd reported a ${key} entry Hack cannot read` };
+    }
+    if (key === "ExecStart") {
+      execStarts += paths.length;
+    }
+    programs.push(...paths);
+  }
+  if (execStarts !== 1) {
+    return {
+      error: `hackd.service has ${execStarts} ExecStart entries; expected exactly one`,
+    };
+  }
+  return { programs };
+}
+
+/**
+ * {@link readSystemdServicePrograms}, each checked with
+ * {@link checkServiceExecutableTrusted}.
+ */
+export async function checkSystemdServicePrograms(opts: {
+  readonly deps: SystemdDeps;
+  readonly hackHome: string | null;
+}): Promise<string | null> {
+  const read = await readSystemdServicePrograms({ deps: opts.deps });
+  if ("error" in read) {
+    return read.error;
+  }
+  for (const program of read.programs) {
+    const error = await checkServiceExecutableTrusted({
+      path: program,
+      hackHome: opts.hackHome,
+    });
+    if (error !== null) {
+      return error;
+    }
+  }
+  return null;
 }
 
 function errorMessage(error: unknown): string {

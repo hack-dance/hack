@@ -30,6 +30,7 @@ import {
   checkServiceExecutableTrusted,
   checkServicePathDirectories,
   checkSystemdLoadedUnitPaths,
+  checkSystemdServicePrograms,
   checkSystemdUnitDirectoryChain,
   checkSystemdUnitDropIns,
   checkSystemdUnitFile,
@@ -100,6 +101,8 @@ type Fake = {
   dropInPaths: string;
   /** The manager's `UnitPath=` (null: config and data dirs under the fixture). */
   unitSearchPath: string | null;
+  /** Extra `Exec*=` lines (drop-in overrides) the manager reports. */
+  extraExecLines: string[];
 };
 
 let root: string;
@@ -140,6 +143,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     fragmentPath: null,
     dropInPaths: "",
     unitSearchPath: null,
+    extraExecLines: [],
     deps: undefined as unknown as SystemdDeps,
   };
   const ok = (stdout = ""): ServiceCommandResult => ({
@@ -168,6 +172,22 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
             }
           : ok("Version=255\n")
       );
+    }
+    if (
+      verb === "show" &&
+      args.some((arg) => arg.startsWith("--property=ExecCondition,"))
+    ) {
+      // ExecStart as systemd reports it for the unit file on disk.
+      return (async () => {
+        const text = await readFile(unitPath, "utf8").catch(() => "");
+        const program = extractSystemdExecProgram({ unitText: text });
+        const lines = program
+          ? [
+              `ExecStart={ path=${program} ; argv[]=${program} daemon start --foreground ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`,
+            ]
+          : [];
+        return ok(`${[...lines, ...state.extraExecLines].join("\n")}\n`);
+      })();
     }
     if (verb === "show" && args.includes("--property=UnitPath")) {
       return Promise.resolve(
@@ -369,6 +389,7 @@ test("install writes, reloads and enables; a second install is a no-op", async (
     "systemctl --user --no-pager show --property=UnitPath",
     "systemctl --user daemon-reload",
     "systemctl --user --no-pager show hackd.service --property=Environment,EnvironmentFiles",
+    "systemctl --user --no-pager show hackd.service --property=ExecCondition,ExecStartPre,ExecStart,ExecStartPost,ExecReload,ExecStop,ExecStopPost",
     "systemctl --user enable hackd.service",
   ]);
 
@@ -1271,6 +1292,11 @@ test("start leaves a unit with an ExecStart prefix or specifier as it is", async
   // program, and start rewrote the unit and dropped the prefix.
   const fake = fakeSystemd();
   await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  // systemd resolves the prefix or specifier itself; here it reports the
+  // (trusted) program the unit runs.
+  fake.extraExecLines = [
+    `ExecStart={ path=${program} ; argv[]=${program} daemon start --foreground ; ignore_errors=no }`,
+  ];
   for (const exec of [
     "ExecStart=-/opt/hack-old/hack daemon start --foreground",
     "ExecStart=%h/.local/bin/hack daemon start --foreground",
@@ -2258,4 +2284,48 @@ test("an EnvironmentFile on the unit stops install before enable and start", asy
   expect(
     await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
   ).toContain("EnvironmentFile");
+});
+
+test("the programs systemd will run (drop-in Exec* overrides) are checked", async () => {
+  // Codex review: a drop-in can override ExecStart (or add ExecStartPre=)
+  // with a program others can replace; only the unit file's was checked.
+  const fake = fakeSystemd();
+  await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
+  expect(
+    await checkSystemdServicePrograms({ deps: fake.deps, hackHome: null })
+  ).toBeNull();
+  const shared = join(root, "shared-exec");
+  await mkdir(shared);
+  await chmod(shared, 0o777);
+  const planted = join(shared, "payload");
+  await writeFile(planted, "#!/bin/sh\n");
+  await chmod(planted, 0o755);
+  fake.extraExecLines = [
+    `ExecStartPre={ path=${planted} ; argv[]=${planted} ; ignore_errors=no }`,
+  ];
+  expect(
+    await checkSystemdServicePrograms({ deps: fake.deps, hackHome: null })
+  ).toContain(shared);
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+  // Install refuses before enable too.
+  const install = await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+  });
+  expect(install.ok).toBe(false);
+  // A second ExecStart (an override that did not reset it) is refused.
+  fake.extraExecLines = [
+    `ExecStart={ path=${program} ; argv[]=${program} ; ignore_errors=no }`,
+  ];
+  expect(
+    await checkSystemdServicePrograms({ deps: fake.deps, hackHome: null })
+  ).toContain("exactly one");
+  // An entry that cannot be read is refused.
+  fake.extraExecLines = ["ExecStop={ something odd }"];
+  expect(
+    await checkSystemdServicePrograms({ deps: fake.deps, hackHome: null })
+  ).toContain("cannot read");
 });

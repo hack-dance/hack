@@ -45,6 +45,7 @@ async function fixture(
     | "slow"
     | "error"
     | "malformed"
+    | "flood"
 ) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-log-process-"))
@@ -63,16 +64,27 @@ async function fixture(
     binary,
     `#!/usr/bin/env bun
 import { writeFileSync } from "node:fs";
+import { once } from "node:events";
 const root = process.argv[3];
 writeFileSync(root + "/args", JSON.stringify(process.argv.slice(2)));
 writeFileSync(root + "/ready", String(process.pid));
+process.stdin.on("end", () => { writeFileSync(root + "/leash-ended", "yes"); process.exit(0); });
+process.stdin.resume();
+setTimeout(() => process.exit(91), ${mode === "flood" ? 10_000 : 5000});
 if (${JSON.stringify(mode)} === "error") { console.error(JSON.stringify({code:"native_log_tty_unsupported",message:"Fixture refusal."})); process.exit(2); }
 if (${JSON.stringify(mode)} === "malformed") { console.log("invalid-wire"); process.exit(0); }
 if (${JSON.stringify(mode)} !== "idle") { console.log(${JSON.stringify(wire)}); }
+if (${JSON.stringify(mode)} === "flood") {
+  const chunk = JSON.parse(${JSON.stringify(wire)});
+  chunk.data = Buffer.from("x".repeat(4095) + "\\n").toString("base64");
+  const line = JSON.stringify(chunk) + "\\n";
+  for (let count = 1; count <= 4096; count++) {
+    if (!process.stdout.write(line)) await once(process.stdout, "drain");
+    writeFileSync(root + "/progress", String(count));
+  }
+  writeFileSync(root + "/offered-all", "yes");
+}
 if (["normal", "slow"].includes(${JSON.stringify(mode)})) { process.exit(0); }
-process.stdin.on("end", () => { writeFileSync(root + "/leash-ended", "yes"); process.exit(0); });
-process.stdin.resume();
-setTimeout(() => process.exit(91), 5000);
 `
   );
   await chmod(binary, 0o700);
@@ -80,12 +92,19 @@ setTimeout(() => process.exit(91), 5000);
     frontend,
     `
 import { Writable } from "node:stream";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { followNativeLogs } from ${JSON.stringify(modulePath)};
 const mode = ${JSON.stringify(mode)};
 const output = new Writable({ write(chunk, encoding, callback) {
   if (String(chunk).includes('"type":"log"')) {
     if (mode === "blocked") { writeFileSync(${JSON.stringify(join(root, "blocked"))}, "yes"); return; }
+    if (mode === "flood") {
+      const released = () => existsSync(${JSON.stringify(join(root, "drain-output"))});
+      if (released()) { callback(); return; }
+      writeFileSync(${JSON.stringify(join(root, "blocked"))}, "yes");
+      const timer = setInterval(() => { if (released()) { clearInterval(timer); callback(); } }, 10);
+      return;
+    }
     if (mode === "broken") { callback(Object.assign(new Error("Consumer closed"), {code:"EPIPE"})); return; }
     if (mode === "slow") { setTimeout(() => process.stdout.write(chunk, callback), 5500); return; }
   }
@@ -234,6 +253,36 @@ test("closed consumer ends quietly and reaps its reader", async () => {
     await f.dispose();
   }
 });
+
+test("a stalled consumer backpressures a real subprocess log flood", async () => {
+  const f = await fixture("flood");
+  try {
+    await waitFile(join(f.root, "blocked"));
+    const progress = join(f.root, "progress");
+    await waitFile(progress);
+    // Allow the finite pipe/stream buffers to fill. The offered output is 16 MiB
+    // of decoded payload; a frontend that eagerly drains it fails this check.
+    await Bun.sleep(500);
+    const first = Number(await readFile(progress, "utf8"));
+    await Bun.sleep(500);
+    const second = Number(await readFile(progress, "utf8"));
+    expect(first).toBeGreaterThan(0);
+    expect(second).toBe(first);
+    expect(second).toBeLessThan(1024);
+    expect(await Bun.file(join(f.root, "offered-all")).exists()).toBe(false);
+    // Release the same consumer: the producer must now finish its whole offer,
+    // ruling out a stalled fixture as the reason its earlier progress stopped.
+    await writeFile(join(f.root, "drain-output"), "yes");
+    await waitFile(join(f.root, "offered-all"));
+    expect(Number(await readFile(progress, "utf8"))).toBe(4096);
+    const pid = Number(await waitFile(join(f.root, "ready")));
+    f.child.kill("SIGINT");
+    expect(await f.child.exited).toBe(130);
+    expectGone(pid);
+  } finally {
+    await f.dispose();
+  }
+}, 15_000);
 
 test("slow output after reader exit keeps the remaining log and end events", async () => {
   const f = await fixture("slow");

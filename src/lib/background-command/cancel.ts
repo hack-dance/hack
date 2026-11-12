@@ -16,6 +16,8 @@ import {
   identityMatches,
   type ObservedIdentity,
   observeIdentities,
+  observeProcessGroup,
+  type ProcessIdentity,
   signalProcess,
   signalProcessGroup,
 } from "./platform.ts";
@@ -24,11 +26,21 @@ import {
   childState,
   type ObserveIdentities,
   type ReadBootTime,
-  withJournalLockOrReserve,
+  withJournalLock,
 } from "./recovery.ts";
 
 const SUPERVISOR_WAIT_MS = 6000;
 const POLL_MS = 100;
+/**
+ * Same grace the supervisor gives a group between SIGTERM and SIGKILL; also
+ * how long the canceller then waits to confirm the KILL.
+ */
+const ORPHAN_STOP_GRACE_MS = 2000;
+
+/** Seam for tests: the members of a process group (pid and birth). */
+export type ObserveGroup = (
+  processGroupId: number
+) => Promise<readonly ProcessIdentity[] | null>;
 
 export type CancelResult = {
   readonly commandId: string;
@@ -49,6 +61,14 @@ export type CancelResult = {
      * confirmed).
      */
     readonly containerProcess: "stopped" | "not_confirmed" | "not_applicable";
+    /**
+     * With no live supervisor the canceller stops the group itself:
+     * `stopped` when every member it recorded is confirmed gone,
+     * `not_confirmed` when one may remain. `not_applicable` when a live
+     * supervisor stopped the group (its final record says the same), or
+     * when the command had already ended.
+     */
+    readonly descendants: "stopped" | "not_confirmed" | "not_applicable";
   };
   /** Identities that failed verification and were therefore not signalled. */
   readonly refused: readonly ("supervisor" | "child")[];
@@ -84,9 +104,12 @@ export async function cancelCommand(opts: {
   /** Store root for the audit line (defaults to the Hack home). */
   readonly root?: string;
   readonly readBootTime?: ReadBootTime;
+  readonly observeGroup?: ObserveGroup;
+  readonly orphanGraceMs?: number;
 }): Promise<CancelResult> {
   const { meta, paths } = opts.journal;
   const observe = opts.observe ?? observeIdentities;
+  const observeGroup = opts.observeGroup ?? observeProcessGroup;
   const signaller = opts.signaller ?? realSignaller;
   // Neither backend's guest command is stopped by stopping its host client:
   // Compose `exec` and the native engine's exec both keep running.
@@ -104,6 +127,7 @@ export async function cancelCommand(opts: {
         childExited: true,
         containerProcess:
           recordedContainerProcess(priorEnd) ?? containerProcess,
+        descendants: "not_applicable",
       },
       refused: [],
     };
@@ -125,7 +149,21 @@ export async function cancelCommand(opts: {
     ]),
     signaller,
   });
-  const { supervisorSignalled, childGroupSignalled, refused } = signalled;
+  const { supervisorSignalled, refused } = signalled;
+  // No live supervisor to stop the group: the canceller runs the same
+  // sequence (record members, TERM, bounded wait, KILL), re-checking each
+  // identity immediately before its signal.
+  const orphan =
+    signalled.orphanGroup && child
+      ? await stopOrphanGroup({
+          child,
+          observe,
+          observeGroup,
+          signaller,
+          graceMs: opts.orphanGraceMs ?? ORPHAN_STOP_GRACE_MS,
+        })
+      : null;
+  const childGroupSignalled = orphan?.signalled ?? false;
   const finalEvent =
     (await waitForEnd({
       journal: opts.journal,
@@ -137,6 +175,8 @@ export async function cancelCommand(opts: {
       signaller,
       containerProcess,
       readBootTime: opts.readBootTime,
+      descendants: orphan?.descendants,
+      groupStopped: orphan !== null,
     }));
   const after = await observe(child ? [child.pid] : []);
   const childExited =
@@ -179,6 +219,7 @@ export async function cancelCommand(opts: {
         finalEvent?.payload.containerProcess === "stopped"
           ? "stopped"
           : containerProcess,
+      descendants: orphan?.descendants ?? "not_applicable",
     },
     refused,
   };
@@ -241,16 +282,17 @@ function signalVerified(opts: {
   readonly signaller: Signaller;
 }): {
   readonly supervisorSignalled: boolean;
-  readonly childGroupSignalled: boolean;
+  /** No live supervisor took the stop, and the child's group verifies. */
+  readonly orphanGroup: boolean;
   readonly refused: ("supervisor" | "child")[];
 } {
   const { owner, child, snapshot } = opts;
   const refused: ("supervisor" | "child")[] = [];
   if (!snapshot) {
-    return { supervisorSignalled: false, childGroupSignalled: false, refused };
+    return { supervisorSignalled: false, orphanGroup: false, refused };
   }
   let supervisorSignalled = false;
-  let childGroupSignalled = false;
+  let orphanGroup = false;
   if (owner && identityMatches({ expected: owner, snapshot })) {
     supervisorSignalled = opts.signaller.process(owner.pid, "SIGTERM");
   } else if (owner && snapshot.has(owner.pid)) {
@@ -260,7 +302,7 @@ function signalVerified(opts: {
   // first, so descendants that ignore SIGTERM are still killed after the
   // leader exits. Signalling the group from here would race that.
   if (child && !supervisorSignalled && childGroupMatches({ child, snapshot })) {
-    childGroupSignalled = opts.signaller.group(child.processGroupId, "SIGTERM");
+    orphanGroup = true;
   } else if (
     child &&
     snapshot.has(child.pid) &&
@@ -268,7 +310,99 @@ function signalVerified(opts: {
   ) {
     refused.push("child");
   }
-  return { supervisorSignalled, childGroupSignalled, refused };
+  return { supervisorSignalled, orphanGroup, refused };
+}
+
+/**
+ * Stop the child's group when no live supervisor will: the supervisor's own
+ * sequence. Members are recorded (pid and birth) only while the leader still
+ * verifies, since after it is gone its group id could be reused. SIGTERM
+ * goes to the group, then after a bounded wait SIGKILL goes to the group if
+ * its leader still verifies, and to each recorded member that still matches
+ * (a descendant that ignored SIGTERM outlives its leader). Each identity is
+ * re-checked immediately before its signal.
+ */
+async function stopOrphanGroup(opts: {
+  readonly child: ObservedIdentity;
+  readonly observe: ObserveIdentities;
+  readonly observeGroup: ObserveGroup;
+  readonly signaller: Signaller;
+  readonly graceMs: number;
+}): Promise<{
+  readonly signalled: boolean;
+  readonly descendants: "stopped" | "not_confirmed";
+}> {
+  const { child } = opts;
+  const members = new Map<number, ProcessIdentity>([
+    [child.pid, { pid: child.pid, birth: child.birth }],
+  ]);
+  let membersKnown = true;
+  const leaderVerifies = async (): Promise<boolean> => {
+    const snapshot = await opts.observe([child.pid]);
+    return snapshot !== null && childGroupMatches({ child, snapshot });
+  };
+  const remember = async (): Promise<void> => {
+    if (!(await leaderVerifies())) {
+      return;
+    }
+    const group = await opts.observeGroup(child.processGroupId);
+    if (group === null) {
+      membersKnown = false;
+      return;
+    }
+    // Read while the leader still verifies (checked again after the read):
+    // these members belong to its group.
+    if (await leaderVerifies()) {
+      for (const member of group) {
+        members.set(member.pid, member);
+      }
+    }
+  };
+  const survivors = async (): Promise<ProcessIdentity[] | null> => {
+    const snapshot = await opts.observe([...members.keys()]);
+    return snapshot
+      ? [...members.values()].filter((member) =>
+          identityMatches({ expected: member, snapshot })
+        )
+      : null;
+  };
+
+  await remember();
+  const signalled =
+    (await leaderVerifies()) &&
+    opts.signaller.group(child.processGroupId, "SIGTERM");
+  const termDeadline = Date.now() + opts.graceMs;
+  while (Date.now() < termDeadline) {
+    await Bun.sleep(POLL_MS);
+    await remember();
+    if ((await survivors())?.length === 0) {
+      return {
+        signalled,
+        descendants: membersKnown ? "stopped" : "not_confirmed",
+      };
+    }
+  }
+  await remember();
+  if (await leaderVerifies()) {
+    opts.signaller.group(child.processGroupId, "SIGKILL");
+  }
+  for (const member of (await survivors()) ?? []) {
+    opts.signaller.process(member.pid, "SIGKILL");
+  }
+  const killDeadline = Date.now() + opts.graceMs;
+  for (;;) {
+    const left = await survivors();
+    if (left?.length === 0) {
+      return {
+        signalled,
+        descendants: membersKnown ? "stopped" : "not_confirmed",
+      };
+    }
+    if (Date.now() >= killDeadline) {
+      return { signalled, descendants: "not_confirmed" };
+    }
+    await Bun.sleep(POLL_MS);
+  }
 }
 
 function childGroupMatches(opts: {
@@ -293,6 +427,7 @@ async function forceStopVerified(opts: {
   readonly owner: ObservedIdentity | null;
   readonly observe: ObserveIdentities;
   readonly signaller: Signaller;
+  readonly killChildGroup: boolean;
 }): Promise<{ readonly supervisorGone: boolean; readonly childGone: boolean }> {
   const { owner } = opts;
   const child = await readChild(opts.journal.paths);
@@ -306,7 +441,7 @@ async function forceStopVerified(opts: {
   if (owner && identityMatches({ expected: owner, snapshot })) {
     opts.signaller.process(owner.pid, "SIGKILL");
   }
-  if (child && childGroupMatches({ child, snapshot })) {
+  if (opts.killChildGroup && child && childGroupMatches({ child, snapshot })) {
     opts.signaller.group(child.processGroupId, "SIGKILL");
   }
   return await waitUntilGone({ owner, child, observe: opts.observe });
@@ -366,9 +501,13 @@ async function finishWithoutSupervisor(opts: {
   readonly signaller: Signaller;
   readonly containerProcess: "not_confirmed" | "not_applicable";
   readonly readBootTime?: ReadBootTime;
+  /** From the canceller's own group stop, when it ran one. */
+  readonly descendants?: "stopped" | "not_confirmed";
+  /** The canceller already ran the TERM/KILL sequence on the child's group. */
+  readonly groupStopped?: boolean;
 }): Promise<EventEnvelope | null> {
   const { paths, meta } = opts.journal;
-  return await withJournalLockOrReserve(paths, async () => {
+  return await withJournalLock(paths, async () => {
     // Read only: the supervisor may still be alive and mid-write here.
     const existing = endedEvent(await readEvents(paths));
     if (existing) {
@@ -380,7 +519,11 @@ async function finishWithoutSupervisor(opts: {
     ) {
       return null;
     }
-    const stopped = await forceStopVerified({ ...opts, owner });
+    const stopped = await forceStopVerified({
+      ...opts,
+      owner,
+      killChildGroup: opts.groupStopped !== true,
+    });
     if (!stopped.supervisorGone) {
       return null;
     }
@@ -415,6 +558,9 @@ async function finishWithoutSupervisor(opts: {
       truncated: emittedOffsets(current).truncated,
       suppressed: meta.capture === "metadata",
       containerProcess: opts.containerProcess,
+      ...(opts.descendants === "not_confirmed"
+        ? { descendants: "not_confirmed" }
+        : {}),
     });
     await auditEnd({ paths, meta, payload: ended.payload });
     return ended;

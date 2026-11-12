@@ -59,7 +59,11 @@ export const TOMBSTONE_MS = 7 * 24 * 60 * 60 * 1000;
  */
 export const RETAINED_RESULTS_LIMIT = 64;
 export const RETAINED_BYTES_LIMIT = 256 * 1024 * 1024;
-/** Past this, the oldest tombstones (and their request keys) are removed. */
+/**
+ * Most tombstones a Hack home keeps. Tombstones (and the request keys they
+ * carry) are never removed before `TOMBSTONE_MS`; at this count a new start
+ * is refused instead, until the oldest age out.
+ */
 export const TOMBSTONE_LIMIT = 4096;
 
 export type AcceptInput = Omit<
@@ -334,6 +338,9 @@ export async function acceptCommand(opts: {
     await mkdir(paths.dir, { mode: 0o700 });
     await createPrivateFileExclusive({ path: paths.meta, text: metaText });
     await reserveFinalRecordSpace(paths.reserve);
+    // The journal lock is an flock on this file: created now, so locking
+    // later never needs disk space.
+    await createPrivateFileExclusive({ path: paths.lock, text: "" });
     const accepted = buildEnvelope({
       meta,
       seq: 1,
@@ -410,6 +417,9 @@ export async function lookupRequest(opts: {
   readonly root?: string;
 }): Promise<AcceptResult | null> {
   const root = opts.root ?? commandsRoot();
+  // Every background-command operation sweeps, including a start answered
+  // from an existing key (it never reaches acceptCommand's sweep).
+  await pruneStore(root);
   if (!(await lstat(resolve(root, "keys")).catch(() => null))?.isDirectory()) {
     return null;
   }
@@ -515,10 +525,12 @@ export async function pruneExpired(opts: {
 
 /**
  * Keep what ended commands store under the per-home ceilings, leaving room
- * for the command being started: the oldest ended results expire early (tombstone, then payload removal, as at their
- * retention time) and, past `TOMBSTONE_LIMIT`, the oldest tombstones and
- * their request keys are removed. Runs under the store lock, before a new
- * command is accepted. Running commands are never touched.
+ * for the command being started: the oldest ended results expire early
+ * (tombstone, then payload removal, as at their retention time). A
+ * tombstone and its request key are kept for the full `TOMBSTONE_MS`; at
+ * `TOMBSTONE_LIMIT` tombstones the start is refused (E_ADMISSION_LIMIT)
+ * rather than forgetting a key early. Runs under the store lock, before a
+ * new command is accepted. Running commands are never touched.
  */
 export async function enforceRetainedQuota(opts: {
   readonly root: string;
@@ -535,6 +547,14 @@ export async function enforceRetainedQuota(opts: {
     tombstones: TOMBSTONE_LIMIT,
   };
   const { retained, tombstones } = await surveyStore(opts.root);
+  // Checked before anything expires: a refused start changes nothing. The
+  // results expired below add at most RETAINED_RESULTS_LIMIT more.
+  if (tombstones.length >= limits.tombstones) {
+    throw new HackCliError({
+      code: "E_ADMISSION_LIMIT",
+      message: `This Hack home remembers ${limits.tombstones} expired background commands (each request key is kept for seven days). Retry once older ones age out.`,
+    });
+  }
   retained.sort((a, b) => a.endedAt - b.endedAt);
   let count = retained.length;
   let bytes = retained.reduce((sum, item) => sum + item.bytes, 0);
@@ -549,26 +569,6 @@ export async function enforceRetainedQuota(opts: {
     });
     count -= 1;
     bytes -= item.bytes;
-    tombstones.push({
-      paths: item.paths,
-      expiredAt: opts.now,
-      holdUntil: holdsSlot({ ...item, now: opts.now })
-        ? Date.parse(item.meta.acceptedAt) + item.meta.timeoutMs
-        : null,
-    });
-  }
-  // A tombstone that still holds an admission slot is never removed: there
-  // are at most `HOME_ACTIVE_LIMIT` of them (each counts against admission),
-  // so the cap still bounds the store.
-  const removable = tombstones
-    .filter((item) => !(item.holdUntil && opts.now < item.holdUntil))
-    .sort((a, b) => a.expiredAt - b.expiredAt);
-  for (const item of removable.slice(
-    0,
-    Math.max(0, tombstones.length - limits.tombstones)
-  )) {
-    await removeRequestKey({ root: opts.root, paths: item.paths });
-    await rm(item.paths.dir, { recursive: true, force: true });
   }
 }
 

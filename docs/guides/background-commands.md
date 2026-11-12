@@ -138,15 +138,14 @@ end-to-end test for both cases). `hack down` does not stop a background `run`:
 but reports that the project network is still in use), so the command keeps
 running until it ends or times out. `hack commands cancel` (or the timeout)
 stops the `docker compose run` client. Whenever a background `run` ends, by a
-stop or because its client exited on its own (for example at the file-size
-cap), the supervisor removes the command's one-off container: Hack names it
+stop or because its client exited on its own (for example after a crash), the
+supervisor removes the command's one-off container: Hack names it
 `hack-bg-<random>` at start and removes it only if Docker reports it as a
-one-off container of the expected service. If the supervisor itself is gone
-(a cancel that had to force-stop it, an orphan timeout, a supervisor error),
-the container is not removed and the end says `containerProcess:
-"not_confirmed"`. The result
-says `containerProcess: "stopped"` when that is confirmed. Both are tested end
-to end. Hack does not reclassify these ends.
+one-off container of the expected service. If the supervisor itself is gone (a
+cancel that had to force-stop it, an orphan timeout, a supervisor error), the
+container is not removed and the end says `containerProcess: "not_confirmed"`.
+The result says `containerProcess: "stopped"` when that is confirmed. Both are
+tested end to end. Hack does not reclassify these ends.
 
 ## Stalls
 
@@ -167,18 +166,18 @@ output, and **the command keeps running** to its normal end, which records
 `truncated: true`. If the disk or quota fills while events are recorded,
 capture also stops and the command keeps running; its final record (written
 from space reserved at start) has `truncated: true` and `captureStopped:
-"no_space"`. On the Compose backend each output file is also capped at 64 MiB
-by a kernel file-size limit on the host-side `docker compose` client, so a
-burst between two supervisor polls cannot fill the disk. A client that writes
-more than that within one poll (200 ms), or keeps writing faster than capture
-can scan its output (most likely with many values to redact), gets a "File too
-large" (EFBIG) error and exits: the command ends `failed`, output after that
-point is lost, and what ran in the container is then stopped like at any other
-end (see Inspect and cancel). Everything the client starts on the host
-inherits the same 64 MiB file limit (with SIGXFSZ ignored). A command whose
-program does not exist ends `failed` with exit code 127. The native backend
-has no such cap. This differs from the foreground `hack.project.exec` and
-`hack.project.run` MCP tools, where reaching 8 MiB stops the command.
+"no_space"`. Capture also stops, the same way, when it falls behind: when more
+than 64 MiB of one stream is waiting to be scanned (a burst between two
+supervisor polls, or output faster than redaction can scan it), Hack records
+`command.output_truncated` with `reason: "capture_behind"` and from then on
+cuts the files back on every poll. No capture limit ever stops or fails the
+command; it keeps running to its own end. The cut-back bounds stored output,
+not the burst itself: a very fast writer can use more disk during the 200 ms
+between two polls before its output is cut back, and if the disk fills, the
+command's own writes fail as on any full disk. A command whose program does
+not exist ends `failed` with exit code 127. This differs from the foreground
+`hack.project.exec` and `hack.project.run` MCP tools, where reaching 8 MiB
+stops the command.
 
 ## Inspect and cancel
 
@@ -287,10 +286,10 @@ user that can select the project can read it, and backups can copy it.
 - A Hack home keeps at most 64 ended results and 256 MiB of their events and
   output. Each start checks this first: past either ceiling, the oldest ended
   results expire early, exactly as at their retention time. Running commands
-  are never touched. At most 4096 tombstones are kept; past that the oldest
-  are removed with their request keys (never one that still holds an
-  admission slot), so a request key is remembered for 7
-  days or until 4096 newer results have expired, whichever comes first.
+  are never touched. A tombstone and its request key are never removed before
+  their 7 days are up: when a Hack home already holds 4096 tombstones, a new
+  start is refused with `E_ADMISSION_LIMIT` until older ones age out, rather
+  than forgetting a key early.
 - Metadata never contains environment values.
 
 Settings, in the global `~/.hack/hack.config.json` or the project's

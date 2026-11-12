@@ -4,8 +4,13 @@ import { isAbsolute } from "node:path";
 import { isRecord } from "../guards.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { auditEnd } from "./audit.ts";
-import { removeOneOffContainer, stopExecGuest } from "./container-stop.ts";
 import {
+  dockerEnvFor,
+  removeOneOffContainer,
+  stopExecGuest,
+} from "./container-stop.ts";
+import {
+  CAPTURE_BACKLOG_LIMIT_BYTES,
   CAPTURE_LIMIT_BYTES,
   type CommandMeta,
   commandsRoot,
@@ -16,7 +21,6 @@ import {
   journalPaths,
   type LaunchRecord,
   OUTPUT_EVENT_LIMIT,
-  OUTPUT_FILE_LIMIT_BYTES,
   type OutputStream,
   outputPath,
   readLaunch,
@@ -303,7 +307,7 @@ function startChild(opts: {
         })();
   let proc: Bun.Subprocess;
   try {
-    proc = Bun.spawn(limitOutputFileSize(opts.meta, opts.launch.argv), {
+    proc = Bun.spawn([...opts.launch.argv], {
       cwd: opts.launch.cwd,
       env:
         opts.meta.backend === "native"
@@ -311,7 +315,7 @@ function startChild(opts: {
               ...childEnv(),
               [NATIVE_EXIT_CONFIRMED_ENV]: opts.paths.exitConfirmed,
             }
-          : withoutInheritedBashVersion(childEnv()),
+          : childEnv(),
       stdin: "ignore",
       stdout: descriptors.stdout,
       stderr: descriptors.stderr,
@@ -325,60 +329,6 @@ function startChild(opts: {
     closeDescriptor(descriptors.stderr);
   }
   return proc;
-}
-
-/**
- * Each output file may grow to OUTPUT_FILE_LIMIT_BYTES at most. The child
- * runs under a file-size limit (RLIMIT_FSIZE via `ulimit -f`, inherited by
- * everything it starts) with SIGXFSZ ignored, so a burst between two polls
- * cannot fill the disk: past the limit a write fails with EFBIG instead of
- * landing. Capture itself still stops at CAPTURE_LIMIT_BYTES; the supervisor
- * then cuts the files back, so ordinary output never reaches the limit.
- */
-export function limitOutputFileSize(
-  meta: CommandMeta,
-  argv: readonly string[]
-): string[] {
-  // Compose only: the cap applies to the host-side Docker client and its
-  // helpers, not to the process in the container. On native the child is the
-  // hack CLI, which writes the whole output in one batch at the end; a cap
-  // there would turn large output into a failed command.
-  if (meta.capture !== "full" || meta.backend !== "compose") {
-    return [...argv];
-  }
-  // `ulimit -f` counts 512-byte blocks in POSIX shells (dash, and bash 5.1
-  // or later running as sh), but 1024-byte blocks in older bash, which is
-  // macOS's /bin/sh (bash 3.2). Pick the unit the running shell uses, so the
-  // limit is OUTPUT_FILE_LIMIT_BYTES on both platforms.
-  const posixBlocks = Math.floor(OUTPUT_FILE_LIMIT_BYTES / 512);
-  const kibBlocks = Math.floor(OUTPUT_FILE_LIMIT_BYTES / 1024);
-  return [
-    "/bin/sh",
-    "-c",
-    [
-      "trap '' XFSZ",
-      `b=${posixBlocks}`,
-      `case "\${BASH_VERSION:-}" in ''|5.[1-9]*|5.[1-9][0-9]*|[6-9].*) ;; *) b=${kibBlocks} ;; esac`,
-      'ulimit -f "$b" 2>/dev/null',
-      'exec "$@"',
-    ].join("; "),
-    "hack-background-command",
-    ...argv,
-  ];
-}
-
-/**
- * The file-size wrapper picks its `ulimit -f` unit from `BASH_VERSION`. Bash
- * sets that itself at startup, but other shells (dash, ash, ksh) would read an
- * inherited one, so a project env setting it could pick the wrong unit (on
- * dash, an inherited 4.x value halved the cap to 32 MiB). Bash
- * resets it for anything bash runs; nothing else is expected to read it.
- */
-export function withoutInheritedBashVersion(
-  env: Record<string, string>
-): Record<string, string> {
-  const { BASH_VERSION: _ignored, ...rest } = env;
-  return rest;
 }
 
 /** Record the child's identity (pid, birth, process group) for cancel and recovery. */
@@ -472,7 +422,7 @@ async function superviseChild(opts: {
   const lateCancel = stopping === "cancelled" && !stopper.signalled;
   await stopper.finish();
   // Every end, whether Hack stopped the client or the client ended on its
-  // own (a signal, the file-size cap, a lost Docker connection): a `run`'s
+  // own (a signal, an OOM kill, a lost Docker connection): a `run`'s
   // one-off container is removed (after checking it is ours) and an
   // `exec`'s marked processes are stopped. No end may leave them running.
   const containerProcess = await stopInContainer({ launch: opts.launch });
@@ -501,17 +451,20 @@ async function superviseChild(opts: {
 async function stopInContainer(opts: {
   readonly launch: LaunchRecord;
 }): Promise<"stopped" | "not_confirmed" | undefined> {
+  // The engine the command started with, from the launch directory.
+  const env = dockerEnvFor({ env: childEnv(), target: opts.launch.docker });
   if (opts.launch.container) {
     return await removeOneOffContainer({
       ...opts.launch.container,
-      env: childEnv(),
+      cwd: opts.launch.cwd,
+      env,
     });
   }
   if (opts.launch.guest) {
     return await stopExecGuest({
       ...opts.launch.guest,
       cwd: opts.launch.cwd,
-      env: childEnv(),
+      env,
     });
   }
   return undefined;
@@ -684,6 +637,9 @@ export class OutputCapture {
     for (const stream of ["stdout", "stderr"] as const) {
       const now = performance.now();
       await this.observeGrowth(stream, now);
+      if (!(final || this.truncated) && this.fallenBehind(stream)) {
+        await this.stopBehind();
+      }
       if (this.truncated) {
         await this.discardPastLimit(stream);
       } else if (this.shouldEmit(stream, now, final)) {
@@ -797,6 +753,33 @@ export class OutputCapture {
       await this.discardPastLimit("stdout");
       await this.discardPastLimit("stderr");
     }
+  }
+
+  /**
+   * Capture has fallen behind when more than CAPTURE_BACKLOG_LIMIT_BYTES of
+   * one stream is unscanned (a burst, or output faster than redaction can
+   * scan it). Ordinary polls only: the final drain still takes the capture
+   * budget, so a command that writes everything at its end keeps its output.
+   */
+  private fallenBehind(stream: OutputStream): boolean {
+    const state = this.streams[stream];
+    return state.size - state.emittedTo > CAPTURE_BACKLOG_LIMIT_BYTES;
+  }
+
+  /**
+   * Stop capture because it fell behind: like reaching the capture limit,
+   * output is no longer stored and the files are cut back on every poll, so
+   * the disk stays bounded. The command keeps running; nothing ends it.
+   */
+  private async stopBehind(): Promise<void> {
+    this.truncated = true;
+    await this.record("command.output_truncated", {
+      capturedBytes: this.captured,
+      limitBytes: CAPTURE_LIMIT_BYTES,
+      reason: "capture_behind",
+    });
+    await this.discardPastLimit("stdout");
+    await this.discardPastLimit("stderr");
   }
 
   /**

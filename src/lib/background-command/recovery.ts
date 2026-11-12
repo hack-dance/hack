@@ -1,5 +1,9 @@
-import { lstat, unlink } from "node:fs/promises";
-import { withProjectsRegistryLock } from "../projects-registry-lock.ts";
+import { closeSync, constants, openSync } from "node:fs";
+import { lstat } from "node:fs/promises";
+import {
+  ProjectsRegistryLockTimeoutError,
+  withProjectsRegistryLock,
+} from "../projects-registry-lock.ts";
 import { auditEnd } from "./audit.ts";
 import {
   type AppendLine,
@@ -20,11 +24,14 @@ import {
 } from "./journal.ts";
 import { pumpStream } from "./output-pump.ts";
 import {
+  fileLocksAvailable,
   identityMatches,
   type ObservedIdentity,
   observeIdentities,
   readBootTimeMs,
+  releaseFileLock,
   signalProcessGroup,
+  tryExclusiveFileLock,
 } from "./platform.ts";
 
 /** How long an accepted command may go without a supervisor record. */
@@ -142,37 +149,52 @@ export async function assessOwner(opts: {
   };
 }
 
-export function withJournalLock<T>(
+const JOURNAL_LOCK_WAIT_MS = 10_000;
+
+/**
+ * The journal lock: an exclusive flock(2) on the journal's `lock` file,
+ * which acceptance creates empty. Taking it allocates nothing, so a full
+ * disk or quota never forces the final record's reserved bytes to be spent
+ * on locking, and the kernel releases it when its holder dies. Only the
+ * writer of `command.ended` releases the reserve, under this lock, so two
+ * recoveries cannot spend it twice. Without libc the file-based registry
+ * lock is used instead (every process on the host makes the same choice).
+ */
+export async function withJournalLock<T>(
   paths: JournalPaths,
   run: () => Promise<T>
 ): Promise<T> {
-  return withProjectsRegistryLock({
-    lockPath: paths.lock,
-    run,
-    label: "background command journal",
-  });
-}
-
-/**
- * The journal lock writes an owner file, which a full disk or quota can
- * refuse. Then the command's reserved bytes are released (they exist only to
- * let the final record be written) and the lock is tried once more.
- */
-export async function withJournalLockOrReserve<T>(
-  paths: JournalPaths,
-  run: (context: { readonly reserveReleased: boolean }) => Promise<T>,
-  lock: typeof withJournalLock = withJournalLock
-): Promise<T> {
+  if (!fileLocksAvailable()) {
+    return await withProjectsRegistryLock({
+      lockPath: paths.lock,
+      run,
+      label: "background command journal",
+    });
+  }
+  // O_CREAT is a no-op for a journal created with its lock file; an older
+  // or damaged journal gets one created here (which can need space).
+  const fd = openSync(
+    paths.lock,
+    constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW,
+    0o600
+  );
   try {
-    return await lock(paths, () => run({ reserveReleased: false }));
-  } catch (error: unknown) {
-    if (!isNoSpaceError(error)) {
-      throw error;
+    const started = performance.now();
+    while (!tryExclusiveFileLock(fd)) {
+      if (performance.now() - started >= JOURNAL_LOCK_WAIT_MS) {
+        throw new ProjectsRegistryLockTimeoutError(
+          "Timed out waiting for background command journal lock"
+        );
+      }
+      await Bun.sleep(25 + Math.random() * 75);
     }
-    await unlink(paths.reserve).catch(() => undefined);
-    // The freed bytes are for the final record only: callers must not spend
-    // them on anything else.
-    return await lock(paths, () => run({ reserveReleased: true }));
+    try {
+      return await run();
+    } finally {
+      releaseFileLock(fd);
+    }
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -212,26 +234,18 @@ export async function recoverLostOwner(opts: {
    */
   readonly enforceTimeout?: boolean;
 }): Promise<EventEnvelope[]> {
-  return await withJournalLockOrReserve(
-    opts.paths,
-    async ({ reserveReleased }) =>
-      // A journal expired since the caller looked is never finalized again:
-      // its tombstone (and any admission hold in it) is the record.
-      (await isExpired(opts.paths))
-        ? []
-        : await recoverLocked({ ...opts, reserveReleased }),
-    opts.lock
+  return await (opts.lock ?? withJournalLock)(opts.paths, async () =>
+    // A journal expired since the caller looked is never finalized again:
+    // its tombstone (and any admission hold in it) is the record.
+    (await isExpired(opts.paths)) ? [] : await recoverLocked(opts)
   );
 }
 
 /** `recoverLostOwner` under the journal lock. */
 async function recoverLocked(
-  opts: Parameters<typeof recoverLostOwner>[0] & {
-    readonly reserveReleased: boolean;
-  }
+  opts: Parameters<typeof recoverLostOwner>[0]
 ): Promise<EventEnvelope[]> {
   const now = opts.now ?? Date.now;
-  const { reserveReleased } = opts;
   // Read only until the supervisor is proven gone: it may be mid-write.
   const observed = await readEvents(opts.paths);
   const assessment = await assessOwner({
@@ -252,17 +266,15 @@ async function recoverLocked(
     events.at(-1)?.seq ?? 0,
     opts.append
   );
-  // On a full disk (the reserve was released to take the lock) nothing
-  // but the final record may be written: skip announcing output.
-  const truncated = reserveReleased
-    ? true
-    : await announceUnsupervisedOutput({
-        paths: opts.paths,
-        meta: opts.meta,
-        events,
-        writer,
-        final: assessment.child === "gone",
-      });
+  // On a full disk announcing stops (ENOSPC is caught there); the reserve
+  // stays untouched for the final record.
+  const truncated = await announceUnsupervisedOutput({
+    paths: opts.paths,
+    meta: opts.meta,
+    events,
+    writer,
+    final: assessment.child === "gone",
+  });
   const overdue =
     opts.enforceTimeout === true &&
     assessment.child === "alive" &&
@@ -278,16 +290,15 @@ async function recoverLocked(
   if (!childGone) {
     return await readEvents(opts.paths);
   }
-  const finalTruncated =
-    overdue && !reserveReleased
-      ? (await announceUnsupervisedOutput({
-          paths: opts.paths,
-          meta: opts.meta,
-          events: await readEvents(opts.paths),
-          writer,
-          final: true,
-        })) || truncated
-      : truncated;
+  const finalTruncated = overdue
+    ? (await announceUnsupervisedOutput({
+        paths: opts.paths,
+        meta: opts.meta,
+        events: await readEvents(opts.paths),
+        writer,
+        final: true,
+      })) || truncated
+    : truncated;
   const ended = await writer.write("command.ended", {
     outcome: overdue ? "timed_out" : "unknown",
     reason: overdue ? "orphan_timeout" : assessment.reason,

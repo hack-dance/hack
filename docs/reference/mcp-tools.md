@@ -208,9 +208,12 @@ Differences from the foreground tools:
   `command.output_truncated`, but the command keeps running to its normal end.
   The foreground `hack.project.exec` and `hack.project.run` stop the command at
   8 MiB.
-- **Storage.** Output is kept in private files under the Hack home for at most
-  24 hours (`capture: "metadata"` keeps none), where later processes of the same
-  OS user that can select the project can read it.
+- **Storage.** Output is stored in private files under the Hack home, where
+  later processes of the same OS user that can select the project can read it
+  (`capture: "metadata"` stores none). It is not readable after its retention
+  time (at most 24 hours after the command ends); the files are physically
+  removed at the next background-command operation, `hack up` or `hack down`,
+  so Hack does not promise physical deletion within 24 hours.
 - **Redaction is partial.** Values Hack had already resolved to inject into the
   command are replaced with `*` before output is announced. Values Hack did not
   inject, or that the command transforms, are not caught. It is defence in

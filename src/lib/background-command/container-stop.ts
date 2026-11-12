@@ -1,4 +1,65 @@
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { exec } from "../shell.ts";
+
+/** The Docker engine selection a command started with (see LaunchRecord). */
+export type DockerTarget = {
+  readonly config?: string;
+  readonly context?: string;
+};
+
+/**
+ * Resolve, at start, which Docker engine the command's client will use, the
+ * way the Docker CLI does: DOCKER_CONFIG (relative to the launch directory),
+ * then DOCKER_CONTEXT, else DOCKER_HOST (left in the environment), else the
+ * config file's `currentContext`. Reads files only; never calls Docker.
+ */
+export async function resolveDockerTarget(opts: {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly cwd: string;
+}): Promise<DockerTarget> {
+  const rawConfig = opts.env.DOCKER_CONFIG;
+  let config: string | undefined;
+  if (rawConfig && rawConfig.length > 0) {
+    config = isAbsolute(rawConfig) ? rawConfig : resolve(opts.cwd, rawConfig);
+  }
+  const fromEnv = opts.env.DOCKER_CONTEXT;
+  if (fromEnv && fromEnv.length > 0) {
+    return { ...(config ? { config } : {}), context: fromEnv };
+  }
+  if (opts.env.DOCKER_HOST && opts.env.DOCKER_HOST.length > 0) {
+    return config ? { config } : {};
+  }
+  const dir = config ?? join(opts.env.HOME || homedir(), ".docker");
+  const current = await readFile(join(dir, "config.json"), "utf8")
+    .then((text): unknown => JSON.parse(text))
+    .catch(() => null);
+  const context =
+    typeof current === "object" &&
+    current !== null &&
+    "currentContext" in current &&
+    typeof current.currentContext === "string" &&
+    current.currentContext.length > 0
+      ? current.currentContext
+      : undefined;
+  return {
+    ...(config ? { config } : {}),
+    ...(context ? { context } : {}),
+  };
+}
+
+/** The command's environment pinned to the engine it started with. */
+export function dockerEnvFor(opts: {
+  readonly env: Readonly<Record<string, string>>;
+  readonly target: DockerTarget | undefined;
+}): Record<string, string> {
+  return {
+    ...opts.env,
+    ...(opts.target?.config ? { DOCKER_CONFIG: opts.target.config } : {}),
+    ...(opts.target?.context ? { DOCKER_CONTEXT: opts.target.context } : {}),
+  };
+}
 
 /** Environment marker on a background `exec`'s process in the container. */
 export const GUEST_MARKER_ENV = "HACK_BACKGROUND_COMMAND";
@@ -60,6 +121,8 @@ export async function removeOneOffContainer(opts: {
   readonly name: string;
   readonly service: string;
   readonly env: Readonly<Record<string, string>>;
+  /** The launch directory: Docker resolves relative settings against it. */
+  readonly cwd: string;
 }): Promise<"stopped" | "not_confirmed"> {
   const inspect = await docker(opts, [
     "inspect",
@@ -102,12 +165,16 @@ export async function removeOneOffContainer(opts: {
 }
 
 async function docker(
-  opts: { readonly env: Readonly<Record<string, string>> },
+  opts: {
+    readonly env: Readonly<Record<string, string>>;
+    readonly cwd: string;
+  },
   args: readonly string[],
   timeoutMs = INSPECT_TIMEOUT_MS
 ): Promise<{ exitCode: number; stdout: string; stderr: string } | null> {
   try {
     return await exec(["docker", ...args], {
+      cwd: opts.cwd,
       stdin: "ignore",
       timeoutMs,
       env: { ...opts.env },

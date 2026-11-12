@@ -5,6 +5,7 @@ import { emitCliResult, HackCliError, okResult } from "../cli-result.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { assertComposeSpawnEnvFits } from "../spawn-env-limit.ts";
 import { appendCommandAudit, auditEnd } from "./audit.ts";
+import { resolveDockerTarget } from "./container-stop.ts";
 import {
   boundedRecordText,
   type CaptureMode,
@@ -213,11 +214,18 @@ export async function startBackgroundCommand(
   assertComposeSpawnEnvFits({ env: opts.child.env, baseEnv: {} });
   const caller = await resolveCaller();
   // Refused before anything is accepted if a reader could not load it.
+  // Cleanup must reach the engine the client started with: resolved now
+  // (files only), not from the supervisor's directory or a later default.
+  const docker =
+    !native && (opts.child.container || opts.child.guest)
+      ? await resolveDockerTarget({ env: opts.child.env, cwd: opts.child.cwd })
+      : null;
   const launchText = boundedRecordText({
     argv: opts.child.argv,
     cwd: opts.child.cwd,
     ...(opts.child.container ? { container: opts.child.container } : {}),
     ...(opts.child.guest ? { guest: opts.child.guest } : {}),
+    ...(docker && Object.keys(docker).length > 0 ? { docker } : {}),
   });
   const accepted = await acceptCommand({
     input: {

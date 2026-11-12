@@ -1,4 +1,13 @@
 import { join } from "node:path";
+import {
+  journalPaths,
+  readChild,
+} from "../../../src/lib/background-command/journal.ts";
+import {
+  identityMatches,
+  type ObservedIdentity,
+  observeIdentities,
+} from "../../../src/lib/background-command/platform.ts";
 import { readLinesFromStream } from "../../../src/ui/lines.ts";
 import { createMonorepoFixture } from "../fixture.ts";
 import {
@@ -434,8 +443,8 @@ async function checkExecCancelStopsGuest(stack: Stack): Promise<void> {
 
 /**
  * A background `exec` whose client ends on its own (here: the command exits
- * 3, leaving a marked process in the background, as a client that hits the
- * file-size cap or loses Docker would) must not leave that process running.
+ * 3, leaving a marked process in the background, as a client killed by the
+ * OOM killer or cut off from Docker would) must not leave that process running.
  */
 async function checkExecSelfExitStopsGuest(stack: Stack): Promise<void> {
   const id = await stack.start([
@@ -482,7 +491,7 @@ async function checkExecSelfExitStopsGuest(stack: Stack): Promise<void> {
 
 /**
  * A background `run` whose Compose client dies on its own (here: killed, as
- * a crash, an OOM kill or the file-size cap would end it) must not leave its
+ * a crash or an OOM kill would end it) must not leave its
  * one-off container running.
  */
 async function checkRunClientDeath(stack: Stack): Promise<void> {
@@ -495,8 +504,24 @@ async function checkRunClientDeath(stack: Stack): Promise<void> {
     that: typeof clientPid === "number" && clientPid > 1,
     message: `show must report the client pid: ${JSON.stringify(shown?.data?.child)}`,
   });
-  // The client was started by this scenario's CLI call; nothing else is killed.
-  process.kill(clientPid as number, "SIGKILL");
+  // A pid from `show` is not ownership proof: re-read the recorded identity
+  // (pid and start time) from the journal and verify it immediately before
+  // the signal, as the product does. A reused pid is never signalled.
+  const child = await readChild(
+    journalPaths({ root: join(stack.ctx.hackHome, "commands"), commandId: id })
+  );
+  expect({
+    that: child !== null && child.pid === clientPid,
+    message: `the journal must record the same client: ${JSON.stringify(child)}`,
+  });
+  const recorded = child as ObservedIdentity;
+  const snapshot = await observeIdentities([recorded.pid]);
+  expect({
+    that:
+      snapshot !== null && identityMatches({ expected: recorded, snapshot }),
+    message: `the client must still be the recorded process before it is signalled: ${JSON.stringify(snapshot?.get(recorded.pid))}`,
+  });
+  process.kill(recorded.pid, "SIGKILL");
   const end = parseLines(
     (
       await stack.cli([

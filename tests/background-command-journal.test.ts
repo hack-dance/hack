@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -14,6 +16,11 @@ import {
   refuseDetachForAuthoredProject,
 } from "../src/commands/background-command-start.ts";
 import { cancelCommand } from "../src/lib/background-command/cancel.ts";
+import {
+  dockerEnvFor,
+  removeOneOffContainer,
+  resolveDockerTarget,
+} from "../src/lib/background-command/container-stop.ts";
 import {
   buildEnvelope,
   type CommandMeta,
@@ -621,75 +628,88 @@ describe("retention", () => {
       true,
       false,
     ]);
-    // Tombstone ceiling: the oldest tombstones are removed entirely.
-    await enforceRetainedQuota({
-      root,
-      now: Date.now(),
-      limits: { results: 100, bytes: 1_000_000, tombstones: 1 },
-    });
-    const left = await listCommandIds(root);
-    // Two of the three tombstones go, the oldest first; results 1 and 2
-    // expired in the same sweep, so either may be the one kept.
-    expect(left).not.toContain(ended[0]?.commandId);
-    expect(
-      [ended[1], ended[2]].filter((meta) =>
-        left.includes(meta?.commandId as string)
-      )
-    ).toHaveLength(1);
-    expect(left).toContain(ended[3]?.commandId as string);
-    expect(left).toContain(running.meta.commandId);
-    expect(await isGone(running.meta)).toBe(false);
-  });
-
-  test("the tombstone cap never removes a tombstone that still holds an admission slot", async () => {
-    const start = Date.now();
-    const accept = async (outcome: string, containerProcess: string) => {
-      const { meta, paths } = await acceptCommand({
-        input: input({ retentionMs: 0 }),
-        root,
-        now: new Date(start),
-      });
-      await new JournalWriter(paths, meta, 1).write("command.ended", {
-        outcome,
-        reason: "test",
-        exitCode: null,
-        signal: null,
-        durationMs: 1,
-        truncated: false,
-        suppressed: false,
-        containerProcess,
-      });
-      return meta;
-    };
-    const held = await accept("cancelled", "not_confirmed");
-    await Bun.sleep(5);
-    const plain = await accept("succeeded", "stopped");
-    await pruneExpired({ root, now: Date.now() + 1000 });
-    await enforceRetainedQuota({
-      root,
-      now: Date.now() + 1000,
-      limits: { results: 100, bytes: 1_000_000, tombstones: 0 },
-    });
-    const left = await listCommandIds(root);
-    expect(left).toContain(held.commandId);
-    expect(left).not.toContain(plain.commandId);
-    // The hold still counts against admission: one slot fewer is left.
-    // (New commands count as active during their start grace period.)
-    for (let index = 1; index < CALLER_ACTIVE_LIMIT; index += 1) {
-      await acceptCommand({
-        input: input({ caller: held.caller }),
-        root,
-        now: new Date(start + 2000),
-      });
-    }
+    // Tombstone ceiling: no tombstone (or its request key) is ever removed
+    // early; a start is refused instead, and nothing changes.
+    const before = await listCommandIds(root);
     await expectCode(
-      acceptCommand({
-        input: input({ caller: held.caller }),
+      enforceRetainedQuota({
         root,
-        now: new Date(start + 2000),
+        now: Date.now(),
+        limits: { results: 100, bytes: 1_000_000, tombstones: 1 },
       }),
       "E_ADMISSION_LIMIT"
     );
+    expect(await listCommandIds(root)).toEqual(before);
+    expect(await isGone(running.meta)).toBe(false);
+  });
+
+  test("at the tombstone bound a request key is still remembered: its retry is never run again", async () => {
+    const first = await acceptCommand({
+      input: input({ requestKey: "kept", retentionMs: 0 }),
+      root,
+    });
+    await new JournalWriter(first.paths, first.meta, 1).write("command.ended", {
+      outcome: "succeeded",
+      reason: "test",
+      exitCode: 0,
+      signal: null,
+      durationMs: 1,
+      truncated: false,
+      suppressed: false,
+      containerProcess: "stopped",
+    });
+    await pruneExpired({ root, now: Date.now() + 1000 });
+    await expectCode(
+      enforceRetainedQuota({
+        root,
+        now: Date.now() + 1000,
+        limits: { results: 100, bytes: 1_000_000, tombstones: 0 },
+      }),
+      "E_ADMISSION_LIMIT"
+    );
+    expect(await listCommandIds(root)).toContain(first.meta.commandId);
+    // The key still maps to the expired command, so the retry is refused
+    // as expired rather than accepted as a new command.
+    await expectCode(
+      acceptCommand({
+        input: input({ requestKey: "kept", retentionMs: 0 }),
+        root,
+      }),
+      "E_RESULT_EXPIRED"
+    );
+  });
+
+  test("a start answered from an existing request key still runs the retention sweep", async () => {
+    const kept = await acceptCommand({
+      input: input({ requestKey: "kept-key" }),
+      root,
+    });
+    const due = await acceptCommand({
+      input: input({ retentionMs: 0 }),
+      root,
+    });
+    await new JournalWriter(due.paths, due.meta, 1).write("command.ended", {
+      outcome: "succeeded",
+      reason: "test",
+      exitCode: 0,
+      signal: null,
+      durationMs: 1,
+      truncated: false,
+      suppressed: false,
+      containerProcess: "stopped",
+    });
+    await Bun.sleep(5);
+    expect(await lstat(due.paths.expired).catch(() => null)).toBeNull();
+    const found = await lookupRequest({
+      projectRoot: kept.meta.projectRoot,
+      requestKey: "kept-key",
+      fingerprintInputs: { argv: ["echo", "hi"], service: "api" },
+      root,
+    });
+    expect(found?.meta.commandId).toBe(kept.meta.commandId);
+    // The other result's retention elapsed: the lookup swept it.
+    expect(await lstat(due.paths.expired).catch(() => null)).not.toBeNull();
+    expect(await lstat(due.paths.stdout).catch(() => null)).toBeNull();
   });
 
   test("a request key for an expired command is never run again", async () => {
@@ -852,6 +872,8 @@ describe("review regressions", () => {
       journal,
       root,
       observe: fakeObserve([child]),
+      observeGroup: async () => [],
+      orphanGraceMs: 200,
       signaller: {
         process: () => false,
         group: (pgid, signal) => {
@@ -1134,43 +1156,77 @@ describe("second-review blockers", () => {
     );
   });
 
-  test("a full disk during recovery cannot block the final record", async () => {
+  /** A full disk: every append fails until the reserve's bytes are released. */
+  const fullDiskAppend =
+    (paths: { readonly reserve: string }) =>
+    async (path: string, line: string): Promise<void> => {
+      if (await lstat(paths.reserve).catch(() => null)) {
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      }
+      await writeFile(path, line, { flag: "a" });
+    };
+
+  test("taking the journal lock needs no disk space: acceptance creates the lock file", async () => {
+    const { paths } = await acceptCommand({ input: input(), root });
+    expect((await lstat(paths.lock)).isFile()).toBe(true);
+    expect((await stat(paths.lock)).size).toBe(0);
+    // Two holders in one process exclude each other.
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = withJournalLock(paths, async () => {
+      order.push("first in");
+      await held;
+      order.push("first out");
+    });
+    await Bun.sleep(50);
+    const second = withJournalLock(paths, async () => {
+      order.push("second in");
+    });
+    await Bun.sleep(150);
+    expect(order).toEqual(["first in"]);
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first in", "first out", "second in"]);
+  });
+
+  test("a full disk with the child still alive leaves the final record's reserve untouched", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.owner, JSON.stringify(deadOwner), { mode: 0o600 });
+    const child = { pid: 600_002, birth: "c", processGroupId: 600_002 };
+    await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+    await writeFile(paths.stdout, "output that cannot be announced\n", {
+      mode: 0o600,
+    });
+    const events = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve([child]),
+      readBootTime: noReboot,
+      append: fullDiskAppend(paths),
+    });
+    expect(events.some((event) => event.type === "command.ended")).toBe(false);
+    expect((await stat(paths.reserve)).size).toBeGreaterThan(0);
+  });
+
+  test("on a full disk the final record still lands, once, even with concurrent recoveries", async () => {
     const { meta, paths } = await acceptCommand({ input: input(), root });
     await writeFile(paths.owner, JSON.stringify(deadOwner), { mode: 0o600 });
     await writeFile(paths.stdout, "output that cannot be announced\n", {
       mode: 0o600,
     });
-    const noSpace = () =>
-      Object.assign(new Error("disk full"), { code: "ENOSPC" });
-    let lockAttempts = 0;
-    let budget = 700;
-    const events = await recoverLostOwner({
-      paths,
-      meta,
-      observe: fakeObserve(),
-      readBootTime: noReboot,
-      // The lock's owner file is the first write in the recovery path.
-      lock: async (lockPaths, run) => {
-        lockAttempts += 1;
-        if (lockAttempts === 1) {
-          throw noSpace();
-        }
-        return await withJournalLock(lockPaths, run);
-      },
-      // A real full disk: appends succeed until a byte budget is spent. The
-      // budget fits the final record only, so any output event written
-      // first would take the space the final record needs.
-      append: async (path, line) => {
-        const bytes = Buffer.byteLength(line);
-        if (bytes > budget) {
-          throw noSpace();
-        }
-        budget -= bytes;
-        await writeFile(path, line, { flag: "a" });
-      },
-    });
-    expect(lockAttempts).toBe(2);
-    expect(await lstat(paths.reserve).catch(() => null)).toBeNull();
+    const recover = () =>
+      recoverLostOwner({
+        paths,
+        meta,
+        observe: fakeObserve(),
+        readBootTime: noReboot,
+        append: fullDiskAppend(paths),
+      });
+    await Promise.all([recover(), recover(), recover()]);
+    const events = await readEvents(paths);
     const ended = events.filter((event) => event.type === "command.ended");
     expect(ended).toHaveLength(1);
     expect(ended[0]?.payload).toMatchObject({
@@ -1178,6 +1234,7 @@ describe("second-review blockers", () => {
       truncated: true,
     });
     expect(events.some((event) => event.type === "command.output")).toBe(false);
+    expect(await lstat(paths.reserve).catch(() => null)).toBeNull();
   });
 });
 
@@ -1408,5 +1465,88 @@ describe("unconfirmed container stops hold admission", () => {
         now: 1_000_001,
       })
     ).toBe(false);
+  });
+});
+
+describe("docker target for cleanup", () => {
+  let dir = "";
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "hack-bg-docker-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("the engine is resolved at start like the Docker CLI: config path, context, host", async () => {
+    const launchDir = join(dir, "project");
+    await mkdir(join(launchDir, "docker-config"), { recursive: true });
+    await writeFile(
+      join(launchDir, "docker-config", "config.json"),
+      JSON.stringify({ currentContext: "ctx-a" })
+    );
+    const home = join(dir, "home");
+    // A relative DOCKER_CONFIG is resolved against the launch directory and
+    // its currentContext is pinned.
+    expect(
+      await resolveDockerTarget({
+        env: { DOCKER_CONFIG: "./docker-config", HOME: home },
+        cwd: launchDir,
+      })
+    ).toEqual({ config: join(launchDir, "docker-config"), context: "ctx-a" });
+    // DOCKER_CONTEXT wins over the file.
+    expect(
+      await resolveDockerTarget({
+        env: { DOCKER_CONFIG: "./docker-config", DOCKER_CONTEXT: "ctx-b" },
+        cwd: launchDir,
+      })
+    ).toEqual({ config: join(launchDir, "docker-config"), context: "ctx-b" });
+    // DOCKER_HOST (without DOCKER_CONTEXT) selects the engine itself: no
+    // context is pinned over it.
+    expect(
+      await resolveDockerTarget({
+        env: { DOCKER_HOST: "unix:///tmp/x.sock", HOME: home },
+        cwd: launchDir,
+      })
+    ).toEqual({});
+    expect(
+      dockerEnvFor({
+        env: { PATH: "/bin", DOCKER_CONFIG: "./docker-config" },
+        target: { config: "/abs/docker-config", context: "ctx-a" },
+      })
+    ).toEqual({
+      PATH: "/bin",
+      DOCKER_CONFIG: "/abs/docker-config",
+      DOCKER_CONTEXT: "ctx-a",
+    });
+  });
+
+  test("one-off cleanup runs from the launch directory against the recorded engine", async () => {
+    const bin = join(dir, "bin");
+    const launchDir = join(dir, "project");
+    const log = join(dir, "docker.log");
+    await mkdir(bin, { recursive: true });
+    await mkdir(launchDir, { recursive: true });
+    await writeFile(
+      join(bin, "docker"),
+      `#!/bin/sh\nprintf '%s|%s|%s\\n' "$PWD" "$DOCKER_CONFIG" "$DOCKER_CONTEXT" >> ${JSON.stringify(log)}\necho 'Error: No such container: x' >&2\nexit 1\n`,
+      { mode: 0o755 }
+    );
+    const result = await removeOneOffContainer({
+      name: "hack-bg-aaaaaaaaaaaaaaaaaaaa",
+      service: "api",
+      cwd: launchDir,
+      env: dockerEnvFor({
+        env: { PATH: `${bin}:/usr/bin:/bin`, DOCKER_CONFIG: "./docker-config" },
+        target: { config: join(launchDir, "docker-config"), context: "ctx-a" },
+      }),
+    });
+    expect(result).toBe("stopped");
+    const calls = (await readFile(log, "utf8")).trim().split("\n");
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call).toBe(
+        `${await realpath(launchDir)}|${join(launchDir, "docker-config")}|ctx-a`
+      );
+    }
   });
 });

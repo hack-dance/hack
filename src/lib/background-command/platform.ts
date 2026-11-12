@@ -320,7 +320,60 @@ export async function readBootTimeMs(): Promise<number | null> {
 const BTIME_PATTERN = /^btime (\d+)$/m;
 const BOOTTIME_PATTERN = /sec = (\d+)/;
 
-let libcGetsid: ((pid: number) => number) | null | undefined;
+type Libc = {
+  readonly getsid: (pid: number) => number;
+  readonly flock: (fd: number, operation: number) => number;
+};
+
+let libc: Libc | null | undefined;
+
+function loadLibc(): Libc | null {
+  if (libc === undefined) {
+    try {
+      const library =
+        process.platform === "darwin"
+          ? "/usr/lib/libSystem.B.dylib"
+          : "libc.so.6";
+      const opened = dlopen(library, {
+        getsid: { args: [FFIType.i32], returns: FFIType.i32 },
+        flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+      });
+      libc = {
+        getsid: (pid) => opened.symbols.getsid(pid),
+        flock: (fd, operation) => opened.symbols.flock(fd, operation),
+      };
+    } catch {
+      libc = null;
+    }
+  }
+  return libc;
+}
+
+// Same values on Linux and macOS.
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const LOCK_UN = 8;
+
+/**
+ * Try to take an exclusive flock(2) on an open descriptor without waiting.
+ * flock allocates nothing on disk, so it works on a full disk, and the
+ * kernel drops it when its holder dies. Locks on separate open descriptions
+ * exclude each other, within one process too. Undefined when libc cannot be
+ * loaded (the caller then uses its file-based lock).
+ */
+export function tryExclusiveFileLock(fd: number): boolean | undefined {
+  const loaded = loadLibc();
+  return loaded ? loaded.flock(fd, LOCK_EX | LOCK_NB) === 0 : undefined;
+}
+
+export function releaseFileLock(fd: number): void {
+  loadLibc()?.flock(fd, LOCK_UN);
+}
+
+/** True when flock(2) is available (libc could be loaded). */
+export function fileLocksAvailable(): boolean {
+  return loadLibc() !== null;
+}
 
 /**
  * getsid(2) through libc: a positive session id, null when the process does
@@ -328,26 +381,13 @@ let libcGetsid: ((pid: number) => number) | null | undefined;
  * caller then falls back to `ps`).
  */
 function getsidFromLibc(pid: number): number | null | undefined {
-  if (libcGetsid === undefined) {
-    try {
-      const library =
-        process.platform === "darwin"
-          ? "/usr/lib/libSystem.B.dylib"
-          : "libc.so.6";
-      const libc = dlopen(library, {
-        getsid: { args: [FFIType.i32], returns: FFIType.i32 },
-      });
-      libcGetsid = (target) => libc.symbols.getsid(target);
-    } catch {
-      libcGetsid = null;
-    }
-  }
-  if (libcGetsid === null) {
+  const loaded = loadLibc();
+  if (!loaded) {
     return undefined;
   }
   if (!(Number.isSafeInteger(pid) && pid > 0)) {
     return null;
   }
-  const session = libcGetsid(pid);
+  const session = loaded.getsid(pid);
   return session > 0 ? session : null;
 }

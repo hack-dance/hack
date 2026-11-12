@@ -8,7 +8,6 @@ import {
   test,
 } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { closeSync, openSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -29,10 +28,9 @@ import {
   GUEST_STOP_SCRIPT,
 } from "../src/lib/background-command/container-stop.ts";
 import {
-  type CommandMeta,
+  CAPTURE_LIMIT_BYTES,
   type EventEnvelope,
   journalPaths,
-  OUTPUT_FILE_LIMIT_BYTES,
   readChild,
   readEvents,
   readOwner,
@@ -40,6 +38,7 @@ import {
 import {
   identityMatches,
   observeIdentities,
+  observeProcessGroup,
   type ProcessIdentity,
   readSessionId,
 } from "../src/lib/background-command/platform.ts";
@@ -50,10 +49,6 @@ import {
   readCommandEvents,
 } from "../src/lib/background-command/reader.ts";
 import { acceptCommand } from "../src/lib/background-command/store.ts";
-import {
-  limitOutputFileSize,
-  withoutInheritedBashVersion,
-} from "../src/lib/background-command/supervisor.ts";
 
 // ---------------------------------------------------------------------------
 // HACK-2085: real detached supervisors and children, on this host's kernel.
@@ -588,6 +583,86 @@ describe("background command processes", () => {
   );
 
   test(
+    "with the supervisor gone, cancel stops a descendant that ignores SIGTERM after the leader exits",
+    async () => {
+      // The leader exits on SIGTERM (and is reaped at once); its descendant
+      // ignores SIGTERM and keeps running. The canceller must remember it
+      // before signalling and kill it by verified identity afterwards.
+      const leader = Bun.spawn(
+        ["sh", "-c", '(trap "" TERM; echo ready; exec sleep 60) & wait'],
+        { stdin: "ignore", stdout: "pipe", stderr: "ignore", detached: true }
+      );
+      const reader = leader.stdout.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain(
+        "ready"
+      );
+      reader.releaseLock();
+      const leaderIdentity = (await track(leader.pid, true)) as ProcessIdentity;
+      const descendant = ((await observeProcessGroup(leader.pid)) ?? []).find(
+        (member) => member.pid !== leader.pid
+      ) as ProcessIdentity;
+      expect(descendant).toBeDefined();
+      await track(descendant.pid, false);
+      const dead = Bun.spawn(["true"]);
+      await dead.exited;
+      const accepted = await acceptCommand({
+        root: fixture.store,
+        input: {
+          requestKey: null,
+          operation: "exec",
+          backend: "compose",
+          projectId: "fixture",
+          projectRoot: fixture.root,
+          instanceId: "@base",
+          service: "api",
+          argv: ["sleep", "60"],
+          workdir: null,
+          caller: "test",
+          timeoutMs: 60_000,
+          stallAfterMs: 0,
+          capture: "full",
+          retentionMs: 60_000,
+          liveOutput: "available",
+          stallDetection: "available",
+          redaction: { values: 0 },
+          fingerprintInputs: {},
+        },
+      });
+      await writeFile(
+        accepted.paths.owner,
+        JSON.stringify({
+          pid: dead.pid,
+          birth: "Thu Jan  1 00:00:00 1970",
+          processGroupId: dead.pid,
+          sessionId: null,
+          newSession: false,
+        }),
+        { mode: 0o600 }
+      );
+      await writeFile(
+        accepted.paths.child,
+        JSON.stringify({ ...leaderIdentity, processGroupId: leader.pid }),
+        { mode: 0o600 }
+      );
+      const result = await cancelCommand({
+        journal: await loadJournal({
+          commandId: accepted.meta.commandId,
+          root: fixture.store,
+        }),
+        root: fixture.store,
+        orphanGraceMs: 500,
+      });
+      expect(result.confirmed.childGroupSignalled).toBe(true);
+      expect(result.confirmed.descendants).toBe("stopped");
+      expect(result.outcome).toBe("cancelled");
+      expect(() => process.kill(descendant.pid, 0)).toThrow();
+      const ended = endedPayload(await readEvents(accepted.paths));
+      expect(ended?.descendants).toBeUndefined();
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
     "cancel leaves a live supervisor that is finishing to finish, and force-stops one that is not",
     async () => {
       // A stand-in supervisor that ignores SIGTERM, as a real one in its end
@@ -964,61 +1039,26 @@ describe("background command processes", () => {
   );
 
   test(
-    "the file-size wrapper stops a writer at exactly the output file limit",
+    "a burst far past every capture limit stops capture, never the command, and leaves the disk bounded",
     async () => {
-      // The wrapper alone, with no supervisor cutting the file back: the
-      // kernel limit is the only thing between the writer and the disk.
-      const path = join(fixture.root, "capped");
-      const fd = openSync(path, "a", 0o600);
-      try {
-        const argv = limitOutputFileSize(
-          { capture: "full", backend: "compose" } as CommandMeta,
-          [
-            "head",
-            "-c",
-            String(OUTPUT_FILE_LIMIT_BYTES + 1024 * 1024),
-            "/dev/zero",
-          ]
-        );
-        const proc = Bun.spawn(argv, {
-          stdin: "ignore",
-          stdout: fd,
-          stderr: "ignore",
-          // An inherited BASH_VERSION must not change the unit a non-bash
-          // sh uses: the supervisor drops it from the wrapper's env.
-          env: withoutInheritedBashVersion({
-            ...fixture.env,
-            BASH_VERSION: "4.4.0(1)-release",
-          }),
-        });
-        // head reports EFBIG ("File too large") and fails.
-        expect(await proc.exited).not.toBe(0);
-      } finally {
-        closeSync(fd);
-      }
-      expect((await stat(path)).size).toBe(OUTPUT_FILE_LIMIT_BYTES);
-    },
-    TEST_TIMEOUT_MS
-  );
-
-  test(
-    "a burst between two polls cannot grow an output file past the kernel file-size limit",
-    async () => {
-      // 100 MiB in one burst. Capture stops at 8 MiB and the supervisor cuts
-      // the file back; whether the writer also hits the 64 MiB kernel limit
-      // (and fails with EFBIG) depends on how fast it writes relative to the
-      // 200 ms poll, so only the bound is asserted here. The wrapper test
-      // above proves the limit itself.
+      // 100 MiB in one burst: more than the capture limit (8 MiB) and the
+      // backlog limit (64 MiB). Capture stops and records `truncated`; the
+      // writer is never refused a write, so it exits 0 and the command
+      // succeeds. The stored file is cut back to what was announced.
       const launched = await launch({
-        argv: ["sh", "-c", "head -c 104857600 /dev/zero"],
+        argv: ["sh", "-c", "head -c 104857600 /dev/zero; echo done >&2"],
       });
       const journal = launched.journal as LoadedJournal;
       const read = await readUntilEnded({ journal });
-      expect(read.outcome === "failed" || read.outcome === "succeeded").toBe(
-        true
-      );
+      expect(read.outcome).toBe("succeeded");
+      expect(read.exitCode).toBe(0);
+      const ended = endedPayload(read.events);
+      expect(ended?.truncated).toBe(true);
+      expect(
+        read.events.some((event) => event.type === "command.output_truncated")
+      ).toBe(true);
       expect((await stat(journal.paths.stdout)).size).toBeLessThanOrEqual(
-        OUTPUT_FILE_LIMIT_BYTES
+        CAPTURE_LIMIT_BYTES
       );
     },
     TEST_TIMEOUT_MS

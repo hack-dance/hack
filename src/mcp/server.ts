@@ -1420,7 +1420,7 @@ function registerBackgroundCommandTools(opts: {
     name: "hack.project.command.start",
     title: "Start a background command",
     description:
-      'Start `exec` (in a running service container) or `run` (one-off container) in the background and return a commandId and cursor at once; then call hack.project.command.read with the cursor until it reports ended. Uses the same validation and argv handling as hack.project.exec/run. Output is stored in private files under the Hack home for up to 24 hours (capture: "metadata" stores none); redaction of values Hack injected is partial, not a safety guarantee. Unlike the foreground tools, reaching the 8 MiB capture limit stops capture but the command keeps running. requestKey makes retries safe: the same key with the same inputs returns the existing command and never runs it twice.',
+      'Start `exec` (in a running service container) or `run` (one-off container) in the background and return a commandId and cursor at once; then call hack.project.command.read with the cursor until it reports ended. Uses the same validation and argv handling as hack.project.exec/run. Output is stored in private files under the Hack home and is not readable after its retention time (at most 24 hours after the end; files are removed at a later sweep, not on a timer; capture: "metadata" stores none); redaction of values Hack injected is partial, not a safety guarantee. Unlike the foreground tools, reaching the 8 MiB capture limit stops capture but the command keeps running. requestKey makes retries safe: the same key with the same inputs returns the existing command and never runs it twice.',
     annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
     inputSchema: {
       ...scopeInput,

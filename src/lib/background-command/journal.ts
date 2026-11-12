@@ -41,10 +41,12 @@ export const RESERVE_BYTES = 64 * 1024;
 /** Capture limit per command, stdout and stderr together. */
 export const CAPTURE_LIMIT_BYTES = 8 * 1024 * 1024;
 /**
- * Largest size of one output file. Enforced by the kernel (file-size limit on
- * the child), so a burst between two supervisor polls cannot fill the disk.
+ * Output not yet scanned beyond which capture counts as fallen behind: it
+ * stops (recorded as `truncated`) and the files are cut back on every poll,
+ * so disk use stays bounded while the command keeps running. Never a limit
+ * on the command itself.
  */
-export const OUTPUT_FILE_LIMIT_BYTES = 64 * 1024 * 1024;
+export const CAPTURE_BACKLOG_LIMIT_BYTES = 64 * 1024 * 1024;
 /** Largest byte range one output event covers. */
 export const OUTPUT_EVENT_MAX_BYTES = 16 * 1024;
 /** Largest `meta.json` or `launch.json` a reader accepts (and a start may write). */
@@ -142,6 +144,18 @@ const launchSchema = z.object({
       marker: z.string().regex(/^[a-z0-9]{20}$/),
       service: z.string(),
       compose: z.array(z.string()).min(2),
+    })
+    .optional(),
+  /**
+   * The Docker engine selection resolved at start (an absolute
+   * DOCKER_CONFIG, and the context name when one was in effect), so cleanup
+   * talks to the same engine even if a relative path or the default context
+   * would now resolve differently. Absent in journals from before it existed.
+   */
+  docker: z
+    .object({
+      config: z.string().optional(),
+      context: z.string().optional(),
     })
     .optional(),
 });

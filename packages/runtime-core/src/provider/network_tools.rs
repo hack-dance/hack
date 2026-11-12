@@ -10,22 +10,25 @@ use std::{
     path::Path,
 };
 
+/// Alpine v3.24 `main`/`aarch64` packages, matching the pinned SmolVM agent rootfs
+/// (Alpine 3.24.4, apk-tools 3). Re-pin these with the rootfs whenever the SmolVM pin
+/// moves the guest to another Alpine release; `guest-network-tools.sh` checks the release.
 const PACKAGES: [(&str, &str); 4] = [
     (
-        "iptables-1.8.10-r3.apk",
-        "31ab6343f1f3d0fbbf290c4dcf0430b2d08e8073e516e13530dfab25b097d467",
+        "iptables-1.8.13-r0.apk",
+        "9d22aef2e74346e9d537f6dc964786ab14b35580e3ccc0e4001dc3a725e8fe77",
     ),
     (
         "libmnl-1.0.5-r2.apk",
-        "d15e6313880bdd14959f42c1556b4a810ef4894992ae9f73b148126f0cc6021d",
+        "0ca382c70f78affef3a4a28016aab25ad8c3ccf1bcdad59f3968d4536a7b2478",
     ),
     (
-        "libnftnl-1.2.6-r0.apk",
-        "ec1c2b02869fc65bcf7a1105e3a7ac5df1bd9a8bd8b399cb6cf650dd3112c021",
+        "libnftnl-1.3.1-r0.apk",
+        "8b31395671e910c294d7f0e29d3ac3c7efe9d89264db255f39aa9944dd4b6cac",
     ),
     (
-        "libxtables-1.8.10-r3.apk",
-        "f0accefde240ece6722479b46cb014d7d2f745af7d796e8eec3ced53571e1088",
+        "libxtables-1.8.13-r0.apk",
+        "7535f18d9c7229178bc5e3809e5fea171033e33dfa054d88846512e1f25eefa8",
     ),
 ];
 fn error(message: impl Into<crate::ErrorMessage>) -> CandidateError {
@@ -372,5 +375,203 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(read_archive(&path, &hash).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pins_match_the_guest_release_and_the_published_table() {
+        // The guest script refuses any other Alpine release; the packages must be built for it.
+        let script = include_str!("guest-network-tools.sh");
+        assert!(script.contains("test \"$(cat /etc/alpine-release)\" = 3.24.4\n"));
+        assert!(script.contains("--no-logfile"));
+        let guide = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/guides/native-candidate.md"),
+        )
+        .unwrap();
+        assert!(guide.contains("https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/"));
+        let rows: Vec<String> = guide
+            .lines()
+            .filter(|line| line.starts_with("| `") && line.contains(".apk` |"))
+            .map(str::to_owned)
+            .collect();
+        let expected: Vec<String> = PACKAGES
+            .iter()
+            .map(|(name, hash)| format!("| `{name}` | `{hash}` |"))
+            .collect();
+        assert_eq!(rows, expected);
+    }
+
+    /// The guest script against a fake guest: a private root, a fake `apk` that refuses any
+    /// call without the empty repositories file (the apk-tools 3 index refresh that timed out
+    /// pools without internet), and `stat` reporting this user as root. Linux only: it needs
+    /// GNU `stat` and `sha256sum`.
+    #[cfg(target_os = "linux")]
+    mod fake_guest {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::{Path, PathBuf};
+        use std::process::{Command, Output};
+
+        const APK: &str = r#"#!/bin/bash
+set -eu
+if test "${1:-}" != --repositories-file || test "${2:-}" != /dev/null; then
+  echo "apk called with repositories: $*" >> "$FAKE_STATE/refused"; exit 99
+fi
+shift 2
+installed="$FAKE_STATE/installed"; touch "$installed"
+case "$1" in
+  --print-arch) echo aarch64 ;;
+  info)
+    case "$2" in
+      -e) grep -qx "$3" "$installed" ;;
+      -L) printf '%s-1.0 contains:\nusr/lib/%s.so\n\n' "$3" "$3" ;;
+      -v) sed 's/$/-1.0/' "$installed" ;;
+      *) exit 98 ;;
+    esac ;;
+  add)
+    if test -e "$FAKE_STATE/fail-add"; then exit 1; fi
+    for file in "$@"; do
+      case "$file" in
+        *.apk) name=$(basename "$file" .apk)
+          mkdir -p "$FAKE_ROOT/usr/lib"; printf '%s' "$name" > "$FAKE_ROOT/usr/lib/$name.so"
+          grep -qx "$name" "$installed" || echo "$name" >> "$installed" ;;
+      esac
+    done ;;
+  *) exit 97 ;;
+esac
+"#;
+        const STAT: &str =
+            "#!/bin/bash\nout=$(/usr/bin/stat \"$@\")\necho \"${out/#$(id -u):/0:}\"\n";
+
+        struct Guest {
+            dir: PathBuf,
+        }
+        impl Drop for Guest {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+        }
+        impl Guest {
+            fn new(name: &str) -> Self {
+                let dir = crate::private_test_root(
+                    &std::env::temp_dir().canonicalize().unwrap(),
+                    &format!("hack-network-guest-{name}"),
+                );
+                for sub in ["bin", "state", "root", "stage", "etc"] {
+                    fs::create_dir(dir.join(sub)).unwrap();
+                }
+                for (name, body) in [
+                    ("apk", APK),
+                    ("stat", STAT),
+                    ("iptables", "#!/bin/sh\nexit 0\n"),
+                ] {
+                    let path = dir.join("bin").join(name);
+                    fs::write(&path, body).unwrap();
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                fs::write(dir.join("etc/alpine-release"), "3.24.4\n").unwrap();
+                for package in ["iptables", "libmnl", "libnftnl", "libxtables"] {
+                    fs::write(dir.join("stage").join(format!("{package}.apk")), b"apk").unwrap();
+                }
+                Self { dir }
+            }
+            fn receipt(&self) -> PathBuf {
+                self.dir.join("etc/hack-local-network-tools")
+            }
+            fn run(&self, owner: &str, mode: &str) -> Output {
+                let script = include_str!("guest-network-tools.sh")
+                    .replace(
+                        "/etc/hack-local-network-tools",
+                        &self.receipt().display().to_string(),
+                    )
+                    .replace(
+                        "/etc/alpine-release",
+                        &self.dir.join("etc/alpine-release").display().to_string(),
+                    )
+                    .replace("\"/$path\"", "\"$FAKE_ROOT/$path\"");
+                let path = format!("{}:/usr/bin:/bin", self.dir.join("bin").display());
+                Command::new("/bin/bash")
+                    .args([
+                        "-c",
+                        &script,
+                        "network-tools",
+                        owner,
+                        "identity-fixture",
+                        mode,
+                    ])
+                    .arg(self.dir.join("stage"))
+                    .env_clear()
+                    .env("PATH", path)
+                    .env("FAKE_STATE", self.dir.join("state"))
+                    .env("FAKE_ROOT", self.dir.join("root"))
+                    .output()
+                    .unwrap()
+            }
+            fn stdout(&self, owner: &str, mode: &str) -> String {
+                let output = self.run(owner, mode);
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout).unwrap()
+            }
+            fn refused_apk_calls(&self) -> bool {
+                Path::new(&self.dir.join("state/refused")).exists()
+            }
+        }
+
+        #[test]
+        fn a_fresh_install_reads_only_the_installed_database_and_is_then_ready() {
+            let guest = Guest::new("fresh");
+            assert_eq!(guest.stdout("owner-a", "check"), "absent\n");
+            guest.stdout("owner-a", "install");
+            assert_eq!(guest.stdout("owner-a", "check"), "ready\n");
+            assert!(
+                !guest.refused_apk_calls(),
+                "every apk call must skip repositories"
+            );
+            // Another pool's owner never reuses this receipt.
+            assert!(!guest.run("owner-b", "check").status.success());
+        }
+
+        #[test]
+        fn a_failed_first_install_resumes_on_retry() {
+            let guest = Guest::new("retry");
+            fs::write(guest.dir.join("state/fail-add"), b"").unwrap();
+            assert!(!guest.run("owner-a", "install").status.success());
+            assert!(guest.receipt().is_dir() && !guest.receipt().join("ready").exists());
+            // The retry sees its own incomplete receipt: absent, then installed and ready.
+            fs::remove_file(guest.dir.join("state/fail-add")).unwrap();
+            assert_eq!(guest.stdout("owner-a", "check"), "absent\n");
+            guest.stdout("owner-a", "install");
+            assert_eq!(guest.stdout("owner-a", "check"), "ready\n");
+            assert!(!guest.refused_apk_calls());
+        }
+
+        #[test]
+        fn an_incomplete_receipt_of_another_pool_or_package_set_is_refused() {
+            let guest = Guest::new("foreign");
+            fs::write(guest.dir.join("state/fail-add"), b"").unwrap();
+            assert!(!guest.run("owner-a", "install").status.success());
+            fs::remove_file(guest.dir.join("state/fail-add")).unwrap();
+            assert!(!guest.run("owner-b", "check").status.success());
+            assert!(!guest.run("owner-b", "install").status.success());
+            // An interruption before the owner was written still resumes.
+            fs::write(guest.receipt().join("owner"), b"").unwrap();
+            guest.stdout("owner-a", "install");
+            assert_eq!(guest.stdout("owner-a", "check"), "ready\n");
+        }
+
+        #[test]
+        fn an_unowned_package_or_a_changed_installed_file_is_refused() {
+            let guest = Guest::new("unowned");
+            fs::write(guest.dir.join("state/installed"), "libmnl\n").unwrap();
+            assert_eq!(guest.run("owner-a", "check").status.code(), Some(81));
+
+            let guest = Guest::new("changed");
+            guest.stdout("owner-a", "install");
+            fs::write(guest.dir.join("root/usr/lib/libmnl.so"), b"changed").unwrap();
+            assert!(!guest.run("owner-a", "check").status.success());
+        }
     }
 }

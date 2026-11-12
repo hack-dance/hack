@@ -550,7 +550,7 @@ fn a_fifo_at_the_witness_path_is_refused_without_blocking() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let directory = home.directory.clone();
     let owner = home.owner.clone();
-    std::thread::spawn(move || {
+    let worker = std::thread::spawn(move || {
         tree_witness::fake_filesystem_type(Some("apfs"));
         let candidate = Candidate::discover(&directory).unwrap();
         let lease = state::Lock::acquire(&root(&candidate)).unwrap();
@@ -561,6 +561,9 @@ fn a_fifo_at_the_witness_path_is_refused_without_blocking() {
     let (result, proofs) = receiver
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("a FIFO at the witness path must not block the start");
+    // Receiving the result precedes the worker's local drops. Wait for its lease to
+    // be released before the next check tries to acquire that same lock.
+    worker.join().expect("witness check worker panicked");
     result.unwrap();
     // No usable witness: proven by content, and a regular witness replaces the FIFO.
     assert_eq!(proofs, 3);

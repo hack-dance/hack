@@ -100,7 +100,7 @@
     "@clack/prompts": "1.0.0-alpha.9",
     "elysia": "^1.4.30",
     "@modelcontextprotocol/sdk": "1.32.0",
-    "@opentui/core": "^0.1.74",
+    "@opentui/core": "^0.8.3",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "zod": "4.6.7"

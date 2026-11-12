@@ -16,6 +16,7 @@
     },
     "test": {
       "dependsOn": ["^test"],
+      "passThroughEnv": ["TMPDIR", "HACK_SYSTEMD_DISABLE"],
       "outputs": []
     },
     "lint": {

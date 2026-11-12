@@ -100,3 +100,6 @@ export const GLOBAL_MANAGED_ENV_SCHEMA_FILENAME =
   "hack.env.managed.schema.json" as const;
 export const GLOBAL_BRANCHES_SCHEMA_FILENAME =
   "hack.branches.schema.json" as const;
+
+/** Compose project name of Hack's global proxy stack (`~/.hack/caddy`). */
+export const GLOBAL_CADDY_PROJECT_NAME = "hack-dev-proxy";

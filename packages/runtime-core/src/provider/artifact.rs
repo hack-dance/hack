@@ -179,6 +179,31 @@ pub fn verify(candidate: &Candidate) -> Result<Artifact, CandidateError> {
     verify_tree(candidate, &SMOLVM)
 }
 
+/// Diagnostic only. A different executable path is a pin mismatch only when
+/// the home's prepared record also selects that exact versioned executable.
+/// This never admits an old binary or replaces native process identity checks.
+pub(super) fn check_process_pin(
+    candidate: &Candidate,
+    executable: &Path,
+) -> Result<(), CandidateError> {
+    let providers = candidate.state_root.join("providers");
+    let path = providers.join(SMOLVM.record);
+    if !path.try_exists().map_err(io)? {
+        return Ok(());
+    }
+    reject_aliased_state(&providers)?;
+    let recorded: Artifact = state::read(&path)?;
+    let previous = providers
+        .join(format!("smolvm-{}-darwin-arm64", recorded.version))
+        .join("smolvm-bin");
+    if executable == previous
+        && (recorded.version != VERSION || recorded.archive_sha256 != ARCHIVE_SHA256)
+    {
+        return Err(pin_changed(&SMOLVM, &recorded));
+    }
+    Ok(())
+}
+
 /// Verify a prepared tree against its record before anything executes from it.
 pub(super) fn verify_tree(
     candidate: &Candidate,
@@ -197,6 +222,54 @@ pub(super) fn verify_tree(
     Ok(artifact)
 }
 
+/// The cheap part of [`verify_tree`]: the preparation record names this executor's pin and
+/// the prepared tree is not an alias. Hashes nothing; returns the record, whose
+/// `tree_sha256` is the tree's content anchor.
+pub(super) fn verify_record(
+    candidate: &Candidate,
+    pin: &TreePin,
+) -> Result<Artifact, CandidateError> {
+    let providers = candidate.state_root.join("providers");
+    reject_aliased_state(&providers.join(pin.directory))?;
+    let artifact: Artifact = state::read(&providers.join(pin.record))?;
+    if artifact.version != pin.version || artifact.archive_sha256 != pin.archive_sha256 {
+        return Err(pin_changed(pin, &artifact));
+    }
+    Ok(artifact)
+}
+
+/// Where a prepared tree lives in this home.
+pub(super) fn tree_root(candidate: &Candidate, pin: &TreePin) -> std::path::PathBuf {
+    candidate.state_root.join("providers").join(pin.directory)
+}
+
+/// The metadata digest ([`super::tree_witness::metadata_digest`]) of a prepared tree.
+pub(super) fn tree_metadata(
+    candidate: &Candidate,
+    pin: &TreePin,
+) -> Result<String, CandidateError> {
+    super::tree_witness::metadata_digest(&tree_root(candidate, pin), None)
+}
+
+/// [`verify_tree`]'s content proof, bracketed by the tree's metadata digest. Returns what the
+/// proof witnessed; a tree whose metadata changed while it was hashed is refused, so the
+/// witness never names metadata the content proof did not cover.
+pub(super) fn verify_witnessed(
+    candidate: &Candidate,
+    pin: &TreePin,
+) -> Result<super::tree_witness::Proven, CandidateError> {
+    let before = tree_metadata(candidate, pin)?;
+    super::tree_witness::note_content_proof();
+    let artifact = verify_tree(candidate, pin)?;
+    if tree_metadata(candidate, pin)? != before {
+        return Err(CandidateError::new("artifact_digest_mismatch", pin.changed));
+    }
+    Ok(super::tree_witness::Proven {
+        metadata: before,
+        content: artifact.tree_sha256,
+    })
+}
+
 /// The refusal for a home prepared under another provider pin. A pin bump is not an
 /// in-place upgrade: the home's guest rootfs copy, disks and provider database were made
 /// by the recorded release and are qualified only with it. Nothing is changed or removed;
@@ -205,7 +278,7 @@ fn pin_changed(pin: &TreePin, recorded: &Artifact) -> CandidateError {
     CandidateError::new(
         "provider_pin_changed",
         format!(
-            "This candidate home was prepared with {} {}; this executor pins {} {}. A provider pin change needs a fresh candidate home: prepare one with the pinned archive (runtime prepare). This home, its volumes and its prepared tree are unchanged; a build that pins {} still runs it, and a pool it left running must be stopped with that build (runtime down).",
+            "This candidate home was prepared with {} {}; this executor pins {} {}. A provider pin change needs a fresh candidate home: prepare one with the pinned archive (runtime prepare). This home, its volumes and its prepared tree are unchanged. Use the native executor from the release that pins {} and started this pool to run runtime down --json on this home. Preserve this home for its retained data, then prepare a fresh home. There is no in-place provider upgrade.",
             pin.label, recorded.version, pin.label, pin.version, recorded.version
         ),
     )
@@ -812,6 +885,54 @@ mod tests {
     }
     fn providers(candidate: &Candidate) -> PathBuf {
         candidate.state_root.join("providers")
+    }
+    #[test]
+    fn old_provider_path_is_a_pin_refusal_only_with_the_matching_prepared_record() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        state::private_directory(&providers(&candidate)).unwrap();
+        let path = providers(&candidate).join(SMOLVM.record);
+        let old = Artifact {
+            version: "1.14.3".into(),
+            archive_sha256: "0".repeat(64),
+            tree_sha256: "1".repeat(64),
+        };
+        state::write(&path, &old).unwrap();
+        let executable = providers(&candidate).join("smolvm-1.14.3-darwin-arm64/smolvm-bin");
+        let owner: state::Owner = serde_json::from_value(serde_json::json!({
+            "version":1,"checkout":candidate.checkout,"token":"a".repeat(32),
+            "machine":"fixture","short_home":root.join("short"),"created":true,"phase":"running",
+            "process":{"pid":2147483647,"start_micros":123,"uid":unsafe {libc::geteuid()},"executable":executable},
+            "storage":null,"overlay":null,"guest_boot_id":null,"previous_guest_boot_id":null,
+            "daemon_pid":null,"daemon_start":null,"rootfs_digest":null
+        })).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        // Diagnose the retained provider path before interpreting PID-file bytes
+        // against the new pin. No process is observed, signalled or adopted.
+        let error = super::super::lifecycle::verify_live(&candidate, &owner).unwrap_err();
+        assert_eq!(error.code, "provider_pin_changed");
+        for text in ["1.14.3", VERSION, "runtime down --json", "retained data"] {
+            assert!(error.message.contains(text));
+        }
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        check_process_pin(&candidate, Path::new("/unrelated/provider")).unwrap();
+        state::write(
+            &path,
+            &Artifact {
+                version: VERSION.into(),
+                archive_sha256: ARCHIVE_SHA256.into(),
+                tree_sha256: "1".repeat(64),
+            },
+        )
+        .unwrap();
+        check_process_pin(&candidate, &executable).unwrap();
+        assert_ne!(
+            super::super::lifecycle::verify_live(&candidate, &owner)
+                .unwrap_err()
+                .code,
+            "provider_pin_changed"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     fn lease(candidate: &Candidate) -> state::Lock {
         state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap()

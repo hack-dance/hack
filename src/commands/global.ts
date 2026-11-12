@@ -164,6 +164,17 @@ import { ensureBundledGumInstalled } from "../ui/gum.ts";
 import { logger } from "../ui/logger.ts";
 import { resolvePreferredHostDnsTarget } from "./doctor-utils.ts";
 import {
+  bootstrapLinuxGlobalDns,
+  inspectLinuxGlobalDns,
+  linuxDnsStatusPayload,
+  offerLinuxGlobalDnsRemoval,
+} from "./global-linux-dns.ts";
+import {
+  configureLinuxSystemAndBrowserTrust,
+  configureLinuxTrustFromRuntime,
+  type LinuxTrustResult,
+} from "./global-linux-trust.ts";
+import {
   inspectProxyNetwork,
   proxyNetworkStatusPayload,
   repairProxyNetworkBeforeUp,
@@ -378,7 +389,8 @@ type GlobalStatusArgs = CommandArgs<
 
 const globalTrustSpec = defineCommand({
   name: "trust",
-  summary: "Trust Caddy Local CA (macOS) so https://*.hack is trusted",
+  summary:
+    "Trust Caddy Local CA (macOS keychain; Linux trust store and NSS) so https://*.hack is trusted",
   group: "Global",
   options: [],
   positionals: [],
@@ -957,7 +969,9 @@ async function globalInstall(): Promise<number> {
   await materializeGlobalInstallFiles({ paths, useStaticIps });
   logger.success({ message: "Global files ready in ~/.hack/" });
   await globalUp();
-  await completeGlobalInstallHostBootstrap();
+  const hostBootstrapOk = await completeGlobalInstallHostBootstrap({
+    useStaticIps,
+  });
   note(
     [
       "Next:",
@@ -967,7 +981,7 @@ async function globalInstall(): Promise<number> {
     "Global install"
   );
 
-  return 0;
+  return hostBootstrapOk ? 0 : 1;
 }
 
 async function ensureOptionalInstallDependencies(opts: {
@@ -1155,14 +1169,24 @@ async function writeGlobalInstallAssets(opts: {
   );
 }
 
-async function completeGlobalInstallHostBootstrap(): Promise<void> {
+/** Returns `false` only when a confirmed host step failed (exit non-zero). */
+async function completeGlobalInstallHostBootstrap(opts: {
+  readonly useStaticIps: boolean;
+}): Promise<boolean> {
   if (isMac()) {
     await bootstrapMacGlobalInstall();
-    return;
+    return true;
+  }
+  if (isLinux()) {
+    const dns = await bootstrapLinuxGlobalDns({
+      useStaticIps: opts.useStaticIps,
+    });
+    logger.info({ message: `Linux DNS result: ${dns}` });
+    return dns !== "failed";
   }
 
   logger.warn({
-    message: "Skipping DNS bootstrap (only implemented for macOS for now).",
+    message: "Skipping DNS bootstrap (implemented for macOS and Linux).",
   });
   note(
     [
@@ -1171,6 +1195,7 @@ async function completeGlobalInstallHostBootstrap(): Promise<void> {
     ].join("\n"),
     "DNS setup"
   );
+  return true;
 }
 
 async function bootstrapMacGlobalInstall(): Promise<void> {
@@ -2342,6 +2367,10 @@ async function globalDown(): Promise<number> {
     });
   }
 
+  if (isLinux()) {
+    await offerLinuxGlobalDnsRemoval();
+  }
+
   if (isMac()) {
     const ok = await confirmSafe({
       message: `Stop dnsmasq? (disables *.${DEFAULT_PROJECT_TLD}, *.${DEFAULT_NEW_PROJECT_TLD} and *.${DEFAULT_OAUTH_ALIAS_ROOT} DNS; requires sudo)`,
@@ -2489,13 +2518,15 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
   const paths = getGlobalPaths();
 
   if (opts.json) {
-    const [caddy, logging, networks, gateway, proxyIssues] = await Promise.all([
-      readComposeStatus(paths.caddyCompose),
-      readComposeStatus(paths.loggingCompose),
-      readNetworksStatus([DEFAULT_INGRESS_NETWORK, DEFAULT_LOGGING_NETWORK]),
-      collectGatewayStatus(),
-      inspectProxyNetwork({ composeFile: paths.caddyCompose }),
-    ]);
+    const [caddy, logging, networks, gateway, proxyIssues, hostDns] =
+      await Promise.all([
+        readComposeStatus(paths.caddyCompose),
+        readComposeStatus(paths.loggingCompose),
+        readNetworksStatus([DEFAULT_INGRESS_NETWORK, DEFAULT_LOGGING_NETWORK]),
+        collectGatewayStatus(),
+        inspectProxyNetwork({ composeFile: paths.caddyCompose }),
+        readLinuxHostDnsStatus(),
+      ]);
     const proxyNetwork = proxyNetworkStatusPayload(proxyIssues);
     // Unknown (Docker unreadable) does not fail the summary; real issues do.
     const proxyNetworkOk = proxyNetwork.ok !== false;
@@ -2505,6 +2536,9 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
       networks_ok: networks.ok,
       proxy_network_ok: proxyNetwork.ok,
       gateway_enabled: gateway.gateway_enabled,
+      ...(hostDns === null
+        ? {}
+        : { host_dns_ok: hostDns.state === "configured" }),
       ok: caddy.ok && logging.ok && networks.ok && proxyNetworkOk,
     };
     const payload = {
@@ -2514,6 +2548,7 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
       logging,
       networks,
       gateway,
+      ...(hostDns === null ? {} : { host_dns: hostDns }),
       summary,
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -2545,7 +2580,32 @@ async function globalStatus(opts: { readonly json: boolean }): Promise<number> {
   await display.section("Gateway");
   await renderGatewayStatus();
 
+  const hostDns = await readLinuxHostDnsStatus();
+  if (hostDns) {
+    await display.section("Host DNS");
+    await display.panel({
+      title: `Linux DNS (${hostDns.resolver})`,
+      tone: hostDns.state === "configured" ? "success" : "warn",
+      lines: [
+        hostDns.code
+          ? `${hostDns.message} (code=${hostDns.code})`
+          : hostDns.message,
+        ...hostDns.fix.map((line) => `fix: ${line}`),
+      ],
+    });
+  }
+
   return 0;
+}
+
+/** Linux host DNS route, or `null` on other platforms. */
+async function readLinuxHostDnsStatus(): Promise<ReturnType<
+  typeof linuxDnsStatusPayload
+> | null> {
+  if (!isLinux()) {
+    return null;
+  }
+  return linuxDnsStatusPayload(await inspectLinuxGlobalDns());
 }
 
 type ComposeServiceStatus = {
@@ -3264,6 +3324,16 @@ async function globalTrust(): Promise<number> {
     return 0;
   }
 
+  if (isLinux()) {
+    return (await configureLinuxTrustFromRuntime({
+      certPath: resolveHackLocalCaCertPath(),
+      composeFile: getGlobalPaths().caddyCompose,
+      configureHostTrust: configureLinuxHostTlsTrust,
+    }))
+      ? 0
+      : 1;
+  }
+
   const existingCertPath = (await pathExists(resolveHackLocalCaCertPath()))
     ? resolveHackLocalCaCertPath()
     : null;
@@ -3305,8 +3375,8 @@ async function globalTrust(): Promise<number> {
     return 0;
   }
 
-  await configureLinuxHostTlsTrust({ certPath });
-  return 0;
+  const linuxTrustOk = await configureLinuxHostTlsTrust({ certPath });
+  return linuxTrustOk ? 0 : 1;
 }
 
 async function handleGlobalCa({
@@ -4223,6 +4293,8 @@ const LINUX_SYSTEM_BUNDLE_CANDIDATES = [
  */
 export async function writeLinuxHostTrustBundle(input: {
   readonly certPath: string;
+  /** Verified CA bytes; when given, `certPath` is not re-read. */
+  readonly localCaPem?: string;
   readonly systemBundleCandidates?: readonly string[];
   readonly bundlePath?: string;
 }): Promise<string | null> {
@@ -4247,7 +4319,11 @@ export async function writeLinuxHostTrustBundle(input: {
     return null;
   }
 
-  const localCaPem = (await readTextFile(input.certPath))?.trim() ?? "";
+  const localCaPem = (
+    input.localCaPem ??
+    (await readTextFile(input.certPath)) ??
+    ""
+  ).trim();
   if (localCaPem.length === 0) {
     logger.warn({
       message: `Unable to read exported Caddy Local CA at ${input.certPath}.`,
@@ -4261,22 +4337,54 @@ export async function writeLinuxHostTrustBundle(input: {
 }
 
 /**
- * Linux host trust setup: generates the combined bundle and the shell env
- * script. System trust-store installation (update-ca-certificates and
- * friends) stays a manual, distro-specific step.
+ * Linux host trust setup: updates system/NSS stores, persists the verified
+ * CA, then generates the combined bundle and shell env from those bytes.
+ * Returns false when an attempted step failed.
  */
-async function configureLinuxHostTlsTrust(input: {
+export async function configureLinuxHostTlsTrust(input: {
   readonly certPath: string;
-}): Promise<void> {
-  const bundlePath = await writeLinuxHostTrustBundle({
-    certPath: input.certPath,
-  });
+  /** Test seams; default to the real system/NSS step and bundle writer. */
+  readonly applySystemTrust?: () => Promise<LinuxTrustResult>;
+  readonly writeBundle?: (opts: {
+    readonly certPath: string;
+    readonly localCaPem: string;
+  }) => Promise<string | null>;
+}): Promise<boolean> {
+  // System trust first: the host bundle copies the system bundle, so after a
+  // Caddy root rotation it must be built from the refreshed system bundle,
+  // not the one that still holds the superseded root.
+  const trust = await (
+    input.applySystemTrust ??
+    (() =>
+      configureLinuxSystemAndBrowserTrust({
+        certPath: input.certPath,
+        composeFile: getGlobalPaths().caddyCompose,
+      }))
+  )();
+  if (trust.verifiedPem === null) {
+    // The CA was refused: leave the host bundle and env as they are rather
+    // than writing an unverified certificate into them.
+    return false;
+  }
+  const verifiedCertPath = join(
+    dirname(resolveHackHostTrustBundlePath()),
+    "caddy-verified-authority.crt"
+  );
+  await ensureDir(dirname(verifiedCertPath));
+  await writeTextFileIfChanged(verifiedCertPath, trust.verifiedPem);
+  // Use the verified bytes, not a re-read of the mutable export: a file
+  // replaced during the prompt must not reach the host bundle.
+  const bundlePath = await (
+    input.writeBundle ??
+    ((opts: { readonly certPath: string; readonly localCaPem: string }) =>
+      writeLinuxHostTrustBundle(opts))
+  )({ certPath: verifiedCertPath, localCaPem: trust.verifiedPem });
   const scriptPath = resolveHackHostTrustEnvScriptPath();
   await ensureDir(dirname(scriptPath));
   await writeTextFile(
     scriptPath,
     renderHackHostTrustShellExports({
-      certPath: input.certPath,
+      certPath: verifiedCertPath,
       bundlePath,
     })
   );
@@ -4286,13 +4394,8 @@ async function configureLinuxHostTlsTrust(input: {
       ? "Generated the combined public+local trust bundle and host trust env."
       : "Prepared host trust env (NODE_EXTRA_CA_CERTS only; no system bundle found).",
   });
-  note(
-    [
-      `Current shell: source ${scriptPath}`,
-      "To trust the CA system-wide, add it to your distro trust store (for example: copy the CA into /usr/local/share/ca-certificates/ and run update-ca-certificates).",
-    ].join("\n"),
-    "Host TLS"
-  );
+  note(`Current shell: source ${scriptPath}`, "Host TLS");
+  return trust.ok;
 }
 
 async function exportCaddyLocalCaCert(): Promise<string | null> {

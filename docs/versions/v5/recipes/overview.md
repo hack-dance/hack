@@ -1,13 +1,13 @@
 # Recipes
 
-The commands and configuration on this page were audited against `v5.0.0-next.14`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
+The commands and configuration on this page were audited against `v5.0.0-next.15`.
+The execution notes retain their original scope; the examples were not rerun with
+the pinned binary.
 
 Step-by-step setups for using Hack with other tools and for everyday
 workflows. Each recipe has a complete project under
-[`examples/recipes`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes) or
-[`examples/configs`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/configs), and each page says what was
+[`examples/recipes`](https://github.com/hack-dance/hack/tree/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/examples/recipes) or
+[`examples/configs`](https://github.com/hack-dance/hack/tree/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/examples/configs), and each page says what was
 tested and what was not.
 
 They all use the supported building blocks: lifecycle hooks and processes,

@@ -2,6 +2,7 @@ import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   nativeDetachedUpReady,
+  nativeDetachedUpShellVariables,
   runNativeDetachedOwner,
   startNativeDetachedUp,
 } from "../../src/lib/native-detached-up.ts";
@@ -63,6 +64,22 @@ if (role === "launcher") {
       process.stderr.write(
         "synthetic hook output must not reach launcher stderr\n"
       );
+      if (mode === "shell-names") {
+        process.send?.({
+          kind: "shell-variables",
+          names: ["invalid\nsynthetic-private-value"],
+        });
+        process.send?.({
+          kind: "shell-variables",
+          names: ["EXTRA_FIELD_MUST_NOT_PRINT"],
+          output: "synthetic-private-value",
+        });
+        nativeDetachedUpShellVariables(["Z_TOKEN", "A_TOKEN", "A_TOKEN"]);
+        nativeDetachedUpShellVariables(["DUPLICATE_NOTICE"]);
+      }
+      if (mode === "shell-names-empty") {
+        nativeDetachedUpShellVariables([]);
+      }
       if (mode === "fail") {
         server.stop(true);
         process.off("SIGTERM", terminate);
@@ -86,7 +103,14 @@ if (role === "launcher") {
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
       }
-      if (mode === "ready" || mode === "cancel-at-accept") {
+      if (
+        [
+          "ready",
+          "cancel-at-accept",
+          "shell-names",
+          "shell-names-empty",
+        ].includes(mode)
+      ) {
         notifyReady();
       }
       const code = await done.promise;

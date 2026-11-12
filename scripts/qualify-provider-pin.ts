@@ -31,7 +31,11 @@
  *   9. web plus database: service DNS, and a database write that survives every step.
  *  10. measurements: prepare time, cold and warm `up` to ready, `restart`, `down`, VM plus
  *      helper physical footprint at idle after 0, 3 and 10 minutes (3 is past the 2-minute
- *      reclaim pulse), and idle CPU.
+ *      reclaim pulse), and idle CPU; then `--warm-runs` (default 5) warm `up -d` runs on the
+ *      running pool, each split into phases from the executor's process lifetimes sampled
+ *      every 50 ms: launcher until `graph retained-preflight`, the preflight, the gap, `runtime
+ *      up`, and serve to ready. `--warm-only` runs steps 1-3 and these warm runs only, for a
+ *      quick before/after comparison.
  *  11. unclean stop, last and recorded only: SIGKILL to the provider VM, then what the
  *      foreground, `down --recover`, `runtime recover` and the next `up -d` do.
  *
@@ -332,6 +336,105 @@ export function providerProcesses(
   return rows.filter((row) => row.command.startsWith(prefix));
 }
 
+/** One `ps` sample of this home's executor processes, at `at` seconds after the command began. */
+export interface PhaseSample {
+  at: number;
+  commands: string[];
+}
+
+/** Per-phase timings of one warm `up -d`, from executor process lifetimes (sampled). */
+export interface WarmPhases {
+  launcher_to_preflight_s: number | null;
+  retained_preflight_s: number | null;
+  preflight_to_runtime_up_s: number | null;
+  runtime_up_s: number | null;
+  serve_to_ready_s: number | null;
+  total_s: number;
+  /** Median interval between samples: each boundary is accurate to about this much. */
+  sample_period_s: number | null;
+  /**
+   * Phases seen in one sample only. Their value is the interval between the samples either
+   * side of that one, the longest the process can have lived; every other phase value is
+   * accurate to about one period at each end.
+   */
+  single_sample: string[];
+}
+
+/**
+ * Split a warm `up -d` into phases from samples of the executor's process command lines:
+ * the launcher until `graph retained-preflight` appears, that preflight, the gap until
+ * `runtime up`, `runtime up` itself, and the rest (plan, serve, health and publish) until
+ * the command exits at `total`. Each boundary is accurate to about one sampling period; a
+ * process seen in a single sample is reported as the interval between its neighbouring
+ * samples (its longest possible lifetime) and listed in `single_sample`.
+ */
+export function warmPhases(samples: PhaseSample[], total: number): WarmPhases {
+  const seen = (pattern: RegExp) => {
+    const times = samples
+      .filter((sample) =>
+        sample.commands.some((command) => pattern.test(command))
+      )
+      .map((sample) => sample.at);
+    return times.length > 0
+      ? { first: Math.min(...times), last: Math.max(...times) }
+      : null;
+  };
+  const preflight = seen(/\sgraph retained-preflight(\s|$)/);
+  const runtimeUp = seen(/\sruntime up(\s|$)/);
+  const gaps = samples
+    .slice(1)
+    .map((sample, index) => sample.at - (samples[index] as PhaseSample).at)
+    .sort((a, b) => a - b);
+  const period =
+    gaps.length > 0
+      ? (gaps[Math.floor((gaps.length - 1) / 2)] as number)
+      : null;
+  const singleSample: string[] = [];
+  const span = (from: number | undefined, to: number | undefined) =>
+    from === undefined || to === undefined
+      ? null
+      : round(Math.max(0, to - from));
+  const lifetime = (name: string, observed: typeof preflight) => {
+    if (observed && observed.first === observed.last) {
+      singleSample.push(name);
+      const index = samples.findIndex((sample) => sample.at === observed.first);
+      const before = samples[index - 1]?.at ?? 0;
+      const after = samples[index + 1]?.at ?? total;
+      return round(after - before);
+    }
+    return span(observed?.first, observed?.last);
+  };
+  return {
+    launcher_to_preflight_s: span(0, preflight?.first),
+    retained_preflight_s: lifetime("retained_preflight_s", preflight),
+    preflight_to_runtime_up_s: span(preflight?.last, runtimeUp?.first),
+    runtime_up_s: lifetime("runtime_up_s", runtimeUp),
+    serve_to_ready_s: span(runtimeUp?.last, total),
+    total_s: round(total),
+    sample_period_s: period === null ? null : round(period),
+    single_sample: singleSample,
+  };
+}
+
+/**
+ * Whether a `ps` command line is an executor process of this run: it runs `native` (or any
+ * `hack-native` executable, however it was launched) with `--candidate-root home`, so other
+ * homes' or the user's own Hack processes on the host are never counted.
+ */
+export function isExecutor(
+  command: string,
+  native: string,
+  home: string
+): boolean {
+  const program = command.startsWith(`${native} `)
+    ? native
+    : (command.split(" ")[0] ?? "");
+  return (
+    (program === "hack-native" || program.endsWith("/hack-native")) &&
+    command.includes(` --candidate-root ${home} `)
+  );
+}
+
 export interface Options {
   hack: string;
   native: string;
@@ -347,6 +450,8 @@ export interface Options {
   amd64Image: string | null;
   idleMinutes: number[];
   skipIdle: boolean;
+  warmRuns: number;
+  warmOnly: boolean;
   keepGoing: boolean;
   profile: "development" | "research";
   caddy: string | null;
@@ -359,6 +464,7 @@ const USAGE = `Usage: bun scripts/qualify-provider-pin.ts --hack /abs/bundle/hac
   --network-tools /abs/private-apk-dir --web-image busybox@sha256:... --db-image postgres@sha256:... \\
   [--upstream-checksums /abs/checksums.sha256] [--approved-host example.com --approved-host example.org] \\
   [--amd64-image repo@sha256:...] [--idle-minutes 0,3,10 | --skip-idle] \\
+  [--warm-runs 5] [--warm-only] \\
   [--profile development|research] [--keep-going] \\
   [--caddy /abs/caddy --https-port 8443] [--run]`;
 
@@ -380,7 +486,22 @@ function idleMinutes(text: string): number[] {
   return idle;
 }
 
-const FLAGS = new Set(["--run", "--skip-idle", "--keep-going"]);
+function wholeNumber(name: string, text: string, maximum: number): number {
+  const value = Number(text);
+  if (!(Number.isInteger(value) && value >= 0 && value <= maximum)) {
+    throw new Error(`${name} must be a whole number from 0 to ${maximum}.`);
+  }
+  return value;
+}
+
+function profileOption(value: string): "development" | "research" {
+  if (value !== "development" && value !== "research") {
+    throw new Error("--profile must be development or research.");
+  }
+  return value;
+}
+
+const FLAGS = new Set(["--run", "--skip-idle", "--warm-only", "--keep-going"]);
 
 /** Parse and validate arguments; throws with a usage line on any problem. */
 export function parseOptions(argv: string[]): Options {
@@ -437,10 +558,12 @@ export function parseOptions(argv: string[]): Options {
     );
   }
   const idle = idleMinutes(one("--idle-minutes", false) ?? "0,3,10");
-  const profile = one("--profile", false) ?? "development";
-  if (profile !== "development" && profile !== "research") {
-    throw new Error("--profile must be development or research.");
-  }
+  const warmRuns = wholeNumber(
+    "--warm-runs",
+    one("--warm-runs", false) ?? "5",
+    20
+  );
+  const profile = profileOption(one("--profile", false) ?? "development");
   const caddy = absolute("--caddy", false);
   const portText = one("--https-port", false);
   const httpsPort = portText === null ? null : Number(portText);
@@ -468,6 +591,8 @@ export function parseOptions(argv: string[]): Options {
     amd64Image: pinned("--amd64-image", false),
     idleMinutes: flags.has("--skip-idle") ? [] : idle,
     skipIdle: flags.has("--skip-idle"),
+    warmRuns,
+    warmOnly: flags.has("--warm-only"),
     keepGoing: flags.has("--keep-going"),
     profile,
     caddy,
@@ -530,6 +655,24 @@ export function foregroundReadyRun(stderr: string): string | null {
   return (
     /^SUCCESS: Project is ready \([^\r\n]*; run ([0-9a-f]{32})\)\. Use hack ps and hack logs from another terminal; press Ctrl-C to stop\.$/m.exec(
       stderr
+    )?.[1] ?? null
+  );
+}
+
+/**
+ * Primary code in the foreground's terminal console error. Qualification fixes the
+ * console logger and does not enable debug stacks; earlier output and runtime notes
+ * may contain service text and cannot establish the command's failure code. The
+ * CLI appends failed-service tails after their own heading; those are not errors
+ * emitted by the frontend, even if a service printed an identical-looking line.
+ */
+export function terminalRuntimeErrorCode(stderr: string): string | null {
+  const diagnostic =
+    stderr.split(/\r?\nLast output of failed services \(/, 1)[0] ?? "";
+  const line = diagnostic.trimEnd().split(/\r?\n/).at(-1) ?? "";
+  return (
+    /^ERROR: Native runtime request failed \(([a-z][a-z0-9_]{0,79})(?:: [a-z][a-z0-9_]{0,79})?\); [^\r\n]+$/.exec(
+      line
     )?.[1] ?? null
   );
 }
@@ -1245,11 +1388,7 @@ export class Qualification {
         // completion, then classify the final output rather than that stale snapshot.
         await this.foreground.exited;
         const finalStderr = this.readStartupOutput(stderrPath);
-        if (
-          /\bprovider_busy\b|Another candidate operation holds the provider lock/.test(
-            finalStderr
-          )
-        ) {
+        if (terminalRuntimeErrorCode(finalStderr) === "provider_busy") {
           this.record(`known_product_bug_provider_busy_${label}`, {
             operation: command,
             exit: this.foreground.exitCode,
@@ -1525,9 +1664,23 @@ export class Qualification {
     );
   }
 
-  observedReady(): boolean {
+  /** The main pool's provider process as `pid@start`, from its receipt, or null. */
+  providerIdentity(): string | null {
+    try {
+      const process = this.owner(this.main).process as
+        | Record<string, unknown>
+        | undefined;
+      return process?.pid && process.start_micros
+        ? `${String(process.pid)}@${String(process.start_micros)}`
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  observedReady(label = "ps-after-recover"): boolean {
     const ps = this.exec(
-      "ps-after-recover",
+      label,
       [this.options.hack, "ps", "--path", this.project, "--json"],
       { cwd: this.project, timeout: 30, allowFailure: true }
     );
@@ -1824,11 +1977,27 @@ export class Qualification {
             "final_down_seconds",
             round(await this.down("down-final"))
           );
+          await this.warm();
         },
       ],
       ["11 unclean stop (recorded)", false, () => this.uncleanStop(identity)],
     ];
-    const failed = await this.runSteps(steps);
+    // --warm-only: steps 1-3 and the warm `up -d` runs, for a quick before/after comparison.
+    const selected: typeof steps = this.options.warmOnly
+      ? [
+          ...steps.slice(0, 2),
+          ...steps.filter(([name]) => name === "3 templates"),
+          [
+            "10 warm up -d",
+            false,
+            async () => {
+              await this.ensureDown("down-before-warm");
+              await this.warm();
+            },
+          ],
+        ]
+      : steps;
+    const failed = await this.runSteps(selected);
     if (failed !== null) {
       return failed;
     }
@@ -2394,6 +2563,117 @@ export class Qualification {
       rss_mib: round(rows.reduce((sum, row) => sum + row.rssKib, 0) / 1024),
       cpu_seconds: rows.reduce((sum, row) => sum + row.cpuSeconds, 0),
     };
+  }
+
+  /**
+   * Warm `up -d` on the running pool, `warmRuns` times: total time and phases from this
+   * home's executor processes sampled every 50 ms, then `down`. Prints each run and medians.
+   */
+  async warm(): Promise<void> {
+    const runs: WarmPhases[] = [];
+    for (let run = 1; run <= this.options.warmRuns; run++) {
+      const label = this.label(`warm-up-d-${run}`);
+      const providerBefore = this.providerIdentity();
+      const started = performance.now();
+      const child = Bun.spawn(
+        [this.options.hack, "up", "-d", "--path", this.project],
+        {
+          cwd: this.project,
+          env: this.env,
+          stdin: "ignore",
+          stdout: Bun.file(join(this.evidence, `${label}.stdout`)),
+          stderr: Bun.file(join(this.evidence, `${label}.stderr`)),
+        }
+      );
+      const samples: PhaseSample[] = [];
+      const deadline = started + 600_000;
+      while (child.exitCode === null && performance.now() < deadline) {
+        const at = (performance.now() - started) / 1000;
+        const listing = Bun.spawn(["/bin/ps", "-A", "-ww", "-o", "command="], {
+          stdout: "pipe",
+          stderr: "ignore",
+        });
+        const text = await new Response(listing.stdout).text();
+        samples.push({
+          at,
+          commands: text
+            .split("\n")
+            .filter((command) =>
+              isExecutor(command, this.options.native, this.main)
+            ),
+        });
+        await Bun.sleep(50);
+      }
+      if (child.exitCode === null) {
+        // This run's own child; the pool is left for the failure report.
+        child.kill("SIGTERM");
+        await Promise.race([child.exited, Bun.sleep(10_000)]);
+        if (child.exitCode === null) {
+          child.kill("SIGKILL");
+        }
+      }
+      const code = await child.exited;
+      const total = (performance.now() - started) / 1000;
+      const phases = warmPhases(samples, total);
+      // The evidence first, so a failed check below still leaves it.
+      writeFileSync(
+        join(this.evidence, `${label}.phases.json`),
+        JSON.stringify({ phases, samples }, null, 2)
+      );
+      // A phase shorter than one sample period is not seen; its time is unknown, not a
+      // failure. That the warm start happened is shown independently: the command exits 0,
+      // the project is observed ready, and the pool kept the same provider process.
+      this.check(
+        `warm up -d run ${run} exits 0`,
+        code === 0,
+        `exit ${code} (see ${label}.stderr)`
+      );
+      this.check(
+        `warm up -d run ${run}: the project is observed ready`,
+        this.observedReady(`warm-ready-${run}`)
+      );
+      const providerAfter = this.providerIdentity();
+      this.check(
+        `warm up -d run ${run}: the pool kept its provider process (no cold boot)`,
+        providerBefore !== null && providerAfter === providerBefore,
+        `${providerBefore} -> ${providerAfter}`
+      );
+      for (const key of ["retained_preflight_s", "runtime_up_s"] as const) {
+        if (phases[key] === null) {
+          this.note(
+            `INFO warm up -d run ${run}: ${key} not sampled (shorter than one ${phases.sample_period_s ?? "?"} s period, or not run); recorded as unknown`
+          );
+        }
+      }
+      runs.push(phases);
+      this.measure(`warm_up_d_run_${run}`, phases);
+      this.hack(`warm-down-${run}`, ["down", "--path", this.project], 300);
+    }
+    if (runs.length > 0) {
+      const median = (values: (number | null)[]) => {
+        const known = values
+          .filter((value): value is number => value !== null)
+          .sort((a, b) => a - b);
+        return known.length === 0
+          ? null
+          : (known[Math.floor((known.length - 1) / 2)] as number);
+      };
+      const keys = [
+        "launcher_to_preflight_s",
+        "retained_preflight_s",
+        "preflight_to_runtime_up_s",
+        "runtime_up_s",
+        "serve_to_ready_s",
+        "total_s",
+        "sample_period_s",
+      ] as const;
+      this.measure(
+        "warm_up_d_median",
+        Object.fromEntries(
+          keys.map((key) => [key, median(runs.map((phases) => phases[key]))])
+        )
+      );
+    }
   }
 
   async idle(): Promise<void> {

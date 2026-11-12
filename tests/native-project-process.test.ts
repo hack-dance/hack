@@ -14,6 +14,34 @@ afterEach(async () => {
   );
 });
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+test.each([
+  false,
+  true,
+])("publisher exit notices are forwarded after readiness, including split frames (%s)", async (split) => {
+  const event = `${JSON.stringify({ kind: "graph_publisher_exit", run, port: 18_080 })}\n`;
+  const opts = await fixture(`
+    process.stdout.write(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}) + "\\n" + ${JSON.stringify(split ? event.slice(0, 12) : event)});
+    await Bun.sleep(30);
+    ${split ? `process.stdout.write(${JSON.stringify(event.slice(12))});` : ""}
+    await Bun.sleep(50);
+  `);
+  let ready = false;
+  const notices: string[] = [];
+  expect(
+    await serveNativeProjectGraph({
+      ...opts,
+      onReady: async () => {
+        ready = true;
+      },
+      onPublicationNotice: (message) => {
+        expect(ready).toBe(true);
+        notices.push(message);
+      },
+    })
+  ).toBe(0);
+  expect(notices).toEqual([expect.stringContaining("127.0.0.1:18080 is down")]);
+  expect(notices[0]).toContain("Run hack down");
+});
 async function fixture(program: string) {
   const root = await mkdtemp(join(tmpdir(), "native-process-"));
   roots.push(root);

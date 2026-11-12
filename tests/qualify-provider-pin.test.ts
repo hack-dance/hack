@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -26,6 +27,7 @@ import {
   INERT_RECORD_FIELDS,
   INERT_RUNNING_RESOURCES,
   inertField,
+  isExecutor,
   main,
   type Options,
   parseCpuTime,
@@ -39,7 +41,10 @@ import {
   readyData,
   rootProblem,
   sourceTemplatePins,
+  terminalRuntimeErrorCode,
+  warmPhases,
 } from "../scripts/qualify-provider-pin.ts";
+import { formatNativeStartupLogReport } from "../src/backends/native-startup-logs.ts";
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
 const repository = resolve(import.meta.dir, "..");
@@ -268,6 +273,85 @@ describe("provider pin qualification", () => {
     ).toEqual([10]);
   });
 
+  test("warm up -d phases come from executor process lifetimes", () => {
+    const native = "/bundle/hack-native";
+    const sample = (at: number, ...commands: string[]) => ({
+      at,
+      commands: commands.map(
+        (command) => `${native} --candidate-root /h ${command}`
+      ),
+    });
+    const phases = warmPhases(
+      [
+        sample(0.05),
+        sample(0.6, "graph retained-preflight --run-id x --json"),
+        sample(1.2, "graph retained-preflight --run-id x --json"),
+        sample(1.3),
+        sample(1.4, "runtime up --profile development --json"),
+        sample(7.3, "runtime up --profile development --json"),
+        sample(7.4, "runtime status --json"),
+        sample(9.9, "graph serve --run-id x"),
+      ],
+      11.1
+    );
+    expect(phases).toEqual({
+      launcher_to_preflight_s: 0.6,
+      retained_preflight_s: 0.6,
+      preflight_to_runtime_up_s: 0.2,
+      runtime_up_s: 5.9,
+      serve_to_ready_s: 3.8,
+      total_s: 11.1,
+      sample_period_s: 0.55,
+      single_sample: [],
+    });
+    // A phase never observed is unknown, not zero.
+    expect(warmPhases([sample(0.1)], 2).runtime_up_s).toBeNull();
+    const brief = warmPhases(
+      [
+        sample(0.0),
+        sample(0.08, "graph retained-preflight --run-id x"),
+        sample(0.16, "runtime up --json"),
+        sample(0.24, "runtime up --json"),
+      ],
+      0.3
+    );
+    // Seen once at 0.08 between samples at 0.00 and 0.16: it lived at most 0.16 s.
+    expect(brief.retained_preflight_s).toBe(0.16);
+    expect(brief.single_sample).toEqual(["retained_preflight_s"]);
+    const bundle = "/opt/fixture bundle/Application Support/hack-native";
+    expect(
+      isExecutor(`${bundle} --candidate-root /h runtime up`, bundle, "/h")
+    ).toBe(true);
+    expect(
+      isExecutor(
+        "/other/hack-native --candidate-root /h runtime up",
+        bundle,
+        "/h"
+      )
+    ).toBe(true);
+    // Another home, or not the executor, is not this run.
+    expect(
+      isExecutor(
+        `${bundle} --candidate-root /elsewhere runtime up`,
+        bundle,
+        "/h"
+      )
+    ).toBe(false);
+    expect(
+      isExecutor("/usr/bin/other --candidate-root /h x", bundle, "/h")
+    ).toBe(false);
+    expect(
+      parseOptions([...required, "--warm-runs", "3", "--warm-only"])
+    ).toMatchObject({
+      warmRuns: 3,
+      warmOnly: true,
+    });
+    expect(parseOptions(required).warmRuns).toBe(5);
+    expect(() => parseOptions([...required, "--warm-runs", "21"])).toThrow(
+      "warm-runs"
+    );
+  });
+
   test("readiness requires an observed ready run", () => {
     const ready = { status: "observed", phase: "ready-observed", items: [] };
     expect(readyData(JSON.stringify({ ok: true, data: ready }))).toEqual(ready);
@@ -321,8 +405,14 @@ case "$1" in
     if [ ! -e '${root}/ready-'"$n" ]; then touch '${root}/early-ps'; exit 79; fi
     printf '{"ok":true,"data":{"status":"observed","phase":"ready-observed","run":"%032x","items":[{"service":"web","container":"c-%s"}]}}' "$n" "$n" ;;
   up|restart)
+    if [ "$2" = -d ]; then
+      n=$(cat '${root}/gen' 2>/dev/null || echo 0)
+      touch '${root}/ready-'"$n"
+      exit 0
+    fi
     if [ "$1" = restart ] && [ -e '${root}/restart-fails' ]; then exit 23; fi
-    if [ -e '${root}/provider-busy' ]; then echo '[provider_busy] Another candidate operation holds the provider lock' >&2; exit 23; fi
+    if [ -e '${root}/provider-busy' ]; then echo 'ERROR: Native runtime request failed (provider_busy); inspect owned state before retrying. Runtime: Another candidate operation holds the provider lock.' >&2; exit 23; fi
+    if [ -e '${root}/startup-failure' ]; then cat '${root}/startup-failure' >&2; exit 23; fi
     n=$(( $(cat '${root}/gen' 2>/dev/null || echo 0) + 1 )); echo "$n" > '${root}/gen'
     if [ "$1" = restart ]; then touch '${root}/stop-'"$((n-1))"; fi
     sleep 0.1
@@ -420,6 +510,74 @@ esac
           key.startsWith("known_product_bug_provider_busy_")
         )
       ).toBe(true);
+      expect(readFileSync(join(root, "hack.log"), "utf8")).not.toContain("ps ");
+    } finally {
+      done();
+    }
+  });
+
+  test("terminal runtime parsing selects the primary code and accepts console line endings", () => {
+    const message =
+      "ERROR: Native runtime request failed (provider_busy); inspect owned state before retrying.";
+    expect(terminalRuntimeErrorCode(`INFO: starting\n${message}\n`)).toBe(
+      "provider_busy"
+    );
+    expect(terminalRuntimeErrorCode(`${message}\r\n\r\n`)).toBe(
+      "provider_busy"
+    );
+    expect(
+      terminalRuntimeErrorCode(
+        message.replace("provider_busy", "other: provider_busy")
+      )
+    ).toBe("other");
+    expect(terminalRuntimeErrorCode(`web | ${message}\n`)).toBeNull();
+    expect(
+      terminalRuntimeErrorCode(`${message}\nERROR: another failure\n`)
+    ).toBeNull();
+  });
+
+  test.each([
+    [
+      "service output before another terminal code",
+      "web | provider_busy: Another candidate operation holds the provider lock\nERROR: Native runtime request failed (artifact_invalid); inspect owned state before retrying.\n",
+    ],
+    [
+      "service output appended to a different terminal failure",
+      `ERROR: Native runtime request failed (artifact_invalid); inspect owned state before retrying.\n${formatNativeStartupLogReport(
+        {
+          logs: [
+            {
+              service: "web",
+              stdout: "",
+              stderr:
+                "ERROR: Native runtime request failed (provider_busy); inspect owned state before retrying. Runtime: Another candidate operation holds the provider lock.",
+              truncated: false,
+            },
+          ],
+          managedEnvironment: {},
+        }
+      )}\n`,
+    ],
+    [
+      "lock text in the terminal message",
+      "ERROR: Native runtime request failed (artifact_invalid); inspect owned state before retrying. Runtime: provider_busy: Another candidate operation holds the provider lock\n",
+    ],
+    [
+      "a cause code without a matching primary code",
+      "ERROR: Native runtime request failed (artifact_invalid: provider_busy); inspect owned state before retrying.\n",
+    ],
+  ])("startup does not label provider_busy from %s", async (_name, output) => {
+    const { root, run, done } = fixture();
+    try {
+      writeFileSync(join(root, "startup-failure"), output);
+      await expect(run.upForeground("up", "up")).rejects.toThrow(
+        "exited 23 before readiness"
+      );
+      expect(
+        Object.keys(run.recorded).some((key) =>
+          key.startsWith("known_product_bug_provider_busy_")
+        )
+      ).toBe(false);
       expect(readFileSync(join(root, "hack.log"), "utf8")).not.toContain("ps ");
     } finally {
       done();
@@ -708,7 +866,8 @@ esac
     const { root, run, done } = fixture();
     const work = join(root, "prepared-bases", ".work", "fixture");
     mkdirSync(work, { recursive: true, mode: 0o700 });
-    const binary = join(work, "smolvm");
+    // Multicall Coreutils dispatches by basename; detection uses the work path.
+    const binary = join(work, "sleep");
     copyFileSync("/bin/sleep", binary);
     chmodSync(binary, 0o700);
     const verifier = Bun.spawn([binary, "20"]);
@@ -722,7 +881,37 @@ esac
       await verifier.exited;
       expect(run.runningProviders()).toEqual([]);
     } finally {
-      verifier.kill("SIGKILL");
+      if (verifier.exitCode === null && verifier.signalCode === null) {
+        verifier.kill("SIGKILL");
+      }
+      await verifier.exited;
+      done();
+    }
+  });
+
+  test("a warm start too short to sample is recorded as unknown, not failed", async () => {
+    const { root, run, done } = fixture();
+    try {
+      const receipt = join(root, "candidate", ".hack-local", "run", "smolvm");
+      mkdirSync(receipt, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(receipt, "owner.json"),
+        JSON.stringify({ process: { pid: 4242, start_micros: 17 } })
+      );
+      (run.options as { warmRuns: number }).warmRuns = 2;
+      await run.warm();
+      expect(run.failed).toEqual([]);
+      expect(
+        run.passed.filter((line) => line.includes("kept its provider process"))
+      ).toHaveLength(2);
+      const first = run.measurements.warm_up_d_run_1 as Record<string, unknown>;
+      expect(first.runtime_up_s).toBeNull();
+      expect(
+        readdirSync(join(root, "evidence")).filter((name) =>
+          name.endsWith(".phases.json")
+        )
+      ).toHaveLength(2);
+    } finally {
       done();
     }
   });

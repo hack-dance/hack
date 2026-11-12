@@ -1,15 +1,15 @@
 # Expose a local service through a tunnel
 
-The commands and configuration on this page were audited against `v5.0.0-next.14`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
+The commands and configuration on this page were audited against `v5.0.0-next.15`.
+The execution notes retain their original scope; the examples were not rerun with
+the pinned binary.
 
 Use this when something outside your machine must reach a local service: a
 webhook sender, a phone, or a teammate. The tunnel runs as a Hack lifecycle
 process, so `hack up` starts it and `hack down` stops it.
 
 The complete project is in
-[`examples/recipes/tunnel`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/tunnel). It uses
+[`examples/recipes/tunnel`](https://github.com/hack-dance/hack/tree/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/examples/recipes/tunnel). It uses
 `cloudflared` quick tunnels, which need no account. Any tunnel CLI that runs in
 the foreground works the same way.
 

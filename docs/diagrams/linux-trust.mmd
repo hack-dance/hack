@@ -1,0 +1,14 @@
+flowchart TD
+  A[Validate exported CA] --> B{Matches running Caddy?}
+  B -- no --> X[Fail and stop]
+  B -- yes --> C{System trust action}
+  C -- already trusted --> N[Check NSS ownership]
+  C -- manual or declined --> N
+  C -- confirmed --> D[Root reads validated stdin]
+  D --> E{Bundle verified?}
+  E -- no --> X
+  E -- yes --> N
+  N --> F[Import validated stdin]
+  F --> G{Certificate readback matches?}
+  G -- no --> X
+  G -- yes --> H[Write host bundle]

@@ -145,6 +145,7 @@ async function writeDocuments(
 const nativeSectionOrder = [
   "overview",
   "try-it",
+  "preflight",
   "limits",
   "install",
   "reference",

@@ -147,6 +147,7 @@ async function fixture() {
     binary,
     `#!${process.execPath}
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
+if (process.argv.includes("old-provider")) { console.error(JSON.stringify({code:"provider_pin_changed",message:"synthetic-secret-diagnostic"})); process.exit(2); }
 if (process.argv.includes("fixed-message")) { console.error(JSON.stringify({code:"graph_image",message:"Pinned image architecture or implicit volumes are incompatible.",message_fixed:true,service:"web"})); process.exit(2); }
 if (process.argv.includes("unsafe-fixed")) { console.error(JSON.stringify({code:"graph_image",message:"synthetic-secret-diagnostic\\nsecond line",message_fixed:true,service:"../synthetic-secret-diagnostic"})); process.exit(2); }
 if (process.argv.includes("plan-change")) { console.error(JSON.stringify({code:"graph_plan_reconcile",message:"synthetic-secret-diagnostic",plan_change:{version:1,service:"deps",field:"dependency_cache_volume"}})); process.exit(23); }
@@ -1330,4 +1331,17 @@ test("run-service uses explicit command completion transport without accepting u
       args: ["graph", "run-selection", "--json", "--"],
     })
   ).rejects.toThrow("budget");
+});
+
+test("a different provider pin names the original release's recovery, without exposing dynamic native text", async () => {
+  const f = await fixture();
+  const error = await expectClosedRefusal(
+    invokeNativeRuntime({ runtime: f, cwd: f.home, args: ["old-provider"] }),
+    "different provider version"
+  );
+  expect(error.message).toContain("release that started its pool");
+  expect(error.message).toContain("runtime down --json");
+  expect(error.message).toContain("runtime down");
+  expect(error.message).not.toContain("PID file changed");
+  expect(error.message).not.toContain("synthetic-secret-diagnostic");
 });

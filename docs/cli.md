@@ -214,6 +214,43 @@ route for it.
 
 ## Running things (decision guide)
 
+For an existing container, `exec` takes a service and a command tail; the explicit
+separator form below keeps the child command's flags out of Hack's options.
+
+```mermaid
+---
+title: Exec command form
+---
+railroad-ebnf-beta
+  exec = "hack" "exec" service "--" command { argument } ;
+```
+
+For a one-off container, `run` takes a service and an optional command tail;
+omitting the command uses the service's default command.
+
+```mermaid
+---
+title: Run command form
+---
+railroad-ebnf-beta
+  run = "hack" "run" service [ [ "--" ] command { argument } ] ;
+```
+
+For a finite log snapshot, `logs` can select a service and use `--no-follow`
+instead of starting another command inside a container.
+
+```mermaid
+---
+title: Logs command form
+---
+railroad-ebnf-beta
+  logs = "hack" "logs" [ service ] [ "--no-follow" ] ;
+```
+
+These are common forms, not exhaustive grammars: `exec` also accepts an omitted
+separator, Hack's options belong before the command tail, and more log options
+are listed in the [command reference](reference/cli.md).
+
 - One-off command in a fresh service container (deps started as needed): `hack run <service> <cmd...>`.
 - Command inside an already-running service container: `hack exec <service> -- <cmd...>`.
 - Long command you want to start now and read later (or from another process): add `--detach` to

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "scope": {
+    "projectRoot": "/fixture/project",
+    "projectDir": "/fixture/project/.hack",
+    "nativeHome": "/fixture/candidate",
+    "branch": null,
+    "rootIdentity": {
+      "dev": 1,
+      "ino": 2
+    },
+    "dirIdentity": {
+      "dev": 1,
+      "ino": 3
+    },
+    "homeIdentity": {
+      "dev": 1,
+      "ino": 4
+    }
+  },
+  "run": {
+    "run": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "owner": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "namespace": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "planId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "effectiveEnvName": null,
+    "profiles": [],
+    "aws": null
+  }
+}

@@ -1,8 +1,8 @@
 # Install dependencies in a deps service
 
-The commands and configuration on this page were audited against `v5.0.0-next.14`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
+The commands and configuration on this page were audited against `v5.0.0-next.15`.
+The execution notes retain their original scope; the examples were not rerun with
+the pinned binary.
 
 Install Node and Bun packages (npm, pnpm, Yarn, Bun) **inside the container
 environment**, not on your machine. Give the project one `deps` service that
@@ -10,7 +10,7 @@ installs once into a named volume, and let every Node or Bun service use that
 volume.
 
 The complete project is in
-[`examples/recipes/deps-service`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/deps-service). Every
+[`examples/recipes/deps-service`](https://github.com/hack-dance/hack/tree/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/examples/recipes/deps-service). Every
 Node or Bun project in [Config examples](config-examples.md) uses the same
 pattern.
 

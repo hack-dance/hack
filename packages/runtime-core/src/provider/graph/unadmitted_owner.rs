@@ -91,7 +91,15 @@ fn select_relay(
         .as_deref()
         .filter(|boot| !boot.is_empty())
         .ok_or_else(refused)?;
-    let root = startup::control_root(&candidate.state_root, &owner.token, Some(boot), Some(run))?;
+    let root =
+        startup::process_control_root(&candidate.state_root, &owner.token, boot, run, process)?;
+    // Older binaries used one deterministic directory per run/boot. New owners
+    // use their exact native incarnation even before receipt admission.
+    let root = if root.exists() {
+        root
+    } else {
+        startup::control_root(&candidate.state_root, &owner.token, Some(boot), Some(run))?
+    };
     if present(&root.join(RELAY_RETIREMENT))? {
         let context = host_relay::context(&owner.token, boot)?;
         return persisted_relay(root, context, boot, run, process).map(Some);

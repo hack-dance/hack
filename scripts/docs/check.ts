@@ -9,9 +9,11 @@ import {
   resolvePublicSource,
   rewriteTarget,
 } from "./prepare";
+import { readmeDiagrams } from "./readme-diagrams";
 import { isVersionedSearchUrl } from "./version-boundary";
 import versions from "./versions.json";
 
+await readmeDiagrams({ check: true });
 await prepare(true);
 // Boundary checks: traversal, private evidence, untracked input must never become a link.
 const source = resolve(repositoryRoot, "docs/README.md");
@@ -450,6 +452,29 @@ if (navigation.title !== versions.v5.label) {
 const recipeNavigation = await Bun.file(
   resolve(v5Root, "recipes/meta.json")
 ).json();
+const nativeNavigation = await Bun.file(
+  resolve(v5Root, "native/meta.json")
+).json();
+const nativePreflightIndex = nativeNavigation.pages.indexOf("preflight");
+if (
+  nativePreflightIndex < 1 ||
+  nativeNavigation.pages[nativePreflightIndex - 1] !== "try-it"
+) {
+  throw new Error("Native preflight must follow Try it in navigation");
+}
+for (const [file, facts] of [
+  ["architecture.md", ["proxy network", "proxy_network", "hack global up"]],
+  ["reference/cli.md", ["--native-preflight"]],
+  ["native/preflight.md", ["runtime_review.status", "ready: false"]],
+  ["guides/proxy-network-repair.md", ["hack global up", "ok: null"]],
+] as const) {
+  const text = await Bun.file(resolve(v5Root, file)).text();
+  for (const fact of facts) {
+    if (!text.includes(fact)) {
+      throw new Error(`Pinned release feature missing: ${file}/${fact}`);
+    }
+  }
+}
 if (
   JSON.stringify(recipeNavigation.pages) !==
   JSON.stringify([

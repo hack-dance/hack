@@ -1572,6 +1572,25 @@ export async function checkSystemdLoadedUnitPaths(opts: {
   if (pathError !== null) {
     return `Not starting ${SYSTEMD_UNIT_NAME}: ${pathError}`;
   }
+  const files = await checkLoadedUnitFiles({
+    unitPath: opts.unitPath,
+    deps: opts.deps,
+    uid,
+  });
+  return files === null ? null : `Not starting ${SYSTEMD_UNIT_NAME}: ${files}`;
+}
+
+/**
+ * The files systemd has loaded for hackd.service (`FragmentPath`,
+ * `DropInPaths`): the fragment must be the unit Hack manages, and every
+ * drop-in, the directories above it and every symlink hop must belong to
+ * this user or root and not be writable by others. Null, or why not.
+ */
+async function checkLoadedUnitFiles(opts: {
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  readonly uid: number;
+}): Promise<string | null> {
   const show = await opts.deps.run("systemctl", [
     "--user",
     "--no-pager",
@@ -1580,22 +1599,26 @@ export async function checkSystemdLoadedUnitPaths(opts: {
     "--property=FragmentPath,DropInPaths",
   ]);
   if (show.exitCode !== 0) {
-    return `Not starting ${SYSTEMD_UNIT_NAME}: systemd did not report which files it loads (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`;
+    return `systemd did not report which files it loads (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`;
   }
   const props = parseSystemdProperties(show.stdout);
   const fragment = props.FragmentPath ?? "";
   if (resolve(fragment) !== resolve(opts.unitPath)) {
-    return `Not starting ${SYSTEMD_UNIT_NAME}: systemd loads it from ${fragment || "an unknown file"}, not ${opts.unitPath}. Review that file, then run: hack daemon install`;
+    return `systemd loads it from ${fragment || "an unknown file"}, not ${opts.unitPath}. Review that file, then run: hack daemon install`;
   }
   const dropIns = await parseSystemdPathList(props.DropInPaths ?? "");
   if ("error" in dropIns) {
-    return `Not starting ${SYSTEMD_UNIT_NAME}: ${dropIns.error}`;
+    return dropIns.error;
   }
   for (const path of dropIns.paths) {
     // The file, every directory above it up to `/`, and every symlink hop.
-    const error = await checkDropInFile({ path, uid, allowRoot: true });
+    const error = await checkDropInFile({
+      path,
+      uid: opts.uid,
+      allowRoot: true,
+    });
     if (error !== null) {
-      return `Not starting ${SYSTEMD_UNIT_NAME}: its drop-in ${error}. Review and remove it, then run: systemctl --user daemon-reload`;
+      return `its drop-in ${error}. Review and remove it, then run: systemctl --user daemon-reload`;
     }
   }
   return null;
@@ -2197,15 +2220,35 @@ async function checkShebangInterpreter(opts: {
 }
 
 /**
- * Stopping the unit runs its `ExecStop`/`ExecStopPost` hooks (systemd runs
- * them even after `systemctl kill`). Hack writes none, so any hook is one
- * it cannot vouch for: stop and uninstall refuse while one is loaded. A
- * stop does not launch `ExecStart`, so a unit whose program was removed
- * can still be stopped. Null, or the refusal.
+ * What stopping the unit can run must be vouched for first (HACK-2052).
+ * A stop runs `ExecStop`/`ExecStopPost` hooks (even after `systemctl
+ * kill`), and the inactive transition starts units named by settings such
+ * as `OnSuccess=`, which a drop-in another account planted could add. So
+ * stop and uninstall check, as start does, every user-unit load directory
+ * ({@link checkSystemdUnitLoadPaths}) and the files systemd has loaded
+ * ({@link checkLoadedUnitFiles}), then refuse while any stop hook is
+ * loaded (Hack writes none). A stop does not launch `ExecStart`, so a unit
+ * whose program was removed can still be stopped. Null, or the refusal.
  */
 export async function checkSystemdStopHooks(opts: {
+  readonly unitPath: string;
   readonly deps: SystemdDeps;
+  /** Defaults to this process's uid. */
+  readonly uid?: number;
 }): Promise<string | null> {
+  const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const loadPaths = await checkSystemdUnitLoadPaths({ deps: opts.deps, uid });
+  if (loadPaths !== null) {
+    return loadPaths;
+  }
+  const files = await checkLoadedUnitFiles({
+    unitPath: opts.unitPath,
+    deps: opts.deps,
+    uid,
+  });
+  if (files !== null) {
+    return `Not stopping ${SYSTEMD_UNIT_NAME}: ${files}`;
+  }
   const read = await readSystemdServiceExecEntries({ deps: opts.deps });
   if ("error" in read) {
     return read.error;
@@ -2408,9 +2451,12 @@ async function disableUnitSafely(opts: {
   readonly unitPath: string;
   readonly deps: SystemdDeps;
 }): Promise<string | null> {
-  const untrusted = await checkSystemdStopHooks({ deps: opts.deps });
+  const untrusted = await checkSystemdStopHooks({
+    unitPath: opts.unitPath,
+    deps: opts.deps,
+  });
   if (untrusted !== null) {
-    return `${untrusted}. Stopping it would run that hook, so it was not stopped or removed: fix or remove that entry, run systemctl --user daemon-reload, then run hack daemon uninstall again`;
+    return `${untrusted}. Stopping it could run what that configuration adds, so it was not stopped or removed: fix it, run systemctl --user daemon-reload, then run hack daemon uninstall again`;
   }
   const args = ["--user", "disable", "--now", SYSTEMD_UNIT_NAME];
   const result = await opts.deps.run("systemctl", args);

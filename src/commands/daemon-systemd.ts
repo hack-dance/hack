@@ -432,15 +432,15 @@ export async function stopViaSystemdIfInstalled(opts: {
       pid: opts.pid,
       isPidInUnit: opts.isPidInUnit,
     }));
-  // `stop` runs the unit's ExecStop hooks: check what systemd has loaded
-  // first, and never run hooks Hack cannot vouch for (HACK-2052).
-  const hooksError = await checkSystemdStopHooks({ deps });
+  // `stop` runs the unit's ExecStop hooks and OnSuccess= units: check what
+  // systemd has loaded first, and never run what Hack cannot vouch for.
+  const hooksError = await checkSystemdStopHooks({ unitPath, deps });
   if (hooksError !== null) {
     return {
       ...none,
-      // systemd runs stop hooks whenever the service stops (even after
-      // `systemctl kill`): the unsafe entry has to go first.
-      refused: `${hooksError}. Stopping it would run that hook: fix or remove that entry, run systemctl --user daemon-reload, then run hack daemon stop again`,
+      // systemd runs stop hooks and OnSuccess= units whenever the service
+      // stops (even after `systemctl kill`): the unsafe entry goes first.
+      refused: `${hooksError}. Stopping it could run what that configuration adds: fix it, run systemctl --user daemon-reload, then run hack daemon stop again`,
     };
   }
   const stopped = await systemdServiceAction({ action: "stop", deps });

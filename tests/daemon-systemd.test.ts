@@ -3271,3 +3271,53 @@ linuxTest(
     expect(fake.calls).toContain("systemctl --user restart hackd.service");
   }
 );
+
+linuxTest(
+  "stop and uninstall check the loaded drop-ins, not only Exec* hooks",
+  async () => {
+    // Codex security review: a planted drop-in with OnSuccess= runs its
+    // unit when hackd stops; stop and uninstall checked only Exec* hooks.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const dropInDir = `${unitPath}.d`;
+    await mkdir(dropInDir, { mode: 0o700 });
+    await chmod(dropInDir, 0o700);
+    const dropIn = join(dropInDir, "override.conf");
+    await writeFile(dropIn, "[Unit]\nOnSuccess=payload.service\n");
+    // Writable by others: its contents cannot be vouched for.
+    await chmod(dropIn, 0o666);
+    fake.dropInPaths = dropIn;
+    fake.active = true;
+    fake.calls.length = 0;
+    const stop = await stopViaSystemdIfInstalled({
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(stop.refused).toContain(dropIn);
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    const removed = await uninstallSystemdUnit({
+      unitPath,
+      deps: fake.deps,
+      hackHome: join(root, ".hack"),
+    });
+    expect(removed.ok).toBe(false);
+    expect(fake.calls.some((call) => call.includes(" disable"))).toBe(false);
+    expect(fake.active).toBe(true);
+    // The user's own protected drop-in is fine.
+    await chmod(dropIn, 0o600);
+    expect(
+      (
+        await stopViaSystemdIfInstalled({
+          pid: null,
+          hackHome: join(root, ".hack"),
+          deps: fake.deps,
+        })
+      ).handled
+    ).toBe(true);
+  }
+);

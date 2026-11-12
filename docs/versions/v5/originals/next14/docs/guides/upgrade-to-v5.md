@@ -18,7 +18,7 @@ is the runtime layer underneath and the product boundary around it.
 - **Native backend (beta, Apple Silicon macOS).** Through the `hack-next` channel only,
   `HACK_RUNTIME_BACKEND=native` runs explicitly prepared projects without Docker. It
   supports a bounded command subset and is qualified project by project. See
-  [the native backend](native-candidate.md).
+  [the native backend overview](../native/README.md).
 - **A config compiler.** `hack config validate`, `config plan`, `config import
   --dry-run` and `config adopt --dry-run` inspect and preview native configuration
   without starting workloads. See [Native config import](../reference/native-config-import.md).
@@ -58,7 +58,7 @@ repository but are unsupported; see [unsupported retained surfaces](../extension
 3. Check the application itself: sign-in, data-backed pages, and anything written
    before a restart that must still be there after it.
 4. Only then try the native backend on a disposable project, following
-   [the native backend guide](native-candidate.md) and the staged plan in
+   [try the native backend](../native/try-it.md) and the staged plan in
    [Qualify a project on v5](v5-dogfooding.md).
 
 When 5.0.0 ships, `brew upgrade hack` or the release installer moves the stable

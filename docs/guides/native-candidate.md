@@ -189,6 +189,123 @@ finalization checks still apply. Fresh and already branch-scoped graphs keep
 their normal branch namespace. This compatibility path does not authorize
 adopting an unrelated branch or project.
 
+## Check a project before you start it
+
+`hack up` on the native backend checks a Compose project in two places and stops
+at the first refusal of each: the CLI's own admission, then the runtime review.
+To see the findings together, run the preflight:
+
+```sh
+hack doctor --native-preflight            # in the project, or with --path <root>
+hack doctor --native-preflight --profile dev,ops
+hack doctor --native-preflight --json
+```
+
+It lists the blockers and notes for the project's `.hack/docker-compose.yml`,
+each with a plain sentence and a fix. It judges what `hack up` judges: the
+Compose document after the selected native adaptation and the project-wide
+extra hosts are applied, reviewed with the profiles you pass.
+
+The Compose input must be a nonempty regular file of at most 256 KiB, not a
+symbolic link. Unreadable, changing or oversized input is reported as
+`compose_file_unreadable`; the check never waits for a FIFO writer.
+
+It changes nothing in the project and starts nothing: no VM, no image pull, no
+lifecycle hook. It accepts only `--path`, `--profile` and `--json`. The report
+never prints authored values. A finding names a closed code, a service and a
+field; environment values, label keys and values, paths and image names are
+left out.
+
+The runtime review half needs a native runtime, so run the preflight from the
+`hack-next` launcher for the full list. Without native selection only the CLI's
+checks run and the review is reported as `skipped`. The review needs no running
+VM.
+
+With `--json` the report is the `data` of the standard result envelope:
+
+```json
+{
+  "report_version": 1,
+  "backend": "native",
+  "compose_file": ".hack/docker-compose.yml",
+  "ready": false,
+  "runtime_review": { "status": "completed" },
+  "blockers": [
+    {
+      "severity": "blocker",
+      "gate": "cli",
+      "code": "env_file",
+      "service": "web",
+      "field": "env_file",
+      "message": "The service uses env_file, which native does not read.",
+      "fix": "Move its variables into Hack managed env with hack env set --service, or run hack doctor --migrate-env-config."
+    }
+  ],
+  "warnings": []
+}
+```
+
+- `ready` is true only when there is no blocker and the runtime review
+  completed.
+- The exit status follows the blockers: `0` with none, `1` otherwise. A skipped
+  or unavailable review is not a blocker, so that run exits `0` with
+  `ready: false`. With `--json` the envelope is `ok: true` in both cases; read
+  `ready` and `blockers` for the verdict.
+- `gate` is `cli` or `runtime`: which of the two checks reported the finding.
+- `runtime_review.status` is one of:
+  - `completed`: the review ran.
+  - `stopped`: the review met a project problem it cannot continue past, such as
+    an anonymous volume (`invalid_mount`) or a mount outside the project
+    (`source_escape`). `code` names it, it is listed as a blocker, and more
+    findings can appear once it is fixed.
+  - `skipped`: the review did not run. Without `code`, no native runtime is
+    selected. `code` is `native_selection_incomplete` when
+    `HACK_RUNTIME_BACKEND=native` is set without a candidate, and
+    `native_adaptation_invalid` when the adaptation was refused: the unadapted
+    document is not reviewed, because its findings would mislead.
+  - `unavailable`: the selected runtime did not return a review. `code`, when
+    present, is the runtime's own failure code. This says nothing about the
+    project.
+- Codes are stable. The CLI's codes are `compose_file_unreadable`,
+  `project_config_invalid`, `native_settings_invalid`,
+  `native_adaptation_invalid`, `internal_hosts_unreadable`,
+  `internal_hosts_without_dependencies`, `external_network`, `external_volume`,
+  `reserved_label`, `unsupported_build`, `foreign_platform`,
+  `invalid_service_name`, `invalid_service`, `build_requires_opt_in`,
+  `unsupported_build_form`, `emulated_build`, `env_file`, `missing_image`,
+  `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
+  `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
+  `dotenv_without_managed_env`, `shared_source_grant_required`,
+  `route_probe_required` and `too_many_bridges`. Runtime findings use the
+  review's own diagnostic codes, for example `privileged_service` or
+  `invalid_mount`, and `review_incompatible` when the review does not admit the
+  project and gives no finding this version can show. A code this version has
+  no sentence for is still listed, by its code and field.
+
+The preflight is a report, not an admission decision: `hack up` still runs its
+own checks, and a clean report starts nothing. It does not cover:
+
+- A project with native project inputs: a native project file
+  (`.hack/hack.project.json`) or a Compose file adopted into generated native
+  inputs. Those take another admission path, and the preflight refuses them
+  with a usage error.
+- `--env`, and a retained run's environment. It uses the project's default
+  environment to select the per-env adaptation and dependency files; `hack up`
+  uses `--env` when given, or the environment of a run it resumes.
+- Checks that need secret values or a resolved managed environment: a build
+  argument that carries a stored secret, a managed variable whose name is not
+  a valid environment name, and managed env that fails to resolve. `hack up`
+  also replaces the `environment` entries that managed env supplies before its
+  review, so a malformed authored value under such a key is a blocker here and
+  not there.
+- Image pinning. `hack up` reviews images by content ID after it has admitted
+  and pulled them; the preflight reviews the references as written.
+- What only a start can find: an image that cannot be pulled or admitted, a
+  source tree over the size limit, a process wrapper a service cannot run, a
+  host dependency without a binding, or a host port that is already in use.
+- More than the first problem of a kind that stops the review. See `stopped`
+  above.
+
 ## Compose projects that stay on the Compose backend
 
 In v5, an unchanged Compose project (`.hack/hack.config.json` with

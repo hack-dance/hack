@@ -16,6 +16,7 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 
 ## Understand the project
 
+- [Global settings](../guides/global-settings.md): machine-wide configuration and proxy bind addresses.
 - [Core concepts](../core.md): projects, services, instances and local URLs.
 - [Environment and secrets](../env.md): committed configuration with encrypted values.
 - [Lifecycle](../lifecycle.md): hooks, tunnels and host helpers that start with the project.

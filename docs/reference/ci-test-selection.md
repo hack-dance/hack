@@ -100,9 +100,9 @@ Run `bun run ci:selection-replay -- --repository=owner/repository --count=30 --r
 It prints one JSON record per merged PR: revision, changed paths, full/selected
 reason, selected files and platform pools, ready/draft policy, run/attempt counts,
 known failed files, hidden failures and evidence gaps. No historical code runs:
-the failure audit models integration coverage, with light-PR deferrals reported
-separately. Deferred historical macOS failures are not PR Linux qualification.
-source snapshots come from Git objects. Final selections and historical failed
+source snapshots come from Git objects. The failure audit models integration
+coverage, with light-PR deferrals reported separately. Deferred historical macOS
+failures are not PR Linux qualification. Final selections and historical failed
 revisions are evaluated separately, so a later fix cannot erase an earlier
 selection bug. A label present at merge cannot mask a narrower historical plan.
 

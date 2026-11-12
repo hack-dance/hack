@@ -225,15 +225,15 @@ railroad-ebnf-beta
   exec = "hack" "exec" service "--" command { argument } ;
 ```
 
-For a one-off container, `run` also takes a service and command tail, with an
-optional separator before the child command.
+For a one-off container, `run` takes a service and an optional command tail;
+omitting the command uses the service's default command.
 
 ```mermaid
 ---
 title: Run command form
 ---
 railroad-ebnf-beta
-  run = "hack" "run" service [ "--" ] command { argument } ;
+  run = "hack" "run" service [ [ "--" ] command { argument } ] ;
 ```
 
 For a finite log snapshot, `logs` can select a service and use `--no-follow`

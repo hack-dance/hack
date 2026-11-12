@@ -53,17 +53,18 @@ architecture-beta
   service client[Local client] in host
   service publisher[Loopback publisher] in host
   group pool[VM pool]
-  service bridge[Application bridge] in pool
   service workload[Service container] in pool
+  service bridge[Application bridge] in pool
   compiler:R --> L:frontend
   frontend:B --> T:provider
   provider:B --> T:workload
   client:B --> T:publisher
   publisher:B --> T:bridge
-  bridge:R --> L:workload
+  bridge:L --> R:workload
   align row compiler frontend
   align column frontend provider workload
   align column client publisher bridge
+  align row workload bridge
 ```
 
 The compiler does not carry application traffic. This picture covers published
@@ -131,7 +132,6 @@ flowchart TD
   supported -- yes --> prepared
   prepared -- no --> setup
   prepared -- yes --> trial
-  class compose idle
   class setup wait
 ```
 

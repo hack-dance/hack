@@ -475,13 +475,19 @@ directory above them must belong to you or root and not be writable by your
 group or others (sticky directories such as `/tmp` excepted). Hack does not
 repair these, even inside `HACK_HOME`: a program or directory others could
 write may already have been changed, so it refuses and prints the
-`chmod go-w` to run. Every program systemd will run for the unit
-(`ExecStart` and the other `Exec*` settings, drop-ins included) gets the same
-check. That includes `hack daemon stop` and `hack daemon uninstall`:
-stopping the service runs its `ExecStop`/`ExecStopPost` hooks (systemd runs them
-even after `systemctl kill`), so when one of them fails the check Hack does not
-stop, disable or remove the unit; it names the entry to fix, then
-`systemctl --user daemon-reload`. hackd runs helpers such as `docker` and `git` through its
+`chmod go-w` to run. Another regular user's program is never trusted; a file
+owned by a system account (below `UID_MIN`) is accepted only in a root-owned
+directory nobody else can write, as package managers install setuid tools.
+
+What systemd runs for the unit is an allowlist: exactly one `ExecStart` running
+`<hack> daemon start --foreground`, and no other `Exec*` setting. A drop-in that
+adds `ExecStartPre=`, `ExecStop=`, an interpreter wrapper or a second
+`ExecStart` makes `install` and `start` refuse. `hack daemon stop` and
+`hack daemon uninstall` refuse while an `ExecStop`/`ExecStopPost` hook is
+loaded, because stopping runs it (systemd runs stop hooks even after
+`systemctl kill`); remove it and run `systemctl --user daemon-reload` first. A
+unit whose `hack` was removed can still be stopped and uninstalled. `install`
+also refuses to enable a unit that a drop-in points at another `HACK_HOME`. hackd runs helpers such as `docker` and `git` through its
 `PATH`, so every directory on the service's `PATH` (the one Hack writes at install,
 and the effective one systemd reports before each start) must not let other users
 add or create programs there either. Put local settings, such as

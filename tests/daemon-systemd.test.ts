@@ -113,6 +113,9 @@ type Fake = {
  */
 const linuxTest = process.platform === "linux" ? test : test.skip;
 
+const EXEC_START_RAW = /^ExecStart=(.*)$/m;
+const QUOTED_FIRST_WORD = /^"([^"]*)"/;
+
 let root: string;
 let unitPath: string;
 let program: string;
@@ -193,10 +196,13 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
       return (async () => {
         const text = await readFile(unitPath, "utf8").catch(() => "");
         const program = extractSystemdExecProgram({ unitText: text });
+        // argv as written in the unit: the program unquoted, then the rest.
+        const execLine = EXEC_START_RAW.exec(text)?.[1] ?? "";
+        const argv = execLine.replace(QUOTED_FIRST_WORD, "$1");
         const lines = [
           ...(program
             ? [
-                `ExecStart={ path=${program} ; argv[]=${program} daemon start --foreground ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`,
+                `ExecStart={ path=${program} ; argv[]=${argv} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`,
               ]
             : []),
           ...state.extraExecLines,
@@ -2605,8 +2611,9 @@ linuxTest(
     fake.extraExecLines = [
       `ExecStartPre={ path=${planted} ; argv[]=${planted} ; ignore_errors=no }`,
     ];
+    // Allowlist: any Exec* entry besides Hack's own ExecStart is refused.
     expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
-      shared
+      "ExecStartPre"
     );
     fake.calls.length = 0;
     expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
@@ -2620,11 +2627,26 @@ linuxTest(
     expect(install.ok).toBe(false);
     // A second ExecStart (an override that did not reset it) is refused.
     fake.extraExecLines = [
-      `ExecStart={ path=${program} ; argv[]=${program} ; ignore_errors=no }`,
+      `ExecStart={ path=${program} ; argv[]=${program} daemon start --foreground ; ignore_errors=no }`,
     ];
     expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
       "exactly one"
     );
+    // An interpreter wrapper (`/bin/sh script`) is not Hack's ExecStart.
+    fake.extraExecLines = [];
+    const wrapper = join(shared, "hook.sh");
+    await writeFile(wrapper, "true\n");
+    await writeFile(
+      unitPath,
+      unitText().replace(
+        /^ExecStart=.*$/m,
+        () => `ExecStart=/bin/sh ${wrapper}`
+      )
+    );
+    expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+      "does not run or vouch for"
+    );
+    await writeFile(unitPath, unitText());
     // An entry that cannot be read is refused.
     fake.extraExecLines = ["ExecStop={ something odd }"];
     expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
@@ -2802,5 +2824,57 @@ linuxTest(
     expect(await checkServicePathDirectories({ dirs: [bin] })).toContain(
       shared
     );
+  }
+);
+
+linuxTest(
+  "install does not enable a unit a drop-in points at another Hack home",
+  async () => {
+    // Codex review: install restarted (and handed over to) a unit whose
+    // drop-in sets HACK_HOME to another home.
+    const fake = fakeSystemd();
+    fake.unitEnvironment = "HACK_HOME=/srv/other-home HACK_NO_INTERACTIVE=1";
+    const result = await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+      hackHome: join(root, ".hack"),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("/srv/other-home");
+    }
+    expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
+    // The full install command stops there: no handover, no start/restart.
+    fake.calls.length = 0;
+    expect(await installDaemonSystemdService(installHooks(fake, []))).toBe(1);
+    expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user restart hackd.service");
+  }
+);
+
+linuxTest(
+  "another regular user's program is never trusted, even in a protected root directory",
+  async () => {
+    // Codex security review: the owner of a 0755 file can chmod and rewrite it
+    // whatever its directory. Only system accounts (below UID_MIN) get the
+    // package-manager exception. Modelled with the uid the check compares to.
+    const { isSystemAccount } = await import("../src/lib/path-trust.ts");
+    expect(isSystemAccount(1)).toBe(true);
+    expect(isSystemAccount(0)).toBe(false);
+    expect(isSystemAccount(60_000)).toBe(false);
+    // /usr/bin/at-like case: a system account's file in /usr/bin stays fine.
+    // A regular user's file: refused (this test's own file, attributed to a
+    // regular uid that is not the checker's).
+    const own = process.getuid?.() ?? 0;
+    const bin = join(root, "regular-bin");
+    await mkdir(bin);
+    await chmod(bin, 0o755);
+    const tool = join(bin, "tool");
+    await writeFile(tool, "#!/bin/sh\n");
+    await chmod(tool, 0o755);
+    expect(
+      await checkServicePathDirectories({ dirs: [bin], uid: own + 60_000 })
+    ).toContain("owned by another user");
   }
 );

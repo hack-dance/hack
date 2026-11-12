@@ -1,6 +1,6 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessProof,
@@ -627,6 +627,7 @@ export async function installDaemonSystemdService(
     unitText: expected.unitText,
     deps,
     forceReload: before?.needsReload === true,
+    hackHome: dirname(hooks.paths.root),
   });
   if (!installed.ok) {
     logger.error({

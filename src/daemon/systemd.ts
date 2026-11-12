@@ -23,6 +23,7 @@ import { normalizeHomeDir, resolveUserHomeDir } from "../lib/home-dir.ts";
 import {
   checkReplaceableChain,
   entryExists,
+  isSystemAccount,
   lettingOthersCreate,
   walkReplaceableChain,
 } from "../lib/path-trust.ts";
@@ -929,6 +930,12 @@ export async function installSystemdUnit(opts: {
    * `NeedDaemonReload=yes`, so an earlier reload after a write failed.
    */
   readonly forceReload?: boolean;
+  /**
+   * The installing CLI's Hack home: before enabling, the unit's effective
+   * HACK_HOME (drop-ins included) must be this one. Unset for the start
+   * repair, which does not enable.
+   */
+  readonly hackHome?: string;
 }): Promise<SystemdInstallResult> {
   const access = resolveSystemdAccess({ env: opts.deps.env });
   if (!access.allowed) {
@@ -991,22 +998,12 @@ export async function installSystemdUnit(opts: {
   if (opts.enable === false) {
     return { ok: true, changed };
   }
-  // A drop-in can override PATH: check what systemd now has loaded before
-  // the unit is enabled to start at login.
-  const servicePath = await readSystemdServicePathDirectories({
+  const beforeEnable = await checkBeforeEnable({
     deps: opts.deps,
+    hackHome: opts.hackHome,
   });
-  const pathError =
-    ("error" in servicePath
-      ? servicePath.error
-      : await checkServicePathDirectories({
-          dirs: servicePath.dirs,
-        })) ?? (await checkSystemdServicePrograms({ deps: opts.deps }));
-  if (pathError !== null) {
-    return {
-      ok: false,
-      error: `Not enabling ${SYSTEMD_UNIT_NAME}: ${pathError}`,
-    };
+  if (beforeEnable !== null) {
+    return { ok: false, error: beforeEnable };
   }
   const enable = await opts.deps.run("systemctl", [
     "--user",
@@ -1745,11 +1742,14 @@ function programFileProblem(opts: {
   readonly systemDir: boolean;
 }): string | null {
   const { info } = opts;
+  // Another regular user's file is never trusted (they can chmod and
+  // rewrite it); a system account's file only in a protected root-owned
+  // directory (the package manager's, such as `at` owned by `daemon`).
   if (
-    !opts.systemDir &&
     opts.uid >= 0 &&
     info.uid !== opts.uid &&
-    info.uid !== 0
+    info.uid !== 0 &&
+    !(opts.systemDir && isSystemAccount(info.uid))
   ) {
     return `${opts.path}, owned by another user (uid ${info.uid})`;
   }
@@ -1809,109 +1809,143 @@ const EXEC_PROPERTIES = [
   "ExecStop",
   "ExecStopPost",
 ] as const;
-const EXEC_ENTRY_PATH = /path=(.*?) ; argv\[\]=/g;
+
+/** One `Exec*=` entry as systemd reports it. */
+export interface SystemdExecEntry {
+  readonly key: string;
+  readonly path: string;
+  /** The `argv[]=` text, space-joined as systemd prints it. */
+  readonly argv: string;
+}
+
+const EXEC_ENTRY = /path=(.*?) ; argv\[\]=(.*?) ;/g;
+const DAEMON_ARGV_SUFFIX = " daemon start --foreground";
 
 /**
- * The programs systemd will run for hackd.service, read from the manager
- * (unit file and drop-ins): every `Exec*=` entry's `path=`. A drop-in can
- * replace `ExecStart` or add `ExecStartPre=`, so the unit file alone is
- * not enough (HACK-2052). Refused when systemd cannot say, when there is
- * not exactly one `ExecStart`, or when an entry cannot be read.
+ * Every `Exec*=` entry systemd has loaded for hackd.service (unit file and
+ * drop-ins). Refused when systemd cannot say or an entry cannot be read.
  */
-export async function readSystemdServicePrograms(opts: {
+export async function readSystemdServiceExecEntries(opts: {
   readonly deps: SystemdDeps;
-  /** Which `Exec*` settings to read (default: all of them, for a start). */
-  readonly properties?: readonly (typeof EXEC_PROPERTIES)[number][];
 }): Promise<
-  { readonly programs: readonly string[] } | { readonly error: string }
+  { readonly entries: readonly SystemdExecEntry[] } | { readonly error: string }
 > {
-  const properties: readonly string[] = opts.properties ?? EXEC_PROPERTIES;
   const show = await opts.deps.run("systemctl", [
     "--user",
     "--no-pager",
     "show",
     SYSTEMD_UNIT_NAME,
-    `--property=${properties.join(",")}`,
+    `--property=${EXEC_PROPERTIES.join(",")}`,
   ]);
   if (show.exitCode !== 0) {
     return {
       error: `systemd did not report the programs hackd.service runs (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`,
     };
   }
-  const programs: string[] = [];
-  let execStarts = 0;
+  const entries: SystemdExecEntry[] = [];
   for (const line of show.stdout.split("\n")) {
     const eq = line.indexOf("=");
     const key = eq > 0 ? line.slice(0, eq) : "";
     const value = eq > 0 ? line.slice(eq + 1).trim() : "";
-    if (!properties.includes(key) || value === "") {
+    if (!(EXEC_PROPERTIES as readonly string[]).includes(key) || value === "") {
       continue;
     }
-    const paths = [...value.matchAll(EXEC_ENTRY_PATH)].map((m) => m[1] ?? "");
-    const entries = value.split("{").length - 1;
-    if (paths.length === 0 || paths.length !== entries) {
+    const found = [...value.matchAll(EXEC_ENTRY)];
+    if (found.length === 0 || found.length !== value.split("{").length - 1) {
       return { error: `systemd reported a ${key} entry Hack cannot read` };
     }
-    if (key === "ExecStart") {
-      execStarts += paths.length;
+    for (const match of found) {
+      entries.push({ key, path: match[1] ?? "", argv: match[2] ?? "" });
     }
-    programs.push(...paths);
   }
-  if (properties.includes("ExecStart") && execStarts !== 1) {
-    return {
-      error: `hackd.service has ${execStarts} ExecStart entries; expected exactly one`,
-    };
-  }
-  return { programs };
+  return { entries };
 }
 
 /**
- * {@link readSystemdServicePrograms}, each checked with
- * {@link checkServiceExecutableTrusted}.
+ * What systemd will run for hackd.service is an allowlist (HACK-2052):
+ * exactly one `ExecStart` running `<program> daemon start --foreground`,
+ * with that program trusted ({@link checkServiceExecutableTrusted}), and
+ * no other `Exec*` entry. A hook (`ExecStartPre`, `ExecStop`, ...) or an
+ * interpreter wrapper (`/bin/sh script`) runs code Hack cannot vouch for,
+ * so a drop-in that adds one is refused rather than inspected.
  */
 export async function checkSystemdServicePrograms(opts: {
   readonly deps: SystemdDeps;
 }): Promise<string | null> {
-  const read = await readSystemdServicePrograms({ deps: opts.deps });
+  const read = await readSystemdServiceExecEntries({ deps: opts.deps });
   if ("error" in read) {
     return read.error;
   }
-  for (const program of read.programs) {
-    const error = await checkServiceExecutableTrusted({ path: program });
-    if (error !== null) {
-      return error;
-    }
+  const extra = read.entries.find(
+    (entry) =>
+      entry.key !== "ExecStart" || !entry.argv.endsWith(DAEMON_ARGV_SUFFIX)
+  );
+  if (extra) {
+    return `hackd.service has ${extra.key}=${extra.argv}, which Hack does not run or vouch for; remove it from the unit or its drop-ins`;
   }
-  return null;
+  const starts = read.entries.filter((entry) => entry.key === "ExecStart");
+  if (starts.length !== 1) {
+    return `hackd.service has ${starts.length} ExecStart entries; expected exactly one`;
+  }
+  return await checkServiceExecutableTrusted({
+    path: (starts[0] as SystemdExecEntry).path,
+  });
 }
 
 /**
- * What a stop runs: only `ExecStop` and `ExecStopPost` (drop-ins included),
- * each checked with {@link checkServiceExecutableTrusted}. A stop does not
- * launch `ExecStart`, so a unit whose program was removed (an upgrade or
- * cleanup) can still be stopped and uninstalled. Null, or the refusal.
+ * Stopping the unit runs its `ExecStop`/`ExecStopPost` hooks (systemd runs
+ * them even after `systemctl kill`). Hack writes none, so any hook is one
+ * it cannot vouch for: stop and uninstall refuse while one is loaded. A
+ * stop does not launch `ExecStart`, so a unit whose program was removed
+ * can still be stopped. Null, or the refusal.
  */
 export async function checkSystemdStopHooks(opts: {
   readonly deps: SystemdDeps;
 }): Promise<string | null> {
-  const read = await readSystemdServicePrograms({
-    deps: opts.deps,
-    properties: ["ExecStop", "ExecStopPost"],
-  });
+  const read = await readSystemdServiceExecEntries({ deps: opts.deps });
   if ("error" in read) {
     return read.error;
   }
-  for (const program of read.programs) {
-    const error = await checkServiceExecutableTrusted({ path: program });
-    if (error !== null) {
-      return `Not stopping ${SYSTEMD_UNIT_NAME}: its stop hook ${error}`;
-    }
-  }
-  return null;
+  const hook = read.entries.find(
+    (entry) => entry.key === "ExecStop" || entry.key === "ExecStopPost"
+  );
+  return hook
+    ? `Not stopping ${SYSTEMD_UNIT_NAME}: it has ${hook.key}=${hook.argv}, which Hack does not write or vouch for`
+    : null;
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * What must hold, in what systemd has just loaded, before the unit is
+ * enabled to start at login: it serves the installer's Hack home (a
+ * drop-in can set HACK_HOME), its PATH directories and the programs it
+ * runs are safe (a drop-in can set PATH or add Exec* entries).
+ */
+async function checkBeforeEnable(opts: {
+  readonly deps: SystemdDeps;
+  readonly hackHome: string | undefined;
+}): Promise<string | null> {
+  if (opts.hackHome !== undefined) {
+    const unitHome = await readSystemdUnitHackHome({ deps: opts.deps });
+    if (unitHome.kind === "unknown") {
+      return `Not enabling ${SYSTEMD_UNIT_NAME}: its Hack home could not be read (${unitHome.detail})`;
+    }
+    if (unitHome.path !== resolve(opts.hackHome)) {
+      return `Not enabling ${SYSTEMD_UNIT_NAME}: a drop-in makes it run hackd for ${unitHome.path}, not ${resolve(opts.hackHome)}; remove that override or install from that Hack home`;
+    }
+  }
+  const servicePath = await readSystemdServicePathDirectories({
+    deps: opts.deps,
+  });
+  const error =
+    ("error" in servicePath
+      ? servicePath.error
+      : await checkServicePathDirectories({ dirs: servicePath.dirs })) ??
+    (await checkSystemdServicePrograms({ deps: opts.deps }));
+  return error === null ? null : `Not enabling ${SYSTEMD_UNIT_NAME}: ${error}`;
 }
 
 /** Runs `systemctl --user daemon-reload`. */

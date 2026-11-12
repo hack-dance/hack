@@ -1,6 +1,7 @@
 import {
   chmodSync,
   lstatSync,
+  readFileSync,
   readlinkSync,
   type Stats,
   statSync,
@@ -192,14 +193,20 @@ function checkServicePathEntry(opts: {
     return `${opts.path} could not be inspected: ${error instanceof Error ? error.message : String(error)}`;
   }
   // Ownership first, links included: in a sticky directory the owner of a
-  // link can still replace it. A regular file in a root-owned directory
-  // nobody else can write is the package manager's (setuid tools owned by
-  // system accounts): only its mode matters there.
+  // link can still replace it. A regular file owned by a system account in
+  // a root-owned directory nobody else can write is the package manager's
+  // (setuid tools such as `at` owned by `daemon`): only its mode matters
+  // there. Another regular user's file is never trusted: its owner can
+  // chmod and rewrite it whatever the directory.
   if (
     opts.uid >= 0 &&
     info.uid !== opts.uid &&
     info.uid !== 0 &&
-    !(info.isFile() && isProtectedSystemDir(dirname(opts.path)))
+    !(
+      info.isFile() &&
+      isSystemAccount(info.uid) &&
+      isProtectedSystemDir(dirname(opts.path))
+    )
   ) {
     return `${opts.path} is owned by another user (uid ${info.uid})`;
   }
@@ -251,3 +258,28 @@ function isProtectedSystemDir(dir: string): boolean {
     return false;
   }
 }
+
+let uidMin: number | null = null;
+
+/**
+ * Below the system's first regular-user uid (`UID_MIN` in
+ * /etc/login.defs, 1000 when absent): an operating-system account, not
+ * another person on the host.
+ */
+export function isSystemAccount(uid: number): boolean {
+  if (uidMin === null) {
+    uidMin = 1000;
+    try {
+      const defs = readFileSync("/etc/login.defs", "utf8");
+      const value = UID_MIN_LINE.exec(defs)?.[1];
+      if (value) {
+        uidMin = Number.parseInt(value, 10);
+      }
+    } catch {
+      // No login.defs: keep the common default.
+    }
+  }
+  return uid > 0 && uid < uidMin;
+}
+
+const UID_MIN_LINE = /^\s*UID_MIN\s+(\d+)/m;

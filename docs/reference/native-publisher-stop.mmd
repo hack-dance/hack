@@ -5,6 +5,8 @@ stateDiagram-v2
     direction TB
     [*] --> ready
     ready --> enrolled : Interrupt
+    ready --> enrolled : FrontendLost [lifetime watch]
+    ready --> enrolled : PublisherCrash [exact Child reaped]
     enrolled --> enrolled : StopPublisher
     ready --> intent : Recover [owner absent]
     enrolled --> intent : Recover [owner absent]
@@ -29,4 +31,5 @@ stateDiagram-v2
     note right of retired
         Compute absent, data retained
         Foreground publication retired
+        Dead frontend finalization recovered by down --recover
     end note

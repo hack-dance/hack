@@ -2452,9 +2452,9 @@ may ask for again after a failed attempt; nothing is stopped or started. `hack d
 selects this recovery on the same guest boot, and `hack doctor --native-cleanup
 inspect` reports such a run as `interrupted_startup_candidate` with a `dead` count.
 If the engine still cannot remove the container, `hack down` refuses and keeps the
-run. Once the graph is stopped with data retained, `hack down` names the
-`hack restart --recover-frontend --expect-finalization-attempt` command that
-finishes the failed `hack up`'s own finalization. A run restored from that
+run. Once the graph is stopped with data retained, `hack down` names
+`hack down --recover`, which verifies and retires the failed `hack up`'s
+recorded dead frontend attempt in the same command. A run restored from that
 retained data that fails again treats the earlier, finished recovery journal as
 history (`interrupted-start-cleanup-retired-<selection>.json`).
 Likewise, a pending guest helper, probe or environment deletion advances only
@@ -3421,9 +3421,11 @@ Foreground Compose `up` and `restart` isolate their graph owner from the
 terminal's process group, including projects without hooks. Each port publisher
 also has its own group. Ctrl-C asks the owner to stop through the frontend;
 publisher retirement must still prove exit before graph cleanup is confirmed.
-If the frontend is killed or its terminal closes, the isolated graph owner may
-remain alive with its port; `hack down --recover` uses that owner's authenticated
-stop. Frontend death alone is never evidence that services stopped.
+If the frontend is killed or its terminal closes, the owner observes its exact
+parent's exit and requests retaining cleanup, including authenticated publisher
+retirement. A publisher crash also wakes the owner: it reaps its direct child
+and persists the exact incarnation's exit proof before cleanup. Frontend death
+alone never proves that services stopped.
 
 `hack down --recover` uses the ordinary authenticated stop when the graph owner
 is still running, including when its frontend was lost. It does not treat a live
@@ -3435,9 +3437,13 @@ present and name the next step: a running owner must be stopped with Ctrl-C or
 `hack down --recover`. That command selects the run's exact receipt with the
 read-only `graph foreground-owner --run-id RUN --json` and then uses the
 same-boot `graph recover-live-owner` described below, retaining data and
-retiring the stale publication. If the frontend that owned the run also exited
-before confirming its cleanup, `hack down --recover` prints the exact
-`hack restart --recover-frontend --expect-finalization-attempt ATTEMPT` step.
+retiring the stale publication. If its recorded frontend also exited before
+confirming cleanup, the same command verifies the exact captured attempt,
+stopped graph, HTTPS ownership and lifecycle-process absence, then records
+frontend recovery. Success exits zero with data retained; plain `hack up` can
+start it again. Recovery remains distinct from the old frontend completing its
+own finalizers. Legacy finalization tokens without a recorded PID still require
+the existing explicit operator proof.
 
 An owner of a retained run that exited before the runtime admitted its restore
 is also retired by `hack down --recover`. The admission's first durable write

@@ -2177,3 +2177,29 @@ and an external 300-second watchdog. Set `HACK_LOCAL_TEST_ROOT`,
 other isolated native fixtures. The tests retain their generated data receipts
 for inspection; stop the disposable pool after qualification. They are ignored
 on ordinary test runs and do not qualify recovery until executed on Apple Silicon.
+
+
+### Foreground lifetime and retained owner control generations
+
+The native foreground event queue watches the exact frontend parent and every
+retained publisher Child. Frontend loss requests ordinary retaining cleanup.
+A non-reaping child-exit check takes no provider lease, so healthy publishers do
+not contend with launch or status. Publisher exit is reaped promptly; before
+reaping, the owner pins the exact
+native birth and any committed/pending registry generation. Its exact exit proof
+is retained in memory across a failed registry write and durably recorded before
+cleanup. A readable different birth at a reused PID proves the recorded publisher
+gone, without authorizing a signal to the replacement; unreadable birth refuses.
+
+Each new owner process derives a control generation from its native PID, birth
+time and UID. Executable-path changes do not change that lifetime identity. The startup receipt binds that generation to its control directory.
+Retained restore therefore cannot reuse the predecessor's unfinished coordinator,
+even on the same guest boot. Missing generation selects the unchanged legacy
+run/boot directory. Pre-admission recovery derives the new directory from the
+exact recorded dead process, falling back to the legacy directory for old owners.
+Neither path overwrites or acknowledges an old coordinator.
+
+After graph recovery, frontend `down --recover` also recovers its captured dead
+frontend finalization under the existing exact-attempt lock and side-effect
+proofs. It exits zero with data retained and permits plain `up`. An external down
+also produces the confirmed-stop closing line in the original foreground.

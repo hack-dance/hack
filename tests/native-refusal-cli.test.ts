@@ -88,7 +88,10 @@ async function fixture(compose = COMPOSE) {
     binary,
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${stub}/calls'
-if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
+if [ -f '${stub}/'"$3-$4"'.out' ]; then
+  if [ -f '${stub}/'"$3-$4"'.after-inspect' ]; then cp '${stub}/'"$3-$4"'.after-inspect' '${stub}/graph-inspect.out'; fi
+  cat '${stub}/'"$3-$4"'.out'; exit 0
+fi
 if [ -f '${stub}/'"$3-$4"'.err' ]; then cat '${stub}/'"$3-$4"'.err' >&2; exit 1; fi
 printf '%s' '{"code":"runtime_not_running"}' >&2
 exit 1
@@ -124,7 +127,23 @@ exit 1
         ...extra,
       },
     });
-  return { root, project, projectDir, scope, compose, reply, fail, calls, env };
+  const finishOn = async (request: string, value: unknown) =>
+    await writeFile(
+      join(stub, `${request.replace(" ", "-")}.after-inspect`),
+      JSON.stringify(value)
+    );
+  return {
+    root,
+    project,
+    projectDir,
+    scope,
+    compose,
+    reply,
+    fail,
+    finishOn,
+    calls,
+    env,
+  };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -515,12 +534,137 @@ test(
     const result = await cli({ fixture: f, args: ["up"], env: SHARED });
     expectOneClosedLine(
       result,
-      "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying. Startup diagnostic: Native graph startup was interrupted or failed (runtime_not_running). Native exit diagnostic: runtime_not_running."
+      "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained. Startup diagnostic: Native graph startup was interrupted or failed (runtime_not_running). Native exit diagnostic: runtime_not_running."
     );
     expect((await f.calls()).slice(-2)).toEqual([
       "graph serve",
       "graph inspect",
     ]);
+    const next = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(next.code).toBe(0);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test.each([
+  "graph_cleanup_enrollment",
+  "graph_publisher_running",
+  "publisher_stop_uncertain",
+  "graph_dead_owner_recovery",
+])(
+  "recovery refusal %s names a ps command that succeeds on the retained run",
+  async (code) => {
+    const f = await fixture();
+    await savedRun(f);
+    await f.reply("graph inspect", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+    });
+    await f.fail("graph recover-live-owner", { code });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain("Run hack ps --json");
+    const next = await cli({ fixture: f, args: ["ps", "--json"] });
+    expect(next.code).toBe(0);
+    expect((await f.calls()).at(-1)).toBe("graph inspect");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test.each(["provider_busy", "native_request_timeout"])(
+  "transient recovery refusal %s names a down retry that succeeds",
+  async (code) => {
+    const f = await fixture();
+    await savedRun(f);
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    await f.reply("graph inspect", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+    });
+    await f.fail("graph recover-live-owner", { code });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain("Run hack down --recover");
+    await f.reply("graph recover-live-owner", {
+      run: run.run,
+      recovered: true,
+      data_retained: true,
+      publisher_retired: true,
+    });
+    await f.finishOn("graph recover-live-owner", stoppedGraph);
+    const next = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(next.code).toBe(0);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "stopped-runtime recovery refusal names ps, which confirms the stopped runtime",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await f.fail("graph inspect", { code: "runtime_not_running" });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain("Run hack ps --json");
+    const next = await cli({ fixture: f, args: ["ps", "--json"] });
+    expect(next.code).toBe(0);
+    expect(JSON.parse(next.stdout).data.status).toBe("runtime_not_running");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "predecessor hint failure keeps its diagnostic and names a working inspection command",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await f.reply("graph inspect", stoppedGraph);
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "stopped-data-retained",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+      dead_owner_recovery: null,
+      dead_owner_recovery_error: "invalid_receipt",
+    });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain(
+      "predecessor recovery selection failed (invalid_receipt)"
+    );
+    expect(refused.output).toContain("Run hack ps --json");
+    expect(await f.calls()).not.toContain("graph recover-live-owner");
+    const next = await cli({ fixture: f, args: ["ps", "--json"] });
+    expect(next.code).toBe(0);
   },
   SPAWN_TIMEOUT_MS
 );

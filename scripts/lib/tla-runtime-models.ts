@@ -958,7 +958,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-publisher-stop",
     module: "PublisherStop",
-    states: 48,
+    states: 92,
     invariant: "NoUnsafeCleanup",
     action: "ReleaseBridge",
     fields: [
@@ -978,6 +978,13 @@ const contracts: readonly ModelContract[] = [
       },
     ],
     additionalControls: [
+      {
+        name: "frontend-loss",
+        negative: true,
+        invariant: "NoSilentOrphan",
+        action: "FrontendLost",
+        fields: ['phase = "ready"', "frontend = FALSE", "owner = TRUE"],
+      },
       {
         name: "group-signal",
         negative: true,

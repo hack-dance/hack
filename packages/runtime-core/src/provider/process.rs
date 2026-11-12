@@ -375,3 +375,6 @@ mod tests {
         println!("private-child-mask-verified");
     }
 }
+
+#[cfg(all(test, feature = "native-stream-relay"))]
+pub(crate) mod native_publisher_tests;

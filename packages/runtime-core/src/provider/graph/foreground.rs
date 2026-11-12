@@ -16,6 +16,8 @@ mod native_test;
 mod publishers;
 pub(in crate::provider::graph) mod redelivery;
 pub use dependency_refresh::request as refresh_dependencies_request;
+#[cfg(all(test, feature = "native-stream-relay"))]
+mod lifetime_tests;
 mod retained_data;
 pub(in crate::provider::graph) mod signals;
 #[cfg(test)]
@@ -316,7 +318,7 @@ fn serve_input<'a>(
     let result = (|| {
         if signals.pending() {
             cleanup_attempted = true;
-            return runtime.cleanup(candidate, false);
+            return publishers.cleanup(candidate, &mut runtime, false);
         }
         publishers.start(candidate, &receipt, &signals, deadline, route_slots)?;
         signals.watch_read(runtime.dependency_notification_fd())?;
@@ -350,9 +352,11 @@ fn serve_input<'a>(
                     automatic.deadline()
                 };
                 match signals.wait_until(wake)? {
-                    signals::Wake::Signal => {
+                    signals::Wake::Signal
+                    | signals::Wake::FrontendExit
+                    | signals::Wake::PublisherExit => {
                         cleanup_attempted = true;
-                        return runtime.cleanup(candidate, false);
+                        return publishers.cleanup(candidate, &mut runtime, false);
                     }
                     // A watched refreshable listener exited: a stale notice
                     // without traffic. Its replacement may still be starting.
@@ -491,7 +495,7 @@ fn serve_input<'a>(
             }
             if let Some(remove_data) = request.remove_data {
                 cleanup_attempted = true;
-                match runtime.cleanup(candidate, remove_data) {
+                match publishers.cleanup(candidate, &mut runtime, remove_data) {
                     Ok(cleaned) => {
                         publishers.reap_after_cleanup(
                             &signals,
@@ -550,7 +554,8 @@ fn serve_input<'a>(
         // A failed explicit cleanup may already have an EffectStarted journal; do
         // not replay it here. Retain publication and graph evidence for recovery.
         Err(error) => {
-            if !cleanup_attempted && runtime.cleanup(candidate, false).is_ok() {
+            publishers.reap_exited(candidate)?;
+            if !cleanup_attempted && publishers.cleanup(candidate, &mut runtime, false).is_ok() {
                 publishers.reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))?;
                 publication.finish()?;
             }

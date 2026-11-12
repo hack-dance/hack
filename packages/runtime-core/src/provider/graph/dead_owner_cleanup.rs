@@ -108,9 +108,9 @@ pub(super) fn recovery_hint(
     receipt: &Receipt,
     owner: &Owner,
     publication: foreground::transport::PublishedOwner,
-) -> Option<String> {
+) -> Result<Option<String>, CandidateError> {
     if publication == foreground::transport::PublishedOwner::Running {
-        return None;
+        return Ok(None);
     }
     recovery_selection(
         candidate,
@@ -119,8 +119,6 @@ pub(super) fn recovery_hint(
         owner,
         publication != foreground::transport::PublishedOwner::Absent,
     )
-    .ok()
-    .flatten()
 }
 
 pub(super) fn recovery_selection(
@@ -176,13 +174,8 @@ pub(super) fn recovery_selection(
         marker.valid() && marker.boot == context.boot && marker.runtime == context.runtime
     });
     let root_matches = receipt.relay_startup.as_ref().is_some_and(|startup| {
-        startup::control_root(
-            &candidate.state_root,
-            &receipt.owner,
-            Some(previous),
-            Some(&receipt.run),
-        )
-        .is_ok_and(|expected| startup.control_root == expected)
+        startup::receipt_control_root(&candidate.state_root, receipt, previous)
+            .is_ok_and(|expected| startup.control_root == expected)
     });
     (marker_matches || root_matches)
         .then(|| selected(receipt))
@@ -1487,6 +1480,7 @@ mod tests {
                 &owner,
                 foreground::transport::PublishedOwner::Running
             )
+            .unwrap()
             .is_none()
         );
         assert!(
@@ -1497,7 +1491,7 @@ mod tests {
                 &owner,
                 foreground::transport::PublishedOwner::Exited
             )
-            .is_none()
+            .is_err()
         );
     }
     fn partial() -> Receipt {

@@ -610,7 +610,7 @@ function completionResponse(
       message: timedOut
         ? "Native runtime request timed out; inspect owned state before retrying."
         : nativeFailureMessage(failure),
-      nativeCode: timedOut ? undefined : failure?.code,
+      nativeCode: timedOut ? "native_request_timeout" : failure?.code,
       nativeCauseCode: timedOut ? undefined : failure?.causeCode,
       nativeMessage: timedOut ? undefined : failure?.message,
       nativeService: timedOut ? undefined : failure?.service,

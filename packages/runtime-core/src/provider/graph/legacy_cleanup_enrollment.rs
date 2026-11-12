@@ -21,7 +21,7 @@ pub(super) struct Selection {
 fn refused() -> CandidateError {
     error(
         "graph_cleanup_enrollment",
-        "The selected legacy cleanup coordinator changed or cannot be bound to the dead graph owner; retain the native home unchanged for inspection.",
+        "The selected legacy cleanup coordinator changed or cannot be bound to the dead graph owner. Run hack ps --json to inspect retained state.",
     )
 }
 impl Selection {
@@ -176,6 +176,49 @@ pub(super) fn verify(
 mod tests {
     use super::*;
 
+    #[test]
+    fn next13_writer_coordinator_binds_without_rewriting_its_evidence() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("next13-enrollment-{}", std::process::id()));
+        state::private_directory(&root).unwrap();
+        let control = root.join("relay-lifecycle");
+        state::private_directory(&control).unwrap();
+        let parent = fs::metadata(&control).unwrap();
+        let mut original: Receipt = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/native-next13/ready-pending.json"
+        ))
+        .unwrap();
+        original.relay_startup.as_mut().unwrap().control_root = root.clone();
+        let context = host_relay::context(&original.owner, "old-boot").unwrap();
+        let marker = original.relay_cleanup.as_mut().unwrap();
+        marker.control_root = root.clone();
+        marker.runtime = context.runtime;
+        marker.boot = context.boot;
+        let mut record: Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/native-next13/coordinator.json"
+        ))
+        .unwrap();
+        record["parent"] = json!([parent.dev(), parent.ino()]);
+        record["runtime"] = json!(context.runtime);
+        record["boot"] = json!(context.boot);
+        let mut graph = Sha256::new();
+        graph.update(b"Hack graph relay scope v1\0");
+        graph.update(context.runtime);
+        graph.update(original.run.as_bytes());
+        let graph: [u8; 32] = graph.finalize().into();
+        record["graph"] = json!(graph);
+        record["process"]["uid"] = json!(unsafe { libc::geteuid() });
+        state::write(&control.join("state.json"), &record).unwrap();
+        let process: ProcessIdentity = serde_json::from_value(record["process"].clone()).unwrap();
+        let bytes = fs::read(control.join("state.json")).unwrap();
+        let selected = Selection::capture_previous(&original, "old-boot", &process).unwrap();
+        selected.verify_raw(&original).unwrap();
+        assert_eq!(fs::read(control.join("state.json")).unwrap(), bytes);
+        let mut wrong = process;
+        wrong.start_micros += 1;
+        assert!(Selection::capture_previous(&original, "old-boot", &wrong).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn legacy_enrollment_binds_exact_dead_owner_and_operation() {
         // This is the unchanged next.13 Pending marker. No recovery fields or

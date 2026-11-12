@@ -9,11 +9,19 @@ import { openNativeDownHookSession } from "./native-project-down-hooks.ts";
 import {
   captureNativeProjectFinalization,
   type NativeProjectFinalizationToken,
+  recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { recoverNativeInterruptedStartupCleanup } from "./native-project-interrupted-cleanup.ts";
-import { retireNativeRecoveredPublisher } from "./native-project-recovery.ts";
+import {
+  retireNativeRecoveredPublisher,
+  verifyNativeFrontendRecovery,
+} from "./native-project-recovery.ts";
+import {
+  nativeRecoveryGuidance,
+  withNativeRecoveryGuidance,
+} from "./native-project-recovery-guidance.ts";
 import { withNativeRemovalLock } from "./native-project-removal-lock.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
 import {
@@ -33,12 +41,12 @@ import {
 
 function refused(): Error {
   return new ClosedCliError(
-    "Native down cleanup is unconfirmed; retained mapping and runtime state require inspection. No cleanup was replayed."
+    "Native down cleanup is unconfirmed; no cleanup was replayed. Run hack ps --json to inspect this run's retained state."
   );
 }
 function finalizationRefused(): Error {
   return new ClosedCliError(
-    "Native down frontend finalization is unconfirmed or its ownership changed; retained mapping and runtime state require inspection. No cleanup was replayed."
+    "Native down frontend finalization is unconfirmed or its ownership changed; no cleanup was replayed. Run hack ps --json to inspect this run's retained state."
   );
 }
 async function captureFinalization(opts: {
@@ -89,6 +97,7 @@ function verify(value: unknown, run: NativeProjectRun, stopped: boolean): void {
   }
 }
 const RECEIPT_SHA = /^[a-f0-9]{64}$/;
+const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 /** Only ESRCH proves a recorded frontend exited; a live or inaccessible PID does not. */
 function processExited(pid: number): boolean {
@@ -111,11 +120,12 @@ type ForegroundOwnerSelection = {
   readonly deadOwnerRecovery: string | null;
   /** Exact runtime completion commit, distinct from a stopped receipt phase. */
   readonly deadOwnerRecoveryComplete: boolean;
+  readonly deadOwnerRecoveryError: string | null;
 };
 
 function ownerRecoveryRefused(): Error {
   return new ClosedCliError(
-    "Native down --recover cannot confirm this run's foreground owner state; retained data and runtime state were not changed."
+    "Native down --recover cannot confirm this run's foreground owner state; retained data was not changed. Run hack ps --json to inspect this run's retained state."
   );
 }
 
@@ -158,6 +168,13 @@ async function selectForegroundOwner(opts: {
       !(
         value.dead_owner_recovery_complete === undefined ||
         typeof value.dead_owner_recovery_complete === "boolean"
+      )) ||
+    (value.foreground !== "running" &&
+      !(
+        value.dead_owner_recovery_error === undefined ||
+        value.dead_owner_recovery_error === null ||
+        (typeof value.dead_owner_recovery_error === "string" &&
+          RECOVERY_CODE.test(value.dead_owner_recovery_error))
       ))
   ) {
     throw ownerRecoveryRefused();
@@ -179,6 +196,11 @@ async function selectForegroundOwner(opts: {
     deadOwnerRecoveryComplete:
       value.foreground !== "running" &&
       value.dead_owner_recovery_complete === true,
+    deadOwnerRecoveryError:
+      value.foreground !== "running" &&
+      typeof value.dead_owner_recovery_error === "string"
+        ? value.dead_owner_recovery_error
+        : null,
   };
 }
 
@@ -242,7 +264,7 @@ async function invokeOwnerRecovery(opts: {
   } catch (error) {
     if (error instanceof NativeRuntimeRequestError) {
       throw new ClosedCliError(
-        `Native down --recover could not prove owner and publisher exit or unchanged cleanup evidence (${error.nativeCode ?? "native_request_failed"}). No safe cleanup command can proceed with this evidence; keep the native home unchanged for inspection.`
+        `Native down --recover could not confirm cleanup (${error.nativeCode ?? "native_request_failed"}). ${nativeRecoveryGuidance(error.nativeCode)}`
       );
     }
     throw error;
@@ -331,7 +353,7 @@ async function retireUnadmittedOwner(opts: {
       error.nativeCode === "graph_unadmitted_owner_recovery"
     ) {
       throw new ClosedCliError(
-        "Native down --recover could not prove that this run's foreground owner exited before its restore was admitted. Data is retained; keep the native home unchanged for inspection."
+        "Native down --recover could not prove that this run's foreground owner exited before its restore was admitted. Run hack ps --json to inspect this run's retained state."
       );
     }
     throw error;
@@ -372,7 +394,7 @@ function requireRecoverableOwner(selection: ForegroundOwnerSelection): void {
     selection.phase !== "ready-observed"
   ) {
     throw new ClosedCliError(
-      "Native down --recover found a foreground owner that exited before its start was confirmed. Data is retained, but no supported command can prove and retire that attempt yet; keep the native home unchanged for inspection. Nothing was changed."
+      "Native down --recover found a foreground owner that exited before its start was confirmed. Nothing was changed. Run hack ps --json to inspect this run's retained state."
     );
   }
 }
@@ -428,7 +450,7 @@ export async function nativeProjectDown(opts: {
       dataPreserved: true,
     } as const;
   }
-  const invoke = opts.invoke ?? invokeNativeRuntime;
+  const invoke = withNativeRecoveryGuidance(opts.invoke ?? invokeNativeRuntime);
   const inspect = () =>
     inspectNativeProjectGraph({
       runtime: opts.runtime,
@@ -447,6 +469,11 @@ export async function nativeProjectDown(opts: {
       })
     : undefined;
   if (selection) {
+    if (selection.deadOwnerRecoveryError) {
+      throw new ClosedCliError(
+        `Native predecessor recovery selection failed (${selection.deadOwnerRecoveryError}). ${nativeRecoveryGuidance(selection.deadOwnerRecoveryError)}`
+      );
+    }
     requireRecoverableOwner(selection);
   }
   if (selection?.deadOwnerRecovery && selection.foreground !== "running") {
@@ -514,7 +541,7 @@ export async function nativeProjectDown(opts: {
     ? undefined
     : await captureFinalization({ scope: opts.scope, run });
   // A frontend that has exited cannot finish later, so its finalization is read
-  // once instead of awaited. Only ESRCH proves the exit; PID reuse can only make
+  // once before explicit retaining recovery. Only ESRCH proves the exit; PID reuse can only make
   // an exited frontend look live, which keeps the ordinary wait. HACK-1968: a
   // failed `hack up` that recorded its run for down exits without finishing it.
   const frontendGone =
@@ -536,10 +563,42 @@ export async function nativeProjectDown(opts: {
       if (!frontendGone) {
         throw finalizationRefused();
       }
+      if (opts.recover === true) {
+        // Exact captured attempt, dead frontend, stopped graph and all frontend
+        // effects are rechecked under the existing finalization lock. Recovery
+        // remains a separate fact from that frontend completing its own cleanup.
+        await recoverNativeProjectFinalization({
+          scope: opts.scope,
+          run,
+          token: finalization,
+          expectAttempt: finalization.attempt,
+          verifyEffects: () =>
+            verifyNativeFrontendRecovery({
+              runtime: opts.runtime,
+              scope: opts.scope,
+              run,
+              httpsPort: finalization.httpsPort,
+              httpsLease:
+                finalization.version === 3
+                  ? finalization.httpsLease
+                  : undefined,
+              legacy: false,
+              invoke,
+              cleanupLifecycle: async () => {
+                await opts.retireHostProcesses?.(run);
+              },
+            }),
+        });
+        await waitNativeProjectFinalization({
+          scope: opts.scope,
+          run,
+          token: finalization,
+          timeoutMs: 1,
+        });
+        return;
+      }
       throw new ClosedCliError(
-        opts.recover === true
-          ? `Native down --recover: this run's services are stopped with data retained, but the hack up or hack restart that owned it exited before confirming its own cleanup. Run hack restart --recover-frontend --expect-finalization-attempt ${finalization.attempt} to finish that recovery and start the project.`
-          : `Native down frontend finalization is unconfirmed: this run's services are stopped with data retained, but the hack up or hack restart that owned it exited before confirming its own cleanup. Run hack restart --recover-frontend --expect-finalization-attempt ${finalization.attempt} to finish that recovery and start the project.`
+        "Native down frontend finalization is unconfirmed: this run's services are stopped with data retained, but its frontend exited before confirming cleanup. Run hack down --recover to finish retaining cleanup."
       );
     }
   };
@@ -707,7 +766,7 @@ export async function nativeDownEnvironment(opts: {
       throw named;
     }
     throw new ClosedCliError(
-      "Native down lifecycle environment is unavailable; values omitted. No cleanup was requested."
+      "Native down lifecycle environment is unavailable; values omitted. No cleanup was requested. Run hack ps --json to inspect this run's retained state."
     );
   }
 }

@@ -12,58 +12,36 @@ afterEach(async () => {
 });
 const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 
-// Exercise the production process adapter in a real foreground group. The fake
-// Linux and macOS signal semantics are qualified separately; retain macOS CI coverage.
-// runtime owns a real TCP publisher: interrupting that child independently makes
-// cleanup unconfirmed, just as the native publisher's private stop would be lost.
+// Exercise the production frontend adapter with a minimal owner. Real native
+// publisher/group/control semantics run separately in Rust with stream-relay-host.
 test.each([
   { restore: false, label: "up" },
   { restore: true, label: "restart" },
-])("group Ctrl-C preserves publisher until confirmed cleanup ($label)", async ({
+])("group Ctrl-C requests explicit owner cleanup ($label)", async ({
   restore,
 }) => {
   const root = await mkdtemp(join(tmpdir(), "native-group-stop-"));
   roots.push(root);
-  const publisher = join(root, "publisher.ts");
   const runtime = join(root, "runtime.ts");
   const binary = join(root, "runtime");
   const launcher = join(root, "launcher.ts");
   const receipt = join(root, "cleanup.json");
   await writeFile(
-    publisher,
-    `
-    process.on("SIGINT", () => process.exit(91));
-    process.on("SIGTERM", () => process.exit(92));
-    const deadline = setTimeout(() => process.exit(96), 12000);
-    const server = Bun.serve({ hostname:"127.0.0.1", port:0, fetch:() => new Response("ready") });
-    console.log(server.port);
-    if ((await Bun.stdin.text()) !== "stop") process.exit(93);
-    await server.stop(true);
-    clearTimeout(deadline);
-  `
-  );
-  await writeFile(
     runtime,
     `
     import { writeFile } from "node:fs/promises";
-    const publisher = Bun.spawn([process.execPath, ${JSON.stringify(publisher)}], {stdin:"pipe",stdout:"pipe",stderr:"inherit"});
     let stop;
     const stopped = new Promise(resolve => stop = resolve);
     const deadline = setTimeout(() => stop(), 10000);
     process.on("SIGTERM", () => stop());
     process.on("SIGINT", () => process.exit(94));
-    const reader = publisher.stdout.getReader();
-    const first = await reader.read();
-    const port = Number(new TextDecoder().decode(first.value).trim());
-    reader.releaseLock();
+    const server = Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>new Response("ready")});
+    const port = server.port;
     console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${"a".repeat(32)}"}));
     await stopped;
     clearTimeout(deadline);
-    publisher.stdin.write("stop");
-    publisher.stdin.end();
-    const exit = await publisher.exited;
-    await writeFile(${JSON.stringify(receipt)}, JSON.stringify({exit,port,action:process.argv.includes("serve-restore") ? "restart" : "up"}));
-    process.exit(exit === 0 ? 0 : 95);
+    await server.stop(true);
+    await writeFile(${JSON.stringify(receipt)}, JSON.stringify({exit:0,port,action:process.argv.includes("serve-restore") ? "restart" : "up"}));
   `
   );
   await writeFile(

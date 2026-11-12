@@ -97,6 +97,7 @@ pub struct HostRelayRuntime {
     job_targets: BTreeMap<String, Vec<crate::provider::relay_owner::Target>>,
     run: Option<String>,
     selected_run: Option<String>,
+    control_generation: String,
     startup_cancelled: Option<fn() -> bool>,
     /// Sticky: a dependency rebind wrote its journal and did not complete. Its
     /// effects are unconfirmed, so automatic refresh must never try again.
@@ -323,12 +324,76 @@ pub(in crate::provider::graph) fn control_root(
     boot: Option<&str>,
     run: Option<&str>,
 ) -> Result<PathBuf, CandidateError> {
+    control_root_generation(state_root, owner, boot, run, None)
+}
+
+/// Reconstruct only the directory bound by this exact receipt and boot.
+pub(in crate::provider::graph) fn receipt_control_root(
+    state_root: &Path,
+    receipt: &Receipt,
+    boot: &str,
+) -> Result<PathBuf, CandidateError> {
+    let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
+    control_root_generation(
+        state_root,
+        &receipt.owner,
+        Some(boot),
+        Some(&receipt.run),
+        startup.control_generation.as_deref(),
+    )
+}
+
+pub(in crate::provider::graph) fn process_control_generation(
+    process: &crate::provider::identity::ProcessIdentity,
+) -> Result<String, CandidateError> {
+    let digest = Sha256::digest(
+        serde_json::to_vec(&(
+            "hack-graph-owner-process-v1",
+            process.pid,
+            process.start_micros,
+            process.uid,
+        ))
+        .map_err(|_| refused())?,
+    );
+    Ok(format!("{digest:x}")[..32].to_owned())
+}
+
+pub(in crate::provider::graph) fn process_control_root(
+    state_root: &Path,
+    owner: &str,
+    boot: &str,
+    run: &str,
+    process: &crate::provider::identity::ProcessIdentity,
+) -> Result<PathBuf, CandidateError> {
+    control_root_generation(
+        state_root,
+        owner,
+        Some(boot),
+        Some(run),
+        Some(&process_control_generation(process)?),
+    )
+}
+
+fn control_root_generation(
+    state_root: &Path,
+    owner: &str,
+    boot: Option<&str>,
+    run: Option<&str>,
+    generation: Option<&str>,
+) -> Result<PathBuf, CandidateError> {
+    if generation.is_some_and(|value| !hex(value, 32)) {
+        return Err(refused());
+    }
     let identity = match run {
         Some(run) if hex(run, 32) => {
             json!(["hack-graph-owner-run-v1", state_root, owner, boot, run])
         }
         Some(_) => return Err(refused()),
         None => json!(["hack-graph-owner-v1", state_root, owner, boot]),
+    };
+    let identity = match generation {
+        Some(generation) => json!(["hack-graph-owner-lifetime-v1", identity, generation]),
+        None => identity,
     };
     let digest = format!(
         "{:x}",
@@ -478,11 +543,18 @@ impl HostRelayRuntime {
                 dependency,
             );
         }
-        let control_root = control_root(
+        // The native owner incarnation also lets pre-admission recovery locate
+        // its directory before a Startup receipt exists. A replacement process
+        // has a different birth time even when its PID was reused.
+        let control_generation = process_control_generation(&crate::provider::identity::observe(
+            std::process::id() as i32,
+        )?)?;
+        let control_root = control_root_generation(
             &candidate.state_root,
             &owner.token,
             owner.guest_boot_id.as_deref(),
             selected_run,
+            Some(&control_generation),
         )?;
         state::private_directory(&control_root)?;
         let mut dependency_reservation = if let Some(run) = selected_run {
@@ -551,6 +623,7 @@ impl HostRelayRuntime {
             job_targets: BTreeMap::new(),
             run: None,
             selected_run: selected_run.map(str::to_owned),
+            control_generation,
             startup_cancelled: None,
             rebind_unconfirmed: false,
             dependency_reservation,
@@ -870,6 +943,7 @@ impl Driver for HostRelayRuntime {
             control_only: self.dependencies.is_empty(),
             guest_root: None,
             control_root: self.endpoint().runtime_root().into(),
+            control_generation: Some(self.control_generation.clone()),
             artifact: self.artifact_hash.clone(),
             services,
         });
@@ -1294,6 +1368,7 @@ mod route_tests {
             },
         )]);
         let startup = Startup {
+            control_generation: None,
             control_only: false,
             guest_root: Some((1, 1)),
             control_root: PathBuf::from("/tmp/fixture-control"),
@@ -1595,6 +1670,77 @@ mod application_failure_tests {
 #[cfg(test)]
 mod owner_scope_tests {
     use super::*;
+    #[test]
+    fn restored_owner_stops_without_replaying_legacy_pending_coordinator() {
+        use crate::provider::relay_owner::lifecycle_intent::Coordinator;
+        let state = std::env::temp_dir().join(format!("owner-restore-{}", std::process::id()));
+        state::private_directory(&state).unwrap();
+        let run = "a".repeat(32);
+        let owner = "b".repeat(32);
+        let context = super::super::super::host_relay::context(&owner, "boot").unwrap();
+        let graph = super::super::super::host_relay::graph_scope(context, &run).unwrap();
+        let old_root = control_root(&state, &owner, Some("boot"), Some(&run)).unwrap();
+        state::private_directory(&old_root).unwrap();
+        let mut old_owner = ManagedOwner::start(context, &old_root, vec![]).unwrap();
+        let endpoint = old_owner.endpoint();
+        let mut pending =
+            Coordinator::begin_graph_enrolled(&endpoint, graph, [4; 32], None, |_| Ok(())).unwrap();
+        pending
+            .prepare_graph(&endpoint, Duration::from_secs(2))
+            .unwrap();
+        assert!(
+            pending
+                .execute::<()>([4; 32], || Err(CandidateError::new(
+                    "publisher_stop_uncertain",
+                    "legacy publisher exited before stop"
+                )))
+                .is_err()
+        );
+        drop(pending);
+        old_owner.shutdown().unwrap();
+        let bytes = fs::read(old_root.join("relay-lifecycle/state.json")).unwrap();
+        let process = crate::provider::identity::observe(std::process::id() as i32).unwrap();
+        let fresh_root = process_control_root(&state, &owner, "boot", &run, &process).unwrap();
+        assert_ne!(fresh_root, old_root);
+        let mut replacement = process.clone();
+        replacement.executable = "/fixture/renamed-runtime".into();
+        assert_eq!(
+            fresh_root,
+            process_control_root(&state, &owner, "boot", &run, &replacement).unwrap()
+        );
+        replacement.start_micros += 1;
+        assert_ne!(
+            fresh_root,
+            process_control_root(&state, &owner, "boot", &run, &replacement).unwrap()
+        );
+        state::private_directory(&fresh_root).unwrap();
+        let mut fresh = ManagedOwner::start(context, &fresh_root, vec![]).unwrap();
+        let endpoint = fresh.endpoint();
+        let mut stop =
+            Coordinator::begin_graph_enrolled(&endpoint, graph, [5; 32], None, |_| Ok(())).unwrap();
+        stop.prepare_graph(&endpoint, Duration::from_secs(2))
+            .unwrap();
+        let compute = state.join("compute-running");
+        fs::write(&compute, b"running").unwrap();
+        stop.execute([5; 32], || fs::remove_file(&compute).map_err(state::io))
+            .unwrap();
+        stop.confirm([5; 32], || {
+            assert!(!compute.exists());
+            Ok([6; 32])
+        })
+        .unwrap();
+        stop.acknowledge().unwrap();
+        drop(stop);
+        fresh.shutdown().unwrap();
+        assert_eq!(
+            fs::read(old_root.join("relay-lifecycle/state.json")).unwrap(),
+            bytes
+        );
+        fs::remove_dir_all(old_root).unwrap();
+        fs::remove_dir_all(fresh_root).unwrap();
+        fs::remove_dir_all(state).unwrap();
+    }
+
     #[test]
     fn scoped_identity_binds_run_owner_boot_and_candidate() {
         let state = Path::new("/candidate/.hack-local");

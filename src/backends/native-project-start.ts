@@ -1095,10 +1095,10 @@ function cleanupUnconfirmed(
 ): Error {
   const recorded =
     recordedRun !== undefined && RUN.test(recordedRun)
-      ? ` The failed run ${recordedRun} is recorded as this project's run mapping; hack ps, hack down and hack doctor --native-cleanup inspect select it.`
+      ? ` The failed run ${recordedRun} is recorded as this project's run mapping.`
       : "";
   return new ClosedCliError(
-    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
+    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
   );
 }
 /** Runtime process-wrapper refusals: service names and closed fields only. */
@@ -1747,7 +1747,7 @@ function reportStopped(opts: {
   readonly published: boolean;
   readonly final: unknown;
 }): void {
-  if (opts.signal.aborted && !opts.infrastructureFailure) {
+  if ((opts.signal.aborted || opts.published) && !opts.infrastructureFailure) {
     opts.progress(
       opts.published
         ? { phase: "stopped", summary: nativeStoppedNotice(opts.final) }

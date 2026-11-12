@@ -1712,12 +1712,18 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
     };
     // Recovery hints grant no authority. A malformed sidecar must not prevent
     // authenticated cleanup by a live owner, or poison read-only discovery.
-    let predecessor =
-        dead_owner_cleanup::recovery_hint(candidate, &root, &receipt, &owner, publication);
+    let hint = dead_owner_cleanup::recovery_hint(candidate, &root, &receipt, &owner, publication)
+        .and_then(|selected| {
+            let complete =
+                selected.is_some() && dead_owner_cleanup::current_completion(&root, &receipt)?;
+            Ok((selected, complete))
+        });
+    let (predecessor, predecessor_complete, predecessor_error) = match hint {
+        Ok((selected, complete)) => (selected, complete, None),
+        Err(error) => (None, false, Some(error.code)),
+    };
     // A stopped receipt can precede the intent's completion commit. Only that
     // exact commit lets a caller skip cleanup and resume partial retirement.
-    let predecessor_complete = predecessor.is_some()
-        && dead_owner_cleanup::current_completion(&root, &receipt).unwrap_or(false);
     Ok(json!({
         "version": 1,
         "run": receipt.run,
@@ -1728,6 +1734,7 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "live_owner_recovery": resumable,
         "dead_owner_recovery": predecessor,
         "dead_owner_recovery_complete": predecessor_complete,
+        "dead_owner_recovery_error": predecessor_error,
     }))
 }
 

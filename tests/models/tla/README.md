@@ -1380,10 +1380,14 @@ kernel exit proof; `Recover` pins the exact old owner/coordinator/inventories;
 `ReleaseBridge` maps to confirmed publisher/guest-helper retirement and registry
 release, before `CleanupGuest` removes compute. `Retire` archives the foreground
 publication only after compute absence is verified. A failed or stale proof preserves capacity and evidence.
-The positive configuration explores 48 states. The two guard-removal controls
+The positive configuration explores 92 states. The two guard-removal controls
 must violate `NoUnsafeCleanup` at `ReleaseBridge` and `NoInterruptRace` at
 `Interrupt`. The `NeverComplete` control must reach `Retire`, establishing that
-the positive guards permit completion. No fairness/eventual recovery is claimed.
+the positive guards permit completion. A fifth configuration removes the
+frontend lifetime watch and must violate `NoSilentOrphan` at `FrontendLost`.
+Watch delivery plus stop initiation, and publisher exit plus exact child reaping,
+are atomic assumptions; native event/reaping tests exercise these boundaries.
+No fairness/eventual recovery is claimed.
 Atomic journal steps, identity and exit observations are assumptions here; real
 process tests, legacy journal and opt-in published-port VM fixtures, source
 compilation and Apple Silicon VM qualification remain separate evidence. This
@@ -1409,3 +1413,11 @@ Ready/Pending state before any new recovery intent. No completion claim covers
 that abstract reselection. `startup::cleanup_guest(..., false)` checks startup
 artifacts/listener state without removing containers; bridge release then
 precedes `shutdown::stop_owned` and container DELETE in `cleanup_owned_fenced`.
+
+
+A new owner process for a retained run receives a distinct native-incarnation
+control generation in its startup receipt. Legacy receipts still select their
+original deterministic path. This avoids admitting a new owner into an old
+pending coordinator's directory; it does not acknowledge or roll over that
+coordinator. Directory derivation and a real coordinator start/stop regression
+cover this restored-owner boundary outside the finite publisher model.

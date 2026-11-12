@@ -1399,7 +1399,10 @@ SIGHUP follows the same stop transition as SIGINT/SIGTERM. `PublisherCrash`
 enters `publisher-down`: services stay up until an explicit stop or frontend
 loss, while the reaped publisher is reported down. Publication notice emission
 and exact reaping are abstracted together; stream framing and ps port projection
-are implementation-test obligations. Notice delivery can fail after frontend
+are implementation-test obligations. Notices begin only after readiness is
+flushed; startup reaping does not emit a notice or grant readiness. An early
+notice must not interrupt startup cleanup or hide its failure diagnostics.
+Notice delivery can fail after frontend
 loss without gating cleanup; a closed-stream implementation regression covers
 that boundary outside the model. Watch delivery plus stop initiation and
 publisher exit plus exact child reaping are atomic assumptions; native event/reaping tests exercise these boundaries.

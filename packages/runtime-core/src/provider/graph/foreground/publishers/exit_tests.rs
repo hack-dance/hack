@@ -23,15 +23,20 @@ impl Drop for ChildGuard {
 /// until an explicit stop. No Engine/VM or synthetic publisher stands in for it.
 #[test]
 fn exited_native_publisher_stays_observable_without_starting_guest_cleanup() {
-    exercise(false);
+    exercise(true, false);
 }
 
 #[test]
 fn closed_frontend_notice_stream_does_not_refuse_reaping_before_cleanup() {
-    exercise(true);
+    exercise(true, true);
 }
 
-fn exercise(broken_notice: bool) {
+#[test]
+fn startup_publisher_exit_is_reaped_without_a_notice_before_readiness() {
+    exercise(false, false);
+}
+
+fn exercise(announce: bool, broken_notice: bool) {
     let path = std::fs::canonicalize("/tmp")
         .unwrap()
         .join(format!("hpub-{}", graph::probes::token().unwrap()));
@@ -83,6 +88,7 @@ fn exercise(broken_notice: bool) {
     child.kill().unwrap();
     let mut publishers = Publishers {
         owner: "a".repeat(32),
+        announce: false,
         probe_generations: BTreeMap::new(),
         children: vec![Owned {
             child: guard.0.take().unwrap(),
@@ -94,6 +100,9 @@ fn exercise(broken_notice: bool) {
             exit_proof: None,
         }],
     };
+    if announce {
+        publishers.announce();
+    }
     let deadline = Instant::now() + Duration::from_secs(5);
     let (mut notice, reader) = std::os::unix::net::UnixStream::pair().unwrap();
     drop(reader);
@@ -104,16 +113,16 @@ fn exercise(broken_notice: bool) {
     let mut attempted = 0;
     {
         let mut reap = |publishers: &mut Publishers| {
-            if broken_notice {
-                publishers.reap_exited_with_notice(&candidate, |run, port| {
-                    attempted += 1;
+            publishers.reap_exited_with_notice(&candidate, |run, port| {
+                attempted += 1;
+                if broken_notice {
                     let error = exit_notice(&mut notice, run, port).unwrap_err();
                     assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
                     Err(error)
-                })
-            } else {
-                publishers.reap_exited(&candidate)
-            }
+                } else {
+                    Ok(())
+                }
+            })
         };
         while !reap(&mut publishers).unwrap() {
             assert!(Instant::now() < deadline);
@@ -121,7 +130,16 @@ fn exercise(broken_notice: bool) {
         }
         assert!(reap(&mut publishers).unwrap());
     }
-    assert_eq!(attempted, usize::from(broken_notice));
+    assert_eq!(attempted, usize::from(announce));
+    // Announcing later must not replay a publisher reaped during startup.
+    publishers.announce();
+    assert!(
+        publishers
+            .reap_exited_with_notice(&candidate, |_, _| {
+                panic!("an already reaped publisher must not announce again")
+            })
+            .unwrap()
+    );
     assert!(!publishers.observe_live(&candidate).unwrap());
     assert_eq!(
         publishers.port_status(),

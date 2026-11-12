@@ -41,6 +41,7 @@ pub(super) struct Publishers {
     children: Vec<Owned>,
     probe_generations: BTreeMap<String, String>,
     owner: String,
+    announce: bool,
 }
 
 fn command(
@@ -77,6 +78,11 @@ fn command(
 }
 
 impl Publishers {
+    /// Notices may follow only the successfully flushed foreground readiness frame.
+    pub(super) fn announce(&mut self) {
+        self.announce = true;
+    }
+
     pub(super) fn cleanup(
         &mut self,
         candidate: &Candidate,
@@ -328,7 +334,7 @@ impl Publishers {
                     &mut owned.child,
                     &mut owned.exit_proof,
                 )?;
-                if owned.exited.is_some() {
+                if self.announce && owned.exited.is_some() {
                     // A dead frontend can close stdout before its publisher is
                     // reaped. Presentation must not prevent retaining cleanup;
                     // identity and journal errors above still refuse normally.

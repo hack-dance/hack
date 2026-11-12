@@ -103,6 +103,8 @@ export async function serveNativeProjectGraph(
     readyLimit: 8192,
     strictReady: false,
     isolateOwner: true,
+    ignoreBeforeReady: (line) =>
+      nativePublisherExitNotice(line, opts.run) !== null,
     onEvent: (line) => {
       const notice = nativePublisherExitNotice(line, opts.run);
       if (notice) {
@@ -327,6 +329,7 @@ async function serveGraphProcess(
     /** Compose ownership is independent of readiness framing and optional hooks. */
     readonly isolateOwner?: boolean;
     readonly onEvent?: (line: string) => void;
+    readonly ignoreBeforeReady?: (line: string) => boolean;
     readonly onReady: (
       value: unknown,
       interrupted: () => boolean,
@@ -460,6 +463,7 @@ async function serveGraphProcess(
       readyLimit: opts.readyLimit,
       strictReady: opts.strictReady,
       onEvent: opts.onEvent,
+      ignoreBeforeReady: opts.ignoreBeforeReady,
       interrupted: () =>
         canceled ||
         timedOut ||
@@ -588,6 +592,7 @@ type GraphOutputOptions = {
   readonly readyLimit: number;
   readonly strictReady: boolean;
   readonly onEvent?: (line: string) => void;
+  readonly ignoreBeforeReady?: (line: string) => boolean;
   readonly interrupted: () => boolean;
   readonly onReady: (
     value: unknown,
@@ -627,11 +632,27 @@ async function consumeGraphOutput(opts: GraphOutputOptions): Promise<boolean> {
   return frames.ready();
 }
 
-/** Readiness and later bounded notices may share a chunk or span several chunks. */
+/** Early notices grant no readiness; later notices may share or span chunks. */
 function graphOutputFrames(opts: GraphOutputOptions) {
   let ready = false;
   let line = "";
   const decoder = new TextDecoder("utf-8", { fatal: true });
+  async function acceptFrame(frame: string): Promise<void> {
+    if (
+      (ready || opts.strictReady) &&
+      Buffer.byteLength(frame) > opts.readyLimit
+    ) {
+      throw new ClosedCliError(
+        "Native graph control response exceeded its budget."
+      );
+    }
+    if (ready) {
+      opts.onEvent?.(frame);
+    } else if (!ignoreStartupNotice(opts, frame)) {
+      await acceptGraphReady({ ...opts, line: frame });
+      ready = true;
+    }
+  }
   return {
     ready: () => ready,
     push: async (chunk: Uint8Array) => {
@@ -642,20 +663,7 @@ function graphOutputFrames(opts: GraphOutputOptions) {
       let end = line.indexOf("\n");
       while (end >= 0) {
         const frame = line.slice(0, end);
-        if (
-          (ready || opts.strictReady) &&
-          Buffer.byteLength(frame) > opts.readyLimit
-        ) {
-          throw new ClosedCliError(
-            "Native graph control response exceeded its budget."
-          );
-        }
-        if (ready) {
-          opts.onEvent?.(frame);
-        } else {
-          await acceptGraphReady({ ...opts, line: frame });
-          ready = true;
-        }
+        await acceptFrame(frame);
         if (!opts.onEvent) {
           line = "";
           return;
@@ -670,6 +678,13 @@ function graphOutputFrames(opts: GraphOutputOptions) {
       }
     },
   };
+}
+
+function ignoreStartupNotice(opts: GraphOutputOptions, frame: string): boolean {
+  return (
+    Buffer.byteLength(frame) <= opts.readyLimit &&
+    opts.ignoreBeforeReady?.(frame) === true
+  );
 }
 
 function readyFrameSize(line: string, strict: boolean): number {

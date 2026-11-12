@@ -330,6 +330,7 @@ fn serve_input<'a>(
             .and_then(|_| stdout.flush())
             .map_err(|_| refused())?;
         drop(stdout);
+        publishers.announce();
         let mut queued = None;
         let supervise_restarts = receipt.resources.values().any(|r| {
             r.restart_policy.is_some() && (r.routing.is_some() || !r.loopback_ports.is_empty())

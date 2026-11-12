@@ -2988,3 +2988,26 @@ linuxTest(
     ).toBeNull();
   }
 );
+
+linuxTest(
+  "install checks what holds the config home before creating anything",
+  async () => {
+    // Codex security review: between mkdir and chmod another account could
+    // swap the new directory for a link when its parent is writable by them.
+    const shared = join(root, "shared-config-parent");
+    await mkdir(shared);
+    await chmod(shared, 0o777);
+    const configHome = join(shared, "config");
+    const fake = fakeSystemd();
+    const result = await ensureOwnerWritableOnlyDirectories({
+      dirs: [configHome, join(configHome, "systemd")],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain(shared);
+    }
+    // Nothing was created.
+    expect(await Bun.file(join(configHome, "systemd")).exists()).toBe(false);
+    expect(fake.calls).toEqual([]);
+  }
+);

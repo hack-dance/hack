@@ -1088,6 +1088,17 @@ export async function ensureOwnerWritableOnlyDirectories(opts: {
   { readonly ok: true } | { readonly ok: false; readonly error: string }
 > {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
+  // Before creating or chmod-ing anything: what holds the first directory
+  // must not be writable by others, or they could swap a just-created
+  // directory for a link between mkdir and chmod (the chmod would follow
+  // it). Nothing is repaired here.
+  const first = opts.dirs[0];
+  if (first !== undefined) {
+    const parent = checkParentNotReplaceable({ dir: first, uid });
+    if (parent !== null) {
+      return { ok: false, error: parent };
+    }
+  }
   for (const dir of opts.dirs) {
     const created = await createDirectoryExactly(dir);
     const error =
@@ -1099,10 +1110,38 @@ export async function ensureOwnerWritableOnlyDirectories(opts: {
   return { ok: true };
 }
 
+/**
+ * The chain to `dir`'s parent (or, when it is missing, its deepest
+ * existing directory) must not be replaceable, and that directory must not
+ * let others create entries. Null, or the refusal.
+ */
+function checkParentNotReplaceable(opts: {
+  readonly dir: string;
+  readonly uid: number;
+}): string | null {
+  const walk = walkReplaceableChain({
+    path: dirname(resolve(opts.dir)),
+    uid: opts.uid,
+    hackHome: null,
+    allowMissing: true,
+  });
+  if ("error" in walk) {
+    return `${opts.dir} is not safe to create in: ${walk.error}`;
+  }
+  const creatable = lettingOthersCreate(walk.existing);
+  return creatable === null
+    ? null
+    : `${walk.existing} is writable by other users (${creatable}), so ${opts.dir} cannot be created safely; run: chmod go-w ${walk.existing}`;
+}
+
 /** mkdir at `0755` whatever the umask; an existing directory is kept. */
 async function createDirectoryExactly(dir: string): Promise<string | null> {
   try {
     await mkdir(dir, { mode: 0o755 });
+    // Never chmod through a link: confirm what was created first.
+    if (!lstatSync(dir).isDirectory()) {
+      return `${dir} changed while it was created`;
+    }
     // mkdir applies the umask, which can only remove bits; set it exactly.
     await chmod(dir, 0o755);
     return null;

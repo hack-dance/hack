@@ -103,3 +103,5 @@ export const GLOBAL_BRANCHES_SCHEMA_FILENAME =
 
 /** Compose project name of Hack's global proxy stack (`~/.hack/caddy`). */
 export const GLOBAL_CADDY_PROJECT_NAME = "hack-dev-proxy";
+
+// Temporary source-only CI selection verification.

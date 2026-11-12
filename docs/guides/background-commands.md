@@ -201,7 +201,9 @@ process exits by itself just as a cancel arrives, the group was never stopped;
 the final record then also says `descendants: "not_confirmed"`. With no live
 supervisor, `cancel` runs the same sequence itself; it reports descendants
 `stopped` only when it read the group's members while the command's own
-process still verified, and `"not_confirmed"` otherwise. A command that already
+process still verified, and `"not_confirmed"` otherwise. Either way
+`stopped` covers the members seen up to the last check: a descendant started
+after it, just as the command's own process exits, is not seen. A command that already
 exited 0 stays `succeeded` even if a cancel raced its end. The result says what
 was confirmed: `supervisorSignalled`, `childGroupSignalled`, `childExited`, and
 `containerProcess`: `"stopped"` when what ran in the container is confirmed

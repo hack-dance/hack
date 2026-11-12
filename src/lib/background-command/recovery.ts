@@ -21,7 +21,7 @@ import {
   readEvents,
   readOwner,
   reconcileTail,
-  type WriteAt,
+  type TailIo,
 } from "./journal.ts";
 import { pumpStream } from "./output-pump.ts";
 import {
@@ -161,7 +161,9 @@ const JOURNAL_LOCK_WAIT_MS = 10_000;
  * recoveries cannot spend it twice. Without libc the file-based registry
  * lock is used instead (every process on the host makes the same choice). It
  * publishes an owner receipt, so it uses its own path: the empty `lock` file
- * acceptance created would read as an unreclaimable foreign owner.
+ * acceptance created would read as an unreclaimable foreign owner. Writing
+ * that receipt needs space, so in this fallback a full disk or quota can
+ * block recovery until space is freed; only flock locking needs none.
  */
 export async function withJournalLock<T>(
   paths: JournalPaths,
@@ -232,7 +234,7 @@ export async function recoverLostOwner(opts: {
   readonly signalGroup?: (pgid: number, signal: NodeJS.Signals) => boolean;
   /** Test seams: journal append, tail repair write and lock. */
   readonly append?: AppendLine;
-  readonly writeAt?: WriteAt;
+  readonly tailIo?: Partial<TailIo>;
   readonly lock?: typeof withJournalLock;
   /**
    * Stop a verified orphan that ran past its timeout. Only the start path
@@ -262,7 +264,7 @@ async function recoverLocked(
   if (assessment.kind !== "owner_lost") {
     return observed;
   }
-  const events = await reconcileTail(opts.paths, opts.writeAt);
+  const events = await reconcileTail(opts.paths, opts.tailIo);
   if (endedEvent(events)) {
     return events;
   }

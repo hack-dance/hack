@@ -503,15 +503,22 @@ export const appendLine: AppendLine = async (path, line) => {
   }
 };
 
-/** Seam for tests: a positioned write; returns the bytes written. */
-export type WriteAt = (
-  handle: FileHandle,
-  bytes: Buffer,
-  position: number
-) => Promise<number>;
+/** Seams for tests: the tail repair's positioned write and its fsync. */
+export type TailIo = {
+  /** A positioned write; returns the bytes written. */
+  readonly writeAt: (
+    handle: FileHandle,
+    bytes: Buffer,
+    position: number
+  ) => Promise<number>;
+  readonly sync: (handle: FileHandle) => Promise<void>;
+};
 
-const writeAtPosition: WriteAt = async (handle, bytes, position) =>
-  (await handle.write(bytes, 0, bytes.length, position)).bytesWritten;
+const defaultTailIo: TailIo = {
+  writeAt: async (handle, bytes, position) =>
+    (await handle.write(bytes, 0, bytes.length, position)).bytesWritten,
+  sync: async (handle) => await handle.sync(),
+};
 
 /**
  * Make the journal's tail whole before a writer other than the live
@@ -527,8 +534,9 @@ const writeAtPosition: WriteAt = async (handle, bytes, position) =>
  */
 export async function reconcileTail(
   paths: JournalPaths,
-  writeAt: WriteAt = writeAtPosition
+  seams: Partial<TailIo> = {}
 ): Promise<EventEnvelope[]> {
+  const io: TailIo = { ...defaultTailIo, ...seams };
   const handle = await open(
     paths.events,
     constants.O_RDWR | constants.O_NOFOLLOW
@@ -556,57 +564,78 @@ export async function reconcileTail(
     if (
       next &&
       next.seq === (committed.at(-1)?.seq ?? 0) + 1 &&
-      (await commitNewline({ handle, paths, at: bytes.length, next, writeAt }))
+      (await commitNewline({ handle, paths, at: bytes.length, next, io })) &&
+      // Some filesystems report a full disk only at fsync: then the record
+      // is not known to be durable and is cut like any other.
+      (await syncUnlessNoSpace(handle, io))
     ) {
-      await handle.sync();
       return [...committed, next];
     }
-    // Not the next record, or no space to commit one that is not final:
-    // cutting it allocates nothing, and readers never counted it.
+    // Not the next record, or no space to commit it: cutting it allocates
+    // nothing, and readers never counted it. Its fsync is best effort on a
+    // full disk, since nothing new needs to persist.
     await handle.truncate(committedLength);
-    await handle.sync();
+    await syncUnlessNoSpace(handle, io);
     return committed;
   } finally {
     await handle.close();
   }
 }
 
+/** fsync; false on a full disk or quota, other errors propagate. */
+async function syncUnlessNoSpace(
+  handle: FileHandle,
+  io: TailIo
+): Promise<boolean> {
+  try {
+    await io.sync(handle);
+    return true;
+  } catch (error: unknown) {
+    if (!isNoSpace(error)) {
+      throw error;
+    }
+    return false;
+  }
+}
+
 /**
  * Write the newline that commits a complete tail envelope. On a full disk or
  * quota the newline can need a new block: a final record is committed from
- * the reserve (the reserve exists for it), any other record is reported as
- * not committed so the caller cuts it, which needs no space. Returns whether
- * the newline was written.
+ * the reserve (the reserve exists for it). Any other record, or a final
+ * record whose reserve is already spent, is reported as not committed so the
+ * caller cuts it, which needs no space. Returns whether the newline was
+ * written.
  */
 async function commitNewline(opts: {
   readonly handle: FileHandle;
   readonly paths: JournalPaths;
   readonly at: number;
   readonly next: EventEnvelope;
-  readonly writeAt: WriteAt;
+  readonly io: TailIo;
 }): Promise<boolean> {
-  const write = async (): Promise<void> => {
-    const written = await opts.writeAt(opts.handle, Buffer.from("\n"), opts.at);
-    if (written !== 1) {
-      throw Object.assign(new Error("Short write to the command journal."), {
-        code: "ENOSPC",
-      });
+  const write = async (): Promise<boolean> => {
+    try {
+      const written = await opts.io.writeAt(
+        opts.handle,
+        Buffer.from("\n"),
+        opts.at
+      );
+      return written === 1;
+    } catch (error: unknown) {
+      if (!isNoSpace(error)) {
+        throw error;
+      }
+      return false;
     }
   };
-  try {
-    await write();
+  if (await write()) {
     return true;
-  } catch (error: unknown) {
-    if (!isNoSpace(error)) {
-      throw error;
-    }
   }
   if (opts.next.type !== "command.ended") {
     return false;
   }
   await unlink(opts.paths.reserve).catch(() => undefined);
-  await write();
-  return true;
+  return await write();
 }
 
 function parseEnvelope(text: string): EventEnvelope | null {

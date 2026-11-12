@@ -34,6 +34,7 @@ import {
   parseEventLines,
   readEvents,
   readMeta,
+  reconcileTail,
 } from "../src/lib/background-command/journal.ts";
 import { requestIdentity } from "../src/lib/background-command/launch.ts";
 import {
@@ -1309,7 +1310,7 @@ describe("second-review blockers", () => {
         observe: fakeObserve(),
         readBootTime: noReboot,
         append: fullDiskAppend(paths),
-        writeAt: fullDiskWriteAt(paths),
+        tailIo: { writeAt: fullDiskWriteAt(paths) },
       });
     const events = await recover();
     expect(events.map((event) => event.seq)).toEqual([1, 2]);
@@ -1339,12 +1340,69 @@ describe("second-review blockers", () => {
       observe: fakeObserve(),
       readBootTime: noReboot,
       append: fullDiskAppend(paths),
-      writeAt: fullDiskWriteAt(paths),
+      tailIo: { writeAt: fullDiskWriteAt(paths) },
     });
     expect(events.map((event) => event.seq)).toEqual([1, 2]);
     expect(events.at(-1)?.payload.outcome).toBe("succeeded");
     expect((await readFile(paths.events, "utf8")).endsWith("\n")).toBe(true);
     expect(await lstat(paths.reserve).catch(() => null)).toBeNull();
+  });
+
+  test("a tail repair never throws on a full disk: a spent reserve or a failing fsync cuts the record", async () => {
+    const noSpace = () =>
+      Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    // The reserve was already spent by a writer that died mid-retry.
+    const spent = await acceptCommand({ input: input(), root });
+    await rm(spent.paths.reserve);
+    const ended = buildEnvelope({
+      meta: spent.meta,
+      seq: 2,
+      type: "command.ended",
+      payload: { outcome: "succeeded", exitCode: 0 },
+    });
+    await writeFile(spent.paths.events, JSON.stringify(ended), { flag: "a" });
+    const cut = await reconcileTail(spent.paths, {
+      writeAt: async () => {
+        throw noSpace();
+      },
+    });
+    expect(cut.map((event) => event.seq)).toEqual([1]);
+    expect((await readFile(spent.paths.events, "utf8")).endsWith("\n")).toBe(
+      true
+    );
+    // The cut freed the bytes: recovery records its own end, once.
+    await writeFile(spent.paths.owner, JSON.stringify(deadOwner), {
+      mode: 0o600,
+    });
+    const recovered = await recoverLostOwner({
+      paths: spent.paths,
+      meta: spent.meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+    });
+    expect(recovered.map((event) => event.type)).toEqual([
+      "command.accepted",
+      "command.ended",
+    ]);
+    // fsync reports the full disk after the newline was written.
+    const late = await acceptCommand({ input: input(), root });
+    const started = buildEnvelope({
+      meta: late.meta,
+      seq: 2,
+      type: "command.started",
+      payload: { pid: 1 },
+    });
+    await writeFile(late.paths.events, JSON.stringify(started), { flag: "a" });
+    let syncs = 0;
+    const synced = await reconcileTail(late.paths, {
+      sync: async () => {
+        syncs += 1;
+        throw noSpace();
+      },
+    });
+    expect(synced.map((event) => event.seq)).toEqual([1]);
+    expect(syncs).toBe(2);
+    expect(await readEvents(late.paths)).toHaveLength(1);
   });
 
   test("the file-based fallback lock takes a newly created journal's lock and excludes", async () => {

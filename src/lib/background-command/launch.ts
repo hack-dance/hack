@@ -5,7 +5,7 @@ import { emitCliResult, HackCliError, okResult } from "../cli-result.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { assertComposeSpawnEnvFits } from "../spawn-env-limit.ts";
 import { appendCommandAudit, auditEnd } from "./audit.ts";
-import { resolveDockerTarget } from "./container-stop.ts";
+import { dockerEnvFor, resolveDockerTarget } from "./container-stop.ts";
 import {
   boundedRecordText,
   type CaptureMode,
@@ -210,16 +210,22 @@ export async function startBackgroundCommand(
   if (settings.capture === "full") {
     assertRedactionValuesBounded(opts.redactValues);
   }
-  // Refuse before anything is persisted when the supervisor could not start.
-  assertComposeSpawnEnvFits({ env: opts.child.env, baseEnv: {} });
   const caller = await resolveCaller();
   // Refused before anything is accepted if a reader could not load it.
-  // Cleanup must reach the engine the client started with: resolved now
-  // (files only), not from the supervisor's directory or a later default.
+  // The client and cleanup must reach the same engine: resolved now (files
+  // only), not from the supervisor's directory or a later default.
   const docker =
     !native && (opts.child.container || opts.child.guest)
       ? await resolveDockerTarget({ env: opts.child.env, cwd: opts.child.cwd })
       : null;
+  // Refuse before anything is persisted when the supervisor could not start
+  // the client with its pinned environment.
+  assertComposeSpawnEnvFits({
+    env: docker
+      ? dockerEnvFor({ env: opts.child.env, target: docker })
+      : opts.child.env,
+    baseEnv: {},
+  });
   const launchText = boundedRecordText({
     argv: opts.child.argv,
     cwd: opts.child.cwd,

@@ -10,7 +10,7 @@ const ISO_TIMESTAMP_PREFIX_REGEX =
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type LogJsonEntry = {
-  readonly source: "compose" | "loki";
+  readonly source: "compose" | "loki" | "native";
   readonly message: string;
   readonly raw: string;
   readonly stream?: "stdout" | "stderr";

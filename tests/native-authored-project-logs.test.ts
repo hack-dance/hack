@@ -312,8 +312,6 @@ test.each([
   });
 });
 const unsupported: readonly Partial<NativeComposeCommandOptions>[] = [
-  { follow: true },
-  { follow: undefined },
   { service: undefined },
   { service: "../web" },
   { tail: 0 },
@@ -646,7 +644,7 @@ macTest.each([
       });
       if (!allowed) {
         expect(result.exitCode).toBe(1);
-        expect(result.combined).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+        expect(result.combined).toContain("E_USAGE");
         expect(await Bun.file(attempts).exists()).toBe(false);
         return;
       }

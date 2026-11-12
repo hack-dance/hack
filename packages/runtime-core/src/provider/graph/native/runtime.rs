@@ -443,7 +443,11 @@ fn storage_attempt_preflight(
     Ok(())
 }
 
-fn ownership(receipt: &Receipt, resource: &Resource, value: &Value) -> Result<(), CandidateError> {
+pub(super) fn ownership(
+    receipt: &Receipt,
+    resource: &Resource,
+    value: &Value,
+) -> Result<(), CandidateError> {
     let expected = labels(&receipt.owner, &receipt.review, resource);
     let id = value["Id"]
         .as_str()

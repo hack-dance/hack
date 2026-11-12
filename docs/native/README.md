@@ -57,7 +57,6 @@ What you get today:
 
 What you give up today:
 
-- Following logs live.
 - Interactive shells in a container.
 - UDP ports.
 - Automatic restart for services that publish a port.

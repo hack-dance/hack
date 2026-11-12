@@ -1,4 +1,5 @@
 mod graph_cli;
+mod log_follow_cli;
 mod normalized_cli;
 mod prepared_base_cli;
 mod runtime_up_cli;
@@ -48,6 +49,7 @@ Usage:
   hack-local graph resolve-cache-quarantine --run-id <32-hex> --volume <logical-volume> --path <declared-relative-directory> --expect-selection <64-hex> [--json]
   hack-local graph recover-source-device-rebind --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
   hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
+  hack-local graph logs-follow --run-id <32-hex> --service <name> --expect-owner <32-hex> --expect-plan <64-hex> --expect-namespace <64-hex> [--native] [--tail <1..1000>] [--since <unix-seconds>] (frontend lifetime pipe on stdin)
   hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]
   hack-local graph dependency-check --host-pid <pid> --host-port <port> [--json]
@@ -359,6 +361,9 @@ fn run() -> Result<(), CandidateError> {
         }
         ["__job_fixture", fixture] => {
             hack_runtime_core::node::fixture(fixture)?;
+        }
+        ["graph", "logs-follow", arguments @ ..] => {
+            log_follow_cli::command(&discover_candidate(&requested)?, arguments)?;
         }
         ["graph", arguments @ ..] => {
             let candidate = discover_candidate(&requested)?;

@@ -4,7 +4,7 @@ An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
 current command slice supports whole-project foreground or detached `up` and foreground `restart`,
 owner-mediated `down` and explicit stored-generation `down --recover`, saved-run
-`ps`, finite service `logs --no-follow`, noninteractive service `exec` and one-off
+`ps`, live service `logs --follow`, finite `logs --no-follow`, noninteractive service `exec` and one-off
 service `run` on macOS with an absolute `HACK_NATIVE_BINARY` and private canonical
 `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
@@ -74,7 +74,7 @@ provider contact. A refusal names no option value, path or project detail.
 | `down` | Whole-project owner-mediated stop of a ready generation through its live foreground owner or private no-host endpoint | `--json`, `--detach`, `--profile` and `--env` overrides, service subsets including an empty selection, single-service, command, workdir, follow, tail and format options |
 | `down --recover` | Explicit retirement of a complete stored generation whose owners are dead, or of a pending startup intent that never reserved runtime state; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
 | `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
-| `logs` | `logs SERVICE --no-follow` with `--tail` from 1 through 1000 (default 200), plain or `--json` | Follow mode (the default), omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, time and query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options |
+| `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 1 through 1000 (default 200), plain or `--json`; `--since` with follow | Omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, `--until`, query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options; TTY-configured services in follow mode |
 | `exec` | `exec SERVICE -- COMMAND ARG...` with closed stdin, no TTY and an optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, interactive or TTY input, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
 | `run` | `run SERVICE -- COMMAND ARG...` through a ready foreground owner, closed stdin, no TTY, optional absolute `--workdir`; member must have no mounts | The `exec` option refusals above; source, persistent-data or private-env mounts refuse before the one-off effect |
 | `restart` | Whole-project proven stop followed by fresh foreground `up`; `--branch`, `--profile` and `--env` select the fresh generation | Service subsets, `--json`, `--detach`, `--target`, recovery and other unsupported foreground options; missing or unproven stop prevents startup |
@@ -139,7 +139,7 @@ processes, down hooks and existing stop/recovery protocols; the launcher does no
 become a resource owner. Launcher loss before IPC acceptance requests ordinary
 stop; loss afterwards leaves the owner running. Detached mode closes stdin and
 suppresses hook output to avoid retaining private values. Service logs remain
-available through the supported `logs SERVICE --no-follow` form.
+available through `logs SERVICE --follow` or `logs SERVICE --no-follow`.
 `restart --detach` remains unsupported. See the
 [native candidate guide](../guides/native-candidate.md) for ownership and recovery limits.
 
@@ -334,12 +334,58 @@ stop request. Portable stand-in controls cover the stop-then-start ordering,
 failed-stop retention and cancellation between the halves; installed live restart
 acceptance remains a separate host-serialized gate.
 
+## Followed service logs
+
+![Native log reader and lifecycle ownership](../native/log-follow.svg)
+
+`hack logs SERVICE --follow` reads the saved service's existing container through
+the native Engine socket. Follow is the default. `--tail` selects 1 through 1000
+initial lines (default 200); `--since` accepts a timestamp or duration such as
+`10m`. The default tail still limits that time window to the latest 200 lines;
+use `--tail` to select another supported bound. `--json` uses the same
+`start`, `log` and `end` event envelope as Compose, with `backend: "native"`.
+The optional `project` field is present only when `--project` was supplied;
+saved-run observation does not reload project configuration to derive a name.
+Each log event's `entry` contains `source: "native"`, `service`, `stream`,
+`message`, `raw`, and the Engine timestamp. Plain output uses
+`SERVICE | text` and preserves stdout/stderr. One service is required. Unsupported
+flags are refused by name, and TTY-configured services report
+`native_log_tty_unsupported`.
+
+Following starts only after the saved service is ready. A pending startup or
+journal refuses with `native_log_selection_changed`; it does not wait for startup.
+
+Following holds no provider mutation lease and does not use the foreground
+owner's serial control loop. It cannot reserve the lifecycle lock against `up`,
+`down` or `restart`. The selected container ID and start generation stay pinned;
+the follower never switches to a replacement container. Ctrl-C stops only the
+reader and exits 130. A confirmed service stop or removal ends the read with 0;
+unexplained transport loss reports `native_log_stream_uncertain`, while changed
+ownership or generation refuses explicitly. No stream result grants cleanup
+authority.
+
+A container restart also ends the follower. If the new start generation is
+already visible at the final observation, the result is
+`native_log_container_restarted`; if the stop is still visible, it is a clean
+stop. Start another follower for the restarted service. A local output pipe
+closing, such as `hack logs SERVICE | head -1`, stops the reader quietly with 0.
+
+The runtime emits at most 4 KiB per envelope and waits for the frontend to consume
+output. The frontend retains at most 64 Ki characters per unfinished line per
+descriptor; any longer line ends the whole follow with `native_log_line_limit`.
+No partial line is presented as a complete application log entry. Neither side accumulates
+the stream's history. A lifetime pipe ends even an idle reader when its frontend
+dies. A slow output consumer may finish draining after the reader exits; the
+pipe-exit timeout bounds stalled child-pipe reads, not consumer writes.
+Linux fake-runtime and process tests cover framing and cancellation;
+actual Engine EOF and provider behavior require Apple Silicon acceptance.
+
 ## Finite service logs
 
 An already running authored foreground owner supports `logs SERVICE --no-follow`
 on macOS. `--tail` defaults to 200 and accepts integers from 1 through 1000;
 `--json` returns separate stdout/stderr strings and a truncation flag. Plain output
-preserves those two streams. Follow mode, pretty formatting, time/query filters,
+preserves those two streams. Pretty formatting and time/query filters,
 profiles, environment overrides and multiple service selections refuse before any
 input or runtime operation. This is a finite log-read capability, not full logs parity.
 

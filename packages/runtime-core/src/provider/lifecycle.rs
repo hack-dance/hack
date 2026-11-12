@@ -323,6 +323,12 @@ pub(super) struct ObservedGuest<'a> {
 }
 
 impl<'a> ObservedGuest<'a> {
+    #[cfg(target_os = "macos")]
+    pub(super) fn boot_id(&self) -> Result<&str, CandidateError> {
+        self.owner.guest_boot_id.as_deref().ok_or_else(|| {
+            CandidateError::new("runtime_changed", "Observed guest boot is unavailable.")
+        })
+    }
     pub(super) fn connect(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         reject_aliased_state(&root(candidate))?;
         if !root(candidate)

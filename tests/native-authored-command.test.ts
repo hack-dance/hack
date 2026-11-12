@@ -693,7 +693,7 @@ if (process.platform !== "darwin") {
         env: { HACK_RUNTIME_BACKEND: "native" },
       })
     ).rejects.toThrow(
-      "requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS"
+      "requires whole-project foreground up or restart, owner-mediated down, ps, single-service logs, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS"
     );
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   });

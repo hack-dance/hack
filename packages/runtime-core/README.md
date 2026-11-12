@@ -316,8 +316,17 @@ missing ready files, expired timeouts and dead processes do not grant cleanup or
 replay. The strict Compose v1 reader and its artifact path remain unchanged.
 The macOS Bun frontend selects these owners through explicit native backend
 foreground `up`, owner-mediated `down` and `down --recover`, saved-run `ps`,
-finite `logs --no-follow` and noninteractive `exec`; installed live provider
+single-service `logs --follow`, finite `logs --no-follow` and noninteractive `exec`; installed live provider
 acceptance remains the gate.
+
+Live logs use a separate `graph logs-follow` reader over the existing Engine relay.
+It pins the admitted container and start generation through `ObservedGuest`, without
+a mutation lease or the serial foreground control loop. A stdin lifetime pipe ends
+the reader on frontend death. Bounded HTTP/multiplex decoding and output writes
+apply backpressure; stopped/absent selection ends normally, while unexplained EOF
+or a changed generation reports a named refusal. These reads grant no cleanup
+authority. See [the command contract](../../docs/reference/native-authored-commands.md)
+for flags, output limits and remaining live Mac acceptance.
 
 Held startup admission can also publish the exact public source envelope in that
 excluded storage. It captures profiles, overlay and closed names-only metadata
@@ -372,7 +381,7 @@ source files, arguments, stdout or journal records.
 
 The Bun project frontend selects this consumer only through the explicit native
 backend macOS slices: foreground `up`, owner-mediated `down` and `down --recover`,
-saved-run `ps`, finite `logs --no-follow` and noninteractive `exec`; `run`,
+saved-run `ps`, single-service `logs --follow`, finite `logs --no-follow` and noninteractive `exec`; `run`,
 `restart`, detached startup and service subsets still refuse. Installed live
 provider acceptance of those slices remains the gate, and full network acceptance
 and the source/storage/routing/host contracts remain separate qualification gates.

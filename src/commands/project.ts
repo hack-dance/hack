@@ -44,6 +44,7 @@ import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
 import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
+import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
   nativeDownEnvironment,
@@ -55,6 +56,7 @@ import {
 } from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import {
+  followNativeProjectLogs,
   nativeProjectLogs,
   nativeProjectPs,
   requireComposeOperationAvailable,
@@ -9824,22 +9826,23 @@ async function handleNativeLogs({
   const json = args.options.json === true;
   const service = args.positionals.service;
   const tail = args.options.tail ?? 200;
+  assertNativeLogFlags(args.options);
   const follow = !args.options.noFollow;
-  if (
-    [
-      args.options.profile,
-      args.options.compose,
-      args.options.loki,
-      args.options.services,
-      args.options.query,
-      args.options.since,
-      args.options.until,
-      args.options.pretty,
-    ].some(Boolean)
-  ) {
-    throw new CliUsageError(
-      "Native logs support only a service, --no-follow, --tail and --json."
-    );
+  if (follow) {
+    return await followNativeProjectLogs({
+      runtime: native,
+      scope: {
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        nativeHome: native.home,
+        branch,
+      },
+      service,
+      tail,
+      since: args.options.since,
+      json,
+      project: args.options.project,
+    });
   }
   const result = await nativeProjectLogs({
     runtime: native,
@@ -9879,7 +9882,6 @@ function logsHaveUnsupportedNativeOptions(
         options.pretty ||
         options.query !== undefined ||
         options.services !== undefined ||
-        options.since !== undefined ||
         options.until !== undefined ||
         (options.follow && options.noFollow)
     );
@@ -9900,6 +9902,9 @@ async function handleLogs({
   readonly ctx: CliContext;
   readonly args: LogsArgs;
 }): Promise<number> {
+  if (process.env.HACK_RUNTIME_BACKEND === "native") {
+    assertNativeLogFlags(args.options);
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -9914,6 +9919,7 @@ async function handleLogs({
     json: args.options.json,
     follow: !args.options.noFollow,
     tail: args.options.tail,
+    since: args.options.since,
     logFormat: resolveLogFormat({
       json: args.options.json,
       pretty: args.options.pretty,

@@ -11,6 +11,7 @@ mod private_child;
 #[cfg(all(test, target_os = "macos"))]
 mod provider_repair_tests;
 mod relay_process;
+mod running_start;
 mod short_home;
 use super::{
     admission, agent, artifact, identity, process,
@@ -1209,6 +1210,13 @@ fn start_pool(
     }
     let requested = bridge_request.initial();
     let dependencies = dependency_request.initial();
+    let request = running_start::StartRequest {
+        bridges: bridge_request,
+        network: network.as_ref(),
+        dependencies: dependency_request,
+        project_share: project_share.as_ref(),
+        amd64_emulation: start.amd64_emulation,
+    };
     super::network_update::require_complete(candidate)?;
     super::share_update::require_complete(candidate)?;
     if let Some(share) = &project_share {
@@ -1232,11 +1240,7 @@ fn start_pool(
             .map_err(io)?
         {
             let owner = Owner::load(candidate)?;
-            check_amd64_emulation_request(&owner, start.amd64_emulation)?;
-            super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
-            bridge_request.check(owner.application_bridge)?;
-            super::network_intent::check_request(&owner.network, network.as_ref())?;
-            dependency_request.check(owner.dependency_sockets)?;
+            request.check(&owner)?;
             (
                 owner.application_bridge,
                 owner.network.clone(),
@@ -1247,7 +1251,7 @@ fn start_pool(
         } else {
             (
                 requested,
-                network.unwrap_or_default(),
+                network.clone().unwrap_or_default(),
                 dependencies,
                 project_share.clone(),
                 Vec::new(),
@@ -1271,6 +1275,17 @@ fn start_pool(
             "profile_conflict",
             "Existing capacity belongs to another profile. No resize, replacement or adoption was attempted.",
         ));
+    }
+    // A pool that is already running and owned by this home allocates nothing, so it takes
+    // the named fast path instead of the admission windows below (`running_start`).
+    if let Some(running) = running_start::select(candidate, profile)? {
+        return running_start::resume(candidate, running, &request, || {
+            #[cfg(target_os = "macos")]
+            if let Some(guard) = &retained_guard {
+                guard.verify(candidate)?;
+            }
+            Ok(())
+        });
     }
     // Admission before aliases, provider commands, disks or VM effects. Only
     // independently verified ownership of existing disks (a live pool, or an exactly
@@ -1296,8 +1311,17 @@ fn start_pool(
             admission_pool::probe(candidate, profile, &admission_owner)
         })?
     };
-    artifact::verify(candidate)?;
-    artifact::verify_engine(candidate)?;
+    // The content proof a boot records in its tree witness (`tree_witness`).
+    let mut proven_trees = std::collections::BTreeMap::from([
+        (
+            super::tree_witness::SMOLVM.to_owned(),
+            artifact::verify_witnessed(candidate, &artifact::SMOLVM)?,
+        ),
+        (
+            super::tree_witness::ENGINE.to_owned(),
+            artifact::verify_witnessed(candidate, &artifact::ENGINE)?,
+        ),
+    ]);
     super::network_tools::verify(candidate)?;
     let (lock, fresh_samples) = startup_admission_lease(
         &root(candidate),
@@ -1338,6 +1362,8 @@ fn start_pool(
         existing_dependencies,
         existing_share.clone(),
     )?;
+    // These leased checks must stay a superset of `running_start::StartRequest::check`, which
+    // the fast path runs under its lease; network is bound to the pre-lease receipt here.
     super::project_share::check_request(&owner.project_shares(), project_share.as_ref())?;
     if owner.project_share != existing_share
         || owner.additional_project_shares != existing_additional
@@ -1376,6 +1402,9 @@ fn start_pool(
     }
     super::dependency_socket::verify(candidate, &owner)?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
+    // A pool running at this point became running after `running_start::select` (a concurrent
+    // start won the lease first); every other running pool took the fast path. Keep the full
+    // re-verification for that race.
     if owner.phase == "running" {
         if let Some(selected) = settled.selected() {
             selected.reverify(candidate)?;
@@ -1422,7 +1451,14 @@ fn start_pool(
         &mut restart,
         &lock,
     )?;
-    prepare_rootfs(candidate, &mut owner)?;
+    let rootfs_metadata = prepare_rootfs(candidate, &mut owner)?;
+    proven_trees.insert(
+        super::tree_witness::ROOTFS.to_owned(),
+        super::tree_witness::Proven {
+            metadata: rootfs_metadata,
+            content: owner.rootfs_digest.clone().unwrap_or_default(),
+        },
+    );
     if !owner.created {
         // A reserve-qualified start never reaches `machine create`.
         let fresh = admission_pool::fresh_create(&restart)?;
@@ -1539,6 +1575,14 @@ fn start_pool(
     owner.process = Some(observed);
     owner.save(candidate)?;
     let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
+    // A witness is recorded only where it can be accepted (a qualified filesystem).
+    super::tree_witness::record_boot(
+        candidate,
+        &lock,
+        result.is_ok() && witness_qualified(candidate),
+        owner.process.as_ref(),
+        proven_trees,
+    );
     if let Err(error) = &result {
         // Disk rejection must not keep an allocation alive. Process authority is
         // independent of disk adoption; this is an unclean stop, never reconciliation.
@@ -1855,7 +1899,9 @@ exit 43"#,
     status(candidate)
 }
 
-fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<(), CandidateError> {
+/// Copy (once) and prove the pool's guest rootfs by content. Returns its metadata digest
+/// (`tree_witness`), taken around the final content proof.
+fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<String, CandidateError> {
     let templates = root(candidate).join("home/.smolvm");
     state::private_directory(&templates)?;
     for name in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
@@ -1886,12 +1932,7 @@ fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<(), Candid
     }
     let destination = root(candidate).join("rootfs");
     reject_aliased_state(&destination)?;
-    let data = owner.data_dir();
-    let hash = data
-        .file_name()
-        .and_then(|v| v.to_str())
-        .expect("machine hash");
-    let marker = format!(".smolvm-ready.{hash}");
+    let marker = rootfs_marker(owner)?;
     if owner.rootfs_digest.is_none() {
         if destination.try_exists().map_err(io)? {
             return Err(CandidateError::new(
@@ -1917,13 +1958,52 @@ fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<(), Candid
         owner.rootfs_digest = Some(source_hash);
         owner.save(candidate)?;
     }
-    if Some(artifact::rootfs_digest(&destination, Some(&marker))?) != owner.rootfs_digest {
-        return Err(CandidateError::new(
+    prove_rootfs(&destination, &marker, owner.rootfs_digest.as_deref())
+}
+
+/// The provider's per-machine readiness marker in the shared guest rootfs, which every
+/// rootfs proof excludes.
+/// Whether the witnessed trees (the SmolVM tree, the engine tree and the pool's rootfs copy)
+/// are all on a filesystem qualified for the metadata check. A witness is accepted only when
+/// they are; otherwise every start proves them by content.
+pub(super) fn witness_qualified(candidate: &Candidate) -> bool {
+    super::tree_witness::qualified(&[
+        &artifact::tree_root(candidate, &artifact::SMOLVM),
+        &artifact::tree_root(candidate, &artifact::ENGINE),
+        &root(candidate).join("rootfs"),
+    ])
+}
+
+pub(super) fn rootfs_marker(owner: &Owner) -> Result<String, CandidateError> {
+    let data = owner.data_dir();
+    let hash = data.file_name().and_then(|v| v.to_str()).ok_or_else(|| {
+        CandidateError::new("foreign_state", "Owned machine identity is missing.")
+    })?;
+    Ok(format!(".smolvm-ready.{hash}"))
+}
+
+/// Prove the rootfs copy by content against its pin, bracketed by its metadata digest, which
+/// is returned.
+pub(super) fn prove_rootfs(
+    destination: &Path,
+    marker: &str,
+    expected: Option<&str>,
+) -> Result<String, CandidateError> {
+    let changed = || {
+        CandidateError::new(
             "artifact_digest_mismatch",
             "Runtime guest base changed; refusing boot.",
-        ));
+        )
+    };
+    let before = super::tree_witness::metadata_digest(destination, Some(marker))?;
+    super::tree_witness::note_content_proof();
+    if Some(artifact::rootfs_digest(destination, Some(marker))?.as_str()) != expected {
+        return Err(changed());
     }
-    Ok(())
+    if super::tree_witness::metadata_digest(destination, Some(marker))? != before {
+        return Err(changed());
+    }
+    Ok(before)
 }
 
 /// Retained startup may verify existing templates/rootfs but never reconstruct
@@ -1957,11 +2037,28 @@ pub(super) fn verify_retained_rootfs(
     }
     let destination = root(candidate).join("rootfs");
     reject_aliased_state(&destination)?;
-    let data = owner.data_dir();
-    let machine = data.file_name().and_then(|v| v.to_str()).ok_or_else(|| {
-        CandidateError::new("foreign_state", "Owned machine identity is missing.")
-    })?;
-    let marker = format!(".smolvm-ready.{machine}");
+    let marker = rootfs_marker(owner)?;
+    // A running pool whose boot witnessed this rootfs by content against this pin accepts an
+    // unchanged metadata digest (`tree_witness`); a stopped pool, or any difference, proves by
+    // content. Read-only: nothing is recorded here.
+    if owner.phase == "running"
+        && let Some(process) = &owner.process
+        && super::tree_witness::qualified(&[
+            &artifact::tree_root(candidate, &artifact::SMOLVM),
+            &artifact::tree_root(candidate, &artifact::ENGINE),
+        ])
+        && let Some(metadata) = super::tree_witness::qualified_digest(&destination, Some(&marker))?
+        && super::tree_witness::matches(
+            candidate,
+            process,
+            super::tree_witness::ROOTFS,
+            &metadata,
+            expected,
+        )
+    {
+        return Ok(());
+    }
+    super::tree_witness::note_content_proof();
     if artifact::rootfs_digest(&destination, Some(&marker))? != expected {
         return Err(CandidateError::new(
             "artifact_digest_mismatch",

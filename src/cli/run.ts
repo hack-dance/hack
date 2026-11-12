@@ -7,7 +7,7 @@ import {
   HackCliError,
 } from "../lib/cli-result.ts";
 import { setNoInteractiveFlag } from "../lib/interactivity.ts";
-import { nativeDetachedUpProviderPinFailure } from "../lib/native-detached-up.ts";
+import { nativeDetachedUpFailure } from "../lib/native-detached-up.ts";
 import { logger } from "../ui/logger.ts";
 import {
   type AnyCommandSpec,
@@ -124,7 +124,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       process.stderr.write(`${sensitiveError}\n`);
       return 1;
     }
-    await nativeDetachedUpProviderPinFailure(error);
+    await nativeDetachedUpFailure(error);
     return await handleRunCliError({ error, jsonRequested, handlerPath });
   }
 }

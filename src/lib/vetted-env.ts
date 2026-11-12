@@ -13,6 +13,18 @@
  */
 export const VETTED_HELPER_PATH = "/usr/sbin:/usr/bin:/sbin:/bin";
 
+/** Reapply the fixed environment after sudo can replace PATH via secure_path. */
+export function vettedRootCommand(argv: readonly string[]): readonly string[] {
+  return [
+    "/usr/bin/env",
+    "-i",
+    `PATH=${VETTED_HELPER_PATH}`,
+    "LANG=C",
+    "LC_ALL=C",
+    ...argv,
+  ];
+}
+
 /** Inherited only when present; none of these selects code or files. */
 const PASSED_THROUGH = ["HOME", "USER", "LOGNAME", "TERM"] as const;
 

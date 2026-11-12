@@ -18,7 +18,20 @@ export interface ExecOptions {
   readonly unsetEnvKeys?: readonly string[];
   readonly stdin?: "inherit" | "pipe" | "ignore" | Blob;
   readonly timeoutMs?: number;
+  /**
+   * Capture stdout as raw bytes under this budget. `stdout` is then
+   * latin1-decoded (one char per byte, so `Buffer.from(stdout, "latin1")`
+   * restores the exact bytes). Past the budget the child is killed and the
+   * result reports exit 125 with empty stdout; nothing beyond the budget is
+   * held in memory.
+   */
+  readonly maxStdoutBytes?: number;
 }
+
+/** Exit code `exec` reports when `maxStdoutBytes` was exceeded. */
+export const EXEC_STDOUT_OVERFLOW_EXIT = 125;
+
+class StdoutOverflow extends Error {}
 
 /**
  * Build the child env from the CURRENT `process.env` plus overrides.
@@ -61,12 +74,43 @@ export async function exec(
   });
   const observeCpu = beginNativeCpuChild(proc, nativeCpuCommandCategory(cmd));
 
-  const stdoutText = await streamToText(proc.stdout);
-  const stderrText = await streamToText(proc.stderr);
+  const limit = opts.maxStdoutBytes;
+  let overflowed = false;
+  const stderrRead = streamToText(proc.stderr);
+  let stdoutText = "";
+  if (limit === undefined) {
+    stdoutText = await streamToText(proc.stdout);
+  } else {
+    try {
+      const bytes = await readBoundedStream(
+        proc.stdout,
+        limit,
+        undefined,
+        () => {
+          throw new StdoutOverflow();
+        }
+      );
+      stdoutText = Buffer.from(bytes).toString("latin1");
+    } catch (error) {
+      if (!(error instanceof StdoutOverflow)) {
+        throw error;
+      }
+      overflowed = true;
+      proc.kill("SIGKILL");
+    }
+  }
+  const stderrText = await stderrRead;
   const exitCode = await proc.exited;
   observeCpu(exitCode);
   timeout.dispose();
 
+  if (overflowed) {
+    return {
+      exitCode: EXEC_STDOUT_OVERFLOW_EXIT,
+      stdout: "",
+      stderr: stderrText,
+    };
+  }
   return {
     exitCode: timeout.didTimeout() ? 124 : exitCode,
     stdout: stdoutText,

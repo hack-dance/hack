@@ -28,6 +28,7 @@ import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 import { installFixtureProcessCensus } from "./helpers/fixture-process-census.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { waitForFileContent } from "./helpers/wait-for-file-content.ts";
 
 let activeOriginalCases = 0;
 let originalLifetimeUnknown = false;
@@ -608,14 +609,21 @@ async function interruptTakeover(
     env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR },
   });
   fixtures.push({ root: current.root, child });
-  const deadline = performance.now() + 5000;
-  while (!(await Bun.file(witness).exists())) {
-    if (child.exitCode !== null || performance.now() >= deadline) {
-      throw new Error("Owned takeover did not reach the named interruption.");
-    }
-    await Bun.sleep(10);
-  }
-  expect(await Bun.file(witness).text()).toBe(stage);
+  const observed = await waitForFileContent({
+    path: witness,
+    what: "owned takeover interruption",
+    budgetMs: 5000,
+    complete: (text) => {
+      if (text === stage) {
+        return text;
+      }
+      if (!stage.startsWith(text) || child.exitCode !== null) {
+        throw new Error("Owned takeover did not reach the named interruption.");
+      }
+      return undefined;
+    },
+  });
+  expect(observed).toBe(stage);
   if (kill) {
     child.kill("SIGKILL");
     expect(await child.exited).toBe(137);

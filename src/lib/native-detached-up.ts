@@ -22,24 +22,75 @@ type Ready = {
 };
 let publishReady: ((ready: Ready) => void) | undefined;
 let publishShellVariables: ((names: readonly string[]) => void) | undefined;
-let publishProviderPinFailure: (() => Promise<void>) | undefined;
+type StartupFailure = {
+  readonly code: string;
+  readonly message?: string;
+  readonly service?: string;
+};
+let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
+const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const FAILURE_MESSAGE = /^[\x20-\x7e]{1,400}$/;
+const FAILURE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
 
-/** Closed, value-free failure handoff; never forwards runtime error text or logs. */
-export async function nativeDetachedUpProviderPinFailure(
-  error: unknown
-): Promise<void> {
-  if (!publishProviderPinFailure) {
+/** Only the runtime's validated fixed detail crosses IPC; never an Error's text or logs. */
+export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
+  if (!publishFailure) {
     return;
   }
-  const { NativeRuntimeRequestError } = await import(
+  const { nativeRuntimeFailure } = await import(
     "../backends/native-runtime-client.ts"
   );
-  if (
-    error instanceof NativeRuntimeRequestError &&
-    error.nativeCode === "provider_pin_changed"
-  ) {
-    await publishProviderPinFailure();
+  const failure = nativeRuntimeFailure(error);
+  if (isStartupFailure(failure)) {
+    await publishFailure(failure);
   }
+}
+
+function isStartupFailure(value: unknown): value is StartupFailure {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) =>
+      ["code", "message", "service"].includes(key)
+    ) &&
+    typeof value.code === "string" &&
+    FAILURE_CODE.test(value.code) &&
+    (value.message === undefined ||
+      (typeof value.message === "string" &&
+        FAILURE_MESSAGE.test(value.message))) &&
+    (value.service === undefined ||
+      (typeof value.service === "string" &&
+        FAILURE_SERVICE.test(value.service)))
+  );
+}
+
+function startupFailureMessage(value: unknown): StartupFailure | undefined {
+  return isRecord(value) &&
+    Object.keys(value).length === 2 &&
+    value.kind === "failure" &&
+    isStartupFailure(value.data)
+    ? value.data
+    : undefined;
+}
+
+function startupFailureError(failure: StartupFailure): HackCliError {
+  if (failure.code === "provider_pin_changed") {
+    return new HackCliError({
+      code: "E_STARTUP_INCOMPLETE",
+      message: `Native detached startup refused (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`,
+    });
+  }
+  let detail = "";
+  if (failure.message) {
+    detail = failure.service
+      ? ` Service ${failure.service}: ${failure.message}`
+      : ` Runtime: ${failure.message}`;
+  } else if (failure.service) {
+    detail = ` Service: ${failure.service}.`;
+  }
+  return new HackCliError({
+    code: "E_STARTUP_INCOMPLETE",
+    message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}`,
+  });
 }
 
 /** Names-only notice: never accepts or forwards an environment map or output text. */
@@ -107,21 +158,26 @@ export async function runNativeDetachedOwner(opts: {
       | string
       | { readonly kind: "ready"; readonly data: Ready }
       | { readonly kind: "shell-variables"; readonly names: readonly string[] }
-  ) => {
-    if (!(process.send && process.connected)) {
-      disconnected();
-      return;
-    }
-    try {
-      process.send(value, undefined, undefined, (error) => {
-        if (error) {
-          disconnected();
-        }
-      });
-    } catch {
-      disconnected();
-    }
-  };
+      | { readonly kind: "failure"; readonly data: StartupFailure }
+  ): Promise<void> =>
+    new Promise((resolve) => {
+      if (!(process.send && process.connected)) {
+        disconnected();
+        resolve();
+        return;
+      }
+      try {
+        process.send(value, undefined, undefined, (error) => {
+          if (error) {
+            disconnected();
+          }
+          resolve();
+        });
+      } catch {
+        disconnected();
+        resolve();
+      }
+    });
   const message = (value: unknown) => {
     if (value === "cancel") {
       requestStop();
@@ -147,27 +203,18 @@ export async function runNativeDetachedOwner(opts: {
       send({ kind: "shell-variables", names });
     }
   };
-  publishProviderPinFailure = () =>
-    new Promise<void>((resolve) => {
-      if (ready || stopping || !process.send || !process.connected) {
-        resolve();
-        return;
-      }
-      try {
-        process.send("provider_pin_changed", undefined, undefined, () =>
-          resolve()
-        );
-      } catch {
-        resolve();
-      }
-    });
+  publishFailure = async (data) => {
+    if (!(ready || stopping)) {
+      await send({ kind: "failure", data });
+    }
+  };
   try {
     return await opts.run(opts.args);
   } finally {
     stopping = true;
     publishReady = undefined;
     publishShellVariables = undefined;
-    publishProviderPinFailure = undefined;
+    publishFailure = undefined;
     process.off("disconnect", disconnected);
     process.off("message", message);
     if (process.connected) {
@@ -268,14 +315,10 @@ export async function startNativeDetachedUp(opts: {
     if (failed) {
       return;
     }
-    if (!ready && value === "provider_pin_changed") {
+    const failure = ready ? undefined : startupFailureMessage(value);
+    if (failure) {
       failed = true;
-      result.reject(
-        new HackCliError({
-          code: "E_STARTUP_INCOMPLETE",
-          message: `Native detached startup refused (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`,
-        })
-      );
+      result.reject(startupFailureError(failure));
       return;
     }
     if (isRecord(value) && value.kind === "shell-variables") {

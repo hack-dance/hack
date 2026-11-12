@@ -1,4 +1,5 @@
 import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -58,6 +59,18 @@ async function fixture(approveSource = false) {
   );
   const binary = join(root, "native-tripwire");
   await writeFile(join(root, "hack-relay-guest"), "synthetic fixture artifact");
+  const reviewed = JSON.stringify({
+    plan_id: "f".repeat(64),
+    start_refusals: [],
+    plan: {
+      namespace: "c".repeat(64),
+      compose_sha256: createHash("sha256")
+        .update(await Bun.file(join(projectDir, "docker-compose.yml")).text())
+        .digest("hex"),
+      enrollment_compatible: true,
+      services: { web: { active: true } },
+    },
+  });
   await writeFile(
     binary,
     `#!/bin/sh
@@ -76,6 +89,10 @@ if [ "$4" = "admit-image" ]; then
   printf '{"reference":"%s","kind":"docker_hub"}\n' "$6"
   exit 0
 fi
+if [ "$3" = "project" ] && [ "$4" = "plan" ]; then
+  printf '%s\\n' '${reviewed}'
+  exit 0
+fi
 touch "$HOME/native-ran"
 exit 71
 `,
@@ -92,6 +109,7 @@ exit 71
     HACK_NATIVE_HOME: nativeHome,
     HACK_NATIVE_SHARED_SOURCE: "1",
     HACK_NO_INTERACTIVE: "1",
+    HACK_DAEMON_AUTOSTART_DISABLE: "1",
     HACK_LOGGER: "console",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",

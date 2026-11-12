@@ -387,6 +387,7 @@ import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
+import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
 import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
@@ -6317,10 +6318,8 @@ async function handleUp({
     // Once per `hack up`, whichever native start path follows (HACK-2026).
     noteNativeBackendBeta({ json: args.options.json === true });
   }
-  if (
-    (args.options.detach || args.options.json) &&
-    resolveNativeRuntimeSelection()
-  ) {
+  const native = resolveNativeRuntimeSelection();
+  if ((args.options.detach || args.options.json) && native) {
     refuseUnsupportedNativeUpOptions({
       restart: false,
       target: args.options.target,
@@ -6337,6 +6336,41 @@ async function handleUp({
       if (value !== undefined) {
         childArgs.push(`--${name}=${value}`);
       }
+    }
+    const alreadyRunning = await answerNativeAlreadyRunning({
+      native,
+      json: args.options.json === true,
+      selection: {
+        path: args.options.path,
+        project: args.options.project,
+        branch: args.options.branch,
+        env: resolveRequestedEnvName({ envOption: args.options.env }),
+        profiles:
+          args.options.profile === undefined
+            ? undefined
+            : parseCsvList(args.options.profile),
+      },
+      resolveProject: () =>
+        resolveProjectForArgs({
+          ctx,
+          pathOpt: args.options.path,
+          projectOpt: args.options.project,
+          touchRegistration: false,
+        }),
+      resolveBranch: (project) =>
+        resolveEffectiveBranchForCommand({
+          project,
+          branchOption: args.options.branch,
+          noticeToStderr: args.options.json === true,
+        }),
+      onBranchResolved: (branch) => {
+        if (args.options.branch === undefined && branch !== null) {
+          childArgs.push(`--branch=${branch}`);
+        }
+      },
+    });
+    if (alreadyRunning !== null) {
+      return alreadyRunning;
     }
     return await startNativeDetachedUp({
       cwd: ctx.cwd,
@@ -6360,7 +6394,6 @@ async function handleUp({
   if (authored !== null) {
     return authored;
   }
-  const native = resolveNativeRuntimeSelection();
   if (native) {
     return await handleNativeUp({ ctx, args, native });
   }

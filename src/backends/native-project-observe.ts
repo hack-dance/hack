@@ -33,11 +33,15 @@ type Item = {
   state: string;
   health: string | null;
   exitCode: number | null;
+  /** Included only for callers that need the receipt's retained readiness goal. */
+  readiness?: "started" | "healthy" | "completed";
 };
 type Options = {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeProjectRunScope;
   readonly invoke?: typeof invokeNativeRuntime;
+  /** Internal admission callers need completion roles; ordinary ps output is unchanged. */
+  readonly includeReadiness?: boolean;
 };
 function refused(): Error {
   return new ClosedCliError(
@@ -79,7 +83,8 @@ export type NativeProjectPsResult = {
 };
 function inspected(
   value: unknown,
-  expected: NativeProjectRun
+  expected: NativeProjectRun,
+  includeReadiness = false
 ): {
   items: Item[];
   phase: string;
@@ -115,7 +120,19 @@ function inspected(
     if (resource.kind !== "container") {
       continue;
     }
-    items.push(containerItem(resource, value.observations));
+    const item = containerItem(resource, value.observations);
+    const readiness = isRecord(receipt.readiness)
+      ? receipt.readiness[item.service]
+      : undefined;
+    if (
+      includeReadiness &&
+      (readiness === "started" ||
+        readiness === "healthy" ||
+        readiness === "completed")
+    ) {
+      item.readiness = readiness;
+    }
+    items.push(item);
   }
   if (items.length > 32) {
     throw refused();
@@ -164,7 +181,8 @@ async function inspect(opts: Options, run: NativeProjectRun) {
       invoke: opts.invoke,
       busyWaitMs: OBSERVER_BUSY_WAIT_MS,
     }),
-    run
+    run,
+    opts.includeReadiness
   );
 }
 /** Ordinary states in which nothing was observed; every other refusal rethrows. */

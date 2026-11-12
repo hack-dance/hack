@@ -33,6 +33,7 @@ Already have a project? Follow [Project setup](guides/init-project.md), or use
 - [CLI overview](cli.md) explains which command to use; the [command reference](reference/cli.md) lists every flag.
 - [Global settings](guides/global-settings.md) covers machine-wide configuration.
 - [macOS connectivity](guides/macos-browser-network.md) and [certificate trust](guides/macos-certificate-trust.md) explain local URL problems.
+- [Linux certificate trust](guides/linux-certificate-trust.md) covers the distribution trust store and browsers on Linux.
 - [Linux host setup](guides/linux-setup.md) covers DNS, trust and the daemon on Linux.
 - [Architecture](architecture.md) explains how the pieces fit together.
 

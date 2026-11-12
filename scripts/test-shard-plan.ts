@@ -557,6 +557,7 @@ function localImports(opts: {
   readonly repoRoot: string;
   readonly file: string;
   readonly source: string;
+  readonly sources?: Readonly<Record<string, string>>;
 }): string[] {
   const found: string[] = [];
   const base = dirname(resolve(opts.repoRoot, opts.file));
@@ -564,7 +565,10 @@ function localImports(opts: {
     const target = resolve(base, match[1] as string);
     for (const candidate of [target, `${target}.ts`]) {
       const path = relative(opts.repoRoot, candidate).split(sep).join("/");
-      if (!path.startsWith("../") && isFile(candidate)) {
+      if (
+        !path.startsWith("../") &&
+        (opts.sources ? Object.hasOwn(opts.sources, path) : isFile(candidate))
+      ) {
         found.push(path);
         break;
       }
@@ -591,6 +595,8 @@ export async function testSourceMatches(opts: {
   readonly cache?: Map<string, string>;
   /** Which imported modules to read too; test-suite modules by default. */
   readonly follow?: (path: string) => boolean;
+  /** Historical replay reads git objects without executing or checking them out. */
+  readonly sources?: Readonly<Record<string, string>>;
 }): Promise<boolean> {
   const cache = opts.cache ?? new Map<string, string>();
   const seen = new Set<string>();
@@ -603,16 +609,24 @@ export async function testSourceMatches(opts: {
     seen.add(file);
     let source = cache.get(file);
     if (source === undefined) {
-      source = await Bun.file(resolve(opts.repoRoot, file)).text();
+      source = opts.sources
+        ? opts.sources[file]
+        : await Bun.file(resolve(opts.repoRoot, file)).text();
+      if (source === undefined) {
+        throw new ClosedCliError("test shard: source snapshot is incomplete.");
+      }
       cache.set(file, source);
     }
     if (opts.pattern.test(source)) {
       return true;
     }
     queue.push(
-      ...localImports({ repoRoot: opts.repoRoot, file, source }).filter(
-        opts.follow ?? inTestSuite
-      )
+      ...localImports({
+        repoRoot: opts.repoRoot,
+        file,
+        source,
+        sources: opts.sources,
+      }).filter(opts.follow ?? inTestSuite)
     );
   }
   return false;
@@ -623,6 +637,7 @@ export async function classifyTestPools(opts: {
   readonly repoRoot: string;
   readonly files: readonly string[];
   readonly macosFiles?: Readonly<Record<string, string>>;
+  readonly sources?: Readonly<Record<string, string>>;
 }): Promise<{
   readonly macos: readonly string[];
   readonly linux: readonly string[];
@@ -639,6 +654,7 @@ export async function classifyTestPools(opts: {
         file,
         pattern: PLATFORM_SENSITIVE_SOURCE,
         cache,
+        sources: opts.sources,
       }));
     (sensitive ? macos : linux).push(file);
   }
@@ -686,6 +702,26 @@ export type ShardPlan = {
   readonly durations: Readonly<Record<string, number>>;
 };
 
+function selectedScope(opts: {
+  readonly scope: readonly string[];
+  readonly tracked: readonly string[];
+  readonly selected: readonly string[] | undefined;
+}): readonly string[] {
+  if (!opts.selected) {
+    return opts.scope;
+  }
+  const selected = new Set(opts.selected);
+  if (
+    selected.size !== opts.selected.length ||
+    opts.selected.some((file) => !opts.tracked.includes(file))
+  ) {
+    throw new ClosedCliError(
+      "test shard: selection contains duplicate or undiscovered files."
+    );
+  }
+  return opts.scope.filter((file) => selected.has(file));
+}
+
 /**
  * Discover, partition and verify the plan for `count` shards. Refuses,
  * closed, when disk and Git disagree on the test-file set or when the shards
@@ -704,6 +740,8 @@ export async function buildVerifiedPlan(opts: {
   readonly macosFiles?: Readonly<Record<string, string>>;
   /** Plan only the files that read these sources; `count` shards split them. */
   readonly focus?: readonly TestFocus[];
+  /** Validated PR subset. Full discovery/coverage still runs before filtering. */
+  readonly selectedFiles?: readonly string[];
 }): Promise<ShardPlan> {
   const suites = opts.suites ?? TEST_SUITES;
   if (!opts.suites) {
@@ -770,6 +808,7 @@ export async function buildVerifiedPlan(opts: {
     }
     scope = focused;
   }
+  scope = selectedScope({ scope, tracked, selected: opts.selectedFiles });
   const shards = (opts.partition ?? partitionTestFiles)({
     files: scope,
     count: opts.count,

@@ -1,20 +1,36 @@
 import { X509Certificate } from "node:crypto";
-import { lstat, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
+import { GLOBAL_CADDY_PROJECT_NAME } from "../constants.ts";
 import { readTextFile } from "./fs.ts";
 import { isRecord } from "./guards.ts";
-import { exec } from "./shell.ts";
+import { EXEC_STDOUT_OVERFLOW_EXIT, exec } from "./shell.ts";
+import { readSingleRegularFileFromTar } from "./single-file-tar.ts";
 
 const MAX_CERTIFICATE_BYTES = 65_536;
+/** One certificate entry, an optional PAX header and tar padding. */
+const MAX_ARCHIVE_BYTES = MAX_CERTIFICATE_BYTES + 32_768;
 const FULL_CONTAINER_ID = /^[a-f0-9]{64}$/;
 const CONTAINER_ID = /^[a-f0-9]{12,64}$/;
 const SINGLE_CERTIFICATE =
   /^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----$/;
 const ROOT_PATH = "/data/caddy/pki/authorities/local/root.crt";
 const INSPECT_FORMAT =
-  '{"id":{{json .Id}},"running":{{json .State.Running}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}';
+  '{"id":{{json .Id}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}';
+/**
+ * Select Hack's Caddy by its Compose labels with the project fixed, never
+ * through the user-writable Compose file: a file whose top-level `name:` was
+ * changed must not be able to point the witness at another project's `caddy`.
+ */
+const SELECT_CADDY = [
+  "docker",
+  "ps",
+  "--quiet",
+  "--no-trunc",
+  "--filter",
+  `label=com.docker.compose.project=${GLOBAL_CADDY_PROJECT_NAME}`,
+  "--filter",
+  "label=com.docker.compose.service=caddy",
+] as const;
 
 export type CaddyCaIdentity = {
   readonly state: "current" | "stale" | "missing" | "unavailable" | "invalid";
@@ -45,42 +61,40 @@ function matchesRunningCaddy(value: unknown, id: string): boolean {
     FULL_CONTAINER_ID.test(value.id) &&
     value.id.startsWith(id) &&
     value.running === true &&
+    value.project === GLOBAL_CADDY_PROJECT_NAME &&
     value.service === "caddy"
   );
 }
 
-/** Distroless Caddy has no shell tools. Only the public root is copied.
- * Docker cp is time-bounded but may write more than 64 KiB before validation;
- * lstat bounds the subsequent memory read and rejects copied symlinks.
+/**
+ * Distroless Caddy has no shell tools. Only the public root is copied, and it
+ * is streamed (`docker cp … -`) into bounded memory as a tar archive rather
+ * than written to a path: a same-user process cannot swap a file between the
+ * copy and the read, because there is no file. Docker cp is time-bounded, and
+ * output past the archive budget kills the copy.
  */
 async function copyRuntimeRoot(opts: {
   readonly id: string;
   readonly execute: typeof exec;
-  readonly read: typeof readTextFile;
 }): Promise<{ readonly pem: string } | { readonly invalid: true } | null> {
-  const directory = await mkdtemp(join(tmpdir(), "hack-caddy-ca-identity-"));
-  const destination = join(directory, "root.crt");
-  try {
-    const copied = await opts.execute(
-      ["docker", "cp", `${opts.id}:${ROOT_PATH}`, destination],
-      { timeoutMs: 5000, stdin: "ignore" }
-    );
-    if (copied.exitCode !== 0) {
-      return null;
-    }
-    const metadata = await lstat(destination);
-    if (
-      !metadata.isFile() ||
-      metadata.isSymbolicLink() ||
-      metadata.size > MAX_CERTIFICATE_BYTES
-    ) {
-      return { invalid: true };
-    }
-    const pem = await opts.read(destination);
-    return pem === null ? null : { pem };
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+  const copied = await opts.execute(
+    ["docker", "cp", `${opts.id}:${ROOT_PATH}`, "-"],
+    { timeoutMs: 5000, stdin: "ignore", maxStdoutBytes: MAX_ARCHIVE_BYTES }
+  );
+  if (copied.exitCode === EXEC_STDOUT_OVERFLOW_EXIT) {
+    return { invalid: true };
   }
+  if (copied.exitCode !== 0) {
+    return null;
+  }
+  const content = readSingleRegularFileFromTar({
+    archive: Buffer.from(copied.stdout, "latin1"),
+    name: "root.crt",
+    maxBytes: MAX_CERTIFICATE_BYTES,
+  });
+  return content === null
+    ? { invalid: true }
+    : { pem: Buffer.from(content).toString("utf8") };
 }
 
 /**
@@ -89,7 +103,6 @@ async function copyRuntimeRoot(opts: {
  * equal DER bytes are. Unavailable runtime evidence never confirms an old export.
  */
 export async function inspectCaddyCaIdentity(opts: {
-  readonly composeFile: string;
   readonly certPath: string;
   readonly exec?: typeof exec;
   readonly readTextFile?: typeof readTextFile;
@@ -103,10 +116,10 @@ export async function inspectCaddyCaIdentity(opts: {
   };
   let runtimePem: string;
   try {
-    const selected = await execute(
-      ["docker", "compose", "-f", opts.composeFile, "ps", "-q", "caddy"],
-      { timeoutMs: 5000, stdin: "ignore" }
-    );
+    const selected = await execute(SELECT_CADDY, {
+      timeoutMs: 5000,
+      stdin: "ignore",
+    });
     const id = selected.stdout.trim();
     if (selected.exitCode !== 0 || !CONTAINER_ID.test(id)) {
       return unavailable;
@@ -129,7 +142,7 @@ export async function inspectCaddyCaIdentity(opts: {
     ) {
       return unavailable;
     }
-    const copied = await copyRuntimeRoot({ id, execute, read });
+    const copied = await copyRuntimeRoot({ id, execute });
     if (copied === null) {
       return unavailable;
     }
@@ -137,7 +150,7 @@ export async function inspectCaddyCaIdentity(opts: {
       return {
         state: "invalid",
         message:
-          "Running Caddy root certificate copy is not a regular file within the 64 KiB limit",
+          "Running Caddy root certificate copy is not a single regular file within the 64 KiB limit",
       };
     }
     runtimePem = copied.pem;

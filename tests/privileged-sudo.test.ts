@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type FileFacts,
   PRIVILEGED_CHILD_PATH,
@@ -128,7 +131,15 @@ describe("runTrustedSudo", () => {
       }
     }
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.argv).toEqual(["/usr/bin/sudo", "update-ca-certificates"]);
+    expect(calls[0]?.argv).toEqual([
+      "/usr/bin/sudo",
+      "/usr/bin/env",
+      "-i",
+      `PATH=${PRIVILEGED_CHILD_PATH}`,
+      "LANG=C",
+      "LC_ALL=C",
+      "update-ca-certificates",
+    ]);
     const opts = calls[0]?.opts as {
       stdin: string;
       env: Record<string, string>;
@@ -160,7 +171,17 @@ describe("runTrustedSudo", () => {
       }) as never,
     });
     expect(exit).toBe(0);
-    expect(calls[0]?.argv).toEqual(["/usr/bin/sudo", "sh", "-c", "cat"]);
+    expect(calls[0]?.argv).toEqual([
+      "/usr/bin/sudo",
+      "/usr/bin/env",
+      "-i",
+      `PATH=${PRIVILEGED_CHILD_PATH}`,
+      "LANG=C",
+      "LC_ALL=C",
+      "sh",
+      "-c",
+      "cat",
+    ]);
     expect(new TextDecoder().decode(calls[0]?.input)).toBe("bytes");
     expect(calls[0]?.env).toMatchObject({
       PATH: PRIVILEGED_CHILD_PATH,
@@ -179,6 +200,46 @@ describe("runTrustedSudo", () => {
     });
     expect(exit).toBe(SUDO_UNAVAILABLE_EXIT);
     expect(ran).toBe(false);
+  });
+
+  test.each([
+    false,
+    true,
+  ])("sudo secure_path cannot select a root helper (stdin: %s)", async (withInput) => {
+    const dir = await mkdtemp(join(tmpdir(), "hack-sudo-path-"));
+    try {
+      const poison = join(dir, "poison");
+      await mkdir(poison);
+      await writeFile(join(poison, "dirname"), "#!/bin/sh\nexit 99\n", {
+        mode: 0o755,
+      });
+      let output = "";
+      const simulateSudo = async (argv: readonly string[]) => {
+        // This is sudo's effect: overwrite PATH before exec of its child.
+        const child = Bun.spawn([...argv.slice(1)], {
+          env: { PATH: `${poison}:/usr/bin:/bin`, NODE_OPTIONS: "untrusted" },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        output = await new Response(child.stdout).text();
+        return await child.exited;
+      };
+      expect(
+        await runTrustedSudo(
+          ["/bin/sh", "-c", 'dirname /a/b; [ -z "${NODE_OPTIONS+x}" ]'],
+          {
+            fs: fakeFs({ facts: goodTree }),
+            input: withInput ? new Uint8Array([1]) : undefined,
+            inputRunner: async (argv) => await simulateSudo(argv),
+            runner: async (argv) => await simulateSudo(argv),
+          }
+        )
+      ).toBe(0);
+      expect(output).toBe("/a\n");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("a spawn failure is an exit code, not a throw", async () => {

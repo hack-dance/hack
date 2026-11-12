@@ -56,6 +56,9 @@ flate2 = { version = "=1.1.10", default-features = false, features = ["rust_back
 ruzstd = "=0.8.2"
 tokio = { version = "1", default-features = false, features = ["rt"] }
 
+[build-dependencies]
+sha2 = "0.10"
+
 [profile.release]
 lto = "thin"
 strip = true

@@ -59,7 +59,7 @@ function fixedNativeMessage(
 }
 
 /** The fixed message and validated service a runtime failure carries, if any. */
-function nativeFailureDetail(value: Record<string, unknown>): {
+export function nativeFailureDetail(value: Record<string, unknown>): {
   message?: string;
   service?: string;
 } {
@@ -72,6 +72,34 @@ function nativeFailureDetail(value: Record<string, unknown>): {
     ...(message ? { message } : {}),
     ...(service ? { service } : {}),
   };
+}
+
+type SafeNativeFailure = Readonly<{
+  code: string;
+  message?: string;
+  service?: string;
+}>;
+/** Opaque association: never retain an error, its text, logs, causes or getters. */
+const retainedFailures = new WeakMap<object, SafeNativeFailure>();
+
+export function nativeRuntimeFailure(
+  error: unknown
+): SafeNativeFailure | undefined {
+  return typeof error === "object" && error !== null
+    ? retainedFailures.get(error)
+    : undefined;
+}
+
+/** Preserve safe detail through a closed cleanup wrapper without an Error cause. */
+export function retainNativeRuntimeFailure<T extends Error>(opts: {
+  readonly error: T;
+  readonly original: unknown;
+}): T {
+  const detail = nativeRuntimeFailure(opts.original);
+  if (detail) {
+    retainedFailures.set(opts.error, detail);
+  }
+  return opts.error;
 }
 
 /**
@@ -121,6 +149,19 @@ export class NativeRuntimeRequestError extends ClosedCliError {
     this.nativeMessage = opts.nativeMessage;
     this.nativeService = opts.nativeService;
     this.nativeStopFailures = opts.nativeStopFailures;
+    if (opts.nativeCode && ERROR_CODE.test(opts.nativeCode)) {
+      retainedFailures.set(
+        this,
+        Object.freeze({
+          code: opts.nativeCode,
+          ...nativeFailureDetail({
+            message: opts.nativeMessage,
+            message_fixed: true,
+            service: opts.nativeService,
+          }),
+        })
+      );
+    }
   }
 }
 

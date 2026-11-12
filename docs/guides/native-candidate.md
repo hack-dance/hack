@@ -1819,7 +1819,8 @@ Two native frontends exist. An authored `.hack/hack.project.json` project is own
 by `src/lib/native-authored-command.ts`, which admits only the bounded macOS slices
 in the [authored command contract](../reference/native-authored-commands.md):
 foreground `up` and `restart`, owner-mediated `down` and `down --recover`, saved-run
-`ps`, finite `logs --no-follow`, noninteractive `exec` and bounded one-off `run`.
+`ps`, single-service `logs --follow`, finite `logs --no-follow`, noninteractive
+`exec` and bounded one-off `run`.
 One-off `run` refuses members with source, persistent-data or private-env mounts;
 `restart` requires a proven stop before a fresh foreground start. The
 rest of this section describes the older Compose-file native frontend for
@@ -1843,11 +1844,15 @@ line naming the native backend as a beta for Apple Silicon macOS, delivered by t
 
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps`, for
-`hack status` and for bounded `hack logs SERVICE --no-follow`. `hack status`
+`hack status`, `hack logs SERVICE --follow` and bounded `logs --no-follow`. `hack status`
 observes one project, the cwd project or `--project <name>`, with the same
 output and `--json` envelope as native `hack ps`; outside a project it refuses
 instead of listing Compose state, which cannot see native graphs (HACK-1988). They verify the project/branch run mapping
-against the current native graph. Logs do not support following or Loki options.
+against the current native graph. Live logs follow one admitted start generation
+without a mutation lease, with bounded buffers and explicit refusals for unsupported
+flags or TTY services. Loki queries remain unsupported. See the
+[live log contract](../reference/native-authored-commands.md#followed-service-logs)
+for limits and stop behavior.
 A project with no admitted mapping reports not started. `hack ps` keeps container
 observations separate from the last graph receipt; an exited container's state
 shows its exit code, as in Compose (`exited (1)`). For a ready foreground graph,

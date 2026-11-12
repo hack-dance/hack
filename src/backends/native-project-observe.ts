@@ -1,6 +1,10 @@
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  followNativeLogs,
+  nativeLogFollowOptions,
+} from "./native-log-follow.ts";
+import {
   inspectNativeProjectGraph,
   isNativeProviderBusy,
   OBSERVER_BUSY_WAIT_MS,
@@ -267,7 +271,38 @@ export async function nativeProjectPs(
     ...(ports.length ? { ports } : {}),
   };
 }
-/** Native logs are a bounded, single-service snapshot; no polling or Compose fallback. */
+/** Read only the saved mapping, then let the lease-free runtime select its exact container. */
+export async function followNativeProjectLogs(
+  opts: Options & {
+    readonly service?: string;
+    readonly tail?: number;
+    readonly since?: string;
+    readonly json?: boolean;
+    readonly project?: string;
+  }
+): Promise<number> {
+  const selected = nativeLogFollowOptions(opts);
+  const run = await loadNativeProjectRun(opts.scope);
+  if (!run) {
+    throw new ClosedCliError(
+      "Native project has not been started; no owned graph mapping exists."
+    );
+  }
+  return await followNativeLogs({
+    ...opts,
+    service: selected.service,
+    cwd: opts.scope.projectRoot,
+    branch: opts.scope.branch ?? undefined,
+    selection: {
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan: run.planId,
+      native: false,
+    },
+  });
+}
+/** Native finite logs remain a bounded, single-service snapshot. */
 export async function nativeProjectLogs(
   opts: Options & {
     readonly service?: string;

@@ -179,3 +179,96 @@ fn installed_home_still_refuses_overlapping_source() {
         "overlapping_workspace"
     );
 }
+
+#[test]
+fn project_plan_reports_shared_start_refusals_without_runtime_effects() {
+    use serde_json::json;
+    let fixture = Fixture::new();
+    let project = fixture.directory("project");
+    let candidate = fixture.directory("candidate");
+    let home = fixture.directory("fake-home");
+    let config = fixture.directory("config");
+    let state = fixture.directory("state");
+    let cache = fixture.directory("cache");
+    let data = fixture.directory("data");
+    let empty_path = fixture.directory("empty-path");
+    let image = format!("sha256:{}", "a".repeat(64));
+    let base = json!({"image": image});
+    let mut udp = base.clone();
+    udp["ports"] = json!(["8787:3000/udp"]);
+    let mut disabled_health = base.clone();
+    disabled_health["healthcheck"] = json!({"disable":true});
+    let mut limited = base.clone();
+    limited["deploy"] = json!({"resources":{"limits":{"cpus":"2"}}});
+    let cases = [
+        (
+            json!({"services":{"web":udp}}),
+            Some("graph_port_publication"),
+        ),
+        (
+            json!({"services":{"web":{"image":image,"ports":[{"target":3000,"published":8787,"protocol":"udp"}]}}}),
+            Some("graph_port_publication"),
+        ),
+        (
+            json!({"services":{"web":base,"worker":{"image":image,"profiles":["worker"],"ports":["8787:3000/udp"]}}}),
+            None,
+        ),
+        (
+            json!({"services":{"job":disabled_health}}),
+            Some("graph_readiness"),
+        ),
+        (
+            json!({"services":{"a":limited,"b":limited,"c":limited}}),
+            Some("graph_budget"),
+        ),
+    ];
+    for (document, expected) in cases {
+        std::fs::write(
+            project.join("compose.json"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_hack-native"))
+            .arg("--candidate-root")
+            .arg(&candidate)
+            .args(["project", "plan", "--project"])
+            .arg(&project)
+            .args(["--file", "compose.json", "--json"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_STATE_HOME", &state)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("XDG_DATA_HOME", &data)
+            .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .env("HACK_NO_INTERACTIVE", "1")
+            .env("PATH", &empty_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let refusals = report["start_refusals"].as_array().unwrap();
+        if let Some(code) = expected {
+            assert!(
+                refusals.iter().any(|r| r["code"] == code),
+                "missing {code}: {report}"
+            );
+            let refusal = refusals.iter().find(|r| r["code"] == code).unwrap();
+            assert_eq!(refusal["message_fixed"], true);
+            if code == "graph_port_publication" {
+                assert_eq!(refusal["service"], "web");
+                assert_eq!(
+                    refusal["message"],
+                    "Native publishes only TCP ports; keep UDP publication on the Compose backend."
+                );
+            }
+        } else {
+            assert!(refusals.is_empty(), "{refusals:?}");
+        }
+        assert_eq!(std::fs::read_dir(&candidate).unwrap().count(), 0);
+    }
+}

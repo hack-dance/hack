@@ -164,6 +164,7 @@ import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
+  retainNativeRuntimeFailure,
 } from "./native-runtime-client.ts";
 import {
   applyNativeRuntimeMetadata,
@@ -1128,9 +1129,12 @@ function cleanupUnconfirmed(
     recordedRun !== undefined && RUN.test(recordedRun)
       ? ` The failed run ${recordedRun} is recorded as this project's run mapping; hack ps, hack down and hack doctor --native-cleanup inspect select it.`
       : "";
-  return new ClosedCliError(
-    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
-  );
+  return retainNativeRuntimeFailure({
+    error: new ClosedCliError(
+      `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
+    ),
+    original: startupFailure,
+  });
 }
 /** Runtime process-wrapper refusals: service names and closed fields only. */
 function refusedProcesses(
@@ -1178,9 +1182,12 @@ function finalInspectionFailure(opts: {
     };
   }
   return {
-    error: new ClosedCliError(
-      `Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed.${startupDiagnostic(opts.serveFailure)}${refusedProcesses(opts.processRefusals)}`
-    ),
+    error: retainNativeRuntimeFailure({
+      error: new ClosedCliError(
+        `Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed.${startupDiagnostic(opts.serveFailure)}${refusedProcesses(opts.processRefusals)}`
+      ),
+      original: opts.serveFailure,
+    }),
     nothingReserved: true,
   };
 }

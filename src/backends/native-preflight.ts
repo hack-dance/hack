@@ -35,7 +35,9 @@ import {
   isNativeRuntimeStopError,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
+  nativeFailureDetail,
 } from "./native-runtime-client.ts";
+import { NATIVE_START_REFUSAL_ENTRIES } from "./native-start-refusal-entries.ts";
 
 /**
  * Native preflight: everything that would stop a Compose project from starting
@@ -1057,6 +1059,51 @@ function runtimeFinding(
   );
 }
 
+/** Fixed, value-free diagnostics from the start driver's shared Compose admission. */
+function runtimeStartFindings(
+  value: unknown,
+  services: readonly string[]
+): NativePreflightFinding[] | null {
+  if (!Array.isArray(value) || value.length > 4096) {
+    return null;
+  }
+  const findings: NativePreflightFinding[] = [];
+  for (const refusal of value) {
+    if (
+      !(
+        isRecord(refusal) &&
+        typeof refusal.code === "string" &&
+        CODE.test(refusal.code)
+      )
+    ) {
+      return null;
+    }
+    const detail = nativeFailureDetail(refusal);
+    const service =
+      detail.service && services.includes(detail.service)
+        ? detail.service
+        : undefined;
+    const field = NATIVE_START_REFUSAL_ENTRIES[refusal.code];
+    findings.push(
+      finding(
+        {
+          severity: "blocker",
+          gate: "runtime",
+          code: refusal.code,
+          ...(service ? { service } : {}),
+          ...(field ? { field } : {}),
+        },
+        {
+          message:
+            detail.message ??
+            `Native startup refuses this configuration (${refusal.code}).`,
+          fix: USE_COMPOSE,
+        }
+      )
+    );
+  }
+  return findings;
+}
 type RuntimeReview = {
   readonly review: NativePreflightReport["runtime_review"];
   readonly findings: NativePreflightFinding[];
@@ -1179,6 +1226,17 @@ async function collectNativeRuntimeFindings(opts: {
     const found = runtimeFinding(diagnostic, services);
     return found ? [found] : [];
   });
+  const startFindings = runtimeStartFindings(reply.start_refusals, services);
+  if (startFindings === null) {
+    return {
+      review: {
+        status: "unavailable",
+        code: "native_start_review_unavailable",
+      },
+      findings,
+    };
+  }
+  findings.push(...startFindings);
   // Native start refuses on this flag alone; never report ready against it.
   if (
     reply.plan.enrollment_compatible !== true &&
@@ -1425,6 +1483,9 @@ function reviewLine(review: NativePreflightReport["runtime_review"]): string {
     return "Runtime review: stopped early. More findings may appear after the blocker below is fixed.";
   }
   if (review.status === "unavailable") {
+    if (review.code === "native_start_review_unavailable") {
+      return "Runtime review: unavailable; update the selected native runtime to include start-admission checks. Only the CLI's own checks ran.";
+    }
     return "Runtime review: unavailable; the selected native runtime did not return a review. Only the CLI's own checks ran.";
   }
   if (review.code === "native_adaptation_invalid") {

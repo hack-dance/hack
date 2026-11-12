@@ -98,12 +98,14 @@ exit 1
       diagnostics: unknown[],
       plan: Record<string, unknown> = {},
       /** `"normalized"` scripts only the review of the adapted document. */
-      which: "both" | "normalized" = "both"
+      which: "both" | "normalized" = "both",
+      startRefusals: unknown = []
     ) =>
       await write(
         which === "both" ? "project-plan.out" : "project-plan-normalized.out",
         {
           plan_id: "f".repeat(64),
+          start_refusals: startRefusals,
           plan: {
             namespace: NAMESPACE,
             services: {},
@@ -952,4 +954,97 @@ test(
     });
   },
   SPAWN_TIMEOUT_MS * 2
+);
+
+const UDP_REASON =
+  "Native publishes only TCP ports; keep UDP publication on the Compose backend.";
+
+test("preflight shows the start driver's UDP refusal without copying runtime text of unknown provenance", async () => {
+  const f = await fixture({
+    services: { web: { image: IMAGE, ports: ["8787:3000/udp"] } },
+  });
+  for (const fixed of [true, false]) {
+    await f.review([], { services: { web: { active: true } } }, "both", [
+      {
+        code: "graph_port_publication",
+        service: "web",
+        message_fixed: fixed,
+        message: fixed ? UDP_REASON : PRIVATE,
+      },
+    ]);
+    const result = await preflight(f, { ...f.native, ...GRANT });
+    expect(result.code).toBe(1);
+    expect(result.report.ready).toBe(false);
+    expect(result.report.blockers).toContainEqual(
+      expect.objectContaining({
+        code: "graph_port_publication",
+        service: "web",
+        field: "ports",
+        message: fixed
+          ? UDP_REASON
+          : "Native startup refuses this configuration (graph_port_publication).",
+      })
+    );
+    expect(result.output).not.toContain(PRIVATE);
+    expect(await f.calls()).not.toContain("runtime up");
+  }
+});
+
+test("preflight cannot report ready when a runtime omits or corrupts start-admission review", async () => {
+  const f = await fixture({ services: { web: { image: IMAGE } } });
+  for (const startRefusals of [undefined, {}, [null]]) {
+    await f.reply("project-plan.out", {
+      plan_id: "f".repeat(64),
+      start_refusals: startRefusals,
+      plan: {
+        namespace: NAMESPACE,
+        enrollment_compatible: true,
+        services: { web: { active: true } },
+        diagnostics: [],
+      },
+    });
+    const result = await preflight(f, { ...f.native, ...GRANT });
+    expect(result.report.ready).toBe(false);
+    expect(result.report.runtime_review).toEqual({
+      status: "unavailable",
+      code: "native_start_review_unavailable",
+    });
+    const text = await cli(f, ["doctor", "--native-preflight"], {
+      ...f.native,
+      ...GRANT,
+    });
+    expect(text.output).toContain("update the selected native runtime");
+  }
+});
+
+test(
+  "foreground, detached and JSON native up retain the fixed UDP refusal and omit unrelated runtime text",
+  async () => {
+    const f = await fixture({
+      services: { web: { image: IMAGE, ports: ["8787:3000/udp"] } },
+    });
+    await scriptSourceShare(f);
+    await f.reply("runtime-up.err", {
+      code: "graph_port_publication",
+      message_fixed: true,
+      message: UDP_REASON,
+      service: "web",
+      output: PRIVATE,
+    });
+    for (const flags of [[], ["-d"], ["--json"]]) {
+      const result = await cli(f, ["up", ...flags], { ...f.native, ...GRANT });
+      expect(result.code).toBe(1);
+      expect(result.output).toContain("graph_port_publication");
+      expect(result.output).toContain(UDP_REASON);
+      expect(result.output).not.toContain(PRIVATE);
+      expect(result.output).not.toContain("startup was not confirmed");
+      if (flags.includes("--json")) {
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          ok: false,
+          error: { message: expect.stringContaining(UDP_REASON) },
+        });
+      }
+    }
+  },
+  SPAWN_TIMEOUT_MS
 );

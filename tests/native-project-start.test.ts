@@ -55,7 +55,10 @@ import {
   startNativeProject,
   verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
-import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import {
+  NativeRuntimeRequestError,
+  nativeRuntimeFailure,
+} from "../src/backends/native-runtime-client.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
@@ -2966,10 +2969,16 @@ test("final inspection failure reports uncertainty without echoing arbitrary fai
 test("a refusal before admission reports that nothing was created, with the runtime reason", async () => {
   const { opts, events } = await fixture();
   const invoke = opts.dependencies.invoke!;
+  const refusal = new NativeRuntimeRequestError({
+    message:
+      "Native graph startup was interrupted or failed (graph_image); inspect owned state before retrying. Service web: Pinned image architecture or implicit volumes are incompatible.",
+    nativeCode: "graph_image",
+    nativeMessage:
+      "Pinned image architecture or implicit volumes are incompatible.",
+    nativeService: "web",
+  });
   opts.dependencies.serve = async () => {
-    throw new ClosedCliError(
-      "Native graph startup was interrupted or failed (graph_image); inspect owned state before retrying. Service web: Pinned image architecture or implicit volumes are incompatible."
-    );
+    throw refusal;
   };
   opts.dependencies.invoke = async (request) => {
     if (request.args[1] === "inspect") {
@@ -2988,6 +2997,12 @@ test("a refusal before admission reports that nothing was created, with the runt
   expect((failure as Error).message).toBe(
     "Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed. Startup diagnostic: Native graph startup was interrupted or failed (graph_image). Service web: Pinned image architecture or implicit volumes are incompatible."
   );
+  expect((failure as Error).cause).toBeUndefined();
+  expect(nativeRuntimeFailure(failure)).toEqual({
+    code: "graph_image",
+    message: "Pinned image architecture or implicit volumes are incompatible.",
+    service: "web",
+  });
   expect(events).not.toContain("save");
   expect(events).not.toContain("remove");
   expect(events.at(-1)).toBe("cleanup");
@@ -5889,5 +5904,47 @@ test("shell values reach private stdin but never startup observations, saved rec
         expect(await readFile(path, "utf8")).not.toContain(privateValue);
       }
     }
+  }
+});
+
+test("startup cleanup retains only safe runtime detail, never original errors or inspection text", async () => {
+  for (const unreserved of [true, false]) {
+    const { opts } = await fixture();
+    const invoke = opts.dependencies.invoke!;
+    opts.dependencies.serve = async () => {
+      throw new NativeRuntimeRequestError({
+        message: "synthetic-private-original",
+        nativeCode: "graph_port_publication",
+        nativeMessage:
+          "Native publishes only TCP ports; keep UDP publication on the Compose backend.",
+        nativeService: "web",
+      });
+    };
+    opts.dependencies.invoke = async (request) => {
+      if (request.args[1] === "inspect") {
+        if (unreserved) {
+          throw new NativeRuntimeRequestError({
+            message: "synthetic-private-inspection",
+            nativeCode: "graph_unreserved",
+          });
+        }
+        throw new Error("synthetic-private-inspection");
+      }
+      return invoke(request);
+    };
+    const failure = await startNativeProject(opts).catch(
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(ClosedCliError);
+    expect((failure as Error).cause).toBeUndefined();
+    expect(Bun.inspect(failure) + JSON.stringify(failure)).not.toContain(
+      "synthetic-private"
+    );
+    expect(nativeRuntimeFailure(failure)).toEqual({
+      code: "graph_port_publication",
+      service: "web",
+      message:
+        "Native publishes only TCP ports; keep UDP publication on the Compose backend.",
+    });
   }
 });

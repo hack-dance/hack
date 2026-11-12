@@ -63,6 +63,7 @@ pub use dependency_hosts::dependency_address;
 #[cfg(target_os = "macos")]
 pub mod foreground;
 mod startup;
+pub(crate) use config::compose_start_refusals;
 mod startup_failure;
 #[cfg(any(target_os = "macos", test))]
 mod startup_logs;

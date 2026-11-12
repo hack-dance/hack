@@ -213,6 +213,9 @@ mod tests {
         state::write(&control.join("state.json"), &record).unwrap();
         let process: ProcessIdentity = serde_json::from_value(record["process"].clone()).unwrap();
         let bytes = fs::read(control.join("state.json")).unwrap();
+        // Observation never creates missing locks, even for a valid old journal.
+        assert!(Selection::capture_previous(&original, "old-boot", &process).is_err());
+        drop(state::Lock::acquire(&control).unwrap());
         let selected = Selection::capture_previous(&original, "old-boot", &process).unwrap();
         selected.verify_raw(&original).unwrap();
         assert_eq!(fs::read(control.join("state.json")).unwrap(), bytes);

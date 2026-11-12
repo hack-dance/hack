@@ -5,6 +5,7 @@ use super::*;
 use crate::provider::{identity, lifecycle, state::Owner};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::MetadataExt;
+mod dependencies;
 const FILE: &str = "dead-owner-cleanup.json";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -621,7 +622,7 @@ pub fn retire_recovered_publisher(
             && witness.matches_graph(&intent.original)
     });
     if intent.new_boot.as_deref() == Some(engine.guest().boot_id()) {
-        if let Some(witness) = legacy {
+        if let Some(witness) = legacy.clone() {
             if let Some(retired) = foreground::transport::Retired::acquire(candidate, run)? {
                 let control_root = witness.control_root().join("relay-control");
                 let control_lock = state::Lock::acquire_existing(&control_root)?;
@@ -711,6 +712,7 @@ pub fn retire_recovered_publisher(
             legacy.as_ref().map(|witness| witness.rebind()),
         )?;
     }
+    dependencies::finish(candidate, &engine, &receipt, &intent, legacy.as_ref())?;
     Ok(json!({"run":run,"publisher_retired":true,"data_retained":true}))
 }
 fn prepare(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, CandidateError> {
@@ -1106,6 +1108,8 @@ fn execute(candidate: &Candidate, run: &str, expected: &str) -> Result<Value, Ca
     intent.complete_sha256 = Some(selected(&cleaned)?);
     retain_interrupted_write(&root)?;
     state::write(&root.join(FILE), &intent)?;
+    #[cfg(test)]
+    fault_pause(&root, run, "dead-owner-after-completion")?;
     super::dependency_slots::recover_cleaned(
         candidate,
         &cleaned,

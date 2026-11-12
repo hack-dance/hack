@@ -3648,11 +3648,19 @@ has already restarted once, the same explicit command can select recovery on tha
 immediate successor boot. It requires the retained dead-owner identity, exact receipt
 hash, and bridge assignments belonging to the recorded previous boot. The recovery
 intent pins those assignments before effects and refuses replacements on retry.
+A remaining legacy device-rebound dependency reservation also requires the
+original recovery boot and host-pin witness. A further boot change refuses its
+release; no automatic recovery command for that state is implemented.
 Do not restart again to attempt this path: another boot rollover invalidates the
 previous-boot evidence. Old guest helper absence follows the verified boot transition;
 it is not recorded as a live helper acknowledgement.
 
-Recovery retains its own durable intent and completion evidence. It does not forge
+Recovery retains its own durable intent and completion evidence. A guest completion
+commit can precede host dependency-reservation release. Repeating `down --recover`
+finishes that release during publisher retirement, including after its publication
+paths have been archived. Success requires reservation absence under the exact
+retired owner, receipt and provider proofs; a changed proof retains evidence and
+refuses. It does not forge
 a relay acknowledgement. A normalized graph can explicitly retire its recovered
 publisher and select a fresh foreground restore using the retained data. Missing
 or replaced foreground evidence, pending graph journals, unfinished explicit page-cache release, changed

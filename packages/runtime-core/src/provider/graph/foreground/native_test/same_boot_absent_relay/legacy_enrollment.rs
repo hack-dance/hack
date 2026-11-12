@@ -327,7 +327,13 @@ fn exercise(previous_boot: bool, publisher_exit: &str) {
             graph::foreground_owner(&candidate, &runs[0]).unwrap()["dead_owner_recovery_complete"],
             false
         );
-        graph::recover_cleanup(&candidate, &runs[0], &expected).unwrap();
+        pause_recovery(
+            &candidate,
+            &runs[0],
+            &expected,
+            "dead-owner-after-completion",
+            deadline,
+        );
         assert_eq!(
             graph::foreground_owner(&candidate, &runs[0]).unwrap()["dead_owner_recovery_complete"],
             true

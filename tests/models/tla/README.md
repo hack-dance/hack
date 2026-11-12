@@ -1378,13 +1378,23 @@ a dead owner with an exited or still-live publisher on either admitted boot. `In
 frontend's group isolation; `StopPublisher` abstracts authenticated control plus
 kernel exit proof; `Recover` pins the exact old owner/coordinator/inventories;
 `ReleaseBridge` maps to confirmed publisher/guest-helper retirement and registry
-release, before `CleanupGuest` removes compute. `Retire` archives the foreground
-publication only after compute absence is verified. A failed or stale proof preserves capacity and evidence.
-The positive configuration explores 92 states. The two guard-removal controls
+release, before `CleanupGuest` removes compute. `Retire` represents command success
+after compute absence, publication retirement and dependency-reservation release
+are verified. Publication archival itself is abstracted and may precede dependency
+release in the implementation. `ReleaseDependencies` is separate from guest completion: an
+interrupted release is retried during `retire_recovered_publisher` under the exact
+retired owner, completion digest, provider lease and any enrolled host-pin guard. A failed or stale proof preserves capacity and evidence.
+The positive configuration explores 106 states. The two guard-removal controls
 must violate `NoUnsafeCleanup` at `ReleaseBridge` and `NoInterruptRace` at
 `Interrupt`. The `NeverComplete` control must reach `Retire`, establishing that
 the positive guards permit completion. A fifth configuration removes the
 frontend lifetime watch and must violate `NoSilentOrphan` at `FrontendLost`.
+A sixth configuration omits reservation release before `Retire` and must violate
+`NoStrandedReservation` with `reservation = TRUE`. Real reservation-file tests
+check capacity reuse, idempotent retry, stale-process refusal and preserved bytes
+when the caller fence fails. The predecessor VM fixture also pauses after the
+completion commit for its dependency-free project; it covers publication retry,
+not reservation release. The real-file reservation tests execute on macOS CI.
 Watch delivery plus stop initiation, and publisher exit plus exact child reaping,
 are atomic assumptions; native event/reaping tests exercise these boundaries.
 No fairness/eventual recovery is claimed.

@@ -1547,6 +1547,47 @@ test.each([
   expect(calls).not.toContain("recover-live-owner");
 });
 
+test("completed predecessor recovery retries host retirement before reporting stopped", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let reservationHeld = true;
+  let attempts = 0;
+  const invoke = async (request: { args: readonly string[] }) => {
+    calls.push(request.args[1]!);
+    if (request.args[1] === "foreground-owner") {
+      return {
+        ...ownerSelection("exited", "stopped-data-retained"),
+        dead_owner_recovery: "7".repeat(64),
+        dead_owner_recovery_complete: true,
+      };
+    }
+    if (request.args[1] === "retire-recovered-publisher") {
+      attempts++;
+      if (attempts === 1) {
+        throw new NativeRuntimeRequestError({
+          message: "reservation release interrupted",
+          nativeCode: "dependency_reservation",
+        });
+      }
+      reservationHeld = false;
+      return { run: run.run, publisher_retired: true, data_retained: true };
+    }
+    expect(request.args[1]).toBe("inspect");
+    return snapshot(true);
+  };
+  await expectClosedRefusal(
+    nativeProjectDown({ ...opts, recover: true, invoke }),
+    "reservation release interrupted"
+  );
+  expect(reservationHeld).toBe(true);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  const result = await nativeProjectDown({ ...opts, recover: true, invoke });
+  expect(result.status).toBe("stopped");
+  expect(reservationHeld).toBe(false);
+  expect(attempts).toBe(2);
+  expect(calls).not.toContain("recover-cleanup");
+});
+
 test("an unfinished stopped predecessor recovery must succeed before publication retirement", async () => {
   const opts = await fixture();
   const calls: string[] = [];

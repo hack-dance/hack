@@ -2213,7 +2213,12 @@ graph reusing the released port/bridge. No old receipt or coordinator is fabrica
 Both boot paths also interrupt the publication registry after its pending bytes
 are synchronized but before rename. The predecessor path additionally interrupts
 after the stopped receipt commits and before the recovery-intent completion
-digest, then verifies that cleanup resumes before publication retirement.
+digest, then verifies that cleanup resumes before publication retirement. It also
+interrupts after the completion digest commits and before dependency release;
+the dependency-free fixture verifies publication retirement across that boundary.
+It does not exercise a held dependency reservation. The macOS reservation-file
+unit tests cover that tail and its capacity reuse/refusal checks. The completion
+digest proves guest cleanup, not this host-side tail.
 They need a caller-prepared disposable capacity-one pool, a matching all-feature
 CLI, a pinned BusyBox image with `sh`, `httpd` and `sleep`, an exclusive host port
 and an external 300-second watchdog. Set `HACK_LOCAL_TEST_ROOT`,

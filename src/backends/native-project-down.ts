@@ -118,7 +118,7 @@ type ForegroundOwnerSelection = {
   /** Original receipt digest of an interrupted same-boot dead-owner recovery. */
   readonly liveOwnerRecovery: string | null;
   readonly deadOwnerRecovery: string | null;
-  /** Exact runtime completion commit, distinct from a stopped receipt phase. */
+  /** Guest completion commit. Retirement still finishes and verifies reservation release. */
   readonly deadOwnerRecoveryComplete: boolean;
   readonly deadOwnerRecoveryError: string | null;
 };

@@ -15,7 +15,8 @@ stateDiagram-v2
     intent --> bridge_retired : ReleaseBridge [proof current]
     bridge_retired --> intent : Recover [owner absent]
     bridge_retired --> stopped : CleanupGuest [proof current]
-    stopped --> retired : Retire [proof current]
+    stopped --> stopped : ReleaseDependencies [proof current]
+    stopped --> retired : Retire [no reservation]
     retired --> [*]
     state "bridge-retired" as bridge_retired
     note right of intent
@@ -31,5 +32,10 @@ stateDiagram-v2
     note right of retired
         Compute absent, data retained
         Foreground publication retired
+        Dependency reservations absent
         Dead frontend finalization recovered by down --recover
+    end note
+    note left of stopped
+        Guest completion can precede reservation release
+        Retirement retries release under the same proofs
     end note

@@ -54,7 +54,7 @@ export type LinuxTrustHost = {
   readonly inspectPath: (path: string) => Promise<ResolvedPathInfo | null>;
   /** Create a directory and its parents (mode 0700); false on failure. */
   readonly makeDir: (path: string) => Promise<boolean>;
-  /** Absolute path of an executable (PATH, then sbin/bin), or `null`. */
+  /** Vetted root-owned executable from fixed system bin/sbin paths, or `null`. */
   readonly resolveCommand: (name: string) => Promise<string | null>;
   /** The same vetted absolute sudo used by automatic execution. */
   readonly resolveSudo: () => Promise<string | null>;

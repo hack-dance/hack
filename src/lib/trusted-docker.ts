@@ -33,6 +33,8 @@ const ROOT_UID = 0;
 const GROUP_OR_WORLD_WRITE = 0o022;
 const WORLD_WRITE = 0o002;
 const ANY_EXECUTE = 0o111;
+const SYSTEM_TOOL_DIRS = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"] as const;
+const SYSTEM_TOOL_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 /** No user can create this (its parent is `/`), so no user plugins load. */
 export const FROZEN_DOCKER_CONFIG = "/nonexistent/hack-trusted-docker-config";
 const ENGINE_SELECTORS = [
@@ -122,6 +124,27 @@ export async function resolveTrustedDocker(
   return await firstVetted({
     fs,
     candidates: DOCKER_CANDIDATES,
+    accept: (facts) =>
+      facts.isFile &&
+      rootOwnedNotWritable(facts) &&
+      (facts.mode & ANY_EXECUTE) !== 0,
+  });
+}
+
+/**
+ * A distro-provided executable used by Linux trust, never selected from PATH.
+ * Apply the same root ownership, mode and ancestor policy as the Docker client.
+ */
+export async function resolveTrustedSystemTool(opts: {
+  readonly name: string;
+  readonly fs?: BinaryFs;
+}): Promise<string | null> {
+  if (!SYSTEM_TOOL_NAME.test(opts.name)) {
+    return null;
+  }
+  return await firstVetted({
+    fs: opts.fs ?? realFs,
+    candidates: SYSTEM_TOOL_DIRS.map((dir) => `${dir}/${opts.name}`),
     accept: (facts) =>
       facts.isFile &&
       rootOwnedNotWritable(facts) &&

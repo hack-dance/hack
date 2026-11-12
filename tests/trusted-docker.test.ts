@@ -7,6 +7,7 @@ import {
   FROZEN_DOCKER_CONFIG,
   resolveSystemDockerSocket,
   resolveTrustedDocker,
+  resolveTrustedSystemTool,
 } from "../src/lib/trusted-docker.ts";
 import { vettedHelperEnv } from "../src/lib/vetted-env.ts";
 
@@ -104,6 +105,56 @@ describe("resolveSystemDockerSocket", () => {
   test("no system socket (Docker Desktop / rootless): null", async () => {
     const { "/run/docker.sock": _socket, ...noSocket } = tree;
     expect(await resolveSystemDockerSocket(fakeFs(noSocket))).toBeNull();
+  });
+});
+
+describe("resolveTrustedSystemTool", () => {
+  test("certutil is selected only from fixed vetted system directories", async () => {
+    expect(
+      await resolveTrustedSystemTool({
+        name: "certutil",
+        fs: fakeFs({
+          ...tree,
+          "/usr/bin/certutil": DOCKER,
+          "/user/bin/certutil": { ...DOCKER, uid: 1000 },
+        }),
+      })
+    ).toBe("/usr/bin/certutil");
+    expect(
+      await resolveTrustedSystemTool({
+        name: "certutil",
+        fs: fakeFs({ ...tree, "/user/bin/certutil": { ...DOCKER, uid: 1000 } }),
+      })
+    ).toBeNull();
+  });
+
+  test.each([
+    [
+      "user-owned executable",
+      { "/usr/bin/certutil": { ...DOCKER, uid: 1000 } },
+    ],
+    [
+      "writable executable",
+      { "/usr/bin/certutil": { ...DOCKER, mode: 0o10_0777 } },
+    ],
+    ["not executable", { "/usr/bin/certutil": { ...DOCKER, mode: 0o10_0644 } }],
+    ["writable ancestor", { "/usr/bin": { ...DIR, mode: 0o4_0777 } }],
+  ])("refuses %s", async (_label, override) => {
+    expect(
+      await resolveTrustedSystemTool({
+        name: "certutil",
+        fs: fakeFs({ ...tree, "/usr/bin/certutil": DOCKER, ...override }),
+      })
+    ).toBeNull();
+  });
+
+  test("a tool name cannot escape the fixed directories", async () => {
+    expect(
+      await resolveTrustedSystemTool({
+        name: "../user/certutil",
+        fs: fakeFs(tree),
+      })
+    ).toBeNull();
   });
 });
 

@@ -1,13 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, X509Certificate } from "node:crypto";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -29,10 +22,7 @@ import {
   VERIFIED_TRUST_ANCHOR_SCRIPT,
   validateCaddyRootPem,
 } from "../src/lib/linux-trust.ts";
-import {
-  createLinuxTrustHost,
-  resolveExecutable,
-} from "../src/lib/linux-trust-host.ts";
+import { createLinuxTrustHost } from "../src/lib/linux-trust-host.ts";
 import {
   applyLinuxNssTrust,
   applyLinuxSystemTrust,
@@ -1111,23 +1101,6 @@ describe("real host boundary (finding 6)", () => {
       });
       await writeFile(join(dir, "missing.db"), "db");
       expect(await host.inspectPath(link)).toMatchObject({ isFile: false });
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("resolveExecutable returns an executable absolute path and skips others", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "hack-linux-trust-bin-"));
-    try {
-      expect(await resolveExecutable("hack-test-no-such-tool", dir)).toBeNull();
-      await writeFile(join(dir, "hack-test-tool"), "#!/bin/sh\nexit 0\n");
-      await chmod(join(dir, "hack-test-tool"), 0o644);
-      // Present but not executable: skipped.
-      expect(await resolveExecutable("hack-test-tool", dir)).toBeNull();
-      await chmod(join(dir, "hack-test-tool"), 0o755);
-      expect(await resolveExecutable("hack-test-tool", dir)).toBe(
-        join(dir, "hack-test-tool")
-      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

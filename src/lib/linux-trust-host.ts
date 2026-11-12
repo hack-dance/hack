@@ -1,59 +1,15 @@
-import { constants } from "node:fs";
-import {
-  access,
-  lstat,
-  mkdir,
-  readdir,
-  realpath,
-  stat,
-} from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { readTextFile } from "./fs.ts";
 import type { LinuxTrustHost } from "./linux-trust-setup.ts";
 import { resolveTrustedSudo, runTrustedSudo } from "./privileged-sudo.ts";
 import { exec } from "./shell.ts";
+import { resolveTrustedSystemTool } from "./trusted-docker.ts";
 import { vettedHelperEnv } from "./vetted-env.ts";
 
 const CERTUTIL_TIMEOUT_MS = 10_000;
-const FALLBACK_DIRS = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"] as const;
 const SPAWN_FAILED = { exitCode: 127, stdout: "" } as const;
-
-async function isExecutableFile(path: string): Promise<boolean> {
-  try {
-    const info = await stat(path);
-    if (!info.isFile()) {
-      return false;
-    }
-    await access(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Absolute path of `name`: the first executable regular file on PATH, then
- * the usual sbin/bin directories (tools such as update-ca-certificates live
- * in /usr/sbin, which a user PATH may omit). The returned path is the one
- * executed, so discovery and execution cannot disagree.
- */
-export async function resolveExecutable(
-  name: string,
-  pathEnv: string | undefined = process.env.PATH
-): Promise<string | null> {
-  const dirs = [
-    ...(pathEnv ?? "").split(delimiter).filter((dir) => isAbsolute(dir)),
-    ...FALLBACK_DIRS,
-  ];
-  for (const dir of dirs) {
-    const candidate = join(dir, name);
-    if (await isExecutableFile(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
-}
 
 /**
  * Real host boundary: reads files, runs `certutil` (by absolute path) as the
@@ -123,7 +79,7 @@ export function createLinuxTrustHost(opts?: {
         return false;
       }
     },
-    resolveCommand: async (name) => await resolveExecutable(name),
+    resolveCommand: async (name) => await resolveTrustedSystemTool({ name }),
     resolveSudo: async () => await resolveTrustedSudo(),
     exec: async (argv, input) => {
       try {

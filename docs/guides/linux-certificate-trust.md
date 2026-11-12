@@ -71,7 +71,8 @@ interpreter, locale-path and tool-selection variables are not inherited.
    PATH and C locale as the automatic path. If no sudo qualifies, Hack reports
    the missing tool without printing runnable root commands.
 3. **NSS databases** for Chrome, Chromium and Firefox (no root). With `certutil`
-   installed, Hack runs it by its resolved absolute path and adds the CA as a
+   installed as a root-owned executable in the fixed system bin/sbin directories,
+   Hack checks its ownership, modes and ancestors, runs that absolute path, and adds the CA as a
    trusted TLS issuer (trust attributes `C,,`), nickname `Hack Caddy Local CA`,
    to:
    - the shared user database Chromium uses: an existing `~/.pki/nssdb`, else an

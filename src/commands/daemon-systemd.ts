@@ -166,6 +166,17 @@ export async function startViaSystemdIfInstalled(
     logger.error({ message: untrusted });
     return 1;
   }
+  // The unit is a per-user singleton: starting (or repairing) it from a
+  // shell with another Hack home would start someone else's daemon, and
+  // this shell's would never become ready (HACK-2052).
+  const foreign = await describeStartForeignHome({
+    hackHome: dirname(hooks.paths.root),
+    deps,
+  });
+  if (foreign !== null) {
+    logger.error({ message: foreign });
+    return 1;
+  }
   const prepared = await prepareSystemdUnitForStart({
     status,
     unitPath,
@@ -203,6 +214,26 @@ export async function startViaSystemdIfInstalled(
     message: `systemd started hackd but it did not report ready yet | Check: hack daemon logs --tail 200 and ${JOURNAL_HINT}`,
   });
   return 1;
+}
+
+/**
+ * Null when the unit's effective Hack home ({@link readSystemdUnitHackHome})
+ * is `hackHome`; otherwise the refusal for `start`, with how to go on.
+ */
+async function describeStartForeignHome(opts: {
+  readonly hackHome: string;
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  const unitHome = await readSystemdUnitHackHome({ deps: opts.deps });
+  const ours = resolve(opts.hackHome);
+  if (unitHome.kind === "home" && unitHome.path === ours) {
+    return null;
+  }
+  const whose =
+    unitHome.kind === "home"
+      ? `it runs hackd for ${unitHome.path}, not ${ours}`
+      : `its Hack home could not be read (${unitHome.detail})`;
+  return `Not starting ${SYSTEMD_UNIT_NAME}: ${whose}. Start it from that Hack home, or remove the setting that points it there (systemctl --user cat ${SYSTEMD_UNIT_NAME} shows it) and run systemctl --user daemon-reload`;
 }
 
 /**

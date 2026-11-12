@@ -3469,3 +3469,28 @@ linuxTest(
     expect((await stop()).handled).toBe(true);
   }
 );
+
+linuxTest("start refuses a unit that serves another Hack home", async () => {
+  // Codex review: start checked PATH, programs and unit files, but not
+  // the effective Hack home, so it started another home's daemon.
+  const fake = fakeSystemd();
+  await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+  });
+  fake.unitEnvironment = "HACK_NO_INTERACTIVE=1 HACK_HOME=/srv/other-home";
+  fake.calls.length = 0;
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+  expect(fake.active).toBe(false);
+  // An unreadable home is refused too.
+  fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+  fake.passEnvironment = "HACK_HOME";
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  expect(fake.active).toBe(false);
+  // This shell's home: started.
+  fake.passEnvironment = "";
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(0);
+  expect(fake.active).toBe(true);
+});

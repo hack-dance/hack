@@ -109,7 +109,8 @@ interpreter, locale-path and tool-selection variables are not inherited.
    after that call. Hack accepts the remaining same-user race: a process
    running as you can, without Hack noticing, replace the directory, an
    ancestor or a database file after one check and restore it before the
-   next, or create a missing database file while a certutil call runs, so
+   next, replace a database file with one that reuses its device and inode
+   number, or create a missing database file while a certutil call runs, so
    certutil may write to a database other than the one Hack checked.
    After import or a trust change, Hack reads the stored certificate back and
    compares it with the validated CA.

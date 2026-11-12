@@ -21,8 +21,9 @@
  * signal handler never signals any process: a shell cannot tell atomically
  * whether a child pid is already reaped (and so possibly reused), so the
  * stdin reader is never cancelled by pid. After a signal it stops on its own,
- * at end of input (Hack closes stdin when it exits) or at the time limit, and
- * until then writes only to the temporary file, already unlinked.
+ * at end of input (Hack writes the input in full and closes the pipe) or at
+ * the time limit, and until then writes only to the temporary file, already
+ * unlinked.
  * `.` and `..` components are refused, and the file is synced before the
  * rename. Arguments are positional
  * (`/bin/sh -c SCRIPT hack-install BYTES SHA256 DEST MODE`), never

@@ -1096,6 +1096,33 @@ describe("applyLinuxNssTrust", () => {
     ).toBe(false);
   });
 
+  test("removal of a database file after export stops all writes", async () => {
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      dirs: { [userDb]: ["cert9.db", "key4.db"] },
+    });
+    const execute = host.exec;
+    const outcome = await nss({
+      ...host,
+      exec: async (argv, input) => {
+        const result = await execute(argv, input);
+        state.dirs.set(
+          userDb,
+          (state.dirs.get(userDb) ?? []).filter((name) => name !== "key4.db")
+        );
+        return result;
+      },
+    });
+    expect(outcome).toMatchObject({
+      databases: [
+        { status: "failed", reason: "key4.db was replaced or removed" },
+      ],
+    });
+    expect(
+      state.execs.some((a) => ["-A", "-M", "-D"].includes(a[3] ?? ""))
+    ).toBe(false);
+  });
+
   test("a database file that appears between certutil calls stops all writes", async () => {
     const { host, state } = createFakeHost({
       commands: ["certutil"],

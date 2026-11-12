@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { ensureDir, readTextFile, writeTextFile } from "../../../lib/fs.ts";
+import { readTextFile, writeTextFile } from "../../../lib/fs.ts";
 import { getString, isRecord } from "../../../lib/guards.ts";
 
 export type GatewayTokenRecord = {
@@ -62,7 +63,8 @@ export async function writeGatewayTokenStore(opts: {
   readonly store: GatewayTokenStore;
 }): Promise<void> {
   const dir = resolveGatewayDir({ rootDir: opts.rootDir });
-  await ensureDir(dir);
+  // Owner-only from creation: hackd appends here (HACK-2142).
+  await mkdir(dir, { recursive: true, mode: 0o700 });
   const path = resolveGatewayTokensPath({ rootDir: opts.rootDir });
   await writeTextFile(path, `${JSON.stringify(opts.store, null, 2)}\n`);
 }

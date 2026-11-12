@@ -170,3 +170,36 @@ test("planted entries in a repaired daemon directory are refused (HACK-2142)", a
   await secureDaemonDirectory({ root: daemonRoot });
   expect((await stat(daemonRoot)).mode & 0o777).toBe(0o700);
 });
+
+test("planted entries one level down (gateway/) are refused (HACK-2142)", async () => {
+  // Reviewer: hackd appends to gateway/audit.jsonl as well; a link planted
+  // in a group-writable gateway/ was not seen by the top-level check.
+  const hackHome = join(root, "home", ".hack");
+  const daemonRoot = join(hackHome, "daemon");
+  const gateway = join(daemonRoot, "gateway");
+  await mkdir(gateway, { recursive: true });
+  await chmod(join(root, "home"), 0o755);
+  await chmod(hackHome, 0o755);
+  await chmod(daemonRoot, 0o775);
+  await chmod(gateway, 0o775);
+  const victim = join(root, "victim.txt");
+  await writeFile(victim, "keep\n");
+  await symlink(victim, join(gateway, "audit.jsonl"));
+  await expect(secureDaemonDirectory({ root: daemonRoot })).rejects.toThrow(
+    `${join(gateway, "audit.jsonl")}, a symbolic link`
+  );
+  expect(await readFile(victim, "utf8")).toBe("keep\n");
+  // The subdirectory itself was made owner-only before its entries were read.
+  expect((await stat(gateway)).mode & 0o777).toBe(0o700);
+  // Hack creates nothing deeper: a nested directory is refused.
+  await rm(join(gateway, "audit.jsonl"));
+  await mkdir(join(gateway, "nested"));
+  await expect(secureDaemonDirectory({ root: daemonRoot })).rejects.toThrow(
+    "a nested directory"
+  );
+  // Hack's own files there are fine.
+  await rm(join(gateway, "nested"), { recursive: true });
+  await writeFile(join(gateway, "audit.jsonl"), "{}\n");
+  await writeFile(join(gateway, "tokens.json"), "{}\n");
+  await secureDaemonDirectory({ root: daemonRoot });
+});

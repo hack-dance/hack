@@ -1,6 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: "bun"
+    target-branch: "next"
     directories:
       - "/"
       - "/examples/next-app"

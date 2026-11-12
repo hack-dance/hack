@@ -25,6 +25,8 @@ async function stop(root: string): Promise<void> {
 
 for (const mode of [
   "ready",
+  "shell-names",
+  "shell-names-empty",
   "fail",
   "timeout",
   "launcher-loss",
@@ -56,8 +58,14 @@ for (const mode of [
       const code = await launcher.exited;
       const stdout = await new Response(launcher.stdout).text();
       const stderr = await new Response(launcher.stderr).text();
-      expect(stderr).toBe("");
-      if (mode === "ready") {
+      expect(stderr).toBe(
+        mode === "shell-names"
+          ? "Forwarding shell variables: A_TOKEN, Z_TOKEN.\n"
+          : mode === "shell-names-empty"
+            ? "Forwarding shell variables: (none).\n"
+            : ""
+      );
+      if (["ready", "shell-names", "shell-names-empty"].includes(mode)) {
         expect(code).toBe(0);
         expect(JSON.parse(stdout)).toEqual({
           ok: true,
@@ -97,7 +105,9 @@ for (const mode of [
           "down.before\nprocess.stop\ndown.after\n"
         );
         expect(await readFile(join(root, "stop-signals"), "utf8")).toBe(
-          mode === "ready" ? "0" : "1"
+          ["ready", "shell-names", "shell-names-empty"].includes(mode)
+            ? "0"
+            : "1"
         );
       }
     } finally {

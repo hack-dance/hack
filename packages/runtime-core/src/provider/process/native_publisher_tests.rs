@@ -172,7 +172,10 @@ fn real_publisher_probe() {
     unsafe {
         libc::signal(libc::SIGINT, caught as *const () as libc::sighandler_t);
     }
-    let root = std::env::temp_dir().join(format!("native-pub-{}", std::process::id()));
+    // Native stop rejects aliased ancestors; Unix sockets also need a short path.
+    let root = fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("native-pub-{}", std::process::id()));
     let mut child = NativePublisher::new(root);
     // SAFETY: retained direct child prevents PID reuse before reaping.
     assert_eq!(

@@ -21,7 +21,10 @@ fn publisher_crash_wakes_owner_and_confirms_cleanup_before_frontend_exit() {
     exercise("publisher");
 }
 fn exercise(cause: &str) {
-    let root = std::env::temp_dir().join(format!("owner-loss-{}-{cause}", std::process::id()));
+    // Use the same canonical, short socket parent as the native publisher probe.
+    let root = fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("owner-loss-{}-{cause}", std::process::id()));
     fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
     let mut parent = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", PROBE, "--nocapture"])

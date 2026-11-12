@@ -5,6 +5,7 @@ import {
   nativeLogFollowOptions,
 } from "./native-log-follow.ts";
 import { resumeNativeLogs } from "./native-log-restart.ts";
+import { selectNativeLogContainer } from "./native-log-selection.ts";
 import {
   inspectNativeProjectGraph,
   isNativeProviderBusy,
@@ -368,7 +369,15 @@ export async function followNativeProjectLogs(
       resumeNativeLogs({
         previous,
         signal,
-        select,
+        select: async (admissionSignal) =>
+          selectNativeLogContainer({
+            runtime: opts.runtime,
+            cwd: opts.scope.projectRoot,
+            service: selected.service,
+            selection: await select(),
+            signal: admissionSignal,
+            invoke: opts.invoke,
+          }),
         restarting: async () =>
           (await loadNativeRestartIntent(opts.scope)) !== null,
       }),

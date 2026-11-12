@@ -416,8 +416,13 @@ selection grants no authority. An advisory restart notice (authored projects) or
 the existing restart intent (adopted projects) allows up to 30 seconds of read-only
 waiting, without a mutation lease. A normal down does not enter this wait. Notices expire after the stop timeout plus 30 seconds (at most 330 seconds); publishing or retiring one never changes the
 lifecycle command result. A recent stale notice can cause a bounded wait, ending with `native_log_restart_unavailable`
-and exit 1. The same run is never replayed. A same-container Engine restart ends
-with `native_log_container_restarted` instead of silently changing generations.
+and exit 1. Reattachment requires a different container ID; an adopted restore may
+retain both its run ID and provider owner. The old reader supplies its admitted
+container, and a finite lease-free read selects the replacement. The new reader
+rechecks that exact container before requesting logs. A same-container Engine restart
+observed by the reader ends with `native_log_container_restarted`. If the reader
+already confirmed a stop before that restart, the follow ends as stopped; it never
+reattaches to the same container.
 
 Once the replacement Engine transport admits, one plain stderr marker line (or JSON
 `notice` with reason `native_log_restarted`) precedes the new container's output.

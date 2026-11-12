@@ -2,7 +2,7 @@
 use super::*;
 use crate::provider::engine::{Observer, log_follow};
 use crate::provider::graph::log_follow::{
-    LogFollowOptions, changed, require_ready, validate_state,
+    LogFollowOptions, admit_container, changed, require_ready, validate_state, write_selection,
 };
 
 pub(in crate::provider::graph) fn follow_logs(
@@ -56,6 +56,10 @@ pub(in crate::provider::graph) fn follow_logs(
     };
     let initial = state()?.ok_or_else(changed)?;
     let generation = initial["State"]["StartedAt"].clone();
+    admit_container(options, container)?;
+    if options.selection_only {
+        return write_selection(options, container, initial, &generation);
+    }
     log_follow::follow(
         &observer,
         container,

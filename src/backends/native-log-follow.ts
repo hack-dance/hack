@@ -15,6 +15,7 @@ import { watchLogConsumer } from "./native-log-consumer.ts";
 import { readLogFailure } from "./native-log-drain.ts";
 import {
   abortableLogRead,
+  isNewLogContainer,
   NativeLogRestartUnavailable,
 } from "./native-log-restart.ts";
 import {
@@ -210,7 +211,7 @@ export async function* nativeLogWireLines(
 export function nativeLogLineDecoder(input: {
   readonly service: string;
   readonly container?: string;
-  readonly onAttached?: () => Promise<void>;
+  readonly onAttached?: (container: string) => Promise<void>;
   readonly onLine: (
     stream: "stdout" | "stderr",
     text: string,
@@ -293,7 +294,7 @@ export function nativeLogLineDecoder(input: {
         (container === undefined || container === value.container)
       ) {
         container = value.container;
-        await input.onAttached?.();
+        await input.onAttached?.(container);
         return;
       }
       if (
@@ -318,7 +319,7 @@ export function nativeLogLineDecoder(input: {
       if (bytes.byteLength > 4096) {
         refused("native_log_wire_limit");
       }
-      await input.onAttached?.();
+      await input.onAttached?.(value.container);
       const selected = state[value.stream];
       if (
         !(selected.pending || selected.truncated) &&
@@ -469,7 +470,7 @@ function logOutput(
     },
     decoder: (
       selection: NativeLogFollowSelection,
-      onAttached: () => Promise<void>
+      onAttached: (container: string) => Promise<void>
     ) =>
       nativeLogLineDecoder({
         service: input.service,
@@ -640,7 +641,7 @@ async function runLogSession(
   let resumed = false;
   for (;;) {
     signal.throwIfAborted();
-    await readSelectedLogs({
+    const container = await readSelectedLogs({
       input,
       selection,
       opts: resumed ? { service: opts.service, tail: 1000 } : opts,
@@ -648,6 +649,7 @@ async function runLogSession(
       output,
       resumed,
     });
+    selection = { ...selection, container };
     signal.throwIfAborted();
     const resume = input.resume;
     const next = resume
@@ -658,7 +660,7 @@ async function runLogSession(
       await output.end(0, signal, "native_log_service_stopped");
       return 0;
     }
-    if (next.namespace !== selection.namespace || next.run === selection.run) {
+    if (!isNewLogContainer(selection, next)) {
       refused("native_log_restart_unavailable");
     }
     selection = next;
@@ -680,8 +682,11 @@ async function readSelectedLogs({
   signal: AbortSignal;
   output: ReturnType<typeof logOutput>;
   resumed: boolean;
-}): Promise<void> {
-  await withPinnedRuntimeBinary(
+}): Promise<string> {
+  const containerArgs = selection.container
+    ? ["--expect-container", selection.container]
+    : [];
+  return await withPinnedRuntimeBinary(
     { binary: input.runtime.binary, signal, refused },
     async (pin) => {
       await pin.check();
@@ -704,6 +709,7 @@ async function readSelectedLogs({
           selection.plan,
           "--expect-namespace",
           selection.namespace,
+          ...containerArgs,
           "--tail",
           String(opts.tail),
           ...(selection.native ? ["--native"] : []),
@@ -723,7 +729,9 @@ async function readSelectedLogs({
       const reader = ownLogReader(child, signal);
       const failure = readLogFailure(child.stderr, reader.exited, signal);
       let marked = !resumed;
-      const decoder = output.decoder(selection, async () => {
+      let attachedContainer: string | undefined;
+      const decoder = output.decoder(selection, async (container) => {
+        attachedContainer = container;
         if (!marked) {
           await output.restarted();
           marked = true;
@@ -744,6 +752,7 @@ async function readSelectedLogs({
         if (code !== 0 || detail?.code) {
           refused(detail?.code);
         }
+        return attachedContainer ?? refused("native_log_selection_changed");
       } catch (error) {
         if (!signal.aborted) {
           await decoder.finish();

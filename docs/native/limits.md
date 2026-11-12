@@ -38,8 +38,9 @@ The exact rules for each command are in
 - Querying log history with Loki. Native live logs select one service; services configured with a TTY are currently refused by name.
 - Unbounded restart following. Project restart re-admission waits at most 30 seconds
   and retains at most 1000 initial lines from the new container. Failure reports
-  `native_log_restart_unavailable`. Same-container Engine restarts still report
-  `native_log_container_restarted`; no generation is followed implicitly.
+  `native_log_restart_unavailable`. Same-container Engine restarts observed by
+  the reader report `native_log_container_restarted`; after an already confirmed
+  stop the follow ends as stopped. Neither case reattaches to that container.
 - Following a service before its graph is ready. Startup refuses with
   `native_log_selection_changed`.
 - Complete oversized lines. Lines over 64 Ki characters retain only that

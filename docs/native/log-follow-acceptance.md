@@ -32,15 +32,17 @@ the adopted fixture as well:
    service. Since and tail appear in the Engine request; TTY refuses by name.
 5. Keep one JSON follower through `restart`. Require one `notice` with reason
    `native_log_restarted`, then fresh-container lines, with no second start or
-   replay of the previous generation. Plain restart notices go to stderr. More
-   than 1000 startup lines may lose their oldest prefix by the documented bound.
+   replay of the previous generation. Plain restart notices go to stderr.
+   For adopted restore, record the retained run ID and replacement container ID;
+   the follower must reattach even when the run and provider owner are unchanged.
+   More than 1000 startup lines may lose their oldest prefix by the documented bound.
    Repeat with a stop that takes more than 30 seconds: reattach must still work
    within the 30-second wait after the old service ends.
 6. Run `down` with followers attached. Require prompt exit 0, one stderr stopped
    notice, `end.reason: "native_log_service_stopped"`, and no reader left. Compare
    down latency without making a performance claim from a single pair.
    Also kill the fixture's restart after the old service stops but before Ready,
-   then run `down` while its advisory marker remains unexpired. With no new run,
+   then run `down` while its advisory marker remains unexpired. With no replacement container,
    the follower waits at most 30 seconds and ends with
    `native_log_restart_unavailable`, exit 1.
 7. Produce a line over 64 Ki characters, a partial final line, and a timestamped

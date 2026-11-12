@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   hasLogRestart,
+  isNewLogContainer,
   publishLogRestart,
   resumeNativeLogs,
 } from "../src/backends/native-log-restart.ts";
@@ -14,8 +15,39 @@ const previous = {
   namespace: "c".repeat(64),
   plan: "d".repeat(64),
   native: true,
+  container: "1".repeat(64),
 };
-const next = { ...previous, run: "e".repeat(32), owner: "f".repeat(32) };
+const next = {
+  ...previous,
+  run: "e".repeat(32),
+  owner: "f".repeat(32),
+  container: "2".repeat(64),
+};
+test("adopted restore can retain run and owner after its restart intent retires", async () => {
+  const restored = { ...previous, native: false, container: next.container };
+  expect(
+    await resumeNativeLogs({
+      previous: { ...previous, native: false },
+      signal: new AbortController().signal,
+      select: async () => restored,
+      restarting: async () => {
+        throw new Error("retired intent must not be needed");
+      },
+    })
+  ).toEqual(restored);
+});
+test("run or owner changes cannot replay a container, and backend changes cannot reattach", () => {
+  expect(
+    isNewLogContainer(previous, { ...next, container: previous.container })
+  ).toBe(false);
+  expect(isNewLogContainer(previous, { ...next, native: false })).toBe(false);
+  expect(isNewLogContainer(previous, { ...next, container: undefined })).toBe(
+    false
+  );
+  expect(isNewLogContainer({ ...previous, container: undefined }, next)).toBe(
+    false
+  );
+});
 test("restart uses fresh admission, tolerates missing mapping during stop, and accepts a new owner", async () => {
   let calls = 0;
   expect(
@@ -34,7 +66,7 @@ test("restart uses fresh admission, tolerates missing mapping during stop, and a
     })
   ).toEqual(next);
 });
-test("down does not enter the restart wait and an unchanged run is never replayed", async () => {
+test("down does not enter the restart wait and an unchanged container is never replayed", async () => {
   let calls = 0;
   expect(
     await resumeNativeLogs({

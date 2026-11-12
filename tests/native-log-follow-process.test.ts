@@ -45,6 +45,8 @@ async function fixture(
     | "restart-wait"
     | "output-error"
     | "restart"
+    | "restored"
+    | "unchanged"
     | "normal"
     | "idle"
     | "blocked"
@@ -59,6 +61,10 @@ async function fixture(
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-log-process-"))
   );
+  const caseSelection =
+    mode === "restored"
+      ? { ...selection, native: false, container: undefined }
+      : selection;
   const binary = join(root, "runtime");
   const frontend = join(root, "frontend.ts");
   const wire = JSON.stringify({
@@ -100,7 +106,9 @@ if (${JSON.stringify(mode)} === "long-partial") {
   console.log(JSON.stringify(chunk));
   process.exit(0);
 }
-if (${JSON.stringify(mode)} !== "idle") { console.log(${JSON.stringify(wire)}); }
+const selectedWire = JSON.parse(${JSON.stringify(wire)});
+if (process.argv.includes("--from-start")) selectedWire.container = "9".repeat(64);
+if (${JSON.stringify(mode)} !== "idle") { console.log(JSON.stringify(selectedWire)); }
 if (${JSON.stringify(mode)} === "flood") {
   const chunk = JSON.parse(${JSON.stringify(wire)});
   chunk.data = Buffer.from("x".repeat(4095) + "\\n").toString("base64");
@@ -111,7 +119,7 @@ if (${JSON.stringify(mode)} === "flood") {
   }
   writeFileSync(root + "/offered-all", "yes");
 }
-if (["normal", "slow", "plain", "restart", "restart-wait"].includes(${JSON.stringify(mode)})) { process.exit(0); }
+if (["normal", "slow", "plain", "restart", "restored", "unchanged", "restart-wait"].includes(${JSON.stringify(mode)})) { process.exit(0); }
 `
   );
   await chmod(binary, 0o700);
@@ -140,7 +148,7 @@ const output = new Writable({ write(chunk, encoding, callback) {
   }
   process.stdout.write(chunk, callback);
 } });
-const code = await followNativeLogs({ runtime: { binary: ${JSON.stringify(binary)}, home: ${JSON.stringify(root)} }, cwd: ${JSON.stringify(root)}, selection: mode === "select-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : mode === "admission" ? async () => { throw new Error("private selection failure"); } : ${JSON.stringify(selection)}, resume: mode === "restart-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : mode === "restart" ? async () => ++attachments === 1 ? { ...${JSON.stringify(selection)}, run: "f".repeat(32), owner: "a".repeat(32) } : null : undefined, service: "web-2", tail: mode === "long-partial" ? 0 : 12, since: "2026-01-01T00:00:00Z", timestamps: mode === "normal", json: !["plain", "pipe"].includes(mode), project: "fixture", branch: "topic", stdout: mode === "pipe" ? process.stdout : output });
+const code = await followNativeLogs({ runtime: { binary: ${JSON.stringify(binary)}, home: ${JSON.stringify(root)} }, cwd: ${JSON.stringify(root)}, selection: mode === "select-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : mode === "admission" ? async () => { throw new Error("private selection failure"); } : ${JSON.stringify(caseSelection)}, resume: mode === "restart-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : ["restart", "restored", "unchanged"].includes(mode) ? async () => ++attachments === 1 ? { ...${JSON.stringify(caseSelection)}, ...(mode === "restart" ? { run: "f".repeat(32), owner: "a".repeat(32) } : {}), container: mode === "unchanged" ? ${JSON.stringify(container)} : "9".repeat(64) } : null : undefined, service: "web-2", tail: mode === "long-partial" ? 0 : 12, since: "2026-01-01T00:00:00Z", timestamps: mode === "normal", json: !["plain", "pipe"].includes(mode), project: "fixture", branch: "topic", stdout: mode === "pipe" ? process.stdout : output });
 process.exit(code);
 `
   );
@@ -232,6 +240,8 @@ test("fake runtime receives exact selection and emits Compose-shaped JSON lines"
       selection.plan,
       "--expect-namespace",
       selection.namespace,
+      "--expect-container",
+      selection.container,
       "--tail",
       "12",
       "--native",
@@ -478,30 +488,55 @@ test("closing a real output pipe reaps an idle reader without another service wr
   }
 });
 
-test("restart keeps one session, admits a fresh owner and emits one marker", async () => {
-  const f = await fixture("restart");
+for (const mode of ["restart", "restored"] as const) {
+  test(`${mode} keeps one session and emits one marker for the replacement container`, async () => {
+    const f = await fixture(mode);
+    try {
+      const events = (await new Response(f.child.stdout).text())
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(await f.child.exited).toBe(0);
+      expect(events.map((event) => event.type)).toEqual([
+        "start",
+        "log",
+        "notice",
+        "log",
+        "end",
+      ]);
+      expect(events[2].reason).toBe("native_log_restarted");
+      const args: string[] = JSON.parse(
+        await readFile(join(f.root, "args"), "utf8")
+      );
+      expect(args[args.indexOf("--run-id") + 1]).toBe(
+        mode === "restart" ? "f".repeat(32) : selection.run
+      );
+      expect(args[args.indexOf("--expect-container") + 1]).toBe("9".repeat(64));
+      expect(args[args.indexOf("--expect-owner") + 1]).toBe(
+        mode === "restart" ? "a".repeat(32) : selection.owner
+      );
+      expect(args[args.indexOf("--tail") + 1]).toBe("1000");
+      expect(args).not.toContain("--since");
+      expect(args).toContain("--from-start");
+    } finally {
+      await f.dispose();
+    }
+  });
+}
+
+test("session refuses an unchanged container before starting a second reader", async () => {
+  const f = await fixture("unchanged");
   try {
     const events = (await new Response(f.child.stdout).text())
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(await f.child.exited).toBe(0);
-    expect(events.map((event) => event.type)).toEqual([
-      "start",
-      "log",
-      "notice",
-      "log",
-      "end",
-    ]);
-    expect(events[2].reason).toBe("native_log_restarted");
-    const args: string[] = JSON.parse(
-      await readFile(join(f.root, "args"), "utf8")
-    );
-    expect(args[args.indexOf("--run-id") + 1]).toBe("f".repeat(32));
-    expect(args[args.indexOf("--expect-owner") + 1]).toBe("a".repeat(32));
-    expect(args[args.indexOf("--tail") + 1]).toBe("1000");
-    expect(args).not.toContain("--since");
-    expect(args).toContain("--from-start");
+    expect(await f.child.exited).toBe(1);
+    expect(events.map((event) => event.type)).toEqual(["start", "log", "end"]);
+    expect(events[2].reason).toBe("native_log_restart_unavailable");
+    expect(
+      JSON.parse(await readFile(join(f.root, "args"), "utf8"))
+    ).not.toContain("--from-start");
   } finally {
     await f.dispose();
   }

@@ -13,6 +13,8 @@ pub struct LogFollowOptions<'a> {
     pub timestamps: bool,
     pub from_start: bool,
     pub native: bool,
+    pub selection_only: bool,
+    pub expected_container: Option<&'a str>,
 }
 impl LogFollowOptions<'_> {
     pub fn validate(&self) -> Result<(), CandidateError> {
@@ -21,6 +23,9 @@ impl LogFollowOptions<'_> {
             || !super::hex(self.plan, 64)
             || !super::hex(self.namespace, 64)
             || self.tail > 1000
+            || self
+                .expected_container
+                .is_some_and(|id| !super::hex(id, 64))
             || (self.from_start && self.since.is_some())
             || self.service.is_empty()
             || self.service.len() > 128
@@ -142,6 +147,10 @@ fn imported(candidate: &Candidate, options: &LogFollowOptions<'_>) -> Result<(),
     };
     let initial = state()?.ok_or_else(changed)?;
     let generation = initial["State"]["StartedAt"].clone();
+    admit_container(options, container)?;
+    if options.selection_only {
+        return write_selection(options, container, initial, &generation);
+    }
     super::super::engine::log_follow::follow(
         &observer,
         container,
@@ -156,6 +165,47 @@ fn imported(candidate: &Candidate, options: &LogFollowOptions<'_>) -> Result<(),
             validate_state(state()?, &generation)
         },
     )
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn admit_container(
+    options: &LogFollowOptions<'_>,
+    container: &str,
+) -> Result<(), CandidateError> {
+    if options
+        .expected_container
+        .is_some_and(|expected| expected != container)
+    {
+        return Err(changed());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn write_selection(
+    options: &LogFollowOptions<'_>,
+    container: &str,
+    initial: serde_json::Value,
+    generation: &serde_json::Value,
+) -> Result<(), CandidateError> {
+    if !validate_state(Some(initial), generation)? {
+        return Err(changed());
+    }
+    // A finite admission read: no log socket and no frontend lifetime watcher.
+    use std::io::Write;
+    let mut output = std::io::stdout().lock();
+    serde_json::to_writer(
+        &mut output,
+        &serde_json::json!({
+            "version": 1, "kind": "native-log-selection",
+            "service": options.service, "container": container
+        }),
+    )
+    .map_err(|_| changed())?;
+    output
+        .write_all(b"\n")
+        .and_then(|_| output.flush())
+        .map_err(|_| changed())
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -223,8 +273,20 @@ mod tests {
             timestamps: false,
             from_start: false,
             native: false,
+            selection_only: false,
+            expected_container: None,
         };
         options.validate().unwrap();
+        admit_container(&options, &"e".repeat(64)).unwrap();
+        let pinned = LogFollowOptions {
+            expected_container: Some(&"e".repeat(64)),
+            ..options
+        };
+        admit_container(&pinned, &"e".repeat(64)).unwrap();
+        assert_eq!(
+            admit_container(&pinned, &"f".repeat(64)).unwrap_err().code,
+            "native_log_selection_changed"
+        );
         assert_eq!(
             since(
                 &LogFollowOptions {

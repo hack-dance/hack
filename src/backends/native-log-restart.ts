@@ -127,12 +127,28 @@ export function abortableLogRead<T>(
   });
 }
 
+/** Compare admitted compute, never the run ID retained across adopted restores. */
+export function isNewLogContainer(
+  previous: NativeLogFollowSelection,
+  next: NativeLogFollowSelection
+): boolean {
+  // Adopted restore retains the run and provider owner, but recreates compute.
+  // Same-container Engine restarts remain a named refusal, never a replay.
+  return (
+    next.namespace === previous.namespace &&
+    next.native === previous.native &&
+    previous.container !== undefined &&
+    next.container !== undefined &&
+    next.container !== previous.container
+  );
+}
+
 /** Re-admission supplies all authority. No mutation lease is held while waiting. */
 export async function resumeNativeLogs(input: {
   readonly previous: NativeLogFollowSelection;
   readonly signal: AbortSignal;
   readonly restarting: () => Promise<boolean>;
-  readonly select: () => Promise<NativeLogFollowSelection>;
+  readonly select: (signal: AbortSignal) => Promise<NativeLogFollowSelection>;
   readonly timeoutMs?: number;
   readonly intervalMs?: number;
 }): Promise<NativeLogFollowSelection | null> {
@@ -143,11 +159,8 @@ export async function resumeNativeLogs(input: {
   const fresh = async () => {
     input.signal.throwIfAborted();
     try {
-      const next = await abortableLogRead(input.select, signal);
-      return next.run !== input.previous.run &&
-        next.namespace === input.previous.namespace
-        ? next
-        : null;
+      const next = await abortableLogRead(() => input.select(signal), signal);
+      return isNewLogContainer(input.previous, next) ? next : null;
     } catch {
       input.signal.throwIfAborted();
       if (signal.aborted) {

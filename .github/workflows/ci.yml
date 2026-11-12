@@ -674,14 +674,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Prepare matching compiler for private file owner tests
         run: bun run build:config-compiler
-      # GitHub's Ubuntu image leaves /usr/local/bin and /opt (where some
-      # /usr/bin links point) writable by everyone. The hackd.service PATH
-      # checks refuse that, as they should on a real host (HACK-2142), so the
-      # daemon tests would only see the runner's layout. Make them
-      # owner-writable, as on a stock Ubuntu install.
-      - name: Harden runner PATH directories
+      # GitHub's Ubuntu image leaves files and directories under /usr/local
+      # and /opt (where some /usr/bin links point, such as /opt/microsoft)
+      # writable by everyone. The hackd.service PATH checks refuse that, as
+      # they should on a real host (HACK-2142), so the daemon tests would
+      # only see the runner's layout. Remove group/other write there (sticky
+      # directories excepted), as on a stock Ubuntu install, and list what
+      # changed.
+      - name: Harden runner PATH trees
         if: runner.os == 'Linux'
-        run: sudo chmod go-w /usr/local/bin /opt
+        run: |
+          sudo find /usr/local /opt -xdev -perm /022 \( -type f -o \( -type d ! -perm -1000 \) \) -print0 > "$RUNNER_TEMP/writable.list"
+          echo "removing group/other write from $(tr -cd '\0' < "$RUNNER_TEMP/writable.list" | wc -c) entries; first ones:"
+          tr '\0' '\n' < "$RUNNER_TEMP/writable.list" | head -20
+          sudo xargs -0 -r chmod go-w < "$RUNNER_TEMP/writable.list"
       # Runs check:bun-version and test:preflight as `bun run test` does, then
       # verifies that the shards (and, when pooled, the two pools) cover the
       # full test file set, the both-pool files once on each host.

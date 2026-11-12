@@ -112,6 +112,7 @@ exit 1
     join(stub, "project-plan.out"),
     JSON.stringify({
       plan_id: "f".repeat(64),
+      start_refusals: [],
       plan: {
         namespace: "c".repeat(64),
         compose_sha256: createHash("sha256")

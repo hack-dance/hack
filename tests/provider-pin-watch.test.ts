@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import pinnedManifest from "../packages/runtime-core/provider-pins.json";
 import {
   type Advisory,
   affecting,
   BOT_LOGIN,
   COMPONENTS,
   cell,
+  checkPinnedUrls,
   classify,
   delta,
   GitHub,
@@ -18,6 +20,7 @@ import {
   patched,
   plan,
   type Release,
+  readPinnedFiles,
   readPins,
   renderBody,
   SMOLVM_INTERFACES,
@@ -452,6 +455,9 @@ describe("provider pin watch", () => {
     }) {
       const calls: Call[] = [];
       const respond = (method: string, url: string): [number, unknown] => {
+        if (method === "HEAD") {
+          return [200, null];
+        }
         if (url.includes("/repos/smol-machines/smolvm/releases")) {
           return [200, options.smolvmReleases ?? []];
         }
@@ -499,6 +505,21 @@ describe("provider pin watch", () => {
           body: init?.body ? JSON.parse(String(init.body)) : undefined,
         });
         const [status, value] = respond(method, url);
+        if (method === "HEAD") {
+          const pin = [
+            pinnedManifest.smolvm,
+            pinnedManifest.docker,
+            pinnedManifest.buildx,
+            ...pinnedManifest.network_tools,
+          ].find((entry) => entry.url === url);
+          if (!pin) {
+            throw new Error("Unexpected pinned file.");
+          }
+          return new Response(null, {
+            status,
+            headers: { "content-length": String(pin.size_bytes) },
+          });
+        }
         return new Response(JSON.stringify(value), { status });
       }) as typeof fetch;
       return { calls, fetcher };
@@ -527,7 +548,7 @@ describe("provider pin watch", () => {
     });
     const behind = [release("v99.0.0", "Fix --mount-socket framing")];
     const writes = (calls: Call[]) =>
-      calls.filter((call) => call.method !== "GET");
+      calls.filter((call) => call.method !== "GET" && call.method !== "HEAD");
 
     test("the lookup asks for the watch label and the bot, and a dry run writes nothing", async () => {
       const api = fakeApi({ smolvmReleases: behind });
@@ -677,4 +698,196 @@ describe("provider pin watch", () => {
       expect(api.calls).toEqual([]);
     });
   });
+});
+
+describe("pinned download availability", () => {
+  test("every archive and guest URL is checked without a token, with bounded redirects", async () => {
+    const files = readPinnedFiles(
+      join(repository, "packages/runtime-core/provider-pins.json")
+    );
+    expect(files).toHaveLength(7);
+    const observed: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        expect(request.method).toBe("HEAD");
+        expect(request.headers.has("authorization")).toBe(false);
+        const path = new URL(request.url).pathname;
+        observed.push(path);
+        if (path === "/redirect") {
+          return Response.redirect("https://mirror.test/final", 302);
+        }
+        if (path === "/retired") {
+          return new Response(null, { status: 410 });
+        }
+        if (path === "/missing") {
+          return new Response(null, { status: 404 });
+        }
+        if (path === "/foreign") {
+          return Response.redirect("https://unlisted.test/final", 302);
+        }
+        if (path === "/downgrade") {
+          return Response.redirect("http://source.test/final", 302);
+        }
+        if (path === "/loop") {
+          return new Response(null, {
+            status: 302,
+            headers: { location: "/loop" },
+          });
+        }
+        const pin = files.find((entry) => new URL(entry.url).pathname === path);
+        return new Response(null, {
+          status: 200,
+          headers: { "content-length": String(pin?.sizeBytes ?? 5) },
+        });
+      },
+    });
+    const fetcher = ((input: string | URL | Request, init?: RequestInit) =>
+      fetch(
+        new URL(new URL(String(input)).pathname, server.url),
+        init
+      )) as typeof fetch;
+    try {
+      const available = await checkPinnedUrls(files, fetcher);
+      expect(available.every((entry) => entry.problem === null)).toBe(true);
+      expect(observed).toHaveLength(7);
+      const checks = await checkPinnedUrls(
+        ["redirect", "retired", "missing", "foreign", "downgrade", "loop"].map(
+          (path) => ({
+            url: `https://source.test/${path}`,
+            redirectHosts: ["mirror.test"],
+            sizeBytes: 5,
+          })
+        ),
+        fetcher
+      );
+      expect(checks.map((entry) => entry.problem)).toEqual([
+        null,
+        "HTTP 410: upstream no longer serves this pinned file",
+        "HTTP 404: upstream no longer serves this pinned file",
+        "redirect refused (host or scheme not pinned)",
+        "redirect refused (host or scheme not pinned)",
+        "redirect missing or limit exceeded",
+      ]);
+      expect(observed.filter((path) => path === "/loop")).toHaveLength(6);
+      const failed = checks.filter((entry) => entry.problem !== null);
+      const current = [delta(smolvm, "1.34.1", [])];
+      expect(plan(current, null, "2026-11-12", failed)).toMatchObject({
+        action: "create",
+        security: false,
+      });
+      expect(
+        plan(
+          current,
+          { number: 7, state: "closed", stateReason: "not_planned" },
+          "2026-11-12",
+          failed
+        ).action
+      ).toBe("update");
+      expect(renderBody(current, "2026-11-12", checks)).toContain(
+        "Pinned download availability"
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+test("HEAD length and failure kinds distinguish broken pins from transient failures", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/gone") {
+        return new Response(null, { status: 410 });
+      }
+      if (path === "/missing") {
+        return new Response(null, { status: 404 });
+      }
+      if (path === "/busy") {
+        return new Response(null, { status: 503 });
+      }
+      return new Response(null, {
+        status: 200,
+        headers: { "content-length": path === "/wrong" ? "6" : "5" },
+      });
+    },
+  });
+  const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/timeout") {
+      throw new DOMException("synthetic timeout", "TimeoutError");
+    }
+    return fetch(new URL(url.pathname, server.url), init);
+  }) as typeof fetch;
+  try {
+    const checks = await checkPinnedUrls(
+      ["good", "wrong", "gone", "missing", "busy", "timeout"].map((path) => ({
+        url: `https://source.test/${path}`,
+        sizeBytes: 5,
+        redirectHosts: [],
+      })),
+      fetcher
+    );
+    expect(checks.map((file) => file.kind)).toEqual([
+      "available",
+      "invalid",
+      "no_longer_served",
+      "no_longer_served",
+      "transient",
+      "transient",
+    ]);
+    expect(checks[1]?.problem).toContain(
+      "Content-Length differs from pinned size_bytes (5)"
+    );
+    const current = [delta(smolvm, "1.34.1", [])];
+    const invalid = checks.filter((entry) => entry.kind === "invalid");
+    expect(invalid).toHaveLength(1);
+    expect(
+      plan(
+        current,
+        { number: 7, state: "closed", stateReason: "not_planned" },
+        "2026-11-12",
+        invalid
+      ).action
+    ).toBe("none");
+    for (const check of checks.filter((entry) => entry.kind === "transient")) {
+      expect(check.problem).not.toContain("no longer serves");
+      for (const stateReason of ["completed", "not_planned"]) {
+        expect(
+          plan(
+            current,
+            { number: 7, state: "closed", stateReason },
+            "2026-11-12",
+            [check]
+          ).action
+        ).toBe("none");
+      }
+      expect(plan(current, null, "2026-11-12", [check]).action).toBe("none");
+      expect(
+        plan(
+          current,
+          { number: 7, state: "open", stateReason: null },
+          "2026-11-12",
+          [check]
+        ).action
+      ).toBe("update");
+    }
+    for (const check of checks.filter(
+      (entry) => entry.kind === "no_longer_served"
+    )) {
+      expect(
+        plan(
+          current,
+          { number: 7, state: "closed", stateReason: "not_planned" },
+          "2026-11-12",
+          [check]
+        ).action
+      ).toBe("update");
+    }
+  } finally {
+    server.stop(true);
+  }
 });

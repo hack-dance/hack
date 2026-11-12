@@ -159,11 +159,13 @@ import {
   requireCapturedNativeSourceWithinLimit,
   requireNativeSourceWithinLimit,
 } from "./native-project-source-size.ts";
+import { requireNativeStaticStartReview } from "./native-project-start-preflight.ts";
 import { reportNativeRestartPolicyNotices } from "./native-restart-policy-notices.ts";
 import {
   invokeNativeRuntime,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
+  retainNativeRuntimeFailure,
 } from "./native-runtime-client.ts";
 import {
   applyNativeRuntimeMetadata,
@@ -356,6 +358,7 @@ type Dependencies = {
   /** Value-free operator notices (for example credential expiry); stderr by default. */
   warn: (line: string) => void;
   review: typeof withNativeProjectReview;
+  staticReview: typeof requireNativeStaticStartReview;
   selectReview: typeof selectNativeProjectReviewIdentity;
   retainedImages: typeof selectNativeRetainedImages;
   serve: typeof serveNativeProjectGraph;
@@ -389,6 +392,7 @@ const DEFAULTS: Dependencies = {
     process.stderr.write(`${line}\n`);
   },
   review: withNativeProjectReview,
+  staticReview: requireNativeStaticStartReview,
   selectReview: selectNativeProjectReviewIdentity,
   retainedImages: selectNativeRetainedImages,
   serve: serveNativeProjectGraph,
@@ -1128,9 +1132,12 @@ function cleanupUnconfirmed(
     recordedRun !== undefined && RUN.test(recordedRun)
       ? ` The failed run ${recordedRun} is recorded as this project's run mapping.`
       : "";
-  return new ClosedCliError(
-    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
-  );
+  return retainNativeRuntimeFailure({
+    error: new ClosedCliError(
+      `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
+    ),
+    original: startupFailure,
+  });
 }
 /** Runtime process-wrapper refusals: service names and closed fields only. */
 function refusedProcesses(
@@ -1178,9 +1185,12 @@ function finalInspectionFailure(opts: {
     };
   }
   return {
-    error: new ClosedCliError(
-      `Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed.${startupDiagnostic(opts.serveFailure)}${refusedProcesses(opts.processRefusals)}`
-    ),
+    error: retainNativeRuntimeFailure({
+      error: new ClosedCliError(
+        `Native graph startup failed before any runtime state was reserved; nothing was created and no cleanup is needed.${startupDiagnostic(opts.serveFailure)}${refusedProcesses(opts.processRefusals)}`
+      ),
+      original: opts.serveFailure,
+    }),
     nothingReserved: true,
   };
 }
@@ -1986,6 +1996,18 @@ async function startNativeProjectAttempt(
     selectedDependencyFile !== undefined,
     buildServices
   );
+  await deps.staticReview({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    composeFile: opts.composeFile,
+    input,
+    profiles,
+    branch: opts.scope.branch,
+    deferredRestore: restore !== undefined,
+    buildServices,
+    invoke: deps.invoke,
+    signal: opts.signal,
+  });
   // A graph that captures source (bind mounts or a dependency cache) measures it
   // before hooks, image work or runtime start, so an oversized project refuses with
   // its size and largest paths. An image-only graph never reads source content.

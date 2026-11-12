@@ -3369,6 +3369,19 @@ fn loopback_ports_are_admitted_only_for_the_foreground_owner() {
             "execution_incompatible"
         };
         assert_eq!(code, Some(expected), "{ports}");
+        if check == "web" {
+            let review = project::plan(&candidate, fixture.options()).unwrap();
+            let start = config::loopback_publications(&review.plan, true).unwrap_err();
+            let preflight = review
+                .start_refusals
+                .iter()
+                .find(|e| e.code == start.code)
+                .unwrap();
+            assert_eq!(preflight.message, start.message);
+            assert!(preflight.message_fixed);
+            assert_eq!(preflight.service.as_deref(), Some("web"));
+            assert_eq!(review.plan_id, project::identity(&review.plan).unwrap());
+        }
     }
     let mut many = compose(&image, "marker", false);
     many["services"]["web"]["ports"] = json!(

@@ -171,6 +171,7 @@ export type NativeComposeCommandOptions = {
   readonly workdir?: string;
   readonly follow?: boolean;
   readonly tail?: number;
+  readonly since?: string;
   readonly logFormat?: LogOutputFormat;
   readonly unsupportedOptions?: boolean;
 };

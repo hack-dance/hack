@@ -316,8 +316,19 @@ missing ready files, expired timeouts and dead processes do not grant cleanup or
 replay. The strict Compose v1 reader and its artifact path remain unchanged.
 The macOS Bun frontend selects these owners through explicit native backend
 foreground `up`, owner-mediated `down` and `down --recover`, saved-run `ps`,
-finite `logs --no-follow` and noninteractive `exec`; installed live provider
+single-service `logs --follow`, finite `logs --no-follow` and noninteractive `exec`; installed live provider
 acceptance remains the gate.
+
+Live logs use a separate `graph logs-follow` reader over the existing Engine relay.
+It pins the admitted container and start generation through `ObservedGuest`, without
+a mutation lease or the serial foreground control loop. A stdin lifetime pipe ends
+the reader on frontend death. Bounded HTTP/multiplex decoding and output writes
+apply backpressure; stream EOF plus stopped/absent selection ends normally. A
+five-second stopped-service idle cutoff reports `native_log_stopped_idle` and
+does not claim a complete tail. Unexplained EOF
+or a changed generation reports a named refusal. These reads grant no cleanup
+authority. See [the command contract](../../docs/reference/native-authored-commands.md)
+for flags, output limits and remaining live Mac acceptance.
 
 Held startup admission can also publish the exact public source envelope in that
 excluded storage. It captures profiles, overlay and closed names-only metadata
@@ -372,7 +383,7 @@ source files, arguments, stdout or journal records.
 
 The Bun project frontend selects this consumer only through the explicit native
 backend macOS slices: foreground `up`, owner-mediated `down` and `down --recover`,
-saved-run `ps`, finite `logs --no-follow` and noninteractive `exec`; `run`,
+saved-run `ps`, single-service `logs --follow`, finite `logs --no-follow` and noninteractive `exec`; `run`,
 `restart`, detached startup and service subsets still refuse. Installed live
 provider acceptance of those slices remains the gate, and full network acceptance
 and the source/storage/routing/host contracts remain separate qualification gates.
@@ -498,7 +509,16 @@ whose vulnerable range contains a pinned version and whose fix the pin has not r
 issue carries the `security` label exactly while such an advisory exists. Not covered: advisories
 for components SmolVM bundles (libkrun, libkrunfw, the guest kernel and rootfs packages) or
 published only in the global advisory database. It never changes a pin; bumps are qualified by
-hand.
+hand. The workflow also checks every pinned download URL, including guest
+packages, with bounded unauthenticated HEAD requests and a comparison of a 200
+reply's `Content-Length` with `size_bytes`. Only 404 and 410 mean the pinned file
+is no longer served and can reopen an issue closed as not planned. Timeouts,
+other HTTP errors (including 403, 429 and 5xx), and a missing `Content-Length`
+are transient failures: they are reported but never create or reopen
+an issue by themselves, and an open issue is not closed while availability is
+unknown. Size mismatches and refused redirects are reported as invalid pins.
+Availability alone never authorizes archive use or changes pins. Alpine package
+revisions may be retired upstream.
 The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine
@@ -656,21 +676,28 @@ history format. Stable v4 uses its separate state and is unaffected.
 ## How a provider pin bump is qualified
 
 [`provider-pins.json`](provider-pins.json) pins SmolVM, the guest Docker engine and
-the BuildKit client by version and SHA-256. Bump about every four weeks, or sooner
+the BuildKit client by version, SHA-256 and exact `size_bytes`. Bump about every four weeks, or sooner
 for a security fix, so each bump stays small enough to review against upstream notes.
 
 1. Read every upstream release note since the current pin and record, for each
    provider interface the runtime uses (`machine` subcommands and flags, `SMOLVM_*`
    variables, the machine database and running configuration, the agent protocol,
    templates, the guest rootfs release), whether it changed and what was done.
-2. Update the pin, `artifact::{VERSION, ARCHIVE_SHA256}`, the expanded template
+2. Update each changed pin's SHA-256 and exact compressed `size_bytes` together;
+   measure the downloaded file rather than copying an HTTP header. Keep
+   `max_bytes` as a sanity ceiling. Update `artifact::{VERSION, ARCHIVE_SHA256}`, the expanded template
    digests in `disk_template::PINNED` (decode the archive's `*.ext4.zst` with an
    independent decoder and apply the `content_digest` definition), the network-tool
    packages when the guest Alpine release moves, and the audit lists in
    `config_audit.rs` for any new machine-record capability.
 3. On an Apple Silicon Mac, run [`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts)
    once with a bundle built from the current pin (baseline) and once with the bump,
-   each in its own empty private root. It checks the archive and signature, prepare,
+   each in its own empty private root. Supply `--provider-archive`,
+   `--engine-archive`, `--builder-archive` (the pinned host buildx file) and
+   `--network-tools` so all seven input files have their actual lengths checked
+   against the bundle's `size_bytes` before extraction or preparation. A correct
+   hash with a stale or missing length fails qualification. The builder file is
+   measured here without installing it. It checks the archive and signature, prepare,
    a prepared base built and verified (its overlay inventory), a pool without internet,
    template expansion and digests, exact disk identity, restart, down and up, network
    modes, the dependency-socket relay, Rosetta and a web-plus-database project, then
@@ -2306,12 +2333,16 @@ proofs. It exits zero with data retained and permits plain `up`. An external dow
 also produces the confirmed-stop closing line in the original foreground.
 
 
-A publisher-only exit is reported as a bounded, run-bound frontend notice once
+A publisher-only exit after readiness is reported as a bounded, run-bound frontend notice once
 its exact direct child has been reaped. It leaves the project's compute running
 and the authenticated owner available for `hack down`; it does not trigger a
 long guest cleanup or automatically recreate the publisher. `owner-status`
 reports retained port children as down, and ps/status preserve service rows and
-show that publication state. The frontend decodes notices after readiness,
+show that publication state. The owner enables notices only after flushing its
+readiness frame; startup reaping still records exit proof without emitting a
+notice. The frontend ignores a bounded, run-matching notice before readiness so
+it can await startup cleanup and report the native failure code and log tails.
+It decodes notices after readiness,
 including multiple frames in a chunk and partial frames across chunks. Notices
 and status are presentation, not cleanup or replacement authority. Notice delivery
 is best-effort: a frontend may close its stdout pipe before the owner reaps an

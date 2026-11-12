@@ -13,7 +13,7 @@ use std::{
 /// Alpine v3.24 `main`/`aarch64` packages, matching the pinned SmolVM agent rootfs
 /// (Alpine 3.24.4, apk-tools 3). Re-pin these with the rootfs whenever the SmolVM pin
 /// moves the guest to another Alpine release; `guest-network-tools.sh` checks the release.
-const PACKAGES: [(&str, &str); 4] = [
+pub(super) const PACKAGES: [(&str, &str); 4] = [
     (
         "iptables-1.8.13-r0.apk",
         "9d22aef2e74346e9d537f6dc964786ab14b35580e3ccc0e4001dc3a725e8fe77",

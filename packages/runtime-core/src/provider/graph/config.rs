@@ -167,6 +167,160 @@ fn port_refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     error("graph_port_publication", message)
 }
 
+/// File-local admission shared by read-only review and the foreground driver.
+/// This never resolves images or private inputs and cannot contact a provider.
+pub(crate) fn compose_start_refusals(plan: &project::PlanData) -> Vec<CandidateError> {
+    let mut errors = Vec::new();
+    if let Err(error) = loopback_publications(plan, true) {
+        errors.push(error);
+    }
+    if let Err(error) = declared_configuration(plan, true, true) {
+        errors.push(error);
+    }
+    if !plan.enrollment_compatible {
+        return errors;
+    }
+    let mut goals = plan
+        .services
+        .iter()
+        .filter(|(_, s)| s.active)
+        .map(|(name, service)| {
+            (
+                name.clone(),
+                if service.healthcheck.is_some() {
+                    Condition::Healthy
+                } else {
+                    Condition::Started
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for service in plan.services.values().filter(|s| s.active) {
+        for (name, edge) in &service.dependencies {
+            if goals.contains_key(name) {
+                match edge.condition.as_str() {
+                    "service_completed_successfully" => {
+                        goals.insert(name.clone(), Condition::Completed);
+                    }
+                    "service_healthy" => {
+                        goals.insert(name.clone(), Condition::Healthy);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+        if service.one_shot || service.dependency_cache.is_some() {
+            goals.insert(name.clone(), Condition::Completed);
+        }
+        if service.routing.is_some() {
+            goals.insert(name.clone(), Condition::Healthy);
+        }
+    }
+    let graph = match Graph::from_plan(plan, &goals) {
+        Ok(graph) => graph,
+        Err(error) => {
+            errors.push(error);
+            return errors;
+        }
+    };
+    if let Err(error) = routes::validate_plan(plan, &graph, true) {
+        errors.push(error);
+    }
+    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+        if let Err(error) = project::capabilities::effective(service.capabilities.as_ref()) {
+            errors.push(error.with_service(name));
+        }
+        if let Some(cache) = &service.dependency_cache {
+            if let Some(volume) = plan.volumes.get(&cache.volume) {
+                if let Err(error) = validate_disposable_cache(true, &volume.disposable_caches) {
+                    errors.push(error.with_service(name));
+                }
+            }
+        }
+        if let Err(error) = validate_readiness_role(service, graph.services[name].ready) {
+            errors.push(error.with_service(name));
+        }
+        if let Err(error) = validate_probe(service, graph.services[name].ready) {
+            errors.push(error.with_service(name));
+        }
+        if let Err(error) = super::restart_policy::admit(&super::restart_policy::Admission {
+            service,
+            ready: graph.services[name].ready,
+            // Private delivery and resolved host bindings are checked only at start.
+            managed_environment: false,
+            host_dependencies: !service.extra_hosts.is_empty(),
+        }) {
+            errors.push(error.with_service(name));
+        }
+    }
+    errors
+}
+
+fn validate_disposable_cache(shared: bool, directories: &[String]) -> Result<(), CandidateError> {
+    if shared && !directories.is_empty() {
+        return Err(error(
+            "graph_disposable_cache",
+            "A shared dependency cache volume cannot declare disposable cache directories.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_readiness_role(
+    service: &project::ServicePlan,
+    ready: Condition,
+) -> Result<(), CandidateError> {
+    if service.dependency_cache.is_some() && ready != Condition::Completed {
+        return Err(error(
+            "graph_cache_readiness",
+            "Dependency cache initializers require successful completion readiness.",
+        ));
+    }
+    if service.one_shot && ready != Condition::Completed {
+        return Err(error(
+            "graph_one_shot_readiness",
+            "One-shot services require successful completion readiness.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_probe(service: &project::ServicePlan, ready: Condition) -> Result<(), CandidateError> {
+    let Some(probe) = service
+        .healthcheck
+        .as_ref()
+        .and_then(|h| h.native_http.as_ref())
+    else {
+        return Ok(());
+    };
+    if !cfg!(feature = "native-http-probe") {
+        return Err(error(
+            "native_http_unavailable",
+            "Build the candidate with native-http-probe to run native HTTP checks.",
+        ));
+    }
+    probe.validate()?;
+    if ready == Condition::Completed {
+        return Err(error(
+            "native_http_readiness",
+            "Native HTTP requires a long-running service readiness goal.",
+        ));
+    }
+    if service.mounts.iter().any(|mount| {
+        mount.target == "/"
+            || mount.target == "/run"
+            || mount.target.starts_with("/run/hack-http-probe")
+    }) {
+        return Err(error(
+            "native_http_mount",
+            "Mount overlaps a reserved HTTP probe path.",
+        ));
+    }
+    Ok(())
+}
+
 /// Admit reviewed Compose `ports` of active services as owned host-loopback TCP
 /// publications. Only the foreground owner, which starts and retires the host
 /// publishers, admits them; every other path keeps refusing `ports` with
@@ -186,27 +340,30 @@ pub(super) fn loopback_publications(
             if port.protocol != "tcp" {
                 return Err(port_refused(
                     "Native publishes only TCP ports; keep UDP publication on the Compose backend.",
-                ));
+                )
+                .with_service(name));
             }
             if port.proposed_host_ip != "127.0.0.1" {
                 return Err(port_refused(
                     "Native publishes ports only on IPv4 loopback (127.0.0.1); IPv6 loopback publication is not available yet.",
-                ));
+                ).with_service(name));
             }
             let Some(host_port) = port.published else {
                 return Err(port_refused(
                     "Native requires an explicit published host port; an engine-assigned host port is not modeled.",
-                ));
+                ).with_service(name));
             };
             if service.network_mode != "project-networks" || service.networks.is_empty() {
                 return Err(port_refused(
                     "A published port requires a service attached to a project network.",
-                ));
+                )
+                .with_service(name));
             }
             if !host_ports.insert(host_port) {
-                return Err(port_refused(
-                    "Two active publications request the same host port.",
-                ));
+                return Err(
+                    port_refused("Two active publications request the same host port.")
+                        .with_service(name),
+                );
             }
             ports.push(LoopbackPort {
                 host_port,
@@ -224,6 +381,135 @@ pub(super) fn loopback_publications(
         ));
     }
     Ok(result)
+}
+
+/// File-local graph subset and reservation budgets. Image/source bindings are
+/// checked separately, after acquisition; this helper performs no I/O.
+fn declared_configuration(
+    plan: &project::PlanData,
+    loopback_ports: bool,
+    routing_enrolled: bool,
+) -> Result<(BTreeSet<String>, BTreeSet<String>), CandidateError> {
+    if plan.services.values().filter(|s| s.active).count() > MAX_SERVICES {
+        return Err(error(
+            "graph_budget",
+            "At most 32 services fit this driver profile; aggregate resource limits also apply.",
+        ));
+    }
+    let mut networks = BTreeSet::new();
+    let mut volumes = BTreeSet::new();
+    let mut total_memory = 0u64;
+    let mut total_cpus = 0f64;
+    for service in plan.services.values().filter(|s| s.active) {
+        if (!service.ports.is_empty() && !loopback_ports)
+            || service.labels.keys().any(|key| {
+                !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
+                    && !(service.one_shot && key == "hack.service.one-shot")
+                    // Inert hostname declarations carry no traffic; they never
+                    // reach the engine (graph labels are ownership-only).
+                    && !(service.inert_route_labels
+                        && service.routing.is_none()
+                        && matches!(key.as_str(), "caddy" | "caddy.tls"))
+                    // Plain metadata is reviewed with a warning and dropped here.
+                    && !crate::project::inert_metadata_label(key)
+                    && !(service.dependency_cache.is_some()
+                        && matches!(
+                            key.as_str(),
+                            "hack.dependencies.cache-volume"
+                                | "hack.dependencies.lockfiles"
+                                | "hack.dependencies.runtime-files"
+                                | "hack.dependencies.bootstrap"
+                        ))
+            })
+            // A local driver is reviewed with a warning and not applied; an
+            // external sink was already an error at review.
+            || service
+                .logging
+                .as_ref()
+                .is_some_and(|logging| logging.driver == "[unsupported]")
+            || service.platform.as_deref().is_some_and(|p| {
+                !(["linux/arm64", "linux/arm64/v8"].contains(&p)
+                    || (p == "linux/amd64" && service.amd64_emulation.is_some()))
+            })
+        {
+            return Err(unsupported());
+        }
+        if service.network_mode == "project-networks" {
+            if service.networks.is_empty()
+                || service.networks.len() > MAX_NETWORKS
+                || service.networks.iter().collect::<BTreeSet<_>>().len() != service.networks.len()
+            {
+                return Err(unsupported());
+            }
+            for network in &service.networks {
+                if !plan
+                    .networks
+                    .get(network)
+                    .is_some_and(|n| n.driver == "bridge")
+                {
+                    return Err(unsupported());
+                }
+                networks.insert(network.clone());
+            }
+        } else if service.network_mode != "none" || !service.networks.is_empty() {
+            return Err(unsupported());
+        }
+        for mount in &service.mounts {
+            if mount.subpath.as_deref().is_some_and(|value| {
+                mount.kind != "volume" || !project::valid_volume_subpath(value)
+            }) {
+                return Err(unsupported());
+            }
+            if mount.kind == "bind" {
+                continue;
+            }
+            if mount.kind != "volume" || !plan.volumes.contains_key(&mount.source) {
+                return Err(unsupported());
+            }
+            volumes.insert(mount.source.clone());
+        }
+        // Omitted limits share the already-admitted VM pool; only explicit limits
+        // count toward graph reservations. Docker represents omitted caps as zero.
+        let memory = service.limits.memory_bytes.unwrap_or(0);
+        let cpus = service.limits.cpus.unwrap_or(0.0);
+        if service
+            .limits
+            .memory_bytes
+            .is_some_and(|value| !(16 * 1024 * 1024..=MAX_MEMORY_BYTES).contains(&value))
+            || service
+                .limits
+                .cpus
+                .is_some_and(|value| !value.is_finite() || !(0.1..=2.0).contains(&value))
+            || service.limits.pids.is_some_and(|p| p > 128)
+            || service
+                .limits
+                .shared_memory_bytes
+                .is_some_and(|v| !(1..=1024 * 1024 * 1024).contains(&v))
+            || service
+                .stop_grace_period_nanos
+                .is_some_and(|n| n > 30_000_000_000)
+        {
+            return Err(error(
+                "graph_budget",
+                "A service exceeds the bounded graph profile.",
+            ));
+        }
+        // ShmSize is a tmpfs ceiling, not preallocated RSS. Its actual usage is
+        // already constrained by an explicit container memory cap or the VM pool.
+        total_memory += memory;
+        total_cpus += cpus;
+    }
+    if networks.len() > MAX_NETWORKS
+        || volumes.len() > MAX_VOLUMES
+        || total_memory > MAX_TOTAL_MEMORY_BYTES
+        || total_cpus > 4.0
+    {
+        return Err(error(
+            "graph_budget",
+            "Graph exceeds 32 networks, 16 volumes, four CPUs or the development guest memory reservation budget.",
+        ));
+    }
+    Ok((networks, volumes))
 }
 pub(super) fn prepare_delivery(
     inputs: ExecutionInputs,
@@ -254,25 +540,8 @@ pub(super) fn prepare_delivery(
     let plan = &inputs.review.plan;
     routes::validate_plan(plan, &graph, routing_enrolled)?;
     for (name, service) in plan.services.iter().filter(|(_, service)| service.active) {
-        if service.dependency_cache.is_some() && graph.services[name].ready != Condition::Completed
-        {
-            return Err(error(
-                "graph_cache_readiness",
-                "Dependency cache initializers require successful completion readiness.",
-            ));
-        }
-        if service.one_shot && graph.services[name].ready != Condition::Completed {
-            return Err(error(
-                "graph_one_shot_readiness",
-                "One-shot services require successful completion readiness.",
-            ));
-        }
-    }
-    if graph.services.len() > MAX_SERVICES {
-        return Err(error(
-            "graph_budget",
-            "At most 32 services fit this driver profile; aggregate resource limits also apply.",
-        ));
+        validate_readiness_role(service, graph.services[name].ready)?;
+        validate_probe(service, graph.services[name].ready)?;
     }
     let dependency_cache::Resolved {
         current: caches,
@@ -322,124 +591,19 @@ pub(super) fn prepare_delivery(
             restart_policies.insert(name.clone(), policy);
         }
     }
-    let mut networks = BTreeSet::new();
-    let mut volumes = BTreeSet::new();
-    let mut total_memory = 0u64;
-    let mut total_cpus = 0f64;
+    let (networks, volumes) = declared_configuration(plan, loopback_ports, routing_enrolled)?;
     for service in plan.services.values().filter(|s| s.active) {
-        if (!service.ports.is_empty() && !loopback_ports)
-            || service.labels.keys().any(|key| {
-                !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
-                    && !(service.one_shot && key == "hack.service.one-shot")
-                    // Inert hostname declarations carry no traffic; they never
-                    // reach the engine (graph labels are ownership-only).
-                    && !(service.inert_route_labels
-                        && service.routing.is_none()
-                        && matches!(key.as_str(), "caddy" | "caddy.tls"))
-                    // Plain metadata is reviewed with a warning and dropped here.
-                    && !crate::project::inert_metadata_label(key)
-                    && !(service.dependency_cache.is_some()
-                        && matches!(
-                            key.as_str(),
-                            "hack.dependencies.cache-volume"
-                                | "hack.dependencies.lockfiles"
-                                | "hack.dependencies.runtime-files"
-                                | "hack.dependencies.bootstrap"
-                        ))
-            })
-            // A local driver is reviewed with a warning and not applied; an
-            // external sink was already an error at review.
-            || service
-                .logging
-                .as_ref()
-                .is_some_and(|logging| logging.driver == "[unsupported]")
-            || service.image.as_deref().is_none_or(|v| !image_id(v))
-            || service.platform.as_deref().is_some_and(|p| {
-                !(["linux/arm64", "linux/arm64/v8"].contains(&p)
-                    || (p == "linux/amd64" && service.amd64_emulation.is_some()))
-            })
-        {
+        // Acquisition binds these inputs; a model-only review cannot grant them.
+        if service.image.as_deref().is_none_or(|v| !image_id(v)) {
             return Err(unsupported());
         }
-        if service.network_mode == "project-networks" {
-            if service.networks.is_empty()
-                || service.networks.len() > MAX_NETWORKS
-                || service.networks.iter().collect::<BTreeSet<_>>().len() != service.networks.len()
+        for mount in service.mounts.iter().filter(|m| m.kind == "bind") {
+            if (!mount.read_only && !source.is_some_and(|s| s.binding.shared.is_some()))
+                || !source.is_some_and(|s| s.paths.contains_key(&mount.source))
             {
                 return Err(unsupported());
             }
-            for network in &service.networks {
-                if !plan
-                    .networks
-                    .get(network)
-                    .is_some_and(|n| n.driver == "bridge")
-                {
-                    return Err(unsupported());
-                }
-                networks.insert(network.clone());
-            }
-        } else if service.network_mode != "none" || !service.networks.is_empty() {
-            return Err(unsupported());
         }
-        for mount in &service.mounts {
-            if mount.subpath.as_deref().is_some_and(|value| {
-                mount.kind != "volume" || !project::valid_volume_subpath(value)
-            }) {
-                return Err(unsupported());
-            }
-            if mount.kind == "bind" {
-                if (!mount.read_only && !source.is_some_and(|s| s.binding.shared.is_some()))
-                    || !source.is_some_and(|s| s.paths.contains_key(&mount.source))
-                {
-                    return Err(unsupported());
-                }
-                continue;
-            }
-            if mount.kind != "volume" || !plan.volumes.contains_key(&mount.source) {
-                return Err(unsupported());
-            }
-            volumes.insert(mount.source.clone());
-        }
-        // Omitted limits share the already-admitted VM pool; only explicit limits
-        // count toward graph reservations. Docker represents omitted caps as zero.
-        let memory = service.limits.memory_bytes.unwrap_or(0);
-        let cpus = service.limits.cpus.unwrap_or(0.0);
-        if service
-            .limits
-            .memory_bytes
-            .is_some_and(|value| !(16 * 1024 * 1024..=MAX_MEMORY_BYTES).contains(&value))
-            || service
-                .limits
-                .cpus
-                .is_some_and(|value| !value.is_finite() || !(0.1..=2.0).contains(&value))
-            || service.limits.pids.is_some_and(|p| p > 128)
-            || service
-                .limits
-                .shared_memory_bytes
-                .is_some_and(|v| !(1..=1024 * 1024 * 1024).contains(&v))
-            || service
-                .stop_grace_period_nanos
-                .is_some_and(|n| n > 30_000_000_000)
-        {
-            return Err(error(
-                "graph_budget",
-                "A service exceeds the bounded graph profile.",
-            ));
-        }
-        // ShmSize is a tmpfs ceiling, not preallocated RSS. Its actual usage is
-        // already constrained by an explicit container memory cap or the VM pool.
-        total_memory += memory;
-        total_cpus += cpus;
-    }
-    if networks.len() > MAX_NETWORKS
-        || volumes.len() > MAX_VOLUMES
-        || total_memory > MAX_TOTAL_MEMORY_BYTES
-        || total_cpus > 4.0
-    {
-        return Err(error(
-            "graph_budget",
-            "Graph exceeds 32 networks, 16 volumes, four CPUs or the development guest memory reservation budget.",
-        ));
     }
     let mut resources = BTreeMap::new();
     for (kind, entries) in [(Kind::Network, networks), (Kind::Volume, volumes)] {
@@ -452,12 +616,7 @@ pub(super) fn prepare_delivery(
             };
             // A shared dependency cache has consumers outside this graph; its
             // directories can never be selected through one graph's declaration.
-            if cache.is_some() && !disposable_caches.is_empty() {
-                return Err(error(
-                    "graph_disposable_cache",
-                    "A shared dependency cache volume cannot declare disposable cache directories.",
-                ));
-            }
+            validate_disposable_cache(cache.is_some(), &disposable_caches)?;
             let resource = Resource {
                 routing: None,
                 loopback_ports: Vec::new(),
@@ -677,29 +836,7 @@ pub(super) fn prepare_delivery(
             .as_ref()
             .and_then(|h| h.native_http.as_ref())
         {
-            if !cfg!(feature = "native-http-probe") {
-                return Err(error(
-                    "native_http_unavailable",
-                    "Build the candidate with native-http-probe to run native HTTP checks.",
-                ));
-            }
-            probe.validate()?;
-            if readiness[name] == Condition::Completed {
-                return Err(error(
-                    "native_http_readiness",
-                    "Native HTTP requires a long-running service readiness goal.",
-                ));
-            }
             launcher::identity(&config)?;
-            for mount in config["HostConfig"]["Mounts"].as_array().unwrap() {
-                let path = mount["Target"].as_str().unwrap_or("");
-                if path == "/" || path == "/run" || path.starts_with("/run/hack-http-probe") {
-                    return Err(error(
-                        "native_http_mount",
-                        "Mount overlaps a reserved HTTP probe path.",
-                    ));
-                }
-            }
             probes.insert(name.clone(), probe.clone());
             config["Healthcheck"] = json!({"Test":["NONE"]});
         } else if let Some(health) = &service.healthcheck {

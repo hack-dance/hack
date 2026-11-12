@@ -12,6 +12,32 @@ use std::{
 };
 const PROBE: &str = "provider::graph::foreground::lifetime_tests::lifetime_probe";
 
+/// Lives outside the signalled helper: a fatal SIGHUP skips the helper's Drop.
+/// Teardown uses its exact native identity and authenticated control, never PID kill.
+struct PublisherCleanup(std::path::PathBuf);
+impl Drop for PublisherCleanup {
+    fn drop(&mut self) {
+        if let Ok(bytes) = fs::read(self.0.join("ready.json")) {
+            if let Ok(identity) =
+                serde_json::from_slice::<crate::provider::identity::ProcessIdentity>(&bytes)
+            {
+                let stopped =
+                    crate::provider::publisher::stop(crate::provider::publisher::StopOptions {
+                        process: &identity,
+                        binary: &identity.executable,
+                        control: &self.0.join("pub/control"),
+                        token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    });
+                if stopped.is_err() {
+                    eprintln!("fixture publisher cleanup unconfirmed; retained fixture evidence");
+                    return;
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn frontend_loss_wakes_owner_and_confirms_native_publisher_cleanup() {
     exercise("frontend");
@@ -30,6 +56,7 @@ fn exercise(cause: &str) {
         .unwrap()
         .join(format!("owner-loss-{}-{cause}", std::process::id()));
     fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    let _cleanup = PublisherCleanup(root.clone());
     let mut parent = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", PROBE, "--nocapture"])
         .env("HACK_OWNER_LIFETIME_ROLE", "frontend")
@@ -64,7 +91,6 @@ fn exercise(cause: &str) {
     assert_eq!(stopped["publisher_absent"], true);
     drop(parent.stdin.take());
     assert!(parent.wait().unwrap().success());
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -96,7 +122,11 @@ fn lifetime_probe() {
     events.watch_frontend().unwrap();
     let mut publisher = NativePublisher::new(root.join("pub"));
     events.watch_child(&publisher.child).unwrap();
-    fs::write(root.join("ready.json"), b"{}").unwrap();
+    fs::write(
+        root.join("ready.json"),
+        serde_json::to_vec(publisher.identity()).unwrap(),
+    )
+    .unwrap();
     let crashed = std::env::var("HACK_OWNER_LIFETIME_CAUSE").as_deref() == Ok("publisher");
     if crashed {
         publisher.child.kill().unwrap();

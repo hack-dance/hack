@@ -62,7 +62,10 @@ mod volume_subpaths;
 pub use dependency_hosts::dependency_address;
 #[cfg(target_os = "macos")]
 pub mod foreground;
+#[cfg(any(target_os = "macos", test))]
+mod owner_loop;
 mod startup;
+pub(crate) use config::compose_start_refusals;
 mod startup_failure;
 #[cfg(any(target_os = "macos", test))]
 mod startup_logs;
@@ -147,9 +150,11 @@ mod restore;
 pub(in crate::provider) mod retained_startup;
 #[cfg(target_os = "macos")]
 pub use retained_startup::preflight as retained_startup_preflight;
+mod log_follow;
 mod restore_history;
 mod routes;
 mod service_logs;
+pub use log_follow::{LogFollowOptions, follow_logs};
 mod shutdown;
 pub use service_logs::{
     ServiceLogOptions, ServiceLogResult, ServiceSelection, service_logs, service_selection,

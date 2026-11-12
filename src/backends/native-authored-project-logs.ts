@@ -14,6 +14,10 @@ import {
   withPinnedRuntimeBinary,
 } from "./native-authored-runtime-binary.ts";
 import {
+  followNativeLogs,
+  nativeLogFollowOptions,
+} from "./native-log-follow.ts";
+import {
   invokeNativeRuntime,
   isNativeRuntimeNotRunning,
   type NativeRuntimeSelection,
@@ -35,16 +39,56 @@ export type NativeAuthoredLogs = {
   readonly stderr: string;
   readonly truncated: boolean;
 };
+/** Select without a mutation lease; normal down may retire the frontend mapping while reading. */
+export async function followNativeAuthoredProjectLogs(input: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeAuthoredProjectRunScope;
+  readonly service: string;
+  readonly tail?: number;
+  readonly since?: string;
+  readonly json?: boolean;
+  readonly project?: string;
+}): Promise<number> {
+  nativeLogFollowOptions(input);
+  if (input.runtime.home !== input.scope.nativeHome) {
+    return refused();
+  }
+  const receipt = await withNativeAuthoredProjectStatus(
+    input.scope,
+    async (saved) => {
+      const selected =
+        requireReadyServiceReceipt(saved, input.scope, input.service) ??
+        refused();
+      await saved.assertFresh();
+      return selected;
+    }
+  );
+  return await followNativeLogs({
+    ...input,
+    cwd: input.scope.projectRoot,
+    branch: input.scope.branch ?? undefined,
+    selection: {
+      run: receipt.review.provenance.run,
+      owner: receipt.owner,
+      namespace: receipt.review.provenance.namespace,
+      plan: receipt.review.review_id,
+      native: true,
+      container:
+        receipt.resources[`container:${input.service}`]?.id ?? undefined,
+    },
+  });
+}
 export function nativeAuthoredLogsOptions(
   service: unknown,
-  tail: unknown
+  tail: unknown,
+  follow = false
 ): service is string {
   return (
     typeof service === "string" &&
     SERVICE.test(service) &&
     typeof tail === "number" &&
     Number.isSafeInteger(tail) &&
-    tail >= 1 &&
+    tail >= (follow ? 0 : 1) &&
     tail <= 1000
   );
 }

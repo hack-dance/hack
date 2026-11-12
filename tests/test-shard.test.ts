@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fullPushPlan } from "../scripts/ci-pr-plan.ts";
 import { CI_JOBS } from "../scripts/prerelease-plan.ts";
 import {
   bunFilesRan,
@@ -895,7 +896,7 @@ type Workflow = {
       readonly "timeout-minutes"?: number;
       readonly strategy?: {
         readonly "fail-fast"?: boolean;
-        readonly matrix?: { readonly shard?: readonly number[] };
+        readonly matrix?: { readonly shard?: readonly number[] | string };
       };
       readonly steps: readonly {
         readonly name?: string;
@@ -936,6 +937,75 @@ describe("test shard per-file bun test process", () => {
       await writeFile(join(root, path), text);
     }
     return root;
+  }
+
+  async function suitePreloadFixture(rejectingSuite?: string): Promise<string> {
+    const root = await bunFixture();
+    for (const suite of FIXTURE_SUITES) {
+      const cwd = join(root, suite.cwd);
+      await writeFile(
+        join(cwd, "bunfig.toml"),
+        '[test]\npreload = ["./preload.ts"]\n'
+      );
+      await writeFile(
+        join(cwd, "preload.ts"),
+        [
+          'import { afterEach } from "bun:test";',
+          'import { writeFileSync } from "node:fs";',
+          `globalThis[Symbol.for("suite-preload")] = "${suite.id}";`,
+          "afterEach(() => {",
+          `  writeFileSync(new URL("./guard-receipt", import.meta.url), "${suite.id}");`,
+          suite.id === rejectingSuite
+            ? '  throw new Error("fixture preload guard failed");'
+            : "",
+          "});",
+        ].join("\n")
+      );
+      await writeFile(
+        join(cwd, "tests/preload.test.ts"),
+        [
+          'import { expect, test } from "bun:test";',
+          'import { writeFileSync } from "node:fs";',
+          'test("suite preload ran before the test", () => {',
+          `  expect(globalThis[Symbol.for("suite-preload")]).toBe("${suite.id}");`,
+          '  writeFileSync(new URL("./body-receipt", import.meta.url), "passed");',
+          "});",
+        ].join("\n")
+      );
+    }
+    return root;
+  }
+
+  for (const suite of FIXTURE_SUITES) {
+    for (const rejects of [false, true]) {
+      test(`${suite.id} suite preload ${rejects ? "guard failure fails the file" : "runs before the test and after its body"}`, async () => {
+        const root = await suitePreloadFixture(rejects ? suite.id : undefined);
+        const file = join(suite.cwd, "tests/preload.test.ts");
+        const { state, ended } = await runFixture({
+          files: [file],
+          runFile: bunTestFile({
+            repoRoot: root,
+            suites: FIXTURE_SUITES,
+            quiet: true,
+          }),
+        });
+        // The assertion in the body must pass before a teardown failure counts.
+        expect(
+          await Bun.file(join(root, suite.cwd, "tests/body-receipt")).text()
+        ).toBe("passed");
+        expect(
+          await Bun.file(join(root, suite.cwd, "guard-receipt")).text()
+        ).toBe(suite.id);
+        expect(ended).toBe("complete");
+        expect(state.results).toHaveLength(1);
+        expect(state.results[0]).toMatchObject({
+          file,
+          outcome: rejects ? "fail" : "pass",
+          exitCode: rejects ? 1 : 0,
+          filesRan: 1,
+        });
+      }, 30_000);
+    }
   }
 
   test("reports exit status and exactly one file from the suite directory", async () => {
@@ -999,7 +1069,10 @@ describe("test shard per-file bun test process", () => {
 describe("hosted test CI fan-in", () => {
   test("the shard matrix covers 1..n, keeps the suite setup and runs its own slice", async () => {
     const shardJob = (await ciWorkflow()).jobs["test-shard"];
-    const matrix = shardJob?.strategy?.matrix?.shard ?? [];
+    expect(shardJob?.strategy?.matrix?.shard).toBe(
+      "${{ fromJSON(needs.changes.outputs.test_shards) }}"
+    );
+    const matrix: number[] = JSON.parse(fullPushPlan().test_shards);
     const count = matrix.length;
     expect(count).toBeGreaterThan(POOLED_MACOS_SHARDS);
     expect(matrix).toEqual(Array.from({ length: count }, (_, i) => i + 1));
@@ -1010,7 +1083,7 @@ describe("hosted test CI fan-in", () => {
     // Full layout: every shard on macOS. Pooled: the macOS pool's shards on
     // macOS, the rest on Linux; the runner refuses a shard on the wrong host.
     expect(shardJob?.["runs-on"]).toBe(
-      `\${{ (needs.changes.outputs.test_layout == 'pooled' && matrix.shard > ${POOLED_MACOS_SHARDS}) && 'ubuntu-latest' || 'macos-15' }}`
+      `\${{ (needs.changes.outputs.draft == 'true' || (needs.changes.outputs.test_layout == 'pooled' && matrix.shard > ${POOLED_MACOS_SHARDS})) && 'ubuntu-latest' || 'macos-15' }}`
     );
     expect(shardJob?.["timeout-minutes"]).toBeLessThan(60);
     const steps = shardJob?.steps ?? [];
@@ -1065,7 +1138,7 @@ describe("hosted test CI fan-in", () => {
     );
   });
 
-  test("test gates on the job in scope, accepts cancellation and never skips failures", async () => {
+  test("test gates on the job in scope and rejects incomplete evidence", async () => {
     const workflow = await ciWorkflow();
     const fanIn = workflow.jobs.test;
     expect(fanIn?.name ?? "test").toBe("test");
@@ -1085,7 +1158,7 @@ describe("hosted test CI fan-in", () => {
     // [scope result, suite, focus, shard result, focus result, exit code]
     for (const [changes, suite, focus, shards, focused, exitCode] of [
       ["success", "true", "", "success", "success", 0],
-      ["success", "true", "", "cancelled", "success", 0],
+      ["success", "true", "", "cancelled", "success", 1],
       ["success", "true", "", "failure", "success", 1],
       ["success", "true", "", "skipped", "success", 1],
       ["success", "true", "", "", "success", 1],
@@ -1095,16 +1168,16 @@ describe("hosted test CI fan-in", () => {
       ["success", "true", "", "success", "failure", 1],
       // Focused scopes gate on the focus job; skipped shards are expected.
       ["success", "false", "docs", "skipped", "success", 0],
-      ["success", "false", "docs", "skipped", "cancelled", 0],
+      ["success", "false", "docs", "skipped", "cancelled", 1],
       ["success", "false", "docs", "skipped", "failure", 1],
       ["success", "false", "docs", "skipped", "skipped", 1],
       ["success", "false", "", "skipped", "success", 1],
       ["success", "", "", "skipped", "success", 1],
-      // A failed or skipped scope fails closed; a cancelled run does not.
+      // A failed or skipped scope fails closed; cancelled runs fail too.
       ["failure", "", "", "skipped", "skipped", 1],
       ["skipped", "", "", "skipped", "skipped", 1],
       ["", "", "", "skipped", "skipped", 1],
-      ["cancelled", "", "", "skipped", "skipped", 0],
+      ["cancelled", "", "", "skipped", "skipped", 1],
     ] as const) {
       const run = Bun.spawnSync(["bash", "-e", "-c", gate.run], {
         env: {
@@ -1131,9 +1204,7 @@ describe("hosted test CI fan-in", () => {
   });
 
   test("the prerelease gate requires the fan-in and every shard job by name", async () => {
-    const count =
-      (await ciWorkflow()).jobs["test-shard"]?.strategy?.matrix?.shard
-        ?.length ?? 0;
+    const count = JSON.parse(fullPushPlan().test_shards).length;
     const required: readonly string[] = CI_JOBS;
     expect(required).toContain("test");
     for (let shard = 1; shard <= count; shard += 1) {

@@ -530,7 +530,7 @@ hack logs [service] [options]
 | `--loki` | Force Loki backend (do not fall back to docker compose logs) |
 | `--services <csv>` | Filter Loki logs by service(s), comma-separated (e.g. api,www) |
 | `--query <logql>` | Raw LogQL selector/query (overrides auto selector built from project + services) |
-| `--since <time>` | Start time for Loki logs (RFC3339 or duration like 15m) |
+| `--since <time>` | Start time for Loki or native followed logs (RFC3339 or duration like 15m) |
 | `--until <time>` | End time for Loki logs (RFC3339 or duration like 15m) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -1634,8 +1634,8 @@ hack daemon <subcommand> [options]
 | `hack daemon metrics` | Show hackd metrics |
 | `hack daemon logs` | Show hackd logs |
 | `hack daemon clear` | Clear stale hackd pid/socket files |
-| `hack daemon install` | Install hackd as a launchd service (macOS) |
-| `hack daemon uninstall` | Uninstall hackd launchd service (macOS) |
+| `hack daemon install` | Install hackd as a login service (launchd on macOS, systemd user unit on Linux) |
+| `hack daemon uninstall` | Uninstall the hackd login service (launchd or systemd) |
 
 ### Options
 
@@ -1776,7 +1776,7 @@ hack daemon clear [options]
 
 ## `hack daemon install`
 
-Install hackd as a launchd service (macOS)
+Install hackd as a login service (launchd on macOS, systemd user unit on Linux)
 
 ### Usage
 
@@ -1788,17 +1788,17 @@ hack daemon install [options]
 
 | Option | Description |
 | --- | --- |
-| `--run-at-load` | Start hackd automatically on login |
-| `--no-run-at-load` | Do not start hackd automatically on login |
-| `--gui-only` | Only run in GUI sessions (default) |
-| `--no-gui-only` | Run in all session types (including SSH) |
+| `--run-at-load` | Start hackd automatically on login (macOS launchd) |
+| `--no-run-at-load` | Do not start hackd automatically on login (macOS launchd) |
+| `--gui-only` | Only run in GUI sessions (macOS launchd; default) |
+| `--no-gui-only` | Run in all session types, including SSH (macOS launchd) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
 
 ## `hack daemon uninstall`
 
-Uninstall hackd launchd service (macOS)
+Uninstall the hackd login service (launchd or systemd)
 
 ### Usage
 

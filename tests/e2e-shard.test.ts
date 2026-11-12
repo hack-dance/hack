@@ -222,7 +222,7 @@ describe("docker-e2e CI fan-in", () => {
     }
   });
 
-  test("docker-e2e accepts success, cancellation or an out-of-scope skip and never hides failures", async () => {
+  test("docker-e2e accepts success or an out-of-scope skip and rejects incomplete evidence", async () => {
     const workflow = await ciWorkflow();
     const fanIn = workflow.jobs["docker-e2e"];
     expect(fanIn?.name ?? "docker-e2e").toBe("docker-e2e");
@@ -230,14 +230,18 @@ describe("docker-e2e CI fan-in", () => {
     expect(fanIn?.if).toBe("${{ always() }}");
     const shardJob = workflow.jobs["docker-e2e-shard"];
     expect(shardJob?.needs).toBe("changes");
-    expect(shardJob?.if).toBe("${{ needs.changes.outputs.suite == 'true' }}");
+    expect(shardJob?.if).toBe(
+      "${{ needs.changes.outputs.docker_suite == 'true' && needs.changes.outputs.draft != 'true' }}"
+    );
     const gate = fanIn?.steps.find(
       (step) => step.name === "Reject failed or skipped docker-e2e shards"
     );
     expect(gate?.env).toEqual({
+      PR_DRAFT:
+        "${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}",
       CHANGES_RESULT: "${{ needs.changes.result }}",
       SCOPE: "${{ needs.changes.outputs.scope }}",
-      SUITE: "${{ needs.changes.outputs.suite }}",
+      SUITE: "${{ needs.changes.outputs.docker_suite }}",
       SHARD_RESULT: "${{ needs.docker-e2e-shard.result }}",
     });
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
@@ -248,7 +252,7 @@ describe("docker-e2e CI fan-in", () => {
     // [scope result, suite in scope, shard result, exit code]
     for (const [changes, suite, result, exitCode] of [
       ["success", "true", "success", 0],
-      ["success", "true", "cancelled", 0],
+      ["success", "true", "cancelled", 1],
       ["success", "true", "failure", 1],
       ["success", "true", "skipped", 1],
       ["success", "true", "", 1],
@@ -257,11 +261,11 @@ describe("docker-e2e CI fan-in", () => {
       ["success", "false", "skipped", 0],
       ["success", "false", "failure", 1],
       ["success", "", "skipped", 1],
-      // A failed or skipped scope fails closed; a cancelled run does not.
+      // A failed or skipped scope fails closed; cancelled runs fail too.
       ["failure", "false", "skipped", 1],
       ["skipped", "false", "skipped", 1],
       ["", "false", "skipped", 1],
-      ["cancelled", "", "skipped", 0],
+      ["cancelled", "", "skipped", 1],
     ] as const) {
       const run = Bun.spawnSync(["bash", "-e", "-c", gate.run], {
         env: {

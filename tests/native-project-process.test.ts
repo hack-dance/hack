@@ -3,7 +3,10 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serveNativeProjectGraph } from "../src/backends/native-project-process.ts";
-import { NATIVE_EXIT_DRAIN_BOUND_MS } from "../src/backends/native-runtime-client.ts";
+import {
+  NATIVE_EXIT_DRAIN_BOUND_MS,
+  NativeRuntimeRequestError,
+} from "../src/backends/native-runtime-client.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
@@ -17,10 +20,10 @@ const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 test.each([
   false,
   true,
-])("publisher exit notices are forwarded after readiness, including split frames (%s)", async (split) => {
+])("early publisher notices are ignored and later notices forwarded, including split frames (%s)", async (split) => {
   const event = `${JSON.stringify({ kind: "graph_publisher_exit", run, port: 18_080 })}\n`;
   const opts = await fixture(`
-    process.stdout.write(JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}) + "\\n" + ${JSON.stringify(split ? event.slice(0, 12) : event)});
+    process.stdout.write(${JSON.stringify(event)} + JSON.stringify({kind:"graph_foreground_ready",run:"${run}"}) + "\\n" + ${JSON.stringify(split ? event.slice(0, 12) : event)});
     await Bun.sleep(30);
     ${split ? `process.stdout.write(${JSON.stringify(event.slice(12))});` : ""}
     await Bun.sleep(50);
@@ -42,6 +45,57 @@ test.each([
   expect(notices).toEqual([expect.stringContaining("127.0.0.1:18080 is down")]);
   expect(notices[0]).toContain("Run hack down");
 });
+test.each([
+  false,
+  true,
+])("a pre-ready publisher notice preserves startup cleanup and diagnostics (%s)", async (earlyNotice) => {
+  const logs = [
+    { service: "web", stdout: "", stderr: "startup failed", truncated: false },
+  ];
+  const reply = JSON.stringify({
+    code: "graph_route_publisher",
+    startup_logs: { version: 1, services: logs },
+  });
+  const opts = await fixture(`
+    process.on("SIGTERM", async () => {
+      await Bun.write("terminated", "SIGTERM");
+      process.exit(91);
+    });
+    ${earlyNotice ? `console.log(JSON.stringify({kind:"graph_publisher_exit",run:"${run}",port:18080}));` : ""}
+    await Bun.sleep(150);
+    console.error(${JSON.stringify(reply)});
+    process.exit(2);
+  `);
+  const received: unknown[] = [];
+  const notices: string[] = [];
+  const diagnostics: unknown[] = [];
+  await expect(
+    serveNativeProjectGraph({
+      ...opts,
+      onReady: async () => {
+        throw new Error("must not become ready");
+      },
+      onStartupLogs: (tails) => {
+        received.push(tails);
+      },
+      onPublicationNotice: (notice) => {
+        notices.push(notice);
+      },
+      onExitDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+      },
+    })
+  ).rejects.toThrow("graph_route_publisher");
+  expect(received).toEqual([logs]);
+  expect(notices).toEqual([]);
+  expect(diagnostics).toEqual([
+    { exitCode: 2, nativeCode: "graph_route_publisher" },
+  ]);
+  expect(await Bun.file(join(opts.projectRoot, "terminated")).exists()).toBe(
+    false
+  );
+});
+
 async function fixture(program: string) {
   const root = await mkdtemp(join(tmpdir(), "native-process-"));
   roots.push(root);
@@ -784,5 +838,39 @@ test("a malformed process refusal list is dropped whole", async () => {
     }).catch(() => undefined);
     expect(diagnostics[0]?.processRefusals).toBeUndefined();
     expect(diagnostics[0]?.nativeCode).toBe("environment_user");
+  }
+});
+
+test("startup failure retains only the runtime's validated fixed detail for detached reporting", async () => {
+  for (const fixed of [true, false]) {
+    const reply = JSON.stringify({
+      code: "graph_port_publication",
+      message_fixed: fixed,
+      message: fixed
+        ? "Native publishes only TCP ports; keep UDP publication on the Compose backend."
+        : "synthetic-private-detail",
+      service: "web",
+    });
+    const opts = await fixture(
+      `console.error(${JSON.stringify(reply)}); process.exit(2);`
+    );
+    const failure = await serveNativeProjectGraph({
+      ...opts,
+      onReady: async () => {
+        throw new Error("must not become ready");
+      },
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(NativeRuntimeRequestError);
+    if (!(failure instanceof NativeRuntimeRequestError)) {
+      throw new Error("Missing structured failure");
+    }
+    expect(failure.nativeCode).toBe("graph_port_publication");
+    expect(failure.nativeService).toBe("web");
+    expect(failure.nativeMessage).toBe(
+      fixed
+        ? "Native publishes only TCP ports; keep UDP publication on the Compose backend."
+        : undefined
+    );
+    expect(String(failure)).not.toContain("synthetic-private-detail");
   }
 });

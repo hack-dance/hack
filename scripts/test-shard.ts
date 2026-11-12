@@ -521,6 +521,22 @@ async function resolveTarget(opts: {
   readonly args: readonly string[];
   readonly requireHost: boolean;
 }): Promise<ShardTarget> {
+  const selectionJson = process.env.HACK_TEST_SELECTION;
+  const selectedFiles: unknown = selectionJson
+    ? JSON.parse(selectionJson)
+    : undefined;
+  if (
+    selectedFiles !== undefined &&
+    !(
+      Array.isArray(selectedFiles) &&
+      selectedFiles.every((file) => typeof file === "string")
+    )
+  ) {
+    throw new ClosedCliError(
+      "test shard: selection must be a JSON string array."
+    );
+  }
+  const subset = selectedFiles as readonly string[] | undefined;
   const focusValue = optionValue(opts.args, "focus");
   if (focusValue !== undefined) {
     if (
@@ -536,6 +552,7 @@ async function resolveTarget(opts: {
       repoRoot: REPO_ROOT,
       count: 1,
       focus,
+      selectedFiles: subset,
     });
     return {
       label: `[test focus ${focus.join(",")}]`,
@@ -549,6 +566,7 @@ async function resolveTarget(opts: {
     const plan = await buildVerifiedPlan({
       repoRoot: REPO_ROOT,
       count: selection.count,
+      selectedFiles: subset,
     });
     return {
       label: `[test shard ${selection.index}/${selection.count}]`,
@@ -557,6 +575,26 @@ async function resolveTarget(opts: {
     };
   }
   const pooled = pooledSelection(selection);
+  if (process.env.HACK_TEST_DRAFT === "true") {
+    if (
+      pooled.pool !== "linux" ||
+      (opts.requireHost && process.platform !== "linux")
+    ) {
+      throw new ClosedCliError(
+        "test shard: draft tests require a Linux shard."
+      );
+    }
+    const plan = await buildVerifiedPlan({
+      repoRoot: REPO_ROOT,
+      count: pooled.selection.count,
+      selectedFiles: subset,
+    });
+    return {
+      label: `[draft Linux shard ${pooled.selection.index}/${pooled.selection.count}]`,
+      plan,
+      files: plan.shards[pooled.selection.index - 1] ?? [],
+    };
+  }
   if (opts.requireHost && process.platform !== poolPlatform(pooled.pool)) {
     throw new ClosedCliError(
       `test shard: pooled shard ${selection.index}/${selection.count} is in the ${pooled.pool} pool and must run on ${poolPlatform(pooled.pool)}, not ${process.platform}.`
@@ -566,6 +604,7 @@ async function resolveTarget(opts: {
     repoRoot: REPO_ROOT,
     count: pooled.selection.count,
     pool: pooled.pool,
+    selectedFiles: subset,
   });
   return {
     label: `[test shard ${selection.index}/${selection.count} ${pooled.pool} ${pooled.selection.index}/${pooled.selection.count}]`,

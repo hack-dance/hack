@@ -53,3 +53,19 @@ test("receipt port intent is unconfirmed until the current owner reports a compl
     expect(nativeObservedPorts(ports, value)).toEqual(ports);
   }
 });
+test("malformed or duplicated declared ports cannot become public observations", () => {
+  for (const bindings of [
+    null,
+    [{ host_port: 0, target: 8080 }],
+    [
+      { host_port: 18_080, target: 8080 },
+      { host_port: 18_080, target: 8080 },
+    ],
+  ]) {
+    expect(() =>
+      nativeDeclaredPorts({
+        web: { kind: "container", key: "web", loopback_ports: bindings },
+      })
+    ).toThrow("publication intent is invalid");
+  }
+});

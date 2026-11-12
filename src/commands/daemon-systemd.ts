@@ -431,6 +431,15 @@ export async function stopViaSystemdIfInstalled(opts: {
       pid: opts.pid,
       isPidInUnit: opts.isPidInUnit,
     }));
+  // `stop` runs the unit's ExecStop hooks: check what systemd has loaded
+  // first, and never run hooks Hack cannot vouch for (HACK-2052).
+  const hooksError = await checkSystemdLoadedUnitPaths({ unitPath, deps });
+  if (hooksError !== null) {
+    return {
+      ...none,
+      refused: `${hooksError}. To stop it without running its stop hooks, run: systemctl --user kill ${SYSTEMD_UNIT_NAME}`,
+    };
+  }
   const stopped = await systemdServiceAction({ action: "stop", deps });
   if (!stopped.ok) {
     return { handled: false, ownedPid, failed: stopped.error, refused: null };

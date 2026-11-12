@@ -1846,17 +1846,12 @@ export async function uninstallSystemdUnit(opts: {
   }
   const availability = await probeSystemdUserManager(opts.deps);
   if (availability.available) {
-    const disable = await opts.deps.run("systemctl", [
-      "--user",
-      "disable",
-      "--now",
-      SYSTEMD_UNIT_NAME,
-    ]);
-    if (disable.exitCode !== 0 && !isUnitMissingError(disable.stderr)) {
-      return {
-        ok: false,
-        error: `systemctl --user disable --now ${SYSTEMD_UNIT_NAME} failed: ${firstLine(disable.stderr) || `exit code ${disable.exitCode}`}`,
-      };
+    const disabled = await disableUnitSafely({
+      unitPath: opts.unitPath,
+      deps: opts.deps,
+    });
+    if (disabled !== null) {
+      return { ok: false, error: disabled };
     }
   }
   try {
@@ -1884,6 +1879,37 @@ export async function uninstallSystemdUnit(opts: {
     managerNotified: availability.available,
     reloadError,
   };
+}
+
+/**
+ * Disables the unit and stops it. `disable --now` runs the unit's ExecStop
+ * hooks, so when what systemd has loaded cannot be vouched for
+ * ({@link checkSystemdLoadedUnitPaths}) it is stopped without hooks
+ * (`kill`) instead: removing a bad unit never runs its programs
+ * (HACK-2052). Returns null, or the error.
+ */
+async function disableUnitSafely(opts: {
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  const untrusted = await checkSystemdLoadedUnitPaths({
+    unitPath: opts.unitPath,
+    deps: opts.deps,
+  });
+  const steps: readonly (readonly string[])[] =
+    untrusted === null
+      ? [["--user", "disable", "--now", SYSTEMD_UNIT_NAME]]
+      : [
+          ["--user", "disable", SYSTEMD_UNIT_NAME],
+          ["--user", "kill", SYSTEMD_UNIT_NAME],
+        ];
+  for (const args of steps) {
+    const result = await opts.deps.run("systemctl", args);
+    if (result.exitCode !== 0 && !isUnitMissingError(result.stderr)) {
+      return `systemctl ${args.join(" ")} failed: ${firstLine(result.stderr) || `exit code ${result.exitCode}`}`;
+    }
+  }
+  return null;
 }
 
 function isUnitMissingError(stderr: string): boolean {

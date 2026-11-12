@@ -531,8 +531,10 @@ linuxTest(
       managerNotified: true,
       reloadError: null,
     });
-    expect(fake.calls).toEqual([
-      "systemctl --user --no-pager show --property=Version",
+    // Read-only checks of what systemd loaded come first; then the trusted
+    // unit is disabled and stopped, removed, and systemd reloaded.
+    const mutating = fake.calls.filter((call) => !call.includes(" show "));
+    expect(mutating).toEqual([
       "systemctl --user disable --now hackd.service",
       "systemctl --user daemon-reload",
     ]);
@@ -2617,5 +2619,49 @@ linuxTest(
     expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
       "cannot read"
     );
+  }
+);
+
+linuxTest(
+  "stop and uninstall never run stop hooks Hack cannot vouch for",
+  async () => {
+    // Codex security review: `systemctl stop` and `disable --now` run ExecStop
+    // hooks, which were not checked before stopping.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const shared = join(root, "shared-hooks");
+    await mkdir(shared);
+    await chmod(shared, 0o777);
+    const hook = join(shared, "on-stop");
+    await writeFile(hook, "#!/bin/sh\n");
+    await chmod(hook, 0o755);
+    fake.extraExecLines = [
+      `ExecStop={ path=${hook} ; argv[]=${hook} ; ignore_errors=no }`,
+    ];
+    fake.active = true;
+    fake.calls.length = 0;
+    const stop = await stopViaSystemdIfInstalled({
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(stop.handled).toBe(false);
+    expect(stop.refused).toContain("systemctl --user kill hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+
+    // Uninstall still removes the unit, but stops it without hooks.
+    fake.calls.length = 0;
+    const removed = await uninstallSystemdUnit({ unitPath, deps: fake.deps });
+    expect(removed.ok).toBe(true);
+    expect(fake.calls).toContain("systemctl --user disable hackd.service");
+    expect(fake.calls).toContain("systemctl --user kill hackd.service");
+    expect(fake.calls).not.toContain(
+      "systemctl --user disable --now hackd.service"
+    );
+    expect(await Bun.file(unitPath).exists()).toBe(false);
   }
 );

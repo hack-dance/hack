@@ -144,6 +144,7 @@ fn wrapped_policy_rotates_only_intermediate_identities_under_exact_anchor_and_ch
 
 fn startup(generation: &str, services: &[&str]) -> Startup {
     Startup {
+        control_generation: None,
         control_only: false,
         guest_root: Some((1, 1)),
         control_root: "/tmp/unused".into(),

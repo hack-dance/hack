@@ -83,6 +83,43 @@ Both backends remain experimental. This table records the refusal boundary of th
 current slices; it is not a parity claim against the Compose owner and does not
 report installed live acceptance.
 
+## Native run journal
+
+The authored native graph journal records startup observations and cleanup phases;
+cleanup advances only after current ownership checks and the corresponding stop
+or removal proof.
+
+```mermaid
+---
+title: Native journal main paths
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Preparing
+  Preparing --> ReadyObserved: readiness observed
+  Preparing --> FailedRetained: startup failure retained
+  ReadyObserved --> StopIntent: owned stop admitted
+  FailedRetained --> StopIntent: recovery admitted
+  StopIntent --> Stopped: terminal state proven
+  Stopped --> RemovalIntent: removal admitted
+  RemovalIntent --> Removed: resource removal proven
+  Removed --> [*]
+  class Preparing live
+  class ReadyObserved ok
+  class FailedRetained fail
+  class StopIntent,RemovalIntent wait
+  class Stopped,Removed idle
+```
+
+These are actual journal phase names, not current health states. Every cleanup
+edge assumes the required current owner, boot, source and resource proofs. A failed
+or unknown observation retains evidence; an intent alone never proves a stopped
+or removed resource. `Removed` concerns compute resources and does not authorize
+persistent-data deletion. This view shows the main authored graph paths; cleanup
+can also follow an interrupted startup, and retries resume committed cleanup
+phases without rewinding them. The recovery sections below describe those checks.
+It does not model every Compose-file native publication protocol.
+
 ## Foreground `up`
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across

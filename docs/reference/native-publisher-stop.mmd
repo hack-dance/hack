@@ -1,0 +1,50 @@
+---
+title: Native foreground publisher shutdown
+---
+stateDiagram-v2
+    direction TB
+    [*] --> ready
+    ready --> enrolled : Interrupt
+    ready --> enrolled : FrontendLost [lifetime watch]
+    ready --> publisher_down : PublisherCrash [exact Child reaped]
+    publisher_down --> enrolled : Interrupt or SIGHUP
+    publisher_down --> enrolled : FrontendLost [lifetime watch]
+    publisher_down --> intent : Recover [owner absent]
+    state "publisher-down" as publisher_down
+    note left of publisher_down
+        Exit reported; published port down
+        Services stay running and observable
+        Run hack down for confirmed cleanup
+    end note
+    enrolled --> enrolled : StopPublisher
+    ready --> intent : Recover [owner absent]
+    enrolled --> intent : Recover [owner absent]
+    intent --> intent : StopPublisher [identity matches]
+    enrolled --> bridge_retired : ReleaseBridge [publisher absent]
+    intent --> bridge_retired : ReleaseBridge [proof current]
+    bridge_retired --> intent : Recover [owner absent]
+    bridge_retired --> stopped : CleanupGuest [proof current]
+    stopped --> stopped : ReleaseDependencies [proof current]
+    stopped --> retired : Retire [no reservation]
+    retired --> [*]
+    state "bridge-retired" as bridge_retired
+    note right of intent
+        Dead owner and pinned coordinator
+        Same or audited successor boot
+        Exact bridge and environment inventory
+        Changed evidence retains this intent
+    end note
+    note right of bridge_retired
+        Publisher and bridge helper absent
+        Capacity released before compute removal
+    end note
+    note right of retired
+        Compute absent, data retained
+        Foreground publication retired
+        Dependency reservations absent
+        Dead frontend finalization recovered by down --recover
+    end note
+    note left of stopped
+        Guest completion can precede reservation release
+        Retirement retries release under the same proofs
+    end note

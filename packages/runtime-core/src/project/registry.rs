@@ -454,6 +454,13 @@ mod tests {
     fn rejects_mutation_replacement_and_new_hardlink_during_read() {
         let fixture = Fixture::new();
         fixture.write("registry=https://registry.npmjs.org/");
+        // The replacement has the same length. Give the original a distinct
+        // timestamp so filesystems that coalesce immediate writes still exercise
+        // the metadata mutation check, without relying on a scheduling delay.
+        File::open(fixture.0.join(".npmrc"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+            .unwrap();
         assert!(
             read_checked(&fixture.0, || fixture
                 .write("registry=https://npm.pkg.github.com/"))

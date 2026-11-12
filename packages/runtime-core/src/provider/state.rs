@@ -213,6 +213,16 @@ pub fn read_bounded<T: serde::de::DeserializeOwned>(
 }
 
 pub fn write(path: &Path, value: &impl Serialize) -> Result<(), CandidateError> {
+    write_before_rename(path, value, &|| Ok(()))
+}
+
+/// Recheck an effect fence after syncing the pending bytes, before publication.
+/// A refused fence deliberately retains the synchronized pending journal.
+pub(crate) fn write_before_rename(
+    path: &Path,
+    value: &impl Serialize,
+    before_rename: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     let temporary = path.with_extension("pending");
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| CandidateError::new("invalid_receipt", e.to_string()))?;
@@ -224,6 +234,7 @@ pub fn write(path: &Path, value: &impl Serialize) -> Result<(), CandidateError> 
         .map_err(io)?;
     file.write_all(&bytes).map_err(io)?;
     file.sync_all().map_err(io)?;
+    before_rename()?;
     fs::rename(&temporary, path).map_err(io)?;
     File::open(path.parent().expect("receipt parent"))
         .map_err(io)?

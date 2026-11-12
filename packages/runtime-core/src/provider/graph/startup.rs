@@ -10,6 +10,10 @@ pub struct Startup {
     pub(crate) control_only: bool,
     pub(crate) guest_root: Option<(u64, u64)>,
     pub(crate) control_root: PathBuf,
+    /// New owner lifetimes never reuse an earlier lifetime's cleanup intent.
+    /// Missing means the exact legacy deterministic directory, without migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) control_generation: Option<String>,
     pub(crate) artifact: String,
     pub(crate) services: BTreeMap<String, Service>,
 }
@@ -106,7 +110,10 @@ pub(crate) enum Phase {
 }
 impl Startup {
     pub(super) fn valid(&self, receipt: &Receipt) -> bool {
-        self.guest_root.is_none_or(|(_, inode)| inode != 0)
+        self.control_generation
+            .as_deref()
+            .is_none_or(|value| hex(value, 32))
+            && self.guest_root.is_none_or(|(_, inode)| inode != 0)
             && self.control_root.is_absolute()
             && self.control_root.as_os_str().len() < 80
             && self
@@ -377,10 +384,12 @@ pub(super) fn attach(
 
 #[cfg(target_os = "macos")]
 mod runtime;
-#[cfg(target_os = "macos")]
-pub(super) use runtime::control_root;
+#[cfg(all(test, target_os = "macos"))]
+pub(super) use runtime::control_root as legacy_control_root;
 #[cfg(target_os = "macos")]
 pub use runtime::{Dependency, HostRelayRuntime, RefreshPolicy};
+#[cfg(target_os = "macos")]
+pub(super) use runtime::{control_root, process_control_root, receipt_control_root};
 
 /// Incomplete native dependency mutation cannot authorize a fresh execution.
 /// Observation and explicit owned cleanup remain independent of this gate.

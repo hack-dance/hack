@@ -402,7 +402,9 @@ go through `systemctl --user`, so a single manager owns the socket and pid file.
 cancels a restart systemd has scheduled after a crash. `stop` does not touch
 a unit whose effective environment serves a different Hack home from the shell's,
 or whose environment it cannot read with certainty (for example an
-`EnvironmentFile=` or a `PassEnvironment=` naming `HACK_HOME`, `HOME` or `PATH`).
+`EnvironmentFile=`, an `ExecSearchPath=`, a `PassEnvironment=` naming
+`HACK_HOME`, `HOME` or `PATH`, or an escaped quote or backslash in
+`Environment=`).
 The effective environment is built the way systemd builds it: the user manager's
 environment, then the unit's `Environment=` (drop-ins included), then
 `UnsetEnvironment=` last. In those cases `stop` exits 1 and prints
@@ -487,8 +489,10 @@ directory nobody else can write, as package managers install setuid tools.
 
 What systemd runs for the unit is an allowlist: exactly one `ExecStart` running
 `<hack> daemon start --foreground`, and no other `Exec*` setting. The program
-must be a hack executable: named `hack` or `hack-*`, resolving to a file named
-the same way or to a `#!` launcher. Any other program, such as an interpreter
+must be a hack executable: named `hack` or `hack-*`, resolving to a binary named
+the same way or to a `#!` launcher whose interpreter is an absolute path that
+passes the same ownership check (with no argument, or `env <program>`, which
+is looked up through the checked `PATH`). Any other program, such as an interpreter
 that would run a script named `daemon`, is unknown, and the unit is left as it is. A drop-in that
 adds `ExecStartPre=`, `ExecStop=`, an interpreter wrapper or a second
 `ExecStart` makes `install` and `start` refuse. `hack daemon stop` and

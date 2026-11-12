@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, lstatSync } from "node:fs";
 import { chmod, type FileHandle, open } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -55,7 +55,7 @@ export async function secureDaemonDirectory(opts: {
     );
   } catch (error: unknown) {
     throw new Error(
-      `hackd state directory ${opts.root} is not a directory of its own (${error instanceof Error ? error.message : String(error)}); remove or rename it and start hackd again`
+      describeUnopenableDirectory({ root: opts.root, uid, error })
     );
   }
   try {
@@ -81,6 +81,29 @@ export async function secureDaemonDirectory(opts: {
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Why the daemon directory could not be opened: one of this user's own
+ * directories without read permission gets the `chmod` to run; anything
+ * else (a link, another account's entry, not a directory) is not Hack's.
+ */
+function describeUnopenableDirectory(opts: {
+  readonly root: string;
+  readonly uid: number;
+  readonly error: unknown;
+}): string {
+  const detail =
+    opts.error instanceof Error ? opts.error.message : String(opts.error);
+  try {
+    const info = lstatSync(opts.root);
+    if (info.isDirectory() && (opts.uid < 0 || info.uid === opts.uid)) {
+      return `hackd state directory ${opts.root} could not be opened (${detail}); fix its permissions (chmod 700 ${opts.root}) and start hackd again`;
+    }
+  } catch {
+    // Described below.
+  }
+  return `hackd state directory ${opts.root} is not a directory of its own (${detail}); remove or rename it and start hackd again`;
 }
 
 /**

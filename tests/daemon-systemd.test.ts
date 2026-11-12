@@ -100,6 +100,8 @@ type Fake = {
   unsetEnvironment: string;
   /** `PassEnvironment=` as `systemctl show` prints it. */
   passEnvironment: string;
+  /** `ExecSearchPath=` as `systemctl show` prints it. */
+  execSearchPath: string;
   /** `FragmentPath=` (defaults to the managed unit path). */
   fragmentPath: string | null;
   /** `DropInPaths=` as `systemctl show` prints it. */
@@ -160,6 +162,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     environmentFiles: "",
     unsetEnvironment: "",
     passEnvironment: "",
+    execSearchPath: "",
     fragmentPath: null,
     dropInPaths: "",
     unitSearchPath: null,
@@ -240,7 +243,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     if (
       verb === "show" &&
       args.includes(
-        "--property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment"
+        "--property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment,ExecSearchPath"
       )
     ) {
       return Promise.resolve(
@@ -250,6 +253,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
             `EnvironmentFiles=${state.environmentFiles}`,
             `UnsetEnvironment=${state.unsetEnvironment}`,
             `PassEnvironment=${state.passEnvironment}`,
+            `ExecSearchPath=${state.execSearchPath}`,
             "",
           ].join("\n")
         )
@@ -445,7 +449,7 @@ linuxTest(
       "systemctl --user --no-pager show --property=Version",
       "systemctl --user --no-pager show --property=UnitPath",
       "systemctl --user daemon-reload",
-      "systemctl --user --no-pager show hackd.service --property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment",
+      "systemctl --user --no-pager show hackd.service --property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment,ExecSearchPath",
       "systemctl --user show-environment",
       "systemctl --user --no-pager show hackd.service --property=ExecCondition,ExecStartPre,ExecStart,ExecStartPost,ExecReload,ExecStop,ExecStopPost",
       "systemctl --user enable hackd.service",
@@ -3165,3 +3169,71 @@ linuxTest(
     expect(fake.active).toBe(true);
   }
 );
+
+linuxTest(
+  "escapes in the unit environment and ExecSearchPath= are refused",
+  async () => {
+    // Reviewer: `Environment="X=a\" PATH=/usr/bin"` is one variable X, but
+    // a quote-only word split read a PATH out of it.
+    const fake = fakeSystemd();
+    fake.unitEnvironment = '"X=a\\" PATH=/usr/bin"';
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toMatchObject({ error: expect.stringContaining("escape") });
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+    fake.unsetEnvironment = '"X=a\\" HACK_HOME"';
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toMatchObject({ error: expect.stringContaining("UnsetEnvironment") });
+    // ExecSearchPath= (systemd 250+) sets the service PATH: not checked
+    // here, so refused.
+    fake.unsetEnvironment = "";
+    fake.execSearchPath = join(root, "shared-bin");
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toMatchObject({ error: expect.stringContaining("ExecSearchPath") });
+  }
+);
+
+linuxTest("a #! launcher's interpreter line is checked", async () => {
+  // Reviewer: the kernel runs `<interpreter> [arg] <launcher> ...`; an
+  // extra script argument or a replaceable interpreter was not checked.
+  const fake = fakeSystemd();
+  await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+  });
+  const setLauncher = (text: string) => writeFile(program, text);
+  // Plain absolute interpreter and `env <name>`: accepted.
+  await setLauncher("#!/bin/sh\n");
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toBeNull();
+  await setLauncher("#!/usr/bin/env bash\nexec true\n");
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toBeNull();
+  // An extra script on the #! line runs code Hack has not checked.
+  await setLauncher("#!/bin/sh /srv/other/script.sh\n");
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+    "does not vouch for"
+  );
+  await setLauncher("#!/usr/bin/env -S bash /srv/other/script.sh\n");
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+    "does not vouch for"
+  );
+  // An interpreter in a directory others can write is refused.
+  const shared = join(root, "shared-tools");
+  await mkdir(shared);
+  const interpreter = join(shared, "runner");
+  await writeFile(interpreter, "binary");
+  await chmod(interpreter, 0o755);
+  await chmod(shared, 0o777);
+  await setLauncher(`#!${interpreter}\n`);
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+    shared
+  );
+  // A #! interpreter that is itself a script is not followed.
+  await chmod(shared, 0o755);
+  await writeFile(interpreter, "#!/bin/sh\n");
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+    "itself a script"
+  );
+});

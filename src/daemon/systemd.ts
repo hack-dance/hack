@@ -846,7 +846,7 @@ export async function readSystemdServiceEnvironment(opts: {
     "--no-pager",
     "show",
     SYSTEMD_UNIT_NAME,
-    "--property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment",
+    "--property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment,ExecSearchPath",
   ]);
   if (show.exitCode !== 0) {
     return {
@@ -858,6 +858,23 @@ export async function readSystemdServiceEnvironment(opts: {
     return {
       error: `${SYSTEMD_UNIT_NAME} reads an EnvironmentFile, whose PATH, HOME and HACK_HOME cannot be checked; move them into Environment= or remove the EnvironmentFile`,
     };
+  }
+  // ExecSearchPath= (systemd 250+) sets the service's PATH, between the
+  // manager environment and Environment=; Hack writes none.
+  if ((props.ExecSearchPath ?? "").length > 0) {
+    return {
+      error: `${SYSTEMD_UNIT_NAME} sets ExecSearchPath=, which Hack does not check; set PATH with Environment= instead`,
+    };
+  }
+  // `systemctl show` escapes quotes and backslashes inside a quoted value
+  // (`\"`, `\\`), which the word split here does not decode: an escape
+  // anywhere could shift where a PATH or HACK_HOME word starts.
+  for (const setting of ["Environment", "UnsetEnvironment"] as const) {
+    if ((props[setting] ?? "").includes("\\")) {
+      return {
+        error: `${SYSTEMD_UNIT_NAME} has an ${setting}= value with an escape Hack does not read; remove the backslash or quote from that value`,
+      };
+    }
   }
   const passed = splitEnvironmentWords(props.PassEnvironment ?? "");
   const passedKey = SERVICE_ENV_KEYS.find((key) => passed.includes(key));
@@ -882,31 +899,25 @@ export async function readSystemdServiceEnvironment(opts: {
       env[key] = value;
     }
   }
-  const error = applyUnitEnvironment({ env, props });
-  return error === null ? { env } : { error };
+  applyUnitEnvironment({ env, props });
+  return { env };
 }
 
 /**
  * Applies the unit's `Environment=` and then its `UnsetEnvironment=` to
- * `env` for the keys Hack reads. Null, or why an entry cannot be read.
+ * `env` for the keys Hack reads (escapes were refused before this).
  */
 function applyUnitEnvironment(opts: {
   readonly env: Partial<Record<ServiceEnvKey, string>>;
   readonly props: Readonly<Record<string, string>>;
-}): string | null {
+}): void {
   const { env, props } = opts;
-  const unreadable = (setting: string, word: string) =>
-    `${SYSTEMD_UNIT_NAME} has an ${setting}= entry Hack cannot read (${word})`;
   for (const word of splitEnvironmentWords(props.Environment ?? "")) {
     const eq = word.indexOf("=");
     const name = eq > 0 ? word.slice(0, eq) : "";
-    if (!isServiceEnvKey(name)) {
-      continue;
+    if (isServiceEnvKey(name)) {
+      env[name] = word.slice(eq + 1);
     }
-    if (word.includes("\\")) {
-      return unreadable("Environment", word);
-    }
-    env[name] = word.slice(eq + 1);
   }
   for (const word of splitEnvironmentWords(props.UnsetEnvironment ?? "")) {
     const eq = word.indexOf("=");
@@ -914,15 +925,11 @@ function applyUnitEnvironment(opts: {
     if (!isServiceEnvKey(name)) {
       continue;
     }
-    if (word.includes("\\")) {
-      return unreadable("UnsetEnvironment", word);
-    }
     // `NAME=VALUE` removes only that exact assignment.
     if (eq < 0 || env[name] === word.slice(eq + 1)) {
       delete env[name];
     }
   }
-  return null;
 }
 
 /** The words of a `systemctl show` environment list (quotes removed). */
@@ -2087,18 +2094,22 @@ function isHackExecutableName(path: string): boolean {
  * which no Hack installation or checkout ships and Hack never checks.
  *
  * Accepted: a program named `hack`/`hack-*` whose resolved file is either
- * named the same way (a compiled binary, a Homebrew or `dist/hack` link)
- * or a `#!` script (the local-development shim, a package manager's
- * launcher): the kernel then runs the interpreter on that very file, whose
- * chain {@link checkServiceExecutableTrusted} checks. Anything else is
+ * a binary named the same way (a compiled binary, a Homebrew or
+ * `dist/hack` link) or a `#!` launcher (the local-development shim, a
+ * package manager's launcher) whose interpreter line Hack can vouch for
+ * ({@link checkShebangInterpreter}). The resolved file's own chain is
+ * checked by {@link checkServiceExecutableTrusted}. Anything else is
  * unknown: refused, and the unit is left as it is.
  */
 export async function checkHackExecutableIdentity(opts: {
   readonly path: string;
 }): Promise<string | null> {
-  const unknown = `${SYSTEMD_UNIT_NAME} runs ${opts.path}, which Hack does not recognize as a hack executable (an interpreter would run a script named "daemon" that Hack has not checked); leaving the unit as it is. Review it, then run: hack daemon install`;
+  const unknown = (why: string) =>
+    `${SYSTEMD_UNIT_NAME} runs ${opts.path}, which Hack does not recognize as a hack executable (${why}); leaving the unit as it is. Review it, then run: hack daemon install`;
   if (!isHackExecutableName(opts.path)) {
-    return unknown;
+    return unknown(
+      'an interpreter would run a script named "daemon" that Hack has not checked'
+    );
   }
   let resolved: string;
   try {
@@ -2106,24 +2117,83 @@ export async function checkHackExecutableIdentity(opts: {
   } catch (error: unknown) {
     return `${opts.path} could not be resolved: ${errorMessage(error)}`;
   }
-  if (isHackExecutableName(resolved)) {
-    return null;
+  const line = await readShebangLine(resolved);
+  if (line === null) {
+    return isHackExecutableName(resolved)
+      ? null
+      : unknown(
+          `it resolves to ${resolved}; an interpreter would run a script named "daemon" that Hack has not checked`
+        );
   }
-  return (await startsWithShebang(resolved)) ? null : unknown;
+  const problem = await checkShebangInterpreter({ line });
+  return problem === null ? null : unknown(`${resolved}: ${problem}`);
 }
 
-async function startsWithShebang(path: string): Promise<boolean> {
+const SHEBANG_MAX_BYTES = 256;
+const ENV_PROGRAM_NAME = /^[A-Za-z0-9._+][A-Za-z0-9._+-]*$/;
+const TRAILING_CR = /\r$/;
+
+/**
+ * The text after `#!` on the first line, or null when the file does not
+ * start with `#!` (or cannot be read: the chain check reports that).
+ */
+async function readShebangLine(path: string): Promise<string | null> {
   let handle: FileHandle | null = null;
   try {
     handle = await open(path, "r");
-    const head = Buffer.alloc(2);
-    const { bytesRead } = await handle.read(head, 0, 2, 0);
-    return bytesRead === 2 && head.toString("latin1") === "#!";
+    const head = Buffer.alloc(SHEBANG_MAX_BYTES);
+    const { bytesRead } = await handle.read(head, 0, SHEBANG_MAX_BYTES, 0);
+    const text = head.subarray(0, bytesRead).toString("latin1");
+    if (!text.startsWith("#!")) {
+      return null;
+    }
+    const newline = text.indexOf("\n");
+    // No newline within the bytes read: an interpreter line longer than
+    // Hack reads is not vouched for.
+    return newline < 0 ? "\u0000" : text.slice(2, newline);
   } catch {
-    return false;
+    return null;
   } finally {
     await handle?.close();
   }
+}
+
+/**
+ * Linux runs `<interpreter> [<one argument>] <launcher> daemon start
+ * --foreground` for a `#!` launcher, the rest of the line passed as a
+ * single argument. Hack vouches only for an absolute interpreter it trusts
+ * ({@link checkServiceExecutableTrusted}) that is not itself a `#!` file,
+ * with either no argument or, for `env`, one plain program name (looked up
+ * through the service PATH, which is checked). Anything else (an extra
+ * script, `env -S`, an option) is refused. Null, or why not.
+ */
+async function checkShebangInterpreter(opts: {
+  readonly line: string;
+}): Promise<string | null> {
+  const trimmed = opts.line.replace(TRAILING_CR, "").trim();
+  if (trimmed.includes("\u0000") || trimmed.length === 0) {
+    return "its #! line cannot be read";
+  }
+  const space = trimmed.search(WHITESPACE);
+  const interpreter = space < 0 ? trimmed : trimmed.slice(0, space);
+  const argument = space < 0 ? "" : trimmed.slice(space).trim();
+  if (!isAbsolute(interpreter)) {
+    return `its #! interpreter ${interpreter} is not an absolute path`;
+  }
+  if (
+    argument.length > 0 &&
+    !(basename(interpreter) === "env" && ENV_PROGRAM_NAME.test(argument))
+  ) {
+    return `its #! line passes "${argument}" to ${interpreter}, which Hack does not vouch for`;
+  }
+  try {
+    if ((await readShebangLine(await realpath(interpreter))) !== null) {
+      return `its #! interpreter ${interpreter} is itself a script`;
+    }
+  } catch (error: unknown) {
+    return `its #! interpreter ${interpreter} could not be resolved: ${errorMessage(error)}`;
+  }
+  return await checkServiceExecutableTrusted({ path: interpreter });
 }
 
 /**

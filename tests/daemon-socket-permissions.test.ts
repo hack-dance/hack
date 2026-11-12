@@ -93,3 +93,19 @@ test("a daemon link to another directory is refused before any mode change", asy
   );
   expect((await stat(unrelated)).mode & 0o777).toBe(0o755);
 });
+
+test("an unreadable daemon directory of this user's gets the chmod to run", async () => {
+  const hackHome = join(root, "home", ".hack");
+  const daemonRoot = join(hackHome, "daemon");
+  await mkdir(daemonRoot, { recursive: true });
+  await chmod(join(root, "home"), 0o755);
+  await chmod(hackHome, 0o755);
+  await chmod(daemonRoot, 0o300);
+  try {
+    await expect(secureDaemonDirectory({ root: daemonRoot })).rejects.toThrow(
+      "chmod 700"
+    );
+  } finally {
+    await chmod(daemonRoot, 0o700);
+  }
+});

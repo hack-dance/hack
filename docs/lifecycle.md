@@ -357,7 +357,80 @@ Lifecycle output is now surfaced across CLI/runtime views:
 
 ## Runtime behavior
 
+For detached whole-project Compose startup, a failed start or unconfirmed stop needs
+inspection rather than an assumption that the instance is absent.
+
+```mermaid
+---
+title: Compose instance outcomes
+---
+stateDiagram-v2
+  direction TB
+  state "Needs inspection" as Inspect
+  state "Startup accepted" as Ready
+  [*] --> Absent
+  Absent --> Starting: hack up
+  Starting --> Ready: startup verified
+  Starting --> Inspect: start failed
+  Ready --> Stopping: hack down
+  Stopping --> Absent: stop confirmed
+  Stopping --> Inspect: stop not confirmed
+  Inspect --> Stopping: retry hack down
+  classDef ok stroke-width:1.6px
+  classDef wait stroke-width:1.6px
+  class Ready ok
+  class Inspect wait
+```
+
+This is an outcome view, not a persisted state enum or an exhaustive map of
+repeated commands. Failed startup can leave containers to inspect with `hack ps`;
+an ownership error or unavailable cleanup check never proves absence. Restart's
+preserved-runtime rules are described separately below. Accepted startup can
+include running services and recognized one-shots that completed successfully.
+
 ### `hack up`
+
+Detached whole-project startup resolves the environment before hooks, starts host
+processes before the engine, and verifies service states after the after hooks.
+
+```mermaid
+---
+title: Compose startup phases
+---
+stateDiagram-v2
+  direction TB
+  state "Resolve environment" as Env
+  state "Before hooks" as Before
+  state "Host processes" as Processes
+  state "Compose startup" as Engine
+  state "After hooks" as After
+  state "Verify service states" as Verify
+  state "Startup accepted" as Ready
+  state "Inspect failure" as Inspect
+  [*] --> Env
+  Env --> Before: valid contract
+  Before --> Processes: hooks succeed
+  Processes --> Engine: processes prepared
+  Engine --> After: command succeeds
+  After --> Verify: hooks succeed
+  Verify --> Ready: services acceptable
+  Env --> Inspect: contract refused
+  Before --> Inspect: hook failed
+  Processes --> Inspect: preparation failed
+  Engine --> Inspect: startup failed
+  After --> Inspect: hook failed
+  Verify --> Inspect: startup incomplete
+  classDef ok stroke-width:1.6px
+  classDef fail stroke-width:1.6px
+  class Ready ok
+  class Inspect fail
+```
+
+Persistent before hooks start in list order without waiting for their process to
+exit; the following process phase handles `lifecycle.processes`. On failure,
+cleanup targets only what this operation owns and may refuse an uncertain stop;
+the shared-helper retention and ownership rules above still apply. Service-scoped
+commands skip these project-wide hooks, and native command limits are separate.
 
 1. Resolve env contract (and optionally prompt for missing required env in interactive shells).
 2. Run `lifecycle.up.before` hooks in order.
@@ -365,6 +438,8 @@ Lifecycle output is now surfaced across CLI/runtime views:
 4. Start lifecycle processes (if any) inside the same dedicated lifecycle session.
 5. Run `docker compose up` (or `up -d` when `--detach`).
 6. Run `lifecycle.up.after` hooks.
+7. Inspect the selected services and reject incomplete startup; recognized successful
+   one-shots count as completed rather than failed.
 
 Before starting persistent work, Hack reconciles the expected lifecycle session with
 `.hack/.internal/lifecycle/state.json`:

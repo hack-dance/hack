@@ -7,6 +7,21 @@ repository, so teammates and agents can use the same definition.
 Developers and agents use the local CLI to control a local runtime; Hack does not
 require a hosted control service.
 
+```mermaid
+---
+title: Local runtime context
+---
+C4Context
+  Person(developer, "Developer")
+  System_Ext(agent, "Agent harness", "Optional CLI client")
+  System(hack, "Hack CLI", "Local project commands")
+  System_Ext(engine, "Local engine", "Compose by default")
+  Rel(developer, hack, "Runs commands")
+  Rel(agent, hack, "Runs commands")
+  Rel(hack, engine, "Controls services")
+  UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
+```
+
 ## Project, service and instance
 
 A **project** is a repository with Hack configuration. A **service** is one part of

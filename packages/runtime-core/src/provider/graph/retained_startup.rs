@@ -317,13 +317,24 @@ pub(in crate::provider::graph) mod tests {
 
     #[test]
     fn a_running_pools_rootfs_witness_skips_the_content_proof_only_while_it_holds() {
-        use crate::provider::tree_witness;
+        use crate::provider::{artifact, tree_witness};
         // Qualified filesystem at the statfs boundary (the runner's temp volume may not be).
         tree_witness::fake_filesystem_type(Some("apfs"));
         let fixture = Fixture::new();
         let candidate = &fixture.candidate;
         let mut owner = Owner::load(candidate).unwrap();
         let rootfs = candidate.state_root.join("run/smolvm/rootfs");
+        // Retained witnesses require both prepared provider trees as well as the rootfs.
+        // This fixture otherwise contains only templates and a synthetic guest base.
+        let provider_trees = [
+            artifact::tree_root(candidate, &artifact::SMOLVM),
+            artifact::tree_root(candidate, &artifact::ENGINE),
+        ];
+        for tree in &provider_trees {
+            state::private_directory(tree).unwrap();
+            fs::write(tree.join("fixture"), b"synthetic provider").unwrap();
+        }
+        assert!(lifecycle::witness_qualified(candidate));
         let marker = lifecycle::rootfs_marker(&owner).unwrap();
         let proofs = |owner: &Owner| {
             let before = tree_witness::content_proofs();
@@ -355,6 +366,17 @@ pub(in crate::provider::graph) mod tests {
         let (result, count) = proofs(&owner);
         result.unwrap();
         assert_eq!(count, 0);
+        // Missing provider state disables the rootfs witness even if its metadata matches.
+        for tree in &provider_trees {
+            let held = tree.with_extension("held");
+            fs::rename(tree, &held).unwrap();
+            assert!(!lifecycle::witness_qualified(candidate));
+            let (result, count) = proofs(&owner);
+            result.unwrap();
+            assert_eq!(count, 1);
+            fs::rename(held, tree).unwrap();
+            assert_eq!(proofs(&owner).1, 0);
+        }
         // A stopped pool never uses the witness.
         let mut stopped = owner.clone();
         stopped.phase = "stopped".into();

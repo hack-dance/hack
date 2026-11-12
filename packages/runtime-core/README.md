@@ -2336,12 +2336,16 @@ proofs. It exits zero with data retained and permits plain `up`. An external dow
 also produces the confirmed-stop closing line in the original foreground.
 
 
-A publisher-only exit is reported as a bounded, run-bound frontend notice once
+A publisher-only exit after readiness is reported as a bounded, run-bound frontend notice once
 its exact direct child has been reaped. It leaves the project's compute running
 and the authenticated owner available for `hack down`; it does not trigger a
 long guest cleanup or automatically recreate the publisher. `owner-status`
 reports retained port children as down, and ps/status preserve service rows and
-show that publication state. The frontend decodes notices after readiness,
+show that publication state. The owner enables notices only after flushing its
+readiness frame; startup reaping still records exit proof without emitting a
+notice. The frontend ignores a bounded, run-matching notice before readiness so
+it can await startup cleanup and report the native failure code and log tails.
+It decodes notices after readiness,
 including multiple frames in a chunk and partial frames across chunks. Notices
 and status are presentation, not cleanup or replacement authority. Notice delivery
 is best-effort: a frontend may close its stdout pipe before the owner reaps an

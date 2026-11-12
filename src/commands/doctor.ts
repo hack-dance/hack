@@ -61,6 +61,10 @@ import {
 } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
+import {
+  resolveSystemdUnitPath,
+  SYSTEMD_READ_ONLY_ENV,
+} from "../daemon/systemd.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
 import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import {
@@ -96,6 +100,11 @@ import {
   type ComposeBackendReport,
   composeBackendCheckResult,
 } from "../lib/doctor-compose-backend.ts";
+import {
+  buildDaemonServiceCheck,
+  DAEMON_SERVICE_CHECK,
+  decideDaemonServiceFix,
+} from "../lib/doctor-daemon-service.ts";
 import {
   describeEnvKeyInspection,
   type EnvKeyInspection,
@@ -260,6 +269,10 @@ import {
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
+import {
+  resolveSystemdSummary,
+  withSystemdIncompatibleNextStep,
+} from "./daemon-systemd.ts";
 import { runNativePreflightCommand } from "./doctor-native-preflight.ts";
 import {
   analyzeComposeNetworkHygiene,
@@ -481,6 +494,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       `network:${DEFAULT_INGRESS_NETWORK} subnet`,
       "global files",
       "daemon",
+      DAEMON_SERVICE_CHECK,
       "gateway config",
       "gateway tokens",
       "grafana",
@@ -846,6 +860,21 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   // Global files
   results.push(await runCheck(s, "global files", () => checkGlobalFiles()));
   results.push(await runCheck(s, "daemon", () => checkDaemonStatus()));
+  if (isLinux()) {
+    // The row is omitted when systemd management is disabled for this
+    // process (isolated HACK_HOME, HACK_SYSTEMD_DISABLE=1); a failure to
+    // read it is reported, not thrown.
+    const serviceCheck = await resolveSystemdSummary({
+      paths: resolveDaemonPaths({}),
+    }).then(buildDaemonServiceCheck, (error: unknown) => ({
+      name: DAEMON_SERVICE_CHECK,
+      status: "warn" as const,
+      message: `Could not read the hackd systemd service: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+    if (serviceCheck) {
+      results.push(await runCheck(s, DAEMON_SERVICE_CHECK, () => serviceCheck));
+    }
+  }
   results.push(await runCheck(s, "gateway config", () => checkGatewayConfig()));
   results.push(await runCheck(s, "gateway tokens", () => checkGatewayTokens()));
 
@@ -1891,13 +1920,15 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     ? await probeDaemonApi({ socketPath: paths.socketPath, timeoutMs: 500 })
     : { reachable: false, compatible: false, version: null };
 
-  const report = buildDaemonStatusReport({
-    pid: status.pid,
-    processRunning: status.running,
-    socketExists: status.socketExists,
-    logExists: status.logExists,
-    apiReachable: probe.reachable,
-    apiCompatible: probe.compatible,
+  const report = await withSystemdIncompatibleNextStep({
+    report: buildDaemonStatusReport({
+      pid: status.pid,
+      processRunning: status.running,
+      socketExists: status.socketExists,
+      logExists: status.logExists,
+      apiReachable: probe.reachable,
+      apiCompatible: probe.compatible,
+    }),
   });
 
   if (report.status === "running") {
@@ -4005,7 +4036,8 @@ async function runDoctorFix(opts: {
     await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
-  await maybeRepairHackd();
+  const serviceWrites = await maybeInstallDaemonService();
+  await maybeRepairHackd({ serviceWrites });
   // Env migration changes project files only, so it runs before the Docker
   // gate: an unreachable Docker never skips a requested migration.
   if (opts.migrateEnvConfig) {
@@ -5110,7 +5142,10 @@ async function dockerInfoOk(): Promise<boolean> {
  * non-interactive mode alike, before it prompts or runs anything. It notes the
  * skip with the reason and the command to run instead.
  */
-async function maybeRepairHackd(): Promise<void> {
+async function maybeRepairHackd(opts: {
+  readonly serviceWrites: DaemonServiceWrites;
+}): Promise<void> {
+  const env = daemonRepairEnv(opts.serviceWrites);
   const report = await resolveDaemonReportForDoctorFix();
   if (report.status === "running") {
     return;
@@ -5134,7 +5169,7 @@ async function maybeRepairHackd(): Promise<void> {
       initialValue: true,
     });
     if (okRestart) {
-      await runHackSubcommand({ args: ["daemon", "restart"] });
+      await runHackSubcommand({ args: ["daemon", "restart"], env });
     }
     return;
   }
@@ -5145,7 +5180,7 @@ async function maybeRepairHackd(): Promise<void> {
       initialValue: true,
     });
     if (okClear) {
-      await runHackSubcommand({ args: ["daemon", "clear"] });
+      await runHackSubcommand({ args: ["daemon", "clear"], env });
     }
   }
 
@@ -5154,8 +5189,66 @@ async function maybeRepairHackd(): Promise<void> {
     initialValue: true,
   });
   if (okStart) {
-    await runHackSubcommand({ args: ["daemon", "start"] });
+    await runHackSubcommand({ args: ["daemon", "start"], env });
   }
+}
+
+/**
+ * Linux `--fix`: offer `hack daemon install` when the hackd systemd unit is
+ * missing, drifted or disabled ({@link decideDaemonServiceFix}). It writes
+ * under `~/.config/systemd/user` and enables a login service, so it is a
+ * destructive step: confirmed interactively, skipped and listed without a
+ * TTY. Linger is reported by the check but never changed.
+ */
+async function maybeInstallDaemonService(): Promise<DaemonServiceWrites> {
+  // Owner decision (HACK-2052): without a TTY, doctor --fix may start hackd
+  // but never writes or reloads the unit; an interactive run that declines
+  // the install carries the same refusal into the hackd repair below.
+  const interactive = canPrompt();
+  if (!isLinux()) {
+    return interactive ? "allowed" : "refused";
+  }
+  const decision = decideDaemonServiceFix({
+    summary: await resolveSystemdSummary({ paths: resolveDaemonPaths({}) }),
+    autostart: resolveDaemonAutostartAccess(),
+  });
+  if (decision.kind === "none") {
+    return interactive ? "allowed" : "refused";
+  }
+  if (decision.kind === "skip") {
+    note(
+      [
+        `Skipped the hackd systemd service install: ${decision.reason}`,
+        `To install it yourself, run: ${decision.command}`,
+      ].join("\n"),
+      "doctor fix"
+    );
+    return "refused";
+  }
+  const ok = await doctorConfirm({
+    message: `Install hackd as a systemd user service (hack daemon install)?\nIt writes ${resolveSystemdUnitPath()} and starts hackd at login.`,
+    initialValue: true,
+    destructive: true,
+  });
+  if (!ok) {
+    return "refused";
+  }
+  await runHackSubcommand({ args: ["daemon", "install"] });
+  return "allowed";
+}
+
+/**
+ * Whether the hackd repair that follows may change the systemd unit.
+ * "refused" runs its `hack daemon` steps with
+ * {@link SYSTEMD_READ_ONLY_ENV}=1, so `hack daemon start` neither writes nor
+ * reloads the unit.
+ */
+type DaemonServiceWrites = "allowed" | "refused";
+
+function daemonRepairEnv(
+  writes: DaemonServiceWrites
+): Record<string, string> | undefined {
+  return writes === "refused" ? { [SYSTEMD_READ_ONLY_ENV]: "1" } : undefined;
 }
 
 /** The explicit commands that perform the {@link maybeRepairHackd} steps. */
@@ -5295,10 +5388,12 @@ async function resolveDaemonReportForDoctorFix(): Promise<
 
 async function runHackSubcommand(opts: {
   readonly args: readonly string[];
+  readonly env?: Record<string, string>;
 }): Promise<void> {
   const invocation = await resolveHackInvocation();
   await run([invocation.bin, ...invocation.args, ...opts.args], {
     stdin: "inherit",
+    ...(opts.env ? { env: opts.env } : {}),
   });
 }
 

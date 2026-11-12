@@ -958,7 +958,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-publisher-stop",
     module: "PublisherStop",
-    states: 110,
+    states: 168,
     invariant: "NoUnsafeCleanup",
     action: "ReleaseBridge",
     fields: [
@@ -978,6 +978,18 @@ const contracts: readonly ModelContract[] = [
       },
     ],
     additionalControls: [
+      {
+        name: "uncommitted-exit",
+        negative: true,
+        invariant: "NoUncommittedExit",
+        action: "ReleaseBridge",
+        fields: [
+          'phase = "bridge-retired"',
+          "owner = TRUE",
+          "exitProof = FALSE",
+          "publisher = FALSE",
+        ],
+      },
       {
         name: "reservation-tail",
         negative: true,

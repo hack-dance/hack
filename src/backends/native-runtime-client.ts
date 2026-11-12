@@ -78,6 +78,8 @@ type SafeNativeFailure = Readonly<{
   code: string;
   message?: string;
   service?: string;
+  /** Set only by the frontend's effect-free static review, never runtime output. */
+  startupPhase?: "static-preflight";
 }>;
 /** Opaque association: never retain an error, its text, logs, causes or getters. */
 const retainedFailures = new WeakMap<object, SafeNativeFailure>();
@@ -141,6 +143,7 @@ export class NativeRuntimeRequestError extends ClosedCliError {
     readonly nativeMessage?: string;
     readonly nativeService?: string;
     readonly nativeStopFailures?: readonly NativeStopFailure[];
+    readonly nativeStartupPhase?: "static-preflight";
   }) {
     super(opts.message);
     this.stopSignal = opts.stopSignal;
@@ -154,6 +157,9 @@ export class NativeRuntimeRequestError extends ClosedCliError {
         this,
         Object.freeze({
           code: opts.nativeCode,
+          ...(opts.nativeStartupPhase === "static-preflight"
+            ? { startupPhase: "static-preflight" as const }
+            : {}),
           ...nativeFailureDetail({
             message: opts.nativeMessage,
             message_fixed: true,

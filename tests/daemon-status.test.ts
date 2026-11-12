@@ -98,7 +98,7 @@ test("buildDaemonStatusReport marks incompatible daemon with guided restart", ()
   expect(report.stale).toBe(false);
 });
 
-test("buildDaemonRepairMessage points stale state to daemon clear", () => {
+test("buildDaemonRepairMessage points stale state to the same command as next_step", () => {
   const report = buildDaemonStatusReport({
     pid: 123,
     processRunning: false,
@@ -115,7 +115,10 @@ test("buildDaemonRepairMessage points stale state to daemon clear", () => {
     dockerReachable: true,
   });
 
-  expect(message).toContain("hack daemon clear");
+  // `hack daemon start` clears stale pid/socket files itself; the text names
+  // the same command `status --json` reports as next_step (HACK-2052).
+  expect(report.nextStep).toBe("hack daemon start");
+  expect(message).toContain("Run: hack daemon start");
 });
 
 test("buildDaemonRepairMessage calls out launchd crashes and restart guidance", () => {

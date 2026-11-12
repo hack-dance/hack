@@ -3645,7 +3645,7 @@ linuxTest(
     const pending = await uninstall();
     expect(pending.ok).toBe(false);
     if (!pending.ok) {
-      expect(pending.error).toContain("systemctl --user disable --now");
+      expect(pending.error).toContain("systemctl --user stop hackd.service");
       expect(pending.error).toContain(unitPath);
     }
     expect(fake.calls.some((call) => call.includes(" disable"))).toBe(false);

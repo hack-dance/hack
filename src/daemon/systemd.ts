@@ -2610,7 +2610,7 @@ async function refuseLoadedUnitWithoutFile(opts: {
       return null;
     }
   }
-  return `Not uninstalling ${SYSTEMD_UNIT_NAME}: systemd has it ${status.activeState}, but not from ${opts.unitPath}, the unit Hack manages (it was removed or is loaded from another directory), so it cannot be checked. Review it with systemctl --user status ${SYSTEMD_UNIT_NAME}; to remove it by hand, run: systemctl --user disable --now ${SYSTEMD_UNIT_NAME}`;
+  return `Not uninstalling ${SYSTEMD_UNIT_NAME}: systemd has it ${status.activeState}, but not from ${opts.unitPath}, the unit Hack manages (it was removed or is loaded from another directory), so it cannot be checked. Review it with systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it by hand, run: systemctl --user stop ${SYSTEMD_UNIT_NAME} (and, if its file still exists elsewhere: systemctl --user disable ${SYSTEMD_UNIT_NAME}, then systemctl --user daemon-reload)`;
 }
 
 /**

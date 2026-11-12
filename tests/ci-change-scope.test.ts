@@ -12,6 +12,7 @@ import {
   scopeOutputs,
   touchesDocsSite,
 } from "../scripts/ci-change-scope.ts";
+import { fullPushPlan } from "../scripts/ci-pr-plan.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
@@ -239,6 +240,30 @@ describe("pull request diff", () => {
     git(root, ["merge", "--quiet", "--no-ff", "--no-edit", "topic"]);
     expect(pullRequestPaths(root)).toEqual(["docs/topic.md"]);
     expect(changeScope(pullRequestPaths(root) ?? [])).toBe("docs");
+    await mkdir(join(root, "tests"), { recursive: true });
+    await mkdir(join(root, "packages/db"), { recursive: true });
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        resolve(repoRoot, "scripts/ci-change-scope.ts"),
+        "--event=pull_request",
+        `--repo-root=${root}`,
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          GITHUB_OUTPUT: "",
+          GITHUB_STEP_SUMMARY: "",
+          PR_DRAFT: "false",
+          PR_FULL: "false",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.stdout.toString()).toContain("scope=docs\n");
   });
 
   test("the CLI requires an event and reports full scope outside pull requests", () => {
@@ -265,7 +290,7 @@ describe("pull request diff", () => {
 describe("CI workflow wiring", () => {
   test("the changes job exposes every scope output and checks out the merge parent", async () => {
     const changes = (await ciWorkflow()).jobs.changes;
-    const keys = Object.keys(scopeOutputs("full")).sort();
+    const keys = Object.keys(fullPushPlan()).sort();
     expect(Object.keys(changes?.outputs ?? {}).sort()).toEqual(keys);
     for (const key of keys) {
       expect(changes?.outputs?.[key]).toBe(
@@ -276,8 +301,9 @@ describe("CI workflow wiring", () => {
       String((step as { uses?: string }).uses).startsWith("actions/checkout")
     );
     expect(checkout?.with?.["fetch-depth"]).toBe(2);
-    expect(changes?.steps?.at(-1)?.run).toBe(
-      'bun scripts/ci-change-scope.ts --event="$EVENT_NAME"'
+    expect(changes?.steps?.at(-1)?.run).toContain('git archive "$base"');
+    expect(changes?.steps?.at(-1)?.run).toContain(
+      '--repo-root="$GITHUB_WORKSPACE"'
     );
   });
 
@@ -300,12 +326,11 @@ describe("CI workflow wiring", () => {
     for (const name of [
       "runtime-images",
       "docker-e2e-shard",
-      "test-shard",
       "linux-process-lifetime",
     ]) {
       expect(jobs[name]?.needs, name).toBe("changes");
       expect(jobs[name]?.if, name).toBe(
-        "${{ needs.changes.outputs.suite == 'true' }}"
+        "${{ needs.changes.outputs.docker_suite == 'true' && needs.changes.outputs.draft != 'true' }}"
       );
     }
     // `docs site` is a required check: the job always runs, and every step
@@ -326,8 +351,13 @@ describe("CI workflow wiring", () => {
         "${{ needs.changes.outputs.docs_site == 'true' }}"
       );
     }
-    // Jobs that do not depend on the scope keep running on every event.
-    for (const name of ["state-models", "secret-scan"]) {
+    expect(jobs["test-shard"]?.if).toBe(
+      "${{ needs.changes.outputs.suite == 'true' }}"
+    );
+    expect(jobs["state-models"]?.if).toBe(
+      "${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}"
+    );
+    for (const name of ["secret-scan"]) {
       expect(jobs[name]?.needs, name).toBeUndefined();
       expect(jobs[name]?.if, name).toBeUndefined();
     }

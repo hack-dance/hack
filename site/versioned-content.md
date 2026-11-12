@@ -24,11 +24,14 @@ artifact URLs and the `V=5.0.0-next.N` shell variable with the corpus pin. The
 original snapshot bytes and hashes remain unchanged. Both `docs:check` and the
 HTTP smoke reject installer artifact URLs for any other release tag.
 
-The next.14 pin adds Global settings (including `proxy.bind_address`) and the
-Dependency installer protocol to Guides. The eleven recipes and four native
-overview pages have release snapshots; five recipes keep newer, explicitly
-attributed corrections. Linux DNS, certificate trust, daemon and proxy network
-repair guides are absent from this tag and stay outside this corpus.
+The next.15 pin includes proxy-network repair in Architecture and native preflight
+in the command and native references. Two versioned editorial entry pages expose
+those features in navigation: Proxy network repair and Native preflight. Both
+name their next.15 source explicitly. The eleven recipes and four native overview
+pages have release snapshots; five recipes retain explicitly attributed link
+corrections. The runtime examples already contain their mount and token-scope
+fixes at this tag. Linux DNS, Linux certificate trust and daemon guides remain
+outside this corpus because this tag does not contain them.
 
 Editorial pages state their own provenance: the pinned revision by default, or an
 explicit `sourceRevision` and `sourceLabel` when a page was written against a

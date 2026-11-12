@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-flowchart" viewBox="0 0 1344 856" width="1344" height="856" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_r:var(--pele-radius,4px);--_fm:var(--pele-font-mono,Geist Mono);font:15px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,Geist)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="flowchart" data-theme="light"><style><![CDATA[
+.pele {
+  --pele-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --pele-font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --pele-bg: #F3EFE3;
+  --pele-fg: #1D1D1B;
+  --pele-muted: #3D3C37;
+  --pele-line: #3D3C37;
+  --pele-surface: #FBF9F1;
+  --pele-surface-alt: #E8E4D8;
+  --pele-border: #66625A;
+  --pele-accent: #1D1D1B;
+  --pele-critical: #C2461F;
+  --pele-error: #C2461F;
+  --pele-radius: 8px;
+  --pele-title-weight: 600;
+  --pele-heading-weight: 600;
+  --pele-bold-weight: 600;
+  --pele-series-1: #5b3df5; --pele-series-2: #0e9f8a; --pele-series-3: #e08a00; --pele-series-4: #d6345a;
+  --pele-series-5: #2f7de1; --pele-series-6: #8a5cf6; --pele-series-7: #4f9d2d; --pele-series-8: #a0674b;
+
+  --hd-live: #4B4790;  --hd-live-bg: #E6E4F0;
+  --hd-wait: #34506E;  --hd-wait-bg: #D3DBE5;
+  --hd-ok:   #3A7A2E;  --hd-ok-bg:   #E2EBD9;
+  --hd-fail: #C2461F;  --hd-fail-bg: #F5E0D6;
+  --hd-idle: #8A8576;  --hd-idle-bg: #E8E4D8;
+  background: var(--pele-bg);
+}
+.pele[data-theme="dark"], [data-theme="dark"] .pele {
+  --pele-bg: #11100E;
+  --pele-fg: #EDE8D9;
+  --pele-muted: #C9C3B2;
+  --pele-line: #C9C3B2;
+  --pele-surface: #191815;
+  --pele-surface-alt: #1B1A17;
+  --pele-border: #8F897A;
+  --pele-accent: #EDE8D9;
+  --pele-critical: #FF7A52;
+  --pele-error: #FF7A52;
+  --pele-series-1: #9a86ff; --pele-series-2: #3fd1b8; --pele-series-3: #ffb547; --pele-series-4: #ff6b8b;
+  --pele-series-5: #6aa8ff; --pele-series-6: #c4a5ff; --pele-series-7: #8fd16a; --pele-series-8: #d29b7f;
+  --hd-live: #A39CE0;  --hd-live-bg: #24223A;
+  --hd-wait: #9DB4CF;  --hd-wait-bg: #22303D;
+  --hd-ok:   #7CC25E;  --hd-ok-bg:   #1C2A17;
+  --hd-fail: #FF7A52;  --hd-fail-bg: #33190F;
+  --hd-idle: #7A7466;  --hd-idle-bg: #1B1A17;
+}
+
+.pele .pele-edge path { stroke-width: 1.4px; stroke-linecap: round; }
+.pele .pele-edge-label rect { fill: var(--pele-bg); }
+.pele .pele-edge-label text { fill: var(--pele-muted); }
+.pele .pele-cluster-label, .pele .pele-title { letter-spacing: .01em; }
+.pele .pele-node > rect, .pele .pele-node > path, .pele .pele-node > polygon, .pele .pele-node > circle, .pele .pele-node > ellipse { stroke-width: 1.2px; }
+
+.pele .live > rect, .pele .live > path, .pele .live > polygon, .pele .live > circle, .pele .live > ellipse { fill: var(--hd-live-bg) !important; stroke: var(--hd-live) !important; }
+.pele .wait > rect, .pele .wait > path, .pele .wait > polygon, .pele .wait > circle, .pele .wait > ellipse { fill: var(--hd-wait-bg) !important; stroke: var(--hd-wait) !important; }
+.pele .ok   > rect, .pele .ok   > path, .pele .ok   > polygon, .pele .ok > circle, .pele .ok > ellipse { fill: var(--hd-ok-bg)   !important; stroke: var(--hd-ok)   !important; }
+.pele .fail > rect, .pele .fail > path, .pele .fail > polygon, .pele .fail > circle, .pele .fail > ellipse { fill: var(--hd-fail-bg) !important; stroke: var(--hd-fail) !important; }
+.pele .idle > rect, .pele .idle > path, .pele .idle > polygon, .pele .idle > circle, .pele .idle > ellipse { fill: var(--hd-idle-bg) !important; stroke: var(--hd-idle) !important; stroke-dasharray: 4 3; }
+.pele .live .pele-label { fill: var(--hd-live); font-weight: 600; }
+.pele .wait .pele-label { fill: var(--hd-wait); font-weight: 600; }
+.pele .ok   .pele-label { fill: var(--hd-ok);   font-weight: 600; }
+.pele .fail .pele-label { fill: var(--hd-fail); font-weight: 600; }
+.pele .idle .pele-label { fill: var(--hd-idle); }
+]]></style><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge" data-id="L_event_full_0"><path d="M545.66,94.91C545.66,101.29 126.63,114.04 126.63,120.41L126.63,174.68"/><path class="pele-marker" d="M126.63,181.68L123.27,173.68L129.99,173.68Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_event_draft_0"><path d="M561.66,94.91C561.66,107.66 678.83,107.66 678.83,120.41L678.83,164.91"/><path class="pele-marker" d="M678.83,171.91L675.47,163.91L682.19,163.91Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_draft_light_0"><path d="M670.83,233.44C670.83,242.06 368.97,250.32 368.97,258.94L368.97,345.25"/><path class="pele-marker" d="M368.97,352.25L365.61,344.25L372.33,344.25Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_light_blocked_0"><path d="M368.97,416.25L368.97,579.06"/><path class="pele-marker" d="M368.97,586.06L365.61,578.06L372.33,578.06Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_draft_select_0"><path d="M686.83,233.44C686.83,246.19 880.75,246.19 880.75,258.94L880.75,303.44"/><path class="pele-marker" d="M880.75,310.44L877.39,302.44L884.11,302.44Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_select_all_0"><path d="M841.89,433.77C841.89,466.19 790.08,486.06 705.54,486.06C621,486.06 569.19,501.26 569.19,526.06L569.19,579.06"/><path class="pele-marker" d="M569.19,586.06L565.83,578.06L572.55,578.06Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_select_imports_0"><path d="M857.89,443.77C857.89,477.43 840.2,498.06 811.35,498.06C782.49,498.06 764.81,508.7 764.81,526.06L764.81,570.56"/><path class="pele-marker" d="M764.81,577.56L761.45,569.56L768.17,569.56Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_all_pools_0"><path d="M569.19,633.06C569.19,654.81 639.42,654.81 639.42,676.56L639.42,682.56"/><path class="pele-marker" d="M639.42,689.56L636.06,681.56L642.78,681.56Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_imports_pools_0"><path d="M764.81,641.56L764.81,682.56"/><path class="pele-marker" d="M764.81,689.56L761.45,681.56L768.17,681.56Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_pools_gate_0"><path d="M683.79,736.56L683.79,777.56"/><path class="pele-marker" d="M683.79,784.56L680.43,776.56L687.15,776.56Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_select_native_0"><path d="M903.6,443.77C903.6,504.16 996.69,504.16 996.69,564.56L996.69,570.56"/><path class="pele-marker" d="M996.69,577.56L993.33,569.56L1000.05,569.56Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_select_docker_0"><path d="M919.6,433.77C919.6,499.16 1225.65,499.16 1225.65,564.56L1225.65,570.56"/><path class="pele-marker" d="M1225.65,577.56L1222.29,569.56L1229.01,569.56Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_full_release_0"><path d="M126.63,228.68L126.63,353.75"/><path class="pele-marker" d="M126.63,360.75L123.27,352.75L129.99,352.75Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-edge-labels" font-size="13"><g class="pele-edge-label" data-id="L_event_full_0"><rect x="63.02" y="122.41" width="127.22" height="20" rx="3" fill="var(--_bg)"/><text x="126.63" y="136.96" text-anchor="middle">Push to next or main</text></g><g class="pele-edge-label" data-id="L_event_draft_0"><rect x="640.51" y="122.41" width="76.64" height="20" rx="3" fill="var(--_bg)"/><text x="678.83" y="136.96" text-anchor="middle">Pull request</text></g><g class="pele-edge-label" data-id="L_draft_light_0"><rect x="353.77" y="260.94" width="30.4" height="20" rx="3" fill="var(--_bg)"/><text x="368.97" y="275.49" text-anchor="middle">Yes</text></g><g class="pele-edge-label" data-id="L_draft_select_0"><rect x="868.44" y="260.94" width="24.61" height="20" rx="3" fill="var(--_bg)"/><text x="880.75" y="275.49" text-anchor="middle">No</text></g><g class="pele-edge-label" data-id="L_select_all_0"><rect x="553.99" y="528.06" width="30.4" height="20" rx="3" fill="var(--_bg)"/><text x="569.19" y="542.61" text-anchor="middle">Yes</text></g><g class="pele-edge-label" data-id="L_select_imports_0"><rect x="752.5" y="528.06" width="24.61" height="20" rx="3" fill="var(--_bg)"/><text x="764.81" y="542.61" text-anchor="middle">No</text></g></g><g class="pele-nodes"><g class="pele-node pele-shape-diam" data-id="event" transform="translate(553.66,61.96)"><polygon points="0,-37.96 60.73,0 0,37.96 -60.73,0" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">CI event</text></g><g class="pele-node pele-shape-rect live" data-id="full" transform="translate(126.63,205.18)"><rect x="-98.45" y="-23.5" width="196.91" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Every job and every test</text></g><g class="pele-node pele-shape-diam" data-id="draft" transform="translate(678.83,205.18)"><polygon points="0,-33.26 53.22,0 0,33.26 -53.22,0" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Draft?</text></g><g class="pele-node pele-shape-rect live" data-id="light" transform="translate(368.97,384.25)"><rect x="-99.71" y="-32" width="199.43" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Selected Linux tests and</tspan><tspan x="0" y="15.25">static checks</tspan></text></g><g class="pele-node pele-shape-rect fail" data-id="blocked" transform="translate(368.97,609.56)"><rect x="-101.78" y="-23.5" width="203.57" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Fan-ins fail: skipped draft</text></g><g class="pele-node pele-shape-diam" data-id="select" transform="translate(880.75,384.25)"><polygon points="0,-73.81 118.09,0 0,73.81 -118.09,0" fill="var(--_s)" stroke="var(--_b)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Full label or uncertain</tspan><tspan x="0" y="15.25">input?</tspan></text></g><g class="pele-node pele-shape-rect" data-id="all" transform="translate(569.19,609.56)"><rect x="-58.43" y="-23.5" width="116.87" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">All unit tests</text></g><g class="pele-node pele-shape-rect" data-id="imports" transform="translate(764.81,609.56)"><rect x="-97.18" y="-32" width="194.37" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Imports plus always-run</tspan><tspan x="0" y="15.25">tests</tspan></text></g><g class="pele-node pele-shape-rect live" data-id="pools" transform="translate(683.79,713.06)"><rect x="-96.37" y="-23.5" width="192.74" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Selected platform pools</text></g><g class="pele-node pele-shape-rect ok" data-id="gate" transform="translate(683.79,808.06)"><rect x="-83.44" y="-23.5" width="166.89" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Required test fan-in</text></g><g class="pele-node pele-shape-rect" data-id="native" transform="translate(996.69,609.56)"><rect x="-94.69" y="-32" width="189.39" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Native jobs follow input</tspan><tspan x="0" y="15.25">scope</tspan></text></g><g class="pele-node pele-shape-rect" data-id="docker" transform="translate(1225.65,609.56)"><rect x="-94.27" y="-32" width="188.54" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Docker follows existing</tspan><tspan x="0" y="15.25">scope</tspan></text></g><g class="pele-node pele-shape-rect ok" data-id="release" transform="translate(126.63,384.25)"><rect x="-102.63" y="-23.5" width="205.26" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Exact-head full push gate</text></g></g></svg>

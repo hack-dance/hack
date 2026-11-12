@@ -1,8 +1,8 @@
 # Dependency directories and caches
 
-The commands and configuration on this page were audited against `v5.0.0-next.14`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
+The commands and configuration on this page were audited against `v5.0.0-next.15`.
+The execution notes retain their original scope; the examples were not rerun with
+the pinned binary.
 
 Use this to decide where `node_modules`, virtual environments, build output and
 tool caches live. The short rule: anything a container installs or generates

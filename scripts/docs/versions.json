@@ -1028,308 +1028,308 @@
     ]
   },
   "v5": {
-    "revision": "6df12b828ce4db60faf51e1bccc481621a350811",
-    "label": "v5 (next.14)",
+    "revision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",
+    "label": "v5 (next.15)",
     "entries": [
       {
         "file": "docs/README.md",
         "slug": "index",
         "title": "Documentation",
-        "snapshot": "docs/versions/v5/originals/next14/docs/README.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/README.md",
         "sha256": "cb9ec6a239a81b7559e63a0f411401eb80a79db6b8a6418d7831e398bc68e8b3"
       },
       {
         "file": "docs/core.md",
         "slug": "core",
         "title": "Core concepts",
-        "snapshot": "docs/versions/v5/originals/next14/docs/core.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/core.md",
         "sha256": "aed967433ba3bf70e9fd8b5f44614bd2f1c89c521094b6e39cc6dfb6cfc363be"
       },
       {
         "file": "docs/guides/init-project.md",
         "slug": "guides/init-project",
         "title": "Project setup",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/init-project.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/init-project.md",
         "sha256": "07e2c7d42eb5130735345246eae435388d26013166d2628f601a97d932b214e8"
       },
       {
         "file": "docs/env.md",
         "slug": "env",
         "title": "Environment and secrets",
-        "snapshot": "docs/versions/v5/originals/next14/docs/env.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/env.md",
         "sha256": "3affbfc8938289ecbae0907e5cd00701338aa2912d9c236da835a64e095b3833"
       },
       {
         "file": "docs/lifecycle.md",
         "slug": "lifecycle",
         "title": "Lifecycle",
-        "snapshot": "docs/versions/v5/originals/next14/docs/lifecycle.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/lifecycle.md",
         "sha256": "fce6fce516cfbe427050f5f9338a5790a63e9915fd8a8714acce01163dcc64b1"
       },
       {
         "file": "docs/sessions.md",
         "slug": "sessions",
         "title": "Sessions",
-        "snapshot": "docs/versions/v5/originals/next14/docs/sessions.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/sessions.md",
         "sha256": "b8d2db60393945b8bfe2319be7021c47f04e0ca7c53f6c37fc82ef354c5a4ae8"
       },
       {
         "file": "docs/guides/development-runtime-safety.md",
         "slug": "guides/development-runtime-safety",
         "title": "Worktrees and watchers",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/development-runtime-safety.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/development-runtime-safety.md",
         "sha256": "3dba0f7ef07c956b21781d7f281593b76854f9239c9b2793147abc0c048b23c7"
       },
       {
         "file": "docs/guides/global-settings.md",
         "slug": "guides/global-settings",
         "title": "Global settings",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/global-settings.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/global-settings.md",
         "sha256": "584115a9703e02139dde2dc914cf586b9a4d077ba691530b301eebf508fbf154"
       },
       {
         "file": "docs/guides/dependency-cache-protocol.md",
         "slug": "guides/dependency-cache-protocol",
         "title": "Dependency installer protocol",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/dependency-cache-protocol.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/dependency-cache-protocol.md",
         "sha256": "dceb0ee35ff65ce724dbb2d46cb2b248e3b9d14757c4aaf0969a435e6584bb15"
       },
       {
         "file": "docs/guides/macos-browser-network.md",
         "slug": "guides/macos-browser-network",
         "title": "macOS connectivity",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/macos-browser-network.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/macos-browser-network.md",
         "sha256": "d88bddbf02f023f1238ce3a64d0bb6112c722939efc8c0c5cccc8329cc5f5b7b"
       },
       {
         "file": "docs/guides/macos-certificate-trust.md",
         "slug": "guides/macos-certificate-trust",
         "title": "Certificate trust",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/macos-certificate-trust.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/macos-certificate-trust.md",
         "sha256": "cc0f6df0095daf76f3b5c3c42d20173cd813c0948155276590a975817cc1cd06"
       },
       {
         "file": "docs/guides/codex-managed-environments.md",
         "slug": "guides/codex-managed-environments",
         "title": "Cloud and remote development environments",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/codex-managed-environments.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/codex-managed-environments.md",
         "sha256": "ad34fe362f5e09b3c290c680023924d03a5d839da1cab8f3e5dd953eefb9ed5e"
       },
       {
         "file": "docs/guides/agent-first-setup.md",
         "slug": "guides/agent-first-setup",
         "title": "Agent setup",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/agent-first-setup.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/agent-first-setup.md",
         "sha256": "664722c493276714eb8c21e309ffbd9728de8dc6900f7fd10b7e7b2478841c89"
       },
       {
         "file": "docs/integrations.md",
         "slug": "integrations",
         "title": "Agent integrations",
-        "snapshot": "docs/versions/v5/originals/next14/docs/integrations.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/integrations.md",
         "sha256": "b96c9e9eb76ad0bdd7385fcab2e104e4e63055c8d7a24a5131a7bf627a8816e7"
       },
       {
         "file": "docs/cli.md",
         "slug": "cli",
         "title": "CLI overview",
-        "snapshot": "docs/versions/v5/originals/next14/docs/cli.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/cli.md",
         "sha256": "0ff7d6493a1489927fe242c8f4e809e4d29321ebd6e6d89681c7b12a560ab013"
       },
       {
         "file": "docs/reference/cli.md",
         "slug": "reference/cli",
         "title": "Command reference",
-        "snapshot": "docs/versions/v5/originals/next14/docs/reference/cli.md",
-        "sha256": "1d9718bca0e2b8cda331c2bf8ddeb8e61076c08f407ab6f2cfd42fac8402021d"
+        "snapshot": "docs/versions/v5/originals/next15/docs/reference/cli.md",
+        "sha256": "b05ef58b5c1526fb84615722239110279e4d65f4219bcac6e45991fac83c7b96"
       },
       {
         "file": "docs/architecture.md",
         "slug": "architecture",
         "title": "Architecture",
-        "snapshot": "docs/versions/v5/originals/next14/docs/architecture.md",
-        "sha256": "44b6d94dbec2f27435d1e6adaa8386719f7d8fe0017d7a4087e1eb23e9b39312"
+        "snapshot": "docs/versions/v5/originals/next15/docs/architecture.md",
+        "sha256": "bb86b208cc22712c97f261632c1c971ddb23744657f31ce4c565455d6f9f09ea"
       },
       {
         "file": "docs/reference.md",
         "slug": "reference",
         "title": "Reference index",
-        "snapshot": "docs/versions/v5/originals/next14/docs/reference.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/reference.md",
         "sha256": "1d6f7ee4ebe82edbe1934beff6f329854bbf215526a5c6d82b8efd168356a9ff"
       },
       {
         "file": "docs/guides/prereleases.md",
         "slug": "guides/prereleases",
         "title": "Prerelease channels",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/prereleases.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/prereleases.md",
         "sha256": "a0d49c2f5a4a04cfd5035e6e9cdb841324b64fb8aeb1280ef87b27b91fc3575c"
       },
       {
         "file": "docs/guides/candidate-install.md",
         "slug": "native/install",
         "title": "Install the prerelease",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/candidate-install.md",
-        "sha256": "500004aa8b6187ae3ff7874ae9946e26122ee0c5fc89a5e0ba74ae70200fb256"
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/candidate-install.md",
+        "sha256": "0350d10a8e970c1fc34a762174af33a839d3d88e895e1425d421b9b0859e6fc9"
       },
       {
         "file": "docs/guides/native-candidate.md",
         "slug": "native/full-reference",
         "title": "Full reference",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/native-candidate.md",
-        "sha256": "f3d7907cc2176deeef590c7b2a273a750bced16ba0fcb0cb4a1be3793e34e2d4"
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/native-candidate.md",
+        "sha256": "0f7f95c8112029b08789243a67bb721fb42a5c8f6c6c63ffeaa48258e348d733"
       },
       {
         "file": "docs/reference/native-config-import.md",
         "slug": "native/config-import",
         "title": "Config import",
-        "snapshot": "docs/versions/v5/originals/next14/docs/reference/native-config-import.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/reference/native-config-import.md",
         "sha256": "a91021b91b3a87593fe16979c0e30b131add0c3c67e7dda72e7629c6480b0ac2"
       },
       {
         "file": "docs/reference/native-authored-commands.md",
         "slug": "native/authored-commands",
         "title": "Command contract",
-        "snapshot": "docs/versions/v5/originals/next14/docs/reference/native-authored-commands.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/reference/native-authored-commands.md",
         "sha256": "5ae09e524b7f694ede4076edc930fe470170bbcc1d0a4d1434393ee58a4293ee"
       },
       {
         "file": "docs/reference/mcp-tools.md",
         "slug": "reference/mcp-tools",
         "title": "MCP tools",
-        "snapshot": "docs/versions/v5/originals/next14/docs/reference/mcp-tools.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/reference/mcp-tools.md",
         "sha256": "5c2a0b0aa1e73bdb2af161436b89ebf7234c3ee7b53990d5284a2609981ee352"
       },
       {
         "file": "docs/reference/mcp-logs.md",
         "slug": "reference/mcp-logs",
         "title": "MCP logs",
-        "snapshot": "docs/versions/v5/originals/next14/docs/reference/mcp-logs.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/reference/mcp-logs.md",
         "sha256": "51d5222d0aa55f02112216ba6c3bea92a1f20326b4299adcb08f0ed8a9f2aaf5"
       },
       {
         "file": "docs/guides/v5-release-notes.md",
         "slug": "release-notes",
         "title": "What's new in 5.0",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/v5-release-notes.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/v5-release-notes.md",
         "sha256": "e434565b091b7727d345c0c06c3d342ac33a589be899bbf79b6e0f9c4c2ccbff"
       },
       {
         "file": "docs/guides/upgrade-to-v5.md",
         "slug": "upgrade",
         "title": "Upgrade from v4",
-        "snapshot": "docs/versions/v5/originals/next14/docs/guides/upgrade-to-v5.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/guides/upgrade-to-v5.md",
         "sha256": "50ee58eb6a76470c1d5eb0dd6455cbf5a5363d67ad1502279a065c45f8f7bd31"
       },
       {
         "file": "docs/dev.md",
         "slug": "dev",
         "title": "Side-by-side development",
-        "snapshot": "docs/versions/v5/originals/next14/docs/dev.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/dev.md",
         "sha256": "7f452788b580872ae14a6bcf8e3292bd2d2006271c43c18e181daff506f24289"
       },
       {
         "file": "docs/native/README.md",
         "slug": "native/overview",
         "title": "Overview",
-        "snapshot": "docs/versions/v5/originals/next14/docs/native/README.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/native/README.md",
         "sha256": "07388b2dab135a66ecd2aff426ddb19e151a6ddc416c5de40116a6290cbe9cca"
       },
       {
         "file": "docs/native/try-it.md",
         "slug": "native/try-it",
         "title": "Try it",
-        "snapshot": "docs/versions/v5/originals/next14/docs/native/try-it.md",
-        "sha256": "b77dabe08cc5ddc34e3919c9e92b1e1869532228cb531471494796a66bf09b70"
+        "snapshot": "docs/versions/v5/originals/next15/docs/native/try-it.md",
+        "sha256": "c9b408dabb58b4031ac7a60e16eaccaa580ffcda4f56e8c88773f5d1ea491f11"
       },
       {
         "file": "docs/native/limits.md",
         "slug": "native/limits",
         "title": "What works and known limits",
-        "snapshot": "docs/versions/v5/originals/next14/docs/native/limits.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/native/limits.md",
         "sha256": "19462064f68a8d43fb4c6161ad7ca1803b8d00d44e088d639ff141accde36f54"
       },
       {
         "file": "docs/native/reference.md",
         "slug": "native/reference",
         "title": "Reference map",
-        "snapshot": "docs/versions/v5/originals/next14/docs/native/reference.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/native/reference.md",
         "sha256": "11136361226e33c06aa5a59cea35c910c53a39697887728cb9a416c8bea84a5f"
       },
       {
         "file": "docs/recipes/README.md",
         "slug": "recipes/overview",
         "title": "Recipes",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/README.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/README.md",
         "sha256": "b6119a7d9ca01ae6be21196c42aea139c45d8ffd1acae6df205fcd17d04d6560"
       },
       {
         "file": "docs/recipes/cli-sign-in.md",
         "slug": "recipes/cli-sign-in",
         "title": "Sign in to another CLI at startup",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/cli-sign-in.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/cli-sign-in.md",
         "sha256": "5a05cd49841f60371de5effc2d1e2a17a31f55d731290037a543b09040110a1a"
       },
       {
         "file": "docs/recipes/tunnels.md",
         "slug": "recipes/tunnels",
         "title": "Expose a local service through a tunnel",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/tunnels.md",
-        "sha256": "e937201831ede625fe356dc411e0f9f4e67cc657df89b16eee88ec731c5c8cce"
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/tunnels.md",
+        "sha256": "7eb92cddf8859ae0775207db112de126a92337e1cc7fafd6bc7eed7299f755cd"
       },
       {
         "file": "docs/recipes/remote-database.md",
         "slug": "recipes/remote-database",
         "title": "Use a remote database from local services",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/remote-database.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/remote-database.md",
         "sha256": "67cb5d61b6547b199f88e68cecddd7c21035b6803164475b04a518db5c358150"
       },
       {
         "file": "docs/recipes/migrations.md",
         "slug": "recipes/migrations",
         "title": "Run database migrations",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/migrations.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/migrations.md",
         "sha256": "6c497af8d71731d17ce3ff32129239619c9128b080a77992b543d7109b20c67b"
       },
       {
         "file": "docs/recipes/environments.md",
         "slug": "recipes/environments",
         "title": "Switch between environments",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/environments.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/environments.md",
         "sha256": "1733b6951efc406ce7b12826d62ba363b95ab52ac6e57c9ff83089e683bece56"
       },
       {
         "file": "docs/recipes/deps-service.md",
         "slug": "recipes/deps-service",
         "title": "Install dependencies in a deps service",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/deps-service.md",
-        "sha256": "08442110b178d4983ded6110762665200be8e6c4dde9ab91e717c32adf3a1728"
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/deps-service.md",
+        "sha256": "f4f3fb9064efcb3724adaf7eaf42b9a4a1ee2942803f8bed0a5ef246a8bb6a88"
       },
       {
         "file": "docs/recipes/dependency-directories.md",
         "slug": "recipes/dependency-directories",
         "title": "Dependency directories and caches",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/dependency-directories.md",
-        "sha256": "74f490156d0e7d7ec76eda1682ee1ed079edb5d9035f8544000cdf26d45272b3"
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/dependency-directories.md",
+        "sha256": "67a75d65a18a7943bcf972b87fcfc4aaaf0e4a5a25d3cccf7e5b1cb194449aea"
       },
       {
         "file": "docs/recipes/cleanup.md",
         "slug": "recipes/cleanup",
         "title": "Clean up branch instances, worktrees and volumes",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/cleanup.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/cleanup.md",
         "sha256": "d9f3f1a2515b85ff0fea6a757afb29e1c92dfc5240cace7476a3562e7658d4b1"
       },
       {
         "file": "docs/recipes/config-examples.md",
         "slug": "recipes/config-examples",
         "title": "Config examples",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/config-examples.md",
-        "sha256": "45874e4843f7c295196ab5d5e60ef8b9c6158958e5a3aac395a7306d7b4639c5"
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/config-examples.md",
+        "sha256": "cd0ca4e3cceba8bef9a3c118483196907b3c08c564990afbbd3d74b2f2b4b404"
       },
       {
         "file": "docs/recipes/common-pitfalls.md",
         "slug": "recipes/common-pitfalls",
         "title": "Common pitfalls",
-        "snapshot": "docs/versions/v5/originals/next14/docs/recipes/common-pitfalls.md",
+        "snapshot": "docs/versions/v5/originals/next15/docs/recipes/common-pitfalls.md",
         "sha256": "12560070fd1567845bfaccbbcc12532969d34edd16a9b729d63e886d7ae1d8d2"
       }
     ],
@@ -1401,6 +1401,7 @@
       ".github/workflows/bun-crash-experiment.yml",
       ".github/workflows/ci.yml",
       ".github/workflows/prerelease.yml",
+      ".github/workflows/provider-pin-watch.yml",
       ".github/workflows/release-node-runtime-image.yml",
       ".github/workflows/release-prepare.yml",
       ".github/workflows/release.yml",
@@ -1546,6 +1547,8 @@
       "docs/diagrams/native-restart-interruption.svg",
       "docs/diagrams/push-ci-shards.mmd",
       "docs/diagrams/push-ci-shards.svg",
+      "docs/diagrams/recipe-publication.mmd",
+      "docs/diagrams/recipe-publication.svg",
       "docs/diagrams/status-without-docker.mmd",
       "docs/diagrams/status-without-docker.svg",
       "docs/docs-ia.md",
@@ -1670,36 +1673,54 @@
       "docs/versions/v5/index.md",
       "docs/versions/v5/install.md",
       "docs/versions/v5/integrations.md",
-      "docs/versions/v5/native/limits.md",
-      "docs/versions/v5/native/overview.md",
-      "docs/versions/v5/native/reference.md",
-      "docs/versions/v5/native/try-it.md",
-      "docs/versions/v5/originals/next13/docs/README.md",
-      "docs/versions/v5/originals/next13/docs/architecture.md",
-      "docs/versions/v5/originals/next13/docs/cli.md",
-      "docs/versions/v5/originals/next13/docs/core.md",
-      "docs/versions/v5/originals/next13/docs/dev.md",
-      "docs/versions/v5/originals/next13/docs/env.md",
-      "docs/versions/v5/originals/next13/docs/guides/agent-first-setup.md",
-      "docs/versions/v5/originals/next13/docs/guides/candidate-install.md",
-      "docs/versions/v5/originals/next13/docs/guides/codex-managed-environments.md",
-      "docs/versions/v5/originals/next13/docs/guides/development-runtime-safety.md",
-      "docs/versions/v5/originals/next13/docs/guides/init-project.md",
-      "docs/versions/v5/originals/next13/docs/guides/macos-browser-network.md",
-      "docs/versions/v5/originals/next13/docs/guides/macos-certificate-trust.md",
-      "docs/versions/v5/originals/next13/docs/guides/native-candidate.md",
-      "docs/versions/v5/originals/next13/docs/guides/prereleases.md",
-      "docs/versions/v5/originals/next13/docs/guides/upgrade-to-v5.md",
-      "docs/versions/v5/originals/next13/docs/guides/v5-release-notes.md",
-      "docs/versions/v5/originals/next13/docs/integrations.md",
-      "docs/versions/v5/originals/next13/docs/lifecycle.md",
-      "docs/versions/v5/originals/next13/docs/reference.md",
-      "docs/versions/v5/originals/next13/docs/reference/cli.md",
-      "docs/versions/v5/originals/next13/docs/reference/mcp-logs.md",
-      "docs/versions/v5/originals/next13/docs/reference/mcp-tools.md",
-      "docs/versions/v5/originals/next13/docs/reference/native-authored-commands.md",
-      "docs/versions/v5/originals/next13/docs/reference/native-config-import.md",
-      "docs/versions/v5/originals/next13/docs/sessions.md",
+      "docs/versions/v5/originals/next14/docs/README.md",
+      "docs/versions/v5/originals/next14/docs/architecture.md",
+      "docs/versions/v5/originals/next14/docs/cli.md",
+      "docs/versions/v5/originals/next14/docs/core.md",
+      "docs/versions/v5/originals/next14/docs/dev.md",
+      "docs/versions/v5/originals/next14/docs/env.md",
+      "docs/versions/v5/originals/next14/docs/guides/agent-first-setup.md",
+      "docs/versions/v5/originals/next14/docs/guides/candidate-install.md",
+      "docs/versions/v5/originals/next14/docs/guides/codex-managed-environments.md",
+      "docs/versions/v5/originals/next14/docs/guides/dependency-cache-protocol.md",
+      "docs/versions/v5/originals/next14/docs/guides/development-runtime-safety.md",
+      "docs/versions/v5/originals/next14/docs/guides/global-settings.md",
+      "docs/versions/v5/originals/next14/docs/guides/init-project.md",
+      "docs/versions/v5/originals/next14/docs/guides/macos-browser-network.md",
+      "docs/versions/v5/originals/next14/docs/guides/macos-certificate-trust.md",
+      "docs/versions/v5/originals/next14/docs/guides/native-candidate.md",
+      "docs/versions/v5/originals/next14/docs/guides/prereleases.md",
+      "docs/versions/v5/originals/next14/docs/guides/upgrade-to-v5.md",
+      "docs/versions/v5/originals/next14/docs/guides/v5-release-notes.md",
+      "docs/versions/v5/originals/next14/docs/integrations.md",
+      "docs/versions/v5/originals/next14/docs/lifecycle.md",
+      "docs/versions/v5/originals/next14/docs/native/README.md",
+      "docs/versions/v5/originals/next14/docs/native/limits.md",
+      "docs/versions/v5/originals/next14/docs/native/reference.md",
+      "docs/versions/v5/originals/next14/docs/native/try-it.md",
+      "docs/versions/v5/originals/next14/docs/recipes/README.md",
+      "docs/versions/v5/originals/next14/docs/recipes/cleanup.md",
+      "docs/versions/v5/originals/next14/docs/recipes/cli-sign-in.md",
+      "docs/versions/v5/originals/next14/docs/recipes/common-pitfalls.md",
+      "docs/versions/v5/originals/next14/docs/recipes/config-examples.md",
+      "docs/versions/v5/originals/next14/docs/recipes/dependency-directories.md",
+      "docs/versions/v5/originals/next14/docs/recipes/deps-service.md",
+      "docs/versions/v5/originals/next14/docs/recipes/environments.md",
+      "docs/versions/v5/originals/next14/docs/recipes/migrations.md",
+      "docs/versions/v5/originals/next14/docs/recipes/remote-database.md",
+      "docs/versions/v5/originals/next14/docs/recipes/tunnels.md",
+      "docs/versions/v5/originals/next14/docs/reference.md",
+      "docs/versions/v5/originals/next14/docs/reference/cli.md",
+      "docs/versions/v5/originals/next14/docs/reference/mcp-logs.md",
+      "docs/versions/v5/originals/next14/docs/reference/mcp-tools.md",
+      "docs/versions/v5/originals/next14/docs/reference/native-authored-commands.md",
+      "docs/versions/v5/originals/next14/docs/reference/native-config-import.md",
+      "docs/versions/v5/originals/next14/docs/sessions.md",
+      "docs/versions/v5/recipes/config-examples.md",
+      "docs/versions/v5/recipes/dependency-directories.md",
+      "docs/versions/v5/recipes/deps-service.md",
+      "docs/versions/v5/recipes/overview.md",
+      "docs/versions/v5/recipes/tunnels.md",
       "docs/versions/v5/reference/authored-schema-fields.md",
       "docs/versions/v5/reference/command-contracts.md",
       "docs/versions/v5/reference/configuration-fields.md",
@@ -2449,6 +2470,7 @@
       "scripts/docs/check.ts",
       "scripts/docs/curate-cli.ts",
       "scripts/docs/diagrams.ts",
+      "scripts/docs/installer-pin.ts",
       "scripts/docs/manifest.ts",
       "scripts/docs/pin.ts",
       "scripts/docs/prepare.ts",
@@ -2499,6 +2521,8 @@
       "scripts/prepare-release.ts",
       "scripts/prerelease-plan.ts",
       "scripts/privacy-check.ts",
+      "scripts/provider-pin-watch.ts",
+      "scripts/qualify-provider-pin.ts",
       "scripts/railway-node-e2e.ts",
       "scripts/refresh-doc-includes.ts",
       "scripts/release-prepare-gate.ts",
@@ -2539,6 +2563,7 @@
       "site/next.config.mjs",
       "site/package.json",
       "site/postcss.config.mjs",
+      "site/recipe-compatibility.md",
       "site/reference-coverage.md",
       "site/source.config.ts",
       "site/test-dom.ts",
@@ -2623,6 +2648,7 @@
       "src/backends/native-ignored-setting-notices.ts",
       "src/backends/native-image-policy.ts",
       "src/backends/native-plan-change.ts",
+      "src/backends/native-preflight.ts",
       "src/backends/native-prepared-base.ts",
       "src/backends/native-private-cli.ts",
       "src/backends/native-process-census-diagnostics.ts",
@@ -2702,10 +2728,12 @@
       "src/commands/daemon.ts",
       "src/commands/dev.ts",
       "src/commands/dispatch.ts",
+      "src/commands/doctor-native-preflight.ts",
       "src/commands/doctor-utils.ts",
       "src/commands/doctor.ts",
       "src/commands/env.ts",
       "src/commands/gateway.ts",
+      "src/commands/global-proxy-network.ts",
       "src/commands/global.ts",
       "src/commands/help.ts",
       "src/commands/host-ps.ts",
@@ -2840,6 +2868,7 @@
       "src/lib/fs.ts",
       "src/lib/git-info-exclude.ts",
       "src/lib/git-worktree.ts",
+      "src/lib/global-proxy-network.ts",
       "src/lib/global-service-host.ts",
       "src/lib/guards.ts",
       "src/lib/hack-banner.ts",
@@ -3385,6 +3414,7 @@
       "tests/global-command.macos.test.ts",
       "tests/global-command.test.ts",
       "tests/global-dns-authorizer-wiring.test.ts",
+      "tests/global-proxy-network.test.ts",
       "tests/global-service-hosts.test.ts",
       "tests/global-state-guard.test.ts",
       "tests/guards.test.ts",
@@ -4014,6 +4044,8 @@
       "tests/native-plan-change.test.ts",
       "tests/native-plan-cli-wiring.test.ts",
       "tests/native-plan-graph-contract.test.ts",
+      "tests/native-preflight-cli.test.ts",
+      "tests/native-preflight-review-codes.test.ts",
       "tests/native-prepared-base.test.ts",
       "tests/native-private-cli.test.ts",
       "tests/native-private-lock-recovery.test.ts",
@@ -4176,6 +4208,7 @@
       "tests/projects-registry-read-error.test.ts",
       "tests/projects-registry-worktrees.test.ts",
       "tests/projects-registry.test.ts",
+      "tests/provider-pin-watch.test.ts",
       "tests/provider-route-resolver.test.ts",
       "tests/proxy-bind.test.ts",
       "tests/python-free-bootstrap.test.ts",
@@ -4191,6 +4224,7 @@
       "tests/python/test_prepared_base_benchmark.py",
       "tests/python/test_prerelease_install.py",
       "tests/qr.test.ts",
+      "tests/qualify-provider-pin.test.ts",
       "tests/recipe-examples.test.ts",
       "tests/refresh-scheduler.test.ts",
       "tests/registry-credential-preflight.test.ts",
@@ -4378,37 +4412,51 @@
       {
         "slug": "recipes/overview",
         "title": "Recipes",
-        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
-        "sourceLabel": "Recipe corrections (next.14 compatible)",
+        "sourceRevision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",
+        "sourceLabel": "next.15 recipe link corrections",
         "sourceFile": "docs/recipes/README.md"
       },
       {
         "slug": "recipes/tunnels",
         "title": "Expose a local service through a tunnel",
-        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
-        "sourceLabel": "Recipe corrections (next.14 compatible)",
+        "sourceRevision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",
+        "sourceLabel": "next.15 recipe link corrections",
         "sourceFile": "docs/recipes/tunnels.md"
       },
       {
         "slug": "recipes/deps-service",
         "title": "Install dependencies in a deps service",
-        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
-        "sourceLabel": "Recipe corrections (next.14 compatible)",
+        "sourceRevision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",
+        "sourceLabel": "next.15 recipe link corrections",
         "sourceFile": "docs/recipes/deps-service.md"
       },
       {
         "slug": "recipes/dependency-directories",
         "title": "Dependency directories and caches",
-        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
-        "sourceLabel": "Recipe corrections (next.14 compatible)",
+        "sourceRevision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",
+        "sourceLabel": "next.15 recipe link corrections",
         "sourceFile": "docs/recipes/dependency-directories.md"
       },
       {
         "slug": "recipes/config-examples",
         "title": "Config examples",
-        "sourceRevision": "4b400ea4d40acbff4ec00e37a3f288c67da55a03",
-        "sourceLabel": "Recipe corrections (next.14 compatible)",
+        "sourceRevision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",
+        "sourceLabel": "next.15 recipe link corrections",
         "sourceFile": "docs/recipes/config-examples.md"
+      },
+      {
+        "slug": "guides/proxy-network-repair",
+        "title": "Proxy network repair",
+        "sourceRevision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",
+        "sourceLabel": "v5.0.0-next.15",
+        "sourceFile": "docs/architecture.md"
+      },
+      {
+        "slug": "native/preflight",
+        "title": "Native preflight",
+        "sourceRevision": "278aeb1cee5b136d7bae0ddfcd5f3741e9579524",
+        "sourceLabel": "v5.0.0-next.15",
+        "sourceFile": "docs/guides/native-candidate.md"
       }
     ]
   }

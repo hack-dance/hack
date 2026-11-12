@@ -31,6 +31,8 @@ const sources = {
   "tests/generated.test.ts": 'import {source} from "./helper.ts";',
   "packages/db/drizzle.config.ts": "export const config = {};",
   "src/client.config.ts": "export const config = {};",
+  "src/lib/banner.txt": "banner text",
+  "src/lib/defaults.json": "{}",
   // Present files ensure these tests exercise their own rule, not deletion.
   "bun.lock": "{}",
   "package.json": "{}",
@@ -77,6 +79,8 @@ describe("conservative dependency selection", () => {
     ["package.json"],
     ["packages/db/drizzle.config.ts"],
     ["src/client.config.ts"],
+    ["src/lib/banner.txt"],
+    ["src/lib/defaults.json"],
     ["tsconfig.json"],
     [".github/workflows/ci.yml"],
     ["scripts/helper.ts"],

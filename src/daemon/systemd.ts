@@ -1,3 +1,4 @@
+import { lstatSync, readdirSync, type Stats, statSync } from "node:fs";
 import {
   chmod,
   lstat,
@@ -1174,7 +1175,7 @@ async function checkDanglingDropInDirectory(opts: {
   if (await pathExists(opts.dir)) {
     return "present";
   }
-  if (!(await entryExists(opts.dir))) {
+  if (!entryExists(opts.dir)) {
     return null;
   }
   const walk = await walkReplaceableChain({
@@ -1186,7 +1187,7 @@ async function checkDanglingDropInDirectory(opts: {
   if ("error" in walk) {
     return walk.error;
   }
-  const creatable = await lettingOthersCreate(walk.existing);
+  const creatable = lettingOthersCreate(walk.existing);
   return creatable === null
     ? null
     : `directory ${opts.dir} is a link to a path that does not exist yet, and ${walk.existing} lets other users create it (${creatable}); run: chmod go-w ${walk.existing}, or remove the link`;
@@ -1502,7 +1503,7 @@ async function checkUnitLoadDirectory(opts: {
   // new ones: neither a missing load directory's parent, nor a load or
   // drop-in directory (where a new drop-in would be picked up), may be
   // writable by group or others.
-  const creatable = await lettingOthersCreate(existing);
+  const creatable = lettingOthersCreate(existing);
   if (!walk.complete) {
     return creatable === null
       ? null
@@ -1523,7 +1524,7 @@ async function checkUnitLoadDirectory(opts: {
       }
       return dangling;
     }
-    const writable = await lettingOthersCreate(dir);
+    const writable = lettingOthersCreate(dir);
     const error =
       (writable === null
         ? null
@@ -1624,6 +1625,7 @@ export async function checkServicePathDirectories(opts: {
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
   const checked = new Set<string>();
+  const scanned = new Set<string>();
   for (const dir of opts.dirs) {
     if (!isAbsolute(dir)) {
       return `the hackd.service PATH has a directory that is not absolute (${dir || "empty"})`;
@@ -1638,11 +1640,13 @@ export async function checkServicePathDirectories(opts: {
     if ("error" in walk) {
       return `the hackd.service PATH directory ${dir} is not safe: ${walk.error}`;
     }
-    const writable = await lettingOthersCreate(walk.existing);
+    const writable = lettingOthersCreate(walk.existing);
     if (writable !== null) {
       return `other users can ${walk.complete ? "add programs to" : "create"} the hackd.service PATH directory ${dir} (${walk.existing}, ${writable}); run: chmod go-w ${walk.existing}`;
     }
-    if (walk.complete) {
+    // /bin is often a link to /usr/bin: scan each real directory once.
+    if (walk.complete && !scanned.has(walk.existing)) {
+      scanned.add(walk.existing);
       const program = await checkPathDirectoryPrograms({
         dir: walk.existing,
         uid,
@@ -1674,8 +1678,8 @@ async function checkPathDirectoryPrograms(opts: {
   let entries: string[];
   let systemDir: boolean;
   try {
-    entries = await readdir(opts.dir);
-    const dirInfo = await stat(opts.dir);
+    entries = readdirSync(opts.dir);
+    const dirInfo = statSync(opts.dir);
     // Root-owned and writable by nobody else (never /tmp-like): the
     // package manager's directory.
     systemDir = dirInfo.uid === 0 && (dirInfo.mode & 0o022) === 0;
@@ -1684,9 +1688,9 @@ async function checkPathDirectoryPrograms(opts: {
   }
   for (const entry of entries) {
     const path = resolve(opts.dir, entry);
-    let info: Awaited<ReturnType<typeof lstat>>;
+    let info: Stats;
     try {
-      info = await lstat(path);
+      info = lstatSync(path);
     } catch {
       continue;
     }
@@ -1694,12 +1698,7 @@ async function checkPathDirectoryPrograms(opts: {
       continue;
     }
     const error = info.isSymbolicLink()
-      ? await checkReplaceableChain({
-          path,
-          uid: opts.uid,
-          hackHome: null,
-          checked: opts.checked,
-        })
+      ? await checkPathLink({ path, uid: opts.uid, checked: opts.checked })
       : programFileProblem({ path, info, uid: opts.uid, systemDir });
     if (error !== null) {
       return error;
@@ -1708,9 +1707,40 @@ async function checkPathDirectoryPrograms(opts: {
   return null;
 }
 
+/**
+ * A symlinked PATH program: nothing on the way to its target may be
+ * replaceable. A stale link whose target is gone (a removed tool) is fine
+ * as long as nobody else can create that target: the walk stops at the
+ * first missing component and the deepest existing directory must not be
+ * writable by group or others.
+ */
+async function checkPathLink(opts: {
+  readonly path: string;
+  readonly uid: number;
+  readonly checked: Set<string>;
+}): Promise<string | null> {
+  const walk = await walkReplaceableChain({
+    path: opts.path,
+    uid: opts.uid,
+    hackHome: null,
+    allowMissing: true,
+    checked: opts.checked,
+  });
+  if ("error" in walk) {
+    return walk.error;
+  }
+  if (walk.complete) {
+    return null;
+  }
+  const creatable = lettingOthersCreate(walk.existing);
+  return creatable === null
+    ? null
+    : `${opts.path}, a link to a missing target that other users could create in ${walk.existing} (${creatable})`;
+}
+
 function programFileProblem(opts: {
   readonly path: string;
-  readonly info: Awaited<ReturnType<typeof lstat>>;
+  readonly info: Stats;
   readonly uid: number;
   readonly systemDir: boolean;
 }): string | null {

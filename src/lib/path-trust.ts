@@ -1,9 +1,18 @@
-import { chmod, lstat, readlink, stat } from "node:fs/promises";
+import {
+  chmodSync,
+  lstatSync,
+  readlinkSync,
+  type Stats,
+  statSync,
+} from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 
 /**
  * Whether anything on the way to a path can be replaced by another
- * account (HACK-2052): used for hackd's state directory, the programs and
+ * account (HACK-2052). The checks use synchronous `lstat`/`readlink`: they
+ * are short local metadata reads, and a PATH directory such as /usr/bin
+ * holds thousands of entries, where an async round trip per call costs
+ * more than the call: used for hackd's state directory, the programs and
  * unit files a login service runs, and systemd's load paths. Paths are
  * walked the way the kernel resolves them, one component at a time with
  * symlinks followed where they are met.
@@ -19,7 +28,7 @@ const MAX_SERVICE_PATH_HOPS = 64;
  * (sticky directories excepted); group/other write is removed inside
  * `hackHome` (Hack's own directories) and refused elsewhere.
  */
-export async function checkReplaceableChain(opts: {
+export function checkReplaceableChain(opts: {
   readonly path: string;
   readonly uid: number;
   readonly hackHome: string | null;
@@ -30,8 +39,8 @@ export async function checkReplaceableChain(opts: {
    * under the same directories (a whole PATH directory).
    */
   readonly checked?: Set<string>;
-}): Promise<string | null> {
-  const walk = await walkReplaceableChain(opts);
+}): string | null {
+  const walk = walkReplaceableChain(opts);
   return "error" in walk ? walk.error : null;
 }
 
@@ -42,17 +51,16 @@ export async function checkReplaceableChain(opts: {
  * after every link on the way (dangling ones included) was followed and
  * checked, and `complete` is false.
  */
-export async function walkReplaceableChain(opts: {
+export function walkReplaceableChain(opts: {
   readonly path: string;
   readonly uid: number;
   readonly hackHome: string | null;
   readonly stopAtLink?: boolean;
   readonly allowMissing?: boolean;
   readonly checked?: Set<string>;
-}): Promise<
+}):
   | { readonly error: string }
-  | { readonly existing: string; readonly complete: boolean }
-> {
+  | { readonly existing: string; readonly complete: boolean } {
   if (!isAbsolute(opts.path)) {
     return { error: `${opts.path} is not an absolute path` };
   }
@@ -68,12 +76,12 @@ export async function walkReplaceableChain(opts: {
     cur: "/",
     hops: 0,
   };
-  const rootError = await checkChainEntry(state, "/");
+  const rootError = checkChainEntry(state, "/");
   if (rootError !== null) {
     return { error: rootError };
   }
   while (state.queue.length > 0) {
-    const step = await walkChainStep(state);
+    const step = walkChainStep(state);
     if (step !== null) {
       return step;
     }
@@ -95,15 +103,12 @@ type ChainWalk = {
   hops: number;
 };
 
-async function checkChainEntry(
-  state: ChainWalk,
-  entry: string
-): Promise<string | null> {
+function checkChainEntry(state: ChainWalk, entry: string): string | null {
   if (state.checked.has(entry)) {
     return null;
   }
   state.checked.add(entry);
-  return await checkServicePathEntry({
+  return checkServicePathEntry({
     path: entry,
     uid: state.opts.uid,
     hackHome: state.opts.hackHome,
@@ -111,13 +116,12 @@ async function checkChainEntry(
 }
 
 /** One component of {@link walkReplaceableChain}; a result ends the walk. */
-async function walkChainStep(
+function walkChainStep(
   state: ChainWalk
-): Promise<
+):
   | { readonly error: string }
   | { readonly existing: string; readonly complete: boolean }
-  | null
-> {
+  | null {
   const component = state.queue.shift() as string;
   if (component === "" || component === ".") {
     return null;
@@ -128,14 +132,14 @@ async function walkChainStep(
   }
   const next =
     state.cur === "/" ? `/${component}` : `${state.cur}/${component}`;
-  if (state.opts.allowMissing === true && !(await entryExists(next))) {
+  if (state.opts.allowMissing === true && !entryExists(next)) {
     return { existing: state.cur, complete: false };
   }
-  const error = await checkChainEntry(state, next);
+  const error = checkChainEntry(state, next);
   if (error !== null) {
     return { error };
   }
-  const link = await readSymlinkTarget(next);
+  const link = readSymlinkTarget(next);
   if (
     link === null ||
     (state.opts.stopAtLink === true && state.queue.length === 0)
@@ -155,9 +159,9 @@ async function walkChainStep(
 }
 
 /** Any directory entry, a dangling symlink included. */
-export async function entryExists(path: string): Promise<boolean> {
+export function entryExists(path: string): boolean {
   try {
-    await lstat(path);
+    lstatSync(path);
     return true;
   } catch {
     return false;
@@ -165,25 +169,25 @@ export async function entryExists(path: string): Promise<boolean> {
 }
 
 /** A symlink's raw target, or null when `path` is not a link. */
-async function readSymlinkTarget(path: string): Promise<string | null> {
+function readSymlinkTarget(path: string): string | null {
   try {
-    if (!(await lstat(path)).isSymbolicLink()) {
+    if (!lstatSync(path).isSymbolicLink()) {
       return null;
     }
-    return await readlink(path);
+    return readlinkSync(path);
   } catch {
     return null;
   }
 }
 
-async function checkServicePathEntry(opts: {
+function checkServicePathEntry(opts: {
   readonly path: string;
   readonly uid: number;
   readonly hackHome: string | null;
-}): Promise<string | null> {
-  let info: Awaited<ReturnType<typeof lstat>>;
+}): string | null {
+  let info: Stats;
   try {
-    info = await lstat(opts.path);
+    info = lstatSync(opts.path);
   } catch (error: unknown) {
     return `${opts.path} could not be inspected: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -195,7 +199,7 @@ async function checkServicePathEntry(opts: {
     opts.uid >= 0 &&
     info.uid !== opts.uid &&
     info.uid !== 0 &&
-    !(info.isFile() && (await isProtectedSystemDir(dirname(opts.path))))
+    !(info.isFile() && isProtectedSystemDir(dirname(opts.path)))
   ) {
     return `${opts.path} is owned by another user (uid ${info.uid})`;
   }
@@ -215,8 +219,8 @@ async function checkServicePathEntry(opts: {
     (opts.path === opts.hackHome || opts.path.startsWith(`${opts.hackHome}/`));
   if (insideHackHome && info.isDirectory() && info.uid === opts.uid) {
     try {
-      await chmod(opts.path, info.mode & 0o7755);
-      if (((await lstat(opts.path)).mode & 0o022) === 0) {
+      chmodSync(opts.path, info.mode & 0o7755);
+      if ((lstatSync(opts.path).mode & 0o022) === 0) {
         return null;
       }
     } catch {
@@ -227,8 +231,8 @@ async function checkServicePathEntry(opts: {
 }
 
 /** "mode NNNN" when others may create entries in `dir` (sticky or not). */
-export async function lettingOthersCreate(dir: string): Promise<string | null> {
-  const mode = (await stat(dir)).mode;
+export function lettingOthersCreate(dir: string): string | null {
+  const mode = statSync(dir).mode;
   return (mode & 0o022) === 0 ? null : `mode ${(mode & 0o7777).toString(8)}`;
 }
 
@@ -237,9 +241,9 @@ export async function lettingOthersCreate(dir: string): Promise<string | null> {
  * does a file's foreign owner mean "the package manager set it". In `/tmp`
  * (root-owned, 1777) a file's owner controls it.
  */
-async function isProtectedSystemDir(dir: string): Promise<boolean> {
+function isProtectedSystemDir(dir: string): boolean {
   try {
-    const info = await lstat(dir);
+    const info = lstatSync(dir);
     return (
       info.isDirectory() && info.uid === 0 && (Number(info.mode) & 0o022) === 0
     );

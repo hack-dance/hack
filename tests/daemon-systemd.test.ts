@@ -2783,3 +2783,24 @@ linuxTest(
     }
   }
 );
+
+linuxTest(
+  "a stale symlink in a service PATH directory does not block hackd",
+  async () => {
+    // Codex review: a dangling link left by an uninstalled tool refused
+    // install and start, although nobody else can create its target.
+    const bin = join(root, "stale-bin");
+    await mkdir(bin);
+    await chmod(bin, 0o755);
+    await symlink("../removed-tool", join(bin, "old-tool"));
+    expect(await checkServicePathDirectories({ dirs: [bin] })).toBeNull();
+    // A dangling link into a directory others can write is still refused.
+    const shared = join(root, "shared-later");
+    await mkdir(shared);
+    await chmod(shared, 0o777);
+    await symlink(join(shared, "not-yet"), join(bin, "later"));
+    expect(await checkServicePathDirectories({ dirs: [bin] })).toContain(
+      shared
+    );
+  }
+);

@@ -5,8 +5,12 @@ pub mod endpoints;
 #[cfg(target_os = "macos")]
 pub mod foreground;
 mod journal;
+#[cfg(target_os = "macos")]
+mod log_follow;
 pub mod persistent_data;
 mod runtime;
+#[cfg(target_os = "macos")]
+pub(super) use log_follow::follow_logs;
 pub mod selection;
 mod source;
 pub use journal::{Phase, Receipt};

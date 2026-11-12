@@ -218,14 +218,29 @@ fn read_checked(
         .map_err(|_| unsafe_file())?;
     after_read();
     let after = file.metadata().map_err(|_| unsafe_file())?;
-    let current = open_project_file(project)?
-        .ok_or_else(unsafe_file)?
-        .metadata()
-        .map_err(|_| unsafe_file())?;
+    let mut current_file = open_project_file(project)?.ok_or_else(unsafe_file)?;
+    let current = current_file.metadata().map_err(|_| unsafe_file())?;
     if bytes.len() > MAX_BYTES
         || bytes.len() as u64 != before.len()
         || !same_file(&before, &after)
         || !same_file(&after, &current)
+    {
+        return Err(unsafe_file());
+    }
+    // Same-size writes can share a timestamp tick. Recheck the bounded bytes
+    // through the freshly opened name as well as its identity; metadata alone
+    // cannot establish stability. Both allocations retain zeroizing ownership.
+    let mut verified = Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1));
+    (&mut current_file)
+        .take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut verified)
+        .map_err(|_| unsafe_file())?;
+    if *verified != *bytes
+        || !same_file(
+            &current,
+            &current_file.metadata().map_err(|_| unsafe_file())?,
+        )
+        || !same_file(&after, &file.metadata().map_err(|_| unsafe_file())?)
     {
         return Err(unsafe_file());
     }

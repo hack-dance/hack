@@ -2,8 +2,22 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const fixture = join(import.meta.dir, "fixtures", "native-detached-owner.ts");
+
+function fixtureEnv(root: string) {
+  return privateCliEnv({
+    root,
+    env: {
+      HACK_NO_INTERACTIVE: "1",
+      XDG_CONFIG_HOME: join(root, "config"),
+      XDG_STATE_HOME: join(root, "state"),
+      XDG_CACHE_HOME: join(root, "cache"),
+      XDG_DATA_HOME: join(root, "data"),
+    },
+  });
+}
 
 async function waitForFile(path: string): Promise<string> {
   const deadline = performance.now() + 5000;
@@ -27,6 +41,7 @@ for (const mode of [
   "ready",
   "shell-names",
   "shell-names-empty",
+  "unsafe-failure",
   "fail",
   "timeout",
   "launcher-loss",
@@ -40,6 +55,7 @@ for (const mode of [
     const launcher = Bun.spawn(
       [process.execPath, fixture, "launcher", root, mode],
       {
+        env: fixtureEnv(root),
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
@@ -65,7 +81,14 @@ for (const mode of [
             ? "Forwarding shell variables: (none).\n"
             : ""
       );
-      if (["ready", "shell-names", "shell-names-empty"].includes(mode)) {
+      if (
+        [
+          "ready",
+          "shell-names",
+          "shell-names-empty",
+          "unsafe-failure",
+        ].includes(mode)
+      ) {
         expect(code).toBe(0);
         expect(JSON.parse(stdout)).toEqual({
           ok: true,
@@ -105,7 +128,12 @@ for (const mode of [
           "down.before\nprocess.stop\ndown.after\n"
         );
         expect(await readFile(join(root, "stop-signals"), "utf8")).toBe(
-          ["ready", "shell-names", "shell-names-empty"].includes(mode)
+          [
+            "ready",
+            "shell-names",
+            "shell-names-empty",
+            "unsafe-failure",
+          ].includes(mode)
             ? "0"
             : "1"
         );
@@ -120,3 +148,37 @@ for (const mode of [
     }
   }, 15_000);
 }
+
+test("detached failure keeps validated runtime detail through cleanup wrappers, never their text", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-detached-failure-"));
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "wrapped-failure"],
+    {
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      launcher.exited,
+      new Response(launcher.stdout).text(),
+      new Response(launcher.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("graph_port_publication") },
+    });
+    expect(stdout).toContain("Native publishes only TCP ports");
+    expect(stdout + stderr).not.toContain("synthetic-private-value");
+    expect(stderr).toBe("");
+  } finally {
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -3,7 +3,10 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serveNativeProjectGraph } from "../src/backends/native-project-process.ts";
-import { NATIVE_EXIT_DRAIN_BOUND_MS } from "../src/backends/native-runtime-client.ts";
+import {
+  NATIVE_EXIT_DRAIN_BOUND_MS,
+  NativeRuntimeRequestError,
+} from "../src/backends/native-runtime-client.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
@@ -784,5 +787,39 @@ test("a malformed process refusal list is dropped whole", async () => {
     }).catch(() => undefined);
     expect(diagnostics[0]?.processRefusals).toBeUndefined();
     expect(diagnostics[0]?.nativeCode).toBe("environment_user");
+  }
+});
+
+test("startup failure retains only the runtime's validated fixed detail for detached reporting", async () => {
+  for (const fixed of [true, false]) {
+    const reply = JSON.stringify({
+      code: "graph_port_publication",
+      message_fixed: fixed,
+      message: fixed
+        ? "Native publishes only TCP ports; keep UDP publication on the Compose backend."
+        : "synthetic-private-detail",
+      service: "web",
+    });
+    const opts = await fixture(
+      `console.error(${JSON.stringify(reply)}); process.exit(2);`
+    );
+    const failure = await serveNativeProjectGraph({
+      ...opts,
+      onReady: async () => {
+        throw new Error("must not become ready");
+      },
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(NativeRuntimeRequestError);
+    if (!(failure instanceof NativeRuntimeRequestError)) {
+      throw new Error("Missing structured failure");
+    }
+    expect(failure.nativeCode).toBe("graph_port_publication");
+    expect(failure.nativeService).toBe("web");
+    expect(failure.nativeMessage).toBe(
+      fixed
+        ? "Native publishes only TCP ports; keep UDP publication on the Compose backend."
+        : undefined
+    );
+    expect(String(failure)).not.toContain("synthetic-private-detail");
   }
 });

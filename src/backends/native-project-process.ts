@@ -15,6 +15,7 @@ import { nativePublisherExitNotice } from "./native-project-publications.ts";
 import {
   invokeNativeRuntime,
   NATIVE_EXIT_DRAIN_BOUND_MS,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
   nativeFailureNote,
   readNativeStartupFailure,
@@ -557,9 +558,12 @@ async function reportStartupLogs(
 function interruptedStartup(
   failure: Awaited<ReturnType<typeof readNativeStartupFailure>>
 ): Error {
-  return new ClosedCliError(
-    `Native graph startup was interrupted or failed${failure ? ` (${failure.code})` : ""}; inspect owned state before retrying.${failure ? nativeFailureNote(failure) : ""}`
-  );
+  return new NativeRuntimeRequestError({
+    message: `Native graph startup was interrupted or failed${failure ? ` (${failure.code})` : ""}; inspect owned state before retrying.${failure ? nativeFailureNote(failure) : ""}`,
+    nativeCode: failure?.code,
+    nativeMessage: failure?.message,
+    nativeService: failure?.service,
+  });
 }
 
 /** An attached finite-hook owner must not retire while its captured detached group is present.

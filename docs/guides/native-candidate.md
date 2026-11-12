@@ -206,6 +206,12 @@ each with a plain sentence and a fix. It judges what `hack up` judges: the
 Compose document after the selected native adaptation and the project-wide
 extra hosts are applied, reviewed with the profiles you pass.
 
+The review includes the graph driver's own file-local start admission. A UDP
+publication is a `graph_port_publication` blocker with the same reason as
+foreground `up`; native publishes TCP only. Graph budgets, readiness, probes
+and restart restrictions use the same admission checks. Inactive profile
+services do not contribute publication blockers.
+
 The Compose input must be a nonempty regular file of at most 256 KiB, not a
 symbolic link. Unreadable, changing or oversized input is reported as
 `compose_file_unreadable`; the check never waits for a FIFO writer.
@@ -220,6 +226,11 @@ The runtime review half needs a native runtime, so run the preflight from the
 `hack-next` launcher for the full list. Without native selection only the CLI's
 checks run and the review is reported as `skipped`. The review needs no running
 VM.
+
+Use a matching updated CLI and runtime. A runtime without start-admission review
+is reported as `unavailable` with an update hint and cannot produce `ready: true`.
+Image acquisition, private delivery, verified source/cache bindings, retained
+ownership and actual service readiness are checked during `up`.
 
 With `--json` the report is the `data` of the standard result envelope:
 
@@ -283,7 +294,14 @@ With `--json` the report is the `data` of the standard result envelope:
   no sentence for is still listed, by its code and field.
 
 The preflight is a report, not an admission decision: `hack up` still runs its
-own checks, and a clean report starts nothing. It does not cover:
+own checks, and a clean report starts nothing. Foreground and detached `up`
+also run the shared file-local start checks on the selected, adapted Compose
+input before hooks, image acquisition or VM boot. A known static blocker such
+as UDP publication refuses without starting a cold pool. Admitted builds use
+review-only image placeholders for this check; startup still builds or selects
+the real image and repeats its review before graph admission. Missing or invalid
+static-review metadata refuses before boot and names the preflight command.
+The standalone preflight does not cover:
 
 - A project with native project inputs: a native project file
   (`.hack/hack.project.json`) or a Compose file adopted into generated native
@@ -457,7 +475,8 @@ bridge to the container's target port, after the graph is ready. The rules:
 
 - Only TCP with an explicit host port is published. UDP, an engine-assigned host
   port (a bare `"3000"`), and IPv6 loopback (`::1`) publication are refused with
-  `graph_port_publication`; keep those projects on the Compose backend.
+  `graph_port_publication` before VM boot, including detached `up`; keep those
+  projects on the Compose backend.
 - One graph publishes at most 16 ports. Routes and published ports share the
   pool's 32 application bridge sockets.
 - Two active services, two graphs in the same pool, or a graph and any other
@@ -547,6 +566,9 @@ Without these flags, `hack up` stays attached and Ctrl-C requests ordinary stop.
 Detached startup has no terminal stdin and suppresses hook/owner output rather
 than persisting potentially private values. Service logs remain available through
 `hack logs`. Its JSON result uses the v4 lifecycle envelope.
+When startup fails, the launcher reports the runtime's validated code and fixed
+reason, including the service when available, in human and JSON output. Hook
+output and arbitrary owner diagnostics remain suppressed.
 
 A private IPC readiness/acceptance exchange transfers only launcher responsibility;
 it creates no new runtime authority. Launcher loss before acceptance requests

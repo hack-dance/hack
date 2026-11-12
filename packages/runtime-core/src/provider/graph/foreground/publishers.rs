@@ -307,6 +307,16 @@ impl Publishers {
         Ok(!exited)
     }
     pub(super) fn reap_exited(&mut self, candidate: &Candidate) -> Result<bool, CandidateError> {
+        self.reap_exited_with_notice(candidate, |run, port| {
+            exit_notice(&mut std::io::stdout().lock(), run, port)
+        })
+    }
+
+    fn reap_exited_with_notice(
+        &mut self,
+        candidate: &Candidate,
+        mut notice: impl FnMut(&str, Option<u16>) -> std::io::Result<()>,
+    ) -> Result<bool, CandidateError> {
         let mut exited = false;
         for owned in &mut self.children {
             if owned.exited.is_none() {
@@ -319,13 +329,10 @@ impl Publishers {
                     &mut owned.exit_proof,
                 )?;
                 if owned.exited.is_some() {
-                    use std::io::Write;
-                    let notice = serde_json::json!({"kind":"graph_publisher_exit","run":owned.run,"port":owned.port});
-                    let mut stdout = std::io::stdout().lock();
-                    serde_json::to_writer(&mut stdout, &notice).map_err(|_| refused())?;
-                    writeln!(stdout)
-                        .and_then(|_| stdout.flush())
-                        .map_err(|_| refused())?;
+                    // A dead frontend can close stdout before its publisher is
+                    // reaped. Presentation must not prevent retaining cleanup;
+                    // identity and journal errors above still refuse normally.
+                    let _ = notice(&owned.run, owned.port);
                 }
             }
             exited |= owned.exited.is_some();
@@ -507,6 +514,21 @@ impl Publishers {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+fn exit_notice(
+    output: &mut impl std::io::Write,
+    run: &str,
+    port: Option<u16>,
+) -> std::io::Result<()> {
+    let notice = serde_json::json!({"kind":"graph_publisher_exit","run":run,"port":port});
+    serde_json::to_writer(&mut *output, &notice).map_err(|error| {
+        std::io::Error::new(
+            error.io_error_kind().unwrap_or(std::io::ErrorKind::Other),
+            error,
+        )
+    })?;
+    writeln!(output).and_then(|_| output.flush())
 }
 
 const PENDING_ENDPOINT_POLL: Duration = Duration::from_millis(100);

@@ -23,6 +23,15 @@ impl Drop for ChildGuard {
 /// until an explicit stop. No Engine/VM or synthetic publisher stands in for it.
 #[test]
 fn exited_native_publisher_stays_observable_without_starting_guest_cleanup() {
+    exercise(false);
+}
+
+#[test]
+fn closed_frontend_notice_stream_does_not_refuse_reaping_before_cleanup() {
+    exercise(true);
+}
+
+fn exercise(broken_notice: bool) {
     let path = std::fs::canonicalize("/tmp")
         .unwrap()
         .join(format!("hpub-{}", graph::probes::token().unwrap()));
@@ -86,10 +95,33 @@ fn exited_native_publisher_stays_observable_without_starting_guest_cleanup() {
         }],
     };
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !publishers.reap_exited(&candidate).unwrap() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
+    let (mut notice, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(reader);
+    assert_eq!(
+        notice.write(b"probe").unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    let mut attempted = 0;
+    {
+        let mut reap = |publishers: &mut Publishers| {
+            if broken_notice {
+                publishers.reap_exited_with_notice(&candidate, |run, port| {
+                    attempted += 1;
+                    let error = exit_notice(&mut notice, run, port).unwrap_err();
+                    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+                    Err(error)
+                })
+            } else {
+                publishers.reap_exited(&candidate)
+            }
+        };
+        while !reap(&mut publishers).unwrap() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reap(&mut publishers).unwrap());
     }
+    assert_eq!(attempted, usize::from(broken_notice));
     assert!(!publishers.observe_live(&candidate).unwrap());
     assert_eq!(
         publishers.port_status(),

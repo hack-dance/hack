@@ -2262,7 +2262,10 @@ long guest cleanup or automatically recreate the publisher. `owner-status`
 reports retained port children as down, and ps/status preserve service rows and
 show that publication state. The frontend decodes notices after readiness,
 including multiple frames in a chunk and partial frames across chunks. Notices
-and status are presentation, not cleanup or replacement authority. Healthy
+and status are presentation, not cleanup or replacement authority. Notice delivery
+is best-effort: a frontend may close its stdout pipe before the owner reaps an
+exited publisher. A failed notice must not prevent authenticated retaining cleanup;
+native identity and journal failures still refuse. Healthy
 siblings still require their current publication proof.
 
 When a retained provider process names an earlier versioned executable, lifecycle

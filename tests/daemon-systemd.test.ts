@@ -1110,6 +1110,8 @@ linuxTest(
     for (const dir of ["config", "config/systemd", "config/systemd/user"]) {
       await chmod(join(root, dir), 0o755);
     }
+    // Stop checks the unit file as start does: not writable by others.
+    await chmod(unitPath, 0o644);
     const result = await uninstallSystemdUnit({ unitPath, deps: fake.deps });
     expect(result).toEqual({
       ok: true,
@@ -1120,7 +1122,8 @@ linuxTest(
     expect(await Bun.file(unitPath).exists()).toBe(false);
 
     await mkdir(join(root, "config", "systemd", "user"), { recursive: true });
-    await writeFile(unitPath, unitText());
+    await writeFile(unitPath, unitText(), { mode: 0o644 });
+    await chmod(unitPath, 0o644);
     expect(await uninstallDaemonSystemdService({ deps: fake.deps })).toBe(1);
   }
 );
@@ -3340,5 +3343,38 @@ linuxTest(
     fake.showFails = true;
     expect(await installDaemonSystemdService(installHooks(fake, []))).toBe(1);
     expect(await Bun.file(unitPath).exists()).toBe(false);
+  }
+);
+
+linuxTest(
+  "stop and uninstall refuse a unit file others could have edited",
+  async () => {
+    // Reviewer: stop checked the drop-ins but not the unit file, where
+    // OnSuccess= could be added the same way.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    await chmod(unitPath, 0o666);
+    fake.active = true;
+    fake.calls.length = 0;
+    const stop = await stopViaSystemdIfInstalled({
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(stop.refused).toContain("Not stopping hackd.service");
+    expect(stop.refused).toContain(unitPath);
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    const removed = await uninstallSystemdUnit({
+      unitPath,
+      deps: fake.deps,
+      hackHome: join(root, ".hack"),
+    });
+    expect(removed.ok).toBe(false);
+    expect(fake.calls.some((call) => call.includes(" disable"))).toBe(false);
+    expect(fake.active).toBe(true);
   }
 );

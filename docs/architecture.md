@@ -452,7 +452,7 @@ is looked up through the checked `PATH`). Any other program, such as an interpre
 that would run a script named `daemon`, is unknown, and the unit is left as it is. A drop-in that
 adds `ExecStartPre=`, `ExecStop=`, an interpreter wrapper or a second
 `ExecStart` makes `install` and `start` refuse. `hack daemon stop` and
-`hack daemon uninstall` first make the same load-directory and drop-in checks
+`hack daemon uninstall` first make the same unit-file, load-directory and drop-in checks
 as `start` (a stop also starts units a drop-in names, such as `OnSuccess=`),
 and refuse while an `ExecStop`/`ExecStopPost` hook is loaded, because stopping
 runs it (systemd runs stop hooks even after `systemctl kill`); remove it and run `systemctl --user daemon-reload` first. A

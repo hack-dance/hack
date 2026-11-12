@@ -1604,7 +1604,7 @@ async function checkLoadedUnitFiles(opts: {
   const props = parseSystemdProperties(show.stdout);
   const fragment = props.FragmentPath ?? "";
   if (resolve(fragment) !== resolve(opts.unitPath)) {
-    return `systemd loads it from ${fragment || "an unknown file"}, not ${opts.unitPath}. Review that file, then run: hack daemon install`;
+    return `systemd loads it from ${fragment || "an unknown file"}, not ${opts.unitPath}; review that file`;
   }
   const dropIns = await parseSystemdPathList(props.DropInPaths ?? "");
   if ("error" in dropIns) {
@@ -2225,7 +2225,8 @@ async function checkShebangInterpreter(opts: {
  * kill`), and the inactive transition starts units named by settings such
  * as `OnSuccess=`, which a drop-in another account planted could add. So
  * stop and uninstall check, as start does, every user-unit load directory
- * ({@link checkSystemdUnitLoadPaths}) and the files systemd has loaded
+ * ({@link checkSystemdUnitLoadPaths}), the unit file itself
+ * ({@link checkSystemdUnitTrusted}) and the files systemd has loaded
  * ({@link checkLoadedUnitFiles}), then refuse while any stop hook is
  * loaded (Hack writes none). A stop does not launch `ExecStart`, so a unit
  * whose program was removed can still be stopped. Null, or the refusal.
@@ -2237,9 +2238,16 @@ export async function checkSystemdStopHooks(opts: {
   readonly uid?: number;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
-  const loadPaths = await checkSystemdUnitLoadPaths({ deps: opts.deps, uid });
+  // The unit file itself (owner, mode, not a link), as start checks it: an
+  // account that could edit it could add OnSuccess= there too.
+  const loadPaths =
+    (await checkSystemdUnitTrusted({ unitPath: opts.unitPath, uid })) ??
+    (await checkSystemdUnitLoadPaths({ deps: opts.deps, uid }));
   if (loadPaths !== null) {
-    return loadPaths;
+    return loadPaths.replace(
+      `Not using ${SYSTEMD_UNIT_NAME}:`,
+      `Not stopping ${SYSTEMD_UNIT_NAME}:`
+    );
   }
   const files = await checkLoadedUnitFiles({
     unitPath: opts.unitPath,

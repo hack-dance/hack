@@ -12,9 +12,11 @@ hack doctor --native-preflight --path /absolute/project --json
 
 Use the profiles your project declares. This mode accepts only `--path`,
 `--profile` and `--json` beside `--native-preflight`; it does not run Doctor's
-other checks or repairs. The global `--env` option is ignored in this mode;
-preflight reads the project's managed environment selection. Authored native
-project files take a separate admission path; use `hack config validate` for them.
+other checks or repairs. Preflight has no `--env` option; it always uses the
+project's default environment. `hack up --env <name>`, or a resumed run's
+environment, can select different adaptation and dependency files. Authored
+native project files take a separate admission path; use `hack config validate`
+for them.
 
 ## Read the result
 

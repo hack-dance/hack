@@ -2002,6 +2002,8 @@ async function startNativeProjectAttempt(
     composeFile: opts.composeFile,
     input,
     profiles,
+    branch: opts.scope.branch,
+    deferredRestore: restore !== undefined,
     buildServices,
     invoke: deps.invoke,
     signal: opts.signal,

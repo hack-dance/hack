@@ -21,6 +21,9 @@ export async function requireNativeStaticStartReview(opts: {
   readonly composeFile: string;
   readonly input: NativeProjectInput;
   readonly profiles: readonly string[];
+  readonly branch?: string | null;
+  /** Retained branch identity is selected later under its existing restore proof. */
+  readonly deferredRestore?: boolean;
   readonly buildServices: ReadonlySet<string>;
   readonly invoke?: typeof invokeNativeRuntime;
   readonly signal?: AbortSignal;
@@ -41,6 +44,7 @@ export async function requireNativeStaticStartReview(opts: {
   }
   await withNativeProjectReview({
     ...opts,
+    branch: opts.deferredRestore ? undefined : opts.branch,
     input: { ...opts.input, normalizedComposeJson: JSON.stringify(compose) },
     invoke: (request) => invoke({ ...request, signal: opts.signal }),
     run: ({ report }) => {
@@ -58,7 +62,7 @@ export async function requireNativeStaticStartReview(opts: {
       const first = refusals[0];
       if (first) {
         throw new NativeRuntimeRequestError({
-          message: `Native static start review refused (${first.code}); no VM was started.${nativeFailureNote(first)}`,
+          message: `Native static start review refused (${first.code}); no VM was started.${nativeFailureNote(first)} Run hack doctor --native-preflight to list every static blocker.`,
           nativeCode: first.code,
           nativeMessage: first.message,
           nativeService: first.service,

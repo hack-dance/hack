@@ -92,6 +92,28 @@ test("static admission uses only bound read-only plans and removes its temporary
   expect(await Bun.file(f.normalized()).exists()).toBe(false);
 });
 
+test("a fresh branch uses its own namespace selection for both static reviews", async () => {
+  const f = await fixture();
+  await requireNativeStaticStartReview({ ...f.opts, branch: "feature-check" });
+  expect(f.calls).toHaveLength(2);
+  for (const args of f.calls) {
+    expect(args[args.indexOf("--branch") + 1]).toBe("feature-check");
+  }
+});
+
+test("a deferred restore does not select retained branch authority during static review", async () => {
+  const f = await fixture();
+  await requireNativeStaticStartReview({
+    ...f.opts,
+    branch: "feature-check",
+    deferredRestore: true,
+  });
+  expect(f.calls).toHaveLength(2);
+  for (const args of f.calls) {
+    expect(args).not.toContain("--branch");
+  }
+});
+
 test("a static refusal preserves only its code, fixed message and admitted service", async () => {
   const f = await fixture();
   f.refuse([

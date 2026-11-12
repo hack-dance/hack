@@ -208,6 +208,7 @@ async function scriptUpThroughReview(
   await f.reply("runtime up", {});
   await f.reply("project plan", {
     plan_id: "f".repeat(64),
+    start_refusals: [],
     plan: {
       namespace: run.namespace,
       compose_sha256: sha,
@@ -352,6 +353,8 @@ test(
     );
     expect(await f.calls()).toEqual([
       "runtime check-project-share",
+      "project plan",
+      "project plan",
       "project source-size",
     ]);
   },
@@ -374,7 +377,11 @@ test(
       result,
       "E_CONFIG_INVALID: Native host dependencies refused: the selection must be {version: 1, dependencies: [1..128 entries]} with no other fields; listener values omitted."
     );
-    expect(await f.calls()).toEqual(["runtime check-project-share"]);
+    expect(await f.calls()).toEqual([
+      "runtime check-project-share",
+      "project plan",
+      "project plan",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -392,7 +399,6 @@ test(
     );
     expect(await f.calls()).toEqual([
       "runtime check-project-share",
-      "runtime up",
       "project plan",
     ]);
   },
@@ -899,6 +905,7 @@ test(
     const sha = createHash("sha256").update(f.compose).digest("hex");
     await f.reply("project plan", {
       plan_id: run.planId,
+      start_refusals: [],
       plan: {
         namespace: run.namespace,
         compose_sha256: sha,

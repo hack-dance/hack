@@ -62,7 +62,7 @@ input gates, separate from the unit import graph.
 
 ## Historical replay
 
-Run `bun scripts/ci-selection-replay.ts --repository=owner/repository --count=30`.
+Run `bun scripts/ci-selection-replay.ts --repository=owner/repository --count=30 --read-logs`.
 It prints one JSON record per merged PR: revision, changed paths, full/selected
 reason, selected files and platform pools, ready/draft policy, run/attempt counts,
 known failed files, hidden failures and evidence gaps. No historical code runs:
@@ -71,15 +71,21 @@ revisions are evaluated separately, so a later fix cannot erase an earlier
 selection bug. A label present at merge cannot mask a narrower historical plan.
 
 The replay follows merge time, paginates run/job history and includes rerun
-attempts and interrupted unit jobs. It reads structured check annotations rather
-than terminal logs: the file runner annotates every non-passing file. Dedicated
+attempts and interrupted unit jobs. It reads structured check annotations and
+private checkout evidence: the file runner annotates every non-passing file. Dedicated
 native/compiler/Docker jobs retain their own tests and are checked against their
 historical input gates. Exit 1 means a known failure would have been hidden.
 Exit 2 means history/annotations were missing or a failure could not be attributed
 to a file; this is inconclusive, not proof of safety. `--skip-logs` is the limited
-inventory mode, disabling per-file failure evidence. With `--read-logs`, the
-replay privately reads logs when annotations are incomplete, including interrupted
-runs. It checks named file outcomes and assertions emitted before cancellation.
+inventory mode, disabling historical failure audits. With `--read-logs`, the
+replay privately reads checkout and failure logs, including interrupted
+runs. It reads checkout's recorded merge SHA and validates its parents before
+loading the source tree and its diff against the actual tested base. The run
+API's PR head SHA can omit tests added on the base, so it is never substituted
+for the tested merge tree. Missing, ambiguous or unavailable checkout evidence
+is inconclusive; complete historical failure audits require `--read-logs`.
+Each audited job reports its tested checkout revision. The replay combines
+annotations with named file outcomes and assertions emitted before cancellation.
 A cancelled file without a failure record has an unknown outcome; it is not
 counted as a test pass or an observed failure. Logs are never printed. Unit fixtures deliberately
 omit a failed file to prove both log and annotation detectors reject it.

@@ -3,9 +3,77 @@ import {
   parseGitSources,
   recentMergedPullRequests,
   replayAnnotations,
+  replayCheckoutRevision,
   replayFailures,
   replayJobAdmitted,
 } from "../scripts/ci-selection-replay.ts";
+import { selectTests } from "../scripts/ci-test-selection.ts";
+
+test("historical failure selection uses the tested merge tree, including tests added on the base", () => {
+  const head = "a".repeat(40);
+  const merge = "b".repeat(40);
+  const log = [
+    `2026-01-01T00:00:00Z fetching PR head ${head}`,
+    "2026-01-01T00:00:01Z [command]/usr/bin/git log -1 --format=%H",
+    `2026-01-01T00:00:01Z ${merge}`,
+    "2026-01-01T00:00:02Z tests/provider.test.ts:",
+    "2026-01-01T00:00:02Z (fail) provider source contract",
+  ].join("\n");
+  const sources = {
+    "tests/provider.test.ts": 'Bun.file("packages/runtime/source.rs");',
+  };
+  expect(replayCheckoutRevision({ log })).toBe(merge);
+  const snapshots = { [head]: {}, [merge]: sources };
+  const revision = replayCheckoutRevision({ log });
+  if (!revision) {
+    throw new Error("missing tested checkout");
+  }
+  const selection = selectTests({
+    repoRoot: "/snapshot",
+    sources: snapshots[revision] ?? {},
+    tests: Object.keys(snapshots[revision] ?? {}),
+    changed: ["docs/example.md"],
+  });
+  expect(replayFailures({ log, selection }).hidden).toEqual([]);
+  expect(
+    replayFailures({
+      log,
+      selection: {
+        mode: "selected",
+        reason: "PR head omits base tests",
+        files: [],
+      },
+    }).hidden
+  ).toEqual(["tests/provider.test.ts"]);
+});
+
+test("missing, truncated or ambiguous checkout revision evidence is not inferred from a PR head", () => {
+  const command = "[command]/usr/bin/git log -1 --format=%H";
+  for (const log of [
+    "no checkout log",
+    command,
+    `${command}\nnot a revision`,
+    `${command}\n${"a".repeat(40)}\n${command}\n${"b".repeat(40)}`,
+  ]) {
+    expect(replayCheckoutRevision({ log })).toBeNull();
+  }
+});
+
+test("Bun focused output attributes each file, while runner frames retain workspace paths", () => {
+  const selection = { mode: "selected" as const, reason: "fixture", files: [] };
+  expect(
+    replayFailures({
+      selection,
+      log: "tests/first.test.ts:\n(fail) first\ntests/second.test.ts:\n(fail) second",
+    }).failed
+  ).toEqual(["tests/first.test.ts", "tests/second.test.ts"]);
+  expect(
+    replayFailures({
+      selection,
+      log: "[test shard 1/8] (1/1) start packages/db/tests/example.test.ts\ntests/example.test.ts:\n(fail) assertion",
+    }).failed
+  ).toEqual(["packages/db/tests/example.test.ts"]);
+});
 
 test("structured annotations find runner failures and do not rely on stack frames", () => {
   const annotations = [

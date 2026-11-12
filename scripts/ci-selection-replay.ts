@@ -4,7 +4,7 @@ import { isRecord } from "../src/lib/guards.ts";
  * Read-only replay of merged PR test selections, including every CI run attempt.
  * No historical code is executed. Git objects are read into memory; gh uses its
  * existing authentication. Missing annotations/history make the verdict inconclusive.
- * Usage: bun scripts/ci-selection-replay.ts --repository=owner/repo [--count=30]
+ * Usage: bun scripts/ci-selection-replay.ts --repository=owner/repo --read-logs [--count=30]
  */
 import { COMPILER_HOSTS, planScope } from "./ci-change-scope.ts";
 import { touchesCandidate, touchesCompilerHost } from "./ci-pr-plan.ts";
@@ -22,6 +22,37 @@ export type ReplayVerdict = {
   readonly unattributedFailure?: boolean;
 };
 
+function replayLogLine(raw: string): string {
+  return raw
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/^\d{4}-\d{2}-\d{2}T\S+Z\s+/, "");
+}
+
+/** The run API names the PR head; checkout records the merge tree actually tested. */
+export function replayCheckoutRevision(opts: {
+  readonly log: string;
+}): string | null {
+  const revisions = new Set<string>();
+  let expectingRevision = false;
+  for (const raw of opts.log.split("\n")) {
+    const line = replayLogLine(raw).trim();
+    if (/^\[command\].*\bgit(?:\.exe)? log -1 --format=%H$/.test(line)) {
+      expectingRevision = true;
+      continue;
+    }
+    if (expectingRevision && line) {
+      if (!/^[0-9a-f]{40}$/.test(line)) {
+        return null;
+      }
+      revisions.add(line);
+      expectingRevision = false;
+    }
+  }
+  return !expectingRevision && revisions.size === 1
+    ? ([...revisions][0] ?? null)
+    : null;
+}
+
 /** File-runner outcomes include crashes/timeouts; a failed test step without a named file is unknown. */
 export function replayFailures(opts: {
   readonly log: string;
@@ -30,14 +61,20 @@ export function replayFailures(opts: {
   const failed = new Set<string>();
   const bunFailures = new Set<string>();
   let running: string | undefined;
+  let runnerFrames = false;
   let unattributedFailure = false;
   for (const raw of opts.log.split("\n")) {
-    const line = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+    const line = replayLogLine(raw).trimEnd();
+    const header = /^((?:tests|packages\/db)\/\S+):$/.exec(line);
+    if (!runnerFrames && header?.[1] && isTestFilePath(header[1])) {
+      running = header[1];
+    }
     const start =
       /\bstart ((?:tests|packages\/db)\/\S+\.(?:test|spec)\.[cm]?[jt]sx?)/.exec(
         line
       );
     if (start?.[1]) {
+      runnerFrames = true;
       running = start[1];
     }
     if (/(?:^|\s)\(fail\) /.test(line)) {
@@ -356,7 +393,6 @@ function isReplayFailureJob(job: Record<string, unknown>): boolean {
 
 function inspectReplayJob(opts: {
   readonly repository: string;
-  readonly merge: string;
   readonly run: Record<string, unknown>;
   readonly job: Record<string, unknown>;
   readonly skipEvidence: boolean;
@@ -365,19 +401,45 @@ function inspectReplayJob(opts: {
     string,
     { changed: readonly string[]; selection: TestSelection }
   >;
-}): ReplayVerdict {
+}): ReplayVerdict & { readonly checkout?: string } {
   try {
-    const revision = field(opts.run, "head_sha");
-    const key = `${opts.merge}:${revision}`;
+    if (opts.skipEvidence || !opts.readLogs) {
+      return { failed: [], hidden: [], unknown: true };
+    }
+    const log = command([
+      "gh",
+      "api",
+      "--allow-escape-sequences",
+      `repos/${opts.repository}/actions/jobs/${integer(opts.job, "id")}/logs`,
+    ]);
+    const revision = replayCheckoutRevision({ log });
+    if (!revision) {
+      return { failed: [], hidden: [], unknown: true };
+    }
+    const head = field(opts.run, "head_sha");
+    const key = `${revision}:${head}`;
     let history = opts.historyCache.get(key);
     if (!history) {
       const historical = snapshot(revision);
-      const base = command([
+      const parents = command([
         "git",
-        "merge-base",
-        `${opts.merge}^1`,
+        "rev-list",
+        "--parents",
+        "-n",
+        "1",
         revision,
-      ]).trim();
+      ])
+        .trim()
+        .split(/\s+/)
+        .slice(1);
+      const [base, parentHead] = parents;
+      if (
+        !(base && parentHead) ||
+        parents.length !== 2 ||
+        !(parentHead === head || revision === head)
+      ) {
+        return { failed: [], hidden: [], unknown: true, checkout: revision };
+      }
       const changed = command([
         "git",
         "diff",
@@ -408,10 +470,8 @@ function inspectReplayJob(opts: {
         failed: [`job: ${name}`],
         hidden: admitted === false ? [`job: ${name}`] : [],
         unknown: admitted === null,
+        checkout: revision,
       };
-    }
-    if (opts.skipEvidence) {
-      return { failed: [], hidden: [], unknown: true };
     }
     // A merge-time label might not have existed on this attempt. Audit the
     // narrower unlabeled subset so a later label cannot mask a selection bug.
@@ -419,23 +479,21 @@ function inspectReplayJob(opts: {
       `repos/${opts.repository}/check-runs/${integer(opts.job, "id")}/annotations`
     );
     const verdict = replayAnnotations({ annotations, selection });
-    if (!(verdict.unknown && opts.readLogs)) {
-      return verdict;
-    }
-    const log = command([
-      "gh",
-      "api",
-      "--allow-escape-sequences",
-      `repos/${opts.repository}/actions/jobs/${integer(opts.job, "id")}/logs`,
-    ]);
     const fromLog = replayFailures({ log, selection });
+    const failed = [...new Set([...verdict.failed, ...fromLog.failed])];
+    const combined = {
+      failed,
+      hidden: failed.filter((file) => !selection.files.includes(file)),
+      unknown: failed.length === 0 || fromLog.unattributedFailure === true,
+      checkout: revision,
+    };
     // A cancelled file has an unknown outcome, not an observed failure. Its
     // complete available log still exposes assertions that failed before it stopped.
     return opts.job.conclusion === "cancelled" &&
       log.trim().length > 0 &&
       !fromLog.unattributedFailure
-      ? { ...fromLog, unknown: false }
-      : fromLog;
+      ? { ...combined, unknown: false }
+      : combined;
   } catch {
     return { failed: [], hidden: [], unknown: true };
   }
@@ -513,6 +571,7 @@ export async function main(args: readonly string[]): Promise<number> {
     const hidden: string[] = [];
     const unknown: string[] = [];
     const failures: string[] = [];
+    const history: Record<string, unknown>[] = [];
     let attempts = 0;
     for (const run of runs) {
       for (let attempt = 1; attempt <= integer(run, "run_attempt"); attempt++) {
@@ -524,12 +583,20 @@ export async function main(args: readonly string[]): Promise<number> {
         for (const job of jobs.filter(isReplayFailureJob)) {
           const verdict = inspectReplayJob({
             repository,
-            merge: sha,
             run,
             job,
             skipEvidence: skipLogs,
             readLogs,
             historyCache,
+          });
+          history.push({
+            run: integer(run, "id"),
+            attempt,
+            job: field(job, "name"),
+            checkout: verdict.checkout ?? null,
+            failed: verdict.failed,
+            hidden: verdict.hidden,
+            unknown: verdict.unknown,
           });
           failures.push(...verdict.failed);
           hidden.push(...verdict.hidden);
@@ -575,6 +642,7 @@ export async function main(args: readonly string[]): Promise<number> {
         },
         runs: runs.length,
         attempts,
+        history,
         failed: [...new Set(failures)],
         hidden: [...new Set(hidden)],
         unknown,

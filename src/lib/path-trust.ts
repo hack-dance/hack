@@ -195,10 +195,12 @@ async function checkServicePathEntry(opts: {
   if ((info.mode & 0o022) === 0 || sticky) {
     return null;
   }
+  // Only a directory inside the Hack home is repaired: whoever could write a
+  // file may already have changed its contents, which a chmod would keep.
   const insideHackHome =
     opts.hackHome !== null &&
     (opts.path === opts.hackHome || opts.path.startsWith(`${opts.hackHome}/`));
-  if (insideHackHome && info.uid === opts.uid) {
+  if (insideHackHome && info.isDirectory() && info.uid === opts.uid) {
     try {
       await chmod(opts.path, info.mode & 0o7755);
       if (((await lstat(opts.path)).mode & 0o022) === 0) {

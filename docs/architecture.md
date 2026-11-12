@@ -472,9 +472,12 @@ existing parent is checked), because another account that can write one could
 add a drop-in for the next login. The program the unit runs gets the same check when you install the
 unit and before each start: the `hack` binary, the file it resolves to, and every
 directory above them must belong to you or root and not be writable by your
-group or others (sticky directories such as `/tmp` excepted). Inside your
-`HACK_HOME` Hack removes group or other write itself; anywhere else it refuses
-and prints the `chmod go-w` to run. hackd runs helpers such as `docker` and `git` through its
+group or others (sticky directories such as `/tmp` excepted). Hack does not
+repair these, even inside `HACK_HOME`: a program or directory others could
+write may already have been changed, so it refuses and prints the
+`chmod go-w` to run. Every program systemd will run for the unit
+(`ExecStart` and the other `Exec*` settings, drop-ins included) gets the same
+check. hackd runs helpers such as `docker` and `git` through its
 `PATH`, so every directory on the service's `PATH` (the one Hack writes at install,
 and the effective one systemd reports before each start) must not let other users
 add or create programs there either. Put local settings, such as

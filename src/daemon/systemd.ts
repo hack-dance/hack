@@ -912,8 +912,6 @@ export async function installSystemdUnit(opts: {
    * `NeedDaemonReload=yes`, so an earlier reload after a write failed.
    */
   readonly forceReload?: boolean;
-  /** Hack's own directories (for the service PATH check before enable). */
-  readonly hackHome?: string | null;
 }): Promise<SystemdInstallResult> {
   const access = resolveSystemdAccess({ env: opts.deps.env });
   if (!access.allowed) {
@@ -986,12 +984,7 @@ export async function installSystemdUnit(opts: {
       ? servicePath.error
       : await checkServicePathDirectories({
           dirs: servicePath.dirs,
-          hackHome: opts.hackHome ?? null,
-        })) ??
-    (await checkSystemdServicePrograms({
-      deps: opts.deps,
-      hackHome: opts.hackHome ?? null,
-    }));
+        })) ?? (await checkSystemdServicePrograms({ deps: opts.deps }));
   if (pathError !== null) {
     return {
       ok: false,
@@ -1344,8 +1337,6 @@ export async function checkSystemdUnitTrusted(opts: {
 export async function checkSystemdLoadedUnitPaths(opts: {
   readonly unitPath: string;
   readonly deps: SystemdDeps;
-  /** Hack's own directories (for the service PATH check). */
-  readonly hackHome?: string | null;
   /** Defaults to this process's uid. */
   readonly uid?: number;
 }): Promise<string | null> {
@@ -1362,13 +1353,8 @@ export async function checkSystemdLoadedUnitPaths(opts: {
       ? servicePath.error
       : await checkServicePathDirectories({
           dirs: servicePath.dirs,
-          hackHome: opts.hackHome ?? null,
           uid,
-        })) ??
-    (await checkSystemdServicePrograms({
-      deps: opts.deps,
-      hackHome: opts.hackHome ?? null,
-    }));
+        })) ?? (await checkSystemdServicePrograms({ deps: opts.deps }));
   if (pathError !== null) {
     return `Not starting ${SYSTEMD_UNIT_NAME}: ${pathError}`;
   }
@@ -1413,8 +1399,6 @@ export async function checkSystemdLoadedUnitPaths(opts: {
  */
 export async function checkServiceExecutableTrusted(opts: {
   readonly path: string;
-  /** Hack's own directories; null when none may be repaired. */
-  readonly hackHome: string | null;
   /** Defaults to this process's uid. */
   readonly uid?: number;
 }): Promise<string | null> {
@@ -1427,7 +1411,9 @@ export async function checkServiceExecutableTrusted(opts: {
   const error = await checkReplaceableChain({
     path: opts.path,
     uid,
-    hackHome: opts.hackHome === null ? null : resolve(opts.hackHome),
+    // Nothing is repaired on the way to a program a login service runs:
+    // whatever could be written may already have been.
+    hackHome: null,
   });
   return error === null
     ? null
@@ -1617,8 +1603,6 @@ const SYSTEMD_DEFAULT_PATH = [
  */
 export async function checkServicePathDirectories(opts: {
   readonly dirs: readonly string[];
-  /** Hack's own directories: group/other write is removed there, not refused. */
-  readonly hackHome: string | null;
   /** Defaults to this process's uid. */
   readonly uid?: number;
 }): Promise<string | null> {
@@ -1630,7 +1614,8 @@ export async function checkServicePathDirectories(opts: {
     const walk = await walkReplaceableChain({
       path: dir,
       uid,
-      hackHome: opts.hackHome === null ? null : resolve(opts.hackHome),
+      // Not repaired: programs may already have been planted.
+      hackHome: null,
       allowMissing: true,
     });
     if ("error" in walk) {
@@ -1753,17 +1738,13 @@ export async function readSystemdServicePrograms(opts: {
  */
 export async function checkSystemdServicePrograms(opts: {
   readonly deps: SystemdDeps;
-  readonly hackHome: string | null;
 }): Promise<string | null> {
   const read = await readSystemdServicePrograms({ deps: opts.deps });
   if ("error" in read) {
     return read.error;
   }
   for (const program of read.programs) {
-    const error = await checkServiceExecutableTrusted({
-      path: program,
-      hackHome: opts.hackHome,
-    });
+    const error = await checkServiceExecutableTrusted({ path: program });
     if (error !== null) {
       return error;
     }

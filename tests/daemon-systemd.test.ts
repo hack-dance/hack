@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   describeSystemdIncompatibleOwner,
   installDaemonSystemdService,
@@ -1054,7 +1054,10 @@ function installHooks(fake: Fake, stopped: number[]) {
 
 async function writePidFile(pid: number | string): Promise<void> {
   const paths = resolveDaemonPaths({ home: root });
-  await mkdir(paths.root, { recursive: true });
+  // Owner-only, whatever the runner's umask (as Hack creates them).
+  await mkdir(paths.root, { recursive: true, mode: 0o700 });
+  await chmod(dirname(paths.root), 0o700);
+  await chmod(paths.root, 0o700);
   await writeFile(paths.pidPath, `${pid}\n`);
 }
 
@@ -1692,7 +1695,7 @@ test("the service program and every directory above it must be this user's or ro
   // enabled unit to run their program as this user.
   const hackHome = join(root, ".hack");
   const check = (path: string, uid?: number) =>
-    checkServiceExecutableTrusted({ path, hackHome, uid });
+    checkServiceExecutableTrusted({ path, uid });
   expect(await check(program)).toBeNull();
 
   // Outside the Hack home a group-writable directory is refused, unchanged.
@@ -1717,15 +1720,25 @@ test("the service program and every directory above it must be this user's or ro
   expect(await check(sharedHack)).toContain("writable by other users");
   await chmod(sharedHack, 0o755);
 
-  // Inside the Hack home (an installer under umask 0002): fixed.
+  // Inside the Hack home too (an installer under umask 0002): refused, not
+  // repaired, since a program may already have been replaced there (Codex
+  // security review).
   const hackBin = join(hackHome, "bin");
   await mkdir(hackBin, { recursive: true });
+  await chmod(hackHome, 0o755);
   await chmod(hackBin, 0o775);
   const installed = join(hackBin, "hack");
   await writeFile(installed, "#!/bin/sh\n");
   await chmod(installed, 0o755);
+  expect(await check(installed)).toContain("chmod go-w");
+  expect((await stat(hackBin)).mode & 0o777).toBe(0o775);
+  await chmod(hackBin, 0o755);
   expect(await check(installed)).toBeNull();
-  expect((await stat(hackBin)).mode & 0o777).toBe(0o755);
+  // A program file others could write is refused, never chmod-ed.
+  await chmod(installed, 0o775);
+  expect(await check(installed)).toContain("writable by other users");
+  expect((await stat(installed)).mode & 0o777).toBe(0o775);
+  await chmod(installed, 0o755);
 
   // Another account's program (modelled with the uid the check compares to).
   const own = process.getuid?.() ?? 0;
@@ -1755,7 +1768,6 @@ test("install refuses a program in a directory others can write and writes no un
 test("every symlink hop of the service program is checked, not just the ends", async () => {
   // Codex review: stable/hack -> shared/hack -> <program>, with `shared`
   // world-writable, passed because neither end's chain included it.
-  const hackHome = join(root, ".hack");
   const shared = join(root, "shared");
   await mkdir(shared);
   await chmod(shared, 0o777);
@@ -1767,7 +1779,6 @@ test("every symlink hop of the service program is checked, not just the ends", a
   expect(
     await checkServiceExecutableTrusted({
       path: join(stable, "hack"),
-      hackHome,
     })
   ).toContain(shared);
 
@@ -1781,7 +1792,6 @@ test("every symlink hop of the service program is checked, not just the ends", a
   expect(
     await checkServiceExecutableTrusted({
       path: join(root, "linked", "bin", "hack"),
-      hackHome,
     })
   ).toContain(sharedDirs);
 
@@ -1790,7 +1800,6 @@ test("every symlink hop of the service program is checked, not just the ends", a
   expect(
     await checkServiceExecutableTrusted({
       path: join(stable, "hack"),
-      hackHome,
     })
   ).toBeNull();
 });
@@ -1915,18 +1924,15 @@ test("a loaded drop-in's whole ancestor chain is checked", async () => {
 test("a symlink hop owned by another account is refused", async () => {
   // Codex review: another account's link in a sticky directory can be
   // replaced by that account, redirecting the service.
-  const hackHome = join(root, ".hack");
   const link = join(root, "stable-link");
   await symlink(program, link);
   const own = process.getuid?.() ?? 0;
   // Modelled with the uid the check compares to: the link (and everything
   // else this user owns) then counts as another account's.
   expect(
-    await checkServiceExecutableTrusted({ path: link, hackHome, uid: own + 1 })
+    await checkServiceExecutableTrusted({ path: link, uid: own + 1 })
   ).toContain("owned by another user");
-  expect(
-    await checkServiceExecutableTrusted({ path: link, hackHome })
-  ).toBeNull();
+  expect(await checkServiceExecutableTrusted({ path: link })).toBeNull();
 });
 
 test("a missing load directory under a sticky shared parent is refused", async () => {
@@ -1976,7 +1982,6 @@ test("an existing sticky shared load directory is refused", async () => {
 test("symlink hops are followed in filesystem order, not normalized first", async () => {
   // Codex review: hack -> safe/link/../hack with safe/link -> shared/subdir
   // runs shared/hack; lexical normalization checked safe/hack instead.
-  const hackHome = join(root, ".hack");
   const safe = join(root, "safe");
   const shared = join(root, "shared");
   await mkdir(join(shared, "subdir"), { recursive: true });
@@ -1991,13 +1996,11 @@ test("symlink hops are followed in filesystem order, not normalized first", asyn
   await symlink(join(shared, "subdir"), join(safe, "link"));
   const entry = join(root, "entry-hack");
   await symlink("safe/link/../hack", entry);
-  expect(
-    await checkServiceExecutableTrusted({ path: entry, hackHome })
-  ).toContain(shared);
+  expect(await checkServiceExecutableTrusted({ path: entry })).toContain(
+    shared
+  );
   await chmod(shared, 0o755);
-  expect(
-    await checkServiceExecutableTrusted({ path: entry, hackHome })
-  ).toBeNull();
+  expect(await checkServiceExecutableTrusted({ path: entry })).toBeNull();
 });
 
 test("a symlinked drop-in routed through a writable directory stops install before enable", async () => {
@@ -2163,40 +2166,40 @@ test("every directory on the service PATH is checked at install and start", asyn
   await mkdir(own);
   await chmod(own, 0o755);
   expect(
-    await checkServicePathDirectories({ dirs: [own, "/usr/bin"], hackHome })
+    await checkServicePathDirectories({ dirs: [own, "/usr/bin"] })
   ).toBeNull();
 
   // A writable PATH directory, sticky or not: refused, unchanged.
   const shared = join(root, "shared-bin");
   await mkdir(shared);
   await chmod(shared, 0o1777);
-  expect(
-    await checkServicePathDirectories({ dirs: [own, shared], hackHome })
-  ).toContain("add programs to");
+  expect(await checkServicePathDirectories({ dirs: [own, shared] })).toContain(
+    "add programs to"
+  );
   expect((await stat(shared)).mode & 0o7777).toBe(0o1777);
 
   // A missing PATH directory others could create: refused.
   expect(
     await checkServicePathDirectories({
       dirs: [join(shared, "later")],
-      hackHome,
     })
   ).toContain("create");
 
-  // Inside HACK_HOME (Hack's own): group write removed instead.
+  // Inside HACK_HOME too: refused, not repaired (helpers may already have
+  // been planted there).
   const hackBin = join(hackHome, "bin");
   await mkdir(hackBin, { recursive: true });
-  await chmod(hackHome, 0o775);
+  await chmod(hackHome, 0o755);
   await chmod(hackBin, 0o775);
-  expect(
-    await checkServicePathDirectories({ dirs: [hackBin], hackHome })
-  ).toBeNull();
-  expect((await stat(hackBin)).mode & 0o777).toBe(0o755);
+  expect(await checkServicePathDirectories({ dirs: [hackBin] })).toContain(
+    "chmod go-w"
+  );
+  expect((await stat(hackBin)).mode & 0o777).toBe(0o775);
 
   // A relative entry is refused.
-  expect(
-    await checkServicePathDirectories({ dirs: ["bin"], hackHome })
-  ).toContain("not absolute");
+  expect(await checkServicePathDirectories({ dirs: ["bin"] })).toContain(
+    "not absolute"
+  );
 
   // Start reads the effective PATH from systemd and refuses a writable one.
   const fake = fakeSystemd();
@@ -2291,9 +2294,7 @@ test("the programs systemd will run (drop-in Exec* overrides) are checked", asyn
   // with a program others can replace; only the unit file's was checked.
   const fake = fakeSystemd();
   await installSystemdUnit({ unitPath, unitText: unitText(), deps: fake.deps });
-  expect(
-    await checkSystemdServicePrograms({ deps: fake.deps, hackHome: null })
-  ).toBeNull();
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toBeNull();
   const shared = join(root, "shared-exec");
   await mkdir(shared);
   await chmod(shared, 0o777);
@@ -2303,9 +2304,9 @@ test("the programs systemd will run (drop-in Exec* overrides) are checked", asyn
   fake.extraExecLines = [
     `ExecStartPre={ path=${planted} ; argv[]=${planted} ; ignore_errors=no }`,
   ];
-  expect(
-    await checkSystemdServicePrograms({ deps: fake.deps, hackHome: null })
-  ).toContain(shared);
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+    shared
+  );
   fake.calls.length = 0;
   expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
   expect(fake.calls).not.toContain("systemctl --user start hackd.service");
@@ -2320,12 +2321,12 @@ test("the programs systemd will run (drop-in Exec* overrides) are checked", asyn
   fake.extraExecLines = [
     `ExecStart={ path=${program} ; argv[]=${program} ; ignore_errors=no }`,
   ];
-  expect(
-    await checkSystemdServicePrograms({ deps: fake.deps, hackHome: null })
-  ).toContain("exactly one");
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+    "exactly one"
+  );
   // An entry that cannot be read is refused.
   fake.extraExecLines = ["ExecStop={ something odd }"];
-  expect(
-    await checkSystemdServicePrograms({ deps: fake.deps, hackHome: null })
-  ).toContain("cannot read");
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+    "cannot read"
+  );
 });

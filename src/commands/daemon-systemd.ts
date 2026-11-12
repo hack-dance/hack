@@ -1,6 +1,6 @@
-import { rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessProof,
@@ -43,7 +43,7 @@ import {
   uninstallSystemdUnit,
 } from "../daemon/systemd.ts";
 import { HackCliError } from "../lib/cli-result.ts";
-import { ensureDir, pathExists, readTextFile } from "../lib/fs.ts";
+import { pathExists, readTextFile } from "../lib/fs.ts";
 import { normalizeHomeDir } from "../lib/home-dir.ts";
 import { logger } from "../ui/logger.ts";
 
@@ -181,15 +181,8 @@ export async function startViaSystemdIfInstalled(
     await systemdServiceAction({ action: "reset-failed", deps });
   }
   const loaded =
-    (await checkSystemdLoadedUnitPaths({
-      unitPath,
-      deps,
-      hackHome: dirname(hooks.paths.root),
-    })) ??
-    (await checkUnitProgramTrusted({
-      unitPath,
-      hackHome: dirname(hooks.paths.root),
-    }));
+    (await checkSystemdLoadedUnitPaths({ unitPath, deps })) ??
+    (await checkUnitProgramTrusted({ unitPath }));
   if (loaded !== null) {
     logger.error({ message: loaded });
     return 1;
@@ -351,16 +344,12 @@ async function completePendingReload(opts: {
  */
 async function checkUnitProgramTrusted(opts: {
   readonly unitPath: string;
-  readonly hackHome: string;
 }): Promise<string | null> {
   const unitText = await readTextFile(opts.unitPath);
   const program = unitText ? extractSystemdExecProgram({ unitText }) : null;
   return program === null
     ? null
-    : await checkServiceExecutableTrusted({
-        path: program,
-        hackHome: opts.hackHome,
-      });
+    : await checkServiceExecutableTrusted({ path: program });
 }
 
 /** systemd states in which the unit runs or will run hackd (a pending restart). */
@@ -605,7 +594,6 @@ export async function installDaemonSystemdService(
   const unitPath = resolveSystemdUnitPath({ env: deps.env });
   const program = await checkInstallPrograms({
     hackBinPath: expected.hackBinPath,
-    hackHome: dirname(hooks.paths.root),
     deps,
   });
   if (program !== null) {
@@ -627,7 +615,6 @@ export async function installDaemonSystemdService(
     unitText: expected.unitText,
     deps,
     forceReload: before?.needsReload === true,
-    hackHome: dirname(hooks.paths.root),
   });
   if (!installed.ok) {
     logger.error({
@@ -678,14 +665,7 @@ export async function installDaemonSystemdService(
   if (before?.activeState === "failed") {
     await systemdServiceAction({ action: "reset-failed", deps });
   }
-  if (
-    !(await runInstalledUnit({
-      action,
-      unitPath,
-      deps,
-      hackHome: dirname(hooks.paths.root),
-    }))
-  ) {
+  if (!(await runInstalledUnit({ action, unitPath, deps }))) {
     return 1;
   }
   // The running service now has the new config (restarted, or started
@@ -706,20 +686,15 @@ export async function installDaemonSystemdService(
  */
 async function checkInstallPrograms(opts: {
   readonly hackBinPath: string;
-  readonly hackHome: string;
   readonly deps: SystemdDeps;
 }): Promise<string | null> {
   return (
-    (await checkServiceExecutableTrusted({
-      path: opts.hackBinPath,
-      hackHome: opts.hackHome,
-    })) ??
+    (await checkServiceExecutableTrusted({ path: opts.hackBinPath })) ??
     (await checkServicePathDirectories({
       dirs: renderedServicePathDirectories({
         hackBinPath: opts.hackBinPath,
         home: normalizeHomeDir(opts.deps.env.HOME) ?? homedir(),
       }),
-      hackHome: opts.hackHome,
     }))
   );
 }
@@ -732,12 +707,10 @@ async function runInstalledUnit(opts: {
   readonly action: "start" | "restart";
   readonly unitPath: string;
   readonly deps: SystemdDeps;
-  readonly hackHome: string;
 }): Promise<boolean> {
   const loaded = await checkSystemdLoadedUnitPaths({
     unitPath: opts.unitPath,
     deps: opts.deps,
-    hackHome: opts.hackHome,
   });
   if (loaded !== null) {
     logger.error({ message: loaded });
@@ -826,7 +799,9 @@ async function noteRestartIfActiveUnitChanges(opts: {
     opts.before?.active &&
     (await readTextFile(opts.unitPath)) !== opts.unitText
   ) {
-    await ensureDir(opts.hooks.paths.root);
+    // Owner-only whatever the umask: a shared ~/.hack would fail the
+    // service PATH check (and hackd's own state-directory check).
+    await mkdir(opts.hooks.paths.root, { recursive: true, mode: 0o700 });
     await writeFile(marker, "restart hackd.service to load its new unit\n");
   }
   return marker;

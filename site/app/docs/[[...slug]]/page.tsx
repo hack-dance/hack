@@ -10,10 +10,10 @@ const legacyRoutes: Record<string, string> = {
   "guides/v5-dogfooding": "getting-started",
   "guides/getting-started": "getting-started",
   "agent-guidance": "agent-handoff",
-  "guides/global-settings": "reference/overview",
 };
 /** v5 pages that moved into the "Native backend (beta)" section. */
 const movedV5Routes: Record<string, string> = {
+  recipes: "recipes/overview",
   "guides/native-candidate": "native/full-reference",
   "guides/candidate-install": "native/install",
   "reference/native-authored-commands": "native/authored-commands",

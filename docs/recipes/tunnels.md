@@ -93,9 +93,11 @@ that you register in advance, so they need a hostname that stays the same:
 
 - **A named tunnel.** Create it once in your tunnel provider's account and run
   it with a token instead of `--url`. Store the token with
-  `<secret-source> | hack env add TUNNEL_TOKEN --secret --local --value-stdin`;
-  lifecycle processes receive managed env values in the global and `host`
-  scopes. For `cloudflared`, the process command is then just
+  `<secret-source> | hack env add TUNNEL_TOKEN --service host --secret --local --value-stdin`.
+  The `host` scope delivers it to host commands and lifecycle processes while
+  keeping it out of the `web` container. Use this pattern in projects without a
+  Compose service named `host`: that name otherwise selects the container's
+  service scope. For `cloudflared`, the process command is then just
   `cloudflared tunnel run`: it reads `TUNNEL_TOKEN` from its environment
   (`cloudflared tunnel run --help` lists it). Do not write
   `--token "$TUNNEL_TOKEN"`; that puts the token in the process's arguments,
@@ -103,7 +105,8 @@ that you register in advance, so they need a hostname that stays the same:
   tunnel, because it needs an account.
 - **A local OAuth alias.** When the provider only needs a callback that your
   browser can reach (not a public one), Hack's `.hack.gy` alias may be enough.
-  See `oauth` in [Initialize a project](../guides/init-project.md).
+  See `--oauth` and `--oauth-tld` under `hack init` in the
+  [Command reference](../reference/cli.md#hack-init).
 
 Point your app's public URL setting (for example `PUBLIC_URL`) at the stable
 hostname, in the overlay you use for tunnel work. See

@@ -181,20 +181,27 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
           : ok("Version=255\n")
       );
     }
-    if (
-      verb === "show" &&
-      args.some((arg) => arg.startsWith("--property=ExecCondition,"))
-    ) {
-      // ExecStart as systemd reports it for the unit file on disk.
+    const execQuery = args.find(
+      (arg) =>
+        arg.startsWith("--property=ExecCondition,") ||
+        arg.startsWith("--property=ExecStop,")
+    );
+    if (verb === "show" && execQuery) {
+      // Exec* settings as systemd reports them: ExecStart for the unit file
+      // on disk, plus any drop-in lines the test set; only those asked for.
+      const wanted = new Set(execQuery.slice("--property=".length).split(","));
       return (async () => {
         const text = await readFile(unitPath, "utf8").catch(() => "");
         const program = extractSystemdExecProgram({ unitText: text });
-        const lines = program
-          ? [
-              `ExecStart={ path=${program} ; argv[]=${program} daemon start --foreground ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`,
-            ]
-          : [];
-        return ok(`${[...lines, ...state.extraExecLines].join("\n")}\n`);
+        const lines = [
+          ...(program
+            ? [
+                `ExecStart={ path=${program} ; argv[]=${program} daemon start --foreground ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`,
+              ]
+            : []),
+          ...state.extraExecLines,
+        ].filter((line) => wanted.has(line.slice(0, line.indexOf("="))));
+        return ok(`${lines.join("\n")}\n`);
       })();
     }
     if (verb === "show" && args.includes("--property=UnitPath")) {
@@ -2711,5 +2718,36 @@ linuxTest(
     await mkdir(join(bin, "lib"));
     await chmod(join(bin, "lib"), 0o777);
     expect(await checkServicePathDirectories({ dirs: [bin] })).toBeNull();
+  }
+);
+
+linuxTest(
+  "a unit whose program was removed can still be stopped and uninstalled",
+  async () => {
+    // Codex review: stop and uninstall ran the start-time checks, so a
+    // missing ExecStart program (an upgrade or cleanup) blocked both. A stop
+    // runs only ExecStop/ExecStopPost.
+    const fake = fakeSystemd({ active: true });
+    const old = await writeOldUnit(fake);
+    await rm(old);
+    fake.active = true;
+    fake.calls.length = 0;
+    const stop = await stopViaSystemdIfInstalled({
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(stop.refused).toBeNull();
+    expect(stop.handled).toBe(true);
+    expect(fake.calls).toContain("systemctl --user stop hackd.service");
+
+    fake.active = true;
+    fake.calls.length = 0;
+    const removed = await uninstallSystemdUnit({ unitPath, deps: fake.deps });
+    expect(removed.ok).toBe(true);
+    expect(fake.calls).toContain(
+      "systemctl --user disable --now hackd.service"
+    );
+    expect(await Bun.file(unitPath).exists()).toBe(false);
   }
 );

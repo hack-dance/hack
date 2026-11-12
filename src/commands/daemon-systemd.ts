@@ -18,6 +18,7 @@ import {
   checkServiceExecutableTrusted,
   checkServicePathDirectories,
   checkSystemdLoadedUnitPaths,
+  checkSystemdStopHooks,
   checkSystemdUnitTrusted,
   defaultSystemdDeps,
   describeSystemdUnavailable,
@@ -433,13 +434,13 @@ export async function stopViaSystemdIfInstalled(opts: {
     }));
   // `stop` runs the unit's ExecStop hooks: check what systemd has loaded
   // first, and never run hooks Hack cannot vouch for (HACK-2052).
-  const hooksError = await checkSystemdLoadedUnitPaths({ unitPath, deps });
+  const hooksError = await checkSystemdStopHooks({ deps });
   if (hooksError !== null) {
     return {
       ...none,
       // systemd runs stop hooks whenever the service stops (even after
       // `systemctl kill`): the unsafe entry has to go first.
-      refused: `${hooksError}. Stopping it would run its stop hooks: fix or remove that entry, run systemctl --user daemon-reload, then run hack daemon stop again`,
+      refused: `${hooksError}. Stopping it would run that hook: fix or remove that entry, run systemctl --user daemon-reload, then run hack daemon stop again`,
     };
   }
   const stopped = await systemdServiceAction({ action: "stop", deps });

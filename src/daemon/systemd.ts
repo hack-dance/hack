@@ -1787,15 +1787,18 @@ const EXEC_ENTRY_PATH = /path=(.*?) ; argv\[\]=/g;
  */
 export async function readSystemdServicePrograms(opts: {
   readonly deps: SystemdDeps;
+  /** Which `Exec*` settings to read (default: all of them, for a start). */
+  readonly properties?: readonly (typeof EXEC_PROPERTIES)[number][];
 }): Promise<
   { readonly programs: readonly string[] } | { readonly error: string }
 > {
+  const properties: readonly string[] = opts.properties ?? EXEC_PROPERTIES;
   const show = await opts.deps.run("systemctl", [
     "--user",
     "--no-pager",
     "show",
     SYSTEMD_UNIT_NAME,
-    `--property=${EXEC_PROPERTIES.join(",")}`,
+    `--property=${properties.join(",")}`,
   ]);
   if (show.exitCode !== 0) {
     return {
@@ -1808,7 +1811,7 @@ export async function readSystemdServicePrograms(opts: {
     const eq = line.indexOf("=");
     const key = eq > 0 ? line.slice(0, eq) : "";
     const value = eq > 0 ? line.slice(eq + 1).trim() : "";
-    if (!(EXEC_PROPERTIES as readonly string[]).includes(key) || value === "") {
+    if (!properties.includes(key) || value === "") {
       continue;
     }
     const paths = [...value.matchAll(EXEC_ENTRY_PATH)].map((m) => m[1] ?? "");
@@ -1821,7 +1824,7 @@ export async function readSystemdServicePrograms(opts: {
     }
     programs.push(...paths);
   }
-  if (execStarts !== 1) {
+  if (properties.includes("ExecStart") && execStarts !== 1) {
     return {
       error: `hackd.service has ${execStarts} ExecStart entries; expected exactly one`,
     };
@@ -1844,6 +1847,31 @@ export async function checkSystemdServicePrograms(opts: {
     const error = await checkServiceExecutableTrusted({ path: program });
     if (error !== null) {
       return error;
+    }
+  }
+  return null;
+}
+
+/**
+ * What a stop runs: only `ExecStop` and `ExecStopPost` (drop-ins included),
+ * each checked with {@link checkServiceExecutableTrusted}. A stop does not
+ * launch `ExecStart`, so a unit whose program was removed (an upgrade or
+ * cleanup) can still be stopped and uninstalled. Null, or the refusal.
+ */
+export async function checkSystemdStopHooks(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  const read = await readSystemdServicePrograms({
+    deps: opts.deps,
+    properties: ["ExecStop", "ExecStopPost"],
+  });
+  if ("error" in read) {
+    return read.error;
+  }
+  for (const program of read.programs) {
+    const error = await checkServiceExecutableTrusted({ path: program });
+    if (error !== null) {
+      return `Not stopping ${SYSTEMD_UNIT_NAME}: its stop hook ${error}`;
     }
   }
   return null;
@@ -1975,12 +2003,9 @@ async function disableUnitSafely(opts: {
   readonly unitPath: string;
   readonly deps: SystemdDeps;
 }): Promise<string | null> {
-  const untrusted = await checkSystemdLoadedUnitPaths({
-    unitPath: opts.unitPath,
-    deps: opts.deps,
-  });
+  const untrusted = await checkSystemdStopHooks({ deps: opts.deps });
   if (untrusted !== null) {
-    return `${untrusted}. Stopping it would run its stop hooks, so it was not stopped or removed: fix or remove that entry, run systemctl --user daemon-reload, then run hack daemon uninstall again`;
+    return `${untrusted}. Stopping it would run that hook, so it was not stopped or removed: fix or remove that entry, run systemctl --user daemon-reload, then run hack daemon uninstall again`;
   }
   const args = ["--user", "disable", "--now", SYSTEMD_UNIT_NAME];
   const result = await opts.deps.run("systemctl", args);

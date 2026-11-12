@@ -25,6 +25,11 @@ export async function checkReplaceableChain(opts: {
   readonly hackHome: string | null;
   /** Check the last component itself but do not follow it when it is a link. */
   readonly stopAtLink?: boolean;
+  /**
+   * Entries already found safe, shared across calls that check many paths
+   * under the same directories (a whole PATH directory).
+   */
+  readonly checked?: Set<string>;
 }): Promise<string | null> {
   const walk = await walkReplaceableChain(opts);
   return "error" in walk ? walk.error : null;
@@ -43,6 +48,7 @@ export async function walkReplaceableChain(opts: {
   readonly hackHome: string | null;
   readonly stopAtLink?: boolean;
   readonly allowMissing?: boolean;
+  readonly checked?: Set<string>;
 }): Promise<
   | { readonly error: string }
   | { readonly existing: string; readonly complete: boolean }
@@ -57,7 +63,7 @@ export async function walkReplaceableChain(opts: {
   // included, is checked; `state.cur` is always a symlink-free directory.
   const state: ChainWalk = {
     opts,
-    checked: new Set<string>(),
+    checked: opts.checked ?? new Set<string>(),
     queue: opts.path.split("/"),
     cur: "/",
     hops: 0,
@@ -182,8 +188,15 @@ async function checkServicePathEntry(opts: {
     return `${opts.path} could not be inspected: ${error instanceof Error ? error.message : String(error)}`;
   }
   // Ownership first, links included: in a sticky directory the owner of a
-  // link can still replace it.
-  if (opts.uid >= 0 && info.uid !== opts.uid && info.uid !== 0) {
+  // link can still replace it. A regular file in a root-owned directory is
+  // the package manager's (setuid tools owned by system accounts): only its
+  // mode matters there.
+  if (
+    opts.uid >= 0 &&
+    info.uid !== opts.uid &&
+    info.uid !== 0 &&
+    !(info.isFile() && (await isRootOwned(dirname(opts.path))))
+  ) {
     return `${opts.path} is owned by another user (uid ${info.uid})`;
   }
   if (info.isSymbolicLink()) {
@@ -217,4 +230,12 @@ async function checkServicePathEntry(opts: {
 export async function lettingOthersCreate(dir: string): Promise<string | null> {
   const mode = (await stat(dir)).mode;
   return (mode & 0o022) === 0 ? null : `mode ${(mode & 0o7777).toString(8)}`;
+}
+
+async function isRootOwned(dir: string): Promise<boolean> {
+  try {
+    return (await lstat(dir)).uid === 0;
+  } catch {
+    return false;
+  }
 }

@@ -2675,3 +2675,41 @@ linuxTest(
     expect(fake.active).toBe(true);
   }
 );
+
+linuxTest(
+  "programs already in a service PATH directory are checked too",
+  async () => {
+    // Codex security review: a protected PATH directory can still hold a
+    // group-writable `docker` that hackd runs at every start.
+    const bin = join(root, "path-bin");
+    await mkdir(bin);
+    await chmod(bin, 0o755);
+    const docker = join(bin, "docker");
+    await writeFile(docker, "#!/bin/sh\n");
+    await chmod(docker, 0o775);
+    expect(await checkServicePathDirectories({ dirs: [bin] })).toContain(
+      "contents cannot be trusted"
+    );
+    expect((await stat(docker)).mode & 0o777).toBe(0o775);
+    await chmod(docker, 0o755);
+    expect(await checkServicePathDirectories({ dirs: [bin] })).toBeNull();
+
+    // A helper that links into a directory others can write.
+    const shared = join(root, "shared-helpers");
+    await mkdir(shared);
+    await chmod(shared, 0o777);
+    const real = join(shared, "git");
+    await writeFile(real, "#!/bin/sh\n");
+    await chmod(real, 0o755);
+    await symlink(real, join(bin, "git"));
+    expect(await checkServicePathDirectories({ dirs: [bin] })).toContain(
+      shared
+    );
+    await chmod(shared, 0o755);
+    expect(await checkServicePathDirectories({ dirs: [bin] })).toBeNull();
+    // Subdirectories are not programs.
+    await mkdir(join(bin, "lib"));
+    await chmod(join(bin, "lib"), 0o777);
+    expect(await checkServicePathDirectories({ dirs: [bin] })).toBeNull();
+  }
+);

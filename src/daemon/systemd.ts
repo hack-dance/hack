@@ -1623,6 +1623,7 @@ export async function checkServicePathDirectories(opts: {
   readonly uid?: number;
 }): Promise<string | null> {
   const uid = opts.uid ?? process.getuid?.() ?? -1;
+  const checked = new Set<string>();
   for (const dir of opts.dirs) {
     if (!isAbsolute(dir)) {
       return `the hackd.service PATH has a directory that is not absolute (${dir || "empty"})`;
@@ -1641,6 +1642,86 @@ export async function checkServicePathDirectories(opts: {
     if (writable !== null) {
       return `other users can ${walk.complete ? "add programs to" : "create"} the hackd.service PATH directory ${dir} (${walk.existing}, ${writable}); run: chmod go-w ${walk.existing}`;
     }
+    if (walk.complete) {
+      const program = await checkPathDirectoryPrograms({
+        dir: walk.existing,
+        uid,
+        checked,
+      });
+      if (program !== null) {
+        return `the hackd.service PATH directory ${dir} holds ${program}`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The programs already in a PATH directory: hackd runs helpers from it
+ * (`docker events` at every start), so none may be writable by group or
+ * others, and a symlink must reach its target through nothing others can
+ * replace. In a directory this user owns (`~/.local/bin`) each program
+ * must also be this user's or root's; in a root-owned system directory the
+ * package manager sets owners (setuid tools owned by system accounts), so
+ * only the mode is checked there. Never repaired. Directories inside it
+ * are not programs and are skipped.
+ */
+async function checkPathDirectoryPrograms(opts: {
+  readonly dir: string;
+  readonly uid: number;
+  readonly checked: Set<string>;
+}): Promise<string | null> {
+  let entries: string[];
+  let systemDir: boolean;
+  try {
+    entries = await readdir(opts.dir);
+    systemDir = (await stat(opts.dir)).uid === 0;
+  } catch (error: unknown) {
+    return `entries that could not be read (${errorMessage(error)})`;
+  }
+  for (const entry of entries) {
+    const path = resolve(opts.dir, entry);
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(path);
+    } catch {
+      continue;
+    }
+    if (info.isDirectory()) {
+      continue;
+    }
+    const error = info.isSymbolicLink()
+      ? await checkReplaceableChain({
+          path,
+          uid: opts.uid,
+          hackHome: null,
+          checked: opts.checked,
+        })
+      : programFileProblem({ path, info, uid: opts.uid, systemDir });
+    if (error !== null) {
+      return error;
+    }
+  }
+  return null;
+}
+
+function programFileProblem(opts: {
+  readonly path: string;
+  readonly info: Awaited<ReturnType<typeof lstat>>;
+  readonly uid: number;
+  readonly systemDir: boolean;
+}): string | null {
+  const { info } = opts;
+  if (
+    !opts.systemDir &&
+    opts.uid >= 0 &&
+    info.uid !== opts.uid &&
+    info.uid !== 0
+  ) {
+    return `${opts.path}, owned by another user (uid ${info.uid})`;
+  }
+  if ((Number(info.mode) & 0o022) !== 0) {
+    return `${opts.path}, writable by other users (mode ${(Number(info.mode) & 0o777).toString(8)}); its contents cannot be trusted`;
   }
   return null;
 }

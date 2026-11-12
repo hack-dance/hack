@@ -897,8 +897,81 @@ compatibility. V4 and candidate homes remain separate; this procedure does not
 migrate V4 data into the candidate or replace the installed `hack`. DNS, trust and
 client configuration are outside this bundle-selection procedure.
 
-Provider setup is separate and explicit. Obtain the exact archives identified in
-`provider-pins.json`, then run:
+Provider setup is separate and explicit. Prepare the native runtime with:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime setup
+```
+
+`runtime setup` lists the pinned SmolVM, Docker engine and four Alpine guest
+packages with their exact compressed byte lengths, source hosts, SHA-256 hashes, private cache and
+install destination, then asks once when preparation is needed. `--no-interactive` (or
+truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case and
+surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
+`--accept-downloads` explicitly consents. No provider download happens from `up`,
+the installer, the probe or any other implicit path. The optional BuildKit client
+is still prepared separately below.
+
+The executable embeds `provider-pins.json` and checks its hashes against the
+manual preparation pins. HTTPS redirects may use only the original host and the
+pin's explicit `redirect_hosts`. The GitHub release pin allows
+`release-assets.githubusercontent.com`. Connections have a 15-second timeout;
+each network read has a 60-second timeout. An explicit 30-minute overall deadline
+per file spans all redirect headers and body reads; progress does not renew it.
+`size_bytes` pins the exact compressed length, shown in the prompt and checked on
+responses, streamed bytes and complete-file verification. `max_bytes` remains a
+separate sanity ceiling. Either a length or hash mismatch refuses publication.
+Downloads never pass through a shell, proxy configuration, keychain or admin prompt.
+Networks that require an HTTP proxy must use the offline form below; setup ignores
+proxy environment variables.
+
+Private partial files and verified archives stay under
+`<candidate-home>/.hack-local/setup/downloads`. A rerun resumes a partial download
+when the server supports ranges, otherwise restarts it. Every complete file is
+hashed before any extraction; a mismatch reports `setup_hash_mismatch` with the
+filename and publishes no provider. A corrupt complete cache file is preserved
+and reports `setup_cache_invalid` with its filename and recovery instructions;
+setup error messages omit full local paths. `setup_pin_unavailable` means a pinned
+URL returned 404 or 410: upstream no longer serves this pinned file; update Hack
+or use the offline form. Alpine repositories can retire package revisions. The
+weekly provider pin watch checks every pinned URL with bounded HEAD requests and
+compares successful replies' `Content-Length` with `size_bytes`. Only 404 and 410
+mean a file is no longer served. Timeouts, other HTTP errors (403, 429 or 5xx),
+and a missing `Content-Length` are transient failures
+and never reopen a closed issue by themselves. Size mismatches and policy
+refusals are reported separately. The watch never changes pins or mirrors files;
+availability checks do not verify archive contents.
+The current pins do not record external signature/checksum files: the repository
+hashes decide acceptance, and the existing SmolVM prepare step also checks its
+code signature. The qualification script's optional upstream checksum comparison
+remains a separate check.
+
+Setup calls the same three manual prepare functions in a private staging home,
+verifies the complete provider set, syncs it, then publishes the provider directory
+under the lifecycle lock. Interrupted staging is rebuilt on rerun. A complete
+matching install is verified before consent and reused without a prompt, consent
+flag, network or preparation; setup
+ends with `runtime probe --profile development`. An existing incomplete, changed
+or differently pinned provider directory is preserved and refused as
+`setup_existing_invalid`: finish the manual steps, repair a changed tree, or use
+a fresh home. Setup never upgrades a home's provider pin in place.
+If another runtime operation holds the lock, `provider_busy` asks you to rerun;
+verified downloads stay cached.
+
+![Native setup decisions](../diagrams/native-setup.svg)
+
+For offline setup, supply every input together; this form never constructs a
+network client:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime setup \
+  --archive /absolute/smolvm-archive.tar.gz \
+  --engine-archive /absolute/docker-archive.tgz \
+  --network-tools-directory /absolute/private/pinned-apks
+```
+
+Or obtain the exact archives identified in `provider-pins.json` and run the
+unchanged individual manual commands (also supported by earlier prereleases):
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare --archive /absolute/smolvm-archive.tar.gz
@@ -912,8 +985,8 @@ For a `hack-next` install, `hack-native` is
 `~/.hack-next/versions/<version>/native-home`. `runtime probe` checks the research
 profile unless you pass `--profile development`; the research profile can report
 "not admitted" on a Mac that the development profile admits. The Alpine package
-hashes are listed under [network tool packages](#network-tool-packages), not in
-`provider-pins.json`.
+hashes are listed in `provider-pins.json` and under
+[network tool packages](#network-tool-packages).
 
 The current SmolVM pin is 1.34.1 (`smolvm-1.34.1-darwin-arm64.tar.gz`, SHA-256
 `8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9`, the value

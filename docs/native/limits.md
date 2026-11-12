@@ -39,7 +39,6 @@ The exact rules for each command are in
   project.
 - UDP ports. Only TCP ports with an explicit host port are published.
 - Automatic restart for services that publish a port.
-- A one-command setup. Preparing the runtime is manual.
 
 ## Compose features that stay on Compose
 

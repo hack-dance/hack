@@ -1,6 +1,7 @@
 mod graph_cli;
 mod normalized_cli;
 mod prepared_base_cli;
+mod runtime_setup_cli;
 mod runtime_up_cli;
 mod source_watch_retry;
 use hack_runtime_core::{CANDIDATE_VERSION, Candidate, CandidateError};
@@ -100,6 +101,8 @@ Usage:
   hack-local runtime project-share remove --project-share <absolute-recorded-root> --json
   hack-local graph serve|run ... --shared-source
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
+  hack-local runtime setup [--accept-downloads] [--no-interactive] [--json]
+  hack-local runtime setup --archive <pinned-smolvm.tar.gz> --engine-archive <pinned-docker.tgz> --network-tools-directory <private-pinned-apks> [--json]
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
   hack-local runtime prepare-builder --archive <pinned-docker-buildx>
   hack-local runtime prepare-network-tools --directory <private-pinned-apk-directory>
@@ -957,6 +960,9 @@ fn run() -> Result<(), CandidateError> {
                     print_json(&serde_json::json!({ "removed": base_id }))?
                 }
             }
+        }
+        ["runtime", "setup", arguments @ ..] => {
+            runtime_setup_cli::run(&discover_candidate(&requested)?, arguments)?;
         }
         ["runtime", "prepare", "--archive", archive] => {
             print_json(&hack_runtime_core::provider::prepare(

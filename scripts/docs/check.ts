@@ -22,6 +22,7 @@ for (const [input, expected] of [
   ["Dogfooding guide", "native runtime use guide"],
   ["docs/guides/v5-dogfooding.md", "docs/guides/v5-dogfooding.md"],
   ["dogfooding.md", "dogfooding.md"],
+  ["#dogfooding", "#dogfooding"],
 ] as const) {
   if (publishedTerminology(input) !== expected) {
     throw new Error(`Editorial terminology boundary failed: ${input}`);

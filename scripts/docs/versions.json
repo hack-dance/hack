@@ -4321,7 +4321,7 @@
       },
       {
         "slug": "guides/upgrade-from-v4",
-        "title": "Upgrade checklist",
+        "title": "Upgrade a v4 machine to v5",
         "sourceRevision": "26a142921c9b9aeb8821b7e0a19c2cfb3be0189f",
         "sourceLabel": "v5 upgrade audit (next 26a142921c)",
         "sourceFile": "docs/guides/upgrade-to-v5.md"

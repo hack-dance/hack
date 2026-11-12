@@ -8,8 +8,9 @@ is the runtime layer underneath and the product boundary around it.
 
 ## What stays the same
 
-- Docker Compose is still the default backend. `hack up`, `hack down`, `hack
-  logs`, `hack env`, `hack host exec` and the rest behave as in v4.
+- Docker Compose is still the ordinary CLI's default backend. The familiar
+  lifecycle commands remain, with env migration and parsing changes described
+  in the [machine upgrade checklist](guides/upgrade-from-v4.md).
 - Project configuration stays in `.hack/`. Legacy env files may need migration;
   use the [machine upgrade checklist](guides/upgrade-from-v4.md) before running it.
 - Shared local routing, `.hack.local` names and certificate trust are unchanged.

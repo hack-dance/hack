@@ -22,7 +22,7 @@ const routes = new Map<string, string>();
 /** Rename the old editorial label without corrupting source paths or identifiers. */
 export function publishedTerminology(text: string): string {
   return text.replace(
-    /(?<![\w/.-])dogfooding(?![\w/-]|\.[a-z\d])/gi,
+    /(?<![\w/.#-])dogfooding(?![\w/-]|\.[a-z\d])/gi,
     "native runtime use"
   );
 }

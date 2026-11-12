@@ -53,16 +53,21 @@ them into an issue. Use a new backup directory and record its location yourself:
 
 ```sh
 BACKUP="$HOME/hack-upgrade-$(date +%Y%m%dT%H%M%S)"
-mkdir -m 700 "$BACKUP"
-hack --version > "$BACKUP/version.txt"
-command -v hack > "$BACKUP/executable-path.txt"
-hack doctor > "$BACKUP/doctor-before.txt" 2>&1
-hack daemon status --json > "$BACKUP/daemon-before.json"
-hack projects --json > "$BACKUP/projects-before.json"
+(
+  set -eu
+  mkdir -m 700 "$BACKUP"
+  hack --version > "$BACKUP/version.txt"
+  command -v hack > "$BACKUP/executable-path.txt"
+  doctor_exit=0; hack doctor > "$BACKUP/doctor-before.txt" 2>&1 || doctor_exit=$?
+  daemon_exit=0; hack daemon status --json > "$BACKUP/daemon-before.json" || daemon_exit=$?
+  projects_exit=0; hack projects --json > "$BACKUP/projects-before.json" || projects_exit=$?
+  printf 'doctor=%s\ndaemon=%s\nprojects=%s\n' \
+    "$doctor_exit" "$daemon_exit" "$projects_exit" > "$BACKUP/exit-statuses.txt"
+)
 ```
 
-Record each command's exit status too; a stopped or incompatible daemon can
-return nonzero. Record the installation method, host OS/architecture, project
+Stop if the subshell fails. Review the saved exit statuses; a stopped or
+incompatible daemon can return nonzero. Record the installation method, host OS/architecture, project
 roots, branches, profiles, selected envs and whether a daemon service was enabled.
 
 Then stop stable daemon activity before the filesystem copy and candidate use:
@@ -87,6 +92,7 @@ Copy, and verify that you can read back:
 | The effective Hack home, normally `~/.hack/` | Includes global config, registry, installed assets and daemon records; copy only after quiescing writers. |
 | `hack.config.json` and `projects.json` in that home | Preserve global settings and registered checkout identities. |
 | Each project's working tree, including ignored `.hack/` files and overlays | Git alone does not back up local env values, keys or uncommitted changes. |
+| Project-root `.hack.secret.key` and `.gitignore`, including whether either was absent | Migration can create the key and edit the root ignore file. |
 | Configured external secret-store/key files and the means to unlock them | A copy of encrypted bytes is not proof that keychain or external-key access will work. |
 | Application-aware database/volume backups | Reinstalling an executable does not undo application data or schema changes. |
 
@@ -99,19 +105,40 @@ Backup/restore on a real 4.2.1 machine, custom homes and external secret stores:
 
 For an existing project with regular directories at the default locations, this
 gives the copies used by the rollback example below. Set `PROJECT` first. Stop
-here if a copy fails, a file was absent originally, or a source is a wrapper or
-symlink you have not accounted for; preserve that layout separately.
+if the subshell fails; do not use a partial backup. A wrapper, symlink, unreadable
+file or nonstandard layout needs its own verified copy procedure.
 
 ```sh
 PROJECT=/absolute/project
-cp -pL "$(command -v hack)" "$BACKUP/hack-v4"
-cp -Rp "$HOME/.hack" "$BACKUP/hack-home"
-cp -Rp "$PROJECT/.hack" "$BACKUP/project-hack"
+(
+  set -eu
+  cp -pL "$(command -v hack)" "$BACKUP/hack-v4"
+  cp -Rp "$HOME/.hack" "$BACKUP/hack-home"
+  cp -Rp "$PROJECT/.hack" "$BACKUP/project-hack"
+  git -C "$PROJECT" status --short --ignored > "$BACKUP/git-before.txt"
+  for FILE in .gitignore .hack.secret.key; do
+    if [ -L "$PROJECT/$FILE" ] || { [ -e "$PROJECT/$FILE" ] && [ ! -f "$PROJECT/$FILE" ]; }; then
+      printf 'Stop: non-regular project file: %s\n' "$FILE" >&2
+      exit 1
+    fi
+    if [ -f "$PROJECT/$FILE" ]; then
+      cp -p "$PROJECT/$FILE" "$BACKUP/project-$FILE"
+    else
+      : > "$BACKUP/project-$FILE.absent"
+    fi
+  done
+)
 ```
+
+Review private `git status --short --ignored` records before and after the trial.
+The template copies only the listed project files; preserve the rest of the
+working tree and any separate Git ignore rules as recorded above. A copy failure
+on daemon sockets or service-owned data is a stop, not permission to skip files.
 
 Sources: [global path resolution](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/lib/config-paths.ts),
 [registry paths](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/lib/projects-registry.ts),
 [secret-store ownership](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/lib/secret-store.ts),
+[key location and ignore rules](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/env.md),
 [data recovery prerequisites](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/v5-dogfooding.md).
 
 ## 3. Choose the version and installation path
@@ -130,12 +157,19 @@ to try the prerelease.
 | Linux 4.x or a fresh Linux host | next.15 publishes no Linux candidate bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
 | Intel macOS or a fresh host | Native is unavailable. A fresh stable installation uses the normal Homebrew/release installer and Compose; use the candidate only on its supported host. | First stable v5 install and project initialization: **to be confirmed in the dogfood run**. |
 
-After backups and stable-daemon quiescence, the Compose pilot is:
+After backups and stable-daemon quiescence, read the migration section below
+**before** the Compose pilot. Prefer the explicit Doctor migration there and
+review its diff first. On eligible legacy projects, interactive `up` otherwise
+asks whether to migrate and **Enter means Yes**. Answer No if you have not
+reviewed and accepted that write. `env exec` and session env resolution can
+migrate without that prompt; do not use them as read-only probes.
+
+After that review, the Compose pilot is:
 
 ```sh
 HACK_RUNTIME_BACKEND=compose "$V5" --version
 HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project
-# Review the migration section before up: env-consuming commands can migrate.
+# Only after reviewing/completing the migration procedure in section 4:
 HACK_RUNTIME_BACKEND=compose "$V5" up --path /absolute/project
 ```
 
@@ -156,6 +190,9 @@ Sources: [stable installation](https://github.com/hack-dance/hack/blob/26a142921
 [release asset generation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/scripts/build-release.ts),
 [next.15 artifact contract](https://github.com/hack-dance/hack/blob/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/docs/guides/candidate-install.md),
 [daemon service platform gate](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/daemon.ts).
+Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/project.ts),
+[env resolution](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/env.ts),
+[session env resolution](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/session.ts).
 
 ## 4. What changes for a project
 
@@ -184,7 +221,8 @@ add that flag just to get past an unfamiliar refusal.
   still needed for interpolation are retained. It can also rewrite legacy config
   keys. Do not delete all `.env*` files by hand.
 - Env-consuming commands can migrate implicitly. The implicit path keeps the
-  contract and tracked files and does not edit Compose, but is still a write.
+  contract and tracked files and does not edit Compose, but can rewrite legacy
+  config keys and remove migrated untracked dotenv files. It is still a write.
 - Migration has refusal paths for collisions, symlinks, unreadable files and
   changed delivery semantics. Earlier layer or ignore-rule changes can remain
   after a refusal; inspect before retrying. Secret-backend/keychain discovery has
@@ -309,7 +347,9 @@ Sources: [setup implementation](https://github.com/hack-dance/hack/blob/26a14292
 
 The recovery path deliberately keeps the original software and data backup.
 Rehearse it on disposable data first. Filesystem restoration below must happen
-with all Hack writers and service respawn stopped.
+with all Hack writers and service respawn stopped. After any env migration,
+restore the saved project state before returning to v4: selecting the v4 binary
+alone does not restore its env inputs.
 
 1. Stop the v5 project with the same executable, backend, path, env, branch and
    profile used to start it. For the Compose pilot:
@@ -327,36 +367,64 @@ with all Hack writers and service respawn stopped.
    use its separately verified restore procedure.
 
    For the default-location copies above, with the original config and registry
-   files present and all writers stopped, restore the project and those two
-   global files. This preserves the post-trial files instead of discarding them:
+   files present and all writers stopped, restore the project, its root files
+   and those two global files. This preserves the post-trial files instead of
+   discarding them. Stop if the subshell fails:
 
    ```sh
-   STAMP=$(date +%Y%m%dT%H%M%S)
-   cp -Rp "$HOME/.hack" "$BACKUP/post-trial-home-$STAMP"
-   mv "$PROJECT/.hack" "$PROJECT/.hack.after-v5-$STAMP" &&
+   (
+     set -eu
+     STAMP=$(date +%Y%m%dT%H%M%S)
+     test ! -e "$BACKUP/post-trial-project-hack-$STAMP"
+     git -C "$PROJECT" status --short --ignored > "$BACKUP/git-after-$STAMP.txt"
+     cp -Rp "$HOME/.hack" "$BACKUP/post-trial-home-$STAMP"
+     mv "$PROJECT/.hack" "$BACKUP/post-trial-project-hack-$STAMP"
      cp -Rp "$BACKUP/project-hack" "$PROJECT/.hack"
-   cp -p "$BACKUP/hack-home/projects.json" "$HOME/.hack/projects.json"
-   cp -p "$BACKUP/hack-home/hack.config.json" "$HOME/.hack/hack.config.json"
-   "$BACKUP/hack-v4" --version
+     for FILE in .gitignore .hack.secret.key; do
+       test -f "$BACKUP/project-$FILE" || test -f "$BACKUP/project-$FILE.absent"
+       if [ -e "$PROJECT/$FILE" ] || [ -L "$PROJECT/$FILE" ]; then
+         test ! -e "$BACKUP/post-trial-$FILE-$STAMP"
+         mv "$PROJECT/$FILE" "$BACKUP/post-trial-$FILE-$STAMP"
+       fi
+       if [ -f "$BACKUP/project-$FILE" ]; then
+         cp -p "$BACKUP/project-$FILE" "$PROJECT/$FILE"
+       fi
+     done
+     cp -p "$BACKUP/hack-home/projects.json" "$HOME/.hack/projects.json"
+     cp -p "$BACKUP/hack-home/hack.config.json" "$HOME/.hack/hack.config.json"
+     "$BACKUP/hack-v4" --version
+   )
    ```
 
-   Do not run this template for custom paths or files that were absent before
-   the trial. Restore any other changed global files from their verified copies;
+   The root-file markers restore original absence without deleting post-trial
+   keys. Do not run this template for custom paths or missing original global
+   files. Restore any other changed global files from their verified copies;
    the template intentionally does not restore daemon socket/PID records.
 4. Return to the retained stable v4 executable and confirm `--version` matches
    `version.txt`. If it was replaced, use the saved installation or a reviewed,
-   explicitly version-selected release installer. For example, to restore 4.2.1:
+   explicitly version-selected release installer. The 4.2.1 release archives
+   support macOS ARM64/x86_64 and Linux x86_64, **not Linux ARM64**. For example,
+   on a supported host, download its legacy installer for review:
 
    ```sh
    curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
      https://github.com/hack-dance/hack/releases/download/v4.2.1/hack-4.2.1-install.sh \
      --output hack-v4-install.sh
    less hack-v4-install.sh
-   HACK_INSTALL_TAG=v4.2.1 bash hack-v4-install.sh
    ```
 
    The versioned script filename alone is not a selection guarantee: the downloader
-   otherwise resolves the latest stable release. Review installation/PATH prompts.
+   otherwise resolves the latest stable release. This legacy downloader has no
+   archive checksum verification and runs the downloaded archive's `install.sh`.
+   Reviewing the downloader alone does not review that second script. Prefer the
+   retained v4 executable; if you accept the legacy install path after reviewing
+   those artifacts, select the target explicitly:
+
+   ```sh
+   HACK_INSTALL_TAG=v4.2.1 bash hack-v4-install.sh
+   ```
+
+   Review installation/PATH prompts.
    For a Homebrew trial, the preferred rollback is the v4 installation you kept;
    a version-specific Homebrew replacement recipe is **to be confirmed in the dogfood run**.
 5. Verify v4's version, run its `doctor`, and inspect the restored registry.

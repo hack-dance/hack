@@ -132,6 +132,7 @@ test("a static refusal preserves only its code, fixed message and admitted servi
     code: "graph_port_publication",
     message: reason,
     service: "web",
+    startupPhase: "static-preflight",
   });
   expect(String(error)).toContain("no VM was started");
   expect(String(error)).not.toContain("synthetic-private");

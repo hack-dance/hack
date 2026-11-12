@@ -12,6 +12,9 @@ export function nativeRecoveryGuidance(code: string | undefined): string {
   if (code === "runtime_not_running") {
     return "Run hack ps --json to confirm that the native runtime is stopped.";
   }
+  if (code === "publisher_identity_unconfirmed") {
+    return "Recovery waits for the process holding the recorded publisher PID to exit when its identity cannot be confirmed. After it exits, rerun hack down --recover.";
+  }
   if (code === "provider_busy" || code === "native_request_timeout") {
     return "Run hack down --recover to retry this run's cleanup with data retained.";
   }

@@ -528,7 +528,7 @@ malicious authorized peer. Guest relay integration, stale boot/owner registratio
 TLS/name qualification and matched resource measurements remain open.
 
 
-A bounded macOS probe of the pinned SmolVM 1.14.3 `--mount-socket` path verified
+A bounded macOS probe of the then-pinned SmolVM 1.14.3 `--mount-socket` path verified
 64-KiB byte exchange and restart with recorded networking disabled. This offers a
 guest-to-host Unix transport without enabling gateway IP routing/NAT. It is not yet
 a transparent stream or a managed application endpoint: the same client calling

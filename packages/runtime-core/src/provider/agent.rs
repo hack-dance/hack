@@ -165,9 +165,14 @@ pub(super) fn answers_ping(path: &Path, timeout: Duration) -> bool {
     }
 }
 
+/// The guest agent protocol version the pinned SmolVM speaks (`smolvm-protocol`
+/// `PROTOCOL_VERSION`, 1 in 1.14.3 and 1.34.1). Recorded as `agent_protocol_version` in
+/// `provider-pins.json`.
+pub(super) const PROTOCOL_VERSION: u64 = 1;
+
 pub fn ping(path: &Path) -> Result<(), CandidateError> {
     let response = request(path, json!({"method":"ping"}), Duration::from_secs(3))?;
-    if response["status"] != "pong" || response["version"] != 1 {
+    if response["status"] != "pong" || response["version"] != PROTOCOL_VERSION {
         return Err(failure("Pinned guest protocol version mismatch."));
     }
     Ok(())

@@ -12,9 +12,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const ARCHIVE_SHA256: &str = "d0c962a017fe07a1b58c1437b16e6a2320c00d8a7cae739882103b871ef7af0f";
-pub const VERSION: &str = "1.14.3";
-const DIRECTORY: &str = "smolvm-1.14.3-darwin-arm64";
+pub const ARCHIVE_SHA256: &str = "8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9";
+pub const VERSION: &str = "1.34.1";
+const DIRECTORY: &str = "smolvm-1.34.1-darwin-arm64";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,6 +130,7 @@ pub fn prepare(candidate: &Candidate, archive: &Path) -> Result<Artifact, Candid
     let _lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
     let providers = candidate.state_root.join("providers");
     state::private_directory(&providers)?;
+    refuse_other_pin(&providers, &SMOLVM)?;
     if root(candidate).try_exists().map_err(io)? {
         return verify(candidate);
     }
@@ -187,13 +188,40 @@ pub(super) fn verify_tree(
     let prepared = providers.join(pin.directory);
     reject_aliased_state(&prepared)?;
     let artifact: Artifact = state::read(&providers.join(pin.record))?;
-    if artifact.version != pin.version
-        || artifact.archive_sha256 != pin.archive_sha256
-        || artifact.tree_sha256 != tree_digest(&prepared)?
-    {
+    if artifact.version != pin.version || artifact.archive_sha256 != pin.archive_sha256 {
+        return Err(pin_changed(pin, &artifact));
+    }
+    if artifact.tree_sha256 != tree_digest(&prepared)? {
         return Err(CandidateError::new("artifact_digest_mismatch", pin.changed));
     }
     Ok(artifact)
+}
+
+/// The refusal for a home prepared under another provider pin. A pin bump is not an
+/// in-place upgrade: the home's guest rootfs copy, disks and provider database were made
+/// by the recorded release and are qualified only with it. Nothing is changed or removed;
+/// the home stays usable by a build that pins the recorded release.
+fn pin_changed(pin: &TreePin, recorded: &Artifact) -> CandidateError {
+    CandidateError::new(
+        "provider_pin_changed",
+        format!(
+            "This candidate home was prepared with {} {}; this executor pins {} {}. A provider pin change needs a fresh candidate home: prepare one with the pinned archive (runtime prepare). This home, its volumes and its prepared tree are unchanged; a build that pins {} still runs it, and a pool it left running must be stopped with that build (runtime down).",
+            pin.label, recorded.version, pin.label, pin.version, recorded.version
+        ),
+    )
+}
+
+/// Refuse preparation in a home whose record names another pin, before any staging.
+fn refuse_other_pin(providers: &Path, pin: &TreePin) -> Result<(), CandidateError> {
+    let record = providers.join(pin.record);
+    if !record.try_exists().map_err(io)? {
+        return Ok(());
+    }
+    let recorded: Artifact = state::read(&record)?;
+    if recorded.version != pin.version || recorded.archive_sha256 != pin.archive_sha256 {
+        return Err(pin_changed(pin, &recorded));
+    }
+    Ok(())
 }
 
 pub const ENGINE_SHA256: &str = "d1d9cb857c32c596ea96a9ca6b25d13621a97c83511e667868a33a320b2a707f";
@@ -214,6 +242,7 @@ pub fn prepare_engine(candidate: &Candidate, archive: &Path) -> Result<Artifact,
     let _lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
     let providers = candidate.state_root.join("providers");
     state::private_directory(&providers)?;
+    refuse_other_pin(&providers, &ENGINE)?;
     if engine_root(candidate).try_exists().map_err(io)? {
         return verify_engine(candidate);
     }
@@ -397,10 +426,7 @@ pub(super) fn repair_tree(
     state::check_private_directory(&providers)?;
     let recorded: Artifact = state::read(&record)?;
     if recorded.version != pin.version || recorded.archive_sha256 != pin.archive_sha256 {
-        return Err(repair_refused(
-            "artifact_digest_mismatch",
-            "Provider preparation record does not match this executor's pin; repair refused.",
-        ));
+        return Err(pin_changed(pin, &recorded));
     }
     let prepared = providers.join(pin.directory);
     let present = match fs::symlink_metadata(&prepared) {
@@ -799,6 +825,51 @@ mod tests {
     }
 
     #[test]
+    fn a_home_prepared_under_another_pin_is_refused_by_name_and_left_unchanged() {
+        let root = fixture();
+        let candidate = Candidate::discover(&root).unwrap();
+        let pin = tree_fixture::prepare(&candidate, &root);
+        let record_path = providers(&candidate).join(pin.record);
+        let mut recorded: Artifact = state::read(&record_path).unwrap();
+        recorded.version = "0.9.0".into();
+        fs::remove_file(&record_path).unwrap();
+        state::write(&record_path, &recorded).unwrap();
+        let tree = tree_digest(&providers(&candidate).join(pin.directory)).unwrap();
+
+        for error in [
+            verify_tree(&candidate, &pin).unwrap_err(),
+            refuse_other_pin(&providers(&candidate), &pin).unwrap_err(),
+        ] {
+            assert_eq!(error.code, "provider_pin_changed");
+            assert!(
+                error.message.contains("prepared with Test tree 0.9.0")
+                    && error.message.contains("pins Test tree 1.0.0")
+                    && error.message.contains("fresh candidate home"),
+                "{}",
+                error.message
+            );
+        }
+        // A changed archive pin with the same version is the same refusal.
+        recorded.version = pin.version.into();
+        recorded.archive_sha256 = "0".repeat(64);
+        fs::remove_file(&record_path).unwrap();
+        state::write(&record_path, &recorded).unwrap();
+        assert_eq!(
+            verify_tree(&candidate, &pin).unwrap_err().code,
+            "provider_pin_changed"
+        );
+        // Neither refusal changed the prepared tree.
+        assert_eq!(
+            tree_digest(&providers(&candidate).join(pin.directory)).unwrap(),
+            tree
+        );
+        // A home without a record is not refused.
+        fs::remove_file(&record_path).unwrap();
+        refuse_other_pin(&providers(&candidate), &pin).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_tree_pruned_of_empty_directories_is_repaired_from_its_retained_archive() {
         let root = fixture();
         let candidate = Candidate::discover(&root).unwrap();
@@ -899,14 +970,14 @@ mod tests {
         assert_eq!(tree_digest(&prepared).unwrap(), changed);
         assert_eq!(repair_staging(&candidate).len(), 1);
 
-        // A record for another version is refused before any extraction.
+        // A record for another version is refused by name before any extraction.
         recorded.tree_sha256 = original;
         recorded.version = "1.0.1".into();
         fs::remove_file(&record).unwrap();
         state::write(&record, &recorded).unwrap();
         assert_eq!(
             repair_tree(&candidate, &pin, &lease).unwrap_err().code,
-            "artifact_digest_mismatch"
+            "provider_pin_changed"
         );
         assert_eq!(repair_staging(&candidate).len(), 1);
         assert_eq!(tree_digest(&prepared).unwrap(), changed);
@@ -920,6 +991,19 @@ mod tests {
             serde_json::from_str(include_str!("../../provider-pins.json")).unwrap();
         assert_eq!(pins["smolvm"]["version"], VERSION);
         assert_eq!(pins["smolvm"]["archive_sha256"], ARCHIVE_SHA256);
+        assert_eq!(pins["smolvm"]["platform"], "darwin-arm64");
+        assert_eq!(
+            pins["smolvm"]["url"],
+            format!(
+                "https://github.com/smol-machines/smolvm/releases/download/v{VERSION}/{DIRECTORY}.tar.gz"
+            )
+        );
+        assert_eq!(DIRECTORY, format!("smolvm-{VERSION}-darwin-arm64"));
+        assert_eq!(SMOLVM.directory, DIRECTORY);
+        assert_eq!(
+            pins["smolvm"]["agent_protocol_version"],
+            super::super::agent::PROTOCOL_VERSION
+        );
         assert_eq!(pins["docker"]["version"], ENGINE_VERSION);
         assert_eq!(pins["docker"]["archive_sha256"], ENGINE_SHA256);
         const PLATFORM: &str = "darwin-arm64";

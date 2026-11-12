@@ -1,8 +1,9 @@
 set -eu
 # Confirms the guest's x86_64 translation matches the pool's audited intent before the engine
-# starts. SmolVM 1.14.3's agent mounts the host Rosetta runtime (virtiofs tag `rosetta`) at
-# /mnt/rosetta and registers it with binfmt_misc as `rosetta`, matching x86_64 ELF with the
-# fix-binary flag so container mount namespaces use the interpreter opened at registration.
+# starts. The pinned SmolVM agent (this registration is unchanged from 1.14.3 to 1.34.1)
+# mounts the host Rosetta runtime (virtiofs tag `rosetta`) at /mnt/rosetta and registers it
+# with binfmt_misc as `rosetta`, matching x86_64 ELF with the fix-binary flag so container
+# mount namespaces use the interpreter opened at registration.
 test "$(cat /storage/.hack-local-owner)" = "$1"
 test "$(cat /proc/sys/kernel/random/boot_id)" = "$2"
 entry=/proc/sys/fs/binfmt_misc/rosetta

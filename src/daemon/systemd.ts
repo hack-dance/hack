@@ -1948,6 +1948,23 @@ async function checkBeforeEnable(opts: {
   return error === null ? null : `Not enabling ${SYSTEMD_UNIT_NAME}: ${error}`;
 }
 
+/**
+ * Null when the unit's effective HACK_HOME (drop-ins included) is
+ * `hackHome`; otherwise why not (another home, or it cannot be read).
+ */
+async function describeForeignHackHome(opts: {
+  readonly deps: SystemdDeps;
+  readonly hackHome: string;
+}): Promise<string | null> {
+  const unitHome = await readSystemdUnitHackHome({ deps: opts.deps });
+  if (unitHome.kind === "unknown") {
+    return `its Hack home could not be read (${unitHome.detail})`;
+  }
+  return unitHome.path === resolve(opts.hackHome)
+    ? null
+    : `it runs hackd for ${unitHome.path}, not ${resolve(opts.hackHome)}; uninstall it from that Hack home`;
+}
+
 /** Runs `systemctl --user daemon-reload`. */
 export async function systemdDaemonReload(opts: {
   readonly deps: SystemdDeps;
@@ -2007,6 +2024,11 @@ export type SystemdUninstallResult =
 export async function uninstallSystemdUnit(opts: {
   readonly unitPath: string;
   readonly deps: SystemdDeps;
+  /**
+   * The uninstalling CLI's Hack home: a unit that a drop-in points at
+   * another home (or whose home cannot be read) is not stopped or removed.
+   */
+  readonly hackHome?: string;
 }): Promise<SystemdUninstallResult> {
   const access = resolveSystemdAccess({ env: opts.deps.env });
   if (!access.allowed) {
@@ -2021,6 +2043,18 @@ export async function uninstallSystemdUnit(opts: {
     };
   }
   const availability = await probeSystemdUserManager(opts.deps);
+  if (availability.available && opts.hackHome !== undefined) {
+    const foreign = await describeForeignHackHome({
+      deps: opts.deps,
+      hackHome: opts.hackHome,
+    });
+    if (foreign !== null) {
+      return {
+        ok: false,
+        error: `Not uninstalling ${SYSTEMD_UNIT_NAME}: ${foreign}`,
+      };
+    }
+  }
   if (availability.available) {
     const disabled = await disableUnitSafely({
       unitPath: opts.unitPath,

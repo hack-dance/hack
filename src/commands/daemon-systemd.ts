@@ -903,7 +903,12 @@ export async function uninstallDaemonSystemdService(opts: {
   const deps = opts.deps ?? defaultSystemdDeps();
   assertSystemdAccess(deps);
   const unitPath = resolveSystemdUnitPath({ env: deps.env });
-  const result = await uninstallSystemdUnit({ unitPath, deps });
+  const result = await uninstallSystemdUnit({
+    unitPath,
+    deps,
+    // The Hack home whose daemon this CLI manages (daemonRoot's parent).
+    hackHome: opts.daemonRoot ? dirname(opts.daemonRoot) : undefined,
+  });
   if (result.ok && opts.daemonRoot) {
     // Without a unit there is nothing left to restart.
     await rm(resolve(opts.daemonRoot, RESTART_PENDING_FILE), { force: true });

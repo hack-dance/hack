@@ -2878,3 +2878,40 @@ linuxTest(
     ).toContain("owned by another user");
   }
 );
+
+linuxTest(
+  "uninstall does not stop or remove another Hack home's unit",
+  async () => {
+    // Codex review: `disable --now` from the default home stopped a unit a
+    // drop-in points at another HACK_HOME.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.active = true;
+    fake.unitEnvironment = "HACK_HOME=/srv/other-home";
+    fake.calls.length = 0;
+    const result = await uninstallSystemdUnit({
+      unitPath,
+      deps: fake.deps,
+      hackHome: join(root, ".hack"),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("/srv/other-home");
+    }
+    expect(fake.calls.some((call) => call.includes(" disable"))).toBe(false);
+    expect(await Bun.file(unitPath).exists()).toBe(true);
+    expect(fake.active).toBe(true);
+    // The command passes the CLI's own Hack home.
+    expect(
+      await uninstallDaemonSystemdService({
+        deps: fake.deps,
+        daemonRoot: join(root, ".hack", "daemon"),
+      })
+    ).toBe(1);
+    expect(await Bun.file(unitPath).exists()).toBe(true);
+  }
+);

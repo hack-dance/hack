@@ -5,6 +5,24 @@ Homebrew `hack` keeps its existing executable and state. A candidate is selected
 explicitly through `hack-next`; installing one does not migrate a project, start a
 VM, install DNS or trust, or replace stable Hack.
 
+Keep stable installed while trying the separate prerelease on Compose first, make
+native testing optional, and upgrade the stable channel only after v5 is released.
+
+```mermaid
+---
+title: Channel adoption phases
+---
+timeline
+  Today : Stable v4 remains
+  Prerelease trial : Separate hack-next
+                   : Compose first
+                   : Native optional
+  After v5 release : Upgrade stable
+```
+
+These are adoption phases, not release dates or a promised schedule; each native
+trial still needs the platform, provider and project prerequisites below.
+
 The first supported package is for Apple Silicon macOS. Provider installation,
 native project adaptations and host routing remain explicit prerequisites in the
 [native candidate guide](native-candidate.md). A packaged candidate is not a claim

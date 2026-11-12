@@ -12,7 +12,7 @@
 //! boot recorded a passing inventory (`prepared_store`); the receipt's sanitization record alone
 //! is a publisher claim this module requires but cannot verify.
 //!
-//! Timing (pinned SmolVM 1.14.3): a machine's disks are formatted from the plain templates during
+//! Timing (the pinned SmolVM): a machine's disks are formatted from the plain templates during
 //! its first start (`prepare_for_launch`); `machine create` makes none. Therefore:
 //! - [`activate`] must finish before the pool's first start, while its disks do not exist.
 //! - The activated templates stay in place through that start. A bound pool verifies them with

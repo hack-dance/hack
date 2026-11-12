@@ -212,9 +212,94 @@ pub fn clean_command(binary: &std::path::Path) -> Command {
     command
 }
 
+/// A publisher is stopped through its authenticated control channel, never by
+/// a terminal or graph-owner group signal. Set the group in the child before
+/// exec; parent-side setpgid would race readiness and terminal interruption.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn publisher_command(binary: &std::path::Path) -> Command {
+    let mut command = Command::new(binary);
+    command.process_group(0);
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publisher_survives_owner_group_interrupt() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "provider::process::tests::publisher_group_probe",
+                "--nocapture",
+            ])
+            .env("HACK_TEST_PUBLISHER_GROUP_PROBE", "1")
+            .process_group(0)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("publisher-group-verified"));
+    }
+
+    #[test]
+    fn publisher_group_probe() {
+        if std::env::var_os("HACK_TEST_PUBLISHER_GROUP_PROBE").is_none() {
+            return;
+        }
+        extern "C" fn caught(_: libc::c_int) {}
+        // SAFETY: isolated helper process, static signal-safe handler; exec
+        // resets this caught disposition in the publisher to its default.
+        unsafe {
+            libc::signal(libc::SIGINT, caught as *const () as libc::sighandler_t);
+        }
+        let child = publisher_command(std::path::Path::new("/bin/cat"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        struct Owned(std::process::Child);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        // SAFETY: observe this direct, unreaped child and signal only the
+        // helper's own group, created by the outer fixture.
+        assert_eq!(
+            unsafe { libc::getpgid(child.id() as i32) },
+            child.id() as i32
+        );
+        let mut owned = Owned(child);
+        assert_eq!(
+            unsafe { libc::kill(-(std::process::id() as i32), libc::SIGINT) },
+            0
+        );
+        use std::io::{Read, Write};
+        owned
+            .0
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"owned stop")
+            .unwrap();
+        let mut output = String::new();
+        owned
+            .0
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        assert!(owned.0.wait().unwrap().success());
+        assert_eq!(output, "owned stop");
+        println!("publisher-group-verified");
+    }
 
     fn shell(script: &str) -> Command {
         let mut command = clean_command(std::path::Path::new("/bin/sh"));
@@ -290,3 +375,6 @@ mod tests {
         println!("private-child-mask-verified");
     }
 }
+
+#[cfg(all(test, feature = "native-stream-relay"))]
+pub(crate) mod native_publisher_tests;

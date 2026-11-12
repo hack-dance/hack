@@ -153,6 +153,7 @@ let originalHome: string | undefined;
 let originalNoInteractive: string | undefined;
 let originalMutagenPath: string | undefined;
 let originalLogger: string | undefined;
+let originalDaemonAutostartDisable: string | undefined;
 
 beforeAll(() => {
   dnsMock.activate();
@@ -166,6 +167,10 @@ beforeEach(async () => {
   originalNoInteractive = process.env.HACK_NO_INTERACTIVE;
   originalMutagenPath = process.env.HACK_MUTAGEN_PATH;
   originalLogger = process.env.HACK_LOGGER;
+  originalDaemonAutostartDisable = process.env.HACK_DAEMON_AUTOSTART_DISABLE;
+  // This fixture exercises daemon repair through a mocked shell. Its own
+  // policy must be independent of the outer suite's daemon safety setting.
+  Reflect.deleteProperty(process.env, "HACK_DAEMON_AUTOSTART_DISABLE");
   tempDir = await mkdtemp(join(tmpdir(), "hack-doctor-fix-"));
   process.env.HOME = tempDir;
   process.env.HACK_NO_INTERACTIVE = "1";
@@ -198,6 +203,7 @@ afterEach(async () => {
     restoreEnv("HACK_MUTAGEN_PATH", originalMutagenPath);
   }
   restoreEnv("HACK_LOGGER", originalLogger);
+  restoreEnv("HACK_DAEMON_AUTOSTART_DISABLE", originalDaemonAutostartDisable);
 });
 
 afterAll(() => {
@@ -218,15 +224,18 @@ async function createProjectWithStaleDaemonPid(): Promise<string> {
     "services:\n  api:\n    image: alpine:3.19\n    env_file:\n      - path: .env\n        required: false\n"
   );
 
-  // Stale daemon pid: a pid that cannot be running (very large, unlikely to
-  // exist) with no socket file, so buildDaemonStatusReport resolves "stale".
+  // Outside supported Linux/macOS PID ranges, with no socket, so the status
+  // resolves "stale" without ever identifying an unrelated live process.
   const daemonDir = resolve(
     tempDir,
     GLOBAL_HACK_DIR_NAME,
     GLOBAL_DAEMON_DIR_NAME
   );
   await mkdir(daemonDir, { recursive: true });
-  await writeFile(resolve(daemonDir, GLOBAL_DAEMON_PID_FILENAME), "999999\n");
+  await writeFile(
+    resolve(daemonDir, GLOBAL_DAEMON_PID_FILENAME),
+    "2147483647\n"
+  );
 
   return projectRoot;
 }

@@ -11,6 +11,7 @@ import {
   parseNativeAuthoredReview,
 } from "./native-authored-graph-protocol.ts";
 import type { NativeAuthoredStorageTool } from "./native-authored-storage-tool.ts";
+import { nativePublisherExitNotice } from "./native-project-publications.ts";
 import {
   invokeNativeRuntime,
   NATIVE_EXIT_DRAIN_BOUND_MS,
@@ -43,6 +44,8 @@ type ProcessOptions = {
   readonly startupTimeoutMs: number;
   readonly signal?: AbortSignal;
   readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
+  /** Value-free publication failure from this exact foreground owner's stream. */
+  readonly onPublicationNotice?: (message: string) => void;
   /**
    * Failed services' bounded output from a startup failure reply, before the
    * failure is thrown. It may contain managed values: the callback must redact
@@ -75,7 +78,7 @@ type ProcessOptions = {
 };
 
 /**
- * Keep the graph owner attached to the calling CLI until owned shutdown completes.
+ * Keep the graph owner supervised by the calling CLI until owned shutdown completes.
  * Startup values travel over stdin only. Readiness is a handshake, not application
  * acceptance; the caller must inspect ownership before publishing a run mapping.
  * Aborted/failed attempts retain native recovery state and are never replayed.
@@ -99,6 +102,17 @@ export async function serveNativeProjectGraph(
     ],
     readyLimit: 8192,
     strictReady: false,
+    isolateOwner: true,
+    onEvent: (line) => {
+      const notice = nativePublisherExitNotice(line, opts.run);
+      if (notice) {
+        if (opts.onPublicationNotice) {
+          opts.onPublicationNotice(notice);
+        } else {
+          process.stderr.write(`${notice}\n`);
+        }
+      }
+    },
     onReady: async (value) => {
       if (
         !isRecord(value) ||
@@ -310,6 +324,9 @@ async function serveGraphProcess(
     readonly command: readonly string[];
     readonly readyLimit: number;
     readonly strictReady: boolean;
+    /** Compose ownership is independent of readiness framing and optional hooks. */
+    readonly isolateOwner?: boolean;
+    readonly onEvent?: (line: string) => void;
     readonly onReady: (
       value: unknown,
       interrupted: () => boolean,
@@ -339,8 +356,13 @@ async function serveGraphProcess(
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      // Compose owners and their port publishers must outlive the terminal's
+      // group interrupt until this frontend requests owned cleanup. Hooks are
+      // optional; their presence must not decide process ownership.
       detached:
-        opts.beforeStop !== undefined || opts.liveStopOwner !== undefined,
+        opts.isolateOwner === true ||
+        opts.beforeStop !== undefined ||
+        opts.liveStopOwner !== undefined,
     }
   );
   // Descendants may inherit a pipe after the owned receiver exits. Its exit,
@@ -437,6 +459,7 @@ async function serveGraphProcess(
       signal: drain.signal,
       readyLimit: opts.readyLimit,
       strictReady: opts.strictReady,
+      onEvent: opts.onEvent,
       interrupted: () =>
         canceled ||
         timedOut ||
@@ -559,18 +582,21 @@ async function requireGroupAbsent(group: number): Promise<void> {
   );
 }
 
-async function consumeGraphOutput(opts: {
+type GraphOutputOptions = {
   readonly output: ReadableStream<Uint8Array>;
   readonly signal: AbortSignal;
   readonly readyLimit: number;
   readonly strictReady: boolean;
+  readonly onEvent?: (line: string) => void;
   readonly interrupted: () => boolean;
   readonly onReady: (
     value: unknown,
     interrupted: () => boolean
   ) => Promise<void>;
-}): Promise<boolean> {
-  let ready = false;
+};
+
+async function consumeGraphOutput(opts: GraphOutputOptions): Promise<boolean> {
+  const frames = graphOutputFrames(opts);
   const reader = opts.output.getReader();
   const cancel = () => {
     void reader.cancel().catch(() => undefined);
@@ -580,8 +606,6 @@ async function consumeGraphOutput(opts: {
     cancel();
   }
   let total = 0;
-  let line = "";
-  const decoder = new TextDecoder("utf-8", { fatal: true });
   try {
     while (true) {
       const chunk = await reader.read();
@@ -594,36 +618,58 @@ async function consumeGraphOutput(opts: {
           "Native graph control output exceeded its budget."
         );
       }
-      if (ready) {
-        continue;
-      }
-      line += decoder.decode(chunk.value, { stream: true });
-      const end = line.indexOf("\n");
-      if (end < 0) {
-        if (readyFrameSize(line, opts.strictReady) > opts.readyLimit) {
-          throw new ClosedCliError(
-            "Native graph readiness response exceeded its budget."
-          );
-        }
-        continue;
-      }
-      if (
-        opts.strictReady &&
-        Buffer.byteLength(line.slice(0, end)) > opts.readyLimit
-      ) {
-        throw new ClosedCliError(
-          "Native graph readiness response exceeded its budget."
-        );
-      }
-      await acceptGraphReady({ ...opts, line: line.slice(0, end) });
-      ready = true;
-      line = "";
+      await frames.push(chunk.value);
     }
   } finally {
     opts.signal.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
-  return ready;
+  return frames.ready();
+}
+
+/** Readiness and later bounded notices may share a chunk or span several chunks. */
+function graphOutputFrames(opts: GraphOutputOptions) {
+  let ready = false;
+  let line = "";
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  return {
+    ready: () => ready,
+    push: async (chunk: Uint8Array) => {
+      if (ready && !opts.onEvent) {
+        return;
+      }
+      line += decoder.decode(chunk, { stream: true });
+      let end = line.indexOf("\n");
+      while (end >= 0) {
+        const frame = line.slice(0, end);
+        if (
+          (ready || opts.strictReady) &&
+          Buffer.byteLength(frame) > opts.readyLimit
+        ) {
+          throw new ClosedCliError(
+            "Native graph control response exceeded its budget."
+          );
+        }
+        if (ready) {
+          opts.onEvent?.(frame);
+        } else {
+          await acceptGraphReady({ ...opts, line: frame });
+          ready = true;
+        }
+        if (!opts.onEvent) {
+          line = "";
+          return;
+        }
+        line = line.slice(end + 1);
+        end = line.indexOf("\n");
+      }
+      if (readyFrameSize(line, opts.strictReady) > opts.readyLimit) {
+        throw new ClosedCliError(
+          "Native graph readiness response exceeded its budget."
+        );
+      }
+    },
+  };
 }
 
 function readyFrameSize(line: string, strict: boolean): number {

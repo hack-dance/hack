@@ -16,6 +16,7 @@ import {
 } from "../src/backends/native-https-owner.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
 import { NATIVE_IMAGE_ENSURE_TIMEOUT_MS } from "../src/backends/native-image-policy.ts";
+import { nativeProjectDown } from "../src/backends/native-project-down.ts";
 import { discardUnpublishedNativeStart } from "../src/backends/native-project-failed-start.ts";
 import {
   admitNativeProjectFinalization,
@@ -28,6 +29,8 @@ import {
   prepareNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
 import { nativeProjectPs } from "../src/backends/native-project-observe.ts";
+import { verifyNativeFrontendRecovery } from "../src/backends/native-project-recovery.ts";
+import { restartNativeProject } from "../src/backends/native-project-restart.ts";
 import {
   nativeRestartSelection,
   preflightNativeRestart,
@@ -63,6 +66,7 @@ import {
 } from "../src/lib/compose-env-fingerprint.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -1580,11 +1584,12 @@ test("AWS delivery warns value-free before expiry and clears its timers on exit"
   expect(
     await startNativeProject({ ...opts, aws: { profile: "qa-test" } })
   ).toBe(0);
-  expect(lines).toHaveLength(1);
+  expect(lines).toHaveLength(2);
   expect(lines[0]).toMatch(
     /^AWS credentials delivered to 2 services expire at \d\d:\d\d; run hack restart to renew\.$/
   );
   expect(lines[0]).not.toContain("qa-test");
+  expect(lines[1]).toBe("Forwarding shell variables: (none).");
 });
 
 test("reviewed dependency caches bind published source and successful completion readiness", async () => {
@@ -5390,6 +5395,23 @@ test("HACK-1939: foreground up prints a ready summary and a confirmed-stop line"
   });
 });
 
+test("a foreground up stopped by another shell prints confirmed cleanup without a signal", async () => {
+  const { opts } = await fixture();
+  const events: NativeStartupProgress[] = [];
+  expect(
+    await startNativeProject({
+      ...opts,
+      onProgress: (event) => {
+        events.push(event);
+      },
+    })
+  ).toBe(0);
+  expect(events.at(-1)).toMatchObject({
+    phase: "stopped",
+    summary: expect.stringContaining("owned cleanup confirmed"),
+  });
+});
+
 test("the ready summary lists reviewed HTTPS routes and published loopback ports only", () => {
   const plan = {
     services: {
@@ -5819,4 +5841,179 @@ test("invalid startup arguments refuse before creating advisory storage", async 
     startNativeProject({ ...opts, allowedHosts: ["bad host"] })
   ).rejects.toThrow();
   expect(await readdir(opts.scope.projectDir)).toEqual([]);
+});
+
+test("restart --recover-frontend starts a fresh lifetime that plain down can stop", async () => {
+  const { opts, saved } = await retainedFinalizationFixture();
+  await saveNativeProjectRun({ ...opts.scope, run: saved });
+  const module = join(
+    import.meta.dir,
+    "../src/backends/native-project-finalization.ts"
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `const {beginNativeProjectFinalization} = await import(${JSON.stringify(module)});
+     await beginNativeProjectFinalization(JSON.parse(process.argv[1]));`,
+      JSON.stringify({ scope: opts.scope, run: saved }),
+    ],
+    {
+      env: privateCliEnv({ root: opts.scope.projectRoot }),
+      stdout: "ignore",
+      stderr: "pipe",
+    }
+  );
+  expect(await child.exited).toBe(0);
+  const token = await captureNativeProjectFinalization({
+    scope: opts.scope,
+    run: saved,
+  });
+  const stop = Promise.withResolvers<void>();
+  let cleaned = false;
+  let down: Promise<unknown> | undefined;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) =>
+    await serve({
+      ...request,
+      onReady: async () => {
+        await request.onReady();
+        down = nativeProjectDown({
+          runtime: opts.runtime,
+          scope: opts.scope,
+          invoke: async (input) => {
+            if (input.args[1] === "cleanup") {
+              cleaned = true;
+              stop.resolve();
+              return {};
+            }
+            return {
+              ...stoppedGraph(saved),
+              receipt: {
+                ...stoppedGraph(saved).receipt,
+                phase: cleaned ? "stopped-data-retained" : "ready-observed",
+              },
+              observations: {
+                "container:web": { state: cleaned ? "absent" : "running" },
+              },
+            };
+          },
+        });
+        await stop.promise;
+      },
+    });
+  opts.dependencies.save = saveNativeProjectRun;
+  const result = await restartNativeProject({
+    scope: opts.scope,
+    preflight: async () => {},
+    down: async () =>
+      await nativeProjectDown({
+        runtime: opts.runtime,
+        scope: opts.scope,
+        deferFinalization: true,
+        invoke: async () => stoppedGraph(saved),
+      }),
+    recovery: {
+      expectAttempt: token.attempt,
+      verifyEffects: async () =>
+        await verifyNativeFrontendRecovery({
+          runtime: opts.runtime,
+          scope: opts.scope,
+          run: saved,
+          legacy: false,
+          httpsPort: null,
+          invoke: async (request) =>
+            request.args[1] === "managed-hostname-authority"
+              ? { authority: { present: false } }
+              : stoppedGraph(saved),
+        }),
+      retirePublisher: async () => {},
+    },
+    start: async (input) =>
+      await startNativeProject({
+        ...opts,
+        restore: input.run,
+        signal: input.signal,
+        onReady: input.onReady,
+        onStopSignals: input.onStopSignals,
+        onProgress: (event) => {
+          if (event.phase === "stopping") {
+            input.onStopRequested();
+          }
+        },
+      }),
+  });
+  expect(result).toBe(0);
+  expect(await down).toMatchObject({ status: "stopped", dataPreserved: true });
+  expect(cleaned).toBe(true);
+});
+
+test("shell values reach private stdin but never startup observations, saved receipts or native-home files", async () => {
+  const { opts } = await fixture();
+  const privateValue = "synthetic-secret-shell-delivery-canary";
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    shellEnvironment: { web: { API_KEY: privateValue } },
+    forwardedShellVariables: {
+      web: ["FIXTURE_API_KEY", "FIXTURE_API_KEY"],
+      inactive: ["INACTIVE_SOURCE"],
+    },
+  });
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  const save = opts.dependencies.save!;
+  opts.dependencies.save = async (request) => {
+    expect(JSON.stringify(request)).not.toContain(privateValue);
+    return await save(request);
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    expect(request.input.normalizedComposeJson).not.toContain(privateValue);
+    return await review(request);
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    expect(JSON.stringify(request)).not.toContain(privateValue);
+    return await invoke(request);
+  };
+  let received = false;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    expect(request.args.join(" ")).not.toContain(privateValue);
+    expect(
+      JSON.parse(new TextDecoder().decode(request.privateInput))
+    ).toMatchObject({ services: { web: { API_KEY: privateValue } } });
+    received = true;
+    return await serve(request);
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      onEnvironmentReady: async (request) => {
+        expect(JSON.stringify(request)).not.toContain(privateValue);
+      },
+      onProgress: (event) => {
+        expect(JSON.stringify(event)).not.toContain(privateValue);
+      },
+    })
+  ).toBe(0);
+  expect(received).toBe(true);
+  expect(notices).toContain("Forwarding shell variables: FIXTURE_API_KEY.");
+  expect(
+    notices.filter((line) => line.startsWith("Forwarding shell variables:"))
+  ).toHaveLength(1);
+  expect(notices.join("\n")).not.toContain(privateValue);
+  expect(notices.join("\n")).not.toContain("INACTIVE_SOURCE");
+  const pending = [opts.scope.nativeHome];
+  for (const directory of pending) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(path);
+      } else if (entry.isFile()) {
+        expect(await readFile(path, "utf8")).not.toContain(privateValue);
+      }
+    }
+  }
 });

@@ -106,12 +106,7 @@ pub(super) fn require_scoped_root(
     receipt: &Receipt,
     boot: &str,
 ) -> Result<(), CandidateError> {
-    let expected = startup::control_root(
-        &candidate.state_root,
-        &receipt.owner,
-        Some(boot),
-        Some(&receipt.run),
-    )?;
+    let expected = startup::receipt_control_root(&candidate.state_root, receipt, boot)?;
     if receipt
         .relay_startup
         .as_ref()
@@ -173,7 +168,7 @@ mod tests {
         .unwrap();
         let boot = "11111111-1111-1111-1111-111111111111";
         assert!(require_scoped_root(&candidate, &receipt, boot).is_err());
-        let root = startup::control_root(
+        let root = startup::legacy_control_root(
             &candidate.state_root,
             &receipt.owner,
             Some(boot),

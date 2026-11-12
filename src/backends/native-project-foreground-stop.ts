@@ -6,7 +6,7 @@ import {
 import type { NativeProjectRunScope } from "./native-project-run.ts";
 
 /**
- * Stop requests of a native foreground `up`. The first SIGINT/SIGTERM (or the
+ * Stop requests of a native foreground `up`. The first SIGINT/SIGTERM/SIGHUP (or the
  * caller's signal) aborts `signal`; a second one, or the caller's force
  * signal, also aborts `force`, which cancels a running down hook and forces
  * the graph owner to stop.
@@ -23,12 +23,17 @@ export function nativeForegroundStopSignals(opts: {
     interruptedExit = 143;
     cancel();
   };
+  const hangup = () => {
+    interruptedExit = 129;
+    cancel();
+  };
   const forced = () => {
     controller.abort();
     force.abort();
   };
   process.on("SIGINT", cancel);
   process.on("SIGTERM", terminate);
+  process.on("SIGHUP", hangup);
   opts.signal?.addEventListener("abort", cancel, { once: true });
   opts.forceSignal?.addEventListener("abort", forced, { once: true });
   return {
@@ -54,6 +59,7 @@ export function nativeForegroundStopSignals(opts: {
     dispose: () => {
       process.off("SIGINT", cancel);
       process.off("SIGTERM", terminate);
+      process.off("SIGHUP", hangup);
       opts.signal?.removeEventListener("abort", cancel);
       opts.forceSignal?.removeEventListener("abort", forced);
     },

@@ -17,6 +17,7 @@ import {
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
+  waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
 import {
   loadNativeProjectRun,
@@ -30,7 +31,9 @@ import {
   markSharedHelperInstanceStopping,
   type ProjectSharedHelperConfig,
 } from "../src/lib/project-shared-helpers.ts";
+import oldReceipt from "./fixtures/native-next13/ready-pending.json";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
+import { installNext13Frontend } from "./helpers/native-next13-state.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -317,10 +320,7 @@ test("already-stopped unacknowledged frontend refuses without replaying compute"
     },
   });
   await expectClosedRefusal(result, "frontend finalization is unconfirmed");
-  await expectClosedRefusal(
-    result,
-    `hack restart --recover-frontend --expect-finalization-attempt ${token.attempt}`
-  );
+  await expectClosedRefusal(result, "hack down --recover");
   expect(performance.now() - started).toBeLessThan(10_000);
   expect(calls).toEqual(["inspect"]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
@@ -1093,7 +1093,12 @@ test("down without --recover names the recovery when the foreground owner is gon
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
-test("down --recover stops a ready run whose foreground owner exited, selected by its exact receipt", async () => {
+test.each([
+  { enrollment: false, label: "ready owner" },
+  { enrollment: true, label: "legacy pending cleanup" },
+])("down --recover stops $label selected by its exact receipt", async ({
+  enrollment,
+}) => {
   const opts = await fixture();
   const events: string[] = [];
   let recovered = false;
@@ -1142,7 +1147,24 @@ test("down --recover stops a ready run whose foreground owner exited, selected b
         };
       }
       expect(request.args[1]).toBe("inspect");
-      return snapshot(recovered);
+      const observed = snapshot(recovered);
+      return enrollment
+        ? {
+            ...observed,
+            receipt: {
+              ...observed.receipt,
+              relay_cleanup: {
+                version: 1,
+                runtime: new Array(16).fill(1),
+                boot: new Array(16).fill(2),
+                operation: new Array(16).fill(3),
+                effect: new Array(32).fill(4),
+                control_root: "/private/owned",
+                phase: "pending",
+              },
+            },
+          }
+        : observed;
     },
   });
   expect(result.status).toBe("stopped");
@@ -1160,7 +1182,10 @@ test("down --recover stops a ready run whose foreground owner exited, selected b
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
-test("down --recover without a remaining publication takes the ordinary cleanup", async () => {
+test.each([
+  "absent",
+  "running",
+] as const)("down --recover with a %s owner takes the ordinary authenticated cleanup", async (foreground) => {
   const opts = await fixture();
   const calls: string[] = [];
   let cleaned = false;
@@ -1170,7 +1195,7 @@ test("down --recover without a remaining publication takes the ordinary cleanup"
     invoke: async (request) => {
       calls.push(request.args[1]!);
       if (request.args[1] === "foreground-owner") {
-        return ownerSelection("absent");
+        return ownerSelection(foreground);
       }
       if (request.args[1] === "cleanup") {
         cleaned = true;
@@ -1191,14 +1216,9 @@ test("down --recover without a remaining publication takes the ordinary cleanup"
 
 test.each([
   {
-    name: "a running owner",
-    selection: ownerSelection("running"),
-    text: "found a running foreground owner",
-  },
-  {
     name: "an owner that exited after its restore was admitted",
     selection: ownerSelection("exited", "failed-retained"),
-    text: "no supported command can prove and retire that attempt yet",
+    text: "Run hack ps --json",
   },
   {
     name: "an unclassified publication",
@@ -1344,7 +1364,7 @@ test("down --recover names a refused unadmitted owner retirement without hooks o
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
-test("down --recover names the exact frontend recovery when the owning frontend also exited", async () => {
+test("down --recover retires the dead frontend in one command and admits a fresh plain start", async () => {
   const opts = await fixture();
   // A frontend that began its finalization and exited without completing it.
   const module = join(
@@ -1367,28 +1387,43 @@ test("down --recover names the exact frontend recovery when the owning frontend 
   expect(attempt).toMatch(/^[a-f0-9]{32}$/);
   let recovered = false;
   const started = performance.now();
-  await expectClosedRefusal(
-    nativeProjectDown({
-      ...opts,
-      recover: true,
-      invoke: async (request) => {
-        if (request.args[1] === "foreground-owner") {
-          return ownerSelection("exited");
-        }
-        if (request.args[1] === "recover-live-owner") {
-          recovered = true;
-          return {
-            run: run.run,
-            recovered: true,
-            data_retained: true,
-            publisher_retired: true,
-          };
-        }
-        return snapshot(recovered);
-      },
-    }),
-    `hack restart --recover-frontend --expect-finalization-attempt ${attempt}`
-  );
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      if (request.args[1] === "foreground-owner") {
+        return ownerSelection("exited");
+      }
+      if (request.args[1] === "recover-live-owner") {
+        recovered = true;
+        return {
+          run: run.run,
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+        };
+      }
+      if (request.args[1] === "managed-hostname-authority") {
+        return { authority: { present: false } };
+      }
+      return snapshot(recovered);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  const token = await captureNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+  });
+  await waitNativeProjectFinalization({
+    scope: opts.scope,
+    run,
+    token,
+    timeoutMs: 1,
+  });
+  // Same admission barrier used by plain up: no special restart is needed.
+  const next = await beginNativeProjectFinalization({ scope: opts.scope, run });
+  expect(next.token.attempt).not.toBe(attempt);
+  await next.complete();
   expect(recovered).toBe(true);
   // An exited frontend is not awaited for the ordinary finalization budget.
   expect(performance.now() - started).toBeLessThan(10_000);
@@ -1448,3 +1483,335 @@ test("down --recover resumes an interrupted dead-owner recovery by its original 
   ]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
+
+test.each([
+  { stopped: false, complete: false },
+  { stopped: true, complete: undefined },
+  { stopped: true, complete: false },
+  { stopped: true, complete: true },
+])("down --recover resumes predecessor cleanup until its completion commits (stopped=$stopped, complete=$complete)", async ({
+  stopped,
+  complete,
+}) => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let cleaned = stopped;
+  let committed = complete === true;
+  const selected = "7".repeat(64);
+  const result = await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      if (request.args[1] === "foreground-owner") {
+        return {
+          ...ownerSelection(
+            "exited",
+            stopped ? "stopped-data-retained" : "ready-observed"
+          ),
+          dead_owner_recovery: selected,
+          dead_owner_recovery_complete: complete,
+        };
+      }
+      if (request.args[1] === "recover-cleanup") {
+        expect(request.args).toEqual([
+          "graph",
+          "recover-cleanup",
+          "--run-id",
+          run.run,
+          "--expect-receipt",
+          selected,
+          "--json",
+        ]);
+        cleaned = true;
+        committed = true;
+        return { run: run.run, recovered: true, data_retained: true };
+      }
+      if (request.args[1] === "retire-recovered-publisher") {
+        expect(cleaned).toBe(true);
+        expect(committed).toBe(true);
+        return { run: run.run, publisher_retired: true, data_retained: true };
+      }
+      expect(request.args[1]).toBe("inspect");
+      return snapshot(cleaned);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(calls.includes("recover-cleanup")).toBe(!complete);
+  if (!complete) {
+    expect(calls.indexOf("recover-cleanup")).toBeLessThan(
+      calls.indexOf("retire-recovered-publisher")
+    );
+  }
+  expect(calls).toContain("retire-recovered-publisher");
+  expect(calls).not.toContain("recover-live-owner");
+});
+
+test("completed predecessor recovery retries host retirement before reporting stopped", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let reservationHeld = true;
+  let attempts = 0;
+  const invoke = async (request: { args: readonly string[] }) => {
+    calls.push(request.args[1]!);
+    if (request.args[1] === "foreground-owner") {
+      return {
+        ...ownerSelection("exited", "stopped-data-retained"),
+        dead_owner_recovery: "7".repeat(64),
+        dead_owner_recovery_complete: true,
+      };
+    }
+    if (request.args[1] === "retire-recovered-publisher") {
+      attempts++;
+      if (attempts === 1) {
+        throw new NativeRuntimeRequestError({
+          message: "reservation release interrupted",
+          nativeCode: "dependency_reservation",
+        });
+      }
+      reservationHeld = false;
+      return { run: run.run, publisher_retired: true, data_retained: true };
+    }
+    expect(request.args[1]).toBe("inspect");
+    return snapshot(true);
+  };
+  await expectClosedRefusal(
+    nativeProjectDown({ ...opts, recover: true, invoke }),
+    "reservation release interrupted"
+  );
+  expect(reservationHeld).toBe(true);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+  const result = await nativeProjectDown({ ...opts, recover: true, invoke });
+  expect(result.status).toBe("stopped");
+  expect(reservationHeld).toBe(false);
+  expect(attempts).toBe(2);
+  expect(calls).not.toContain("recover-cleanup");
+});
+
+test("an unfinished stopped predecessor recovery must succeed before publication retirement", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  await expectClosedRefusal(
+    nativeProjectDown({
+      ...opts,
+      recover: true,
+      invoke: async (request) => {
+        calls.push(request.args[1]!);
+        if (request.args[1] === "foreground-owner") {
+          return {
+            ...ownerSelection("exited", "stopped-data-retained"),
+            dead_owner_recovery: "7".repeat(64),
+            dead_owner_recovery_complete: false,
+          };
+        }
+        if (request.args[1] === "recover-cleanup") {
+          throw new NativeRuntimeRequestError({
+            message: "proof changed",
+            nativeCode: "graph_dead_owner_recovery",
+          });
+        }
+        expect(request.args[1]).toBe("inspect");
+        return snapshot(true);
+      },
+    }),
+    "graph_dead_owner_recovery"
+  );
+  expect(calls).toContain("recover-cleanup");
+  expect(calls).not.toContain("retire-recovered-publisher");
+});
+
+test("a running owner with retained recovery selectors still uses ordinary authenticated cleanup", async () => {
+  const opts = await fixture();
+  let cleaned = false;
+  const calls: string[] = [];
+  await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      if (request.args[1] === "foreground-owner") {
+        return {
+          ...ownerSelection("running"),
+          live_owner_recovery: "7".repeat(64),
+          dead_owner_recovery: "8".repeat(64),
+        };
+      }
+      if (request.args[1] === "cleanup") {
+        cleaned = true;
+        return {};
+      }
+      expect(request.args[1]).toBe("inspect");
+      return snapshot(cleaned);
+    },
+  });
+  expect(calls).toContain("cleanup");
+  expect(calls).not.toContain("recover-cleanup");
+  expect(calls).not.toContain("recover-live-owner");
+});
+
+test("a recovery proof refusal does not suggest stopping a dead owner", async () => {
+  const opts = await fixture();
+  await expectClosedRefusal(
+    nativeProjectDown({
+      ...opts,
+      recover: true,
+      invoke: async (request) => {
+        if (request.args[1] === "foreground-owner") {
+          return ownerSelection("exited");
+        }
+        if (request.args[1] === "recover-live-owner") {
+          throw new NativeRuntimeRequestError({
+            message: "private detail",
+            nativeCode: "publisher_stop_uncertain",
+          });
+        }
+        return snapshot();
+      },
+    }),
+    "Run hack ps --json"
+  );
+});
+
+test("a malformed optional recovery hint cannot block a running owner's authenticated stop", async () => {
+  const opts = await fixture();
+  let stopped = false;
+  await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      if (request.args[1] === "foreground-owner") {
+        return {
+          ...ownerSelection("running"),
+          live_owner_recovery: { malformed: true },
+          dead_owner_recovery: "bad",
+          dead_owner_recovery_complete: { malformed: true },
+        };
+      }
+      if (request.args[1] === "cleanup") {
+        stopped = true;
+        return {};
+      }
+      expect(request.args[1]).toBe("inspect");
+      return snapshot(stopped);
+    },
+  });
+  expect(stopped).toBe(true);
+});
+
+test("a predecessor retained stop without a recovery intent keeps unadmitted retirement", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  await nativeProjectDown({
+    ...opts,
+    recover: true,
+    invoke: async (request) => {
+      calls.push(request.args[1]!);
+      if (request.args[1] === "foreground-owner") {
+        return {
+          ...ownerSelection("exited", "stopped-data-retained"),
+          dead_owner_recovery: null,
+        };
+      }
+      if (request.args[1] === "retire-unadmitted-owner") {
+        return {
+          run: run.run,
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+        };
+      }
+      expect(request.args[1]).toBe("inspect");
+      return snapshot(true);
+    },
+  });
+  expect(calls).toContain("retire-unadmitted-owner");
+  expect(calls).not.toContain("recover-cleanup");
+});
+
+for (const predecessor of [false, true]) {
+  test(`next.13 writer state: one down --recover retires graph and dead frontend (${predecessor ? "predecessor" : "same"} boot)`, async () => {
+    const opts = await fixture(false);
+    const child = Bun.spawn([process.execPath, "-e", ""], {
+      env: privateCliEnv({
+        root: opts.scope.projectRoot,
+        home: opts.scope.nativeHome,
+      }),
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await child.exited).toBe(0);
+    await installNext13Frontend({ scope: opts.scope, exitedPid: child.pid });
+    expect(await loadNativeProjectRun(opts.scope)).toMatchObject(run);
+    let stopped = false;
+    const calls: string[] = [];
+    const inspect = () => ({
+      journal_incomplete: false,
+      receipt: {
+        ...oldReceipt,
+        phase: stopped ? "stopped-data-retained" : oldReceipt.phase,
+      },
+      observations: Object.fromEntries(
+        Object.entries(oldReceipt.resources).map(([key, resource]) => [
+          key,
+          {
+            state:
+              resource.kind === "volume"
+                ? "present"
+                : stopped
+                  ? "absent"
+                  : "running",
+          },
+        ])
+      ),
+    });
+    const result = await nativeProjectDown({
+      ...opts,
+      recover: true,
+      invoke: async (request) => {
+        const command = request.args[1]!;
+        calls.push(command);
+        if (command === "foreground-owner") {
+          return {
+            ...ownerSelection("exited"),
+            dead_owner_recovery: predecessor ? "7".repeat(64) : null,
+          };
+        }
+        if (["recover-live-owner", "recover-cleanup"].includes(command)) {
+          stopped = true;
+          return {
+            run: run.run,
+            recovered: true,
+            data_retained: true,
+            publisher_retired: true,
+          };
+        }
+        if (command === "retire-recovered-publisher") {
+          return { run: run.run, publisher_retired: true, data_retained: true };
+        }
+        if (command === "managed-hostname-authority") {
+          return { authority: { present: false } };
+        }
+        return inspect();
+      },
+    });
+    expect(result).toMatchObject({ status: "stopped", dataPreserved: true });
+    expect(stopped).toBe(true);
+    expect(calls).not.toContain("restore-selection");
+    const token = await captureNativeProjectFinalization({
+      scope: opts.scope,
+      run,
+    });
+    await waitNativeProjectFinalization({
+      scope: opts.scope,
+      run,
+      token,
+      timeoutMs: 1,
+    });
+    const next = await beginNativeProjectFinalization({
+      scope: opts.scope,
+      run,
+    });
+    expect(next.token.attempt).not.toBe(token.attempt);
+    await next.complete();
+  });
+}

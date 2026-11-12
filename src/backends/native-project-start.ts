@@ -9,6 +9,10 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  nativeDetachedUpShellVariables,
+  nativeShellForwardingNotice,
+} from "../lib/native-detached-up.ts";
+import {
   describeNativeProcessRefusals,
   type NativeProcessRefusal,
   requireWrappableNativeProcesses,
@@ -36,6 +40,7 @@ import {
   type NativePreparedBase,
   preparedBaseArguments,
 } from "./native-prepared-base.ts";
+import { nativePrivateEnvironmentPayload } from "./native-private-environment-payload.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   admitNativeProjectBuilds,
@@ -79,9 +84,11 @@ import {
 import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
+  mergeNativeShellEnvironment,
   type NativeProjectInput,
   nativeReviewedActiveServices,
   prepareNativeProjectInput,
+  requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
@@ -405,9 +412,51 @@ const DEFAULTS: Dependencies = {
   downHooks: createNativeForegroundDownHooks,
   exitMonitorIntervalMs: 2000,
 };
+/**
+ * Reports forwarded source names and unset-reference notices for active services.
+ * Detached launchers receive only validated names over IPC; values stay private.
+ */
+function reportNativeEnvironmentNotices(
+  input: NativeProjectInput,
+  reviewedPlan: unknown,
+  warn: (line: string) => void
+): void {
+  const active = nativeReviewedActiveServices(reviewedPlan);
+  const names = [
+    ...new Set(
+      Object.entries(input.forwardedShellVariables ?? {})
+        .filter(([service]) => active.has(service))
+        .flatMap(([, names]) => names)
+    ),
+  ].sort();
+  if (!nativeDetachedUpShellVariables(names)) {
+    warn(nativeShellForwardingNotice(names));
+  }
+  for (const notice of input.environmentNotices ?? []) {
+    if (active.has(notice.service)) {
+      warn(notice.line);
+    }
+  }
+}
+
+/**
+ * The input about to be delivered: the services the reviewed plan marks
+ * active, checked against the runtime's delivery limits. The check comes
+ * last, after the credential adapters added theirs and after the profile
+ * filter, because the runtime receives nothing for an inactive service.
+ */
+function activeNativeDeliveryInput(opts: {
+  readonly input: NativeProjectInput;
+  readonly reviewedPlan: unknown;
+}): NativeProjectInput {
+  const active = selectActiveNativeProjectInput(opts);
+  requireNativeShellDeliveryFits(active);
+  return active;
+}
+
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
-  "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped.";
+  "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped. Run `hack doctor --native-preflight` to list every blocker with its fix.";
 /** Known configuration refusal: a stable code and a closed message, no stack. */
 function refused(): Error {
   return new HackCliError({
@@ -532,6 +581,55 @@ function composeServices(
   return services;
 }
 
+/** Why native service preparation refuses one service; closed names, no values. */
+export const NATIVE_SERVICE_PREPARATION_PROBLEMS = [
+  "invalid_service",
+  "missing_image",
+  "extra_hosts_without_dependencies",
+  "unsupported_logging",
+  "invalid_restart",
+  "unsupported_label",
+] as const;
+export type NativeServicePreparationProblem =
+  (typeof NATIVE_SERVICE_PREPARATION_PROBLEMS)[number];
+
+/**
+ * Every reason {@link prepareNativeProjectServices} refuses one service. The
+ * start path refuses on the first non-empty answer; the native preflight
+ * report lists them all, so both read this one rule.
+ */
+export function nativeServicePreparationProblems(opts: {
+  readonly name: string;
+  readonly service: unknown;
+  readonly hasHostDependencies: boolean;
+  /** Services whose Compose `build` was admitted. */
+  readonly builds: ReadonlySet<string>;
+}): NativeServicePreparationProblem[] {
+  const value = opts.service;
+  if (!isRecord(value)) {
+    return ["invalid_service"];
+  }
+  const problems: NativeServicePreparationProblem[] = [];
+  if (!imageOrAdmittedBuild(opts.name, value, opts.builds)) {
+    problems.push("missing_image");
+  }
+  if (value.extra_hosts !== undefined && !opts.hasHostDependencies) {
+    problems.push("extra_hosts_without_dependencies");
+  }
+  if (!hasOnlyNativeSupportedLogging(value.logging)) {
+    problems.push("unsupported_logging");
+  }
+  // Restart policies are admitted (or refused with a fixed reason) by the
+  // runtime graph, which owns stop/restart interaction; only the type is checked here.
+  if (value.restart !== undefined && typeof value.restart !== "string") {
+    problems.push("invalid_restart");
+  }
+  if (!hasOnlyNativeSupportedLabels(value.labels)) {
+    problems.push("unsupported_label");
+  }
+  return problems;
+}
+
 /**
  * `builds` names the services whose Compose `build` was admitted
  * (`admitNativeProjectBuilds`); only those may omit `image` until they are built.
@@ -548,13 +646,13 @@ export function prepareNativeProjectServices(
   const result: Record<string, Record<string, unknown>> = {};
   for (const [name, value] of Object.entries(compose.services)) {
     if (
-      !(isRecord(value) && imageOrAdmittedBuild(name, value, builds)) ||
-      (value.extra_hosts !== undefined && !hasHostDependencies) ||
-      !hasOnlyNativeSupportedLogging(value.logging) ||
-      // Restart policies are admitted (or refused with a fixed reason) by the
-      // runtime graph, which owns stop/restart interaction; only the type is checked here.
-      (value.restart !== undefined && typeof value.restart !== "string") ||
-      !hasOnlyNativeSupportedLabels(value.labels)
+      !isRecord(value) ||
+      nativeServicePreparationProblems({
+        name,
+        service: value,
+        hasHostDependencies,
+        builds,
+      }).length > 0
     ) {
       throw refused();
     }
@@ -985,30 +1083,12 @@ export function nativeEnvironmentDelivery(opts: {
   }
   return {
     flags: ["--environment-stdin"],
-    payload: Buffer.from(
-      JSON.stringify({
-        version: files.length > 0 ? 2 : 1,
-        plan,
-        run,
-        lifetime_seconds: 300,
-        services: input.managedEnvironment,
-        ...(files.length > 0
-          ? {
-              files: Object.fromEntries(
-                files.map(([service, members]) => [
-                  service,
-                  members.map((member) => ({
-                    name: member.name,
-                    target: member.target,
-                    mode: "0400",
-                    content_b64: member.content.toString("base64"),
-                  })),
-                ])
-              ),
-            }
-          : {}),
-      })
-    ),
+    payload: nativePrivateEnvironmentPayload({
+      services: input.managedEnvironment,
+      files: Object.fromEntries(files),
+      planId: plan,
+      run,
+    }),
   };
 }
 /**
@@ -1046,10 +1126,10 @@ function cleanupUnconfirmed(
 ): Error {
   const recorded =
     recordedRun !== undefined && RUN.test(recordedRun)
-      ? ` The failed run ${recordedRun} is recorded as this project's run mapping; hack ps, hack down and hack doctor --native-cleanup inspect select it.`
+      ? ` The failed run ${recordedRun} is recorded as this project's run mapping.`
       : "";
   return new ClosedCliError(
-    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
+    `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained.${startupDiagnostic(startupFailure)}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}${recorded}`
   );
 }
 /** Runtime process-wrapper refusals: service names and closed fields only. */
@@ -1698,7 +1778,7 @@ function reportStopped(opts: {
   readonly published: boolean;
   readonly final: unknown;
 }): void {
-  if (opts.signal.aborted && !opts.infrastructureFailure) {
+  if ((opts.signal.aborted || opts.published) && !opts.infrastructureFailure) {
     opts.progress(
       opts.published
         ? { phase: "stopped", summary: nativeStoppedNotice(opts.final) }
@@ -1842,6 +1922,8 @@ async function startNativeProjectAttempt(
     ...opts.scope,
     composeFile: opts.composeFile,
     envName: selection.envName,
+    // Service `environment` references are resolved from the caller's shell.
+    env: process.env,
   });
   // Digest the selection now: later steps adapt the delivered values.
   const selectedEnvironment = opts.onEnvironmentReady
@@ -1851,6 +1933,8 @@ async function startNativeProjectAttempt(
         envByService: input.managedEnvironment,
       })
     : undefined;
+  // After the fingerprints: shell values are delivered, never digested to disk.
+  input = mergeNativeShellEnvironment(input);
   const environmentMarkers = requireRetainedEnvironment({
     retainedSelection:
       retained && !opts.restore ? selection.envName : undefined,
@@ -2189,6 +2273,7 @@ async function startNativeProjectAttempt(
         requireEnrollmentCompatible(review.report.plan);
         reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
         reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
+        reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,
@@ -2279,7 +2364,7 @@ async function startNativeProjectAttempt(
               invoke: deps.invoke,
             });
           const delivery = nativeEnvironmentDelivery({
-            input: selectActiveNativeProjectInput({
+            input: activeNativeDeliveryInput({
               input,
               reviewedPlan: review.report.plan,
             }),

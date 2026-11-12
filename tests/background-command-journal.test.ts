@@ -46,6 +46,7 @@ import {
   observeIdentities,
 } from "../src/lib/background-command/platform.ts";
 import {
+  inspectCommand,
   loadJournal,
   readCommandEvents,
 } from "../src/lib/background-command/reader.ts";
@@ -1348,7 +1349,7 @@ describe("second-review blockers", () => {
     expect(await lstat(paths.reserve).catch(() => null)).toBeNull();
   });
 
-  test("a tail repair never throws on a full disk: a spent reserve or a failing fsync cuts the record", async () => {
+  test("a tail repair never throws on a full disk: a spent reserve cuts the record, a failing fsync keeps a published one", async () => {
     const noSpace = () =>
       Object.assign(new Error("disk full"), { code: "ENOSPC" });
     // The reserve was already spent by a writer that died mid-retry.
@@ -1385,7 +1386,8 @@ describe("second-review blockers", () => {
       "command.accepted",
       "command.ended",
     ]);
-    // fsync reports the full disk after the newline was written.
+    // fsync reports the full disk after the newline was written: the record
+    // is published, so it stays (a non-final record needs no marker).
     const late = await acceptCommand({ input: input(), root });
     const started = buildEnvelope({
       meta: late.meta,
@@ -1401,9 +1403,61 @@ describe("second-review blockers", () => {
         throw noSpace();
       },
     });
-    expect(synced.map((event) => event.seq)).toEqual([1]);
-    expect(syncs).toBe(2);
-    expect(await readEvents(late.paths)).toHaveLength(1);
+    expect(synced.map((event) => event.seq)).toEqual([1, 2]);
+    expect(syncs).toBe(1);
+    expect(await readEvents(late.paths)).toHaveLength(2);
+    expect(await lstat(late.paths.endUnsynced).catch(() => null)).toBeNull();
+  });
+
+  test("a final record published by tail repair is never taken back when its fsync reports a full disk", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.owner, JSON.stringify(deadOwner), { mode: 0o600 });
+    const ended = buildEnvelope({
+      meta,
+      seq: 2,
+      type: "command.ended",
+      payload: { outcome: "succeeded", exitCode: 0 },
+    });
+    await writeFile(paths.events, JSON.stringify(ended), { flag: "a" });
+    // An unlocked reader runs between the newline write and the fsync: it
+    // sees the published final record and its cursor.
+    let seenByReader: EventEnvelope | undefined;
+    const events = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+      append: fullDiskAppend(paths),
+      tailIo: {
+        sync: async () => {
+          seenByReader = (await readEvents(paths)).at(-1);
+          throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+        },
+      },
+    });
+    expect(seenByReader?.type).toBe("command.ended");
+    expect(seenByReader?.payload.outcome).toBe("succeeded");
+    // Nothing else takes its cursor: the end stays the one the reader saw.
+    const atCursor = (list: readonly EventEnvelope[]) =>
+      list.filter((event) => event.cursor === seenByReader?.cursor);
+    expect(atCursor(events)).toEqual([seenByReader as EventEnvelope]);
+    const again = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+      append: fullDiskAppend(paths),
+    });
+    expect(again.map((event) => event.seq)).toEqual([1, 2]);
+    expect(atCursor(await readEvents(paths))).toEqual([
+      seenByReader as EventEnvelope,
+    ]);
+    // The end stands, with its durability recorded as not confirmed.
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    const shown = await inspectCommand({ journal, observe: fakeObserve() });
+    expect(shown.state).toBe("ended");
+    expect(shown.endDurability).toBe("not_confirmed");
+    expect((shown.ended as { outcome: string }).outcome).toBe("succeeded");
   });
 
   test("the file-based fallback lock takes a newly created journal's lock and excludes", async () => {

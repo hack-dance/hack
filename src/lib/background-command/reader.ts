@@ -7,6 +7,7 @@ import {
   type EventEnvelope,
   emittedOffsets,
   endedEvent,
+  endUnsynced,
   formatCursor,
   isExpired,
   type JournalPaths,
@@ -507,5 +508,9 @@ export async function inspectCommand(opts: {
       seq: 0,
     }),
     ...(ended ? { ended: ended.payload } : {}),
+    // The final record was published, but its fsync reported a full disk.
+    ...(ended && (await endUnsynced(paths))
+      ? { endDurability: "not_confirmed" }
+      : {}),
   };
 }

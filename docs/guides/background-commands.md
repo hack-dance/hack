@@ -166,7 +166,9 @@ output, and **the command keeps running** to its normal end, which records
 `truncated: true`. If the disk or quota fills while events are recorded,
 capture also stops and the command keeps running; its final record (written
 from space reserved at start) has `truncated: true` and `captureStopped:
-"no_space"`. Capture also stops, the same way, when it falls behind: when more
+"no_space"`. A final record, once written, is never taken back or replaced. If the
+disk reports that it is full only when that record is flushed, the record
+stands and `hack commands show` adds `endDurability: "not_confirmed"`. Capture also stops, the same way, when it falls behind: when more
 than 64 MiB of one stream is waiting to be scanned (a burst between two
 supervisor polls, or output faster than redaction can scan it), Hack records
 `command.output_truncated` with `reason: "capture_behind"` and from then on

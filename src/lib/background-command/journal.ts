@@ -33,6 +33,8 @@ import { readReplaceablePrivateFile } from "../private-file.ts";
  * - `reserve`: preallocated bytes released only to write `command.ended`.
  * - `cancel.json`: a cancel request, written before any signal is sent.
  * - `expired.json`: tombstone left when retention removed the output.
+ * - `end-unsynced`: empty marker; the final record's fsync reported a full
+ *   disk or quota, so its durability was not confirmed.
  * - `lock`: empty file, flocked as the journal lock. `lock.owner` is the
  *   owner receipt of the file-based fallback used when flock is unavailable.
  *
@@ -231,6 +233,8 @@ export type JournalPaths = {
   readonly lock: string;
   /** Owner receipt of the file-based lock used when flock is unavailable. */
   readonly fallbackLock: string;
+  /** Present when the final record's fsync reported a full disk or quota. */
+  readonly endUnsynced: string;
 };
 
 export function journalPaths(opts: {
@@ -261,6 +265,7 @@ export function journalPaths(opts: {
     expired: resolve(dir, "expired.json"),
     lock: resolve(dir, "lock"),
     fallbackLock: resolve(dir, "lock.owner"),
+    endUnsynced: resolve(dir, "end-unsynced"),
   };
 }
 
@@ -529,8 +534,9 @@ const defaultTailIo: TailIo = {
  * those bytes as an event, so the sequence stays dense and a second
  * `command.ended` cannot appear. On a full disk a final tail record is
  * committed from the reserve and any other tail record is cut, so the repair
- * never needs space the final record does not own. Returns the committed
- * events.
+ * never needs space the final record does not own. A record whose newline
+ * was written is never cut afterwards, even if its fsync fails. Returns the
+ * committed events.
  */
 export async function reconcileTail(
   paths: JournalPaths,
@@ -564,24 +570,50 @@ export async function reconcileTail(
     if (
       next &&
       next.seq === (committed.at(-1)?.seq ?? 0) + 1 &&
-      (await commitNewline({ handle, paths, at: bytes.length, next, io })) &&
-      // Some filesystems report a full disk only at fsync: then the record
-      // is not known to be durable and is cut like any other. An unlocked
-      // reader may briefly see it before the cut; the sequence stays dense
-      // and only one final record is ever kept.
-      (await syncUnlessNoSpace(handle, io))
+      (await commitNewline({ handle, paths, at: bytes.length, next, io }))
     ) {
+      // With its newline written the record is published: an unlocked reader
+      // may already hold it and its cursor, so it is never cut and its
+      // sequence never reused. Some filesystems report a full disk only at
+      // fsync; then a final record stays the command's end and the marker
+      // records that its durability was not confirmed (a later fsync of a
+      // final record covers an earlier record, so only a final one needs it).
+      if (
+        !(await syncUnlessNoSpace(handle, io)) &&
+        next.type === "command.ended"
+      ) {
+        await markEndUnsynced(paths);
+      }
       return [...committed, next];
     }
-    // Not the next record, or no space to commit it: cutting it allocates
-    // nothing, and readers never counted it. Its fsync is best effort on a
-    // full disk, since nothing new needs to persist.
+    // Not the next record, or no space to write its newline: it was never
+    // published (readers skip an unterminated line), so cutting it is safe
+    // and allocates nothing. Its fsync is best effort on a full disk, since
+    // nothing new needs to persist.
     await handle.truncate(committedLength);
     await syncUnlessNoSpace(handle, io);
     return committed;
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Note that the final record's fsync reported a full disk or quota. Best
+ * effort: creating the marker can itself need space.
+ */
+async function markEndUnsynced(paths: JournalPaths): Promise<void> {
+  const handle = await open(
+    paths.endUnsynced,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW,
+    0o600
+  ).catch(() => null);
+  await handle?.close();
+}
+
+/** True when the final record's fsync was not confirmed (see `reconcileTail`). */
+export async function endUnsynced(paths: JournalPaths): Promise<boolean> {
+  return (await lstat(paths.endUnsynced).catch(() => null)) !== null;
 }
 
 /** fsync; false on a full disk or quota, other errors propagate. */

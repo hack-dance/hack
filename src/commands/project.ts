@@ -637,7 +637,15 @@ const optQuery = defineOption({
     "Raw LogQL selector/query (overrides auto selector built from project + services)",
 } as const);
 
+const optLogTimestamps = defineOption({
+  name: "timestamps",
+  type: "boolean",
+  long: "--timestamps",
+  description: "Include Engine timestamps in native followed logs",
+} as const);
+
 const logsOptions = [
+  optLogTimestamps,
   optPath,
   optProject,
   optBranch,
@@ -9873,6 +9881,7 @@ async function handleNativeLogs({
       service,
       tail,
       since: args.options.since,
+      timestamps: args.options.timestamps,
       json,
       project: args.options.project,
     });
@@ -9938,6 +9947,12 @@ async function handleLogs({
   if (process.env.HACK_RUNTIME_BACKEND === "native") {
     assertNativeLogFlags(args.options);
   }
+  if (
+    process.env.HACK_RUNTIME_BACKEND !== "native" &&
+    args.options.timestamps
+  ) {
+    throw new CliUsageError("--timestamps currently requires native --follow.");
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -9953,6 +9968,7 @@ async function handleLogs({
     follow: !args.options.noFollow,
     tail: args.options.tail,
     since: args.options.since,
+    timestamps: args.options.timestamps,
     logFormat: resolveLogFormat({
       json: args.options.json,
       pretty: args.options.pretty,

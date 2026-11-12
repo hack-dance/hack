@@ -390,6 +390,7 @@ hack logs [service] [options]
 
 | Option | Description |
 | --- | --- |
+| `--timestamps` | Include Engine timestamps in native followed logs |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |

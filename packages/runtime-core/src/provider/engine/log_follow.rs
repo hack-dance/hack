@@ -1,5 +1,7 @@
 //! Read-only Engine log transport. Buffers never grow with frame size or log rate.
 use crate::CandidateError;
+#[path = "log_timestamp.rs"]
+mod timestamp;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::io::{self, BufRead, Read, Write};
 use std::{
@@ -7,6 +9,7 @@ use std::{
     os::unix::net::UnixStream,
     time::{Duration, Instant},
 };
+pub(in crate::provider) use timestamp::unix_nanos;
 
 pub(in crate::provider) fn failure() -> CandidateError {
     CandidateError::new(
@@ -23,7 +26,7 @@ pub(in crate::provider) fn copy(
     service: &str,
     container: &str,
 ) -> Result<(), CandidateError> {
-    copy_started(input, output, service, container, || {})
+    copy_started(input, output, service, container, false, || {})
 }
 
 fn copy_started(
@@ -31,16 +34,28 @@ fn copy_started(
     output: &mut impl Write,
     service: &str,
     container: &str,
+    timestamps: bool,
     started: impl FnOnce(),
 ) -> Result<(), CandidateError> {
     let mut reader = io::BufReader::with_capacity(8192, input);
     let head = headers(&mut reader)?;
     started();
+    serde_json::to_writer(
+        &mut *output,
+        &serde_json::json!({"version":2,
+        "kind":"native-log-attached","service":service,"container":container}),
+    )
+    .map_err(|_| failure())?;
+    output
+        .write_all(b"\n")
+        .and_then(|_| output.flush())
+        .map_err(|_| failure())?;
     let mut body = Body {
         reader,
         framing: head,
         remaining: 0,
         ended: false,
+        trailer: false,
     };
     loop {
         let mut header = [0u8; 8];
@@ -53,11 +68,20 @@ fn copy_started(
         }
         let mut remaining =
             u32::from_be_bytes(header[4..8].try_into().map_err(|_| failure())?) as usize;
+        let timestamp = if timestamps && remaining > 0 {
+            Some(read_timestamp(&mut body, &mut remaining)?)
+        } else {
+            None
+        };
         while remaining > 0 {
             let mut bytes = [0u8; 4096];
             let size = remaining.min(bytes.len());
-            body.read_exact(&mut bytes[..size]).map_err(|_| failure())?;
-            let event = serde_json::json!({"version":1,"kind":"native-log-chunk",
+            let size = body.read(&mut bytes[..size]).map_err(|_| failure())?;
+            if size == 0 {
+                return Err(failure());
+            }
+            let event = serde_json::json!({"version":2,"kind":"native-log-chunk",
+                "timestamp": timestamp,
                 "service":service,"container":container,
                 "stream":if header[0] == 1 { "stdout" } else { "stderr" },
                 "data":STANDARD.encode(&bytes[..size])});
@@ -69,6 +93,61 @@ fn copy_started(
             remaining -= size;
         }
     }
+}
+
+// Engine timestamps precede each mux frame, including partial log entries. Remove
+// them at that boundary so neither timestamps nor repeated prefixes use payload budget.
+fn read_timestamp(input: &mut impl Read, remaining: &mut usize) -> Result<String, CandidateError> {
+    let mut prefix = Vec::new();
+    while *remaining > 0 && prefix.len() < 40 {
+        let mut byte = [0];
+        input.read_exact(&mut byte).map_err(|_| failure())?;
+        *remaining -= 1;
+        if byte[0] == b' ' {
+            let text = String::from_utf8(prefix).map_err(|_| failure())?;
+            if valid_timestamp(&text) {
+                return Ok(text);
+            }
+            return Err(failure());
+        }
+        prefix.push(byte[0]);
+    }
+    Err(failure())
+}
+pub(in crate::provider) fn valid_timestamp(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let date = if let Some(date) = text.strip_suffix('Z') {
+        date.as_bytes()
+    } else if bytes.len() >= 25 {
+        let offset = &bytes[bytes.len() - 6..];
+        if !matches!(offset[0], b'+' | b'-')
+            || offset[3] != b':'
+            || ![offset[1], offset[2], offset[4], offset[5]]
+                .iter()
+                .all(u8::is_ascii_digit)
+        {
+            return false;
+        }
+        &bytes[..bytes.len() - 6]
+    } else {
+        return false;
+    };
+    if !(date.len() == 19 || (21..=29).contains(&date.len())) {
+        return false;
+    }
+    date.iter().enumerate().all(|(i, ch)| match i {
+        4 | 7 => *ch == b'-',
+        10 => *ch == b'T',
+        13 | 16 => *ch == b':',
+        19 => *ch == b'.',
+        _ => ch.is_ascii_digit(),
+    })
+}
+#[derive(Clone)]
+pub(in crate::provider) struct LogOptions {
+    pub tail: u16,
+    pub since: Option<String>,
+    pub timestamps: bool,
 }
 
 enum Framing {
@@ -132,6 +211,7 @@ struct Body<R> {
     framing: Framing,
     remaining: u64,
     ended: bool,
+    trailer: bool,
 }
 impl<R: BufRead> Read for Body<R> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
@@ -149,6 +229,14 @@ impl<R: BufRead> Read for Body<R> {
             }
             Framing::Chunked => {
                 if self.remaining == 0 {
+                    if self.trailer {
+                        let mut end = [0; 2];
+                        self.reader.read_exact(&mut end)?;
+                        if end != *b"\r\n" {
+                            return Err(invalid());
+                        }
+                        self.trailer = false;
+                    }
                     let size = line(&mut self.reader, 32).map_err(|_| invalid())?;
                     if size.is_empty() || !size.bytes().all(|b| b.is_ascii_hexdigit()) {
                         return Err(invalid());
@@ -176,11 +264,8 @@ impl<R: BufRead> Read for Body<R> {
             Framing::Chunked => {
                 self.remaining -= n as u64;
                 if self.remaining == 0 {
-                    let mut end = [0; 2];
-                    self.reader.read_exact(&mut end)?;
-                    if end != *b"\r\n" {
-                        return Err(invalid());
-                    }
+                    // Return the bytes already read before waiting for framing.
+                    self.trailer = true;
                 }
             }
             Framing::Close => {}
@@ -245,8 +330,7 @@ pub(in crate::provider) fn follow(
     observer: &super::Observer<'_>,
     container: &str,
     service: &str,
-    tail: u16,
-    since: Option<u64>,
+    options: LogOptions,
     check: impl Fn() -> Result<bool, CandidateError>,
 ) -> Result<(), CandidateError> {
     let path = observer.guest().engine_socket()?;
@@ -254,8 +338,7 @@ pub(in crate::provider) fn follow(
         &path,
         container,
         service,
-        tail,
-        since,
+        options,
         check,
         &mut std::io::stdout().lock(),
     )
@@ -267,8 +350,7 @@ pub(in crate::provider) fn follow_socket(
     path: &std::path::Path,
     container: &str,
     service: &str,
-    tail: u16,
-    since: Option<u64>,
+    options: LogOptions,
     check: impl Fn() -> Result<bool, CandidateError>,
     output: &mut impl Write,
 ) -> Result<(), CandidateError> {
@@ -281,8 +363,10 @@ pub(in crate::provider) fn follow_socket(
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|_| failure())?;
-    write!(stream, "GET /v1.53/containers/{container}/logs?follow=1&stdout=1&stderr=1&timestamps=1&tail={tail}{} HTTP/1.1\r\nHost: hack-local\r\nConnection: close\r\n\r\n",
-        since.map(|s| format!("&since={s}")).unwrap_or_default()).map_err(|_| failure())?;
+    stream
+        .write_all(request(container, &options).as_bytes())
+        .map_err(|_| failure())?;
+    let timestamps = options.timestamps;
     let deadline = Cell::new(Some(Instant::now() + Duration::from_secs(5)));
     let stopped = Cell::new(false);
     let check_error = RefCell::new(None);
@@ -296,7 +380,9 @@ pub(in crate::provider) fn follow_socket(
         running,
         stopped_since: None,
     };
-    let result = copy_started(input, output, service, container, || deadline.set(None));
+    let result = copy_started(input, output, service, container, timestamps, || {
+        deadline.set(None)
+    });
     if let Some(error) = check_error.into_inner() {
         return Err(error);
     }
@@ -314,9 +400,39 @@ pub(in crate::provider) fn follow_socket(
     Ok(())
 }
 
+fn request(container: &str, options: &LogOptions) -> String {
+    format!(
+        "GET /v1.53/containers/{container}/logs?follow=1&stdout=1&stderr=1&timestamps={}&tail={}{} HTTP/1.1\r\nHost: hack-local\r\nConnection: close\r\n\r\n",
+        u8::from(options.timestamps),
+        options.tail,
+        options
+            .since
+            .as_ref()
+            .map(|s| format!("&since={s}"))
+            .unwrap_or_default()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn request_uses_unix_nanoseconds_for_both_utc_and_offset_generations() {
+        for stamp in [
+            "2026-01-01T00:00:00.123456789Z",
+            "2026-01-01T02:00:00.123456789+02:00",
+        ] {
+            let options = LogOptions {
+                tail: 1000,
+                since: unix_nanos(stamp),
+                timestamps: false,
+            };
+            assert_eq!(
+                request("container", &options),
+                "GET /v1.53/containers/container/logs?follow=1&stdout=1&stderr=1&timestamps=0&tail=1000&since=1767225600.123456789 HTTP/1.1\r\nHost: hack-local\r\nConnection: close\r\n\r\n"
+            );
+        }
+    }
     #[test]
     fn idle_stopped_service_ends_without_fabricating_http_eof() {
         let (reader, _writer) = UnixStream::pair().unwrap();
@@ -462,9 +578,76 @@ mod tests {
         for line in output.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
             assert!(line.len() < 6000);
             let v: serde_json::Value = serde_json::from_slice(line).unwrap();
+            if v["kind"] == "native-log-attached" {
+                continue;
+            }
             total += STANDARD.decode(v["data"].as_str().unwrap()).unwrap().len();
         }
         assert_eq!(total, payload.len());
+    }
+    #[test]
+    fn engine_timestamp_syntax_accepts_offsets_and_refuses_query_bytes() {
+        for stamp in [
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00.123456789Z",
+            "2026-01-01T00:00:00+02:00",
+            "2026-01-01T00:00:00.1-05:30",
+        ] {
+            assert!(valid_timestamp(stamp));
+        }
+        for stamp in [
+            "",
+            "2026-01-01T00:00:00Z&tail=all",
+            "2026-01-01T00:00:00+02:000",
+            "2026-01-01T00:00:00.1234567890Z",
+        ] {
+            assert!(!valid_timestamp(stamp));
+        }
+    }
+    #[test]
+    fn timestamps_are_metadata_even_on_partial_engine_frames() {
+        let stamp = "2026-01-01T00:00:00.123456789+02:00";
+        let wire = [
+            b"HTTP/1.1 200 OK\r\n\r\n".as_slice(),
+            &frame(format!("{stamp} abc").as_bytes()),
+            &frame(format!("{stamp} def\n").as_bytes()),
+        ]
+        .concat();
+        let mut output = Vec::new();
+        copy_started(&wire[..], &mut output, "web", &"a".repeat(64), true, || {}).unwrap();
+        let events: Vec<serde_json::Value> = output
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice(l).unwrap())
+            .collect();
+        assert_eq!(events[0]["kind"], "native-log-attached");
+        assert_eq!(events[1]["timestamp"], stamp);
+        assert_eq!(events[2]["timestamp"], stamp);
+        assert_eq!(
+            STANDARD
+                .decode(events[1]["data"].as_str().unwrap())
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            STANDARD
+                .decode(events[2]["data"].as_str().unwrap())
+                .unwrap(),
+            b"def\n"
+        );
+    }
+    #[test]
+    fn truncated_http_chunk_delivers_payload_before_missing_trailer_refusal() {
+        let mut wire = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nc\r\n".to_vec();
+        wire.extend_from_slice(&frame(b"tail"));
+        let mut output = Vec::new();
+        assert!(copy(&wire[..], &mut output, "web", &"a".repeat(64)).is_err());
+        let events: Vec<serde_json::Value> = output
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice(l).unwrap())
+            .collect();
+        assert_eq!(events[1]["data"], "dGFpbA==");
     }
     #[test]
     fn refuses_bad_frames_headers_and_truncated_body() {

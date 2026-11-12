@@ -7,6 +7,7 @@ import {
   NativeAuthoredProjectStartError,
   serveNativeAuthoredProject,
 } from "./native-authored-project-start.ts";
+import { publishLogRestart } from "./native-log-restart.ts";
 import type { NativeRuntimeSelection } from "./native-runtime-client.ts";
 
 const RUN = /^[a-f0-9]{32}$/;
@@ -137,49 +138,62 @@ export async function restartNativeAuthoredProject(
       canceled: opts.signal?.aborted === true,
     });
   }
+  const retireNotice = await publishLogRestart(
+    opts.scope,
+    opts.startupTimeoutMs + 30_000
+  );
+  let retired: Promise<void> | undefined;
   try {
-    await deps.stop({
-      scope: opts.scope,
-      timeoutMs: opts.startupTimeoutMs,
-      signal: opts.signal,
-    });
-  } catch {
-    throw new NativeAuthoredProjectRestartError({
-      phase: "stop",
-      canceled: opts.signal?.aborted === true,
-    });
-  }
-  // Only a settled stop proves authenticated Removed; a cancellation here starts nothing.
-  if (opts.signal?.aborted || opts.forceSignal?.aborted) {
-    throw new NativeAuthoredProjectRestartError({
-      phase: "start",
-      canceled: true,
-    });
-  }
-  opts.onStopped?.();
-  try {
-    return await deps.serve({
-      runtime: opts.runtime,
-      scope: opts.scope,
-      run: opts.run,
-      profiles: opts.profiles,
-      overlay: opts.overlay,
-      httpsPort: opts.httpsPort,
-      startupTimeoutMs: opts.startupTimeoutMs,
-      signal: opts.signal,
-      forceSignal: opts.forceSignal,
-      onReady: opts.onReady,
-      onExitDiagnostic: opts.onExitDiagnostic,
-      onHookDiagnostic: opts.onHookDiagnostic,
-      onEnvironmentSelected: opts.onEnvironmentSelected,
-    });
-  } catch (error: unknown) {
-    const startup =
-      error instanceof NativeAuthoredProjectStartError ? error : undefined;
-    throw new NativeAuthoredProjectRestartError({
-      phase: "start",
-      canceled: startup ? startup.canceled : opts.signal?.aborted === true,
-      startup,
-    });
+    try {
+      await deps.stop({
+        scope: opts.scope,
+        timeoutMs: opts.startupTimeoutMs,
+        signal: opts.signal,
+      });
+    } catch {
+      throw new NativeAuthoredProjectRestartError({
+        phase: "stop",
+        canceled: opts.signal?.aborted === true,
+      });
+    }
+    // Only a settled stop proves authenticated Removed; a cancellation here starts nothing.
+    if (opts.signal?.aborted || opts.forceSignal?.aborted) {
+      throw new NativeAuthoredProjectRestartError({
+        phase: "start",
+        canceled: true,
+      });
+    }
+    opts.onStopped?.();
+    try {
+      return await deps.serve({
+        runtime: opts.runtime,
+        scope: opts.scope,
+        run: opts.run,
+        profiles: opts.profiles,
+        overlay: opts.overlay,
+        httpsPort: opts.httpsPort,
+        startupTimeoutMs: opts.startupTimeoutMs,
+        signal: opts.signal,
+        forceSignal: opts.forceSignal,
+        onReady: (selection, identity) => {
+          retired = retireNotice();
+          void retired.catch(() => undefined);
+          return opts.onReady?.(selection, identity);
+        },
+        onExitDiagnostic: opts.onExitDiagnostic,
+        onHookDiagnostic: opts.onHookDiagnostic,
+        onEnvironmentSelected: opts.onEnvironmentSelected,
+      });
+    } catch (error: unknown) {
+      const startup =
+        error instanceof NativeAuthoredProjectStartError ? error : undefined;
+      throw new NativeAuthoredProjectRestartError({
+        phase: "start",
+        canceled: startup ? startup.canceled : opts.signal?.aborted === true,
+        startup,
+      });
+    }
+  } finally {
+    await (retired ?? retireNotice());
   }
 }

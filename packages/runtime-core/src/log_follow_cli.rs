@@ -7,16 +7,26 @@ use std::collections::BTreeMap;
 fn invalid() -> CandidateError {
     CandidateError::new(
         "native_log_arguments",
-        "Use graph logs-follow --run-id ID --service NAME --expect-owner ID --expect-plan SHA --expect-namespace SHA [--native] [--tail 0..1000] [--since UNIX_SECONDS].",
+        "Use graph logs-follow --run-id ID --service NAME --expect-owner ID --expect-plan SHA --expect-namespace SHA [--native] [--tail 0..1000] [--since UNIX_SECONDS] [--timestamps] [--from-start].",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateError> {
     let mut values = BTreeMap::new();
     let mut native = false;
+    let mut timestamps = false;
+    let mut from_start = false;
     let mut index = 0;
     while index < args.len() {
         let key = args[index];
         index += 1;
+        if key == "--from-start" && !from_start {
+            from_start = true;
+            continue;
+        }
+        if key == "--timestamps" && !timestamps {
+            timestamps = true;
+            continue;
+        }
         if key == "--native" && !native {
             native = true;
             continue;
@@ -48,6 +58,8 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateErro
         plan: get("--expect-plan")?,
         namespace: get("--expect-namespace")?,
         native,
+        timestamps,
+        from_start,
         tail: values
             .get("--tail")
             .unwrap_or(&"200")

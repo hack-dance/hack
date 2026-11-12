@@ -10,6 +10,8 @@ pub struct LogFollowOptions<'a> {
     pub namespace: &'a str,
     pub tail: u16,
     pub since: Option<u64>,
+    pub timestamps: bool,
+    pub from_start: bool,
     pub native: bool,
 }
 impl LogFollowOptions<'_> {
@@ -19,6 +21,7 @@ impl LogFollowOptions<'_> {
             || !super::hex(self.plan, 64)
             || !super::hex(self.namespace, 64)
             || self.tail > 1000
+            || (self.from_start && self.since.is_some())
             || self.service.is_empty()
             || self.service.len() > 128
             || !self
@@ -29,6 +32,24 @@ impl LogFollowOptions<'_> {
             return Err(changed());
         }
         Ok(())
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn since(
+    options: &LogFollowOptions<'_>,
+    generation: &serde_json::Value,
+) -> Result<Option<String>, CandidateError> {
+    if options.from_start {
+        Ok(Some(
+            generation
+                .as_str()
+                .and_then(crate::provider::engine::log_follow::unix_nanos)
+                .ok_or_else(changed)?
+                .to_owned(),
+        ))
+    } else {
+        Ok(options.since.map(|value| value.to_string()))
     }
 }
 pub(super) fn changed() -> CandidateError {
@@ -125,8 +146,11 @@ fn imported(candidate: &Candidate, options: &LogFollowOptions<'_>) -> Result<(),
         &observer,
         container,
         options.service,
-        options.tail,
-        options.since,
+        crate::provider::engine::log_follow::LogOptions {
+            tail: options.tail,
+            since: crate::provider::graph::log_follow::since(options, &generation)?,
+            timestamps: options.timestamps,
+        },
         || {
             observer.guest().verify()?;
             validate_state(state()?, &generation)
@@ -196,9 +220,22 @@ mod tests {
             namespace: &"d".repeat(64),
             tail: 0,
             since: None,
+            timestamps: false,
+            from_start: false,
             native: false,
         };
         options.validate().unwrap();
+        assert_eq!(
+            since(
+                &LogFollowOptions {
+                    from_start: true,
+                    ..options
+                },
+                &json!("2026-01-01T00:00:00.123456789Z")
+            )
+            .unwrap(),
+            Some("1767225600.123456789".into())
+        );
         assert!(
             LogFollowOptions {
                 tail: 1001,

@@ -4,6 +4,7 @@ export type LogStreamBackend = "compose" | "loki" | "native";
 export type LogStreamEventType =
   | "start"
   | "log"
+  | "notice"
   | "heartbeat"
   | "error"
   | "end";

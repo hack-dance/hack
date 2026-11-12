@@ -38,6 +38,13 @@ async function waitFile(path: string): Promise<string> {
 
 async function fixture(
   mode:
+    | "plain"
+    | "pipe"
+    | "admission"
+    | "select-wait"
+    | "restart-wait"
+    | "output-error"
+    | "restart"
     | "normal"
     | "idle"
     | "blocked"
@@ -55,12 +62,13 @@ async function fixture(
   const binary = join(root, "runtime");
   const frontend = join(root, "frontend.ts");
   const wire = JSON.stringify({
-    version: 1,
+    version: 2,
+    timestamp: mode === "normal" ? "2026-01-01T00:00:00Z" : null,
     kind: "native-log-chunk",
     service: "web-2",
     container,
     stream: "stderr",
-    data: Buffer.from("2026-01-01T00:00:00Z hello\n").toString("base64"),
+    data: Buffer.from("hello\n").toString("base64"),
   });
   await writeFile(
     binary,
@@ -103,7 +111,7 @@ if (${JSON.stringify(mode)} === "flood") {
   }
   writeFileSync(root + "/offered-all", "yes");
 }
-if (["normal", "slow"].includes(${JSON.stringify(mode)})) { process.exit(0); }
+if (["normal", "slow", "plain", "restart", "restart-wait"].includes(${JSON.stringify(mode)})) { process.exit(0); }
 `
   );
   await chmod(binary, 0o700);
@@ -114,7 +122,9 @@ import { Writable } from "node:stream";
 import { existsSync, writeFileSync } from "node:fs";
 import { followNativeLogs } from ${JSON.stringify(modulePath)};
 const mode = ${JSON.stringify(mode)};
+let attachments = 0;
 const output = new Writable({ write(chunk, encoding, callback) {
+  if (mode === "stopped-idle" && String(chunk).includes('"type":"end"')) { setTimeout(() => process.stdout.write(chunk, callback), 300); return; }
   if (String(chunk).includes('"type":"log"')) {
     if (mode === "blocked") { writeFileSync(${JSON.stringify(join(root, "blocked"))}, "yes"); return; }
     if (mode === "flood") {
@@ -124,12 +134,13 @@ const output = new Writable({ write(chunk, encoding, callback) {
       const timer = setInterval(() => { if (released()) { clearInterval(timer); callback(); } }, 10);
       return;
     }
+    if (mode === "output-error") { callback(Object.assign(new Error("write failure"), {code:"EIO"})); return; }
     if (mode === "broken") { callback(Object.assign(new Error("Consumer closed"), {code:"EPIPE"})); return; }
     if (mode === "slow") { setTimeout(() => process.stdout.write(chunk, callback), 5500); return; }
   }
   process.stdout.write(chunk, callback);
 } });
-const code = await followNativeLogs({ runtime: { binary: ${JSON.stringify(binary)}, home: ${JSON.stringify(root)} }, cwd: ${JSON.stringify(root)}, selection: ${JSON.stringify(selection)}, service: "web-2", tail: mode === "long-partial" ? 0 : 12, since: "2026-01-01T00:00:00Z", json: true, project: "fixture", branch: "topic", stdout: output });
+const code = await followNativeLogs({ runtime: { binary: ${JSON.stringify(binary)}, home: ${JSON.stringify(root)} }, cwd: ${JSON.stringify(root)}, selection: mode === "select-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : mode === "admission" ? async () => { throw new Error("private selection failure"); } : ${JSON.stringify(selection)}, resume: mode === "restart-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : mode === "restart" ? async () => ++attachments === 1 ? { ...${JSON.stringify(selection)}, run: "f".repeat(32), owner: "a".repeat(32) } : null : undefined, service: "web-2", tail: mode === "long-partial" ? 0 : 12, since: "2026-01-01T00:00:00Z", timestamps: mode === "normal", json: !["plain", "pipe"].includes(mode), project: "fixture", branch: "topic", stdout: mode === "pipe" ? process.stdout : output });
 process.exit(code);
 `
   );
@@ -170,7 +181,7 @@ test("fake runtime receives exact selection and emits Compose-shaped JSON lines"
     const output = await new Response(f.child.stdout).text();
     const errors = await new Response(f.child.stderr).text();
     expect(await f.child.exited).toBe(0);
-    expect(errors).toBe("");
+    expect(errors).toBe("Service web-2 stopped.\n");
     const events = output
       .trim()
       .split("\n")
@@ -200,7 +211,7 @@ test("fake runtime receives exact selection and emits Compose-shaped JSON lines"
     expect(events[1].entry.instance).toBeUndefined();
     expect(events[2]).toMatchObject({
       type: "end",
-      reason: "eof",
+      reason: "native_log_service_stopped",
       backend: "native",
     });
     const args: unknown = JSON.parse(
@@ -224,6 +235,7 @@ test("fake runtime receives exact selection and emits Compose-shaped JSON lines"
       "--tail",
       "12",
       "--native",
+      "--timestamps",
       "--since",
       "1767225600",
     ]);
@@ -308,7 +320,9 @@ test("slow output after reader exit keeps the remaining log and end events", asy
   try {
     const output = await new Response(f.child.stdout).text();
     expect(await f.child.exited).toBe(0);
-    expect(await new Response(f.child.stderr).text()).toBe("");
+    expect(await new Response(f.child.stderr).text()).toBe(
+      "Service web-2 stopped.\n"
+    );
     expect(
       output
         .trim()
@@ -343,7 +357,7 @@ test("frontend refusal preserves its named error and closes the JSON envelope", 
       .split("\n")
       .map((line) => JSON.parse(line));
     expect(events.map((event) => event.type)).toEqual(["start", "end"]);
-    expect(events[1].reason).toBe("exit:1");
+    expect(events[1].reason).toBe("native_log_wire_invalid");
     expectGone(Number(await waitFile(join(f.root, "ready"))));
   } finally {
     await f.dispose();
@@ -389,7 +403,7 @@ test("zero tail reaches runtime and truncation continues through a marked partia
     const output = await new Response(f.child.stdout).text();
     const errors = await new Response(f.child.stderr).text();
     expect(await f.child.exited).toBe(0);
-    expect(errors).toBe("");
+    expect(errors).toBe("Service web-2 stopped.\n");
     const args: string[] = JSON.parse(
       await readFile(join(f.root, "args"), "utf8")
     );
@@ -411,7 +425,143 @@ test("zero tail reaches runtime and truncation continues through a marked partia
     expect(events[2].entry.truncated).toBeUndefined();
     expect(events[3].entry.partial).toBe(true);
     expect(events[3].entry.message).toBe("fragment [partial]");
-    expect(events[4].reason).toBe("eof");
+    expect(events[4].reason).toBe("native_log_service_stopped");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("admission failure stays inside one NDJSON session with a named end", async () => {
+  const f = await fixture("admission");
+  try {
+    const events = (await new Response(f.child.stdout).text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(await f.child.exited).toBe(1);
+    expect(events.map((event) => event.type)).toEqual(["start", "end"]);
+    expect(events[1].reason).toBe("native_log_failed");
+    expect(await new Response(f.child.stderr).text()).not.toContain(
+      "private selection failure"
+    );
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("plain stderr service output reaches stdout without a service prefix", async () => {
+  const f = await fixture("plain");
+  try {
+    expect(await new Response(f.child.stdout).text()).toBe("hello\n");
+    expect(await f.child.exited).toBe(0);
+    expect(await new Response(f.child.stderr).text()).toBe(
+      "Service web-2 stopped.\n"
+    );
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("closing a real output pipe reaps an idle reader without another service write", async () => {
+  const f = await fixture("pipe");
+  try {
+    const reader = f.child.stdout.getReader();
+    expect((await reader.read()).done).toBe(false);
+    const pid = Number(await waitFile(join(f.root, "ready")));
+    await reader.cancel();
+    reader.releaseLock();
+    expect(await f.child.exited).toBe(0);
+    expectGone(pid);
+    expect(await new Response(f.child.stderr).text()).toBe("");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("restart keeps one session, admits a fresh owner and emits one marker", async () => {
+  const f = await fixture("restart");
+  try {
+    const events = (await new Response(f.child.stdout).text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(await f.child.exited).toBe(0);
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "log",
+      "notice",
+      "log",
+      "end",
+    ]);
+    expect(events[2].reason).toBe("native_log_restarted");
+    const args: string[] = JSON.parse(
+      await readFile(join(f.root, "args"), "utf8")
+    );
+    expect(args[args.indexOf("--run-id") + 1]).toBe("f".repeat(32));
+    expect(args[args.indexOf("--expect-owner") + 1]).toBe("a".repeat(32));
+    expect(args[args.indexOf("--tail") + 1]).toBe("1000");
+    expect(args).not.toContain("--since");
+    expect(args).toContain("--from-start");
+  } finally {
+    await f.dispose();
+  }
+});
+
+for (const extra of [
+  ["--tail", "invalid"],
+  ["--since"],
+  ["--not-a-log-option"],
+]) {
+  test(`real CLI JSON usage failure leaves stdout empty: ${extra.join(" ")}`, async () => {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        new URL("../index.ts", import.meta.url).pathname,
+        "logs",
+        "web",
+        "--follow",
+        "--json",
+        ...extra,
+      ],
+      {
+        env: {
+          ...process.env,
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_DAEMON_AUTOSTART_DISABLE: "1",
+          HACK_NO_INTERACTIVE: "1",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 10_000,
+      }
+    );
+    expect(await new Response(child.stdout).text()).toBe("");
+    expect(await child.exited).toBe(1);
+    const errors = await new Response(child.stderr).text();
+    expect(errors).toContain("E_USAGE");
+    expect(errors.trim().split("\n")).toHaveLength(1);
+  });
+}
+
+for (const mode of ["select-wait", "restart-wait"] as const) {
+  test(`Ctrl-C interrupts a stalled ${mode} admission`, async () => {
+    const f = await fixture(mode);
+    try {
+      await waitFile(join(f.root, "waiting"));
+      f.child.kill("SIGINT");
+      expect(await f.child.exited).toBe(130);
+    } finally {
+      await f.dispose();
+    }
+  }, 2000);
+}
+test("non-EPIPE output failure still prints a fixed stderr diagnostic", async () => {
+  const f = await fixture("output-error");
+  try {
+    expect(await f.child.exited).toBe(1);
+    expect(await new Response(f.child.stderr).text()).toContain(
+      "native_log_failed"
+    );
   } finally {
     await f.dispose();
   }

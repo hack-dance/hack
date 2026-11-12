@@ -4,6 +4,7 @@ import {
   followNativeLogs,
   nativeLogFollowOptions,
 } from "./native-log-follow.ts";
+import { resumeNativeLogs } from "./native-log-restart.ts";
 import {
   inspectNativeProjectGraph,
   isNativeProviderBusy,
@@ -16,6 +17,7 @@ import {
 } from "./native-project-publications.ts";
 import {
   loadNativeProjectRun,
+  loadNativeRestartIntent,
   type NativeProjectRun,
   type NativeProjectRunScope,
   nativeProjectStartupPending,
@@ -277,29 +279,41 @@ export async function followNativeProjectLogs(
     readonly service?: string;
     readonly tail?: number;
     readonly since?: string;
+    readonly timestamps?: boolean;
     readonly json?: boolean;
     readonly project?: string;
   }
 ): Promise<number> {
   const selected = nativeLogFollowOptions(opts);
-  const run = await loadNativeProjectRun(opts.scope);
-  if (!run) {
-    throw new ClosedCliError(
-      "Native project has not been started; no owned graph mapping exists."
-    );
-  }
-  return await followNativeLogs({
-    ...opts,
-    service: selected.service,
-    cwd: opts.scope.projectRoot,
-    branch: opts.scope.branch ?? undefined,
-    selection: {
+  const select = async () => {
+    const run = await loadNativeProjectRun(opts.scope);
+    if (!run) {
+      throw new ClosedCliError(
+        "Native project has not been started; no owned graph mapping exists."
+      );
+    }
+    return {
       run: run.run,
       owner: run.owner,
       namespace: run.namespace,
       plan: run.planId,
       native: false,
-    },
+    };
+  };
+  return await followNativeLogs({
+    ...opts,
+    service: selected.service,
+    cwd: opts.scope.projectRoot,
+    branch: opts.scope.branch ?? undefined,
+    selection: select,
+    resume: (previous, signal) =>
+      resumeNativeLogs({
+        previous,
+        signal,
+        select,
+        restarting: async () =>
+          (await loadNativeRestartIntent(opts.scope)) !== null,
+      }),
   });
 }
 /** Native finite logs remain a bounded, single-service snapshot. */

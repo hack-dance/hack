@@ -60,8 +60,11 @@ pub(in crate::provider::graph) fn follow_logs(
         &observer,
         container,
         options.service,
-        options.tail,
-        options.since,
+        crate::provider::engine::log_follow::LogOptions {
+            tail: options.tail,
+            since: crate::provider::graph::log_follow::since(options, &generation)?,
+            timestamps: options.timestamps,
+        },
         || {
             observer.guest().verify()?;
             validate_state(state()?, &generation)

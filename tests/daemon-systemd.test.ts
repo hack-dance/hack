@@ -2761,12 +2761,6 @@ linuxTest(
     // root-owned sticky directory, and the uid the check compares to models
     // the other account.
     const own = process.getuid?.() ?? 0;
-    const program = join(root, "tmp-hack");
-    await writeFile(program, "#!/bin/sh\n");
-    await chmod(program, 0o755);
-    // root is a mkdtemp directory: owned by this user, so a foreign uid fails
-    // the owner check there; what matters is that the exception does not
-    // apply to /tmp-like directories.
     const tmpProgram = join(tmpdir(), `hack-sticky-${process.pid}`);
     await writeFile(tmpProgram, "#!/bin/sh\n");
     await chmod(tmpProgram, 0o755);
@@ -2787,6 +2781,5 @@ linuxTest(
     } finally {
       await rm(tmpProgram, { force: true });
     }
-    expect(program).toBeTruthy();
   }
 );

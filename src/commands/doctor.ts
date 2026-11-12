@@ -269,11 +269,11 @@ import {
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
-import { runNativePreflightCommand } from "./doctor-native-preflight.ts";
 import {
   resolveSystemdSummary,
   withSystemdIncompatibleNextStep,
 } from "./daemon-systemd.ts";
+import { runNativePreflightCommand } from "./doctor-native-preflight.ts";
 import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,

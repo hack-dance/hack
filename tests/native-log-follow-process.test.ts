@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const modulePath = new URL(
   "../src/backends/native-log-follow.ts",
@@ -548,33 +549,40 @@ for (const extra of [
   ["--not-a-log-option"],
 ]) {
   test(`real CLI JSON usage failure leaves stdout empty: ${extra.join(" ")}`, async () => {
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        new URL("../index.ts", import.meta.url).pathname,
-        "logs",
-        "web",
-        "--follow",
-        "--json",
-        ...extra,
-      ],
-      {
-        env: {
-          ...process.env,
-          HACK_RUNTIME_BACKEND: "native",
-          HACK_DAEMON_AUTOSTART_DISABLE: "1",
-          HACK_NO_INTERACTIVE: "1",
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: 10_000,
-      }
-    );
-    expect(await new Response(child.stdout).text()).toBe("");
-    expect(await child.exited).toBe(1);
-    const errors = await new Response(child.stderr).text();
-    expect(errors).toContain("E_USAGE");
-    expect(errors.trim().split("\n")).toHaveLength(1);
+    const root = await realpath(await mkdtemp(join(tmpdir(), "log-usage-")));
+    try {
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          new URL("../index.ts", import.meta.url).pathname,
+          "logs",
+          "web",
+          "--follow",
+          "--json",
+          ...extra,
+        ],
+        {
+          cwd: root,
+          env: privateCliEnv({
+            root,
+            env: {
+              HACK_RUNTIME_BACKEND: "native",
+              HACK_NO_INTERACTIVE: "1",
+            },
+          }),
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 10_000,
+        }
+      );
+      expect(await new Response(child.stdout).text()).toBe("");
+      expect(await child.exited).toBe(1);
+      const errors = await new Response(child.stderr).text();
+      expect(errors).toContain("E_USAGE");
+      expect(errors.trim().split("\n")).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 }
 

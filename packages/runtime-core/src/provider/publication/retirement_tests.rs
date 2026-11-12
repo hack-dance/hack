@@ -152,6 +152,14 @@ fn retirement_reconciliation_refuses_live_process_changed_entry_and_malformed_pe
         let mut fixture = Fixture::new();
         if variant == "live" {
             fixture.entry.process.pid = std::process::id() as i32;
+            #[cfg(target_os = "macos")]
+            {
+                // A readable different birth now proves the old publisher gone.
+                // This refusal control must represent the live incarnation.
+                let (birth, uid) = identity::birth(fixture.entry.process.pid).unwrap();
+                fixture.entry.process.start_micros = birth;
+                fixture.entry.process.uid = uid;
+            }
         }
         let entry = &fixture.entry;
         let before = BTreeMap::from([(entry.reservation.clone(), entry.clone())]);

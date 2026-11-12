@@ -179,8 +179,10 @@ mod tests {
     #[test]
     fn next13_writer_coordinator_binds_without_rewriting_its_evidence() {
         use std::os::unix::fs::MetadataExt;
-        let root = std::env::temp_dir().join(format!("next13-enrollment-{}", std::process::id()));
-        state::private_directory(&root).unwrap();
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("next13-enrollment-{}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         let control = root.join("relay-lifecycle");
         state::private_directory(&control).unwrap();
         let parent = fs::metadata(&control).unwrap();

@@ -1685,8 +1685,10 @@ linuxTest(
     // A drop-in set HACK_HOME for the unit.
     fake.unitEnvironment = `"PATH=/usr/bin:/bin" HACK_HOME=/srv/other-home HACK_NO_INTERACTIVE=1`;
     fake.calls.length = 0;
+    // Another home's unit is left alone, not refused: this shell's own
+    // direct hackd is still stopped through the proven-ownership path.
     const foreign = await stop();
-    expect(foreign.refused).toContain("/srv/other-home");
+    expect(foreign).toMatchObject({ handled: false, refused: null });
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
     // An EnvironmentFile is not visible here: unknown, refused.
     fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
@@ -3000,7 +3002,7 @@ linuxTest(
       hackHome: join(root, ".hack"),
       deps: fake.deps,
     });
-    expect(stop.refused).toContain("/srv/other-home");
+    expect(stop).toMatchObject({ handled: false, refused: null });
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
     const removed = await uninstallSystemdUnit({
       unitPath,
@@ -3163,9 +3165,9 @@ linuxTest(
     fake.unitEnvironment = `HACK_HOME=${join(root, ".hack")} HOME=/srv/other`;
     fake.unsetEnvironment = "HACK_HOME";
     fake.calls.length = 0;
+    // The unit serves /srv/other/.hack: left alone.
     const refused = await stop();
-    expect(refused.refused).toContain("/srv/other/.hack");
-    expect(refused.refused).toContain("systemctl --user stop hackd.service");
+    expect(refused).toMatchObject({ handled: false, refused: null });
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
     // `NAME=VALUE` unsets only that exact assignment.
     fake.unsetEnvironment = "HACK_HOME=/srv/elsewhere";
@@ -3451,8 +3453,9 @@ linuxTest(
     // The shell's HOME (deps.env.HOME) is root; the account's is not.
     fake.passwdHome = "/srv/account";
     fake.calls.length = 0;
+    // The unit serves /srv/account/.hack: left alone.
     const other = await stop();
-    expect(other.refused).toContain("/srv/account/.hack");
+    expect(other).toMatchObject({ handled: false, refused: null });
     expect(fake.calls).toContain("getent passwd 1000");
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
     // An account home that cannot be read: unknown, refused.
@@ -3470,7 +3473,7 @@ linuxTest(
   }
 );
 
-linuxTest("start refuses a unit that serves another Hack home", async () => {
+linuxTest("start leaves another Hack home's unit alone", async () => {
   // Codex review: start checked PATH, programs and unit files, but not
   // the effective Hack home, so it started another home's daemon.
   const fake = fakeSystemd();
@@ -3481,10 +3484,12 @@ linuxTest("start refuses a unit that serves another Hack home", async () => {
   });
   fake.unitEnvironment = "HACK_NO_INTERACTIVE=1 HACK_HOME=/srv/other-home";
   fake.calls.length = 0;
-  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);
+  // Null: the caller starts this home's hackd directly.
+  expect(await startViaSystemdIfInstalled(startHooks(fake))).toBeNull();
   expect(fake.calls).not.toContain("systemctl --user start hackd.service");
+  expect(fake.calls).not.toContain("systemctl --user daemon-reload");
   expect(fake.active).toBe(false);
-  // An unreadable home is refused too.
+  // An unreadable home is refused.
   fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
   fake.passEnvironment = "HACK_HOME";
   expect(await startViaSystemdIfInstalled(startHooks(fake))).toBe(1);

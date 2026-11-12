@@ -168,13 +168,21 @@ export async function startViaSystemdIfInstalled(
   }
   // The unit is a per-user singleton: starting (or repairing) it from a
   // shell with another Hack home would start someone else's daemon, and
-  // this shell's would never become ready (HACK-2052).
-  const foreign = await describeStartForeignHome({
+  // this shell's would never become ready (HACK-2052). Another home's unit
+  // is left alone and this home's hackd is started directly (its socket,
+  // pid file and lock live in this home's daemon directory); a home that
+  // cannot be read is refused.
+  const unitHome = await checkUnitServesHome({
     hackHome: dirname(hooks.paths.root),
     deps,
+    action: "starting",
   });
-  if (foreign !== null) {
-    logger.error({ message: foreign });
+  if (unitHome.kind === "foreign") {
+    logger.info({ message: `${unitHome.message}; starting hackd directly` });
+    return null;
+  }
+  if (unitHome.kind === "unknown") {
+    logger.error({ message: unitHome.message });
     return 1;
   }
   const prepared = await prepareSystemdUnitForStart({
@@ -217,23 +225,37 @@ export async function startViaSystemdIfInstalled(
 }
 
 /**
- * Null when the unit's effective Hack home ({@link readSystemdUnitHackHome})
- * is `hackHome`; otherwise the refusal for `start`, with how to go on.
+ * Whether the unit's effective Hack home ({@link readSystemdUnitHackHome})
+ * is `hackHome`. `foreign`: it clearly serves another home, which this
+ * shell leaves alone (its own hackd is handled directly). `unknown`: it
+ * cannot be read with certainty, which is refused with how to go on.
  */
-async function describeStartForeignHome(opts: {
+async function checkUnitServesHome(opts: {
   readonly hackHome: string;
   readonly deps: SystemdDeps;
-}): Promise<string | null> {
+  readonly action: "starting" | "stopping";
+}): Promise<
+  | { readonly kind: "ours" }
+  | { readonly kind: "foreign" | "unknown"; readonly message: string }
+> {
   const unitHome = await readSystemdUnitHackHome({ deps: opts.deps });
   const ours = resolve(opts.hackHome);
-  if (unitHome.kind === "home" && unitHome.path === ours) {
-    return null;
+  if (unitHome.kind === "home") {
+    return unitHome.path === ours
+      ? { kind: "ours" }
+      : {
+          kind: "foreign",
+          message: `${SYSTEMD_UNIT_NAME} runs hackd for ${unitHome.path}, not ${ours}; not ${opts.action} it from here`,
+        };
   }
-  const whose =
-    unitHome.kind === "home"
-      ? `it runs hackd for ${unitHome.path}, not ${ours}`
-      : `its Hack home could not be read (${unitHome.detail})`;
-  return `Not starting ${SYSTEMD_UNIT_NAME}: ${whose}. Start it from that Hack home, or remove the setting that points it there (systemctl --user cat ${SYSTEMD_UNIT_NAME} shows it) and run systemctl --user daemon-reload`;
+  const manual =
+    opts.action === "starting"
+      ? `Check it with systemctl --user cat ${SYSTEMD_UNIT_NAME}, or start it by hand: systemctl --user start ${SYSTEMD_UNIT_NAME}`
+      : `To stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`;
+  return {
+    kind: "unknown",
+    message: `Not ${opts.action} ${SYSTEMD_UNIT_NAME}: its Hack home could not be read (${unitHome.detail}). ${manual}`,
+  };
 }
 
 /**
@@ -464,20 +486,20 @@ export async function stopViaSystemdIfInstalled(opts: {
     return none;
   }
   // The unit is a per-user singleton: stopping it from a shell with another
-  // Hack home would stop someone else's daemon (HACK-2052).
-  const unitHome = await readSystemdUnitHackHome({ deps });
-  const manual = `To stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`;
-  if (unitHome.kind === "unknown") {
-    return {
-      ...none,
-      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: its Hack home could not be read (${unitHome.detail}). ${manual}`,
-    };
+  // Hack home would stop someone else's daemon (HACK-2052). Another home's
+  // unit is left alone (this shell's own direct hackd is still stopped
+  // through the proven-ownership path); an unreadable home is refused.
+  const unitHome = await checkUnitServesHome({
+    hackHome: opts.hackHome,
+    deps,
+    action: "stopping",
+  });
+  if (unitHome.kind === "foreign") {
+    logger.info({ message: unitHome.message });
+    return none;
   }
-  if (unitHome.path !== resolve(opts.hackHome)) {
-    return {
-      ...none,
-      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: it runs hackd for ${unitHome.path}, not this shell's ${resolve(opts.hackHome)}. ${manual}`,
-    };
+  if (unitHome.kind === "unknown") {
+    return { ...none, refused: unitHome.message };
   }
   const ownedPid =
     opts.pid !== null &&

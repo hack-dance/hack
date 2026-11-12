@@ -359,19 +359,18 @@ cancels a restart systemd has scheduled after a crash. When systemd runs or is
 about to restart `hackd.service` but the managed unit file is gone (or the unit
 is loaded from another directory), `stop` refuses and prints the
 `systemctl --user` commands to review and stop it, instead of reporting hackd as
-stopped. `start` refuses a unit whose effective environment serves another Hack
-home (or whose home it cannot read), since it would start that home's daemon.
-`stop` does not touch
-a unit whose effective environment serves a different Hack home from the shell's,
-or whose environment it cannot read with certainty (for example an
+stopped. `start` and `stop` act on the unit only when its effective environment
+serves the shell's Hack home. A unit that serves another Hack home is left alone:
+`start` starts this home's hackd directly (its socket, pid file and lock live in
+this home's `daemon/` directory), and `stop` stops only this home's own hackd.
+When the Hack home cannot be read with certainty (for example an
 `EnvironmentFile=`, an `ExecSearchPath=`, a `PassEnvironment=` naming
-`HACK_HOME`, `HOME` or `PATH`, or an escaped quote or backslash in
-`Environment=`).
-The effective environment is built the way systemd builds it: the user manager's
-environment, then the unit's `Environment=` (drop-ins included), then
-`UnsetEnvironment=` last. In those cases `stop` exits 1 and prints
-`systemctl --user stop hackd.service`
-for stopping it by hand. `start`, `stop` and `clear` remove stale pid and socket
+`HACK_HOME`, `HOME` or `PATH`, a relative `HOME`, or an escaped quote or
+backslash in `Environment=`), both exit 1 and print the `systemctl --user`
+command to use by hand. The effective environment is built the way systemd
+builds it: the user manager's environment, then the unit's `Environment=`
+(drop-ins included), then `UnsetEnvironment=` last; with no `HOME` left, the
+account's home from the password database is used, as hackd does. `start`, `stop` and `clear` remove stale pid and socket
 files only while they are still stale: the socket is removed only if, right
 before removal, the pid file is still the stale one, the socket is the same file
 that was checked, and nothing answers on it. So they never delete the files of a

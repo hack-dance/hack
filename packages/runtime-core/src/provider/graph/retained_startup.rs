@@ -325,7 +325,8 @@ pub(in crate::provider::graph) mod tests {
         let mut owner = Owner::load(candidate).unwrap();
         let rootfs = candidate.state_root.join("run/smolvm/rootfs");
         // Retained witnesses require both prepared provider trees as well as the rootfs.
-        // This fixture otherwise contains only templates and a synthetic guest base.
+        // This fixture otherwise has SmolVM's templates and a synthetic guest base,
+        // but no engine tree.
         let provider_trees = [
             artifact::tree_root(candidate, &artifact::SMOLVM),
             artifact::tree_root(candidate, &artifact::ENGINE),
@@ -366,16 +367,22 @@ pub(in crate::provider::graph) mod tests {
         let (result, count) = proofs(&owner);
         result.unwrap();
         assert_eq!(count, 0);
-        // Missing provider state disables the rootfs witness even if its metadata matches.
-        for tree in &provider_trees {
+        // Missing SmolVM templates refuse before the rootfs check. A missing engine
+        // tree disables its witness and requires a content proof of the unchanged rootfs.
+        for (tree, expected, expected_proofs) in [
+            (&provider_trees[0], Err("provider_state"), 0),
+            (&provider_trees[1], Ok(()), 1),
+        ] {
             let held = tree.with_extension("held");
             fs::rename(tree, &held).unwrap();
             assert!(!lifecycle::witness_qualified(candidate));
             let (result, count) = proofs(&owner);
-            result.unwrap();
-            assert_eq!(count, 1);
+            assert_eq!(result.map_err(|error| error.code), expected);
+            assert_eq!(count, expected_proofs);
             fs::rename(held, tree).unwrap();
-            assert_eq!(proofs(&owner).1, 0);
+            let (result, count) = proofs(&owner);
+            result.unwrap();
+            assert_eq!(count, 0);
         }
         // A stopped pool never uses the witness.
         let mut stopped = owner.clone();

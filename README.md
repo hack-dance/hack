@@ -32,7 +32,17 @@ Hack treats these as one problem. It manages the project's whole environment, no
 only its ports. A project has one identity. Hack uses it to route
 `api.myapp.hack.local`, decrypt the project's secrets, start its helper processes,
 label its logs, and keep its branch instances apart. Under the hood it uses Docker
-Compose for services and Caddy for local DNS and trusted TLS.
+Compose for services, local DNS helpers for names, and Caddy for trusted TLS.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/project.dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="./docs/assets/readme/project.light.svg" />
+  <img alt="Your machine, shared local routing, and project services in the selected engine" src="./docs/assets/readme/project.light.svg" />
+</picture>
+
+On your machine, Hack runs project services through Compose by default, with
+optional daemon caching and shared DNS/HTTPS routing; the native VM is an opt-in
+Apple Silicon macOS beta through `hack-next`.
 
 | The job | A common workaround | With Hack |
 | --- | --- | --- |
@@ -122,6 +132,16 @@ If something looks wrong, run `hack doctor` and read what it reports. Then run
 
 ## Core commands
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/first-run.dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="./docs/assets/readme/first-run.light.svg" />
+  <img alt="Numbered interactions between you, Hack, the Compose engine and the browser" src="./docs/assets/readme/first-run.light.svg" />
+</picture>
+
+After global setup, `hack init` writes config, `hack up --detach` starts services
+that the shared proxy routes, `hack open` opens HTTPS, `hack logs` streams output
+until Ctrl-C, and `hack down` stops services while keeping data.
+
 ```bash
 hack up --detach                     # start the project (hack down stops it)
 hack restart                         # restart the project or selected services
@@ -169,8 +189,8 @@ See [agent integrations](docs/integrations.md).
 Everything above is the supported core. You choose whether to use the items below.
 
 **Native backend (beta, Apple Silicon macOS).** A second way to run the same
-project. Hack starts its own Linux virtual machine and runs Docker inside it,
-so you do not need Docker Desktop or OrbStack. Your `.hack/` folder and your
+project. Hack runs workload containers in a provider-managed Linux VM pool without
+Docker Desktop or OrbStack. Your `.hack/` folder and your
 commands stay the same. It comes only through the separate `hack-next` channel, not
 in the stable archives or the Homebrew formula, and it supports part of what Compose
 supports. Docker Compose stays the default. Read the [overview](docs/native/README.md),
@@ -194,6 +214,21 @@ built for this. See
 The command-line tool is the supported product. The remote, gateway, node and
 dispatch commands and the macOS app in this repository are unsupported. Setup does
 not use them.
+
+## Provider pin qualification (contributors)
+
+[`scripts/qualify-provider-pin.ts`](scripts/qualify-provider-pin.ts) qualifies a
+provider pin on an Apple Silicon Mac using an empty, private, canonical root.
+It previews without `--run`. Foreground startup waits for its own console-ready
+signal before a single `ps --json` confirmation, so qualification does not poll
+the provider lock during startup. A startup `provider_busy` failure stays a failed
+run and is labelled `KNOWN_PRODUCT_BUG provider_busy`, separately from pin failures,
+only when the terminal console error names `provider_busy` as its primary runtime
+code. Lock text in service output, error notes or a cause code cannot supply that
+label; other or unrecognized failures remain failed qualification steps.
+With `--keep-going`, recorded and thrown step failures both settle owned processes
+before advancing; unconfirmed cleanup skips later steps. Restart keeps the previous
+foreground tracked through replacement failure and its bounded exit wait.
 
 ## Documentation
 

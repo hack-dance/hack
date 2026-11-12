@@ -230,15 +230,18 @@ async function createProjectWithStaleDaemonPid(): Promise<string> {
     "services:\n  api:\n    image: alpine:3.19\n    env_file:\n      - path: .env\n        required: false\n"
   );
 
-  // Stale daemon pid: a pid that cannot be running (very large, unlikely to
-  // exist) with no socket file, so buildDaemonStatusReport resolves "stale".
+  // Outside supported Linux/macOS PID ranges, with no socket, so the status
+  // resolves "stale" without ever identifying an unrelated live process.
   const daemonDir = resolve(
     tempDir,
     GLOBAL_HACK_DIR_NAME,
     GLOBAL_DAEMON_DIR_NAME
   );
   await mkdir(daemonDir, { recursive: true });
-  await writeFile(resolve(daemonDir, GLOBAL_DAEMON_PID_FILENAME), "999999\n");
+  await writeFile(
+    resolve(daemonDir, GLOBAL_DAEMON_PID_FILENAME),
+    "2147483647\n"
+  );
 
   return projectRoot;
 }

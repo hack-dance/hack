@@ -23,6 +23,20 @@ the global proxy (`hack global install`). Without it, create the network yoursel
 with `docker network create hack-dev`, and reach services with `hack exec` or
 published ports instead of their `*.hack.local` names.
 
+Each example keeps the project identity, Compose services and default environment
+in three adjacent files under `.hack/`.
+
+```mermaid
+---
+title: Files to copy
+---
+treeView-beta
+  .hack/
+    hack.config.json
+    docker-compose.yml
+    hack.env.default.yaml
+```
+
 ## Web app with Postgres
 
 A Bun web server and a Postgres database. The `deps` service installs packages into a volume; the web service starts when the install finished and the database is healthy.

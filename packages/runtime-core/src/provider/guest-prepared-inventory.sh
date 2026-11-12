@@ -27,14 +27,28 @@ test -n "$device"
 # `/mnt` exists in the base rootfs, and `-n` keeps mount bookkeeping off the inspected disks.
 mountpoint=/mnt
 test -d "$mountpoint"
-mount -n -o ro "$device" "$mountpoint" 2>/dev/null || mount -n "$device" "$mountpoint"
+# The guest already has the overlay disk mounted read-write (it holds the root's upper layer),
+# and a second mount shares that filesystem, so the guest's util-linux 2.42 (Alpine 3.24)
+# refuses a read-only one ("would change RO state"), on stdout. In that case mount it and make
+# this one mount read-only before anything is read; the filesystem itself stays as the guest
+# has it. No mount output reaches the report: it goes to stderr.
+if ! mount -n -o ro "$device" "$mountpoint" 1>&2; then
+  mount -n "$device" "$mountpoint" 1>&2
+  mount -n -o remount,bind,ro "$mountpoint" 1>&2 || { umount -n "$mountpoint" 1>&2; exit 1; }
+fi
+# Nothing is read through a writable mount: the per-mount options must say `ro`.
+options="$(awk -v at="$mountpoint" '$5 == at { last = $6 } END { print last }' /proc/self/mountinfo)"
+case ",$options," in
+  *,ro,*) ;;
+  *) umount -n "$mountpoint" 1>&2; echo "the overlay disk is not mounted read-only" >&2; exit 1 ;;
+esac
 upper="$mountpoint/upper"
 test -d "$upper"
 printf 'upper_files %s\n' "$(tree "$upper" -type f)"
 printf 'upper_links %s\n' "$(tree "$upper" -type l)"
 printf 'upper_dirs %s\n' "$(tree "$upper" -type d)"
 printf 'upper_other %s\n' "$(tree "$upper" ! -type f ! -type l ! -type d)"
-umount -n "$mountpoint"
+umount -n "$mountpoint" 1>&2
 receipt=/etc/hack-local-network-tools
 read_file() { if test -f "$1" && test ! -L "$1"; then encode < "$1"; fi; }
 printf 'tools_owner %s\n' "$(read_file "$receipt/owner")"

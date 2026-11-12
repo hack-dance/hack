@@ -12,6 +12,8 @@ let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalLogger: string | undefined;
 let foreignDaemon: ReturnType<typeof Bun.spawn> | null = null;
+// Outside the PID ranges allocated by supported Linux and macOS hosts.
+const STALE_PID_FILE = "2147483647\n";
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
@@ -68,7 +70,7 @@ test.skipIf(!Bun.which("lsof"))(
 
     const paths = resolveDaemonPaths({});
     await mkdir(paths.root, { recursive: true });
-    await writeFile(paths.pidPath, "999999\n");
+    await writeFile(paths.pidPath, STALE_PID_FILE);
     const { runCli } = await import("../src/cli/run.ts");
     expect(await runCli(["daemon", "clear"])).toBe(0);
     await Bun.sleep(100);
@@ -81,7 +83,7 @@ test.skipIf(!Bun.which("lsof"))(
 test("daemon clear removes stale pid and socket files", async () => {
   const paths = resolveDaemonPaths({});
   await mkdir(paths.root, { recursive: true });
-  await writeFile(paths.pidPath, "999999\n");
+  await writeFile(paths.pidPath, STALE_PID_FILE);
   await writeFile(paths.socketPath, "");
 
   const { runCli } = await import("../src/cli/run.ts");

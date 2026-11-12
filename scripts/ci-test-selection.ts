@@ -218,17 +218,22 @@ export function selectTests(opts: SelectionInputs): TestSelection {
       );
       if (!alias) {
         if (
+          name.startsWith("src/") ||
+          name.startsWith("tests/") ||
+          name.startsWith("packages/")
+        ) {
+          return undefined;
+        }
+        if (
           [...external].some(
             (namePart) => name === namePart || name.startsWith(`${namePart}/`)
           )
         ) {
           return null;
         }
-        return name.startsWith("@") ||
-          name.startsWith("src/") ||
-          name.startsWith("tests/")
-          ? undefined
-          : null;
+        return name.startsWith("node:") || name.startsWith("bun:")
+          ? null
+          : undefined;
       }
       const prefix =
         from.startsWith("packages/db/") &&

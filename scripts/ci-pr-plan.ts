@@ -63,7 +63,7 @@ export async function planPullRequest(opts: {
   });
   const macos = !opts.draft && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
-  const allJobs = opts.full || opts.changed === null;
+  const allJobs = opts.full || !opts.changed?.length;
   const nativeHosts = allJobs || opts.changed?.some(touchesCompilerHost);
   const compiler = opts.draft
     ? "[]"

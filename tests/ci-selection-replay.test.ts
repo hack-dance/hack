@@ -179,6 +179,14 @@ test("an assertion before cancellation is attributed to its running file", () =>
     }).failed
   ).toEqual([]);
 });
+test("unattributed assertions stay inconclusive rather than becoming absent failures", () => {
+  const result = replayFailures({
+    log: "(fail) assertion with no running-file marker",
+    selection: { mode: "selected", reason: "fixture", files: [] },
+  });
+  expect(result.unknown).toBe(true);
+  expect(result.unattributedFailure).toBe(true);
+});
 
 test("git snapshot parser respects UTF-8 byte counts and embedded newlines", () => {
   const oid = "a".repeat(40);

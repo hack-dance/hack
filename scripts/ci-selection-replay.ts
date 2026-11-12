@@ -19,6 +19,7 @@ export type ReplayVerdict = {
   readonly failed: readonly string[];
   readonly hidden: readonly string[];
   readonly unknown: boolean;
+  readonly unattributedFailure?: boolean;
 };
 
 /** File-runner outcomes include crashes/timeouts; a failed test step without a named file is unknown. */
@@ -29,6 +30,7 @@ export function replayFailures(opts: {
   const failed = new Set<string>();
   const bunFailures = new Set<string>();
   let running: string | undefined;
+  let unattributedFailure = false;
   for (const raw of opts.log.split("\n")) {
     const line = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
     const start =
@@ -38,8 +40,12 @@ export function replayFailures(opts: {
     if (start?.[1]) {
       running = start[1];
     }
-    if (running && /(?:^|\s)\(fail\) /.test(line)) {
-      bunFailures.add(running);
+    if (/(?:^|\s)\(fail\) /.test(line)) {
+      if (running) {
+        bunFailures.add(running);
+      } else {
+        unattributedFailure = true;
+      }
     }
     const completed =
       /\b(PASS|FAIL|FILE-COUNT|TIMEOUT|DEADLINE|INTERRUPTED) ((?:tests|packages\/db)\/\S+\.(?:test|spec)\.[cm]?[jt]sx?) in /.exec(
@@ -67,7 +73,8 @@ export function replayFailures(opts: {
     hidden: [...failed]
       .filter((file) => !opts.selection.files.includes(file))
       .sort(),
-    unknown: failed.size === 0,
+    unknown: failed.size === 0 || unattributedFailure,
+    ...(unattributedFailure ? { unattributedFailure: true } : {}),
   };
 }
 
@@ -424,7 +431,9 @@ function inspectReplayJob(opts: {
     const fromLog = replayFailures({ log, selection });
     // A cancelled file has an unknown outcome, not an observed failure. Its
     // complete available log still exposes assertions that failed before it stopped.
-    return opts.job.conclusion === "cancelled"
+    return opts.job.conclusion === "cancelled" &&
+      log.trim().length > 0 &&
+      !fromLog.unattributedFailure
       ? { ...fromLog, unknown: false }
       : fromLog;
   } catch {

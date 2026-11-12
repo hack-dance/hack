@@ -183,7 +183,12 @@ describe("conservative dependency selection", () => {
     expect(plan.files).toEqual(["tests/a.test.ts"]);
   });
   test("unresolved local imports and unknown aliases run conservatively", () => {
-    for (const source of ['import "./missing";', 'import "@unknown/value";']) {
+    for (const source of [
+      'import "./missing";',
+      'import "@unknown/value";',
+      'import "packages/db/src/value.ts";',
+      'import "unknown-module";',
+    ]) {
       expect(
         selectTests({
           repoRoot: "/fixture",
@@ -249,6 +254,17 @@ describe("PR matrix policy", () => {
       runtime_core: true,
       compiler_hosts: JSON.stringify(COMPILER_HOSTS),
     });
+  });
+  test("empty PR diffs preserve the full native job fallback", async () => {
+    const plan = await planPullRequest({
+      repoRoot,
+      changed: [],
+      draft: false,
+      full: false,
+      selection: { mode: "full", reason: "empty diff", files: [] },
+    });
+    expect(plan.runtime_core).toBe(true);
+    expect(JSON.parse(plan.compiler_hosts)).toEqual(COMPILER_HOSTS);
   });
   test("candidate inputs include the compiler consumer dependency", () => {
     expect(touchesCandidate("packages/config-compiler/src/lib.rs")).toBe(true);

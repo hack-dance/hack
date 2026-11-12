@@ -6,20 +6,34 @@ use std::{
 };
 
 pub fn run(candidate: &Candidate, arguments: &[&str]) -> Result<(), CandidateError> {
-    run_with_reuse(candidate, arguments, setup::reuse_existing)
+    execute(
+        candidate,
+        arguments,
+        setup::reuse_existing,
+        setup::run,
+        &mut io::stdout().lock(),
+    )
 }
 
-fn run_with_reuse(
+fn execute(
     candidate: &Candidate,
     arguments: &[&str],
     reuse: impl FnOnce(&Candidate) -> Result<Option<serde_json::Value>, CandidateError>,
+    install: impl FnOnce(
+        &Candidate,
+        Option<setup::OfflineInputs<'_>>,
+        bool,
+    ) -> Result<serde_json::Value, CandidateError>,
+    output: &mut impl Write,
 ) -> Result<(), CandidateError> {
     let options = parse(arguments)?;
     if let Some(result) = reuse(candidate)? {
-        println!(
+        writeln!(
+            output,
             "{}",
             serde_json::to_string(&result).expect("setup result is serializable")
-        );
+        )
+        .map_err(|_| CandidateError::new("setup_output", "Cannot write setup result."))?;
         return Ok(());
     }
     let pins = setup::pins()?;
@@ -34,7 +48,7 @@ fn run_with_reuse(
         ));
     }
     if let Some((archive, engine, packages)) = options.offline {
-        let result = setup::run(
+        let result = install(
             candidate,
             Some(setup::OfflineInputs {
                 archive: Path::new(archive),
@@ -43,10 +57,12 @@ fn run_with_reuse(
             }),
             false,
         )?;
-        println!(
+        writeln!(
+            output,
             "{}",
             serde_json::to_string(&result).expect("setup result is serializable")
-        );
+        )
+        .map_err(|_| CandidateError::new("setup_output", "Cannot write setup result."))?;
         return Ok(());
     }
     eprintln!("Pinned native runtime files (exact compressed byte lengths):");
@@ -91,11 +107,13 @@ fn run_with_reuse(
             "y" | "yes"
         ))
     })?;
-    let result = setup::run(candidate, None, true)?;
-    println!(
+    let result = install(candidate, None, true)?;
+    writeln!(
+        output,
         "{}",
         serde_json::to_string(&result).expect("setup result is serializable")
-    );
+    )
+    .map_err(|_| CandidateError::new("setup_output", "Cannot write setup result."))?;
     Ok(())
 }
 
@@ -176,10 +194,16 @@ mod tests {
         let root = std::env::temp_dir().canonicalize().unwrap();
         let candidate = Candidate::discover(&root).unwrap();
         let mut verified = false;
-        run_with_reuse(&candidate, &["--no-interactive"], |_| {
-            verified = true;
-            Ok(Some(serde_json::json!({"status": "reused"})))
-        })
+        execute(
+            &candidate,
+            &["--no-interactive"],
+            |_| {
+                verified = true;
+                Ok(Some(serde_json::json!({"status": "reused"})))
+            },
+            |_, _, _| panic!("reused install prepared"),
+            &mut Vec::new(),
+        )
         .unwrap();
         assert!(verified);
     }
@@ -247,5 +271,63 @@ mod tests {
         ] {
             assert!(parse(&args).is_err(), "{args:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn offline_archive_form_and_reuse_print_the_complete_json_result() {
+        let candidate = Candidate::discover(&std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let result = serde_json::json!({
+            "status": "installed",
+            "files": [{"name":"provider.tgz", "outcome":"reused", "size_bytes":5,
+                "downloaded_bytes":0, "reused_bytes":5}],
+            "probe": {"supported":true}
+        });
+        let mut output = Vec::new();
+        execute(
+            &candidate,
+            &[
+                "--json",
+                "--no-interactive",
+                "--archive",
+                "/input/provider",
+                "--engine-archive",
+                "/input/engine",
+                "--network-tools-directory",
+                "/input/packages",
+            ],
+            |_| Ok(None),
+            |_, inputs, accepted| {
+                assert!(!accepted);
+                let inputs = inputs.unwrap();
+                assert_eq!(inputs.archive, Path::new("/input/provider"));
+                assert_eq!(inputs.engine_archive, Path::new("/input/engine"));
+                assert_eq!(inputs.network_tools, Path::new("/input/packages"));
+                Ok(result.clone())
+            },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
+            result
+        );
+        output.clear();
+        execute(
+            &candidate,
+            &["--json", "--no-interactive"],
+            |_| Ok(Some(result.clone())),
+            |_, _, _| panic!("reuse prepared"),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output).unwrap(),
+            result
+        );
     }
 }

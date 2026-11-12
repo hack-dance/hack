@@ -7,7 +7,7 @@ mod tests;
 
 use super::{artifact, network_tools, state};
 use crate::{Candidate, CandidateError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -89,6 +89,58 @@ pub struct OfflineInputs<'a> {
     pub network_tools: &'a Path,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Outcome {
+    Downloaded,
+    Resumed,
+    Reused,
+}
+
+/// Accounting for pinned artifacts this invocation. Reused bytes cover offline
+/// inputs, verified cache entries/prefixes, or an equivalent verified installed
+/// tree. Complete-home reuse reads no archive inputs.
+#[derive(Debug, Serialize)]
+struct FileResult {
+    name: String,
+    outcome: Outcome,
+    size_bytes: u64,
+    downloaded_bytes: u64,
+    reused_bytes: u64,
+}
+impl FileResult {
+    fn new(pin: &FilePin, outcome: Outcome, downloaded_bytes: u64) -> Result<Self, CandidateError> {
+        Ok(Self {
+            name: pin.name()?.to_owned(),
+            outcome,
+            size_bytes: pin.size_bytes,
+            downloaded_bytes,
+            reused_bytes: pin.size_bytes - downloaded_bytes,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct Installation {
+    status: &'static str,
+    files: Vec<FileResult>,
+}
+impl Installation {
+    fn reused(files: &[FilePin]) -> Result<Self, CandidateError> {
+        Ok(Self {
+            status: "reused",
+            files: files
+                .iter()
+                .map(|pin| FileResult::new(pin, Outcome::Reused, 0))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    fn with_probe(self, probe: impl Serialize) -> serde_json::Value {
+        serde_json::json!({"status": self.status, "files": self.files, "probe": probe})
+    }
+}
+
 /// Locations displayed before consent. Neither this function nor `pins` performs I/O.
 pub fn download_directory(candidate: &Candidate) -> PathBuf {
     candidate.state_root.join("setup/downloads")
@@ -151,9 +203,9 @@ pub fn reuse_existing(candidate: &Candidate) -> Result<Option<serde_json::Value>
     if !observe_existing(candidate, &verified_install)? {
         return Ok(None);
     }
-    Ok(Some(
-        serde_json::json!({"status": "reused", "probe": super::probe_with_profile(candidate, super::Profile::Development)?}),
-    ))
+    Ok(Some(Installation::reused(&pins()?)?.with_probe(
+        super::probe_with_profile(candidate, super::Profile::Development)?,
+    )))
 }
 
 /// Must be called only by the explicit setup command after consent (or with all offline
@@ -175,7 +227,7 @@ pub fn run(
             "Native setup requires Apple Silicon macOS.",
         ));
     }
-    let status = install(
+    let installation = install(
         candidate,
         inputs,
         &pins()?,
@@ -183,9 +235,10 @@ pub fn run(
         verified_install,
         download::client,
     )?;
-    Ok(
-        serde_json::json!({"status": status, "probe": super::probe_with_profile(candidate, super::Profile::Development)?}),
-    )
+    Ok(installation.with_probe(super::probe_with_profile(
+        candidate,
+        super::Profile::Development,
+    )?))
 }
 
 fn prepare_all(candidate: &Candidate, inputs: OfflineInputs<'_>) -> Result<(), CandidateError> {
@@ -204,22 +257,26 @@ fn install(
     prepare: impl FnOnce(&Candidate, OfflineInputs<'_>) -> Result<(), CandidateError>,
     verify: impl Fn(&Candidate) -> Result<(), CandidateError>,
     client: impl FnOnce() -> Result<download::Client, CandidateError>,
-) -> Result<&'static str, CandidateError> {
+) -> Result<Installation, CandidateError> {
     let setup = candidate.state_root.join("setup");
     let _setup_lock = state::Lock::acquire(&setup)?;
     let target = candidate.state_root.join("providers");
     {
         let _provider_lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
         if reuse(candidate, &target, &verify)? {
-            return Ok("reused");
+            return Installation::reused(files);
         }
     }
     let downloads = download_directory(candidate);
+    let mut results = Vec::with_capacity(files.len());
     let (archive, engine, packages) = if let Some(inputs) = inputs {
         download::verify_input(inputs.archive, &files[0])?;
         download::verify_input(inputs.engine_archive, &files[1])?;
         for pin in &files[2..] {
             download::verify_input(&inputs.network_tools.join(pin.name()?), pin)?;
+        }
+        for pin in files {
+            results.push(FileResult::new(pin, Outcome::Reused, 0)?);
         }
         (
             inputs.archive.to_path_buf(),
@@ -230,7 +287,7 @@ fn install(
         state::private_directory(&downloads)?;
         let client = client()?;
         for pin in files {
-            download::acquire(&client, &downloads, pin)?;
+            results.push(download::acquire(&client, &downloads, pin)?);
         }
         (
             downloads.join(files[0].name()?),
@@ -242,7 +299,12 @@ fn install(
     // Recheck after downloading, then serialize publication with manual preparation.
     let _provider_lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
     if reuse(candidate, &target, &verify)? {
-        return Ok("reused");
+        // A manual prepare may have finished while inputs were acquired. Keep
+        // the actual transfer accounting even though publication is now a no-op.
+        return Ok(Installation {
+            status: "reused",
+            files: results,
+        });
     }
     publish(candidate, &setup, &target, |staged| {
         prepare(
@@ -255,7 +317,10 @@ fn install(
         )?;
         verify(staged)
     })?;
-    Ok("installed")
+    Ok(Installation {
+        status: "installed",
+        files: results,
+    })
 }
 
 fn reuse(
@@ -297,7 +362,11 @@ fn publish(
     staged.state_root = staging.clone();
     prepare(&staged)?;
     sync_tree(&staging.join("providers"))?;
+    #[cfg(test)]
+    tests::publication_checkpoint("before_rename");
     fs::rename(staging.join("providers"), target).map_err(state::io)?;
+    #[cfg(test)]
+    tests::publication_checkpoint("after_rename");
     fs::File::open(&candidate.state_root)
         .and_then(|f| f.sync_all())
         .map_err(state::io)?;

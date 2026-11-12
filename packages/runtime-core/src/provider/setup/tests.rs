@@ -101,7 +101,7 @@ fn install(
     files: &[FilePin],
     prepare: impl FnOnce(&Candidate, OfflineInputs<'_>) -> Result<(), CandidateError>,
     verify: impl Fn(&Candidate) -> Result<(), CandidateError>,
-) -> Result<&'static str, CandidateError> {
+) -> Result<Installation, CandidateError> {
     super::install(candidate, inputs, files, prepare, verify, || Ok(client()))
 }
 
@@ -356,7 +356,9 @@ fn full_setup_orchestration_downloads_once_and_reuses_without_prepare() {
     ]);
     let files = fixture_pins(&pin);
     assert_eq!(
-        install(&candidate, None, &files, fixture_prepare, fixture_verify).unwrap(),
+        install(&candidate, None, &files, fixture_prepare, fixture_verify)
+            .unwrap()
+            .status,
         "installed"
     );
     server.join().unwrap();
@@ -368,7 +370,8 @@ fn full_setup_orchestration_downloads_once_and_reuses_without_prepare() {
             |_, _| panic!("repeat prepared again"),
             fixture_verify
         )
-        .unwrap(),
+        .unwrap()
+        .status,
         "reused"
     );
     // This also proves offline setup reuses the installed set without reading unavailable inputs.
@@ -384,7 +387,8 @@ fn full_setup_orchestration_downloads_once_and_reuses_without_prepare() {
             |_, _| panic!("repeat prepared again"),
             fixture_verify
         )
-        .unwrap(),
+        .unwrap()
+        .status,
         "reused"
     );
 }
@@ -411,21 +415,25 @@ fn offline_setup_and_partial_manual_install_preservation() {
     std::os::unix::fs::symlink(source.join("provider.tgz"), &linked).unwrap();
     let engine = root.0.join("engine-hardlink.tgz");
     fs::hard_link(source.join("engine.tgz"), &engine).unwrap();
-    assert_eq!(
-        install(
-            &candidate,
-            Some(OfflineInputs {
-                archive: &linked,
-                engine_archive: &engine,
-                network_tools: &source
-            }),
-            &files,
-            fixture_prepare,
-            fixture_verify
-        )
-        .unwrap(),
-        "installed"
-    );
+    let result = install(
+        &candidate,
+        Some(OfflineInputs {
+            archive: &linked,
+            engine_archive: &engine,
+            network_tools: &source,
+        }),
+        &files,
+        fixture_prepare,
+        fixture_verify,
+    )
+    .unwrap();
+    assert_eq!(result.status, "installed");
+    assert_eq!(result.files.len(), files.len());
+    for file in result.files {
+        assert_eq!(file.outcome, Outcome::Reused);
+        assert_eq!(file.downloaded_bytes, 0);
+        assert_eq!(file.reused_bytes, file.size_bytes);
+    }
     assert!(!download_directory(&candidate).exists());
     let other = root.0.join("other-home");
     state::private_directory(&other).unwrap();
@@ -660,4 +668,207 @@ fn body_without_content_length_retains_a_short_prefix_for_resume() {
     download::acquire(&client(), &root.0, &pin).unwrap();
     server.join().unwrap();
     assert_eq!(fs::read(root.0.join("archive.tgz")).unwrap(), b"hello");
+}
+
+#[test]
+fn json_accounts_for_download_resume_cache_and_complete_reuse() {
+    let root = Fixture::new();
+    let candidate = Candidate::discover(&root.0).unwrap();
+    let (pin, server) = server(vec![
+        (
+            "get /provider.tgz",
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+        ),
+        (
+            "range: bytes=2-",
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-4/5\r\nContent-Length: 3\r\n\r\nllo",
+        ),
+    ]);
+    let files = fixture_pins(&pin);
+    let downloads = download_directory(&candidate);
+    state::private_directory(&downloads).unwrap();
+    fs::write(downloads.join("engine.tgz.part"), b"he").unwrap();
+    fs::write(downloads.join("guest.apk"), b"hello").unwrap();
+    for name in ["engine.tgz.part", "guest.apk"] {
+        fs::set_permissions(downloads.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let result = install(&candidate, None, &files, fixture_prepare, fixture_verify)
+        .unwrap()
+        .with_probe(serde_json::json!({"supported": true}));
+    server.join().unwrap();
+    assert_eq!(result["status"], "installed");
+    assert_eq!(result["probe"]["supported"], true);
+    assert_eq!(
+        result["files"],
+        serde_json::json!([
+            {"name":"provider.tgz", "outcome":"downloaded", "size_bytes":5, "downloaded_bytes":5, "reused_bytes":0},
+            {"name":"engine.tgz", "outcome":"resumed", "size_bytes":5, "downloaded_bytes":3, "reused_bytes":2},
+            {"name":"guest.apk", "outcome":"reused", "size_bytes":5, "downloaded_bytes":0, "reused_bytes":5}
+        ])
+    );
+    let reused = install(
+        &candidate,
+        None,
+        &files,
+        |_, _| panic!("prepared reuse"),
+        fixture_verify,
+    )
+    .unwrap()
+    .with_probe(serde_json::json!({"supported": true}));
+    assert_eq!(reused["files"].as_array().unwrap().len(), files.len());
+    for file in reused["files"].as_array().unwrap() {
+        assert_eq!(file["outcome"], "reused");
+        assert_eq!(file["downloaded_bytes"], 0);
+        assert_eq!(file["reused_bytes"], 5);
+    }
+}
+
+#[test]
+fn no_range_support_restarts_with_accurate_byte_counts() {
+    let root = Fixture::new();
+    let (pin, server) = server(vec![(
+        "range: bytes=2-",
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nAccept-Ranges: none\r\n\r\nhello",
+    )]);
+    fs::write(root.0.join("archive.tgz.part"), b"he").unwrap();
+    fs::set_permissions(
+        root.0.join("archive.tgz.part"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let result = download::acquire(&client(), &root.0, &pin).unwrap();
+    server.join().unwrap();
+    assert_eq!(result.outcome, Outcome::Downloaded);
+    assert_eq!(result.downloaded_bytes, 5);
+    assert_eq!(result.reused_bytes, 0);
+    assert_eq!(fs::read(root.0.join("archive.tgz")).unwrap(), b"hello");
+}
+
+// These checkpoints exist only in test builds. The helper is an owned subprocess,
+// so the parent can kill it at an actual crash boundary without unwinding cleanup.
+pub(super) fn publication_checkpoint(phase: &str) {
+    if std::env::var("SETUP_TEST_PHASE").as_deref() != Ok(phase) {
+        return;
+    }
+    let root = PathBuf::from(std::env::var_os("SETUP_TEST_ROOT").unwrap());
+    fs::write(root.join("checkpoint"), phase).unwrap();
+    // Self-expire if the parent fails; the parent always owns and reaps this child.
+    thread::sleep(std::time::Duration::from_secs(10));
+    std::process::exit(74);
+}
+
+#[test]
+#[ignore = "owned subprocess entrypoint for setup interruption tests"]
+fn setup_interruption_helper() {
+    let root = PathBuf::from(std::env::var_os("SETUP_TEST_ROOT").unwrap());
+    let candidate = Candidate::discover(&root).unwrap();
+    let pin = FilePin {
+        url: std::env::var("SETUP_TEST_URL").unwrap(),
+        archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+        size_bytes: 5,
+        max_bytes: 16,
+        redirect_hosts: vec![],
+    };
+    install(
+        &candidate,
+        None,
+        &fixture_pins(&pin),
+        |staged, inputs| {
+            let providers = staged.state_root.join("providers");
+            state::private_directory(&providers)?;
+            fs::write(providers.join("incomplete"), b"incomplete").unwrap();
+            publication_checkpoint("preparation");
+            fs::remove_file(providers.join("incomplete")).unwrap();
+            fixture_prepare(staged, inputs)
+        },
+        fixture_verify,
+    )
+    .unwrap();
+}
+
+#[test]
+fn killed_preparation_and_publication_rerun_without_network_or_partial_install() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for phase in ["preparation", "before_rename", "after_rename"] {
+        let root = Fixture::new();
+        let candidate = Candidate::discover(&root.0).unwrap();
+        let (pin, server) = server(vec![
+            (
+                "get /provider.tgz",
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+            ),
+            (
+                "get /engine.tgz",
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+            ),
+            (
+                "get /guest.apk",
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+            ),
+        ]);
+        let mut child = Child(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider::setup::tests::setup_interruption_helper",
+                    "--ignored",
+                ])
+                .env("SETUP_TEST_ROOT", &root.0)
+                .env("SETUP_TEST_PHASE", phase)
+                .env("SETUP_TEST_URL", &pin.url)
+                .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+                .env("HACK_NO_INTERACTIVE", "1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !root.0.join("checkpoint").exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "helper exited before {phase}"
+            );
+            assert!(Instant::now() < deadline, "helper missed {phase}");
+            thread::sleep(Duration::from_millis(5));
+        }
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        server.join().unwrap(); // dead server proves recovery uses the verified cache
+        let target = candidate.state_root.join("providers");
+        assert_eq!(target.exists(), phase == "after_rename");
+        let result = install(
+            &candidate,
+            None,
+            &fixture_pins(&pin),
+            fixture_prepare,
+            fixture_verify,
+        )
+        .unwrap();
+        assert_eq!(
+            result.status,
+            if phase == "after_rename" {
+                "reused"
+            } else {
+                "installed"
+            }
+        );
+        assert_eq!(result.files.len(), 3);
+        assert!(
+            result
+                .files
+                .iter()
+                .all(|f| f.outcome == Outcome::Reused && f.downloaded_bytes == 0)
+        );
+        fixture_verify(&candidate).unwrap();
+        assert!(!target.join("incomplete").exists());
+    }
 }

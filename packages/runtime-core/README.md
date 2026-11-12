@@ -500,7 +500,9 @@ for components SmolVM bundles (libkrun, libkrunfw, the guest kernel and rootfs p
 published only in the global advisory database. It never changes a pin; bumps are qualified by
 hand. The workflow also checks every pinned download URL, including guest
 packages, with bounded unauthenticated HEAD requests and a comparison of a 200
-reply's `Content-Length` with `size_bytes`. Only 404 and 410 mean the pinned file
+reply's `Content-Length` with `size_bytes`. A size disagreement must repeat on a
+second HEAD from the original pinned URL, requesting cache revalidation under the
+same deadline, before it can reopen an issue. Only 404 and 410 mean the pinned file
 is no longer served and can reopen an issue closed as not planned. Timeouts,
 other HTTP errors (including 403, 429 and 5xx), and a missing `Content-Length`
 are transient failures: they are reported but never create or reopen
@@ -686,7 +688,8 @@ for a security fix, so each bump stays small enough to review against upstream n
    `--network-tools` so all seven input files have their actual lengths checked
    against the bundle's `size_bytes` before extraction or preparation. A correct
    hash with a stale or missing length fails qualification. The builder file is
-   measured here without installing it. It checks the archive and signature, prepare,
+   measured and SHA-256 checked here without installing it; a correct length with
+   a wrong builder hash fails before extraction. It checks the archive and signature, prepare,
    a prepared base built and verified (its overlay inventory), a pool without internet,
    template expansion and digests, exact disk identity, restart, down and up, network
    modes, the dependency-socket relay, Rosetta and a web-plus-database project, then

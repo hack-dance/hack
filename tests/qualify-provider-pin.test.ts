@@ -1011,6 +1011,18 @@ describe("qualification exact input lengths", () => {
       expect(() => qualificationInputSizes(options, pins)).toThrow(
         "size_bytes"
       );
+      stale.size_bytes = 1;
+      writeFileSync(join(root, "provider-pins.json"), JSON.stringify(pins));
+      // Same length as the pinned buildx, different bytes: length is not trust.
+      writeFileSync(options.builderArchive, Buffer.alloc(3, "y"));
+      const wrongBuilder = new Qualification(options);
+      wrongBuilder.note = () => undefined;
+      wrongBuilder.exec = () => {
+        throw new Error("must not extract an unverified builder");
+      };
+      expect(() => wrongBuilder.archive()).toThrow(
+        "buildx SHA-256 matches the bundle pin"
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

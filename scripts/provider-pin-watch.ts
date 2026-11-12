@@ -691,11 +691,12 @@ function pinnedUrlAllowed(url: URL, source: URL, pin: PinnedFile): boolean {
 
 async function pinnedUrlProblem(
   pin: PinnedFile,
-  fetcher: typeof fetch
+  fetcher: typeof fetch,
+  signal = AbortSignal.timeout(30_000),
+  firstMismatch?: string
 ): Promise<Pick<PinAvailability, "problem" | "kind">> {
   const source = new URL(pin.url);
   let url = source;
-  const signal = AbortSignal.timeout(30_000);
   try {
     for (let redirects = 0; redirects <= 5; redirects++) {
       if (!pinnedUrlAllowed(url, source, pin)) {
@@ -706,6 +707,10 @@ async function pinnedUrlProblem(
       }
       const response = await fetcher(url, {
         method: "HEAD",
+        headers:
+          firstMismatch === undefined
+            ? undefined
+            : { "cache-control": "no-cache" },
         redirect: "manual",
         signal,
       });
@@ -733,20 +738,13 @@ async function pinnedUrlProblem(
           kind: "transient",
         };
       }
-      const length = response.headers.get("content-length");
-      if (length === null) {
-        return {
-          problem: "Content-Length unavailable; exact size not checked",
-          kind: "transient",
-        };
-      }
-      if (!/^\d+$/.test(length) || Number(length) !== pin.sizeBytes) {
-        return {
-          problem: `Content-Length differs from pinned size_bytes (${pin.sizeBytes})`,
-          kind: "invalid",
-        };
-      }
-      return { problem: null, kind: "available" };
+      return await pinnedLengthProblem(
+        pin,
+        fetcher,
+        signal,
+        response.headers.get("content-length"),
+        firstMismatch
+      );
     }
   } catch {
     return {
@@ -755,6 +753,40 @@ async function pinnedUrlProblem(
     };
   }
   return { problem: "redirect limit exceeded", kind: "invalid" };
+}
+
+async function pinnedLengthProblem(
+  pin: PinnedFile,
+  fetcher: typeof fetch,
+  signal: AbortSignal,
+  length: string | null,
+  firstMismatch?: string
+): Promise<Pick<PinAvailability, "problem" | "kind">> {
+  if (length === null) {
+    return {
+      problem: "Content-Length unavailable; exact size not checked",
+      kind: "transient",
+    };
+  }
+  if (!/^\d+$/.test(length) || Number(length) !== pin.sizeBytes) {
+    if (firstMismatch === undefined) {
+      // One HEAD can carry stale CDN metadata. Confirm independently from
+      // the original pinned URL, under the same total request deadline.
+      return await pinnedUrlProblem(pin, fetcher, signal, length);
+    }
+    if (length !== firstMismatch) {
+      return {
+        problem:
+          "Content-Length disagreement was not confirmed (transient failure)",
+        kind: "transient",
+      };
+    }
+    return {
+      problem: `Content-Length differs from pinned size_bytes (${pin.sizeBytes}); confirmed by a second HEAD`,
+      kind: "invalid",
+    };
+  }
+  return { problem: null, kind: "available" };
 }
 
 /** Bounded, unauthenticated HEAD requests. Never download archives or forward the

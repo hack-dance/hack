@@ -109,3 +109,23 @@ test("an unreadable daemon directory of this user's gets the chmod to run", asyn
     await chmod(daemonRoot, 0o700);
   }
 });
+
+test("a Hack home under a linked path is still repaired (HACK-2142)", async () => {
+  // macOS temp and home paths sit under /var -> /private/var: the chain is
+  // walked physically, so an unresolved Hack home matched nothing and a
+  // group-writable directory inside it was refused instead of repaired.
+  const real = join(root, "real");
+  const linked = join(root, "linked");
+  await mkdir(join(real, "home", ".hack", "daemon"), { recursive: true });
+  await chmod(real, 0o755);
+  await chmod(join(real, "home"), 0o755);
+  await symlink(real, linked);
+  const hackHome = join(linked, "home", ".hack");
+  const daemonRoot = join(hackHome, "daemon");
+  // What `mkdir -p` gives under umask 0002.
+  await chmod(hackHome, 0o775);
+  await chmod(daemonRoot, 0o775);
+  await secureDaemonDirectory({ root: daemonRoot });
+  expect((await stat(hackHome)).mode & 0o777).toBe(0o755);
+  expect((await stat(daemonRoot)).mode & 0o777).toBe(0o700);
+});

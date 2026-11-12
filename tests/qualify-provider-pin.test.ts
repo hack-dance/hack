@@ -41,8 +41,10 @@ import {
   readyData,
   rootProblem,
   sourceTemplatePins,
+  terminalRuntimeErrorCode,
   warmPhases,
 } from "../scripts/qualify-provider-pin.ts";
+import { formatNativeStartupLogReport } from "../src/backends/native-startup-logs.ts";
 import { selectNativeComposeProject } from "../src/lib/native-compose-selection.ts";
 
 const repository = resolve(import.meta.dir, "..");
@@ -409,7 +411,8 @@ case "$1" in
       exit 0
     fi
     if [ "$1" = restart ] && [ -e '${root}/restart-fails' ]; then exit 23; fi
-    if [ -e '${root}/provider-busy' ]; then echo '[provider_busy] Another candidate operation holds the provider lock' >&2; exit 23; fi
+    if [ -e '${root}/provider-busy' ]; then echo 'ERROR: Native runtime request failed (provider_busy); inspect owned state before retrying. Runtime: Another candidate operation holds the provider lock.' >&2; exit 23; fi
+    if [ -e '${root}/startup-failure' ]; then cat '${root}/startup-failure' >&2; exit 23; fi
     n=$(( $(cat '${root}/gen' 2>/dev/null || echo 0) + 1 )); echo "$n" > '${root}/gen'
     if [ "$1" = restart ]; then touch '${root}/stop-'"$((n-1))"; fi
     sleep 0.1
@@ -507,6 +510,74 @@ esac
           key.startsWith("known_product_bug_provider_busy_")
         )
       ).toBe(true);
+      expect(readFileSync(join(root, "hack.log"), "utf8")).not.toContain("ps ");
+    } finally {
+      done();
+    }
+  });
+
+  test("terminal runtime parsing selects the primary code and accepts console line endings", () => {
+    const message =
+      "ERROR: Native runtime request failed (provider_busy); inspect owned state before retrying.";
+    expect(terminalRuntimeErrorCode(`INFO: starting\n${message}\n`)).toBe(
+      "provider_busy"
+    );
+    expect(terminalRuntimeErrorCode(`${message}\r\n\r\n`)).toBe(
+      "provider_busy"
+    );
+    expect(
+      terminalRuntimeErrorCode(
+        message.replace("provider_busy", "other: provider_busy")
+      )
+    ).toBe("other");
+    expect(terminalRuntimeErrorCode(`web | ${message}\n`)).toBeNull();
+    expect(
+      terminalRuntimeErrorCode(`${message}\nERROR: another failure\n`)
+    ).toBeNull();
+  });
+
+  test.each([
+    [
+      "service output before another terminal code",
+      "web | provider_busy: Another candidate operation holds the provider lock\nERROR: Native runtime request failed (artifact_invalid); inspect owned state before retrying.\n",
+    ],
+    [
+      "service output appended to a different terminal failure",
+      `ERROR: Native runtime request failed (artifact_invalid); inspect owned state before retrying.\n${formatNativeStartupLogReport(
+        {
+          logs: [
+            {
+              service: "web",
+              stdout: "",
+              stderr:
+                "ERROR: Native runtime request failed (provider_busy); inspect owned state before retrying. Runtime: Another candidate operation holds the provider lock.",
+              truncated: false,
+            },
+          ],
+          managedEnvironment: {},
+        }
+      )}\n`,
+    ],
+    [
+      "lock text in the terminal message",
+      "ERROR: Native runtime request failed (artifact_invalid); inspect owned state before retrying. Runtime: provider_busy: Another candidate operation holds the provider lock\n",
+    ],
+    [
+      "a cause code without a matching primary code",
+      "ERROR: Native runtime request failed (artifact_invalid: provider_busy); inspect owned state before retrying.\n",
+    ],
+  ])("startup does not label provider_busy from %s", async (_name, output) => {
+    const { root, run, done } = fixture();
+    try {
+      writeFileSync(join(root, "startup-failure"), output);
+      await expect(run.upForeground("up", "up")).rejects.toThrow(
+        "exited 23 before readiness"
+      );
+      expect(
+        Object.keys(run.recorded).some((key) =>
+          key.startsWith("known_product_bug_provider_busy_")
+        )
+      ).toBe(false);
       expect(readFileSync(join(root, "hack.log"), "utf8")).not.toContain("ps ");
     } finally {
       done();

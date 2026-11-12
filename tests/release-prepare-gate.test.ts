@@ -154,6 +154,128 @@ describe("release-prepare gate (HACK-1424)", () => {
     );
   });
 
+  function paginatedCiApi(opts: {
+    readonly pages: readonly unknown[];
+    readonly calls: string[];
+  }) {
+    return async (path: string): Promise<unknown> => {
+      opts.calls.push(path);
+      if (path === "actions/runs/77") {
+        return ciRun;
+      }
+      if (
+        path ===
+        `actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=${sha}&status=success&per_page=1`
+      ) {
+        return { workflow_runs: [ciRun] };
+      }
+      const page = opts.calls.filter((call) =>
+        call.startsWith("actions/runs/77/jobs?")
+      ).length;
+      if (path !== `actions/runs/77/jobs?per_page=100&page=${page}`) {
+        throw new Error(`unexpected ${path}`);
+      }
+      const response = opts.pages[page - 1];
+      if (response === undefined) {
+        throw new Error("CI jobs page unavailable");
+      }
+      return response;
+    };
+  }
+
+  const supplementalJobs = Array.from({ length: 100 }, (_, index) => ({
+    name: `supplemental ${index}`,
+    head_sha: sha,
+    status: "completed",
+    conclusion: "success",
+  }));
+
+  for (const event of ["workflow_run", "workflow_dispatch"] as const) {
+    const trigger = {
+      event,
+      headSha: sha,
+      ciRunId: event === "workflow_run" ? "77" : null,
+    };
+
+    test(`${event} accepts required jobs from a later CI page`, async () => {
+      const calls: string[] = [];
+      const selected = await selectStableCiRun({
+        api: paginatedCiApi({
+          pages: [{ jobs: supplementalJobs }, { jobs }],
+          calls,
+        }),
+        trigger,
+      });
+      expect(selected.jobs).toEqual([...supplementalJobs, ...jobs]);
+      expect(calls.slice(1)).toEqual([
+        "actions/runs/77/jobs?per_page=100&page=1",
+        "actions/runs/77/jobs?per_page=100&page=2",
+      ]);
+      expect(() =>
+        requireStableHeadCi({ ...selected, sourceRevision: sha })
+      ).not.toThrow();
+    });
+
+    for (const conclusion of ["failure", "cancelled", "skipped"]) {
+      test(`${event} refuses a ${conclusion} job on a later CI page`, async () => {
+        const firstPage = [...jobs, ...supplementalJobs].slice(0, 100);
+        const selected = await selectStableCiRun({
+          api: paginatedCiApi({
+            pages: [
+              { jobs: firstPage },
+              {
+                jobs: [
+                  {
+                    name: "late supplemental",
+                    head_sha: sha,
+                    status: "completed",
+                    conclusion,
+                  },
+                ],
+              },
+            ],
+            calls: [],
+          }),
+          trigger,
+        });
+        expect(() =>
+          requireStableHeadCi({ ...selected, sourceRevision: sha })
+        ).toThrow(
+          "Every job in the exact-head CI run must succeed without skips"
+        );
+      });
+    }
+
+    test(`${event} refuses unavailable later CI pages`, async () => {
+      await expect(
+        selectStableCiRun({
+          api: paginatedCiApi({
+            pages: [{ jobs: supplementalJobs }],
+            calls: [],
+          }),
+          trigger,
+        })
+      ).rejects.toThrow("CI jobs page unavailable");
+    });
+
+    test(`${event} refuses CI jobs beyond the pagination limit`, async () => {
+      const calls: string[] = [];
+      await expect(
+        selectStableCiRun({
+          api: paginatedCiApi({
+            pages: Array.from({ length: 10 }, () => ({
+              jobs: supplementalJobs,
+            })),
+            calls,
+          }),
+          trigger,
+        })
+      ).rejects.toThrow("GitHub pagination limit exceeded");
+      expect(calls).toHaveLength(11);
+      expect(calls.at(-1)).toBe("actions/runs/77/jobs?per_page=100&page=10");
+    });
+  }
+
   test("a dispatch without a successful run for the head refuses", async () => {
     const api = async (path: string) => {
       if (path.startsWith("actions/workflows/ci.yml/runs?")) {

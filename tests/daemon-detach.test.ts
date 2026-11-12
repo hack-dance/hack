@@ -239,8 +239,39 @@ test.skipIf(process.platform === "win32")(
         join(daemonDir(f), "hackd.log"),
         "utf8"
       ).catch(() => "(no hackd.log)");
+      // The detached daemon's stderr is discarded; run the same daemon in
+      // the foreground for a few seconds to see what it prints, and say
+      // whether the pid is still alive and what it is.
+      const ps = Bun.spawnSync(
+        ["ps", "-o", "pid=,stat=,command=", "-p", String(pid ?? 0)],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      const foreground = Bun.spawn(
+        ["hack", "daemon", "start", "--foreground"],
+        {
+          env: f.env,
+          cwd: f.root,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+      const killer = setTimeout(() => foreground.kill("SIGTERM"), 8000);
+      const [fgOut, fgErr, fgCode] = await Promise.all([
+        new Response(foreground.stdout).text(),
+        new Response(foreground.stderr).text(),
+        foreground.exited,
+      ]);
+      clearTimeout(killer);
       throw new Error(
-        `hackd did not become ready (pid ${pid}).\n--- hack daemon start ---\n${startLog.slice(-4000)}\n--- hackd.log ---\n${hackdLog.slice(-4000)}`
+        [
+          `hackd did not become ready (pid ${pid}, alive ${pid !== null && isAlive(pid)}).`,
+          `--- ps ---\n${ps.stdout.toString()}`,
+          `--- hack daemon start ---\n${startLog.slice(-4000)}`,
+          `--- hackd.log ---\n${hackdLog.slice(-4000)}`,
+          `--- foreground run (exit ${fgCode}) stdout ---\n${fgOut.slice(-4000)}`,
+          `--- foreground run stderr ---\n${fgErr.slice(-4000)}`,
+        ].join("\n")
       );
     }
     // The unauthenticated API stays private to its owner (Codex security

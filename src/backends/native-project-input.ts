@@ -137,7 +137,8 @@ function environmentRefused(error: unknown): Error {
   );
 }
 
-async function readCompose(path: string): Promise<Buffer> {
+/** Bounded, nonblocking regular Compose snapshot shared by start and preflight. */
+export async function readNativeComposeBytes(path: string): Promise<Buffer> {
   const file = await open(
     path,
     constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW
@@ -456,7 +457,7 @@ export async function prepareNativeProjectInput(opts: {
   readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<NativeProjectInput> {
   try {
-    const bytes = await readCompose(opts.composeFile);
+    const bytes = await readNativeComposeBytes(opts.composeFile);
     let compose: unknown;
     try {
       compose = Bun.YAML.parse(

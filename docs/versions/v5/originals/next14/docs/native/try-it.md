@@ -25,7 +25,7 @@ sh hack-next-install.sh
 Everything goes into `~/.hack-next`. The installer does not edit your PATH, start a
 virtual machine, or change DNS or certificate trust. Newer prereleases are on the
 [releases page](https://github.com/hack-dance/hack/releases). For details, see
-[Install](../install.md) and [Install the prerelease](../../guides/candidate-install.md).
+[Install a prerelease](../guides/candidate-install.md).
 
 ## 2. Prepare the runtime
 
@@ -50,7 +50,7 @@ v3.19 `main` repository for `aarch64`, with exactly these names:
 - `libnftnl-1.2.6-r0.apk`
 - `libxtables-1.8.10-r3.apk`
 
-Their hashes are listed in [the native reference](../../guides/native-candidate.md#manual-candidate-upgrade-and-rollback), under network-tool preparation, not in `provider-pins.json`.
+Their hashes are in the table under [network tool packages](../guides/native-candidate.md#network-tool-packages), not in `provider-pins.json`.
 
 Put them in a folder under your home folder, not under `/tmp`: Hack refuses a path
 that passes through a symbolic link, and `/tmp` is one on macOS. Hack also refuses
@@ -73,7 +73,7 @@ Then prepare the runtime and check that this Mac can run it:
 
 Pass `--profile development` to `runtime probe`. Without it the probe checks a
 stricter research profile and can report "not admitted" on a Mac that runs projects
-fine. The [native reference](../../guides/native-candidate.md#manual-candidate-upgrade-and-rollback) explains
+fine. The [native reference](../guides/native-candidate.md#manual-candidate-upgrade-and-rollback) explains
 each command.
 
 ## 3. Check the project
@@ -107,7 +107,7 @@ Native `up` runs in the foreground and holds the project until you stop it. Add
 Stop the project with `hack down` from another terminal, as above. In this
 prerelease, Ctrl-C may not stop a foreground project cleanly when it publishes
 ports. If you already pressed Ctrl-C, run `hack down`, and `hack down --recover` if
-it reports that the owner is gone.
+it reports that the owner is gone. A fix is in progress.
 
 Then check the application itself: sign in, load a page that reads data, restart,
 and confirm the data is still there. A green status alone does not prove the
@@ -128,7 +128,7 @@ HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --path /absolut
 
 On Compose the prerelease uses your normal Hack home, the same one stable Hack
 uses. Do not run both against it at once. Stop the stable daemon first; the order is
-in [Stop stable hackd before a Compose run](../../guides/candidate-install.md#stop-stable-hackd-before-a-compose-run).
+in [Stop stable hackd before a Compose run](../guides/candidate-install.md#stop-stable-hackd-before-a-compose-run).
 
 Data does not move between backends. A database you filled on native is not in your
 Compose volumes, and the other way round.
@@ -137,4 +137,4 @@ Compose volumes, and the other way round.
 
 Stable Hack never depended on the candidate. To upgrade, roll back or stop using
 `hack-next`, see
-[Upgrade, roll back and return to stable](../../guides/candidate-install.md#upgrade-roll-back-and-return-to-stable).
+[Upgrade, roll back and return to stable](../guides/candidate-install.md#upgrade-roll-back-and-return-to-stable).

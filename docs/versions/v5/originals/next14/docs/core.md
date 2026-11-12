@@ -35,6 +35,15 @@ state and exit-code columns. An exited one-shot with code `0` completed
 successfully; a nonzero code indicates failure. `hack ps --json` reads Compose
 directly and retains each item's `State` and `ExitCode`, including immediately
 after a failed startup. Removed containers are not retained as run history.
+When Compose cannot list containers, `hack ps --json` prints the
+`{ok: false, error}` envelope with a stable code: `E_DOCKER_UNAVAILABLE` when the
+engine is not reachable or does not answer in time, `E_PERMISSION` when the Docker
+socket (or a Compose input) refuses your user, `E_COMPOSE_OUTPUT_INVALID` when the
+output is not JSON, otherwise `E_COMPOSE_FAILED`. Only the Docker client's
+connection error is quoted, with secret-looking values redacted; other Compose
+output is left out because Compose can expand project values into it. Without
+`--json`, the engine and permission cases print the same coded line; for the
+other two, `hack ps` runs plain `docker compose ps` and shows its output.
 When finished:
 
 ```sh
@@ -78,4 +87,4 @@ Docker Compose is the default backend and the one every example on this page use
 v5 adds a native backend (beta) for Apple Silicon macOS, available through the
 `hack-next` channel and selected with `HACK_RUNTIME_BACKEND=native`, that runs explicitly prepared projects without Docker
 and supports a bounded command subset. See [Upgrade to v5](guides/upgrade-to-v5.md)
-and [the native backend guide](guides/native-candidate.md).
+and [the native backend overview](native/README.md).

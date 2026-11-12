@@ -674,9 +674,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Prepare matching compiler for private file owner tests
         run: bun run build:config-compiler
+      # GitHub's Ubuntu image leaves /usr/local/bin and /opt (where some
+      # /usr/bin links point) writable by everyone. The hackd.service PATH
+      # checks refuse that, as they should on a real host (HACK-2142), so the
+      # daemon tests would only see the runner's layout. Make them
+      # owner-writable, as on a stock Ubuntu install.
+      - name: Harden runner PATH directories
+        if: runner.os == 'Linux'
+        run: sudo chmod go-w /usr/local/bin /opt
       # Runs check:bun-version and test:preflight as `bun run test` does, then
       # verifies that the shards (and, when pooled, the two pools) cover the
-      # full test file set exactly once.
+      # full test file set, the both-pool files once on each host.
       - name: Tests (shard)
         env:
           HACK_TEST_SHARD: ${{ matrix.shard }}/8

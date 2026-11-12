@@ -1,0 +1,24 @@
+{
+  "ffffffffffffffffffffffffffffffff": {
+    "owner": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "run": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reservation": "ffffffffffffffffffffffffffffffff",
+    "slot": 0,
+    "port": 18080,
+    "unix": false,
+    "token": "88888888888888888888888888888888",
+    "process": {
+      "pid": 43,
+      "start_micros": 124,
+      "uid": 1000,
+      "executable": "/fixture/publisher"
+    },
+    "digest": "9999999999999999999999999999999999999999999999999999999999999999",
+    "directory": [1, 2],
+    "binary": {
+      "device": 1,
+      "inode": 3,
+      "ready": true
+    }
+  }
+}

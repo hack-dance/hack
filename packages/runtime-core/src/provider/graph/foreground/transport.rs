@@ -1263,7 +1263,24 @@ impl Retired {
         owner_sha256: &str,
         complete_sha256: &str,
     ) -> Result<ProcessIdentity, CandidateError> {
-        self.verify_recovery(candidate, run, owner_sha256, complete_sha256)?;
+        self.publisher_process_with_rebind(candidate, run, owner_sha256, complete_sha256, None)
+    }
+
+    pub fn publisher_process_with_rebind(
+        &self,
+        candidate: &Candidate,
+        run: &str,
+        owner_sha256: &str,
+        complete_sha256: &str,
+        device_rebind: Option<DeviceRebind>,
+    ) -> Result<ProcessIdentity, CandidateError> {
+        self.verify_recovery_with_rebind(
+            candidate,
+            run,
+            owner_sha256,
+            complete_sha256,
+            device_rebind,
+        )?;
         let intent: Retirement = state::read(&retirement_path(&self.root, owner_sha256))
             .map_err(|_| retirement_refused())?;
         let (socket_original, record_original) = verify_retirement(
@@ -1273,7 +1290,7 @@ impl Retired {
             &self.root,
             &self._lock,
             &intent,
-            None,
+            device_rebind,
         )?;
         if socket_original || record_original {
             return Err(retirement_refused());

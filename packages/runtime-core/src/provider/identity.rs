@@ -1,6 +1,10 @@
 //! Strict native process and disk identities; no PID-only or argv-substring adoption.
+mod incarnation;
 use super::state::io;
 use crate::CandidateError;
+#[cfg(target_os = "macos")]
+pub(crate) use incarnation::birth;
+pub(crate) use incarnation::incarnation_gone;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};

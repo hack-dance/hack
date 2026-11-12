@@ -1182,6 +1182,7 @@ mod tests {
 
     fn startup_fixture(aliases: Vec<String>) -> startup::Startup {
         startup::Startup {
+            control_generation: None,
             control_only: false,
             guest_root: None,
             control_root: "/private/tmp/owned-fixture".into(),

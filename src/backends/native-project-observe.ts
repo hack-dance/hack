@@ -6,6 +6,11 @@ import {
   OBSERVER_BUSY_WAIT_MS,
 } from "./native-project-inspect.ts";
 import {
+  type NativePublishedPort,
+  nativeDeclaredPorts,
+  nativeObservedPorts,
+} from "./native-project-publications.ts";
+import {
   loadNativeProjectRun,
   type NativeProjectRun,
   type NativeProjectRunScope,
@@ -67,11 +72,17 @@ export type NativeProjectPsResult = {
   readonly run: string | null;
   readonly phase: string | null;
   readonly items: Item[];
+  readonly ports?: NativePublishedPort[];
 };
 function inspected(
   value: unknown,
   expected: NativeProjectRun
-): { items: Item[]; phase: string; foreground: boolean } {
+): {
+  items: Item[];
+  phase: string;
+  foreground: boolean;
+  ports: NativePublishedPort[];
+} {
   if (
     !(
       isRecord(value) &&
@@ -108,6 +119,7 @@ function inspected(
   }
   return {
     items,
+    ports: nativeDeclaredPorts(receipt.resources),
     phase: receipt.phase,
     foreground:
       receipt.relay_startup !== null && receipt.relay_startup !== undefined,
@@ -198,6 +210,7 @@ export async function nativeProjectPs(
   }
   let status: "observed" | "owner_unconfirmed" | "runtime_degraded" =
     "observed";
+  let ports = snapshot.ports;
   if (snapshot.foreground && snapshot.phase === "ready-observed") {
     try {
       const owner = await (opts.invoke ?? invokeNativeRuntime)({
@@ -219,6 +232,9 @@ export async function nativeProjectPs(
       } else if (!owner.runtime_verified) {
         status = "runtime_degraded";
       }
+      if (status !== "owner_unconfirmed" && isRecord(owner)) {
+        ports = nativeObservedPorts(ports, owner.publisher_ports);
+      }
     } catch {
       // Keep current container observations, but never call a stale ready receipt healthy.
       status = "owner_unconfirmed";
@@ -230,6 +246,7 @@ export async function nativeProjectPs(
     run: run.run,
     items: snapshot.items,
     phase: snapshot.phase,
+    ...(ports.length ? { ports } : {}),
   };
 }
 /** Native logs are a bounded, single-service snapshot; no polling or Compose fallback. */

@@ -4,6 +4,9 @@ Hack keeps the parts needed to run a project together: services, environment,
 secrets, local URLs, startup helpers and logs. The setup lives in `.hack/` in the
 repository, so teammates and agents can use the same definition.
 
+Developers and agents use the local CLI to control a local runtime; Hack does not
+require a hosted control service.
+
 ## Project, service and instance
 
 A **project** is a repository with Hack configuration. A **service** is one part of

@@ -94,9 +94,11 @@ export function pathKind(path: string): PathKind {
 
 /**
  * Inputs of the documentation site job: the docs corpus and its pins, the site,
- * the scripts that stage and check them, and the workflow that defines the job.
+ * the scripts that stage and check them, the README picture references, and
+ * the workflow that defines the job.
  */
 const DOCS_SITE_PATHS = [
+  /^README\.md$/,
   /^docs\//,
   /^site\//,
   /^scripts\/docs\//,

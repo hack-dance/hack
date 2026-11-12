@@ -160,8 +160,8 @@ describe("change scope classification", () => {
       ["site/app/page.tsx", true],
       ["scripts/docs/prepare.ts", true],
       [".github/workflows/ci.yml", true],
-      // Root documents are not published by the site.
-      ["README.md", false],
+      // The README's committed pictures are verified by docs:check.
+      ["README.md", true],
       ["scripts/docs-other.ts", false],
       [".github/workflows/release.yml", false],
       ["src/commands/project.ts", false],
@@ -178,7 +178,7 @@ describe("change scope classification", () => {
     });
     expect(planScope(["README.md"])).toMatchObject({
       scope: "docs",
-      docs_site: false,
+      docs_site: true,
     });
     expect(planScope(["src/a.ts", "site/app/page.tsx"])).toMatchObject({
       scope: "typescript",

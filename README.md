@@ -34,9 +34,9 @@ only its ports. A project has one identity. Hack uses it to route
 label its logs, and keep its branch instances apart. Under the hood it uses Docker
 Compose for services, local DNS helpers for names, and Caddy for trusted TLS.
 
-The CLI runs services through one selected engine, can read cached views from the
-daemon, and shares DNS and a proxy across projects; the native VM is an opt-in
-Apple Silicon macOS beta through `hack-next`.
+The CLI runs services through one selected engine and can read cached views from
+the optional daemon, while global setup shares DNS and a proxy across projects;
+the native VM is an opt-in Apple Silicon macOS beta through `hack-next`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/readme/project.dark.svg" />

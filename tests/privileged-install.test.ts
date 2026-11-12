@@ -108,14 +108,20 @@ describe("stdinInstallStep", () => {
     // No source path anywhere: root reads only stdin.
     expect(STDIN_INSTALL_SCRIPT).not.toContain("$5");
     expect(STDIN_INSTALL_SCRIPT).toContain('sync -- "$tmp"; mv -fT');
+    // The reader writes to a descriptor the shell opened before forking it;
+    // it never opens a path itself.
     expect(STDIN_INSTALL_SCRIPT).toContain(
-      'head -c "$((n + 1))" <&3 > "$tmp" & reader=$!'
+      'head -c "$((n + 1))" <&3 >&4 & reader=$!'
     );
+    expect(
+      STDIN_INSTALL_SCRIPT.indexOf('set -C; exec 4> "$tmp"; set +C')
+    ).toBeLessThan(STDIN_INSTALL_SCRIPT.indexOf("& reader=$!"));
+    expect(STDIN_INSTALL_SCRIPT.match(/> "\$tmp"/g)).toHaveLength(1);
     // The signal handler never cancels the reader by pid (HACK-2136).
     expect(STDIN_INSTALL_SCRIPT).not.toMatch(/\bkill\b/);
     // Cleanup is armed before the temporary file exists.
     expect(STDIN_INSTALL_SCRIPT.indexOf('trap \'[ -z "$tmp" ]')).toBeLessThan(
-      STDIN_INSTALL_SCRIPT.indexOf('set -C; : > "$tmp"')
+      STDIN_INSTALL_SCRIPT.indexOf('set -C; exec 4> "$tmp"')
     );
   });
 });
@@ -339,6 +345,40 @@ describe("root stdin install script", () => {
       expect(await leftovers(box.dest)).toEqual([]);
       expect(await Bun.file(target).exists()).toBe(false);
     }
+  });
+
+  test("a reader that outlives a signal leaves no temporary file behind", async () => {
+    // The script is signalled as soon as the reader has been started, before
+    // it is waited for; the reader then finishes on its own. It writes only
+    // to the descriptor the shell opened, so it cannot recreate the file the
+    // EXIT trap removed. A shell cannot delay a child's own open, so this
+    // does not reproduce the old race (the child opening the path after the
+    // trap); the descriptor assertions in the argv test guard against it.
+    const early = 'wait() { kill -s TERM $$; command wait "$@"; }';
+    const box = await sandbox();
+    const target = join(box.dest, "hack.rules");
+    const step = stdinInstallStep({ target, content: "approved\n" });
+    const [, , , ...rest] = step.argv;
+    const shell = Bun.which("dash") ?? "sh";
+    const proc = Bun.spawn(
+      [
+        shell,
+        "-c",
+        `${early}; ${renderStdinInstallScript({ timeoutSeconds: 5 })}`,
+        ...rest,
+      ],
+      {
+        stdin: new Blob([step.input.slice()]),
+        stdout: "ignore",
+        stderr: "ignore",
+        env: { PATH: `${join(box.root, "bin")}:/usr/bin:/bin` },
+      }
+    );
+    expect(await proc.exited).toBe(130);
+    // Give the reader time to finish reading its (already complete) input.
+    await Bun.sleep(300);
+    expect(await leftovers(box.dest)).toEqual([]);
+    expect(await Bun.file(target).exists()).toBe(false);
   });
 
   test("invalid arguments are refused before anything is created", async () => {

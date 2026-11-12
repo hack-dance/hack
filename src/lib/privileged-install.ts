@@ -80,8 +80,12 @@ export function renderStdinInstallScript(opts?: {
     // The name is set before the file exists, and noclobber makes the
     // create exclusive. Only root can write in this directory (checked
     // above), so a per-process name is enough and nothing can pre-empt it.
+    // The shell itself opens the file, as descriptor 4, before the reader
+    // starts: the reader inherits that descriptor and never opens a path, so
+    // a reader outliving a signal cannot recreate the file after the EXIT
+    // trap removed it.
     'tmp="$dir/.hack-install.$$"',
-    'set -C; : > "$tmp"; set +C',
+    'set -C; exec 4> "$tmp"; set +C',
     // One byte past the declared count, so longer input is seen and refused.
     // The read runs in the background on a copy of stdin (an asynchronous
     // list would otherwise read /dev/null) and the shell waits for it: a
@@ -89,8 +93,10 @@ export function renderStdinInstallScript(opts?: {
     // removes the temporary file. The reader, bounded by its time limit and
     // by end of input, then writes only to that unlinked file.
     "exec 3<&0",
-    `timeout -k 1 ${seconds} head -c "$((n + 1))" <&3 > "$tmp" & reader=$!`,
+    `timeout -k 1 ${seconds} head -c "$((n + 1))" <&3 >&4 & reader=$!`,
     'wait "$reader" || exit 66',
+    // Later steps (and a caller's appended command) do not inherit either.
+    "exec 3<&- 4>&-",
     '[ "$(wc -c < "$tmp")" -eq "$n" ] || exit 66',
     'printf "%s  %s\\n" "$sum" "$tmp" | sha256sum -c --status || exit 67',
     'chown root:root -- "$tmp"',

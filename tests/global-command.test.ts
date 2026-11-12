@@ -82,9 +82,38 @@ const osMock = await registerScopedModuleMock({
   },
 });
 
+// HACK-2053: Linux runs of global install/down/status go through this fake
+// DNS host, never the real /etc, resolvectl or sudo.
+const linuxDnsPrivileged: string[][] = [];
+// Default: resolved inactive, so Linux installs take the manual (no prompt)
+// path even in a terminal. Only the sudo test opts into the apply path.
+let fakeLinuxResolvedActive = false;
+const linuxDnsHostMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/linux-dns-host.ts",
+  overrides: {
+    createLinuxDnsHost: () => ({
+      readFile: async (path: string) =>
+        path === "/etc/resolv.conf" ? "nameserver 127.0.0.53\n" : null,
+      listDir: async () => [],
+      isResolvedActive: async () => fakeLinuxResolvedActive,
+      systemdVersion: async () => 255,
+      findLinkWithAddress: async () => "br-0123456789ab",
+      readLinkRoute: async () => ({ dns: [], domains: [], defaultRoute: null }),
+      stageFile: async ({ name }: { readonly name: string }) =>
+        join(tempDir ?? tmpdir(), name),
+      runPrivileged: async (argv: readonly string[]) => {
+        linuxDnsPrivileged.push([...argv]);
+        return 0;
+      },
+    }),
+  },
+});
+
 beforeAll(() => {
   shellMock.activate();
   osMock.activate();
+  linuxDnsHostMock.activate();
 });
 
 beforeEach(async () => {
@@ -99,6 +128,8 @@ beforeEach(async () => {
   }
   execCalls.length = 0;
   runCalls.length = 0;
+  linuxDnsPrivileged.length = 0;
+  fakeLinuxResolvedActive = false;
   execMockResponder = null;
   runExitResponder = null;
 });
@@ -119,6 +150,7 @@ afterEach(async () => {
 afterAll(() => {
   shellMock.deactivate();
   osMock.deactivate();
+  linuxDnsHostMock.deactivate();
 });
 
 async function writeComposeFile(path: string): Promise<void> {
@@ -885,3 +917,25 @@ test("global up names the listener holding :443 when the proxy cannot start (HAC
   expect(text).toContain("10.8.0.2:443 vpn-client (pid 4242)");
   expect(text).toContain("proxy.bind_address");
 });
+
+test(
+  "non-interactive global install on Linux never runs sudo for DNS (HACK-2053)",
+  async () => {
+    if (process.platform !== "linux") {
+      return;
+    }
+    await writeInstallStubs();
+    fakeLinuxResolvedActive = true;
+    const saved = process.env.HACK_NO_INTERACTIVE;
+    process.env.HACK_NO_INTERACTIVE = "1";
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      expect(await runCli(["global", "install"])).toBe(0);
+    } finally {
+      restoreEnv("HACK_NO_INTERACTIVE", saved);
+    }
+    expect(linuxDnsPrivileged).toEqual([]);
+    expect(runCalls.some((call) => call[0] === "sudo")).toBe(false);
+  },
+  { timeout: 20_000 }
+);

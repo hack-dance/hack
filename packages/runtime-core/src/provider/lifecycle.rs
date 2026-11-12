@@ -185,6 +185,9 @@ pub(super) fn verify_live(candidate: &Candidate, owner: &Owner) -> Result<(), Ca
             "No independently retained provider identity.",
         )
     })?;
+    if recorded.executable != binary(candidate) {
+        artifact::check_process_pin(candidate, &recorded.executable)?;
+    }
     if recorded_process(candidate, owner)? != *recorded {
         return Err(CandidateError::new(
             "process_identity_mismatch",

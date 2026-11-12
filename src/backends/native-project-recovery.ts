@@ -24,7 +24,7 @@ const PROCESS_LINE = /^\s*(\d+)\s+(.+?)\s*$/;
 
 function refused(): Error {
   return new ClosedCliError(
-    "Native frontend recovery cannot prove the old owner and effects are gone; retained data was not changed."
+    "Native frontend recovery cannot prove the old owner and effects are gone; retained data was not changed. Run hack ps --json to inspect this run's retained state."
   );
 }
 

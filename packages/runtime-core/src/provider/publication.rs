@@ -1,5 +1,7 @@
 //! Foreground host publications. Intent precedes staging/exec; cleanup never adopts unknown files.
 pub mod recovery;
+#[cfg(test)]
+mod retirement_tests;
 use super::{identity, publisher, state};
 use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};
@@ -83,6 +85,9 @@ struct Entry {
     directory: Option<(u64, u64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     binary: Option<BinaryStage>,
+    /// Written only after this owner reaps its exact native child incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reaped: Option<identity::ProcessIdentity>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -198,6 +203,7 @@ fn validate(entries: &BTreeMap<String, Entry>, owner: &str) -> Result<(), Candid
             || !slots.insert(e.slot)
             || e.process.pid <= 1
             || e.process.start_micros == 0
+            || e.reaped.as_ref().is_some_and(|proof| proof != &e.process)
             || e.process.uid != unsafe { libc::geteuid() }
             || e.directory.is_some_and(|(_, inode)| inode == 0)
             || e.binary
@@ -213,6 +219,14 @@ fn validate(entries: &BTreeMap<String, Entry>, owner: &str) -> Result<(), Candid
 /// Recover only complete, single-step publications while holding the provider lock.
 /// This runs on cleanup paths; startup never replays a pending journal.
 fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
+    recover_pending_fenced(c, owner, &|| Ok(()), None)
+}
+fn recover_pending_fenced(
+    c: &Candidate,
+    owner: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+    child_exit: Option<&identity::ProcessIdentity>,
+) -> Result<(), CandidateError> {
     let root = root(c);
     let pending = root.join("state.pending");
     if !pending.exists() && !pending.is_symlink() {
@@ -243,12 +257,16 @@ fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
         let old = before.get(*key);
         let new = after.get(*key);
         let entry = new.or(old).expect("changed entry");
-        if identity::alive(entry.process.pid)? {
+        if child_exit != Some(&entry.process)
+            && new.and_then(|entry| entry.reaped.as_ref()).is_none()
+            && !entry_gone(entry)?
+        {
             return Err(error());
         }
         match (old, new) {
             (None, Some(e)) => {
-                if e.directory.is_some()
+                if e.reaped.is_some()
+                    || e.directory.is_some()
                     || e.binary.is_some()
                     || directory(e).exists()
                     || directory(e).is_symlink()
@@ -264,6 +282,10 @@ fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
             (Some(old), Some(new)) => {
                 let mut expected = old.clone();
                 let allowed = match (&old.directory, &new.directory, &old.binary, &new.binary) {
+                    _ if old.reaped.is_none() && new.reaped.as_ref() == Some(&old.process) => {
+                        expected.reaped = new.reaped.clone();
+                        true
+                    }
                     (None, Some(_), None, None) => {
                         expected.directory = new.directory;
                         true
@@ -301,6 +323,7 @@ fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
         .map_err(state::io)?
         .sync_all()
         .map_err(state::io)?;
+    fence()?;
     fs::rename(&pending, &path).map_err(state::io)?;
     File::open(root)
         .map_err(state::io)?
@@ -308,6 +331,125 @@ fn recover_pending(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
         .map_err(state::io)
 }
 fn save(c: &Candidate, entries: &BTreeMap<String, Entry>) -> Result<(), CandidateError> {
+    save_before_rename(c, entries, &|| Ok(()))
+}
+fn entry_gone(entry: &Entry) -> Result<bool, CandidateError> {
+    if entry.reaped.as_ref() == Some(&entry.process) {
+        return Ok(true);
+    }
+    identity::incarnation_gone(&entry.process)
+}
+
+/// Observe only this retained direct child, without reaping or taking a provider
+/// lease. A live publisher must never compete with its launcher's guest lease.
+#[cfg(any(test, target_os = "macos"))]
+fn child_exit_pending(child: &std::process::Child) -> Result<bool, CandidateError> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: valid writable output and our retained direct Child. WNOWAIT
+    // keeps its PID unreusable until identity is bound under the provider lease.
+    if unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    } != 0
+    {
+        return Err(state::io(std::io::Error::last_os_error()));
+    }
+    // SAFETY: waitid returned successfully into zero-initialized storage.
+    let info = unsafe { info.assume_init() };
+    #[cfg(target_os = "macos")]
+    let pid = info.si_pid;
+    #[cfg(not(target_os = "macos"))]
+    // SAFETY: the kernel initialized this siginfo union for waitid.
+    let pid = unsafe { info.si_pid() };
+    Ok(pid != 0)
+}
+
+/// Reap only the caller's retained direct child. Bind its native birth to the
+/// exact journal before try_wait, then persist that exit before guest cleanup.
+#[cfg(target_os = "macos")]
+pub(crate) fn reap_child(
+    c: &Candidate,
+    owner: &str,
+    run: &str,
+    reservation: &str,
+    child: &mut std::process::Child,
+    exit: &mut Option<ChildExit>,
+) -> Result<Option<std::process::ExitStatus>, CandidateError> {
+    if exit.is_none() && !child_exit_pending(child)? {
+        return Ok(None);
+    }
+    let _lease = state::Lock::acquire_existing_waiting(
+        &c.state_root.join("run/smolvm"),
+        std::time::Duration::from_secs(120),
+    )?;
+    if exit.is_none() {
+        // Read both generations without replaying either. A publisher can exit
+        // while its own launch write is pending; reaping must precede recovery.
+        let mut recorded = None;
+        for name in ["state.json", "state.pending"] {
+            let path = root(c).join(name);
+            if !path.exists() && !path.is_symlink() {
+                continue;
+            }
+            let entries: BTreeMap<String, Entry> = state::read_bounded(&path, 65536)?;
+            validate(&entries, owner)?;
+            if let Some(entry) = entries.get(reservation) {
+                if entry.run != run
+                    || entry.process.pid != child.id() as i32
+                    || recorded
+                        .as_ref()
+                        .is_some_and(|before| before != &entry.process)
+                {
+                    return Err(error());
+                }
+                recorded = Some(entry.process.clone());
+            }
+        }
+        let Some(recorded) = recorded else {
+            return child.try_wait().map_err(state::io);
+        };
+        let (start, uid) = identity::birth(child.id() as i32)?;
+        if start != recorded.start_micros || uid != recorded.uid {
+            return Err(error());
+        }
+        if let Some(status) = child.try_wait().map_err(state::io)? {
+            // Retain proof even when the following write refuses or is pending.
+            *exit = Some(ChildExit {
+                process: recorded,
+                status,
+            });
+        }
+    }
+    let Some(proof) = exit else {
+        return Ok(None);
+    };
+    recover_pending_fenced(c, owner, &|| Ok(()), Some(&proof.process))?;
+    let mut entries = load(c, owner)?;
+    if let Some(entry) = entries.get_mut(reservation) {
+        if entry.run != run || entry.process != proof.process {
+            return Err(error());
+        }
+        if entry.reaped.is_none() {
+            entry.reaped = Some(proof.process.clone());
+            save(c, &entries)?;
+        }
+    }
+    Ok(Some(proof.status))
+}
+#[cfg(target_os = "macos")]
+pub(crate) struct ChildExit {
+    process: identity::ProcessIdentity,
+    status: std::process::ExitStatus,
+}
+fn save_before_rename(
+    c: &Candidate,
+    entries: &BTreeMap<String, Entry>,
+    before_rename: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
     if serde_json::to_vec_pretty(entries)
         .map_err(|_| error())?
         .len()
@@ -316,7 +458,21 @@ fn save(c: &Candidate, entries: &BTreeMap<String, Entry>) -> Result<(), Candidat
         return Err(error());
     }
     state::private_directory(&root(c))?;
-    state::write(&root(c).join("state.json"), entries)
+    state::write_before_rename(&root(c).join("state.json"), entries, before_rename)
+}
+
+/// Caller holds the provider lease. Finish only a validated single-step journal
+/// under the same recovery fence before selecting entries for retirement.
+#[cfg(any(test, target_os = "macos"))]
+fn retirement_entries(
+    c: &Candidate,
+    owner: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<BTreeMap<String, Entry>, CandidateError> {
+    fence()?;
+    recover_pending_fenced(c, owner, fence, None)?;
+    fence()?;
+    load(c, owner)
 }
 fn verify_directory(e: &Entry) -> Result<bool, CandidateError> {
     let dir = directory(e);
@@ -405,12 +561,16 @@ fn check_socket(
         .map_err(state::io)
 }
 fn cleanup(e: &Entry) -> Result<(), CandidateError> {
-    publisher::stop(publisher::StopOptions {
+    let options = publisher::StopOptions {
         process: &e.process,
         binary: &e.process.executable,
         control: &directory(e).join("control"),
         token: &e.token,
-    })?;
+    };
+    #[cfg(target_os = "macos")]
+    publisher::stop_with_exit(options, e.reaped.as_ref())?;
+    #[cfg(not(target_os = "macos"))]
+    publisher::stop(options)?;
     if !verify_directory(e)? {
         return Ok(());
     }
@@ -492,6 +652,58 @@ fn cleanup(e: &Entry) -> Result<(), CandidateError> {
         .map_err(state::io)?
         .sync_all()
         .map_err(state::io)
+}
+
+/// The caller holds the provider lease; require every selected recorded process to be absent before
+/// any guest cleanup. A reused, live or inaccessible PID conservatively refuses.
+#[cfg(target_os = "macos")]
+pub(crate) fn require_run_absent(
+    c: &Candidate,
+    owner: &str,
+    run: &str,
+) -> Result<(), CandidateError> {
+    for entry in load(c, owner)?.values().filter(|entry| entry.run == run) {
+        if !entry_gone(entry)? {
+            return Err(CandidateError::new(
+                "graph_publisher_running",
+                "Recovery cannot prove this run's port publisher exited. Run hack ps --json to inspect retained state.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A dead graph owner's recovery may use the publisher's original authenticated
+/// shutdown protocol. Each entry is retired only after exact native process exit
+/// and inode proofs succeed; no signal or PID adoption is introduced here.
+#[cfg(target_os = "macos")]
+pub(crate) fn retire_run(
+    c: &Candidate,
+    owner: &str,
+    run: &str,
+    fence: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    let mut entries = retirement_entries(c, owner, fence)?;
+    let selected = entries
+        .iter()
+        .filter(|(_, entry)| entry.run == run)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in selected {
+        fence()?;
+        cleanup(&entries[&key])?;
+        fence()?;
+        #[cfg(test)]
+        super::graph::publisher_recovery_fault(c, run, "publisher-recovery-after-stop")?;
+        entries.remove(&key);
+        save_before_rename(c, &entries, &|| {
+            fence()?;
+            #[cfg(test)]
+            super::graph::publisher_recovery_fault(c, run, "publisher-recovery-registry-pending")?;
+            Ok(())
+        })?;
+    }
+    require_run_absent(c, owner, run)
 }
 /// Caller holds the provider operation lock. Stop host listeners before guest resources.
 pub(super) fn release(
@@ -783,6 +995,7 @@ pub(super) fn launch(c: &Candidate, options: Launch<'_>) -> Result<(), Candidate
         digest: format!("{:x}", Sha256::digest(bytes)),
         directory: None,
         binary: None,
+        reaped: None,
     };
     let dir = directory(&e);
     e.process.executable = dir.join("publisher");
@@ -941,6 +1154,7 @@ mod tests {
             digest: format!("{:x}", Sha256::digest(b"fixture")),
             directory: None,
             binary: None,
+            reaped: None,
         };
         e.process.executable = directory(&e).join("publisher");
         (candidate, e)
@@ -959,6 +1173,50 @@ mod tests {
             assert_eq!(&args[args.len() - 2..], &["--control-fd", "0"]);
         }
         fs::remove_dir_all(&candidate.checkout).unwrap();
+    }
+    #[test]
+    fn exact_child_exit_is_reaped_and_committed_even_with_pending_launch() {
+        for pending in [false, true] {
+            let (c, mut entry) = fixture();
+            let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+            entry.process = identity::observe(child.id() as i32).unwrap();
+            entry.process.executable = directory(&entry).join("publisher");
+            let entries = BTreeMap::from([(entry.reservation.clone(), entry.clone())]);
+            drop(state::Lock::acquire(&c.state_root.join("run/smolvm")).unwrap());
+            if pending {
+                save(&c, &BTreeMap::new()).unwrap();
+                assert!(save_before_rename(&c, &entries, &|| Err(error())).is_err());
+            } else {
+                save(&c, &entries).unwrap();
+            }
+            child.kill().unwrap();
+            let mut proof = None;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if reap_child(
+                    &c,
+                    &entry.owner,
+                    &entry.run,
+                    &entry.reservation,
+                    &mut child,
+                    &mut proof,
+                )
+                .unwrap()
+                .is_some()
+                {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+            }
+            let recorded = load(&c, &entry.owner).unwrap();
+            assert_eq!(
+                recorded[&entry.reservation].reaped.as_ref(),
+                Some(&entry.process)
+            );
+            assert!(entry_gone(&recorded[&entry.reservation]).unwrap());
+            assert!(!root(&c).join("state.pending").exists());
+            fs::remove_dir_all(&c.checkout).unwrap();
+        }
     }
     #[test]
     fn hostname_transition_preflight_keeps_foreign_and_pending_claims_intact() {

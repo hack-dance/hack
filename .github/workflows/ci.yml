@@ -818,3 +818,5 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Run process and terminal regressions
         run: bun test tests/daemon-command.test.ts tests/daemon-orphan.test.ts tests/host-exec-lifetime.test.ts tests/host-exec-tty.test.ts tests/shell-observation.test.ts tests/shared-host-lifecycle.test.ts tests/project-shared-helpers.test.ts
+
+# Temporary workflow-input CI scope verification.

@@ -84,10 +84,11 @@ export function renderStdinInstallScript(opts?: {
     // and the EXIT trap removes the temporary file.
     "exec 3<&0",
     `timeout -k 1 ${seconds} head -c "$((n + 1))" <&3 > "$tmp" & reader=$!`,
-    'rc=0; wait "$reader" || rc=$?',
-    // The reader is reaped: its pid may be reused from here on, so the signal
-    // handler goes back to cleanup only and never signals that pid again.
-    "trap 'exit 130' HUP INT TERM; reader=",
+    // The reader is reaped once `wait` returns and its pid may be reused, so
+    // `reader` is cleared on the same line (the handler skips the kill when
+    // it is empty) and the handler then goes back to cleanup only.
+    'rc=0; wait "$reader" || rc=$?; reader=',
+    "trap 'exit 130' HUP INT TERM",
     '[ "$rc" -eq 0 ] || exit 66',
     '[ "$(wc -c < "$tmp")" -eq "$n" ] || exit 66',
     'printf "%s  %s\\n" "$sum" "$tmp" | sha256sum -c --status || exit 67',

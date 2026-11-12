@@ -125,7 +125,10 @@ resolver settings when its DNS servers are exactly Hack's CoreDNS; because
 `resolvectl revert` clears every per-link setting, the confirmation lists any
 setting on that link that is not Hack's first. A file without the marker, or a
 bridge with other DNS servers next to CoreDNS, is left in place, and Hack prints
-what it found and the command to remove it by hand.
+what it found and the command to remove it by hand. Running `hack-dns@`
+services are stopped only when Hack deletes its own unit file; services of a
+unit left in place are not touched. `hack global down` is safe to rerun: if an
+earlier run was interrupted, a rerun after a few seconds finishes the removal.
 
 ### Switching resolvers
 

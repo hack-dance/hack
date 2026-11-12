@@ -2680,6 +2680,10 @@ pub(super) fn kill_owned_vm_for_test(candidate: &Candidate) -> Result<(), Candid
 }
 
 #[cfg(test)]
+#[path = "lifecycle_log_follow_tests.rs"]
+mod log_follow_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

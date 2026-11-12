@@ -13,9 +13,18 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseNativeAuthoredReceipt } from "../src/backends/native-authored-graph-protocol.ts";
 import {
+  nativeAuthoredLogsOptions,
   nativeAuthoredProjectLogs,
   parseNativeAuthoredLogs,
 } from "../src/backends/native-authored-project-logs.ts";
+
+test("zero tail is admitted for authored follow but remains invalid for finite snapshots", () => {
+  expect(nativeAuthoredLogsOptions("web", 0, true)).toBe(true);
+  expect(nativeAuthoredLogsOptions("web", 0, false)).toBe(false);
+  expect(nativeAuthoredLogsOptions("web", -1, true)).toBe(false);
+  expect(nativeAuthoredLogsOptions("web", 1001, true)).toBe(false);
+});
+
 import {
   nativeAuthoredProjectNamespace,
   saveNativeAuthoredProjectRun,

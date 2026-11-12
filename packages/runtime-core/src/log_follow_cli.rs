@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 fn invalid() -> CandidateError {
     CandidateError::new(
         "native_log_arguments",
-        "Use graph logs-follow --run-id ID --service NAME --expect-owner ID --expect-plan SHA --expect-namespace SHA [--native] [--tail 1..1000] [--since UNIX_SECONDS].",
+        "Use graph logs-follow --run-id ID --service NAME --expect-owner ID --expect-plan SHA --expect-namespace SHA [--native] [--tail 0..1000] [--since UNIX_SECONDS].",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateError> {

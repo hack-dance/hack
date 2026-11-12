@@ -18,7 +18,7 @@ impl LogFollowOptions<'_> {
             || !super::hex(self.owner, 32)
             || !super::hex(self.plan, 64)
             || !super::hex(self.namespace, 64)
-            || !(1..=1000).contains(&self.tail)
+            || self.tail > 1000
             || self.service.is_empty()
             || self.service.len() > 128
             || !self
@@ -88,6 +88,10 @@ fn imported(candidate: &Candidate, options: &LogFollowOptions<'_>) -> Result<(),
         {
             return Err(changed());
         }
+        require_ready(
+            receipt.phase == "ready-observed",
+            receipt.readiness.contains_key(options.service),
+        )?;
         Ok(receipt)
     };
     let receipt = load_selected()?;
@@ -131,6 +135,14 @@ fn imported(candidate: &Candidate, options: &LogFollowOptions<'_>) -> Result<(),
 }
 
 #[cfg(any(target_os = "macos", test))]
+pub(super) fn require_ready(ready: bool, selected_service: bool) -> Result<(), CandidateError> {
+    if !ready || !selected_service {
+        return Err(changed());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn validate_state(
     value: Option<serde_json::Value>,
     generation: &serde_json::Value,
@@ -164,6 +176,38 @@ pub(super) fn validate_state(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn admission_requires_ready_graph_and_selected_service() {
+        for (ready, service) in [(false, false), (false, true), (true, false)] {
+            assert_eq!(
+                require_ready(ready, service).unwrap_err().code,
+                "native_log_selection_changed"
+            );
+        }
+        require_ready(true, true).unwrap();
+    }
+    #[test]
+    fn zero_tail_selects_only_new_lines() {
+        let options = LogFollowOptions {
+            run: &"a".repeat(32),
+            service: "web",
+            owner: &"b".repeat(32),
+            plan: &"c".repeat(64),
+            namespace: &"d".repeat(64),
+            tail: 0,
+            since: None,
+            native: false,
+        };
+        options.validate().unwrap();
+        assert!(
+            LogFollowOptions {
+                tail: 1001,
+                ..options
+            }
+            .validate()
+            .is_err()
+        );
+    }
     #[test]
     fn stopped_absent_restarted_and_tty_are_distinct() {
         let generation = json!("2026-01-01T00:00:00Z");

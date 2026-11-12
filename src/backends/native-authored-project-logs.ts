@@ -80,14 +80,15 @@ export async function followNativeAuthoredProjectLogs(input: {
 }
 export function nativeAuthoredLogsOptions(
   service: unknown,
-  tail: unknown
+  tail: unknown,
+  follow = false
 ): service is string {
   return (
     typeof service === "string" &&
     SERVICE.test(service) &&
     typeof tail === "number" &&
     Number.isSafeInteger(tail) &&
-    tail >= 1 &&
+    tail >= (follow ? 0 : 1) &&
     tail <= 1000
   );
 }

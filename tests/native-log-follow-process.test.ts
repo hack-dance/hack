@@ -46,6 +46,8 @@ async function fixture(
     | "error"
     | "malformed"
     | "flood"
+    | "stopped-idle"
+    | "long-partial"
 ) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-log-process-"))
@@ -73,6 +75,23 @@ process.stdin.resume();
 setTimeout(() => process.exit(91), ${mode === "flood" ? 10_000 : 5000});
 if (${JSON.stringify(mode)} === "error") { console.error(JSON.stringify({code:"native_log_tty_unsupported",message:"Fixture refusal."})); process.exit(2); }
 if (${JSON.stringify(mode)} === "malformed") { console.log("invalid-wire"); process.exit(0); }
+if (${JSON.stringify(mode)} === "stopped-idle") {
+  const partial = JSON.parse(${JSON.stringify(wire)});
+  partial.data = Buffer.from("tail fragment").toString("base64");
+  console.log(JSON.stringify(partial));
+  console.error(JSON.stringify({code:"native_log_stopped_idle",message:"Stopped without EOF."}));
+  process.exit(1);
+}
+if (${JSON.stringify(mode)} === "long-partial") {
+  const chunk = JSON.parse(${JSON.stringify(wire)});
+  for (let i = 0; i < 17; i++) {
+    chunk.data = Buffer.from("x".repeat(4096)).toString("base64");
+    if (!process.stdout.write(JSON.stringify(chunk) + "\\n")) await once(process.stdout, "drain");
+  }
+  chunk.data = Buffer.from("\\nafter\\nfragment").toString("base64");
+  console.log(JSON.stringify(chunk));
+  process.exit(0);
+}
 if (${JSON.stringify(mode)} !== "idle") { console.log(${JSON.stringify(wire)}); }
 if (${JSON.stringify(mode)} === "flood") {
   const chunk = JSON.parse(${JSON.stringify(wire)});
@@ -110,7 +129,7 @@ const output = new Writable({ write(chunk, encoding, callback) {
   }
   process.stdout.write(chunk, callback);
 } });
-const code = await followNativeLogs({ runtime: { binary: ${JSON.stringify(binary)}, home: ${JSON.stringify(root)} }, cwd: ${JSON.stringify(root)}, selection: ${JSON.stringify(selection)}, service: "web-2", tail: 12, since: "2026-01-01T00:00:00Z", json: true, project: "fixture", branch: "topic", stdout: output });
+const code = await followNativeLogs({ runtime: { binary: ${JSON.stringify(binary)}, home: ${JSON.stringify(root)} }, cwd: ${JSON.stringify(root)}, selection: ${JSON.stringify(selection)}, service: "web-2", tail: mode === "long-partial" ? 0 : 12, since: "2026-01-01T00:00:00Z", json: true, project: "fixture", branch: "topic", stdout: output });
 process.exit(code);
 `
   );
@@ -338,6 +357,61 @@ test("frontend SIGKILL closes the lifetime pipe even with an idle reader", async
     f.child.kill("SIGKILL");
     await f.child.exited;
     expect(await waitFile(join(f.root, "leash-ended"))).toBe("yes");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("stopped idle completion is named in stderr and JSON end instead of EOF", async () => {
+  const f = await fixture("stopped-idle");
+  try {
+    const output = await new Response(f.child.stdout).text();
+    const errors = await new Response(f.child.stderr).text();
+    expect(await f.child.exited).not.toBe(0);
+    const events = output
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.map((event) => event.type)).toEqual(["start", "log", "end"]);
+    expect(events[1].entry.partial).toBe(true);
+    expect(events[1].entry.message).toBe("tail fragment [partial]");
+    expect(events[2].reason).toBe("native_log_stopped_idle");
+    expect(errors).toContain("native_log_stopped_idle");
+    expect(errors).toContain("final tail may be incomplete");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("zero tail reaches runtime and truncation continues through a marked partial entry", async () => {
+  const f = await fixture("long-partial");
+  try {
+    const output = await new Response(f.child.stdout).text();
+    const errors = await new Response(f.child.stderr).text();
+    expect(await f.child.exited).toBe(0);
+    expect(errors).toBe("");
+    const args: string[] = JSON.parse(
+      await readFile(join(f.root, "args"), "utf8")
+    );
+    expect(args[args.indexOf("--tail") + 1]).toBe("0");
+    const events = output
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "log",
+      "log",
+      "log",
+      "end",
+    ]);
+    expect(events[1].entry.truncated).toBe(true);
+    expect(events[1].entry.message).toBe(`${"x".repeat(65_536)} [truncated]`);
+    expect(events[2].entry.message).toBe("after");
+    expect(events[2].entry.truncated).toBeUndefined();
+    expect(events[3].entry.partial).toBe(true);
+    expect(events[3].entry.message).toBe("fragment [partial]");
+    expect(events[4].reason).toBe("eof");
   } finally {
     await f.dispose();
   }

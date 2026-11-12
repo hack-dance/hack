@@ -21,7 +21,7 @@ does not fall back to Docker without telling you.
 | Restart the whole project | `hack restart`, in the foreground only |
 | Stop the project | `hack down`, and `hack down --recover` after a crash |
 | See what is running | `hack ps` |
-| Follow logs | `hack logs <service> --follow`, with `--tail`, `--since` and `--json`; `--no-follow` selects a bounded snapshot |
+| Read recent logs | `hack logs <service> --no-follow`, a bounded snapshot |
 | Run a command in a running service | `hack exec`, without an interactive terminal |
 | Run a one-off command | `hack run`, for services without source, data or private env mounts |
 | Preview without starting | `hack config validate`, `hack config plan`, `hack config import --dry-run`, `hack config adopt --dry-run` |
@@ -31,13 +31,22 @@ The exact rules for each command are in
 
 ## Not supported yet
 
+- Verified live log following. `hack logs <service> --follow` is available under
+  verification, with `--tail`, `--since` and `--json`; real-VM acceptance for both
+  authored and adopted projects remains pending. The following limits apply to
+  this candidate command.
 - Querying log history with Loki. Native live logs select one service; services configured with a TTY are currently refused by name.
 - Following through a container restart. Native follows one start generation;
   a confirmed stop ends the follow, or an already visible restart reports
   `native_log_container_restarted`. Start a new follower after restart.
-- Following a service before it is ready, or a log line longer than 64 Ki
-  characters. Startup refuses with `native_log_selection_changed`; an oversized
-  line ends the follow with `native_log_line_limit`.
+- Following a service before its graph is ready. Startup refuses with
+  `native_log_selection_changed`.
+- Complete oversized lines. Lines over 64 Ki characters retain only that
+  prefix with `[truncated]`; following continues. A trailing fragment is marked
+  `[partial]`. JSON entries also carry `truncated: true` or `partial: true`.
+- Proving a complete tail without transport EOF. A stopped service whose stream
+  stays open for five idle seconds ends with `native_log_stopped_idle` and exit 1,
+  not a clean EOF. The final tail may be incomplete.
 - Interactive `exec` sessions.
 - Changing the env overlay, profiles or target of a project that is already
   running. Stop it and start it again.

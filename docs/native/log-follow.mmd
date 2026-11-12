@@ -13,10 +13,12 @@ sequenceDiagram
     end
     Note over Reader,Down: Reader holds no mutation lease
     Down->>Engine: Stop or remove owned container
-    Engine-->>Reader: End of stream
+    Engine-->>Reader: EOF or idle after service stop
     Reader->>Engine: Check exact selected generation
-    alt Confirmed stopped or absent
+    alt Real EOF and confirmed stopped or absent
         Reader-->>CLI: Exit 0
+    else Five idle seconds without EOF after stop
+        Reader-->>CLI: native_log_stopped_idle, exit 1
     else Changed identity or unexplained EOF
         Reader-->>CLI: Named refusal
     end

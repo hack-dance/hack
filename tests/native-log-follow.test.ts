@@ -36,7 +36,11 @@ test("decodes UTF-8 across envelopes with independent stdout and stderr line sta
   await decoder.accept(envelope("error\n", "stderr"));
   await decoder.accept(envelope(bytes.subarray(8)));
   await decoder.finish();
-  expect(lines).toEqual(["stderr:error", "stdout:hello 🌍", "stdout:last"]);
+  expect(lines).toEqual([
+    "stderr:error",
+    "stdout:hello 🌍",
+    "stdout:last [partial]",
+  ]);
 });
 
 test("refuses changed container, invalid framing and oversized payloads by name", async () => {
@@ -60,17 +64,58 @@ test("refuses changed container, invalid framing and oversized payloads by name"
   );
 });
 
-test("newline-free output hits a fixed line bound instead of accumulating", async () => {
+test("oversized lines retain one bounded prefix, mark truncation and continue", async () => {
+  const lines: { text: string; truncated: boolean; partial: boolean }[] = [];
   const decoder = nativeLogLineDecoder({
     service: "web",
-    onLine: async () => {},
+    onLine: async (_stream, text, completeness) => {
+      lines.push({ text, ...completeness });
+    },
+  });
+  for (let i = 0; i < 64; i++) {
+    await decoder.accept(envelope("x".repeat(4096)));
+  }
+  expect(lines).toEqual([]);
+  await decoder.accept(envelope("\nafter\npartial"));
+  await decoder.finish();
+  expect(lines).toEqual([
+    {
+      text: `${"x".repeat(64 * 1024)} [truncated]`,
+      truncated: true,
+      partial: false,
+    },
+    { text: "after", truncated: false, partial: false },
+    { text: "partial [partial]", truncated: false, partial: true },
+  ]);
+});
+
+test("exact-bound lines stay complete and oversized trailing fragments mark both flags", async () => {
+  const lines: { text: string; truncated: boolean; partial: boolean }[] = [];
+  const decoder = nativeLogLineDecoder({
+    service: "web",
+    onLine: async (_stream, text, completeness) => {
+      lines.push({ text, ...completeness });
+    },
   });
   for (let i = 0; i < 16; i++) {
     await decoder.accept(envelope("x".repeat(4096)));
   }
-  await expect(decoder.accept(envelope("x"))).rejects.toThrow(
-    "native_log_line_limit"
-  );
+  await decoder.accept(envelope("\n"));
+  for (let i = 0; i < 16; i++) {
+    await decoder.accept(envelope("y".repeat(4096)));
+  }
+  await decoder.accept(envelope("more"));
+  await decoder.finish();
+  expect(lines[0]).toEqual({
+    text: "x".repeat(65_536),
+    truncated: false,
+    partial: false,
+  });
+  expect(lines[1]).toEqual({
+    text: `${"y".repeat(65_536)} [truncated] [partial]`,
+    truncated: true,
+    partial: true,
+  });
 });
 
 test("consumer backpressure stops line delivery until the current write finishes", async () => {
@@ -151,6 +196,13 @@ test("unsupported flags and bounds are refused explicitly", () => {
   );
   expect(() => nativeLogFollowOptions({})).toThrow("service");
   expect(() => nativeLogFollowOptions({ service: "web", tail: 1001 })).toThrow(
+    "--tail"
+  );
+  expect(nativeLogFollowOptions({ service: "web", tail: 0 })).toEqual({
+    service: "web",
+    tail: 0,
+  });
+  expect(() => nativeLogFollowOptions({ service: "web", tail: -1 })).toThrow(
     "--tail"
   );
   expect(() =>

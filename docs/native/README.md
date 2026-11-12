@@ -57,6 +57,9 @@ What you get today:
 
 What you give up today:
 
+- Following logs live as a verified native capability. `hack logs --follow` is
+  available for testing; real-VM acceptance for authored and adopted projects
+  is still pending.
 - Interactive shells in a container.
 - UDP ports.
 - Automatic restart for services that publish a port.

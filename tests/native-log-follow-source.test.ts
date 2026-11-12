@@ -12,7 +12,26 @@ test("native follow admission stays on the observer surface without mutation or 
     );
     expect(source).toContain('error.code == "engine_not_found"');
     expect(source).toContain('initial["State"]["StartedAt"]');
+    expect(source).toContain("require_ready(");
+    expect(source).toContain("receipt.readiness.contains_key(options.service)");
   }
+});
+
+test("both graph entrypoints require Ready before selecting a log stream", async () => {
+  const imported = await Bun.file(
+    new URL(
+      "../packages/runtime-core/src/provider/graph/log_follow.rs",
+      import.meta.url
+    )
+  ).text();
+  const authored = await Bun.file(
+    new URL(
+      "../packages/runtime-core/src/provider/graph/native/log_follow.rs",
+      import.meta.url
+    )
+  ).text();
+  expect(imported).toContain('receipt.phase == "ready-observed"');
+  expect(authored).toContain("receipt.phase == Phase::ReadyObserved");
 });
 
 test("streaming command bypasses the serial graph command and its bounded JSON footer", async () => {

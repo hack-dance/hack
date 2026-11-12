@@ -66,7 +66,10 @@ export type NativeLogFollowSelection = {
 function refused(code = "native_log_stream_uncertain"): never {
   throw new HackCliError({
     code: "E_LIFECYCLE_FAILED",
-    message: `Native logs failed (${code}); no cleanup was inferred.`,
+    message:
+      code === "native_log_stopped_idle"
+        ? "Native logs ended after the stopped service was idle for five seconds without stream EOF (native_log_stopped_idle); the final tail may be incomplete."
+        : `Native logs failed (${code}); no cleanup was inferred.`,
   });
 }
 /** Reject unsupported bounds explicitly before selecting or spawning the runtime. */
@@ -79,9 +82,9 @@ export function nativeLogFollowOptions(input: {
     throw new CliUsageError("Native --follow requires one service name.");
   }
   const tail = input.tail ?? 200;
-  if (!Number.isSafeInteger(tail) || tail < 1 || tail > 1000) {
+  if (!Number.isSafeInteger(tail) || tail < 0 || tail > 1000) {
     throw new CliUsageError(
-      "Native --tail requires an integer from 1 to 1000."
+      "Native --tail requires an integer from 0 to 1000."
     );
   }
   if (input.since === undefined) {
@@ -175,11 +178,47 @@ export async function* nativeLogWireLines(
 export function nativeLogLineDecoder(input: {
   readonly service: string;
   readonly container?: string;
-  readonly onLine: (stream: "stdout" | "stderr", text: string) => Promise<void>;
+  readonly onLine: (
+    stream: "stdout" | "stderr",
+    text: string,
+    completeness: { readonly truncated: boolean; readonly partial: boolean }
+  ) => Promise<void>;
 }) {
   const state = {
-    stdout: { decoder: new TextDecoder(), pending: "" },
-    stderr: { decoder: new TextDecoder(), pending: "" },
+    stdout: { decoder: new TextDecoder(), pending: "", truncated: false },
+    stderr: { decoder: new TextDecoder(), pending: "", truncated: false },
+  };
+  const emit = async (stream: "stdout" | "stderr", partial: boolean) => {
+    const selected = state[stream];
+    // Do not split a supplementary Unicode character at the retained-prefix bound.
+    const last = selected.pending.charCodeAt(selected.pending.length - 1);
+    const prefix =
+      selected.truncated && last >= 0xd8_00 && last <= 0xdb_ff
+        ? selected.pending.slice(0, -1)
+        : selected.pending;
+    await input.onLine(
+      stream,
+      `${prefix}${selected.truncated ? " [truncated]" : ""}${partial ? " [partial]" : ""}`,
+      { truncated: selected.truncated, partial }
+    );
+    selected.pending = "";
+    selected.truncated = false;
+  };
+  const append = async (stream: "stdout" | "stderr", text: string) => {
+    const selected = state[stream];
+    let offset = 0;
+    while (offset < text.length) {
+      const newline = text.indexOf("\n", offset);
+      const end = newline < 0 ? text.length : newline;
+      const room = LINE_LIMIT - selected.pending.length;
+      selected.pending += text.slice(offset, Math.min(end, offset + room));
+      selected.truncated ||= end - offset > room;
+      if (newline < 0) {
+        return;
+      }
+      await emit(stream, false);
+      offset = newline + 1;
+    }
   };
   let container = input.container;
   return {
@@ -216,29 +255,17 @@ export function nativeLogLineDecoder(input: {
         refused("native_log_wire_limit");
       }
       const selected = state[value.stream];
-      selected.pending += selected.decoder.decode(bytes, { stream: true });
-      let newline = selected.pending.indexOf("\n");
-      while (newline >= 0) {
-        if (newline > LINE_LIMIT) {
-          refused("native_log_line_limit");
-        }
-        await input.onLine(value.stream, selected.pending.slice(0, newline));
-        selected.pending = selected.pending.slice(newline + 1);
-        newline = selected.pending.indexOf("\n");
-      }
-      if (selected.pending.length > LINE_LIMIT) {
-        refused("native_log_line_limit");
-      }
+      await append(
+        value.stream,
+        selected.decoder.decode(bytes, { stream: true })
+      );
     },
     async finish(): Promise<void> {
       for (const stream of ["stdout", "stderr"] as const) {
         const selected = state[stream];
-        const text = selected.pending + selected.decoder.decode();
-        if (text.length > LINE_LIMIT) {
-          refused("native_log_line_limit");
-        }
-        if (text) {
-          await input.onLine(stream, text);
+        await append(stream, selected.decoder.decode());
+        if (selected.pending || selected.truncated) {
+          await emit(stream, true);
         }
         selected.pending = "";
       }
@@ -335,11 +362,15 @@ function logOutput(
         );
       }
     },
-    async end(code: number, endSignal = signal) {
+    async end(
+      code: number,
+      endSignal = signal,
+      reason = code === 0 ? "eof" : `exit:${code}`
+    ) {
       if (input.json) {
         await write(
           stdout,
-          `${JSON.stringify(buildLogStreamEndEvent({ context, reason: code === 0 ? "eof" : `exit:${code}` }))}\n`,
+          `${JSON.stringify(buildLogStreamEndEvent({ context, reason }))}\n`,
           endSignal
         );
       }
@@ -347,7 +378,7 @@ function logOutput(
     decoder: nativeLogLineDecoder({
       service: input.service,
       container: input.selection.container,
-      onLine: async (stream, text) => {
+      onLine: async (stream, text, completeness) => {
         const raw = `${input.service} | ${text}`;
         const entry: LogJsonEntry = {
           ...parseComposeLogLine({ line: raw, stream }),
@@ -355,6 +386,8 @@ function logOutput(
           service: input.service,
           instance: undefined,
           project: input.project,
+          ...(completeness.truncated ? { truncated: true } : {}),
+          ...(completeness.partial ? { partial: true } : {}),
         };
         const output = input.json || stream === "stdout" ? stdout : stderr;
         await write(
@@ -378,13 +411,16 @@ function logOutput(
 async function endInterruptedLog(
   output: ReturnType<typeof logOutput>,
   code: number,
-  consumerClosed: boolean
+  consumerClosed: boolean,
+  reason?: string
 ) {
   if (code === 0 || consumerClosed) {
     return;
   }
   // Best effort only: cancellation must remain bounded even behind a paused pager.
-  await output.end(code, AbortSignal.timeout(100)).catch(() => undefined);
+  await output
+    .end(code, AbortSignal.timeout(100), reason)
+    .catch(() => undefined);
 }
 
 function ownLogReader(
@@ -490,6 +526,7 @@ export async function followNativeLogs(input: FollowInput): Promise<number> {
         };
         const output = logOutput(input, controller.signal, outputFailed);
         const { decoder } = output;
+        let endReason: string | undefined;
         try {
           await output.start();
           for await (const line of nativeLogWireLines(
@@ -508,6 +545,11 @@ export async function followNativeLogs(input: FollowInput): Promise<number> {
           if (consumerClosed) {
             return 0;
           }
+          if (detail?.code === "native_log_stopped_idle") {
+            endReason = detail.code;
+            await decoder.finish();
+            refused(detail.code);
+          }
           if (
             code !== 0 ||
             controller.signal.aborted ||
@@ -519,7 +561,12 @@ export async function followNativeLogs(input: FollowInput): Promise<number> {
           await output.end(code);
           return 0;
         } catch (error) {
-          await endInterruptedLog(output, canceled || 1, consumerClosed);
+          await endInterruptedLog(
+            output,
+            canceled || 1,
+            consumerClosed,
+            endReason
+          );
           throw error;
         } finally {
           controller.abort();

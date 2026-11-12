@@ -323,7 +323,9 @@ Live logs use a separate `graph logs-follow` reader over the existing Engine rel
 It pins the admitted container and start generation through `ObservedGuest`, without
 a mutation lease or the serial foreground control loop. A stdin lifetime pipe ends
 the reader on frontend death. Bounded HTTP/multiplex decoding and output writes
-apply backpressure; stopped/absent selection ends normally, while unexplained EOF
+apply backpressure; stream EOF plus stopped/absent selection ends normally. A
+five-second stopped-service idle cutoff reports `native_log_stopped_idle` and
+does not claim a complete tail. Unexplained EOF
 or a changed generation reports a named refusal. These reads grant no cleanup
 authority. See [the command contract](../../docs/reference/native-authored-commands.md)
 for flags, output limits and remaining live Mac acceptance.

@@ -74,7 +74,7 @@ provider contact. A refusal names no option value, path or project detail.
 | `down` | Whole-project owner-mediated stop of a ready generation through its live foreground owner or private no-host endpoint | `--json`, `--detach`, `--profile` and `--env` overrides, service subsets including an empty selection, single-service, command, workdir, follow, tail and format options |
 | `down --recover` | Explicit retirement of a complete stored generation whose owners are dead, or of a pending startup intent that never reserved runtime state; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
 | `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
-| `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 1 through 1000 (default 200), plain or `--json`; `--since` with follow | Omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, `--until`, query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options; TTY-configured services in follow mode |
+| `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 0 through 1000 with follow, 1 through 1000 with no-follow (default 200), plain or `--json`; `--since` with follow | Omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, `--until`, query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options; TTY-configured services in follow mode |
 | `exec` | `exec SERVICE -- COMMAND ARG...` with closed stdin, no TTY and an optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, interactive or TTY input, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
 | `run` | `run SERVICE -- COMMAND ARG...` through a ready foreground owner, closed stdin, no TTY, optional absolute `--workdir`; member must have no mounts | The `exec` option refusals above; source, persistent-data or private-env mounts refuse before the one-off effect |
 | `restart` | Whole-project proven stop followed by fresh foreground `up`; `--branch`, `--profile` and `--env` select the fresh generation | Service subsets, `--json`, `--detach`, `--target`, recovery and other unsupported foreground options; missing or unproven stop prevents startup |
@@ -339,10 +339,12 @@ acceptance remains a separate host-serialized gate.
 ![Native log reader and lifecycle ownership](../native/log-follow.svg)
 
 `hack logs SERVICE --follow` reads the saved service's existing container through
-the native Engine socket. Follow is the default. `--tail` selects 1 through 1000
+the native Engine socket. This command is available under verification; real-VM
+acceptance for both authored and adopted projects remains pending.
+Follow is the default. `--tail` selects 0 through 1000
 initial lines (default 200); `--since` accepts a timestamp or duration such as
 `10m`. The default tail still limits that time window to the latest 200 lines;
-use `--tail` to select another supported bound. `--json` uses the same
+use `--tail` to select another supported bound, or `--tail 0` for only new lines. `--json` uses the same
 `start`, `log` and `end` event envelope as Compose, with `backend: "native"`.
 The optional `project` field is present only when `--project` was supplied;
 saved-run observation does not reload project configuration to derive a name.
@@ -359,7 +361,10 @@ Following holds no provider mutation lease and does not use the foreground
 owner's serial control loop. It cannot reserve the lifecycle lock against `up`,
 `down` or `restart`. The selected container ID and start generation stay pinned;
 the follower never switches to a replacement container. Ctrl-C stops only the
-reader and exits 130. A confirmed service stop or removal ends the read with 0;
+reader and exits 130. Actual stream EOF plus a confirmed service stop or removal
+ends the read with 0. If the stopped service's transport remains open for five idle
+seconds, the follower reports `native_log_stopped_idle` on stderr and in the JSON
+`end.reason`, exits 1 and warns that the final tail may be incomplete;
 unexplained transport loss reports `native_log_stream_uncertain`, while changed
 ownership or generation refuses explicitly. No stream result grants cleanup
 authority.
@@ -372,8 +377,10 @@ closing, such as `hack logs SERVICE | head -1`, stops the reader quietly with 0.
 
 The runtime emits at most 4 KiB per envelope and waits for the frontend to consume
 output. The frontend retains at most 64 Ki characters per unfinished line per
-descriptor; any longer line ends the whole follow with `native_log_line_limit`.
-No partial line is presented as a complete application log entry. Neither side accumulates
+descriptor. Longer lines retain that prefix and discard bytes up to the next
+newline, then emit `[truncated]` and continue. A trailing line without a newline
+emits `[partial]`; JSON entries also set `truncated: true` or `partial: true`.
+Neither side accumulates
 the stream's history. A lifetime pipe ends even an idle reader when its frontend
 dies. A slow output consumer may finish draining after the reader exits; the
 pipe-exit timeout bounds stalled child-pipe reads, not consumer writes.

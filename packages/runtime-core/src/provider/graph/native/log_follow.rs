@@ -1,7 +1,9 @@
 //! Native-authored read-only selection uses no foreground control request or lock.
 use super::*;
 use crate::provider::engine::{Observer, log_follow};
-use crate::provider::graph::log_follow::{LogFollowOptions, changed, validate_state};
+use crate::provider::graph::log_follow::{
+    LogFollowOptions, changed, require_ready, validate_state,
+};
 
 pub(in crate::provider::graph) fn follow_logs(
     candidate: &Candidate,
@@ -17,6 +19,10 @@ pub(in crate::provider::graph) fn follow_logs(
         )
     };
     let (receipt, _) = read()?;
+    require_ready(
+        receipt.phase == Phase::ReadyObserved,
+        receipt.readiness.contains_key(options.service),
+    )?;
     let scope = receipt.review.scope();
     if receipt.owner != options.owner
         || receipt.review.review_id() != options.plan
@@ -28,7 +34,7 @@ pub(in crate::provider::graph) fn follow_logs(
         .resources
         .get(&format!("container:{}", options.service))
         .ok_or_else(changed)?;
-    if resource.kind != Kind::Container || !receipt.readiness.contains_key(options.service) {
+    if resource.kind != Kind::Container || resource.key != options.service {
         return Err(changed());
     }
     let container = resource

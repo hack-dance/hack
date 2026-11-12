@@ -69,7 +69,11 @@ function assertLogsOptions(options: NativeComposeCommandOptions): void {
   if (
     process.platform !== "darwin" ||
     options.operation !== "logs" ||
-    !nativeAuthoredLogsOptions(options.service, options.tail ?? 200) ||
+    !nativeAuthoredLogsOptions(
+      options.service,
+      options.tail ?? 200,
+      options.follow !== false
+    ) ||
     options.recover ||
     options.detach ||
     options.unsupportedOptions ||

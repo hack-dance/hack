@@ -249,10 +249,32 @@ pub(in crate::provider) fn follow(
     since: Option<u64>,
     check: impl Fn() -> Result<bool, CandidateError>,
 ) -> Result<(), CandidateError> {
-    let running = check()?;
     let path = observer.guest().engine_socket()?;
+    follow_socket(
+        &path,
+        container,
+        service,
+        tail,
+        since,
+        check,
+        &mut std::io::stdout().lock(),
+    )
+}
+
+/// The portable transport used by the observer. The caller supplies the verified
+/// socket and identity check; this layer never admits mutations or owns a lease.
+pub(in crate::provider) fn follow_socket(
+    path: &std::path::Path,
+    container: &str,
+    service: &str,
+    tail: u16,
+    since: Option<u64>,
+    check: impl Fn() -> Result<bool, CandidateError>,
+    output: &mut impl Write,
+) -> Result<(), CandidateError> {
+    let running = check()?;
     let mut stream =
-        crate::provider::agent::connect_until(&path, Instant::now() + Duration::from_secs(5))?;
+        crate::provider::agent::connect_until(path, Instant::now() + Duration::from_secs(5))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(1)))
         .map_err(|_| failure())?;
@@ -274,18 +296,15 @@ pub(in crate::provider) fn follow(
         running,
         stopped_since: None,
     };
-    let result = copy_started(
-        input,
-        &mut std::io::stdout().lock(),
-        service,
-        container,
-        || deadline.set(None),
-    );
+    let result = copy_started(input, output, service, container, || deadline.set(None));
     if let Some(error) = check_error.into_inner() {
         return Err(error);
     }
     if stopped.get() {
-        return Ok(());
+        return Err(CandidateError::new(
+            "native_log_stopped_idle",
+            "Selected service stopped, but the log transport did not reach EOF within five idle seconds; the final tail may be incomplete.",
+        ));
     }
     result?;
     // A socket ending while the selected service still runs is transport loss.

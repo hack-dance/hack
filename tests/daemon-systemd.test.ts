@@ -368,7 +368,7 @@ test("install writes, reloads and enables; a second install is a no-op", async (
     "systemctl --user --no-pager show --property=Version",
     "systemctl --user --no-pager show --property=UnitPath",
     "systemctl --user daemon-reload",
-    "systemctl --user --no-pager show hackd.service --property=Environment",
+    "systemctl --user --no-pager show hackd.service --property=Environment,EnvironmentFiles",
     "systemctl --user enable hackd.service",
   ]);
 
@@ -2238,4 +2238,24 @@ test("systemctl found on a PATH directory others can write is not run", async ()
   const ran = await deps.run("systemctl", ["--user", "show"]);
   expect(ran.exitCode).toBe(0);
   expect(await Bun.file(marker).exists()).toBe(true);
+});
+
+test("an EnvironmentFile on the unit stops install before enable and start", async () => {
+  // Codex review: an EnvironmentFile= can set PATH, which the Environment=
+  // query did not see.
+  const fake = fakeSystemd();
+  fake.environmentFiles = "/srv/hackd.env (ignore_errors=no)";
+  const install = await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+  });
+  expect(install.ok).toBe(false);
+  if (!install.ok) {
+    expect(install.error).toContain("EnvironmentFile");
+  }
+  expect(fake.calls).not.toContain("systemctl --user enable hackd.service");
+  expect(
+    await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
+  ).toContain("EnvironmentFile");
 });

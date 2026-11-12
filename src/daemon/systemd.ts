@@ -1638,7 +1638,7 @@ export async function checkServicePathDirectories(opts: {
 /**
  * The PATH directories of hackd.service as systemd will start it
  * (`Environment=` from the unit and drop-ins), or systemd's default when
- * the unit sets none.
+ * the unit sets none. Refused when the unit reads an `EnvironmentFile=`.
  */
 export async function readSystemdServicePathDirectories(opts: {
   readonly deps: SystemdDeps;
@@ -1648,15 +1648,24 @@ export async function readSystemdServicePathDirectories(opts: {
     "--no-pager",
     "show",
     SYSTEMD_UNIT_NAME,
-    "--property=Environment",
+    "--property=Environment,EnvironmentFiles",
   ]);
   if (show.exitCode !== 0) {
     return {
       error: `systemd did not report the hackd.service environment (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`,
     };
   }
+  const props = parseSystemdProperties(show.stdout);
+  // An EnvironmentFile= can set PATH too, and its contents are not visible
+  // here: the PATH hackd gets cannot be established, so refuse.
+  if ((props.EnvironmentFiles ?? "").length > 0) {
+    return {
+      error:
+        "hackd.service reads an EnvironmentFile, so the PATH it gets cannot be checked; move PATH into Environment= or remove the EnvironmentFile",
+    };
+  }
   let path: string | null = null;
-  const environment = parseSystemdProperties(show.stdout).Environment ?? "";
+  const environment = props.Environment ?? "";
   for (const match of environment.matchAll(ENV_WORD)) {
     const word = match[1] ?? match[2] ?? "";
     if (word.startsWith("PATH=")) {

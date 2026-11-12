@@ -469,20 +469,35 @@ test("frontend wait polls ESRCH frequently but throttles birth inspection", asyn
   expect(births).toBe(1);
 });
 
-test("legacy recovery requires the observed PID and preserves stale completion", async () => {
+test.each([
+  undefined,
+  "Wed Nov 11 17:23:26 2026",
+])("legacy recovery requires the observed PID and preserves stale completion (birth=%s)", async (birth) => {
   const opts = await fixture();
   const prior = await beginNativeProjectFinalization(opts);
   await prior.complete();
   const lifetime = await beginNativeProjectFinalization(opts);
-  const {
-    version: _version,
-    pid: _pid,
-    httpsPort: _port,
-    ...identity
-  } = lifetime.token.version === 2
-    ? lifetime.token
-    : { ...lifetime.token, pid: 0, httpsPort: null };
-  const legacy = { version: 1 as const, ...identity };
+  const modern = {
+    version: 2 as const,
+    attempt: lifetime.token.attempt,
+    scope: lifetime.token.scope,
+    run: lifetime.token.run,
+    owner: lifetime.token.owner,
+    namespace: lifetime.token.namespace,
+    planId: lifetime.token.planId,
+    pid: process.pid,
+    httpsPort: null,
+    ...(birth === undefined ? {} : { birth }),
+  };
+  const legacy = {
+    version: 1 as const,
+    attempt: modern.attempt,
+    scope: modern.scope,
+    run: modern.run,
+    owner: modern.owner,
+    namespace: modern.namespace,
+    planId: modern.planId,
+  };
   const active = join(
     opts.scope.nativeHome,
     ".hack-local/frontend-finalization",
@@ -490,6 +505,14 @@ test("legacy recovery requires the observed PID and preserves stale completion",
     legacy.run,
     "active.json"
   );
+  await writeFile(active, JSON.stringify(modern));
+  expect(await captureNativeProjectFinalization(opts)).toEqual(modern);
+  expect(
+    isNativeProjectFinalizationToken({
+      ...legacy,
+      birth: "Wed Nov 11 17:23:26 2026",
+    })
+  ).toBe(false);
   await writeFile(active, JSON.stringify(legacy));
   expect(await captureNativeProjectFinalization(opts)).toEqual(legacy);
   const recovery = {

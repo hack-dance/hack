@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fullPushPlan } from "../scripts/ci-pr-plan.ts";
 import { requiresWorkflowFull } from "../scripts/ci-workflow-guard.ts";
-import { fixtureGitEnv } from "./helpers/fixture-git.ts";
+import { fixtureGitEnv, runFixtureGitSync } from "./helpers/fixture-git.ts";
 
 const repository = resolve(import.meta.dir, "..");
 const workflow = Bun.YAML.parse(
@@ -51,14 +51,13 @@ async function scope(opts: {
       },
     });
     const git = (...args: string[]) => {
-      const result = Bun.spawnSync(["git", ...args], {
+      const result = runFixtureGitSync({
         cwd: root,
+        args,
         env,
-        stdout: "pipe",
-        stderr: "pipe",
       });
       if (result.exitCode !== 0) {
-        throw new Error(result.stderr.toString());
+        throw new Error(result.stderr);
       }
     };
     const put = async (path: string, source: string) => {

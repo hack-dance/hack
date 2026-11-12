@@ -103,6 +103,8 @@ type Fake = {
   unitSearchPath: string | null;
   /** Extra `Exec*=` lines (drop-in overrides) the manager reports. */
   extraExecLines: string[];
+  /** `systemctl --user show-environment` output. */
+  managerEnvironment: string;
 };
 
 /**
@@ -155,6 +157,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     dropInPaths: "",
     unitSearchPath: null,
     extraExecLines: [],
+    managerEnvironment: `HOME=${root}\nPATH=/usr/bin:/bin\n`,
     deps: undefined as unknown as SystemdDeps,
   };
   const ok = (stdout = ""): ServiceCommandResult => ({
@@ -251,6 +254,9 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
           ].join("\n")
         )
       );
+    }
+    if (verb === "show-environment") {
+      return Promise.resolve(ok(state.managerEnvironment));
     }
     if (verb === "daemon-reload") {
       if (opts.reloadError) {
@@ -2938,5 +2944,47 @@ linuxTest(
     expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
       "does not run or vouch for"
     );
+  }
+);
+
+linuxTest(
+  "a HACK_HOME in the user manager's environment counts as the unit's home",
+  async () => {
+    // Codex review: the unit inherits the user manager's environment; a
+    // HACK_HOME set there (not in the unit) made stop and uninstall think the
+    // unit served this shell's home.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.active = true;
+    fake.managerEnvironment = `HOME=${root}\nHACK_HOME=/srv/other-home\n`;
+    fake.calls.length = 0;
+    const stop = await stopViaSystemdIfInstalled({
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(stop.refused).toContain("/srv/other-home");
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    const removed = await uninstallSystemdUnit({
+      unitPath,
+      deps: fake.deps,
+      hackHome: join(root, ".hack"),
+    });
+    expect(removed.ok).toBe(false);
+    // The unit's own Environment= still wins over the manager's.
+    fake.unitEnvironment = `HACK_HOME=${join(root, ".hack")}`;
+    expect(
+      (
+        await stopViaSystemdIfInstalled({
+          pid: null,
+          hackHome: join(root, ".hack"),
+          deps: fake.deps,
+        })
+      ).refused
+    ).toBeNull();
   }
 );

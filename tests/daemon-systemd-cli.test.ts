@@ -50,6 +50,7 @@ case "$1" in
     if [ -f "$state/enabled" ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi
     if alive; then echo ActiveState=active; echo "MainPID=$(cat "$main")"; else echo ActiveState=inactive; echo MainPID=0; fi
     exit 0 ;;
+  show-environment) echo "HOME=$HOME"; exit 0 ;;
   daemon-reload|reset-failed) exit 0 ;;
   enable) : > "$state/enabled"; exit 0 ;;
   start|restart)

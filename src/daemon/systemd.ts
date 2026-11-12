@@ -849,6 +849,17 @@ export async function readSystemdUnitHackHome(opts: {
       env[word.slice(0, eq)] = word.slice(eq + 1);
     }
   }
+  // The unit's own Environment= wins; otherwise the user manager's
+  // environment (which every service inherits) may set HACK_HOME or HOME.
+  const inherited = await readManagerEnvironment({ deps: opts.deps });
+  if ("error" in inherited) {
+    return { kind: "unknown", detail: inherited.error };
+  }
+  for (const key of ["HACK_HOME", "HOME"] as const) {
+    if (env[key] === undefined && inherited.env[key] !== undefined) {
+      env[key] = inherited.env[key];
+    }
+  }
   const override = (env.HACK_HOME ?? "").trim();
   if (override.length > 0) {
     return isAbsolute(override)
@@ -863,6 +874,46 @@ export async function readSystemdUnitHackHome(opts: {
     return { kind: "unknown", detail: "no home directory" };
   }
   return { kind: "home", path: resolve(home, GLOBAL_HACK_DIR_NAME) };
+}
+
+/** `systemctl --user show-environment`: what every user service inherits. */
+async function readManagerEnvironment(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<
+  | { readonly env: Readonly<Record<string, string>> }
+  | { readonly error: string }
+> {
+  const result = await opts.deps.run("systemctl", [
+    "--user",
+    "show-environment",
+  ]);
+  if (result.exitCode !== 0) {
+    return {
+      error: `systemctl --user show-environment failed: ${firstLine(result.stderr) || `exit code ${result.exitCode}`}`,
+    };
+  }
+  const env: Record<string, string> = {};
+  for (const line of result.stdout.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) {
+      env[line.slice(0, eq)] = unquoteShellValue(line.slice(eq + 1));
+    }
+  }
+  return { env };
+}
+
+/**
+ * `systemctl show-environment` prints values in shell quoting when they
+ * need it (`$'...'` or `"..."`); plain values are printed as is.
+ */
+function unquoteShellValue(value: string): string {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1).replace(/\\(.)/g, "$1");
+  }
+  if (value.length >= 3 && value.startsWith("$'") && value.endsWith("'")) {
+    return value.slice(2, -1);
+  }
+  return value;
 }
 
 /** Reads `Linger` for the current user; null when it cannot be determined. */

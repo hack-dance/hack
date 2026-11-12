@@ -18,6 +18,7 @@ import {
   requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
+import { nativeEnvironmentDelivery } from "../src/backends/native-project-start.ts";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
@@ -722,4 +723,120 @@ test("merged shell values join the private delivery, and a delivery the runtime 
     expect(message).not.toContain(value.slice(0, 12));
     expect(message).not.toContain("\0");
   }
+});
+
+async function aggregateShellInput(count: number, value: string) {
+  return mergeNativeShellEnvironment(
+    await prepareNativeProjectInput({
+      ...(await fixture({
+        services: Object.fromEntries(
+          Array.from({ length: count }, (_, index) => [
+            `app${index}`,
+            { image: "bun:1", environment: { TOKEN: reference("BIG") } },
+          ])
+        ),
+      })),
+      env: { BIG: value },
+    })
+  );
+}
+
+const aggregateSelection = (count: number) => ({
+  planId: "f".repeat(64),
+  run: "a".repeat(32),
+  reviewedPlan: {
+    services: Object.fromEntries(
+      Array.from({ length: 9 }, (_, index) => [
+        `app${index}`,
+        { active: index < count },
+      ])
+    ),
+  },
+});
+
+test("aggregate private delivery counts active services and encoded file members", async () => {
+  const input = await aggregateShellInput(9, "p".repeat(30 * 1024));
+  for (const count of [8, 9]) {
+    const selection = aggregateSelection(count);
+    const active = selectActiveNativeProjectInput({ input, ...selection });
+    const bytes = nativeEnvironmentDelivery({ input: active, ...selection })
+      .payload?.length;
+    for (const values of Object.values(active.managedEnvironment)) {
+      expect(Buffer.byteLength(JSON.stringify(values))).toBeLessThan(32 * 1024);
+    }
+    if (count === 8) {
+      expect(bytes).toBeLessThan(256 * 1024);
+      expect(() => requireNativeShellDeliveryFits(active)).not.toThrow();
+    } else {
+      expect(bytes).toBeGreaterThan(256 * 1024);
+      expect(() => requireNativeShellDeliveryFits(active)).toThrow(
+        "over 256 KiB"
+      );
+    }
+  }
+  const members = [
+    {
+      name: "credential",
+      target: "/run/secrets/credential",
+      content: Buffer.alloc(16 * 1024, 0x66),
+    },
+  ];
+  const selection = aggregateSelection(8);
+  const inactiveFile = selectActiveNativeProjectInput({
+    input: { ...input, managedFiles: { app8: members } },
+    ...selection,
+  });
+  expect(
+    nativeEnvironmentDelivery({ input: inactiveFile, ...selection }).payload
+      ?.length
+  ).toBeLessThan(256 * 1024);
+  expect(() => requireNativeShellDeliveryFits(inactiveFile)).not.toThrow();
+  const activeFile = { ...inactiveFile, managedFiles: { app0: members } };
+  expect(
+    nativeEnvironmentDelivery({ input: activeFile, ...selection }).payload
+      ?.length
+  ).toBeGreaterThan(256 * 1024);
+  expect(() => requireNativeShellDeliveryFits(activeFile)).toThrow(
+    "over 256 KiB"
+  );
+});
+
+test("aggregate private delivery admits the exact wire limit and counts UTF-8 beyond it", async () => {
+  const input = await aggregateShellInput(8, "p".repeat(32_700));
+  const services = Object.fromEntries(
+    Object.entries(input.managedEnvironment).map(([name, values]) => [
+      name,
+      { ...values },
+    ])
+  );
+  const selection = aggregateSelection(8);
+  const delivery = { ...input, managedEnvironment: services };
+  const initialBytes =
+    nativeEnvironmentDelivery({ input: delivery, ...selection }).payload
+      ?.length ?? 0;
+  const padding = 256 * 1024 - initialBytes;
+  expect(padding).toBeGreaterThan(0);
+  for (const [index, values] of Object.values(services).entries()) {
+    values.TOKEN += "p".repeat(
+      Math.floor(padding / 8) + (index < padding % 8 ? 1 : 0)
+    );
+    expect(Buffer.byteLength(JSON.stringify(values))).toBeLessThanOrEqual(
+      32 * 1024
+    );
+  }
+  expect(
+    nativeEnvironmentDelivery({ input: delivery, ...selection }).payload?.length
+  ).toBe(256 * 1024);
+  expect(() => requireNativeShellDeliveryFits(delivery)).not.toThrow();
+  const first = Object.values(services)[0];
+  if (!first) {
+    throw new Error("Missing test service");
+  }
+  first.TOKEN += "é";
+  expect(
+    nativeEnvironmentDelivery({ input: delivery, ...selection }).payload?.length
+  ).toBe(256 * 1024 + 2);
+  expect(() => requireNativeShellDeliveryFits(delivery)).toThrow(
+    "over 256 KiB"
+  );
 });

@@ -40,6 +40,7 @@ import {
   type NativePreparedBase,
   preparedBaseArguments,
 } from "./native-prepared-base.ts";
+import { nativePrivateEnvironmentPayload } from "./native-private-environment-payload.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   admitNativeProjectBuilds,
@@ -1082,30 +1083,12 @@ export function nativeEnvironmentDelivery(opts: {
   }
   return {
     flags: ["--environment-stdin"],
-    payload: Buffer.from(
-      JSON.stringify({
-        version: files.length > 0 ? 2 : 1,
-        plan,
-        run,
-        lifetime_seconds: 300,
-        services: input.managedEnvironment,
-        ...(files.length > 0
-          ? {
-              files: Object.fromEntries(
-                files.map(([service, members]) => [
-                  service,
-                  members.map((member) => ({
-                    name: member.name,
-                    target: member.target,
-                    mode: "0400",
-                    content_b64: member.content.toString("base64"),
-                  })),
-                ])
-              ),
-            }
-          : {}),
-      })
-    ),
+    payload: nativePrivateEnvironmentPayload({
+      services: input.managedEnvironment,
+      files: Object.fromEntries(files),
+      planId: plan,
+      run,
+    }),
   };
 }
 /**

@@ -1456,6 +1456,11 @@ Three consequences of the private delivery:
   Delivered credential files share the same 32 KiB; only the runtime counts those,
   and its refusal does not name the service.
 
+When shell values are forwarded, the complete private stdin envelope across active services must also fit in
+256 KiB, including encoded credential files and envelope metadata. Both `hack up`
+and `hack restart` check it after credential adaptation and profile selection.
+Restart refuses an oversized envelope before stopping the current graph.
+
 `hack exec` and a one-off `hack run` do not read your shell for these entries, so a
 command started with either does not receive these values. The containers keep the values they started with
 until the next `hack up` or `hack restart`.

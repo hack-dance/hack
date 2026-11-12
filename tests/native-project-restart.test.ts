@@ -2868,3 +2868,96 @@ test("oversized shell delivery is refused before restart cleanup, after adapter 
     expect(f.events).not.toContain("start");
   }
 });
+
+test("aggregate private delivery refuses restart before stopping the current graph", async () => {
+  for (const activeCount of [8, 9]) {
+    const f = fixture();
+    const proof = {
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan: run.planId,
+      service: "app",
+      container: "2".repeat(64),
+      boot: "owned-boot",
+      generation: "3".repeat(64),
+    };
+    const services = Object.fromEntries(
+      Array.from({ length: 9 }, (_, index) => [
+        index === 0 ? "app" : `app${index}`,
+        { image: `sha256:${"9".repeat(64)}`, environment: { TOKEN: null } },
+      ])
+    );
+    const value = "synthetic-shell-private-".padEnd(30 * 1024, "p");
+    const input = {
+      originalSha256: "1".repeat(64),
+      environmentFiles: [],
+      serviceNames: Object.keys(services),
+      normalizedComposeJson: JSON.stringify({ services }),
+      managedEnvironment: {},
+      shellEnvironment: Object.fromEntries(
+        Object.keys(services).map((name) => [name, { TOKEN: value }])
+      ),
+      lifecycleHostEnvironment: {},
+      effectiveEnvName: "qa",
+    };
+    const preflight = async () =>
+      await preflightNativeRestart({
+        runtime: { binary: "/unused", home: "/candidate" },
+        scope,
+        composeFile: "/fixture/.hack/docker-compose.yml",
+        run,
+        dependencies: {
+          activeImages: async () => ({
+            images: new Map<string, string>(),
+            proof,
+          }),
+          prepare: async () => input,
+          adapt: async ({ input }) => input,
+          dependencies: async () => [],
+          invoke: async ({ args }) => {
+            if (args[1] === "probe") {
+              return { admitted: true };
+            }
+            if (args[1] === "run-selection") {
+              return { ok: true, ...proof };
+            }
+            return { network: "internet" };
+          },
+          review: async (options) => {
+            return await options.run({
+              planId: run.planId,
+              namespace: run.namespace,
+              report: {
+                plan: {
+                  services: Object.fromEntries(
+                    Object.keys(services).map((name, index) => [
+                      name,
+                      { active: index < activeCount },
+                    ])
+                  ),
+                },
+              },
+              projectArgs: [],
+            });
+          },
+        },
+      });
+    const error = await restartNativeProject({ ...f.options, preflight }).catch(
+      (error: unknown) => error
+    );
+    if (activeCount === 9) {
+      expect(error).toBeInstanceOf(ClosedCliError);
+      expect(String(error)).toContain("over 256 KiB");
+      expect(String(error)).toContain("The current graph was not stopped");
+      expect(f.events).not.toContain("down");
+      expect(f.events).not.toContain("capture");
+      expect(f.events).not.toContain("start");
+    } else {
+      expect(error).toBe(0);
+      expect(f.events).toContain("down");
+      expect(f.events).toContain("start");
+    }
+    expect(String(error)).not.toContain("synthetic-shell-private-");
+  }
+});

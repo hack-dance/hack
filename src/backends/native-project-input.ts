@@ -11,6 +11,10 @@ import {
   resolveProjectEnvSelection,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import {
+  MAX_NATIVE_PRIVATE_INPUT_BYTES,
+  nativePrivateEnvironmentPayload,
+} from "./native-private-environment-payload.ts";
 import type { NativeEmulationPolicy } from "./native-project-platform.ts";
 import {
   resolveShellEnvironment,
@@ -327,25 +331,39 @@ export function mergeNativeShellEnvironment(
 }
 
 /**
- * Refuses, naming the service, when the private delivery of a service that got
- * a value from the shell exceeds what the runtime accepts. Call it on the
- * input that is about to be delivered: after the credential adapters added
+ * Refuses when a delivery containing shell values exceeds the runtime's service
+ * limits or complete stdin limit. Service-level refusals name the service.
+ * Call it on the input that is about to be delivered: after the credential adapters added
  * theirs, and after {@link selectActiveNativeProjectInput}, because the runtime
  * receives nothing for a service the selected profiles leave out.
  */
 export function requireNativeShellDeliveryFits(
   input: NativeProjectInput
 ): void {
+  const fromShell = new Set(
+    (input.shellServices ?? []).filter((name) =>
+      Object.hasOwn(input.managedEnvironment, name)
+    )
+  );
   const problem = shellDeliveryProblem({
     services: input.managedEnvironment,
-    fromShell: new Set(
-      (input.shellServices ?? []).filter((name) =>
-        Object.hasOwn(input.managedEnvironment, name)
-      )
-    ),
+    fromShell,
   });
   if (problem !== null) {
     throw refused(shellDeliveryRefusal(problem));
+  }
+  if (
+    fromShell.size > 0 &&
+    nativePrivateEnvironmentPayload({
+      services: input.managedEnvironment,
+      files: input.managedFiles,
+      planId: "0".repeat(64),
+      run: "0".repeat(32),
+    }).byteLength > MAX_NATIVE_PRIVATE_INPUT_BYTES
+  ) {
+    throw refused(
+      "the complete private environment delivery, counting values read from your shell, is over 256 KiB"
+    );
   }
 }
 
@@ -435,6 +453,15 @@ export function selectActiveNativeProjectInput(opts: {
         active.has(service)
       )
     ),
+    ...(opts.input.managedFiles === undefined
+      ? {}
+      : {
+          managedFiles: Object.fromEntries(
+            Object.entries(opts.input.managedFiles).filter(([service]) =>
+              active.has(service)
+            )
+          ),
+        }),
   };
 }
 

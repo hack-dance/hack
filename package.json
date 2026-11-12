@@ -68,7 +68,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.11",
-    "@commitlint/cli": "19.8.1",
+    "@commitlint/cli": "21.2.4",
     "@commitlint/config-conventional": "19.8.1",
     "@semantic-release/changelog": "6.0.3",
     "@semantic-release/commit-analyzer": "13.0.1",

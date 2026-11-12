@@ -393,12 +393,26 @@ export async function stopViaSystemdIfInstalled(opts: {
     return none;
   }
   const unitPath = resolveSystemdUnitPath({ env: deps.env });
-  if (!(await pathExists(unitPath))) {
-    return none;
-  }
+  // Ask the manager even without a file at this path: a unit whose file was
+  // removed, or one loaded from another directory, can still be running or
+  // waiting to restart (HACK-2052).
   const status = await readSystemdServiceStatus({ unitPath, deps });
   if (!status?.availability.available) {
     return none;
+  }
+  if (!status.installed) {
+    // Without a file here an unknown state proves nothing either way, and
+    // nothing Hack installed is involved: leave it as before.
+    if (
+      status.activeState === null ||
+      !MANAGER_STOPPABLE_STATES.has(status.activeState)
+    ) {
+      return none;
+    }
+    return {
+      ...none,
+      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: systemd has it ${status.activeState}, but not from ${unitPath}, the unit Hack manages (it was removed or is loaded from another directory), so it cannot be checked. Review it with systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
+    };
   }
   // An unknown state (the unit-specific `systemctl show` failed) does not
   // prove the unit is stopped: stop it anyway, which is harmless when it is

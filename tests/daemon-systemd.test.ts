@@ -3378,3 +3378,36 @@ linuxTest(
     expect(fake.active).toBe(true);
   }
 );
+
+linuxTest(
+  "stop asks systemd even when the managed unit file is gone",
+  async () => {
+    // Codex review: with the unit file removed (or loaded from another
+    // directory) while systemd still had it running or waiting to restart,
+    // stop returned early and reported hackd as not running.
+    const fake = fakeSystemd();
+    const stop = () =>
+      stopViaSystemdIfInstalled({
+        pid: null,
+        hackHome: join(root, ".hack"),
+        deps: fake.deps,
+      });
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+    // Waiting for its automatic restart: refused explicitly, not "stopped".
+    fake.activeState = "activating";
+    fake.calls.length = 0;
+    const pending = await stop();
+    expect(pending.handled).toBe(false);
+    expect(pending.refused).toContain("systemctl --user stop hackd.service");
+    expect(pending.refused).toContain(unitPath);
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    // Not running and no file: nothing to do, as before.
+    fake.activeState = "inactive";
+    expect(await stop()).toEqual({
+      handled: false,
+      ownedPid: false,
+      failed: null,
+      refused: null,
+    });
+  }
+);

@@ -355,7 +355,11 @@ not survive logout or reboot. For that, install it as a login service with
 On Linux, once the unit is installed, `hack daemon start` and `hack daemon stop`
 go through `systemctl --user`, so a single manager owns the socket and pid file.
 `stop` goes through systemd even when the pid file is missing or stale, which also
-cancels a restart systemd has scheduled after a crash. `stop` does not touch
+cancels a restart systemd has scheduled after a crash. When systemd runs or is
+about to restart `hackd.service` but the managed unit file is gone (or the unit
+is loaded from another directory), `stop` refuses and prints the
+`systemctl --user` commands to review and stop it, instead of reporting hackd as
+stopped. `stop` does not touch
 a unit whose effective environment serves a different Hack home from the shell's,
 or whose environment it cannot read with certainty (for example an
 `EnvironmentFile=`, an `ExecSearchPath=`, a `PassEnvironment=` naming

@@ -316,7 +316,8 @@ function signalVerified(opts: {
 /**
  * Stop the child's group when no live supervisor will: the supervisor's own
  * sequence. Members are recorded (pid and birth) only while the leader still
- * verifies, since after it is gone its group id could be reused. SIGTERM
+ * verifies, since after it is gone its group id could be reused; when no
+ * such snapshot was obtained, descendants are reported `not_confirmed`. SIGTERM
  * goes to the group, then after a bounded wait SIGKILL goes to the group if
  * its leader still verifies, and to each recorded member that still matches
  * (a descendant that ignored SIGTERM outlives its leader). Each identity is
@@ -336,7 +337,12 @@ async function stopOrphanGroup(opts: {
   const members = new Map<number, ProcessIdentity>([
     [child.pid, { pid: child.pid, birth: child.birth }],
   ]);
-  let membersKnown = true;
+  // Descendants count as stopped only when at least one group snapshot was
+  // validated (the leader verified before and after the read) and no read
+  // failed. Without one, a descendant may be alive that was never recorded.
+  let snapshotValidated = false;
+  let readFailed = false;
+  const membersKnown = (): boolean => snapshotValidated && !readFailed;
   const leaderVerifies = async (): Promise<boolean> => {
     const snapshot = await opts.observe([child.pid]);
     return snapshot !== null && childGroupMatches({ child, snapshot });
@@ -347,12 +353,13 @@ async function stopOrphanGroup(opts: {
     }
     const group = await opts.observeGroup(child.processGroupId);
     if (group === null) {
-      membersKnown = false;
+      readFailed = true;
       return;
     }
     // Read while the leader still verifies (checked again after the read):
     // these members belong to its group.
     if (await leaderVerifies()) {
+      snapshotValidated = true;
       for (const member of group) {
         members.set(member.pid, member);
       }
@@ -378,7 +385,7 @@ async function stopOrphanGroup(opts: {
     if ((await survivors())?.length === 0) {
       return {
         signalled,
-        descendants: membersKnown ? "stopped" : "not_confirmed",
+        descendants: membersKnown() ? "stopped" : "not_confirmed",
       };
     }
   }
@@ -395,7 +402,7 @@ async function stopOrphanGroup(opts: {
     if (left?.length === 0) {
       return {
         signalled,
-        descendants: membersKnown ? "stopped" : "not_confirmed",
+        descendants: membersKnown() ? "stopped" : "not_confirmed",
       };
     }
     if (Date.now() >= killDeadline) {

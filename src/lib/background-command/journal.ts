@@ -1,6 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readFile, unlink } from "node:fs/promises";
+import {
+  type FileHandle,
+  lstat,
+  open,
+  readFile,
+  unlink,
+} from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import pkg from "../../../package.json";
@@ -27,6 +33,8 @@ import { readReplaceablePrivateFile } from "../private-file.ts";
  * - `reserve`: preallocated bytes released only to write `command.ended`.
  * - `cancel.json`: a cancel request, written before any signal is sent.
  * - `expired.json`: tombstone left when retention removed the output.
+ * - `lock`: empty file, flocked as the journal lock. `lock.owner` is the
+ *   owner receipt of the file-based fallback used when flock is unavailable.
  *
  * Writers: the launcher writes `command.accepted` (seq 1) before the
  * supervisor exists; the live supervisor is then the only writer. Any other
@@ -148,9 +156,10 @@ const launchSchema = z.object({
     .optional(),
   /**
    * The Docker engine selection resolved at start (an absolute
-   * DOCKER_CONFIG, and the context name when one was in effect), so cleanup
-   * talks to the same engine even if a relative path or the default context
-   * would now resolve differently. Absent in journals from before it existed.
+   * DOCKER_CONFIG, and the context name, `default` included). The command's
+   * client and cleanup both run with it, so they talk to the same engine
+   * even if a relative path or the current context would now resolve
+   * differently. Absent in journals from before it existed.
    */
   docker: z
     .object({
@@ -220,6 +229,8 @@ export type JournalPaths = {
   readonly cancel: string;
   readonly expired: string;
   readonly lock: string;
+  /** Owner receipt of the file-based lock used when flock is unavailable. */
+  readonly fallbackLock: string;
 };
 
 export function journalPaths(opts: {
@@ -249,6 +260,7 @@ export function journalPaths(opts: {
     cancel: resolve(dir, "cancel.json"),
     expired: resolve(dir, "expired.json"),
     lock: resolve(dir, "lock"),
+    fallbackLock: resolve(dir, "lock.owner"),
   };
 }
 
@@ -491,6 +503,16 @@ export const appendLine: AppendLine = async (path, line) => {
   }
 };
 
+/** Seam for tests: a positioned write; returns the bytes written. */
+export type WriteAt = (
+  handle: FileHandle,
+  bytes: Buffer,
+  position: number
+) => Promise<number>;
+
+const writeAtPosition: WriteAt = async (handle, bytes, position) =>
+  (await handle.write(bytes, 0, bytes.length, position)).bytesWritten;
+
 /**
  * Make the journal's tail whole before a writer other than the live
  * supervisor appends (call it under the journal lock, with the supervisor
@@ -498,10 +520,14 @@ export const appendLine: AppendLine = async (path, line) => {
  * a complete envelope that is exactly the next sequence number is committed
  * by adding its newline; anything else is cut off. Readers never treated
  * those bytes as an event, so the sequence stays dense and a second
- * `command.ended` cannot appear. Returns the committed events.
+ * `command.ended` cannot appear. On a full disk a final tail record is
+ * committed from the reserve and any other tail record is cut, so the repair
+ * never needs space the final record does not own. Returns the committed
+ * events.
  */
 export async function reconcileTail(
-  paths: JournalPaths
+  paths: JournalPaths,
+  writeAt: WriteAt = writeAtPosition
 ): Promise<EventEnvelope[]> {
   const handle = await open(
     paths.events,
@@ -527,17 +553,60 @@ export async function reconcileTail(
     }
     const tail = bytes.subarray(committedLength).toString("utf8");
     const next = parseEnvelope(tail);
-    if (next && next.seq === (committed.at(-1)?.seq ?? 0) + 1) {
-      await handle.write(Buffer.from("\n"), 0, 1, bytes.length);
+    if (
+      next &&
+      next.seq === (committed.at(-1)?.seq ?? 0) + 1 &&
+      (await commitNewline({ handle, paths, at: bytes.length, next, writeAt }))
+    ) {
       await handle.sync();
       return [...committed, next];
     }
+    // Not the next record, or no space to commit one that is not final:
+    // cutting it allocates nothing, and readers never counted it.
     await handle.truncate(committedLength);
     await handle.sync();
     return committed;
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Write the newline that commits a complete tail envelope. On a full disk or
+ * quota the newline can need a new block: a final record is committed from
+ * the reserve (the reserve exists for it), any other record is reported as
+ * not committed so the caller cuts it, which needs no space. Returns whether
+ * the newline was written.
+ */
+async function commitNewline(opts: {
+  readonly handle: FileHandle;
+  readonly paths: JournalPaths;
+  readonly at: number;
+  readonly next: EventEnvelope;
+  readonly writeAt: WriteAt;
+}): Promise<boolean> {
+  const write = async (): Promise<void> => {
+    const written = await opts.writeAt(opts.handle, Buffer.from("\n"), opts.at);
+    if (written !== 1) {
+      throw Object.assign(new Error("Short write to the command journal."), {
+        code: "ENOSPC",
+      });
+    }
+  };
+  try {
+    await write();
+    return true;
+  } catch (error: unknown) {
+    if (!isNoSpace(error)) {
+      throw error;
+    }
+  }
+  if (opts.next.type !== "command.ended") {
+    return false;
+  }
+  await unlink(opts.paths.reserve).catch(() => undefined);
+  await write();
+  return true;
 }
 
 function parseEnvelope(text: string): EventEnvelope | null {

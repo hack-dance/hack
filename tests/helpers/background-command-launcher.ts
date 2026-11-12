@@ -18,6 +18,12 @@ type LauncherConfig = {
   readonly linger?: boolean;
   /** Overrides for the command's (Compose) environment only. */
   readonly childEnv?: Record<string, string>;
+  /** A stand-in `exec` guest: its `compose` prefix runs the stop at the end. */
+  readonly guest?: {
+    readonly marker: string;
+    readonly service: string;
+    readonly compose: readonly string[];
+  };
 };
 
 // `@<path>` reads the config from a file (large redaction values would not
@@ -57,7 +63,14 @@ try {
     service: "api",
     argv: [...config.argv],
     workdir: null,
-    child: { argv: config.argv, cwd: config.cwd, env },
+    child: {
+      argv: config.argv,
+      cwd: config.cwd,
+      env,
+      ...(config.guest
+        ? { guest: { ...config.guest, compose: [...config.guest.compose] } }
+        : {}),
+    },
     redactValues: config.redactValues ?? [],
     requestIdentity: { argv: config.argv, cwd: config.cwd },
   });

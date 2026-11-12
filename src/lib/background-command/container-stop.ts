@@ -9,11 +9,18 @@ export type DockerTarget = {
   readonly context?: string;
 };
 
+/** The context the Docker CLI uses when nothing else selects one. */
+export const DEFAULT_DOCKER_CONTEXT = "default";
+
 /**
- * Resolve, at start, which Docker engine the command's client will use, the
- * way the Docker CLI does: DOCKER_CONFIG (relative to the launch directory),
- * then DOCKER_CONTEXT, else DOCKER_HOST (left in the environment), else the
- * config file's `currentContext`. Reads files only; never calls Docker.
+ * Resolve, at start, which Docker context the command's client will use, the
+ * way the Docker CLI does: DOCKER_CONFIG (relative to the launch directory)
+ * names the configuration; DOCKER_HOST selects the `default` context (which
+ * then uses DOCKER_HOST, left in the environment); else DOCKER_CONTEXT; else
+ * the config file's `currentContext`; else `default`. The context is always
+ * recorded, `default` included, so a later change of the current context
+ * reaches neither the client nor cleanup. Reads files only; never calls
+ * Docker.
  */
 export async function resolveDockerTarget(opts: {
   readonly env: Readonly<Record<string, string | undefined>>;
@@ -24,32 +31,38 @@ export async function resolveDockerTarget(opts: {
   if (rawConfig && rawConfig.length > 0) {
     config = isAbsolute(rawConfig) ? rawConfig : resolve(opts.cwd, rawConfig);
   }
+  const pinned = (context: string): DockerTarget => ({
+    ...(config ? { config } : {}),
+    context,
+  });
+  if (opts.env.DOCKER_HOST && opts.env.DOCKER_HOST.length > 0) {
+    return pinned(DEFAULT_DOCKER_CONTEXT);
+  }
   const fromEnv = opts.env.DOCKER_CONTEXT;
   if (fromEnv && fromEnv.length > 0) {
-    return { ...(config ? { config } : {}), context: fromEnv };
-  }
-  if (opts.env.DOCKER_HOST && opts.env.DOCKER_HOST.length > 0) {
-    return config ? { config } : {};
+    return pinned(fromEnv);
   }
   const dir = config ?? join(opts.env.HOME || homedir(), ".docker");
   const current = await readFile(join(dir, "config.json"), "utf8")
     .then((text): unknown => JSON.parse(text))
     .catch(() => null);
-  const context =
+  return pinned(
     typeof current === "object" &&
-    current !== null &&
-    "currentContext" in current &&
-    typeof current.currentContext === "string" &&
-    current.currentContext.length > 0
+      current !== null &&
+      "currentContext" in current &&
+      typeof current.currentContext === "string" &&
+      current.currentContext.length > 0
       ? current.currentContext
-      : undefined;
-  return {
-    ...(config ? { config } : {}),
-    ...(context ? { context } : {}),
-  };
+      : DEFAULT_DOCKER_CONTEXT
+  );
 }
 
-/** The command's environment pinned to the engine it started with. */
+/**
+ * The environment of the command's Docker client and of every cleanup call,
+ * pinned to the engine selection recorded at start. With DOCKER_HOST set the
+ * pinned context is `default`, which the CLI also picks for DOCKER_HOST, so
+ * the pin never changes the engine the start resolved.
+ */
 export function dockerEnvFor(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly target: DockerTarget | undefined;

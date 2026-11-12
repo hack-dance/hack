@@ -202,6 +202,12 @@ type LaunchConfig = {
   readonly withoutEnv?: readonly string[];
   /** Store root when it is not the fixture's HACK_HOME. */
   readonly store?: string;
+  /** A stand-in `exec` guest (see the launcher). */
+  readonly guest?: {
+    readonly marker: string;
+    readonly service: string;
+    readonly compose: readonly string[];
+  };
 };
 
 type Launched = {
@@ -1044,9 +1050,10 @@ describe("background command processes", () => {
       // 100 MiB in one burst: more than the capture limit (8 MiB) and the
       // backlog limit (64 MiB). Capture stops and records `truncated`; the
       // writer is never refused a write, so it exits 0 and the command
-      // succeeds. The stored file is cut back to what was announced.
+      // succeeds. The stored file is cut back to what was announced. `&&`
+      // keeps the writer's status: a failed `head` fails the command.
       const launched = await launch({
-        argv: ["sh", "-c", "head -c 104857600 /dev/zero; echo done >&2"],
+        argv: ["sh", "-c", "head -c 104857600 /dev/zero && echo done >&2"],
       });
       const journal = launched.journal as LoadedJournal;
       const read = await readUntilEnded({ journal });
@@ -1060,6 +1067,70 @@ describe("background command processes", () => {
       expect((await stat(journal.paths.stdout)).size).toBeLessThanOrEqual(
         CAPTURE_LIMIT_BYTES
       );
+    },
+    TEST_TIMEOUT_MS
+  );
+
+  test(
+    "the Compose client and its cleanup use the Docker context recorded at start, default included",
+    async () => {
+      const log = join(fixture.root, "docker-context.log");
+      const stop = join(fixture.root, "stand-in-compose.sh");
+      await writeFile(
+        stop,
+        `#!/bin/sh\nprintf 'cleanup|%s\\n' "$DOCKER_CONTEXT" >> ${JSON.stringify(log)}\nexit 0\n`,
+        { mode: 0o755 }
+      );
+      const client = (label: string): string[] => [
+        "sh",
+        "-c",
+        `printf '${label}|%s\\n' "$DOCKER_CONTEXT" >> ${JSON.stringify(log)}`,
+      ];
+      const guest = (marker: string) => ({
+        marker: marker.repeat(20),
+        service: "api",
+        compose: ["sh", stop],
+      });
+      const configFile = join(
+        fixture.env.HOME as string,
+        ".docker",
+        "config.json"
+      );
+      // No current context anywhere: `default` is recorded and pinned.
+      const implicit = await launch({
+        argv: client("client-default"),
+        guest: guest("a"),
+        withoutEnv: ["DOCKER_HOST"],
+      });
+      const first = implicit.journal as LoadedJournal;
+      expect((await readUntilEnded({ journal: first })).outcome).toBe(
+        "succeeded"
+      );
+      // A current context at start is pinned; switching it later changes
+      // neither the client nor cleanup.
+      await mkdir(join(fixture.env.HOME as string, ".docker"), {
+        recursive: true,
+      });
+      await writeFile(configFile, JSON.stringify({ currentContext: "ctx-a" }));
+      const named = await launch({
+        argv: ["sh", "-c", `sleep 1; ${client("client-named").at(-1)}`],
+        guest: guest("b"),
+        withoutEnv: ["DOCKER_HOST"],
+      });
+      await writeFile(configFile, JSON.stringify({ currentContext: "ctx-b" }));
+      const second = named.journal as LoadedJournal;
+      expect((await readUntilEnded({ journal: second })).outcome).toBe(
+        "succeeded"
+      );
+      expect(
+        JSON.parse(await readFile(first.paths.launch, "utf8")).docker
+      ).toEqual({ context: "default" });
+      expect((await readFile(log, "utf8")).trim().split("\n")).toEqual([
+        "client-default|default",
+        "cleanup|default",
+        "client-named|ctx-a",
+        "cleanup|ctx-a",
+      ]);
     },
     TEST_TIMEOUT_MS
   );

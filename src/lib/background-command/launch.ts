@@ -225,7 +225,7 @@ export async function startBackgroundCommand(
     cwd: opts.child.cwd,
     ...(opts.child.container ? { container: opts.child.container } : {}),
     ...(opts.child.guest ? { guest: opts.child.guest } : {}),
-    ...(docker && Object.keys(docker).length > 0 ? { docker } : {}),
+    ...(docker ? { docker } : {}),
   });
   const accepted = await acceptCommand({
     input: {

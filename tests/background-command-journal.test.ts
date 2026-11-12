@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  type FileHandle,
   lstat,
   mkdir,
   mkdtemp,
@@ -891,6 +892,49 @@ describe("review regressions", () => {
     ).toBe(false);
   });
 
+  test("orphan cancel reports descendants not confirmed when no group snapshot was validated", async () => {
+    // The leader verifies for the first `verifiedCalls` observations, then
+    // is gone; a descendant stays alive that was never recorded.
+    for (const verifiedCalls of [1, 2]) {
+      const { meta, paths } = await acceptCommand({ input: input(), root });
+      const child = { pid: 410_002, birth: "c", processGroupId: 410_002 };
+      const descendant = { pid: 410_003, birth: "d", processGroupId: 410_002 };
+      await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+      let leaderCalls = 0;
+      const observe = async (pids: readonly number[]) => {
+        const rows: ObservedIdentity[] = [descendant];
+        if (pids.includes(child.pid)) {
+          leaderCalls += 1;
+          if (leaderCalls <= verifiedCalls) {
+            rows.push(child);
+          }
+        }
+        return new Map(
+          rows
+            .filter((row) => pids.includes(row.pid))
+            .map((row) => [row.pid, row])
+        );
+      };
+      const journal = await loadJournal({ commandId: meta.commandId, root });
+      const result = await cancelCommand({
+        journal,
+        root,
+        observe,
+        observeGroup: async () => [
+          { pid: child.pid, birth: child.birth },
+          { pid: descendant.pid, birth: descendant.birth },
+        ],
+        orphanGraceMs: 100,
+        signaller: { process: () => true, group: () => true },
+      });
+      expect(result.confirmed.descendants).toBe("not_confirmed");
+      const ended = (await readEvents(paths)).find(
+        (event) => event.type === "command.ended"
+      );
+      expect(ended?.payload.descendants).toBe("not_confirmed");
+    }
+  });
+
   test("admission stops an overdue orphaned child it can verify, then records timed_out; reads never do", async () => {
     const accepted = new Date(Date.now() - 120_000);
     const { meta, paths } = await acceptCommand({
@@ -1236,6 +1280,109 @@ describe("second-review blockers", () => {
     expect(events.some((event) => event.type === "command.output")).toBe(false);
     expect(await lstat(paths.reserve).catch(() => null)).toBeNull();
   });
+
+  /** A full disk for positioned writes too (the tail repair's newline). */
+  const fullDiskWriteAt =
+    (paths: { readonly reserve: string }) =>
+    async (handle: FileHandle, bytes: Buffer, position: number) => {
+      if (await lstat(paths.reserve).catch(() => null)) {
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      }
+      return (await handle.write(bytes, 0, bytes.length, position))
+        .bytesWritten;
+    };
+
+  test("on a full disk a complete tail record without its newline is cut, and the final record still lands from the reserve", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.owner, JSON.stringify(deadOwner), { mode: 0o600 });
+    const started = buildEnvelope({
+      meta,
+      seq: 2,
+      type: "command.started",
+      payload: { pid: 1 },
+    });
+    await writeFile(paths.events, JSON.stringify(started), { flag: "a" });
+    const recover = () =>
+      recoverLostOwner({
+        paths,
+        meta,
+        observe: fakeObserve(),
+        readBootTime: noReboot,
+        append: fullDiskAppend(paths),
+        writeAt: fullDiskWriteAt(paths),
+      });
+    const events = await recover();
+    expect(events.map((event) => event.seq)).toEqual([1, 2]);
+    expect(events.map((event) => event.type)).toEqual([
+      "command.accepted",
+      "command.ended",
+    ]);
+    expect(events.at(-1)?.payload.outcome).toBe("unknown");
+    expect(await lstat(paths.reserve).catch(() => null)).toBeNull();
+    // A later read finds the end and writes nothing more.
+    expect((await recover()).map((event) => event.seq)).toEqual([1, 2]);
+  });
+
+  test("on a full disk a complete final record without its newline is committed from the reserve, once", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.owner, JSON.stringify(deadOwner), { mode: 0o600 });
+    const ended = buildEnvelope({
+      meta,
+      seq: 2,
+      type: "command.ended",
+      payload: { outcome: "succeeded", exitCode: 0 },
+    });
+    await writeFile(paths.events, JSON.stringify(ended), { flag: "a" });
+    const events = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+      append: fullDiskAppend(paths),
+      writeAt: fullDiskWriteAt(paths),
+    });
+    expect(events.map((event) => event.seq)).toEqual([1, 2]);
+    expect(events.at(-1)?.payload.outcome).toBe("succeeded");
+    expect((await readFile(paths.events, "utf8")).endsWith("\n")).toBe(true);
+    expect(await lstat(paths.reserve).catch(() => null)).toBeNull();
+  });
+
+  test("the file-based fallback lock takes a newly created journal's lock and excludes", async () => {
+    const { paths } = await acceptCommand({ input: input(), root });
+    // Acceptance created the empty flock file; the fallback must not read it
+    // as another owner's receipt.
+    expect((await stat(paths.lock)).size).toBe(0);
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fallback = { fileLocks: false };
+    const first = withJournalLock(
+      paths,
+      async () => {
+        order.push("first in");
+        await held;
+        order.push("first out");
+      },
+      fallback
+    );
+    await Bun.sleep(50);
+    const second = withJournalLock(
+      paths,
+      async () => {
+        order.push("second in");
+      },
+      fallback
+    );
+    await Bun.sleep(150);
+    expect(order).toEqual(["first in"]);
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first in", "first out", "second in"]);
+    expect(await lstat(paths.fallbackLock).catch(() => null)).toBeNull();
+    expect((await stat(paths.lock)).size).toBe(0);
+  });
 });
 
 describe("read bounds and run refusals", () => {
@@ -1500,14 +1647,28 @@ describe("docker target for cleanup", () => {
         cwd: launchDir,
       })
     ).toEqual({ config: join(launchDir, "docker-config"), context: "ctx-b" });
-    // DOCKER_HOST (without DOCKER_CONTEXT) selects the engine itself: no
-    // context is pinned over it.
+    // DOCKER_HOST selects the `default` context, as the Docker CLI does,
+    // even over DOCKER_CONTEXT; the default context then uses DOCKER_HOST.
     expect(
       await resolveDockerTarget({
         env: { DOCKER_HOST: "unix:///tmp/x.sock", HOME: home },
         cwd: launchDir,
       })
-    ).toEqual({});
+    ).toEqual({ context: "default" });
+    expect(
+      await resolveDockerTarget({
+        env: {
+          DOCKER_HOST: "unix:///tmp/x.sock",
+          DOCKER_CONTEXT: "ctx-b",
+          HOME: home,
+        },
+        cwd: launchDir,
+      })
+    ).toEqual({ context: "default" });
+    // Nothing selects a context: `default` is recorded, not left implicit.
+    expect(
+      await resolveDockerTarget({ env: { HOME: home }, cwd: launchDir })
+    ).toEqual({ context: "default" });
     expect(
       dockerEnvFor({
         env: { PATH: "/bin", DOCKER_CONFIG: "./docker-config" },

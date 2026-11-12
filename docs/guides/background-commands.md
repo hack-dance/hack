@@ -198,7 +198,10 @@ it records the group's members first, so descendants that ignore SIGTERM are
 still killed (after checking their pid and start time) once the command's own
 process exits. The supervisor records `cancelled`. If the command's own
 process exits by itself just as a cancel arrives, the group was never stopped;
-the final record then also says `descendants: "not_confirmed"`. A command that already
+the final record then also says `descendants: "not_confirmed"`. With no live
+supervisor, `cancel` runs the same sequence itself; it reports descendants
+`stopped` only when it read the group's members while the command's own
+process still verified, and `"not_confirmed"` otherwise. A command that already
 exited 0 stays `succeeded` even if a cancel raced its end. The result says what
 was confirmed: `supervisorSignalled`, `childGroupSignalled`, `childExited`, and
 `containerProcess`: `"stopped"` when what ran in the container is confirmed
@@ -222,6 +225,11 @@ does not stop what runs in the container, so:
   `env_reset`, `su -`, a daemon that clears its environment), and one whose
   environment the exec user cannot read (another user's, or a setuid
   program).
+
+The `docker compose` client and every cleanup call use the Docker context
+resolved when the command started, `default` included, so switching the
+current context while the command runs moves neither of them to another
+engine.
 
 An end other than `succeeded` whose container process is `not_confirmed` keeps
 its admission slot until the command's timeout window closes, so a

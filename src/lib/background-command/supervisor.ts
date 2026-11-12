@@ -315,7 +315,8 @@ function startChild(opts: {
               ...childEnv(),
               [NATIVE_EXIT_CONFIRMED_ENV]: opts.paths.exitConfirmed,
             }
-          : childEnv(),
+          : // The engine recorded at start: the client and cleanup share it.
+            dockerEnvFor({ env: childEnv(), target: opts.launch.docker }),
       stdin: "ignore",
       stdout: descriptors.stdout,
       stderr: descriptors.stderr,

@@ -21,6 +21,7 @@ import {
   readEvents,
   readOwner,
   reconcileTail,
+  type WriteAt,
 } from "./journal.ts";
 import { pumpStream } from "./output-pump.ts";
 import {
@@ -158,15 +159,19 @@ const JOURNAL_LOCK_WAIT_MS = 10_000;
  * on locking, and the kernel releases it when its holder dies. Only the
  * writer of `command.ended` releases the reserve, under this lock, so two
  * recoveries cannot spend it twice. Without libc the file-based registry
- * lock is used instead (every process on the host makes the same choice).
+ * lock is used instead (every process on the host makes the same choice). It
+ * publishes an owner receipt, so it uses its own path: the empty `lock` file
+ * acceptance created would read as an unreclaimable foreign owner.
  */
 export async function withJournalLock<T>(
   paths: JournalPaths,
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  /** Test seam: force the file-based fallback. */
+  opts: { readonly fileLocks?: boolean } = {}
 ): Promise<T> {
-  if (!fileLocksAvailable()) {
+  if (!(opts.fileLocks ?? fileLocksAvailable())) {
     return await withProjectsRegistryLock({
-      lockPath: paths.lock,
+      lockPath: paths.fallbackLock,
       run,
       label: "background command journal",
     });
@@ -225,8 +230,9 @@ export async function recoverLostOwner(opts: {
   readonly readBootTime?: ReadBootTime;
   /** Test seam: group signalling. */
   readonly signalGroup?: (pgid: number, signal: NodeJS.Signals) => boolean;
-  /** Test seams: journal append and lock. */
+  /** Test seams: journal append, tail repair write and lock. */
   readonly append?: AppendLine;
+  readonly writeAt?: WriteAt;
   readonly lock?: typeof withJournalLock;
   /**
    * Stop a verified orphan that ran past its timeout. Only the start path
@@ -256,7 +262,7 @@ async function recoverLocked(
   if (assessment.kind !== "owner_lost") {
     return observed;
   }
-  const events = await reconcileTail(opts.paths);
+  const events = await reconcileTail(opts.paths, opts.writeAt);
   if (endedEvent(events)) {
     return events;
   }

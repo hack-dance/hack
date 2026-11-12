@@ -42,7 +42,7 @@ control to keep small labels legible on narrow screens.
 | User journey | `journey` | Yes | Yes | 372; scores and actor legend readable |
 | XY chart | `xychart-beta` | Yes | Yes | 700; grid is faint, axis text readable |
 | Agentflow | `agentflow-beta` | Yes | Yes | 260; task/tool shapes and flow boundary clear |
-| Architecture | `architecture-beta` | Yes | Yes | 136; group and service labels clear |
+| Architecture | `architecture-beta` | Yes | Yes | 136; group and service labels clear; 1.9.0 rejects class/classDef syntax, so the README generator tags its curated nodes with house classes after rendering |
 | Cynefin | `cynefin-beta` | Yes | Yes | 688; domain text and sample cards readable |
 | Ishikawa | `ishikawa-beta` | Yes | Yes | 332; cause text and spine clear |
 | Radar | `radar-beta` | Yes | Yes | 498; grid is faint, axis text readable |

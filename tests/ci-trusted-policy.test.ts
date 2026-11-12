@@ -10,6 +10,7 @@ const repository = resolve(import.meta.dir, "..");
 const workflow = Bun.YAML.parse(
   await Bun.file(join(repository, ".github/workflows/ci.yml")).text()
 ) as {
+  concurrency: { group: string; "cancel-in-progress": string };
   on: { pull_request: { types: string[] } };
   jobs: { changes: { steps: { id?: string; run?: string }[] } };
 };
@@ -24,10 +25,17 @@ async function scope(opts: {
   draft?: boolean;
   event?: string;
   full?: boolean;
+  mac?: boolean;
+  e2e?: boolean;
   bootstrap?: boolean;
   legacy?: boolean;
   tamper?: boolean;
   noMerge?: boolean;
+  ref?: string;
+  before?: string;
+  predecessor?: string;
+  dispatchFull?: boolean;
+  expectedExit?: number;
 }) {
   const root = await mkdtemp(join(tmpdir(), "trusted-ci-policy-"));
   try {
@@ -42,8 +50,13 @@ async function scope(opts: {
         HACK_NO_INTERACTIVE: "1",
         FIXTURE_BUN: process.execPath,
         EVENT_NAME: opts.event ?? "pull_request",
+        CI_REF: opts.ref ?? "refs/pull/1/merge",
+        DISPATCH_FULL: String(opts.dispatchFull ?? true),
+        GITHUB_REPOSITORY: "fixture/repository",
         PR_DRAFT: String(opts.draft ?? false),
         PR_FULL: String(opts.full ?? false),
+        PR_MAC: String(opts.mac ?? false),
+        PR_E2E: String(opts.e2e ?? false),
         RUNNER_TEMP: join(root, "runner"),
         GITHUB_WORKSPACE: root,
         GITHUB_OUTPUT: join(root, "outputs"),
@@ -66,7 +79,7 @@ async function scope(opts: {
     };
     const policy = opts.legacy
       ? 'throw Error("legacy policy must not execute");'
-      : 'const root=process.argv.find(a=>a.startsWith("--repo-root="))?.slice(12); if(!root)throw Error("missing merge data"); await Bun.write(process.env.GITHUB_OUTPUT!, "policy=base\\ndata="+await Bun.file(root+"/src/value.ts").text());';
+      : '/* --base-revision= */ const root=process.argv.find(a=>a.startsWith("--repo-root="))?.slice(12); if(!root)throw Error("missing merge data"); await Bun.write(process.env.GITHUB_OUTPUT!, "policy=base\\ndata="+await Bun.file(root+"/src/value.ts").text()+"\\n");';
     const path = opts.path ?? "src/value.ts";
     await put(path, path.endsWith(".json") ? "{}" : "# base");
     await put("src/value.ts", "base");
@@ -78,6 +91,12 @@ async function scope(opts: {
     git("init", "--quiet", "--initial-branch=base");
     git("add", ".");
     git("commit", "--quiet", "-m", "base");
+    const base = runFixtureGitSync({
+      cwd: root,
+      args: ["rev-parse", "HEAD"],
+      env,
+    }).stdout.trim();
+    env.BEFORE_SHA = opts.before ?? base;
     git("checkout", "--quiet", "-b", "topic");
     await put(
       path,
@@ -107,6 +126,13 @@ async function scope(opts: {
       '#!/bin/sh\n[ "$1" = "--no-env-file" ] && shift\nif [ "$1" = "install" ]; then exit 0; fi\nexec "$FIXTURE_BUN" --no-env-file "$@"\n'
     );
     await chmod(join(root, "bin/bun"), 0o700);
+    await put(
+      "bin/gh",
+      opts.predecessor === "error"
+        ? "#!/bin/sh\nexit 1\n"
+        : `#!/bin/sh\ncat <<'EOF'\n${JSON.stringify({ workflow_runs: opts.predecessor === "missing" ? [] : [{ head_sha: base, head_branch: "next", event: "push", path: ".github/workflows/ci.yml", status: opts.predecessor === "running" ? "in_progress" : "completed", conclusion: opts.predecessor ?? "success" }] })}\nEOF\n`
+    );
+    await chmod(join(root, "bin/gh"), 0o700);
     const result = Bun.spawnSync(["bash", "-c", script], {
       cwd: root,
       env: { ...env, PATH: `${join(root, "bin")}:${process.env.PATH}` },
@@ -114,7 +140,12 @@ async function scope(opts: {
       stderr: "pipe",
       timeout: 10_000,
     });
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.exitCode, result.stderr.toString()).toBe(
+      opts.expectedExit ?? 0
+    );
+    if (opts.expectedExit) {
+      return {};
+    }
     return Object.fromEntries(
       (await Bun.file(join(root, "outputs")).text())
         .trim()
@@ -134,6 +165,13 @@ test("trusted base policy executes against merge-tree data, not merge-tree code"
   expect(await scope({ tamper: true })).toEqual({
     policy: "base",
     data: "topic",
+    ci_evidence: "scoped",
+    compiler_hosts: "[]",
+    runtime_core: "false",
+    test_shards: "[4,5,6,7,8]",
+    defer_macos: "true",
+    docker_suite: "false",
+    build_smoke: "false",
   });
 });
 for (const path of [
@@ -157,15 +195,16 @@ for (const path of [
   "packages/config-compiler/Cargo.toml",
   "packages/runtime-core/Cargo.lock",
 ]) {
-  test(`workflow independently forces every job for present protected input ${path}`, async () => {
+  test(`protected input ${path} selects all files without escalating the PR tier`, async () => {
     const outputs = await scope({ path });
     expect(requiresWorkflowFull([path])).toBe(true);
     expect(outputs.selection_mode).toBe("full");
     expect(outputs.test_files).toBe("");
-    expect(JSON.parse(outputs.compiler_hosts ?? "null")).toEqual(
-      JSON.parse(fullPushPlan().compiler_hosts)
-    );
-    expect(outputs.test_shards).toBe("[1,2,3,4,5,6,7,8]");
+    expect(outputs.compiler_hosts).toBe("[]");
+    expect(outputs.test_shards).toBe("[4,5,6,7,8]");
+    expect(outputs.docker_suite).toBe("false");
+    expect(outputs.defer_macos).toBe("true");
+    expect(outputs.build_smoke).toBe("false");
   });
 }
 test("bootstrap, pushes and ci:full never execute a PR selector", async () => {
@@ -178,10 +217,20 @@ test("bootstrap, pushes and ci:full never execute a PR selector", async () => {
   ]) {
     expect(await scope(options)).toEqual(
       Object.fromEntries(
-        Object.entries(fullPushPlan()).map(([key, value]) => [
-          key,
-          String(value),
-        ])
+        Object.entries({
+          ...fullPushPlan({ releaseHosts: false }),
+          ...("event" in options || "full" in options
+            ? {}
+            : {
+                compiler_hosts: "[]",
+                runtime_core: false,
+                test_shards: "[4,5,6,7,8]",
+                docker_suite: false,
+                defer_macos: true,
+                build_smoke: false,
+              }),
+          ci_evidence: "scoped",
+        }).map(([key, value]) => [key, String(value)])
       )
     );
   }
@@ -198,4 +247,124 @@ test("independent full guard preserves the non-mergeable draft tier", async () =
 });
 test("retargeting reclassifies through the ordinary pull_request event", () => {
   expect(workflow.on.pull_request.types).toContain("edited");
+});
+
+test("only next pushes share a cancelling group; main and dispatch remain unique", () => {
+  expect(workflow.concurrency.group).toBe(
+    "${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}"
+  );
+  expect(workflow.concurrency["cancel-in-progress"]).toBe(
+    "${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/next') }}"
+  );
+});
+
+test("next push runs trusted before policy only after a successful predecessor", async () => {
+  expect(
+    await scope({
+      event: "push",
+      ref: "refs/heads/next",
+      noMerge: true,
+      tamper: true,
+    })
+  ).toEqual({
+    policy: "base",
+    data: "topic",
+    ci_evidence: "scoped",
+    defer_macos: "false",
+    build_smoke: "true",
+  });
+});
+
+for (const predecessor of [
+  "failure",
+  "cancelled",
+  "running",
+  "missing",
+  "error",
+]) {
+  test(`next cannot lose coverage after ${predecessor} predecessor`, async () => {
+    expect(
+      await scope({
+        event: "push",
+        ref: "refs/heads/next",
+        predecessor,
+        noMerge: true,
+      })
+    ).toMatchObject({
+      selection_mode: "full",
+      ci_evidence: "scoped",
+      test_files: "",
+    });
+  });
+}
+
+for (const before of ["", "0".repeat(40), "f".repeat(40), "HEAD~1", "nope"]) {
+  test(`unavailable next before ${before || "missing"} widens to full`, async () => {
+    expect(
+      await scope({ event: "push", ref: "refs/heads/next", before })
+    ).toMatchObject({ selection_mode: "full", ci_evidence: "scoped" });
+  });
+}
+
+test("main and explicit full dispatch retain all release hosts and certificate", async () => {
+  for (const options of [
+    { event: "push", ref: "refs/heads/main" },
+    { event: "workflow_dispatch", ref: "refs/heads/next" },
+  ]) {
+    expect(await scope(options)).toEqual(
+      Object.fromEntries(
+        Object.entries({ ...fullPushPlan(), ci_evidence: "release-full" }).map(
+          ([key, value]) => [key, String(value)]
+        )
+      )
+    );
+  }
+});
+
+test("manual qualification refuses full=false before launching a suite", async () => {
+  expect(
+    await scope({
+      event: "workflow_dispatch",
+      dispatchFull: false,
+      expectedExit: 2,
+    })
+  ).toEqual({});
+});
+
+test("PR labels opt into independent tiers without widening the other tier", async () => {
+  const path = "scripts/ci-test-selection.ts";
+  expect(await scope({ path, mac: true })).toMatchObject({
+    compiler_hosts: fullPushPlan({ releaseHosts: false }).compiler_hosts,
+    runtime_core: "true",
+    test_shards: "[1,2,3,4,5,6,7,8]",
+    docker_suite: "false",
+    defer_macos: "false",
+    build_smoke: "false",
+  });
+  expect(await scope({ path, e2e: true })).toMatchObject({
+    compiler_hosts: "[]",
+    runtime_core: "false",
+    test_shards: "[4,5,6,7,8]",
+    docker_suite: "true",
+    defer_macos: "true",
+    build_smoke: "false",
+  });
+  expect(await scope({ path, full: true })).toMatchObject({
+    compiler_hosts: fullPushPlan({ releaseHosts: false }).compiler_hosts,
+    runtime_core: "true",
+    test_shards: "[1,2,3,4,5,6,7,8]",
+    docker_suite: "true",
+    defer_macos: "false",
+    build_smoke: "true",
+  });
+  expect(
+    await scope({ path, draft: true, full: true, mac: true, e2e: true })
+  ).toMatchObject({
+    compiler_hosts: "[]",
+    runtime_core: "false",
+    test_shards: "[4,5,6,7,8]",
+    docker_suite: "false",
+    defer_macos: "true",
+    build_smoke: "false",
+  });
 });

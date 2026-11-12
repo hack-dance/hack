@@ -119,7 +119,24 @@ Preparation and publication are separate operations. Preparation validates the
 version and source, builds the complete native package, and retains reviewable
 artifacts without creating a Git tag or release.
 
-After the channel workflow is merged into `next`, dispatch the existing `Release`
+First freeze merges to `next` at the intended release head and obtain full CI:
+
+```sh
+gh workflow run ci.yml --ref next -f full=true
+```
+
+Wait for that exact SHA's full run to succeed. Ordinary `next` pushes can select a
+subset and defer Intel compiler checks; even a green full unit selection is not a
+release certificate. Every prerelease needs an explicit full dispatch. Its
+`test` fan-in must execute `selection_mode=full` and `ci_evidence=release-full`,
+and every shard and compiler host must succeed. Both plan and publish recheck
+that evidence, the latest attempt and the selected run's required-check identities.
+Cancelled runs never qualify. If only scoped evidence exists, the plan refuses
+before building and prints this full-dispatch command. Manual full runs have a
+separate concurrency group, so a new `next` push cannot cancel one; moving the
+head still invalidates its release eligibility.
+
+After full CI succeeds, dispatch the existing `Release`
 workflow on that branch with an explicit version and its full commit SHA:
 
 ```sh

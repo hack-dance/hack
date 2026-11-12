@@ -21,8 +21,9 @@
  *
  * The outputs written to `$GITHUB_OUTPUT` are the job switches in
  * `.github/workflows/ci.yml`. Only `full` runs every job and every config
- * compiler host; pushes to `next`/`main` are always `full`, so the prerelease
- * exact-head gate keeps its complete evidence. `ci-pr-plan.ts` layers the
+ * compiler host on main and explicit full dispatches. Next pushes use a proven
+ * successful before revision; the workflow widens uncertainty to full.
+ * `ci-pr-plan.ts` layers the
  * conservative unit subset and draft policy over these coarse switches.
  * Ready PRs retain platform pools; drafts run their subset on Linux and fail
  * the required fan-in. A failed or empty diff selects every unit test.
@@ -135,7 +136,7 @@ export type CompilerHost = {
   readonly arch: "x64" | "arm64";
 };
 
-/** Every compiler release host; pushes and release builds cover them all. */
+/** Every compiler release host; main and explicit release runs cover them all. */
 export const COMPILER_HOSTS: readonly CompilerHost[] = [
   { os: "ubuntu-latest", platform: "linux", arch: "x64" },
   { os: "macos-latest", platform: "darwin", arch: "arm64" },
@@ -264,10 +265,40 @@ export function pullRequestPaths(repoRoot: string): string[] | null {
   ) {
     return null;
   }
+  const baseRevision = parents.stdout.toString().trim().split(/\s+/)[1];
+  return baseRevision ? revisionPaths({ repoRoot, baseRevision }) : null;
+}
+
+/** A push's supplied before SHA is data, and must be a known ancestor. */
+export function revisionPaths(opts: {
+  readonly repoRoot: string;
+  readonly baseRevision: string;
+}): string[] | null {
+  if (
+    !/^[0-9a-f]{40}$/.test(opts.baseRevision) ||
+    /^0+$/.test(opts.baseRevision)
+  ) {
+    return null;
+  }
+  const ancestry = Bun.spawnSync(
+    ["git", "merge-base", "--is-ancestor", opts.baseRevision, "HEAD"],
+    { cwd: opts.repoRoot, stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+  );
+  if (ancestry.exitCode !== 0) {
+    return null;
+  }
   const diff = Bun.spawnSync(
-    ["git", "diff", "--name-only", "--no-renames", "-z", "HEAD^1", "HEAD"],
+    [
+      "git",
+      "diff",
+      "--name-only",
+      "--no-renames",
+      "-z",
+      opts.baseRevision,
+      "HEAD",
+    ],
     {
-      cwd: repoRoot,
+      cwd: opts.repoRoot,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -302,10 +333,17 @@ export async function main(argv: readonly string[]): Promise<number> {
     ? resolve(rootArgument.slice("--repo-root=".length))
     : resolve(import.meta.dir, "..");
   const { fullPushPlan, planPullRequest } = await import("./ci-pr-plan.ts");
-  let outputs = fullPushPlan();
+  const ref = argv.find((arg) => arg.startsWith("--ref="))?.slice(6) ?? "";
+  const nextPush = event === "push" && ref === "refs/heads/next";
+  let outputs = fullPushPlan({
+    releaseHosts: !nextPush && event !== "pull_request",
+  });
   let reason = `event ${event} always runs the full matrix`;
-  if (event === "pull_request") {
-    const paths = pullRequestPaths(repoRoot);
+  if (event === "pull_request" || nextPush) {
+    const baseRevision = argument(argv, "--base-revision=");
+    const paths = nextPush
+      ? revisionPaths({ repoRoot, baseRevision })
+      : pullRequestPaths(repoRoot);
     if (paths === null) {
       reason = "the pull request diff is unavailable; running the full matrix";
     } else {
@@ -320,8 +358,12 @@ export async function main(argv: readonly string[]): Promise<number> {
     outputs = await planPullRequest({
       repoRoot,
       changed: paths,
-      draft: process.env.PR_DRAFT === "true",
-      full: process.env.PR_FULL === "true",
+      draft: event === "pull_request" && process.env.PR_DRAFT === "true",
+      full: event === "pull_request" && process.env.PR_FULL === "true",
+      releaseHosts: false,
+      pullRequest: event === "pull_request",
+      mac: process.env.PR_MAC === "true",
+      e2e: process.env.PR_E2E === "true",
     });
     console.log(
       `test selection: ${outputs.selection_mode}; draft: ${outputs.draft}; shard indices: ${outputs.test_shards}`
@@ -341,6 +383,10 @@ export async function main(argv: readonly string[]): Promise<number> {
     );
   }
   return 0;
+}
+
+function argument(argv: readonly string[], prefix: string): string {
+  return argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length) ?? "";
 }
 
 if (import.meta.main) {

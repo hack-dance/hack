@@ -8,7 +8,10 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
-import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import {
+  NATIVE_PROVIDER_PIN_MESSAGE,
+  NativeRuntimeRequestError,
+} from "../src/backends/native-runtime-client.ts";
 import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
@@ -49,6 +52,30 @@ async function fixture(saved = true) {
   }
   return { scope, runtime: { binary: "/not-invoked", home: nativeHome } };
 }
+
+test("dependency refresh preserves the provider pin refusal before exec can be requested", async () => {
+  const opts = await fixture();
+  let calls = 0;
+  try {
+    await refreshNativeProjectDependencies({
+      ...opts,
+      invoke: async () => {
+        calls++;
+        throw new NativeRuntimeRequestError({
+          nativeCode: "provider_pin_changed",
+          message: "private runtime text",
+        });
+      },
+    });
+    throw new Error("expected refusal");
+  } catch (error) {
+    expect(error).toBeInstanceOf(NativeRuntimeRequestError);
+    expect(error).toMatchObject({ nativeCode: "provider_pin_changed" });
+    expect(String(error)).toContain(NATIVE_PROVIDER_PIN_MESSAGE);
+    expect(String(error)).not.toContain("private runtime text");
+  }
+  expect(calls).toBe(1);
+});
 
 test("refresh validates the owned no-op or bounded changed slots with one public request", async () => {
   const opts = await fixture();

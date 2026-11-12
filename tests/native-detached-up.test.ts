@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
 
 const fixture = join(import.meta.dir, "fixtures", "native-detached-owner.ts");
 
@@ -28,6 +29,7 @@ for (const mode of [
   "shell-names",
   "shell-names-empty",
   "fail",
+  "provider-pin",
   "timeout",
   "launcher-loss",
   "cancel-at-accept",
@@ -96,11 +98,21 @@ for (const mode of [
           ok: false,
           error: { code: "E_CANCELLED" },
         });
+      } else if (mode === "provider-pin") {
+        expect(code).toBe(1);
+        const result = JSON.parse(stdout);
+        expect(result).toMatchObject({
+          ok: false,
+          error: { code: "E_STARTUP_INCOMPLETE" },
+        });
+        expect(result.error.message).toContain("provider_pin_changed");
+        expect(result.error.message).toContain(NATIVE_PROVIDER_PIN_MESSAGE);
+        expect(stdout).not.toContain("synthetic-private-value");
       } else {
         expect(code).not.toBe(0);
         expect(stdout).toBe("");
       }
-      if (mode !== "fail") {
+      if (mode !== "fail" && mode !== "provider-pin") {
         expect(await waitForFile(join(root, "stopped"))).toBe(
           "down.before\nprocess.stop\ndown.after\n"
         );

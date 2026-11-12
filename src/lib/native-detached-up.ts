@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { NATIVE_PROVIDER_PIN_MESSAGE } from "../backends/native-runtime-client.ts";
 import {
   emitCliResult,
   errorResult,
@@ -21,6 +22,25 @@ type Ready = {
 };
 let publishReady: ((ready: Ready) => void) | undefined;
 let publishShellVariables: ((names: readonly string[]) => void) | undefined;
+let publishProviderPinFailure: (() => Promise<void>) | undefined;
+
+/** Closed, value-free failure handoff; never forwards runtime error text or logs. */
+export async function nativeDetachedUpProviderPinFailure(
+  error: unknown
+): Promise<void> {
+  if (!publishProviderPinFailure) {
+    return;
+  }
+  const { NativeRuntimeRequestError } = await import(
+    "../backends/native-runtime-client.ts"
+  );
+  if (
+    error instanceof NativeRuntimeRequestError &&
+    error.nativeCode === "provider_pin_changed"
+  ) {
+    await publishProviderPinFailure();
+  }
+}
 
 /** Names-only notice: never accepts or forwards an environment map or output text. */
 export function nativeDetachedUpShellVariables(
@@ -127,12 +147,27 @@ export async function runNativeDetachedOwner(opts: {
       send({ kind: "shell-variables", names });
     }
   };
+  publishProviderPinFailure = () =>
+    new Promise<void>((resolve) => {
+      if (ready || stopping || !process.send || !process.connected) {
+        resolve();
+        return;
+      }
+      try {
+        process.send("provider_pin_changed", undefined, undefined, () =>
+          resolve()
+        );
+      } catch {
+        resolve();
+      }
+    });
   try {
     return await opts.run(opts.args);
   } finally {
     stopping = true;
     publishReady = undefined;
     publishShellVariables = undefined;
+    publishProviderPinFailure = undefined;
     process.off("disconnect", disconnected);
     process.off("message", message);
     if (process.connected) {
@@ -231,6 +266,16 @@ export async function startNativeDetachedUp(opts: {
   });
   child.on("message", (value: unknown) => {
     if (failed) {
+      return;
+    }
+    if (!ready && value === "provider_pin_changed") {
+      failed = true;
+      result.reject(
+        new HackCliError({
+          code: "E_STARTUP_INCOMPLETE",
+          message: `Native detached startup refused (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`,
+        })
+      );
       return;
     }
     if (isRecord(value) && value.kind === "shell-variables") {

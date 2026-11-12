@@ -7,6 +7,8 @@ import type { NativeProjectRunScope } from "./native-project-run.ts";
 import { loadNativeProjectRun } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_PROVIDER_PIN_MESSAGE,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -133,6 +135,12 @@ export async function nativeProjectExec(opts: {
   }
   const refreshed = await refreshNativeProjectDependencies(opts);
   const before = await nativeProjectPs(opts);
+  if (before.status === "provider_pin_changed") {
+    throw new NativeRuntimeRequestError({
+      nativeCode: "provider_pin_changed",
+      message: NATIVE_PROVIDER_PIN_MESSAGE,
+    });
+  }
   if (!before.run) {
     throw new ClosedCliError(
       "Native project has not been started; no owned graph mapping exists."
@@ -210,6 +218,12 @@ export async function nativeProjectExec(opts: {
   const stdout = decode(value.stdout_base64),
     stderr = decode(value.stderr_base64);
   const after = await nativeProjectPs(opts);
+  if (after.status === "provider_pin_changed") {
+    throw new NativeRuntimeRequestError({
+      nativeCode: "provider_pin_changed",
+      message: NATIVE_PROVIDER_PIN_MESSAGE,
+    });
+  }
   if (
     after.status !== "observed" ||
     after.run !== before.run ||

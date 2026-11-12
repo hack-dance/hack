@@ -1,6 +1,8 @@
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { NativeRuntimeRequestError } from "../../src/backends/native-runtime-client.ts";
 import {
+  nativeDetachedUpProviderPinFailure,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
   runNativeDetachedOwner,
@@ -35,8 +37,16 @@ if (role === "launcher") {
       ],
       timeoutMs: ["timeout", "late-ready"].includes(mode) ? 1000 : 10_000,
     });
-  } catch {
-    process.exitCode = 1;
+  } catch (error) {
+    if (mode === "provider-pin") {
+      const { handleRunCliError } = await import("../../src/cli/run.ts");
+      process.exitCode = await handleRunCliError({
+        error,
+        jsonRequested: true,
+      });
+    } else {
+      process.exitCode = 1;
+    }
   }
 } else if (role === "owner") {
   process.exitCode = await runNativeDetachedOwner({
@@ -80,7 +90,18 @@ if (role === "launcher") {
       if (mode === "shell-names-empty") {
         nativeDetachedUpShellVariables([]);
       }
-      if (mode === "fail") {
+      if (mode === "provider-pin") {
+        await nativeDetachedUpProviderPinFailure(
+          new Error("synthetic-private-value")
+        );
+        await nativeDetachedUpProviderPinFailure(
+          new NativeRuntimeRequestError({
+            nativeCode: "provider_pin_changed",
+            message: "synthetic-private-value",
+          })
+        );
+      }
+      if (mode === "fail" || mode === "provider-pin") {
         server.stop(true);
         process.off("SIGTERM", terminate);
         return 1;

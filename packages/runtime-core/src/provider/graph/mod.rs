@@ -62,6 +62,8 @@ mod volume_subpaths;
 pub use dependency_hosts::dependency_address;
 #[cfg(target_os = "macos")]
 pub mod foreground;
+#[cfg(any(target_os = "macos", test))]
+mod owner_loop;
 mod startup;
 mod startup_failure;
 #[cfg(any(target_os = "macos", test))]

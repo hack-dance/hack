@@ -3960,3 +3960,27 @@ A publisher crash has a different effect: the owner reports the exit and keeps
 the services running, with that published port marked down in `ps` and `status`.
 Run `hack down` to stop the project with data retained. A publication notice is
 not evidence that cleanup completed, and no publisher is restarted automatically.
+
+Publisher exit observation never waits for the provider lease in the owner's
+event loop. If another operation holds that lease, `ps` already marks the port
+down and the runtime degraded. The owner retains the unreaped child and retries
+the identity-bound journal commit; it announces the exit only after that commit.
+Ctrl-C and authenticated `down` remain available. Healthy sibling publications
+keep following their admitted restart policies; an exited publisher's own service
+generation cannot recreate that publisher or rearm its route probe.
+If one service has several publications, losing one pauses restart following for
+all that service's publications until an explicit restart; other services continue.
+
+New macOS frontend finalization records include the process birth time. Retaining
+recovery can distinguish a reused PID without signalling its replacement. A
+matching zombie also counts as exited. Unreadable identities refuse; records
+without a birth retain their PID-only behavior. Linux does not compare `ps`
+births because clock corrections can change that observation. Failure to capture
+the frontend's own birth falls back to the legacy behavior instead of failing up.
+
+A pool started by a different provider version reports `provider_pin_changed`
+through `ps --json`, detached `up` and `exec`, with the same original-release or
+home-retirement guidance. This does not migrate the pool or permit cleanup by a
+different provider version. When publisher identity cannot be confirmed, recovery
+explains that it waits for the process holding that PID to exit and names
+`hack down --recover` as the retaining retry.

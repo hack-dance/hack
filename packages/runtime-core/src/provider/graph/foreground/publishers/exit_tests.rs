@@ -23,20 +23,25 @@ impl Drop for ChildGuard {
 /// until an explicit stop. No Engine/VM or synthetic publisher stands in for it.
 #[test]
 fn exited_native_publisher_stays_observable_without_starting_guest_cleanup() {
-    exercise(true, false);
+    exercise(true, false, false);
 }
 
 #[test]
 fn closed_frontend_notice_stream_does_not_refuse_reaping_before_cleanup() {
-    exercise(true, true);
+    exercise(true, true, false);
 }
 
 #[test]
 fn startup_publisher_exit_is_reaped_without_a_notice_before_readiness() {
-    exercise(false, false);
+    exercise(false, false, false);
 }
 
-fn exercise(announce: bool, broken_notice: bool) {
+#[test]
+fn exited_publisher_waits_for_proof_without_blocking_or_claiming_it_live() {
+    exercise(true, false, true);
+}
+
+fn exercise(announce: bool, broken_notice: bool, busy: bool) {
     let path = std::fs::canonicalize("/tmp")
         .unwrap()
         .join(format!("hpub-{}", graph::probes::token().unwrap()));
@@ -94,10 +99,13 @@ fn exercise(announce: bool, broken_notice: bool) {
             child: guard.0.take().unwrap(),
             run: "b".repeat(32),
             reservation: "c".repeat(32),
+            service: "web".into(),
             hostnames: Vec::new(),
             port: Some(port),
+            target: Some(8080),
             exited: None,
             exit_proof: None,
+            exit_pending: false,
         }],
     };
     if announce {
@@ -111,6 +119,33 @@ fn exercise(announce: bool, broken_notice: bool) {
         std::io::ErrorKind::BrokenPipe
     );
     let mut attempted = 0;
+    if busy {
+        let lease = crate::provider::state::Lock::acquire_existing(
+            &candidate.state_root.join("run/smolvm"),
+        )
+        .unwrap();
+        while !publication::child_exit_pending(&publishers.children[0].child).unwrap() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let started = Instant::now();
+        assert!(
+            publishers
+                .reap_exited_with_notice(&candidate, |_, _| panic!("no committed proof, no notice"))
+                .unwrap()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(publishers.has_pending_reap());
+        assert!(publishers.children[0].exited.is_none());
+        assert!(publishers.children[0].exit_proof.is_none());
+        assert!(publication::child_exit_pending(&publishers.children[0].child).unwrap());
+        assert!(!publishers.observe_live(&candidate).unwrap());
+        assert_eq!(
+            publishers.port_status(),
+            vec![serde_json::json!({"service":"web","port":port,"target":8080,"state":"down"})]
+        );
+        drop(lease);
+    }
     {
         let mut reap = |publishers: &mut Publishers| {
             publishers.reap_exited_with_notice(&candidate, |run, port| {
@@ -124,13 +159,17 @@ fn exercise(announce: bool, broken_notice: bool) {
                 }
             })
         };
-        while !reap(&mut publishers).unwrap() {
+        while {
+            reap(&mut publishers).unwrap();
+            publishers.children[0].exited.is_none()
+        } {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(reap(&mut publishers).unwrap());
     }
     assert_eq!(attempted, usize::from(announce));
+    assert!(!publishers.has_pending_reap());
     // Announcing later must not replay a publisher reaped during startup.
     publishers.announce();
     assert!(
@@ -143,7 +182,7 @@ fn exercise(announce: bool, broken_notice: bool) {
     assert!(!publishers.observe_live(&candidate).unwrap());
     assert_eq!(
         publishers.port_status(),
-        vec![serde_json::json!({"port":port,"state":"down"})]
+        vec![serde_json::json!({"service":"web","port":port,"target":8080,"state":"down"})]
     );
     assert!(publishers.children[0].child.try_wait().unwrap().is_some());
     assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());

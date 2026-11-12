@@ -7,6 +7,7 @@ import {
   readFile,
   realpath,
   rm,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,6 +18,7 @@ import {
   type NativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
 import { installNext13Frontend } from "./helpers/native-next13-state.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -245,6 +247,93 @@ const stoppedGraph = {
   },
   observations: { "container:web": { state: "absent" } },
 };
+
+test(
+  "provider version refusal survives ps JSON, detached up and exec through the source CLI",
+  async () => {
+    const f = await fixture();
+    const pin = {
+      code: "provider_pin_changed",
+      message: "synthetic-private-provider-path",
+    };
+    await scriptUpThroughReview(f);
+    await unlink(join(f.root, "stub/runtime-up.out"));
+    await f.fail("runtime up", pin);
+    const detached = await cli({
+      fixture: f,
+      args: ["up", "-d", "--json"],
+      env: SHARED,
+    });
+    expect(detached.code).toBe(1);
+    expect(detached.output).toContain("provider_pin_changed");
+    expect(detached.output).toContain(NATIVE_PROVIDER_PIN_MESSAGE);
+    expect(detached.output).not.toContain("synthetic-private");
+    await savedRun(f);
+    await f.fail("graph inspect", pin);
+    const ps = await cli({ fixture: f, args: ["ps", "--json"] });
+    expect(ps.code).toBe(0);
+    expect(JSON.parse(ps.stdout)).toMatchObject({
+      ok: true,
+      data: { status: "provider_pin_changed", run: run.run, items: [] },
+    });
+    await f.fail("graph refresh-dependencies", pin);
+    const exec = await cli({ fixture: f, args: ["exec", "web", "--", "true"] });
+    expect(exec.code).toBe(1);
+    expect(exec.output).toContain("provider_pin_changed");
+    expect(exec.output).toContain(NATIVE_PROVIDER_PIN_MESSAGE);
+    expect(exec.output).not.toContain("identity or outcome is unconfirmed");
+    expect(exec.output).not.toContain("synthetic-private");
+    expect(await f.calls()).not.toContain("graph exec");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "publisher identity refusal explains waiting, then the named retaining recovery works",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    await f.reply("graph inspect", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+    });
+    await f.fail("graph recover-live-owner", {
+      code: "publisher_identity_unconfirmed",
+      message: "private process metadata",
+    });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain(
+      "process holding the recorded publisher PID to exit"
+    );
+    expect(refused.output).toContain("rerun hack down --recover");
+    expect(refused.output).not.toContain("private process metadata");
+    await f.reply("graph recover-live-owner", {
+      run: run.run,
+      recovered: true,
+      data_retained: true,
+      publisher_retired: true,
+    });
+    await f.finishOn("graph recover-live-owner", stoppedGraph);
+    const rerun = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(rerun.code).toBe(0);
+    expect(rerun.output).toContain("stopped");
+  },
+  SPAWN_TIMEOUT_MS
+);
 
 test(
   "config adopt --dry-run on the native backend names the exact Compose rerun before any request",

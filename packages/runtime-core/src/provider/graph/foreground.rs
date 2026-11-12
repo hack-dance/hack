@@ -23,6 +23,7 @@ pub(in crate::provider::graph) mod signals;
 #[cfg(test)]
 mod tests;
 pub(in crate::provider::graph) mod transport;
+use super::owner_loop::{Action, OwnerLoop};
 pub(in crate::provider::graph) use transport::DeadOwner;
 pub(in crate::provider::graph) use transport::retire_recovered_publisher as retire_publisher_path;
 use transport::{Publication, WireRequest};
@@ -313,11 +314,11 @@ fn serve_input<'a>(
         }
     };
     let mut publishers = publishers::Publishers::default();
-    let mut cleanup_attempted = false;
+    let mut lifecycle = OwnerLoop::default();
     let mut restore_recovery_error = None;
     let result = (|| {
         if signals.pending() {
-            cleanup_attempted = true;
+            lifecycle.cleanup_attempted = true;
             return publishers.cleanup(candidate, &mut runtime, false);
         }
         publishers.start(candidate, &receipt, &signals, deadline, route_slots)?;
@@ -343,7 +344,7 @@ fn serve_input<'a>(
         }
         loop {
             if queued.is_none() {
-                let wake = if supervise_restarts {
+                let mut wake = if supervise_restarts {
                     Some(
                         automatic
                             .deadline()
@@ -352,12 +353,15 @@ fn serve_input<'a>(
                 } else {
                     automatic.deadline()
                 };
-                match signals.wait_until(wake)? {
-                    signals::Wake::Signal | signals::Wake::FrontendExit => {
-                        cleanup_attempted = true;
+                if publishers.has_pending_reap() {
+                    let retry = Instant::now() + Duration::from_millis(100);
+                    wake = Some(wake.map_or(retry, |due| due.min(retry)));
+                }
+                match lifecycle.step(signals.wait_until(wake)?) {
+                    Action::Cleanup => {
                         return publishers.cleanup(candidate, &mut runtime, false);
                     }
-                    signals::Wake::PublisherExit => {
+                    Action::ReapPublisher => {
                         // Reap and report, but keep the graph observable and its
                         // authenticated down control available. A dead publisher
                         // is not authority to replace it or replay guest work.
@@ -365,15 +369,16 @@ fn serve_input<'a>(
                     }
                     // A watched refreshable listener exited: a stale notice
                     // without traffic. Its replacement may still be starting.
-                    signals::Wake::ListenerExit => automatic.stale(Instant::now()),
-                    signals::Wake::Ready | signals::Wake::Timeout => {}
+                    Action::RefreshDependencies => automatic.stale(Instant::now()),
+                    Action::Continue => {}
                 }
+            }
+            if publishers.has_pending_reap() {
+                publishers.reap_exited(candidate)?;
             }
             if queued.is_none() && supervise_restarts && Instant::now() >= restart_tick {
                 publication.verify()?;
-                if !publishers.has_exited() {
-                    publishers.supervise_restarts(candidate, &receipt.run, &signals)?;
-                }
+                publishers.supervise_restarts(candidate, &receipt.run, &signals)?;
                 restart_tick = Instant::now() + Duration::from_secs(1);
             }
             if queued.is_none() && runtime.drain_dependency_notifications()? {
@@ -473,7 +478,7 @@ fn serve_input<'a>(
                 .and_then(|restored| {
                     publishers
                         .reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))?;
-                    cleanup_attempted = false;
+                    lifecycle.cleanup_attempted = false;
                     publishers.start(
                         candidate,
                         &restored,
@@ -489,7 +494,7 @@ fn serve_input<'a>(
                         json!({"ok":true,"run":restored.run,"phase":restored.phase,"plan":restored.plan_id,"generation":redelivery::generation(&restored)?,"receipt":restored})
                     }
                     Err(error) => {
-                        cleanup_attempted |= effects_started;
+                        lifecycle.cleanup_attempted |= effects_started;
                         if effects_started {
                             restore_recovery_error = Some(error.code);
                         }
@@ -501,7 +506,7 @@ fn serve_input<'a>(
                 continue;
             }
             if let Some(remove_data) = request.remove_data {
-                cleanup_attempted = true;
+                lifecycle.cleanup_attempted = true;
                 match publishers.cleanup(candidate, &mut runtime, remove_data) {
                     Ok(cleaned) => {
                         publishers.reap_after_cleanup(
@@ -535,6 +540,14 @@ fn serve_input<'a>(
                 }
                 // inspect releases its Engine lease before the fresh runtime check.
                 let publishers_live = publishers.observe_live(candidate)?;
+                if publishers.has_pending_reap() {
+                    // Host child observations do not need a guest lease. Keep
+                    // pending ports visible even when guest inspection is busy;
+                    // this response makes no readiness or guest-health claim.
+                    return Ok(
+                        json!({"ok":true,"run":receipt.run,"phase":receipt.phase,"plan":receipt.plan_id,"generation":redelivery::generation(&receipt)?,"foreground_alive":true,"runtime_verified":false,"runtime_error":"publisher_exit_pending","publisher_ports":publishers.port_status()}),
+                    );
+                }
                 let mut snapshot = super::inspect(candidate, &receipt.run)?;
                 let engine = Engine::connect(candidate)?;
                 let (current, root) = super::load(candidate, &engine, &receipt.run)?;
@@ -562,7 +575,9 @@ fn serve_input<'a>(
         // not replay it here. Retain publication and graph evidence for recovery.
         Err(error) => {
             publishers.reap_exited(candidate)?;
-            if !cleanup_attempted && publishers.cleanup(candidate, &mut runtime, false).is_ok() {
+            if !lifecycle.cleanup_attempted
+                && publishers.cleanup(candidate, &mut runtime, false).is_ok()
+            {
                 publishers.reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))?;
                 publication.finish()?;
             }

@@ -37,6 +37,7 @@ fn with_available_lease<L, T>(
 fn probe_tick<L>(
     initialize: bool,
     generations: &mut BTreeMap<String, String>,
+    excluded: &BTreeSet<String>,
     mut acquire: impl FnMut(ConnectionMode) -> Result<L, CandidateError>,
     observe: impl FnOnce(&L) -> Result<BTreeMap<String, String>, CandidateError>,
     mut rearm: impl FnMut(&L, &str, &str) -> Result<bool, CandidateError>,
@@ -56,6 +57,9 @@ fn probe_tick<L>(
         return Ok(());
     }
     for (name, expected) in observed {
+        if !supervised_service(excluded, &name) {
+            continue;
+        }
         if generations.get(&name).ok_or_else(refused)? == &expected {
             continue;
         }
@@ -69,6 +73,14 @@ fn probe_tick<L>(
         }
     }
     Ok(())
+}
+
+/// An engine generation never authorizes resurrecting an exited host publisher.
+pub(in crate::provider::graph) fn supervised_service(
+    excluded: &BTreeSet<String>,
+    service: &str,
+) -> bool {
+    !excluded.contains(service)
 }
 
 /// A generation change is permission to retire only when the receipt admitted
@@ -277,12 +289,14 @@ pub(in crate::provider::graph) fn supervise_probes(
     run: &str,
     generations: &mut BTreeMap<String, String>,
     initialize: bool,
+    excluded: &BTreeSet<String>,
     check: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
     check()?;
     probe_tick(
         initialize,
         generations,
+        excluded,
         |mode| {
             check()?;
             Engine::connect_in_mode(candidate, mode)
@@ -333,6 +347,42 @@ pub(in crate::provider::graph) fn supervise_probes(
 mod tests {
     use super::*;
 
+    #[test]
+    fn exited_publishers_never_rearm_but_healthy_siblings_follow_new_generations() {
+        let excluded = BTreeSet::from(["dead".to_string()]);
+        let mut generations = BTreeMap::from([
+            ("dead".into(), "old".into()),
+            ("sibling".into(), "old".into()),
+        ]);
+        let mut rearmed = Vec::new();
+        probe_tick(
+            false,
+            &mut generations,
+            &excluded,
+            |_| Ok(()),
+            |_| {
+                Ok(BTreeMap::from([
+                    ("dead".into(), "new".into()),
+                    ("sibling".into(), "new".into()),
+                ]))
+            },
+            |_, service, _| {
+                rearmed.push(service.to_string());
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert_eq!(rearmed, ["sibling"]);
+        assert_eq!(generations["dead"], "old");
+        assert_eq!(generations["sibling"], "new");
+        // Rebind uses this same selection before retiring or spawning a publisher.
+        let replacements = ["dead", "sibling"]
+            .into_iter()
+            .filter(|service| supervised_service(&excluded, service))
+            .collect::<Vec<_>>();
+        assert_eq!(replacements, ["sibling"]);
+    }
+
     fn rearm_fixture() -> (super::super::super::tests::Fixture, Receipt, PathBuf) {
         let fixture = super::super::super::tests::Fixture::new();
         let root = fixture.0.join("rearm");
@@ -357,6 +407,7 @@ mod tests {
         probe_tick(
             false,
             &mut generations,
+            &BTreeSet::new(),
             Ok,
             |mode| {
                 assert_eq!(*mode, ConnectionMode::Cleanup);
@@ -419,6 +470,7 @@ mod tests {
             probe_tick(
                 false,
                 &mut generations,
+                &BTreeSet::new(),
                 |mode| {
                     if mode == ConnectionMode::Cleanup {
                         Ok(mode)
@@ -437,6 +489,7 @@ mod tests {
         let initial = probe_tick(
             true,
             &mut BTreeMap::new(),
+            &BTreeSet::new(),
             |_| Err::<ConnectionMode, _>(error("provider_busy", "Busy lease.")),
             |_| panic!("initial enrollment must not silently defer"),
             |_, _, _| panic!("initial enrollment never rearms"),
@@ -454,6 +507,7 @@ mod tests {
             probe_tick(
                 false,
                 &mut generations,
+                &BTreeSet::new(),
                 |mode| {
                     assert_eq!(mode, ConnectionMode::Cleanup);
                     Ok(())
@@ -476,6 +530,7 @@ mod tests {
             probe_tick(
                 false,
                 &mut generations,
+                &BTreeSet::new(),
                 |_| state::Lock::acquire_existing(&root),
                 |_| Ok(BTreeMap::from([("web".into(), "changed".into())])),
                 |_, _, _| Ok(valid),
@@ -492,6 +547,7 @@ mod tests {
             let result = probe_tick(
                 false,
                 &mut generations,
+                &BTreeSet::new(),
                 |_| Ok(()),
                 |_| Ok(BTreeMap::from([("web".into(), "changed".into())])),
                 |_, _, _| Err(error(code, "Admitted effect failed.")),

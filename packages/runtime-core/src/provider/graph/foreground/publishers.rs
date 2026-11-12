@@ -22,11 +22,20 @@ struct Owned {
     child: Child,
     run: String,
     reservation: String,
+    service: String,
     hostnames: Vec<String>,
     /// Reviewed host port of a loopback TCP publication; `None` for a route.
     port: Option<u16>,
+    target: Option<u16>,
     exited: Option<std::process::ExitStatus>,
     exit_proof: Option<publication::ChildExit>,
+    /// Exit observed with WNOWAIT; no persisted reaping proof or notice yet.
+    exit_pending: bool,
+}
+impl Owned {
+    fn down(&self) -> bool {
+        self.exit_pending || self.exited.is_some() || self.exit_proof.is_some()
+    }
 }
 
 /// What one publisher child serves: a route's hostname set over Unix, or one
@@ -89,7 +98,9 @@ impl Publishers {
         runtime: &mut graph::HostRelayRuntime,
         remove_data: bool,
     ) -> Result<Receipt, CandidateError> {
-        self.reap_exited(candidate)?;
+        self.reap_exited_with(candidate, true, |run, port| {
+            exit_notice(&mut std::io::stdout().lock(), run, port)
+        })?;
         runtime.cleanup(candidate, remove_data)
     }
     /// The caller must hold no Engine/provider lease. The provider reserves the
@@ -156,6 +167,7 @@ impl Publishers {
             &receipt.run,
             &mut self.probe_generations,
             true,
+            &BTreeSet::new(),
             &|| check_deadline(signals, deadline),
         )?;
         if !routes.is_empty() {
@@ -220,10 +232,13 @@ impl Publishers {
                 child,
                 run: receipt.run.clone(),
                 reservation: assignment.reservation.clone(),
+                service: assignment.service.clone(),
                 hostnames: Vec::new(),
                 port: Some(port),
+                target: assignment.loopback_port.map(|binding| binding.target),
                 exited: None,
                 exit_proof: None,
+                exit_pending: false,
             });
             self.await_published(candidate, signals, deadline)?;
         }
@@ -286,10 +301,13 @@ impl Publishers {
                 child,
                 run: receipt.run.clone(),
                 reservation: assignment.reservation.clone(),
+                service: assignment.service.clone(),
                 hostnames: route.hostnames.clone(),
                 port: None,
+                target: None,
                 exited: None,
                 exit_proof: None,
+                exit_pending: false,
             });
             self.await_published(candidate, signals, deadline)?;
         }
@@ -306,7 +324,7 @@ impl Publishers {
     pub(super) fn observe_live(&mut self, candidate: &Candidate) -> Result<bool, CandidateError> {
         let exited = self.reap_exited(candidate)?;
         for owned in &mut self.children {
-            if owned.exited.is_none() {
+            if !owned.down() {
                 published(candidate, owned)?;
             }
         }
@@ -321,19 +339,42 @@ impl Publishers {
     fn reap_exited_with_notice(
         &mut self,
         candidate: &Candidate,
+        notice: impl FnMut(&str, Option<u16>) -> std::io::Result<()>,
+    ) -> Result<bool, CandidateError> {
+        self.reap_exited_with(candidate, false, notice)
+    }
+
+    fn reap_exited_with(
+        &mut self,
+        candidate: &Candidate,
+        wait: bool,
         mut notice: impl FnMut(&str, Option<u16>) -> std::io::Result<()>,
     ) -> Result<bool, CandidateError> {
         let mut exited = false;
         for owned in &mut self.children {
             if owned.exited.is_none() {
-                owned.exited = publication::reap_child(
+                if owned.exit_proof.is_none() {
+                    owned.exit_pending |= publication::child_exit_pending(&owned.child)?;
+                }
+                let reap = if wait {
+                    publication::reap_child
+                } else {
+                    publication::try_reap_child
+                };
+                owned.exited = match reap(
                     candidate,
                     &self.owner,
                     &owned.run,
                     &owned.reservation,
                     &mut owned.child,
                     &mut owned.exit_proof,
-                )?;
+                ) {
+                    Err(error) if !wait && error.code == "provider_busy" => None,
+                    outcome => outcome?,
+                };
+                if owned.exited.is_some() {
+                    owned.exit_pending = false;
+                }
                 if self.announce && owned.exited.is_some() {
                     // A dead frontend can close stdout before its publisher is
                     // reaped. Presentation must not prevent retaining cleanup;
@@ -341,20 +382,25 @@ impl Publishers {
                     let _ = notice(&owned.run, owned.port);
                 }
             }
-            exited |= owned.exited.is_some();
+            exited |= owned.down();
         }
         Ok(exited)
     }
 
-    pub(super) fn has_exited(&self) -> bool {
-        self.children.iter().any(|owned| owned.exited.is_some())
+    pub(super) fn has_pending_reap(&self) -> bool {
+        self.children.iter().any(|owned| owned.exit_pending)
     }
 
     /// Presentation only; each entry belongs to this owner's retained child.
     pub(super) fn port_status(&self) -> Vec<serde_json::Value> {
-        self.children.iter().filter_map(|owned| owned.port.map(|port| {
-            serde_json::json!({"port":port,"state":if owned.exited.is_some() {"down"} else {"observed"}})
-        })).collect()
+        self.children
+            .iter()
+            .filter_map(|owned| {
+                owned.port.map(|port| {
+            serde_json::json!({"service":owned.service,"port":port,"target":owned.target,"state":if owned.down() {"down"} else {"observed"}})
+        })
+            })
+            .collect()
     }
 
     /// The foreground owner alone follows engine restart generations. Fully
@@ -368,11 +414,19 @@ impl Publishers {
     ) -> Result<(), CandidateError> {
         let deadline = Instant::now() + Duration::from_secs(30);
         let check = || check_deadline(signals, deadline);
+        self.reap_exited(candidate)?;
+        let excluded = self
+            .children
+            .iter()
+            .filter(|child| child.down())
+            .map(|child| child.service.clone())
+            .collect();
         graph::bridges::supervise_probes(
             candidate,
             run,
             &mut self.probe_generations,
             false,
+            &excluded,
             &check,
         )?;
         for selected in graph::bridges::changed_publications(candidate, run)? {
@@ -383,6 +437,13 @@ impl Publishers {
                     child.run == run && child.reservation == selected.previous.reservation
                 })
                 .ok_or_else(refused)?;
+            // A service generation does not grant resurrection of its exited
+            // host publisher. Other owned publishers keep following restarts.
+            if self.children[index].down()
+                || !graph::bridges::supervised_service(&excluded, &selected.previous.service)
+            {
+                continue;
+            }
             check_deadline(signals, deadline)?;
             if !graph::bridges::retire_rebind(candidate, &selected, &check)? {
                 continue;
@@ -418,10 +479,13 @@ impl Publishers {
                 child,
                 run: run.into(),
                 reservation: assignment.reservation,
+                service: assignment.service,
                 port: frontend.0,
+                target: assignment.loopback_port.map(|binding| binding.target),
                 hostnames: frontend.1,
                 exited: None,
                 exit_proof: None,
+                exit_pending: false,
             });
             if let Err(error) = self.await_published(candidate, signals, deadline) {
                 // The listener can be taken after reservation. Never reuse this
@@ -502,6 +566,11 @@ impl Publishers {
         signals: &signals::Events,
         deadline: Instant,
     ) -> Result<(), CandidateError> {
+        // cleanup() must persist each already-observed exit before guest effects.
+        // Never let try_wait below consume an uncommitted pending proof.
+        if self.has_pending_reap() {
+            return Err(refused());
+        }
         for owned in &self.children {
             signals.unwatch_child(&owned.child)?;
         }

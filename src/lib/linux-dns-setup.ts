@@ -688,7 +688,7 @@ export async function removeLinuxDns(opts: {
     );
   }
   // Order matters: remove the files that re-apply the route and reload, then
-  // stop any instance that is still running its wait loop, and only then
+  // stop any Hack instance that is still running its wait loop, and only then
   // revert the link, so nothing re-applies the route after the revert.
   const commands: string[][] = [];
   if (owned.length > 0) {
@@ -698,7 +698,11 @@ export async function removeLinuxDns(opts: {
       ["udevadm", "control", "--reload"]
     );
   }
-  if (owned.length > 0 || routeIsHacks) {
+  // Instances are stopped only when the template is Hack's and this removal
+  // deletes it: then every `hack-dns@` instance is Hack's. A template left in
+  // place (foreign, or from a newer Hack) keeps its instances untouched, even
+  // when Hack's udev rule is removed or the link is reverted.
+  if (owned.includes(LINUX_DNS_UNIT_PATH)) {
     commands.push(["systemctl", "stop", "--", "hack-dns@*.service"]);
   }
   if (instance !== null && routeIsHacks) {

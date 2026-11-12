@@ -17,7 +17,9 @@
  * 5. sets owner and mode, then renames the temporary file over the
  *    destination (a rename replaces a link at the destination; it never
  *    writes through it; a directory there fails the step).
- * The temporary file is removed on every failure, including a signal.
+ * The temporary file is removed on every failure, including a signal. A
+ * signal stops the stdin reader only while it runs; once it is reaped the
+ * handler only cleans up, so a reused pid is never signalled.
  * `.` and `..` components are refused, and the file is synced before the
  * rename. Arguments are positional
  * (`/bin/sh -c SCRIPT hack-install BYTES SHA256 DEST MODE`), never
@@ -82,7 +84,11 @@ export function renderStdinInstallScript(opts?: {
     // and the EXIT trap removes the temporary file.
     "exec 3<&0",
     `timeout -k 1 ${seconds} head -c "$((n + 1))" <&3 > "$tmp" & reader=$!`,
-    'wait "$reader" || exit 66',
+    'rc=0; wait "$reader" || rc=$?',
+    // The reader is reaped: its pid may be reused from here on, so the signal
+    // handler goes back to cleanup only and never signals that pid again.
+    "trap 'exit 130' HUP INT TERM; reader=",
+    '[ "$rc" -eq 0 ] || exit 66',
     '[ "$(wc -c < "$tmp")" -eq "$n" ] || exit 66',
     'printf "%s  %s\\n" "$sum" "$tmp" | sha256sum -c --status || exit 67',
     'chown root:root -- "$tmp"',

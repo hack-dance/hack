@@ -252,6 +252,45 @@ describe("root stdin install script", () => {
     expect(await Bun.file(target).exists()).toBe(false);
   });
 
+  test("a signal after the reader is reaped only cleans up and never signals its pid", async () => {
+    const box = await sandbox();
+    const target = join(box.dest, "hack.rules");
+    const step = stdinInstallStep({ target, content: "approved\n" });
+    // A checksum step that announces itself and stalls, so the signal lands
+    // after `wait` has reaped the reader.
+    const reached = join(box.root, "checksum-reached");
+    await writeFile(
+      join(box.root, "bin", "sha256sum"),
+      `#!/bin/sh\n: > "${reached}"\nsleep 1\nexec /usr/bin/sha256sum "$@"\n`,
+      { mode: 0o755 }
+    );
+    const [, , , ...rest] = step.argv;
+    const shell = Bun.which("dash") ?? "sh";
+    // xtrace shows every command the signal handler runs.
+    const proc = Bun.spawn(
+      [shell, "-xc", renderStdinInstallScript({ timeoutSeconds: 20 }), ...rest],
+      {
+        stdin: new Blob([step.input.slice()]),
+        stdout: "ignore",
+        stderr: "pipe",
+        env: { PATH: `${join(box.root, "bin")}:/usr/bin:/bin` },
+      }
+    );
+    for (let tries = 0; tries < 100; tries += 1) {
+      if (await Bun.file(reached).exists()) {
+        break;
+      }
+      await Bun.sleep(20);
+    }
+    expect(await Bun.file(reached).exists()).toBe(true);
+    proc.kill("SIGTERM");
+    expect(await proc.exited).toBe(130);
+    const trace = await new Response(proc.stderr).text();
+    expect(trace).not.toMatch(/^\++ kill\b/m);
+    expect(await leftovers(box.dest)).toEqual([]);
+    expect(await Bun.file(target).exists()).toBe(false);
+  });
+
   test("invalid arguments are refused before anything is created", async () => {
     const box = await sandbox();
     const good = stdinInstallStep({

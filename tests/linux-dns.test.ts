@@ -1049,6 +1049,29 @@ describe("removeLinuxDns", () => {
     ]);
     expect(state.files.has(LINUX_DNS_UNIT_PATH)).toBe(true);
     expect(outcome.leftInPlace.join("\n")).toContain("format=999");
+    // The template is left in place, so its instances are not stopped.
+    expect(
+      state.privileged.some(
+        ([verb, sub]) => verb === "systemctl" && sub === "stop"
+      )
+    ).toBe(false);
+  });
+
+  test("a foreign template keeps its instances when Hack's rule is removed and the link reverted", async () => {
+    const files = configuredFiles();
+    files.set(LINUX_DNS_UNIT_PATH, "[Unit]\nDescription=someone else's\n");
+    const { host, state } = createFakeHost({
+      files,
+      routes: new Map([[BRIDGE, appliedRoute()]]),
+    });
+    expect((await remove(host)).status).toBe("removed");
+    expect(state.privileged).toEqual([
+      ["rm", "-f", "--", LINUX_DNS_UDEV_RULE_PATH],
+      ["systemctl", "daemon-reload"],
+      ["udevadm", "control", "--reload"],
+      ["resolvectl", "revert", "--", BRIDGE],
+    ]);
+    expect(state.files.has(LINUX_DNS_UNIT_PATH)).toBe(true);
   });
 
   test("only Hack's file is removed when the other has no marker", async () => {
@@ -1082,10 +1105,8 @@ describe("removeLinuxDns", () => {
       return true;
     });
     expect(outcome.status).toBe("removed");
-    expect(state.privileged).toEqual([
-      ["systemctl", "stop", "--", "hack-dns@*.service"],
-      ["resolvectl", "revert", "--", BRIDGE],
-    ]);
+    // No template of Hack's to remove, so no instance is stopped.
+    expect(state.privileged).toEqual([["resolvectl", "revert", "--", BRIDGE]]);
     expect(notes.join("\n")).toContain("~corp.example");
     expect(notes.join("\n")).toContain("dnssec allow-downgrade");
   });

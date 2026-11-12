@@ -29,6 +29,7 @@ title: Project configuration files
 ---
 treeView-beta
   .hack/
+    .gitignore
     hack.config.json
     docker-compose.yml
     hack.env.default.yaml

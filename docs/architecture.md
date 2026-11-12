@@ -210,25 +210,25 @@ title: Compose startup responsibilities
 ---
 swimlane-beta TB
   subgraph CLI
-    Env[Resolve environment]
+    Env[Resolve env]
     Before[Before hooks]
     Processes[Host processes]
-    Up[Compose up detached]
+    Up[Start detached]
     After[After hooks]
-    Verify[Verify service states]
+    Verify[Check states]
     Env --> Before --> Processes --> Up --> After --> Verify
   end
   subgraph Engine
-    Services[Service containers]
+    Services[Containers]
   end
   subgraph Proxy
-    Labels[Discover labels]
-    Routes[Publish routes]
+    Labels[Read labels]
+    Routes[Routes]
     Labels --> Routes
   end
   subgraph Daemon
-    Events[Observe events]
-    Cache[Refresh cache]
+    Events[Events]
+    Cache[Cache]
     Events --> Cache
   end
   Up --> Services
@@ -238,7 +238,8 @@ swimlane-beta TB
 
 The daemon lane is optional. Observer arrows indicate metadata and event inputs,
 not a readiness acknowledgement: successful startup does not prove that a browser
-can reach a route. Hooks after startup still follow the startup verification rules.
+can reach a route. After hooks run before service-state verification; an after-hook
+failure ends startup there (see [Lifecycle](lifecycle.md#hack-up)).
 
 ## Branch instances
 

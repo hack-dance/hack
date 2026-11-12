@@ -970,6 +970,12 @@ Default behavior:
 - decrypt secrets from `.hack.secret.key` on the local machine
 - linked git worktrees can reuse the primary checkout's `.hack.secret.key` when the worktree copy is missing
 
+On another machine or in a fresh clone, the committed secrets are still encrypted
+with the original key. Copy `.hack.secret.key` from a machine that has it, or set
+`HACK_ENV_SECRET_KEY` to the same key. Do not run `hack env add --secret` there to
+"generate" a key: a new key cannot decrypt the existing values. When a command needs
+the key and finds none, its error says this instead of suggesting a new key.
+
 Linked worktree behavior:
 
 - when a repo uses linked git worktrees, Hack prefers a shared key under the git common dir

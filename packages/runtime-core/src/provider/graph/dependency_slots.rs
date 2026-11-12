@@ -671,10 +671,21 @@ pub(super) fn fixture_reservation(
     state::write(&root(candidate).join(format!("{run}.json")), &record).unwrap();
 }
 /// Caller holds Engine lease and has completed dead-owner cleanup/verification.
+/// A caller reporting the entire recovery complete also verifies record absence;
+/// the guest completion digest alone does not establish this postcondition.
 pub(super) fn recover_cleaned(
     candidate: &Candidate,
     receipt: &Receipt,
     rebind: Option<(DeviceRebind, &LegacyReservation)>,
+) -> Result<(), CandidateError> {
+    recover_cleaned_selected(candidate, receipt, rebind, None)
+}
+
+fn recover_cleaned_selected(
+    candidate: &Candidate,
+    receipt: &Receipt,
+    rebind: Option<(DeviceRebind, &LegacyReservation)>,
+    expected_process: Option<&ProcessIdentity>,
 ) -> Result<(), CandidateError> {
     let directory = root(candidate);
     if absent(&directory.join(format!("{}.json", receipt.run)))? {
@@ -701,6 +712,7 @@ pub(super) fn recover_cleaned(
     if receipt.owner != record.owner
         || receipt.phase != "stopped-data-retained"
         || slots != record.slots.values().copied().collect()
+        || expected_process.is_some_and(|process| process != &record.process)
     {
         return Err(refused());
     }
@@ -715,6 +727,24 @@ pub(super) fn recover_cleaned(
         }
     }
     recover_record(candidate, record, rebind.map(|(value, _)| value))
+}
+
+/// Resume the reservation tail under the caller's exact retired-owner and guest
+/// fences. Success includes record absence; an interrupted release stays retryable.
+pub(super) fn recover_cleaned_fenced(
+    candidate: &Candidate,
+    receipt: &Receipt,
+    expected_process: &ProcessIdentity,
+    rebind: Option<(DeviceRebind, &LegacyReservation)>,
+    verify: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    verify()?;
+    recover_cleaned_selected(candidate, receipt, rebind, Some(expected_process))?;
+    verify()?;
+    if reservation_recorded(candidate, &receipt.run)? {
+        return Err(refused());
+    }
+    verify()
 }
 
 #[cfg(test)]
@@ -961,6 +991,113 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.short_home);
         }
+    }
+    /// Synthetic stopped guest observation; authority is supplied separately by
+    /// the caller's fence. Reservation files and capacity readback are real.
+    fn cleaned_receipt(record: &Record) -> Receipt {
+        serde_json::from_value(serde_json::json!({
+            "version":2,"run":record.run,"owner":record.owner,
+            "namespace":"d".repeat(64),"plan_id":"e".repeat(64),
+            "phase":"stopped-data-retained","readiness":{},"resources":{},
+            "relay_startup":{
+                "guest_root":null,"control_root":"/fixture/control","artifact":"",
+                "services":{"web":{"generation":"f".repeat(64),
+                    "phase":"released","started_at":null,
+                    "bindings":{"host":{"slot":record.slots[&0],"port":8080,"process":null}}}}
+            }
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn completed_guest_recovery_releases_its_reservation_and_retries_after_a_late_refusal() {
+        use std::cell::Cell;
+        let fixture = LeaseFixture::new();
+        let (mut pending, path) = fixture.reservation('5', 0);
+        pending.releasable = false;
+        let (mut sibling, sibling_path) = fixture.reservation('6', 1);
+        sibling.releasable = false;
+        let sibling_bytes = fs::read(&sibling_path).unwrap();
+        let receipt = cleaned_receipt(&pending.record);
+        let _lease = state::Lock::acquire_existing(&fixture.provider).unwrap();
+        let used = |records: Vec<Record>| {
+            records
+                .iter()
+                .flat_map(|record| record.slots.values().copied())
+                .collect::<BTreeSet<_>>()
+        };
+        assert!(
+            select(
+                &BTreeSet::from([0]),
+                &used(records(&root(&fixture.candidate), &fixture.token, 2).unwrap()),
+                2,
+                false
+            )
+            .is_err()
+        );
+        let calls = Cell::new(0);
+        // Release succeeded but its following fence failed. A new command must
+        // verify the absence again and finish, without replaying guest cleanup.
+        let result = recover_cleaned_fenced(
+            &fixture.candidate,
+            &receipt,
+            &pending.record.process,
+            None,
+            &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    Err(refused())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result.unwrap_err().code, "dependency_reservation");
+        assert!(!path.exists());
+        recover_cleaned_fenced(
+            &fixture.candidate,
+            &receipt,
+            &pending.record.process,
+            None,
+            &|| Ok(()),
+        )
+        .unwrap();
+        let remaining = records(&root(&fixture.candidate), &fixture.token, 2).unwrap();
+        assert_eq!(
+            select(&BTreeSet::from([0]), &used(remaining), 2, false).unwrap(),
+            BTreeMap::from([(0, 0)])
+        );
+        assert_eq!(fs::read(sibling_path).unwrap(), sibling_bytes);
+    }
+    #[test]
+    fn reservation_tail_preserves_evidence_when_fence_or_retired_process_changes() {
+        let fixture = LeaseFixture::new();
+        let (mut pending, path) = fixture.reservation('5', 0);
+        pending.releasable = false;
+        let receipt = cleaned_receipt(&pending.record);
+        let bytes = fs::read(&path).unwrap();
+        let _lease = state::Lock::acquire_existing(&fixture.provider).unwrap();
+        assert_eq!(
+            recover_cleaned_fenced(
+                &fixture.candidate,
+                &receipt,
+                &pending.record.process,
+                None,
+                &|| Err(refused())
+            )
+            .unwrap_err()
+            .code,
+            "dependency_reservation"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let mut foreign = pending.record.process.clone();
+        foreign.start_micros += 1;
+        assert_eq!(
+            recover_cleaned_fenced(&fixture.candidate, &receipt, &foreign, None, &|| Ok(()))
+                .unwrap_err()
+                .code,
+            "dependency_reservation"
+        );
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
     /// HACK-1457: when the lease stays busy past the release wait, dropping an unadmitted
     /// reservation leaves its receipt exactly as written, still reserving its slot, and

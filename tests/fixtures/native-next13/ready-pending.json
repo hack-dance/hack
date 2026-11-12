@@ -1,0 +1,71 @@
+{
+  "relay_startup": {
+    "control_only": true,
+    "guest_root": null,
+    "control_root": "/fixture/control",
+    "artifact": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "services": {}
+  },
+  "relay_cleanup": {
+    "version": 1,
+    "runtime": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    "boot": [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    "operation": [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
+    "effect": [
+      4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+      4, 4, 4, 4, 4, 4, 4
+    ],
+    "control_root": "/fixture/control",
+    "phase": "pending"
+  },
+  "version": 1,
+  "run": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "owner": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "namespace": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "plan_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "phase": "ready-observed",
+  "readiness": {
+    "db": "started",
+    "web": "started"
+  },
+  "resources": {
+    "container:db": {
+      "kind": "container",
+      "key": "db",
+      "name": "owned-db",
+      "id": "3333333333333333333333333333333333333333333333333333333333333333",
+      "image": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "phase": "started"
+    },
+    "container:web": {
+      "loopback_ports": [
+        {
+          "host_port": 18080,
+          "target": 8080
+        }
+      ],
+      "kind": "container",
+      "key": "web",
+      "name": "owned-web",
+      "id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "image": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "phase": "started"
+    },
+    "network:default": {
+      "kind": "network",
+      "key": "default",
+      "name": "owned-default",
+      "id": "5555555555555555555555555555555555555555555555555555555555555555",
+      "image": null,
+      "phase": "created"
+    },
+    "volume:data": {
+      "kind": "volume",
+      "key": "data",
+      "name": "owned-data",
+      "id": "owned-data",
+      "image": null,
+      "phase": "created"
+    }
+  }
+}

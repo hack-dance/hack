@@ -22,6 +22,7 @@ import {
 } from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -165,6 +166,123 @@ test("ps distinguishes a live foreground owner from historical ready containers"
     })
   ).toMatchObject({ status: "owner_unconfirmed" });
 });
+
+test("ps keeps current service rows and marks the reaped publisher's port down", async () => {
+  const opts = await fixture();
+  const current = snapshot(true);
+  const value = {
+    ...current,
+    receipt: {
+      ...current.receipt,
+      readiness: { web: "started" },
+      resources: {
+        "container:web": {
+          ...current.receipt.resources["container:web"],
+          loopback_ports: [{ host_port: 18_080, target: 8080 }],
+        },
+      },
+    },
+  };
+  const result = await nativeProjectPs({
+    ...opts,
+    includeReadiness: true,
+    invoke: async (request) =>
+      request.args[1] === "inspect"
+        ? value
+        : {
+            ok: true,
+            run: run.run,
+            plan: run.planId,
+            phase: "ready-observed",
+            foreground_alive: true,
+            runtime_verified: false,
+            runtime_error: "publisher_exited",
+            publisher_ports: [{ port: 18_080, state: "down" }],
+          },
+  });
+  expect(result).toMatchObject({
+    status: "runtime_degraded",
+    items: [{ service: "web", state: "running", readiness: "started" }],
+    ports: [{ service: "web", port: 18_080, target: 8080, state: "down" }],
+  });
+});
+
+test.each([
+  "ps",
+  "status",
+])("plain native %s shows the failed port and a working stop command", async (command) => {
+  const opts = await fixture();
+  await writeFile(
+    join(opts.scope.projectDir, "hack.config.json"),
+    '{"name":"native-observe"}'
+  );
+  await writeFile(
+    join(opts.scope.projectDir, "docker-compose.yml"),
+    "services:\n  web:\n    image: example:public\n"
+  );
+  const current = snapshot(true);
+  const inspected = {
+    ...current,
+    receipt: {
+      ...current.receipt,
+      resources: {
+        "container:web": {
+          ...current.receipt.resources["container:web"],
+          loopback_ports: [{ host_port: 18_080, target: 8080 }],
+        },
+      },
+    },
+  };
+  const owner = {
+    ok: true,
+    run: run.run,
+    plan: run.planId,
+    phase: "ready-observed",
+    foreground_alive: true,
+    runtime_verified: false,
+    publisher_ports: [{ port: 18_080, state: "down" }],
+  };
+  const binary = join(opts.scope.projectRoot, "runtime");
+  await writeFile(
+    binary,
+    `#!${process.execPath}\nconst value = process.argv.includes("owner-status") ? ${JSON.stringify(owner)} : ${JSON.stringify(inspected)}; console.log(JSON.stringify(value));`,
+    { mode: 0o700 }
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      new URL("../index.ts", import.meta.url).pathname,
+      command,
+      ...(command === "ps" ? ["--path", opts.scope.projectRoot] : []),
+    ],
+    {
+      cwd: opts.scope.projectRoot,
+      env: privateCliEnv({
+        root: opts.scope.projectRoot,
+        env: {
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_NATIVE_HOME: opts.scope.nativeHome,
+          HACK_NATIVE_BINARY: binary,
+          HACK_LOGGER: "console",
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 10_000,
+    }
+  );
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(code).toBe(0);
+  expect(stdout + stderr).toContain("web");
+  expect(stdout + stderr).toContain("127.0.0.1:18080");
+  expect(stdout + stderr).toContain("down");
+  expect(stdout + stderr).toContain("Run hack down");
+}, 20_000);
 test("bounded logs verify current container before and after using exact CLI contract", async () => {
   const opts = await fixture();
   const calls: string[][] = [];

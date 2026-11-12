@@ -963,3 +963,85 @@ test("a HEAD length disagreement must repeat before it can reopen an issue", asy
     server.stop(true);
   }
 });
+
+test("unsuccessful length confirmations cannot create or reopen an issue", async () => {
+  const observed = new Map<string, number>();
+  const attempts = new Map<string, number>();
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      expect(request.method).toBe("HEAD");
+      expect(request.headers.has("authorization")).toBe(false);
+      const path = new URL(request.url).pathname;
+      const count = (observed.get(path) ?? 0) + 1;
+      observed.set(path, count);
+      if (count === 1) {
+        return new Response(null, { headers: { "content-length": "6" } });
+      }
+      expect(request.headers.get("cache-control")).toBe("no-cache");
+      if (path === "/gone" || path === "/retired") {
+        return new Response(null, { status: path === "/gone" ? 404 : 410 });
+      }
+      if (path === "/foreign") {
+        return Response.redirect("https://unlisted.test/file", 302);
+      }
+      return new Response(null, {
+        status: 302,
+        headers: path === "/loop" ? { location: "/loop" } : {},
+      });
+    },
+  });
+  const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    expect(url.hostname).toBe("source.test"); // no refused redirect reaches the wire
+    const count = (attempts.get(url.pathname) ?? 0) + 1;
+    attempts.set(url.pathname, count);
+    if (url.pathname === "/timeout" && count === 2) {
+      throw new DOMException("synthetic timeout", "TimeoutError");
+    }
+    return fetch(new URL(url.pathname, server.url), init);
+  }) as typeof fetch;
+  try {
+    const checks = await checkPinnedUrls(
+      ["gone", "retired", "foreign", "missing-redirect", "loop", "timeout"].map(
+        (name) => ({
+          url: `https://source.test/${name}`,
+          sizeBytes: 5,
+          redirectHosts: [],
+        })
+      ),
+      fetcher
+    );
+    expect(checks).toHaveLength(6);
+    const current = [delta(smolvm, "1.34.1", [])];
+    for (const check of checks) {
+      expect(check.kind).toBe("transient");
+      expect(check.problem).not.toContain("upstream no longer serves");
+      expect(attempts.get(`/${check.name}`)).toBe(
+        check.name === "loop" ? 7 : 2
+      );
+      expect(plan(current, null, "2026-11-12", [check]).action).toBe("none");
+      for (const stateReason of ["completed", "not_planned"]) {
+        expect(
+          plan(
+            current,
+            { number: 7, state: "closed", stateReason },
+            "2026-11-12",
+            [check]
+          ).action
+        ).toBe("none");
+      }
+      expect(
+        plan(
+          current,
+          { number: 7, state: "open", stateReason: null },
+          "2026-11-12",
+          [check]
+        ).action
+      ).toBe("update");
+    }
+  } finally {
+    server.stop(true);
+  }
+});

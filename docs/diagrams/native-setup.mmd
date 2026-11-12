@@ -1,0 +1,19 @@
+---
+title: Explicit native setup
+---
+flowchart TD
+  Start["runtime setup"] --> Consent{"Offline inputs or consent?"}
+  Consent -->|"no"| Refused["Refuse before writes"]
+  Consent -->|"yes"| Existing{"Complete matching install?"}
+  Existing -->|"verified"| Probe["Development profile probe"]
+  Existing -->|"invalid existing directory"| Preserved["Refuse and preserve"]
+  Existing -->|"absent"| Acquire["Bounded acquisition or offline inputs"]
+  Acquire --> Hash{"Every pinned hash matches?"}
+  Hash -->|"no"| Retry["Report file and reason"]
+  Hash -->|"yes"| Prepare["Manual prepare in staging"]
+  Prepare --> Publish["Verify, sync, publish under lock"]
+  Publish --> Probe
+  Retry -->|"explicit rerun"| Start
+  class Refused,Preserved,Retry fail
+  class Probe ok
+  class Consent wait

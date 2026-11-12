@@ -30,7 +30,7 @@ virtual machine, or change DNS or certificate trust. Newer prereleases are on th
 ## 2. Prepare the runtime
 
 The native backend needs its virtual machine software set up once per installed
-version. This step is manual today.
+version. Run the explicit setup command; `up` never downloads provider files.
 
 A `hack-next` install keeps each version in its own folder. The two paths you need
 are the native program and its private home:
@@ -40,6 +40,24 @@ V=5.0.0-next.14   # the version you installed; `hack-next --manager status` show
 NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
 NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 ```
+
+```sh
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime setup
+```
+
+Setup lists each file, its maximum download size, source host, pinned SHA-256 and
+destination, then asks once. It downloads the pinned SmolVM, engine and guest
+packages, verifies every hash before preparation, and ends with the development
+profile probe. It needs no administrator password or keychain access. Rerun after
+an interrupted download to resume or restart safely. A complete matching install
+is verified and reused without downloading or preparing again.
+
+For scripts, use `runtime setup --no-interactive --accept-downloads`. Without
+`--accept-downloads`, a noninteractive run fails with `E_INTERACTIVE_REQUIRED`.
+This command is available in builds containing the setup feature; older installed
+prereleases need the manual alternative below.
+
+### Offline or older builds
 
 Download the exact archives named in `provider-pins.json`, which sits beside
 `hack-native` in the bundle. Then download four packages from the Alpine `main`
@@ -52,7 +70,8 @@ SmolVM version in that `provider-pins.json`:
   `libmnl-1.0.5-r2.apk`, `libnftnl-1.2.6-r0.apk` and `libxtables-1.8.10-r3.apk`.
 
 The same file name in another Alpine release has different bytes and is refused. The
-current hashes are in the table under [network tool packages](../guides/native-candidate.md#network-tool-packages), not in `provider-pins.json`.
+current hashes are in `provider-pins.json` and the table under
+[network tool packages](../guides/native-candidate.md#network-tool-packages).
 
 Put them in a folder under your home folder, not under `/tmp`: Hack refuses a path
 that passes through a symbolic link, and `/tmp` is one on macOS. Hack also refuses
@@ -64,7 +83,16 @@ chmod 700 /absolute/private/pinned-apks
 chmod 600 /absolute/private/pinned-apks/*.apk
 ```
 
-Then prepare the runtime and check that this Mac can run it:
+With all inputs already on disk, setup can run without any network access:
+
+```sh
+"$NATIVE" --candidate-root "$NATIVE_HOME" runtime setup \
+  --archive /absolute/smolvm-archive.tar.gz \
+  --engine-archive /absolute/docker-archive.tgz \
+  --network-tools-directory /absolute/private/pinned-apks
+```
+
+The individual manual commands also keep working unchanged, including on older builds:
 
 ```sh
 "$NATIVE" --candidate-root "$NATIVE_HOME" runtime prepare --archive /absolute/smolvm-archive.tar.gz

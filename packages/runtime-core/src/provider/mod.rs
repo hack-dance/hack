@@ -128,6 +128,7 @@ mod supervisor_loss_test;
 pub use source_job::{SourceJob, SourceJobEvent, reconcile_source_job, run_source_job};
 pub use source_probe::{ProbeReceipt, verify as verify_source};
 pub use source_sync::{SyncReceipt, SyncSession, sync_status};
+pub mod setup;
 mod socket_requests;
 mod state;
 pub use lifecycle::{

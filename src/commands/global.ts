@@ -171,6 +171,7 @@ import {
 } from "./global-linux-dns.ts";
 import {
   configureLinuxSystemAndBrowserTrust,
+  configureLinuxTrustFromRuntime,
   type LinuxTrustResult,
 } from "./global-linux-trust.ts";
 import {
@@ -3321,6 +3322,16 @@ async function globalTrust(): Promise<number> {
         "Trust automation is only implemented for macOS and Linux; export the CA with `hack global ca` and trust it manually.",
     });
     return 0;
+  }
+
+  if (isLinux()) {
+    return (await configureLinuxTrustFromRuntime({
+      certPath: resolveHackLocalCaCertPath(),
+      composeFile: getGlobalPaths().caddyCompose,
+      configureHostTrust: configureLinuxHostTlsTrust,
+    }))
+      ? 0
+      : 1;
   }
 
   const existingCertPath = (await pathExists(resolveHackLocalCaCertPath()))

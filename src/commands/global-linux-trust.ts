@@ -9,6 +9,7 @@
  */
 import { X509Certificate } from "node:crypto";
 import { note } from "@clack/prompts";
+import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
 import {
   type CaddyCaIdentity,
   inspectCaddyCaIdentity,
@@ -29,6 +30,50 @@ import {
 } from "../lib/linux-trust-setup.ts";
 import { createTrustedDockerExec } from "../lib/trusted-docker.ts";
 import { logger } from "../ui/logger.ts";
+
+/**
+ * Linux's entire pre-sudo path uses the vetted Docker client and system engine.
+ * It never invokes legacy PATH-selected Docker probes, Compose or bootstrap.
+ * Refreshing the public export is separate from approving trust installation.
+ */
+export async function configureLinuxTrustFromRuntime(opts: {
+  readonly certPath: string;
+  readonly composeFile: string;
+  readonly configureHostTrust: (opts: {
+    readonly certPath: string;
+  }) => Promise<boolean>;
+  readonly inspect?: typeof inspectCaddyCaIdentity;
+}): Promise<boolean> {
+  const inspect =
+    opts.inspect ??
+    (async (input) =>
+      await inspectCaddyCaIdentity({
+        ...input,
+        exec: createTrustedDockerExec(),
+      }));
+  const identity = await inspect({ certPath: opts.certPath });
+  if (!identity.currentPem) {
+    logger.error({
+      message: `${identity.message} (code=linux_trust_ca_unverified). Run hack global up, then hack global trust.`,
+    });
+    return false;
+  }
+  if (identity.state !== "current") {
+    const refreshed = await repairCaddyCaExport({
+      certPath: opts.certPath,
+      composeFile: opts.composeFile,
+      confirm: async () => true,
+      inspect,
+    });
+    if (!refreshed.changed) {
+      logger.error({
+        message: `${refreshed.message}; no trust store was changed. Retry hack global trust.`,
+      });
+      return false;
+    }
+  }
+  return await opts.configureHostTrust({ certPath: opts.certPath });
+}
 
 function renderSudo(argv: readonly string[]): string {
   return renderLinuxManualTrustCommand(argv);

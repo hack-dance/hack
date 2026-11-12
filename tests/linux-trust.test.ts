@@ -1260,3 +1260,109 @@ describe("configureLinuxSystemAndBrowserTrust (finding 1)", () => {
     expect(run.state.privileged).toEqual([]);
   });
 });
+
+describe("Linux trust pre-sudo runtime path", () => {
+  test.each([
+    null,
+    OLD_CA_PEM,
+    CURRENT_CA_PEM,
+  ])("refreshes only from verified runtime bytes before host trust", async (exported) => {
+    const { configureLinuxTrustFromRuntime } = await import(
+      "../src/commands/global-linux-trust.ts"
+    );
+    const dir = await mkdtemp(join(tmpdir(), "hack-trust-runtime-"));
+    try {
+      const certPath = join(dir, "root.crt");
+      if (exported !== null) {
+        await writeFile(certPath, exported);
+      }
+      let inspections = 0;
+      let configured = false;
+      const ok = await configureLinuxTrustFromRuntime({
+        certPath,
+        composeFile: join(dir, "compose.yml"),
+        inspect: async () => {
+          inspections += 1;
+          const current = (await Bun.file(certPath).exists())
+            ? await Bun.file(certPath).text()
+            : null;
+          return {
+            state:
+              current === CURRENT_CA_PEM
+                ? "current"
+                : current === null
+                  ? "missing"
+                  : "stale",
+            message: "verified fixture runtime",
+            currentPem: CURRENT_CA_PEM,
+          };
+        },
+        configureHostTrust: async (input) => {
+          configured = true;
+          expect(await Bun.file(input.certPath).text()).toBe(CURRENT_CA_PEM);
+          return true;
+        },
+      });
+      expect(ok).toBe(true);
+      expect(configured).toBe(true);
+      expect(inspections).toBe(exported === CURRENT_CA_PEM ? 1 : 3);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("unavailable vetted runtime refuses cached trust without any fallback bootstrap", async () => {
+    const { configureLinuxTrustFromRuntime } = await import(
+      "../src/commands/global-linux-trust.ts"
+    );
+    let configured = false;
+    expect(
+      await configureLinuxTrustFromRuntime({
+        certPath: "/unused/root.crt",
+        composeFile: "/unused/compose.yml",
+        inspect: async () => ({
+          state: "unavailable",
+          message: "no vetted engine",
+        }),
+        configureHostTrust: async () => {
+          configured = true;
+          return true;
+        },
+      })
+    ).toBe(false);
+    expect(configured).toBe(false);
+  });
+
+  test("a nonregular export refuses refresh before host trust", async () => {
+    const { configureLinuxTrustFromRuntime } = await import(
+      "../src/commands/global-linux-trust.ts"
+    );
+    const dir = await mkdtemp(join(tmpdir(), "hack-trust-runtime-link-"));
+    try {
+      const original = join(dir, "original.crt");
+      const certPath = join(dir, "root.crt");
+      await writeFile(original, OLD_CA_PEM);
+      await symlink(original, certPath);
+      let configured = false;
+      expect(
+        await configureLinuxTrustFromRuntime({
+          certPath,
+          composeFile: join(dir, "compose.yml"),
+          inspect: async () => ({
+            state: "stale",
+            message: "verified fixture runtime",
+            currentPem: CURRENT_CA_PEM,
+          }),
+          configureHostTrust: async () => {
+            configured = true;
+            return true;
+          },
+        })
+      ).toBe(false);
+      expect(configured).toBe(false);
+      expect(await Bun.file(original).text()).toBe(OLD_CA_PEM);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

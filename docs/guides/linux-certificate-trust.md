@@ -28,6 +28,11 @@ If any check fails, Hack changes nothing and says why
 rotated its root) or one Hack cannot confirm (Docker or the proxy is down) is
 refused. Run `hack global up`, then `hack global trust`.
 
+On Linux, `global trust` uses that vetted client for runtime selection and CA
+export from the start. It never runs PATH-selected Docker probes, Compose or a
+Docker bootstrap before the trust prompt. An unavailable vetted engine stops
+the command before any trust store is changed.
+
 Hack passes the inspected bytes to the trust tools on stdin. A change to the
 export while Hack is running cannot change what is trusted. The prompt shows the
 certificate's subject and SHA-256 fingerprint. Docker, certutil and sudo receive

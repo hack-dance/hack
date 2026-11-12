@@ -18,6 +18,8 @@ use std::{
 pub struct FilePin {
     pub url: String,
     pub archive_sha256: String,
+    /// Exact compressed length of the bytes selected by the pinned digest.
+    pub size_bytes: u64,
     /// Upper bound, not an assertion of the compressed release's exact length.
     pub max_bytes: u64,
     pub redirect_hosts: Vec<String>,
@@ -122,6 +124,38 @@ fn verified_install(candidate: &Candidate) -> Result<(), CandidateError> {
     network_tools::verify(candidate)
 }
 
+fn observe_existing(
+    candidate: &Candidate,
+    verify: &impl Fn(&Candidate) -> Result<(), CandidateError>,
+) -> Result<bool, CandidateError> {
+    let target = candidate.state_root.join("providers");
+    crate::reject_aliased_state(&target).map_err(|_| {
+        CandidateError::new(
+            "setup_existing_invalid",
+            "Unsafe provider directory; existing files were preserved. Use a fresh native home.",
+        )
+    })?;
+    if !target.try_exists().map_err(state::io)? {
+        return Ok(false);
+    }
+    // Existing-only admission never creates directories or a lock before consent.
+    let _lock = state::Lock::acquire_existing(&candidate.state_root.join("run/smolvm")).map_err(|e| {
+        if e.code == "provider_busy" { e } else { CandidateError::new("setup_existing_invalid", "Existing provider lock is missing or unsafe; files were preserved. Finish manual preparation or use a fresh native home.") }
+    })?;
+    reuse(candidate, &target, verify)
+}
+
+/// Verify a complete installation before asking for download consent. Read-only:
+/// an absent home creates nothing; an existing home uses its retained lock.
+pub fn reuse_existing(candidate: &Candidate) -> Result<Option<serde_json::Value>, CandidateError> {
+    if !observe_existing(candidate, &verified_install)? {
+        return Ok(None);
+    }
+    Ok(Some(
+        serde_json::json!({"status": "reused", "probe": super::probe_with_profile(candidate, super::Profile::Development)?}),
+    ))
+}
+
 /// Must be called only by the explicit setup command after consent (or with all offline
 /// inputs). Does not boot a VM or touch trust, DNS, credentials or the system installation.
 pub fn run(
@@ -129,6 +163,9 @@ pub fn run(
     inputs: Option<OfflineInputs<'_>>,
     accepted: bool,
 ) -> Result<serde_json::Value, CandidateError> {
+    if let Some(result) = reuse_existing(candidate)? {
+        return Ok(result);
+    }
     if inputs.is_none() {
         consent(accepted, false, || unreachable!())?;
     }
@@ -138,7 +175,14 @@ pub fn run(
             "Native setup requires Apple Silicon macOS.",
         ));
     }
-    let status = install(candidate, inputs, &pins()?, prepare_all, verified_install)?;
+    let status = install(
+        candidate,
+        inputs,
+        &pins()?,
+        prepare_all,
+        verified_install,
+        download::client,
+    )?;
     Ok(
         serde_json::json!({"status": status, "probe": super::probe_with_profile(candidate, super::Profile::Development)?}),
     )
@@ -159,6 +203,7 @@ fn install(
     files: &[FilePin],
     prepare: impl FnOnce(&Candidate, OfflineInputs<'_>) -> Result<(), CandidateError>,
     verify: impl Fn(&Candidate) -> Result<(), CandidateError>,
+    client: impl FnOnce() -> Result<download::Client, CandidateError>,
 ) -> Result<&'static str, CandidateError> {
     let setup = candidate.state_root.join("setup");
     let _setup_lock = state::Lock::acquire(&setup)?;
@@ -183,7 +228,7 @@ fn install(
         )
     } else {
         state::private_directory(&downloads)?;
-        let client = download::client()?;
+        let client = client()?;
         for pin in files {
             download::acquire(&client, &downloads, pin)?;
         }
@@ -218,12 +263,17 @@ fn reuse(
     target: &Path,
     verify: &impl Fn(&Candidate) -> Result<(), CandidateError>,
 ) -> Result<bool, CandidateError> {
-    crate::reject_aliased_state(target)?;
+    crate::reject_aliased_state(target).map_err(|_| {
+        CandidateError::new(
+            "setup_existing_invalid",
+            "Unsafe provider directory; existing files were preserved. Use a fresh native home.",
+        )
+    })?;
     if !target.try_exists().map_err(state::io)? {
         return Ok(false);
     }
     // Never overwrite an incomplete manual install or a home from another pin.
-    verify(candidate).map_err(|e| CandidateError::new("setup_existing_invalid", format!("{}: {}. Existing provider directory {} was preserved. Finish the manual runtime prepare commands or use a fresh native home; changed trees need runtime repair-provider-tree.", e.code, e.message, target.display())))?;
+    verify(candidate).map_err(|e| CandidateError::new("setup_existing_invalid", format!("{}: existing .hack-local/providers was preserved. Finish the manual runtime prepare commands or use a fresh native home; changed trees need runtime repair-provider-tree.", e.code)))?;
     Ok(true)
 }
 

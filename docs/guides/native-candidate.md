@@ -861,9 +861,10 @@ Provider setup is separate and explicit. Prepare the native runtime with:
 ```
 
 `runtime setup` lists the pinned SmolVM, Docker engine and four Alpine guest
-packages with their byte bounds, source hosts, SHA-256 hashes, private cache and
-install destination, then asks once. `--no-interactive` (or
-`HACK_NO_INTERACTIVE=1`) refuses with `E_INTERACTIVE_REQUIRED` unless
+packages with their exact compressed byte lengths, source hosts, SHA-256 hashes, private cache and
+install destination, then asks once when preparation is needed. `--no-interactive` (or
+truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case and
+surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
 `--accept-downloads` explicitly consents. No provider download happens from `up`,
 the installer, the probe or any other implicit path. The optional BuildKit client
 is still prepared separately below.
@@ -871,9 +872,12 @@ is still prepared separately below.
 The executable embeds `provider-pins.json` and checks its hashes against the
 manual preparation pins. HTTPS redirects may use only the original host and the
 pin's explicit `redirect_hosts`. The GitHub release pin allows
-`release-assets.githubusercontent.com`. Each network request has a 15-second
-connect timeout, a 30-minute total timeout and a streamed byte limit from
-`max_bytes`. Sizes shown are upper bounds, not exact compressed file lengths.
+`release-assets.githubusercontent.com`. Connections have a 15-second timeout;
+each network read has a 60-second timeout. An explicit 30-minute overall deadline
+per file spans all redirect headers and body reads; progress does not renew it.
+`size_bytes` pins the exact compressed length, shown in the prompt and checked on
+responses, streamed bytes and complete-file verification. `max_bytes` remains a
+separate sanity ceiling. Either a length or hash mismatch refuses publication.
 Downloads never pass through a shell, proxy configuration, keychain or admin prompt.
 Networks that require an HTTP proxy must use the offline form below; setup ignores
 proxy environment variables.
@@ -883,7 +887,13 @@ Private partial files and verified archives stay under
 when the server supports ranges, otherwise restarts it. Every complete file is
 hashed before any extraction; a mismatch reports `setup_hash_mismatch` with the
 filename and publishes no provider. A corrupt complete cache file is preserved
-and reports `setup_cache_invalid` with its path and recovery instructions.
+and reports `setup_cache_invalid` with its filename and recovery instructions;
+setup error messages omit full local paths. `setup_pin_unavailable` means a pinned
+URL returned 404 or 410: upstream no longer serves this pinned file; update Hack
+or use the offline form. Alpine repositories can retire package revisions. The
+weekly provider pin watch checks every pinned URL with bounded HEAD requests and
+reports unavailable files in its existing issue; it never changes pins or mirrors
+files. Availability checks do not verify archive contents.
 The current pins do not record external signature/checksum files: the repository
 hashes decide acceptance, and the existing SmolVM prepare step also checks its
 code signature. The qualification script's optional upstream checksum comparison
@@ -892,7 +902,8 @@ remains a separate check.
 Setup calls the same three manual prepare functions in a private staging home,
 verifies the complete provider set, syncs it, then publishes the provider directory
 under the lifecycle lock. Interrupted staging is rebuilt on rerun. A complete
-matching install is verified and reused without network or preparation; setup
+matching install is verified before consent and reused without a prompt, consent
+flag, network or preparation; setup
 ends with `runtime probe --profile development`. An existing incomplete, changed
 or differently pinned provider directory is preserved and refused as
 `setup_existing_invalid`: finish the manual steps, repair a changed tree, or use

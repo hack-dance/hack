@@ -547,7 +547,11 @@ function componentSection(entry: Delta): string[] {
 }
 
 /** The issue body: a summary per component, affecting advisories, and newer releases. */
-export function renderBody(deltas: Delta[], checkedAt: string): string {
+export function renderBody(
+  deltas: Delta[],
+  checkedAt: string,
+  availability: readonly PinAvailability[] = []
+): string {
   const lines = [
     `Checked ${checkedAt} against \`packages/runtime-core/provider-pins.json\`. This issue is`,
     "updated by the weekly provider pin watch and never changes a pin. To bump, follow",
@@ -574,6 +578,21 @@ export function renderBody(deltas: Delta[], checkedAt: string): string {
     }
   }
   const ignored = Object.entries(IGNORED_ADVISORIES);
+  if (availability.length > 0) {
+    lines.push(
+      "",
+      "### Pinned download availability",
+      "",
+      "HEAD checks only; archive acceptance still requires the pinned hash and exact length.",
+      "",
+      "| File | Source host | Availability |",
+      "| --- | --- | --- |",
+      ...availability.map(
+        (file) =>
+          `| ${cell(file.name)} | ${cell(file.host)} | ${cell(file.problem ?? "available")} |`
+      )
+    );
+  }
   if (ignored.length > 0) {
     lines.push(
       "",
@@ -603,6 +622,117 @@ export function readPins(path: string): Map<string, string> {
     pins.set(component.key, version);
   }
   return pins;
+}
+
+export interface PinnedFile {
+  url: string;
+  redirectHosts: readonly string[];
+}
+
+/** All downloadable pins, including guest packages that have no release feed. */
+export function readPinnedFiles(path: string): PinnedFile[] {
+  const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+  if (!(isRecord(value) && Array.isArray(value.network_tools))) {
+    throw new Error("Invalid provider download pins.");
+  }
+  return [value.smolvm, value.docker, value.buildx, ...value.network_tools].map(
+    (pin) => {
+      if (
+        !isRecord(pin) ||
+        typeof pin.url !== "string" ||
+        !Array.isArray(pin.redirect_hosts) ||
+        !pin.redirect_hosts.every((host: unknown) => typeof host === "string")
+      ) {
+        throw new Error("Invalid pinned URL or redirect hosts.");
+      }
+      const url = new URL(pin.url);
+      if (
+        url.protocol !== "https:" ||
+        url.port ||
+        url.username ||
+        url.password ||
+        url.hash
+      ) {
+        throw new Error(
+          "Pinned URLs require HTTPS with no alternate authority."
+        );
+      }
+      return { url: pin.url, redirectHosts: pin.redirect_hosts };
+    }
+  );
+}
+
+export interface PinAvailability {
+  name: string;
+  host: string;
+  problem: string | null;
+}
+
+function pinnedUrlAllowed(url: URL, source: URL, pin: PinnedFile): boolean {
+  return (
+    url.protocol === "https:" &&
+    !url.port &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    (url.hostname === source.hostname ||
+      pin.redirectHosts.includes(url.hostname))
+  );
+}
+
+async function pinnedUrlProblem(
+  pin: PinnedFile,
+  fetcher: typeof fetch
+): Promise<string | null> {
+  const source = new URL(pin.url);
+  let url = source;
+  const signal = AbortSignal.timeout(30_000);
+  try {
+    for (let redirects = 0; redirects <= 5; redirects++) {
+      if (!pinnedUrlAllowed(url, source, pin)) {
+        return "redirect refused (host or scheme not pinned)";
+      }
+      const response = await fetcher(url, {
+        method: "HEAD",
+        redirect: "manual",
+        signal,
+      });
+      await response.body?.cancel();
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        if (!location || redirects === 5) {
+          return "redirect missing or limit exceeded";
+        }
+        url = new URL(location, url);
+        continue;
+      }
+      if (response.status === 404 || response.status === 410) {
+        return `HTTP ${response.status}: upstream no longer serves this pinned file`;
+      }
+      return response.status === 200 ? null : `HTTP ${response.status}`;
+    }
+  } catch {
+    return "request timed out or failed";
+  }
+  return "redirect limit exceeded";
+}
+
+/** Bounded, unauthenticated HEAD requests. Never download archives or forward the
+ * GitHub API token; only original/pin-listed HTTPS hosts may receive a request. */
+export async function checkPinnedUrls(
+  pins: readonly PinnedFile[],
+  fetcher: typeof fetch = fetch
+): Promise<PinAvailability[]> {
+  const results: PinAvailability[] = [];
+  for (const pin of pins) {
+    const source = new URL(pin.url);
+    results.push({
+      name: source.pathname.split("/").at(-1) ?? "pinned file",
+      host: source.hostname,
+      problem: await pinnedUrlProblem(pin, fetcher),
+    });
+  }
+  return results;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -776,18 +906,22 @@ export interface Plan {
 export function plan(
   deltas: Delta[],
   existing: WatchIssue | null,
-  checkedAt: string
+  checkedAt: string,
+  availability: readonly PinAvailability[] = []
 ): Plan {
   // An advisory whose range cannot be read is listed but never keeps the issue open.
-  const behind = deltas.some(
-    (entry) =>
-      entry.releases.length > 0 ||
-      entry.advisories.some((advisory) => advisory.certain)
-  );
+  const unavailable = availability.some((file) => file.problem !== null);
+  const behind =
+    unavailable ||
+    deltas.some(
+      (entry) =>
+        entry.releases.length > 0 ||
+        entry.advisories.some((advisory) => advisory.certain)
+    );
   const security = deltas.some((entry) =>
     entry.advisories.some((advisory) => advisory.certain)
   );
-  const body = renderBody(deltas, checkedAt);
+  const body = renderBody(deltas, checkedAt, availability);
   if (!behind) {
     return {
       action: existing?.state === "open" ? "close" : "none",
@@ -798,7 +932,8 @@ export function plan(
   if (
     existing?.state === "closed" &&
     existing.stateReason === "not_planned" &&
-    !security
+    !security &&
+    !unavailable
   ) {
     return { action: "none", body, security };
   }
@@ -901,9 +1036,12 @@ export async function main(
     return 64;
   }
   const github = new GitHub(token, fetcher);
-  const pins = readPins(
-    resolve(import.meta.dir, "../packages/runtime-core/provider-pins.json")
+  const pinPath = resolve(
+    import.meta.dir,
+    "../packages/runtime-core/provider-pins.json"
   );
+  const pins = readPins(pinPath);
+  const availability = await checkPinnedUrls(readPinnedFiles(pinPath), fetcher);
   const deltas: Delta[] = [];
   for (const component of COMPONENTS) {
     const pinned = pins.get(component.key) as string;
@@ -919,7 +1057,12 @@ export async function main(
     );
   }
   const existing = await github.findIssue(repository);
-  const next = plan(deltas, existing, new Date().toISOString().slice(0, 10));
+  const next = plan(
+    deltas,
+    existing,
+    new Date().toISOString().slice(0, 10),
+    availability
+  );
   console.log(next.body);
   console.log(
     `Action: ${next.action}${existing ? ` (issue #${existing.number})` : ""}; security label: ${next.security ? "on" : "off"}${dryRun ? " (dry run: nothing written)" : ""}`

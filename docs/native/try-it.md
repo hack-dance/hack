@@ -45,15 +45,20 @@ NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 "$NATIVE" --candidate-root "$NATIVE_HOME" runtime setup
 ```
 
-Setup lists each file, its maximum download size, source host, pinned SHA-256 and
+Setup lists each file, its exact compressed byte length, source host, pinned SHA-256 and
 destination, then asks once. It downloads the pinned SmolVM, engine and guest
 packages, verifies every hash before preparation, and ends with the development
 profile probe. It needs no administrator password or keychain access. Rerun after
 an interrupted download to resume or restart safely. A complete matching install
-is verified and reused without downloading or preparing again.
+is verified before consent and reused without prompting, downloading or preparing again.
 
 For scripts, use `runtime setup --no-interactive --accept-downloads`. Without
-`--accept-downloads`, a noninteractive run fails with `E_INTERACTIVE_REQUIRED`.
+`--accept-downloads`, a noninteractive run needing preparation fails with
+`E_INTERACTIVE_REQUIRED`. Complete matching installs need no flag.
+Connections time out after 15 seconds, each read after 60 seconds, and each file
+has a 30-minute overall deadline including redirects. A `setup_pin_unavailable`
+error means upstream returned 404 or 410; update Hack or use offline archives.
+Setup ignores proxy settings; networks requiring a proxy need the offline form.
 This command is available in builds containing the setup feature; older installed
 prereleases need the manual alternative below.
 

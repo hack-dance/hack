@@ -2,12 +2,12 @@
 title: Explicit native setup
 ---
 flowchart TD
-  Start["runtime setup"] --> Consent{"Offline inputs or consent?"}
+  Start["runtime setup"] --> Existing{"Complete matching install?"}
   Consent -->|"no"| Refused["Refuse before writes"]
-  Consent -->|"yes"| Existing{"Complete matching install?"}
+  Consent -->|"yes"| Acquire["Bounded acquisition or offline inputs"]
   Existing -->|"verified"| Probe["Development profile probe"]
   Existing -->|"invalid existing directory"| Preserved["Refuse and preserve"]
-  Existing -->|"absent"| Acquire["Bounded acquisition or offline inputs"]
+  Existing -->|"absent"| Consent
   Acquire --> Hash{"Every pinned hash matches?"}
   Hash -->|"no"| Retry["Report file and reason"]
   Hash -->|"yes"| Prepare["Manual prepare in staging"]

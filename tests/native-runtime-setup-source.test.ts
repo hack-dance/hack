@@ -37,6 +37,8 @@ test("download manifest and user docs retain the manual trust pins", async () =>
     expect(pin.archive_sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(pin.max_bytes).toBeGreaterThan(0);
     expect(pin.max_bytes).toBeLessThanOrEqual(128 * 1024 * 1024);
+    expect(pin.size_bytes).toBeGreaterThan(0);
+    expect(pin.size_bytes).toBeLessThanOrEqual(pin.max_bytes);
     expect(`${artifact}\n${guest}`).toContain(pin.archive_sha256);
   }
   for (const page of [guide, tryIt]) {

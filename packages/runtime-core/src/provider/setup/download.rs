@@ -1,11 +1,7 @@
 //! Bounded HTTPS transfers with explicit redirect admission and digest-only cache trust.
 use super::FilePin;
 use crate::{CandidateError, provider::state};
-use reqwest::{
-    Url,
-    blocking::{Client, Response},
-    header,
-};
+use reqwest::{Response, Url, header};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -14,6 +10,53 @@ use std::{
     path::Path,
     time::Duration,
 };
+
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+const FILE_TIMEOUT: Duration = Duration::from_secs(1800);
+
+pub(super) struct Client {
+    http: reqwest::Client,
+    runtime: tokio::runtime::Runtime,
+    file_timeout: Duration,
+}
+
+fn build_client(
+    https_only: bool,
+    read_timeout: Duration,
+    file_timeout: Duration,
+    resolve: Option<(&str, std::net::SocketAddr)>,
+) -> Result<Client, CandidateError> {
+    let mut builder = reqwest::Client::builder()
+        .https_only(https_only)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(read_timeout);
+    if let Some((host, address)) = resolve {
+        builder = builder.resolve(host, address);
+    }
+    let http = builder
+        .build()
+        .map_err(|_| CandidateError::new("setup_download", "Cannot construct HTTPS client."))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| CandidateError::new("setup_download", "Cannot construct transfer runtime."))?;
+    Ok(Client {
+        http,
+        runtime,
+        file_timeout,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn test_client(
+    read_timeout: Duration,
+    file_timeout: Duration,
+    resolve: Option<(&str, std::net::SocketAddr)>,
+) -> Client {
+    build_client(false, read_timeout, file_timeout, resolve).unwrap()
+}
 
 fn error(pin: &FilePin, code: &'static str, reason: impl std::fmt::Display) -> CandidateError {
     CandidateError::new(
@@ -26,6 +69,8 @@ pub(super) fn validate_pin(pin: &FilePin) -> Result<(), CandidateError> {
     pin.name()?;
     if pin.max_bytes == 0
         || pin.max_bytes > 128 * 1024 * 1024
+        || pin.size_bytes == 0
+        || pin.size_bytes > pin.max_bytes
         || pin.archive_sha256.len() != 64
         || !pin
             .archive_sha256
@@ -43,14 +88,7 @@ pub(super) fn validate_pin(pin: &FilePin) -> Result<(), CandidateError> {
 }
 
 pub(super) fn client() -> Result<Client, CandidateError> {
-    Client::builder()
-        .https_only(!cfg!(test))
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(1800))
-        .build()
-        .map_err(|_| CandidateError::new("setup_download", "Cannot construct HTTPS client."))
+    build_client(true, READ_TIMEOUT, FILE_TIMEOUT, None)
 }
 
 fn check_url(pin: &FilePin, url: &Url) -> Result<(), CandidateError> {
@@ -58,6 +96,7 @@ fn check_url(pin: &FilePin, url: &Url) -> Result<(), CandidateError> {
         Url::parse(&pin.url).map_err(|_| error(pin, "setup_pin_invalid", "invalid source URL"))?;
     // Test transport permits only the fake loopback server; release builds have no HTTP seam.
     let test_http = cfg!(test)
+        && initial.scheme() == "http"
         && initial.host_str() == Some("127.0.0.1")
         && url.scheme() == "http"
         && matches!(url.host_str(), Some("127.0.0.1" | "mirror.test"))
@@ -139,6 +178,13 @@ fn hash(file: &mut File, pin: &FilePin) -> Result<(), CandidateError> {
     if format!("{:x}", hash.finalize()) != pin.archive_sha256 {
         return Err(error(pin, "setup_hash_mismatch", "pinned SHA-256 mismatch"));
     }
+    if total != pin.size_bytes {
+        return Err(error(
+            pin,
+            "setup_size_mismatch",
+            "archive length differs from the pinned exact byte length",
+        ));
+    }
     Ok(())
 }
 
@@ -167,20 +213,45 @@ pub(super) fn verify_input(path: &Path, pin: &FilePin) -> Result<(), CandidateEr
     hash(&mut file, pin)
 }
 
-fn response(client: &Client, pin: &FilePin, offset: u64) -> Result<Response, CandidateError> {
+fn deadline_error(pin: &FilePin) -> CandidateError {
+    error(
+        pin,
+        "setup_download_deadline",
+        "overall file deadline exceeded; partial retained for rerun",
+    )
+}
+
+async fn response(
+    client: &Client,
+    pin: &FilePin,
+    offset: u64,
+    deadline: tokio::time::Instant,
+) -> Result<Response, CandidateError> {
     let mut url =
         Url::parse(&pin.url).map_err(|_| error(pin, "setup_pin_invalid", "invalid URL"))?;
     for redirects in 0..=5 {
         check_url(pin, &url)?;
         let mut request = client
+            .http
             .get(url.clone())
             .header(header::ACCEPT_ENCODING, "identity");
         if offset > 0 {
             request = request.header(header::RANGE, format!("bytes={offset}-"));
         }
-        let response = request
-            .send()
+        let response = tokio::time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| deadline_error(pin))?
             .map_err(|e| error(pin, "setup_download", e.without_url()))?;
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+        ) {
+            return Err(error(
+                pin,
+                "setup_pin_unavailable",
+                "upstream no longer serves this pinned file; update Hack or use the offline form",
+            ));
+        }
         if response.status().is_redirection() {
             if redirects == 5 {
                 return Err(error(pin, "setup_redirect_refused", "too many redirects"));
@@ -215,7 +286,10 @@ fn range_length(response: &Response, offset: u64, pin: &FilePin) -> Result<u64, 
     let start = start.parse::<u64>().map_err(|_| invalid())?;
     let end = end.parse::<u64>().map_err(|_| invalid())?;
     let total = total.parse::<u64>().map_err(|_| invalid())?;
-    if start != offset || end < start || total > pin.max_bytes || end.checked_add(1) != Some(total)
+    if start != offset
+        || end < start
+        || total != pin.size_bytes
+        || end.checked_add(1) != Some(total)
     {
         return Err(invalid());
     }
@@ -229,10 +303,23 @@ pub(super) fn acquire(
     directory: &Path,
     pin: &FilePin,
 ) -> Result<(), CandidateError> {
+    client
+        .runtime
+        .block_on(acquire_inner(client, directory, pin))
+}
+
+async fn acquire_inner(
+    client: &Client,
+    directory: &Path,
+    pin: &FilePin,
+) -> Result<(), CandidateError> {
+    // One absolute deadline spans all redirect headers and body reads; successful
+    // progress never renews it. Reqwest separately bounds each read to 60 seconds.
+    let deadline = tokio::time::Instant::now() + client.file_timeout;
     state::check_private_directory(directory)?;
     let destination = directory.join(pin.name()?);
     match destination.symlink_metadata() {
-        Ok(_) => return verify_file(&destination, pin).map_err(|e| error(pin, "setup_cache_invalid", format!("{}; cached file {} was preserved. Move it aside and rerun setup, or use offline inputs", e.message, destination.display()))),
+        Ok(_) => return verify_file(&destination, pin).map_err(|e| error(pin, "setup_cache_invalid", format!("{}; cached file under .hack-local/setup/downloads was preserved. Move it aside and rerun setup, or use offline inputs", e.code))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
         Err(e) => return Err(error(pin, "setup_file", e)),
     }
@@ -243,13 +330,13 @@ pub(super) fn acquire(
         return commit(file, &partial, &destination, directory, pin);
     }
     // A full-size invalid partial cannot be extended safely. Restart in this invocation.
-    let offset = if offset == pin.max_bytes {
+    let offset = if offset >= pin.size_bytes {
         file.set_len(0).map_err(state::io)?;
         0
     } else {
         offset
     };
-    let mut response = response(client, pin, offset)?;
+    let mut response = response(client, pin, offset, deadline).await?;
     let expected = match response.status() {
         reqwest::StatusCode::OK => {
             file.set_len(0).map_err(state::io)?;
@@ -280,19 +367,30 @@ pub(super) fn acquire(
             "response exceeds pinned byte bound",
         ));
     }
+    if expected.is_some_and(|n| n != pin.size_bytes - start) {
+        file.set_len(0).map_err(state::io)?;
+        return Err(error(
+            pin,
+            "setup_size_mismatch",
+            "declared length differs from the pinned exact byte length",
+        ));
+    }
     let mut count = 0;
-    let mut buffer = [0_u8; 65536];
     loop {
-        let n = response.read(&mut buffer).map_err(|e| {
-            error(
-                pin,
-                "setup_download",
-                format!("interrupted body ({e}); partial retained for rerun"),
-            )
-        })?;
-        if n == 0 {
+        let chunk = tokio::time::timeout_at(deadline, response.chunk())
+            .await
+            .map_err(|_| deadline_error(pin))?
+            .map_err(|_| {
+                error(
+                    pin,
+                    "setup_download",
+                    "body read interrupted or timed out; partial retained for rerun",
+                )
+            })?;
+        let Some(chunk) = chunk else {
             break;
-        }
+        };
+        let n = chunk.len();
         count += n as u64;
         if count > pin.max_bytes - start || expected.is_some_and(|length| count > length) {
             file.set_len(0).map_err(state::io)?;
@@ -302,10 +400,28 @@ pub(super) fn acquire(
                 "body exceeds pinned byte bound or declared length",
             ));
         }
-        file.write_all(&buffer[..n])
+        if count > pin.size_bytes - start {
+            file.set_len(0).map_err(state::io)?;
+            return Err(error(
+                pin,
+                "setup_size_mismatch",
+                "body exceeds pinned exact byte length",
+            ));
+        }
+        file.write_all(&chunk)
             .map_err(|e| error(pin, "setup_file", e))?;
     }
+    if tokio::time::Instant::now() >= deadline {
+        return Err(deadline_error(pin));
+    }
     file.sync_all().map_err(state::io)?;
+    if start + count < pin.size_bytes {
+        return Err(error(
+            pin,
+            "setup_truncated",
+            "body ended before the pinned exact length; partial retained for rerun",
+        ));
+    }
     if expected.is_some_and(|length| count != length) {
         return Err(error(
             pin,
@@ -333,4 +449,57 @@ fn commit(
     File::open(directory)
         .and_then(|d| d.sync_all())
         .map_err(state::io)
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn https_downgrades_credentials_and_unlisted_hosts_refuse() {
+        let pin = FilePin {
+            url: "https://example.test/archive.tgz".into(),
+            archive_sha256: "0".repeat(64),
+            size_bytes: 5,
+            max_bytes: 16,
+            redirect_hosts: vec!["mirror.test".into()],
+        };
+        for url in [
+            "http://example.test/archive.tgz",
+            "https://other.test/archive.tgz",
+            "https://user@example.test/archive.tgz",
+            "https://example.test:444/archive.tgz",
+        ] {
+            assert_eq!(
+                check_url(&pin, &Url::parse(url).unwrap()).unwrap_err().code,
+                "setup_redirect_refused"
+            );
+        }
+        check_url(
+            &pin,
+            &Url::parse("https://mirror.test/archive.tgz").unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn production_client_refuses_http_without_reaching_the_fake_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client = client().unwrap();
+        let result = client.runtime.block_on(
+            client
+                .http
+                .get(format!(
+                    "http://{}/archive.tgz",
+                    listener.local_addr().unwrap()
+                ))
+                .send(),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }

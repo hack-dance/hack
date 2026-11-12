@@ -498,7 +498,12 @@ whose vulnerable range contains a pinned version and whose fix the pin has not r
 issue carries the `security` label exactly while such an advisory exists. Not covered: advisories
 for components SmolVM bundles (libkrun, libkrunfw, the guest kernel and rootfs packages) or
 published only in the global advisory database. It never changes a pin; bumps are qualified by
-hand.
+hand. The workflow also checks every pinned download URL, including guest
+packages, with bounded unauthenticated HEAD requests. Unavailable files or
+redirects to unlisted hosts create, keep open or reopen the watch issue, including
+one closed as not planned. Transient timeouts and 5xx responses are also reported
+for maintainers to assess. Availability alone never authorizes archive use or
+changes pins. Alpine package revisions may be retired upstream.
 The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine

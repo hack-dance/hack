@@ -23,6 +23,9 @@ impl Drop for Fixture {
 }
 
 fn request(stream: &mut TcpStream) -> String {
+    // macOS inherits O_NONBLOCK from the listening socket. Restore blocking I/O
+    // so the explicit accepted-socket read/write timeouts govern this fixture.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
         .unwrap();
@@ -55,6 +58,7 @@ fn scripted_server(
         url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
         archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
         max_bytes: 16,
+        size_bytes: 5,
         redirect_hosts: vec![],
     };
     let replies = replies(listener.local_addr().unwrap().port());
@@ -83,13 +87,22 @@ fn scripted_server(
     });
     (pin, handle)
 }
-fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap()
+fn client() -> download::Client {
+    download::test_client(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+}
+
+fn install(
+    candidate: &Candidate,
+    inputs: Option<OfflineInputs<'_>>,
+    files: &[FilePin],
+    prepare: impl FnOnce(&Candidate, OfflineInputs<'_>) -> Result<(), CandidateError>,
+    verify: impl Fn(&Candidate) -> Result<(), CandidateError>,
+) -> Result<&'static str, CandidateError> {
+    super::install(candidate, inputs, files, prepare, verify, || Ok(client()))
 }
 
 #[test]
@@ -144,7 +157,7 @@ fn rejects_hash_truncation_oversize_and_foreign_redirect() {
         ),
         (
             "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
-            "setup_download",
+            "setup_pin_unavailable",
         ),
     ] {
         let root = Fixture::new();
@@ -273,6 +286,7 @@ fn unsafe_partial_and_offline_digest_are_not_trusted() {
         url: "https://example.test/archive.tgz".into(),
         archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
         max_bytes: 16,
+        size_bytes: 5,
         redirect_hosts: vec![],
     };
     let outside = root.0.join("unrelated");
@@ -388,6 +402,7 @@ fn offline_setup_and_partial_manual_install_preservation() {
         url: "https://unused.example/archive.tgz".into(),
         archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
         max_bytes: 16,
+        size_bytes: 5,
         redirect_hosts: vec![],
     };
     let files = fixture_pins(&pin);
@@ -473,14 +488,176 @@ fn explicitly_allowed_redirect_host_uses_only_the_local_server() {
     pin.redirect_hosts.push("mirror.test".into());
     let url = reqwest::Url::parse(&pin.url).unwrap();
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], url.port().unwrap()));
-    let client = reqwest::blocking::Client::builder()
-        .resolve("mirror.test", address)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap();
+    let client = download::test_client(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(5),
+        Some(("mirror.test", address)),
+    );
     download::acquire(&client, &root.0, &pin).unwrap();
+    server.join().unwrap();
+    assert_eq!(fs::read(root.0.join("archive.tgz")).unwrap(), b"hello");
+}
+
+#[test]
+fn redirect_loop_stops_at_the_pinned_limit() {
+    let root = Fixture::new();
+    let (pin, server) = server(vec![
+        (
+            "get /archive.tgz",
+            "HTTP/1.1 302 Found\r\nLocation: /archive.tgz\r\nContent-Length: 0\r\n\r\n"
+        );
+        6
+    ]);
+    let error = download::acquire(&client(), &root.0, &pin).unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.code, "setup_redirect_refused");
+    assert!(error.message.contains("too many redirects"));
+}
+
+#[test]
+fn exact_length_and_retired_pin_errors_are_named_and_path_free() {
+    for (reply, expected) in [
+        (
+            "HTTP/1.1 410 Gone\r\nContent-Length: 0\r\n\r\n",
+            "setup_pin_unavailable",
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhell",
+            "setup_size_mismatch",
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello!",
+            "setup_size_mismatch",
+        ),
+    ] {
+        let root = Fixture::new();
+        let (pin, server) = server(vec![("get /archive.tgz", reply)]);
+        let error = download::acquire(&client(), &root.0, &pin).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code, expected);
+        assert!(!error.message.contains(root.0.to_str().unwrap()));
+        if expected == "setup_pin_unavailable" {
+            assert!(
+                error
+                    .message
+                    .contains("update Hack or use the offline form")
+            );
+        }
+    }
+    let root = Fixture::new();
+    let (mut pin, server) = server(vec![(
+        "get /archive.tgz",
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+    )]);
+    download::acquire(&client(), &root.0, &pin).unwrap();
+    server.join().unwrap();
+    pin.size_bytes = 6; // A matching hash alone cannot bypass the exact-length pin.
+    assert_eq!(
+        download::verify_file(&root.0.join("archive.tgz"), &pin)
+            .unwrap_err()
+            .code,
+        "setup_size_mismatch"
+    );
+    fs::write(root.0.join("archive.tgz"), b"wrong").unwrap();
+    let error = download::acquire(&client(), &root.0, &pin).unwrap_err();
+    assert_eq!(error.code, "setup_cache_invalid");
+    assert!(!error.message.contains(root.0.to_str().unwrap()));
+}
+
+#[test]
+fn per_read_timeout_and_overall_deadline_bound_a_slow_body() {
+    use std::time::Duration;
+    for (read_timeout, file_timeout, expected) in [
+        (
+            Duration::from_millis(100),
+            Duration::from_secs(3),
+            "setup_download",
+        ),
+        (
+            Duration::from_secs(2),
+            Duration::from_millis(350),
+            "setup_download_deadline",
+        ),
+    ] {
+        let root = Fixture::new();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let pin = FilePin {
+            url: format!("http://{}/archive.tgz", listener.local_addr().unwrap()),
+            archive_sha256: format!("{:x}", Sha256::digest(b"hello")),
+            max_bytes: 16,
+            size_bytes: 5,
+            redirect_hosts: vec![],
+        };
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            request(&mut stream);
+            if stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nh")
+                .is_err()
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(150));
+            let _ = stream.write_all(b"e");
+            thread::sleep(Duration::from_millis(150));
+            let _ = stream.write_all(b"l");
+            thread::sleep(Duration::from_millis(150));
+        });
+        let client = download::test_client(read_timeout, file_timeout, None);
+        let error = download::acquire(&client, &root.0, &pin).unwrap_err();
+        handle.join().unwrap();
+        assert_eq!(error.code, expected);
+        assert!(!root.0.join("archive.tgz").exists());
+    }
+}
+
+#[test]
+fn existing_install_observation_never_writes_or_acquires_inputs() {
+    let root = Fixture::new();
+    let candidate = Candidate::discover(&root.0).unwrap();
+    assert!(!observe_existing(&candidate, &|_| panic!("absent install verified")).unwrap());
+    assert!(!candidate.state_root.exists());
+    let target = candidate.state_root.join("providers");
+    state::private_directory(&target).unwrap();
+    fs::write(target.join("complete"), b"verified").unwrap();
+    assert_eq!(
+        observe_existing(&candidate, &fixture_verify)
+            .unwrap_err()
+            .code,
+        "setup_existing_invalid"
+    );
+    assert!(!candidate.state_root.join("run").exists());
+    let _lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
+    drop(_lock);
+    assert!(observe_existing(&candidate, &fixture_verify).unwrap());
+    assert!(!download_directory(&candidate).exists());
+    fs::write(target.join("complete"), b"changed").unwrap();
+    let error = observe_existing(&candidate, &fixture_verify).unwrap_err();
+    assert_eq!(error.code, "setup_existing_invalid");
+    assert!(!error.message.contains(root.0.to_str().unwrap()));
+}
+
+#[test]
+fn body_without_content_length_retains_a_short_prefix_for_resume() {
+    let root = Fixture::new();
+    let (pin, server) = server(vec![
+        (
+            "get /archive.tgz",
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhe",
+        ),
+        (
+            "range: bytes=2-",
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-4/5\r\nContent-Length: 3\r\n\r\nllo",
+        ),
+    ]);
+    assert_eq!(
+        download::acquire(&client(), &root.0, &pin)
+            .unwrap_err()
+            .code,
+        "setup_truncated"
+    );
+    assert_eq!(fs::read(root.0.join("archive.tgz.part")).unwrap(), b"he");
+    download::acquire(&client(), &root.0, &pin).unwrap();
     server.join().unwrap();
     assert_eq!(fs::read(root.0.join("archive.tgz")).unwrap(), b"hello");
 }

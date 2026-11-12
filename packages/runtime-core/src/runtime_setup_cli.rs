@@ -6,12 +6,27 @@ use std::{
 };
 
 pub fn run(candidate: &Candidate, arguments: &[&str]) -> Result<(), CandidateError> {
+    run_with_reuse(candidate, arguments, setup::reuse_existing)
+}
+
+fn run_with_reuse(
+    candidate: &Candidate,
+    arguments: &[&str],
+    reuse: impl FnOnce(&Candidate) -> Result<Option<serde_json::Value>, CandidateError>,
+) -> Result<(), CandidateError> {
     let options = parse(arguments)?;
+    if let Some(result) = reuse(candidate)? {
+        println!(
+            "{}",
+            serde_json::to_string(&result).expect("setup result is serializable")
+        );
+        return Ok(());
+    }
     let pins = setup::pins()?;
     let interactive = !options.no_interactive
         && io::stdin().is_terminal()
         && io::stderr().is_terminal()
-        && std::env::var("HACK_NO_INTERACTIVE").as_deref() != Ok("1");
+        && !truthy_env(std::env::var("HACK_NO_INTERACTIVE").ok().as_deref());
     if interactive && !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         return Err(CandidateError::new(
             "unsupported_host",
@@ -34,14 +49,14 @@ pub fn run(candidate: &Candidate, arguments: &[&str]) -> Result<(), CandidateErr
         );
         return Ok(());
     }
-    eprintln!("Pinned native runtime files (compressed size upper bounds):");
+    eprintln!("Pinned native runtime files (exact compressed byte lengths):");
     for pin in &pins {
         let url = reqwest::Url::parse(&pin.url)
             .map_err(|_| CandidateError::new("setup_pin_invalid", "Invalid URL."))?;
         eprintln!(
-            "  {}: at most {} bytes; source {}; SHA-256 {}",
+            "  {}: {} bytes; source {}; SHA-256 {}",
             pin.name()?,
-            pin.max_bytes,
+            pin.size_bytes,
             url.host_str().unwrap_or(""),
             pin.archive_sha256
         );
@@ -82,6 +97,13 @@ pub fn run(candidate: &Candidate, arguments: &[&str]) -> Result<(), CandidateErr
         serde_json::to_string(&result).expect("setup result is serializable")
     );
     Ok(())
+}
+
+fn truthy_env(value: Option<&str>) -> bool {
+    matches!(
+        value.unwrap_or("").trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 #[derive(Default)]
@@ -142,6 +164,25 @@ fn parse<'a>(arguments: &[&'a str]) -> Result<Options<'a>, CandidateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn truthy_environment_matches_frontend_and_reuse_precedes_consent() {
+        for value in ["1", "true", " YES ", "On", "TRUE"] {
+            assert!(truthy_env(Some(value)));
+        }
+        for value in ["", "0", "false", "off", "unknown"] {
+            assert!(!truthy_env(Some(value)));
+        }
+        assert!(!truthy_env(None));
+        let root = std::env::temp_dir().canonicalize().unwrap();
+        let candidate = Candidate::discover(&root).unwrap();
+        let mut verified = false;
+        run_with_reuse(&candidate, &["--no-interactive"], |_| {
+            verified = true;
+            Ok(Some(serde_json::json!({"status": "reused"})))
+        })
+        .unwrap();
+        assert!(verified);
+    }
     #[test]
     fn noninteractive_cli_requires_explicit_consent_before_writes() {
         struct Cleanup(std::path::PathBuf);

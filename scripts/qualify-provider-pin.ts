@@ -534,6 +534,24 @@ export function foregroundReadyRun(stderr: string): string | null {
   );
 }
 
+/**
+ * Primary code in the foreground's terminal console error. Qualification fixes the
+ * console logger and does not enable debug stacks; earlier output and runtime notes
+ * may contain service text and cannot establish the command's failure code. The
+ * CLI appends failed-service tails after their own heading; those are not errors
+ * emitted by the frontend, even if a service printed an identical-looking line.
+ */
+export function terminalRuntimeErrorCode(stderr: string): string | null {
+  const diagnostic =
+    stderr.split(/\r?\nLast output of failed services \(/, 1)[0] ?? "";
+  const line = diagnostic.trimEnd().split(/\r?\n/).at(-1) ?? "";
+  return (
+    /^ERROR: Native runtime request failed \(([a-z][a-z0-9_]{0,79})(?:: [a-z][a-z0-9_]{0,79})?\); [^\r\n]+$/.exec(
+      line
+    )?.[1] ?? null
+  );
+}
+
 /** Startup progress is small; fail closed rather than reading an unbounded log. */
 function startupOutput(path: string): string {
   if (!existsSync(path)) {
@@ -1245,11 +1263,7 @@ export class Qualification {
         // completion, then classify the final output rather than that stale snapshot.
         await this.foreground.exited;
         const finalStderr = this.readStartupOutput(stderrPath);
-        if (
-          /\bprovider_busy\b|Another candidate operation holds the provider lock/.test(
-            finalStderr
-          )
-        ) {
+        if (terminalRuntimeErrorCode(finalStderr) === "provider_busy") {
           this.record(`known_product_bug_provider_busy_${label}`, {
             operation: command,
             exit: this.foreground.exitCode,

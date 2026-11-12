@@ -9,6 +9,10 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  nativeDetachedUpShellVariables,
+  nativeShellForwardingNotice,
+} from "../lib/native-detached-up.ts";
+import {
   describeNativeProcessRefusals,
   type NativeProcessRefusal,
   requireWrappableNativeProcesses,
@@ -36,6 +40,7 @@ import {
   type NativePreparedBase,
   preparedBaseArguments,
 } from "./native-prepared-base.ts";
+import { nativePrivateEnvironmentPayload } from "./native-private-environment-payload.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
 import {
   admitNativeProjectBuilds,
@@ -79,9 +84,11 @@ import {
 import { isNativeHttpsProbePath } from "./native-project-https.ts";
 import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
+  mergeNativeShellEnvironment,
   type NativeProjectInput,
   nativeReviewedActiveServices,
   prepareNativeProjectInput,
+  requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
@@ -405,6 +412,48 @@ const DEFAULTS: Dependencies = {
   downHooks: createNativeForegroundDownHooks,
   exitMonitorIntervalMs: 2000,
 };
+/**
+ * Reports forwarded source names and unset-reference notices for active services.
+ * Detached launchers receive only validated names over IPC; values stay private.
+ */
+function reportNativeEnvironmentNotices(
+  input: NativeProjectInput,
+  reviewedPlan: unknown,
+  warn: (line: string) => void
+): void {
+  const active = nativeReviewedActiveServices(reviewedPlan);
+  const names = [
+    ...new Set(
+      Object.entries(input.forwardedShellVariables ?? {})
+        .filter(([service]) => active.has(service))
+        .flatMap(([, names]) => names)
+    ),
+  ].sort();
+  if (!nativeDetachedUpShellVariables(names)) {
+    warn(nativeShellForwardingNotice(names));
+  }
+  for (const notice of input.environmentNotices ?? []) {
+    if (active.has(notice.service)) {
+      warn(notice.line);
+    }
+  }
+}
+
+/**
+ * The input about to be delivered: the services the reviewed plan marks
+ * active, checked against the runtime's delivery limits. The check comes
+ * last, after the credential adapters added theirs and after the profile
+ * filter, because the runtime receives nothing for an inactive service.
+ */
+function activeNativeDeliveryInput(opts: {
+  readonly input: NativeProjectInput;
+  readonly reviewedPlan: unknown;
+}): NativeProjectInput {
+  const active = selectActiveNativeProjectInput(opts);
+  requireNativeShellDeliveryFits(active);
+  return active;
+}
+
 /** Fixed text of the native foreground configuration refusal. */
 export const NATIVE_CONFIGURATION_REFUSAL =
   "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped. Run `hack doctor --native-preflight` to list every blocker with its fix.";
@@ -1034,30 +1083,12 @@ export function nativeEnvironmentDelivery(opts: {
   }
   return {
     flags: ["--environment-stdin"],
-    payload: Buffer.from(
-      JSON.stringify({
-        version: files.length > 0 ? 2 : 1,
-        plan,
-        run,
-        lifetime_seconds: 300,
-        services: input.managedEnvironment,
-        ...(files.length > 0
-          ? {
-              files: Object.fromEntries(
-                files.map(([service, members]) => [
-                  service,
-                  members.map((member) => ({
-                    name: member.name,
-                    target: member.target,
-                    mode: "0400",
-                    content_b64: member.content.toString("base64"),
-                  })),
-                ])
-              ),
-            }
-          : {}),
-      })
-    ),
+    payload: nativePrivateEnvironmentPayload({
+      services: input.managedEnvironment,
+      files: Object.fromEntries(files),
+      planId: plan,
+      run,
+    }),
   };
 }
 /**
@@ -1891,6 +1922,8 @@ async function startNativeProjectAttempt(
     ...opts.scope,
     composeFile: opts.composeFile,
     envName: selection.envName,
+    // Service `environment` references are resolved from the caller's shell.
+    env: process.env,
   });
   // Digest the selection now: later steps adapt the delivered values.
   const selectedEnvironment = opts.onEnvironmentReady
@@ -1900,6 +1933,8 @@ async function startNativeProjectAttempt(
         envByService: input.managedEnvironment,
       })
     : undefined;
+  // After the fingerprints: shell values are delivered, never digested to disk.
+  input = mergeNativeShellEnvironment(input);
   const environmentMarkers = requireRetainedEnvironment({
     retainedSelection:
       retained && !opts.restore ? selection.envName : undefined,
@@ -2238,6 +2273,7 @@ async function startNativeProjectAttempt(
         requireEnrollmentCompatible(review.report.plan);
         reportNativeRestartPolicyNotices(review.report.plan, deps.warn);
         reportNativeIgnoredSettingNotices(review.report.plan, deps.warn);
+        reportNativeEnvironmentNotices(input, review.report.plan, deps.warn);
         if (metadata) {
           verifyNativeRuntimeMetadataRoutes({
             plan: review.report.plan,
@@ -2328,7 +2364,7 @@ async function startNativeProjectAttempt(
               invoke: deps.invoke,
             });
           const delivery = nativeEnvironmentDelivery({
-            input: selectActiveNativeProjectInput({
+            input: activeNativeDeliveryInput({
               input,
               reviewedPlan: review.report.plan,
             }),

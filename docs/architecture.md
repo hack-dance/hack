@@ -183,7 +183,7 @@ through Caddy, which forwards the request to the peer's service port.
 
 ```mermaid
 ---
-title: A request from one service to another
+title: Container HTTPS request
 ---
 sequenceDiagram
   autonumber

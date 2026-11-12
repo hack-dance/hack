@@ -1,20 +1,16 @@
 # Sign in to another CLI at startup
 
-The commands and configuration on this page were audited against `v5.0.0-next.13`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
-
 Use this when your services need a token from another tool's CLI, such as a
 deploy platform or an edge platform. A lifecycle hook signs in on your machine
 before the containers start, then hands the token to the services.
 
 This is a pattern built from lifecycle hooks and managed env. It is not a
 built-in credential adapter. Hack has built-in adapters only for AWS and gcloud,
-and only on the [native backend (beta)](../../guides/native-candidate.md). There is
+and only on the [native backend (beta)](../guides/native-candidate.md). There is
 no plugin API for adding another adapter.
 
 The complete project is in
-[`examples/recipes/cli-login`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/cli-login). It uses two
+[`examples/recipes/cli-login`](../../examples/recipes/cli-login). It uses two
 stand-in CLIs, `deployctl` and `edgectl`, in `stand-ins/`. They are shell
 scripts that behave like a real CLI's sign-in, status and token commands.
 
@@ -189,7 +185,7 @@ waits for input still waits.
   `--env <name>`, pass the same `--env` to `hack env get` and `hack env add`.
 - AWS SSO and gcloud: on the Compose backend, use the same hook pattern
   (`aws sso login`, `gcloud auth login`). The native backend's built-in
-  adapters are described in the [native backend guide](../../guides/native-candidate.md).
+  adapters are described in the [native backend guide](../guides/native-candidate.md).
 
-Related: [Lifecycle](../../lifecycle.md), [Env and secrets](../../env.md),
+Related: [Lifecycle](../lifecycle.md), [Env and secrets](../env.md),
 [Common pitfalls](common-pitfalls.md).

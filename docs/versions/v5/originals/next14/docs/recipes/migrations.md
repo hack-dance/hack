@@ -1,15 +1,11 @@
 # Run database migrations
 
-The commands and configuration on this page were audited against `v5.0.0-next.13`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
-
 Use this to apply schema migrations: once by hand, on every start, and in each
 branch instance. Hack does not ship a migration tool. Use your framework's tool
 (Prisma, Drizzle, Alembic, Rails, Flyway and so on) inside a container.
 
 The complete project is in
-[`examples/recipes/migrations`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/recipes/migrations). Its
+[`examples/recipes/migrations`](../../examples/recipes/migrations). Its
 `scripts/migrate.sh` is a small stand-in tool: it applies each
 `migrations/*.sql` file once and records it in `schema_migrations`.
 

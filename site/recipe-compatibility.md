@@ -1,25 +1,34 @@
-# Recipes on the next.13 site
+# Recipes on the next.14 site
 
-The v5 runtime corpus stays pinned to `v5.0.0-next.13`
-(`7151636f975f473581cc18013604c91789a35c41`). The eleven recipe pages are
-editorial copies of `docs/recipes/` at
-`4b400ea4d40acbff4ec00e37a3f288c67da55a03`. Each has explicit `sourceRevision`,
-`sourceLabel` and `sourceFile` metadata. Example-project links name that same
-source commit because those projects are newer than the runtime pin.
+The v5 runtime corpus is pinned to `v5.0.0-next.14`
+(`6df12b828ce4db60faf51e1bccc481621a350811`). Six recipe pages publish directly
+from their hashed release snapshots. Five retain editorial corrections from
+`4b400ea4d40acbff4ec00e37a3f288c67da55a03`, with explicit `sourceRevision`,
+`sourceLabel` and `sourceFile` metadata:
 
-All eleven pages fit next.13; none waits for a newer runtime. This is a source
+- Overview: example-directory links select the corrected projects.
+- Deps service: read-only consumer mounts and the shared-cache trust boundary.
+- Dependency directories: the same mount rule and a corrected wrapped link.
+- Config examples: matching corrected mounts, including separate monorepo anchors.
+- Tunnels: the host-scoped token and the command-reference OAuth pointer.
+
+Those example links name the correction source commit. The corrections are newer
+than the runtime pin and use only behavior the tagged release supports.
+
+All eleven pages fit next.14; none needs a newer runtime. This is a source
 compatibility audit, not a new execution of their examples. The pages retain
 the original authors' execution evidence and platform limits.
 
 ## Command and configuration audit
 
-Commands and flags were checked against `docs/reference/cli.md` at the next.13
+The initial editorial audit used next.13. Commands and flags were checked again
+against `docs/reference/cli.md` at the next.14
 tag. All thirteen project JSON blocks pass the tag's
 `renderProjectConfigSchemaJson` schema in `src/templates.ts`, including the
 partial lifecycle block when placed in a project. The schema allows unknown
 top-level keys, so reader checks below also matter.
 
-| Page | next.13 surface checked |
+| Page | next.14 surface checked |
 | --- | --- |
 | Recipes | `run`, `exec`, `host exec`, `doctor`; default Compose framing |
 | CLI sign-in | `up -d`, `logs --no-follow`, `env get --service`, `env add --service --secret --local --value-stdin`; `lifecycle.up.before`, `down.after`, hook `name` and `command` |
@@ -55,7 +64,7 @@ The recipe source revision above includes read-only dependency mounts for app
 consumers and writable mounts only for installers, including the config examples.
 Shared caches are limited to equally trusted worktrees; an installer can still
 modify a shared volume. The named-tunnel command uses `--service host`, supported
-at next.13, to keep the token out of application containers. Projects using this
+at next.14, to keep the token out of application containers. Projects using this
 pattern must have no Compose service named `host`, which would select that
 service scope instead.
 
@@ -65,7 +74,7 @@ secret-input command with a synthetic value, reads it through the host scope,
 and verifies it is absent from the web and global scopes. These checks do not
 start containers or a tunnel. The corrected mount variants were not rerun with
 Docker; the affected pages distinguish that correction from their original
-execution evidence. The runtime pin remains next.13.
+execution evidence. The runtime pin remains next.14.
 
 ## Publication
 
@@ -76,4 +85,4 @@ recipes and their index, environment and configuration entry points. Environment
 recipe links are appended during site preparation, keeping the hashed release
 snapshot and its provenance instead of a separate editorial copy.
 Snapshot hashes, public-link boundaries, retired
-surface checks and the next.13 installer pin remain enforced.
+surface checks and the next.14 installer pin remain enforced.

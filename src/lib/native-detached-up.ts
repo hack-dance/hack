@@ -10,6 +10,7 @@ import { isRecord } from "./guards.ts";
 
 export const NATIVE_DETACHED_OWNER_ARGUMENT =
   "--internal-native-detached-owner";
+const SHELL_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 type Ready = {
   readonly project: string;
@@ -19,6 +20,35 @@ type Ready = {
   readonly completed?: readonly string[];
 };
 let publishReady: ((ready: Ready) => void) | undefined;
+let publishShellVariables: ((names: readonly string[]) => void) | undefined;
+
+/** Names-only notice: never accepts or forwards an environment map or output text. */
+export function nativeDetachedUpShellVariables(
+  names: readonly string[]
+): boolean {
+  if (!publishShellVariables) {
+    return false;
+  }
+  publishShellVariables(names);
+  return true;
+}
+
+export function nativeShellForwardingNotice(names: readonly string[]): string {
+  return `Forwarding shell variables: ${names.length ? [...new Set(names)].sort().join(", ") : "(none)"}.`;
+}
+
+/** Bound and validate IPC metadata before it reaches a terminal, including on failure. */
+function isShellVariables(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 8192 &&
+    value.every(
+      (name: unknown) =>
+        typeof name === "string" && SHELL_VARIABLE_NAME.test(name)
+    ) &&
+    Buffer.byteLength(JSON.stringify(value)) <= 256 * 1024
+  );
+}
 
 /** Called only after durable readiness and up.after; contains no private values. */
 export function nativeDetachedUpReady(ready: Ready): void {
@@ -53,7 +83,10 @@ export async function runNativeDetachedOwner(opts: {
     }
   };
   const send = (
-    value: string | { readonly kind: "ready"; readonly data: Ready }
+    value:
+      | string
+      | { readonly kind: "ready"; readonly data: Ready }
+      | { readonly kind: "shell-variables"; readonly names: readonly string[] }
   ) => {
     if (!(process.send && process.connected)) {
       disconnected();
@@ -89,11 +122,17 @@ export async function runNativeDetachedOwner(opts: {
     ready = true;
     send({ kind: "ready", data });
   };
+  publishShellVariables = (names) => {
+    if (!stopping) {
+      send({ kind: "shell-variables", names });
+    }
+  };
   try {
     return await opts.run(opts.args);
   } finally {
     stopping = true;
     publishReady = undefined;
+    publishShellVariables = undefined;
     process.off("disconnect", disconnected);
     process.off("message", message);
     if (process.connected) {
@@ -153,6 +192,7 @@ export async function startNativeDetachedUp(opts: {
   const result = Promise.withResolvers<Ready>();
   let failed = false;
   let cancellationCode: number | undefined;
+  let shellVariablesReported = false;
   const fail = () => {
     if (committed || failed) {
       return;
@@ -191,6 +231,17 @@ export async function startNativeDetachedUp(opts: {
   });
   child.on("message", (value: unknown) => {
     if (failed) {
+      return;
+    }
+    if (isRecord(value) && value.kind === "shell-variables") {
+      if (
+        !shellVariablesReported &&
+        Object.keys(value).length === 2 &&
+        isShellVariables(value.names)
+      ) {
+        shellVariablesReported = true;
+        process.stderr.write(`${nativeShellForwardingNotice(value.names)}\n`);
+      }
       return;
     }
     if (

@@ -1580,11 +1580,12 @@ test("AWS delivery warns value-free before expiry and clears its timers on exit"
   expect(
     await startNativeProject({ ...opts, aws: { profile: "qa-test" } })
   ).toBe(0);
-  expect(lines).toHaveLength(1);
+  expect(lines).toHaveLength(2);
   expect(lines[0]).toMatch(
     /^AWS credentials delivered to 2 services expire at \d\d:\d\d; run hack restart to renew\.$/
   );
   expect(lines[0]).not.toContain("qa-test");
+  expect(lines[1]).toBe("Forwarding shell variables: (none).");
 });
 
 test("reviewed dependency caches bind published source and successful completion readiness", async () => {
@@ -5819,4 +5820,74 @@ test("invalid startup arguments refuse before creating advisory storage", async 
     startNativeProject({ ...opts, allowedHosts: ["bad host"] })
   ).rejects.toThrow();
   expect(await readdir(opts.scope.projectDir)).toEqual([]);
+});
+
+test("shell values reach private stdin but never startup observations, saved receipts or native-home files", async () => {
+  const { opts } = await fixture();
+  const privateValue = "synthetic-secret-shell-delivery-canary";
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    shellEnvironment: { web: { API_KEY: privateValue } },
+    forwardedShellVariables: {
+      web: ["FIXTURE_API_KEY", "FIXTURE_API_KEY"],
+      inactive: ["INACTIVE_SOURCE"],
+    },
+  });
+  const notices: string[] = [];
+  opts.dependencies.warn = (line) => notices.push(line);
+  const save = opts.dependencies.save!;
+  opts.dependencies.save = async (request) => {
+    expect(JSON.stringify(request)).not.toContain(privateValue);
+    return await save(request);
+  };
+  const review = opts.dependencies.review!;
+  opts.dependencies.review = async (request) => {
+    expect(request.input.normalizedComposeJson).not.toContain(privateValue);
+    return await review(request);
+  };
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    expect(JSON.stringify(request)).not.toContain(privateValue);
+    return await invoke(request);
+  };
+  let received = false;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    expect(request.args.join(" ")).not.toContain(privateValue);
+    expect(
+      JSON.parse(new TextDecoder().decode(request.privateInput))
+    ).toMatchObject({ services: { web: { API_KEY: privateValue } } });
+    received = true;
+    return await serve(request);
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      onEnvironmentReady: async (request) => {
+        expect(JSON.stringify(request)).not.toContain(privateValue);
+      },
+      onProgress: (event) => {
+        expect(JSON.stringify(event)).not.toContain(privateValue);
+      },
+    })
+  ).toBe(0);
+  expect(received).toBe(true);
+  expect(notices).toContain("Forwarding shell variables: FIXTURE_API_KEY.");
+  expect(
+    notices.filter((line) => line.startsWith("Forwarding shell variables:"))
+  ).toHaveLength(1);
+  expect(notices.join("\n")).not.toContain(privateValue);
+  expect(notices.join("\n")).not.toContain("INACTIVE_SOURCE");
+  const pending = [opts.scope.nativeHome];
+  for (const directory of pending) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(path);
+      } else if (entry.isFile()) {
+        expect(await readFile(path, "utf8")).not.toContain(privateValue);
+      }
+    }
+  }
 });

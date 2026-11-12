@@ -866,7 +866,8 @@ esac
     const { root, run, done } = fixture();
     const work = join(root, "prepared-bases", ".work", "fixture");
     mkdirSync(work, { recursive: true, mode: 0o700 });
-    const binary = join(work, "smolvm");
+    // Multicall coreutils dispatches by basename; the scanner owns the .work path.
+    const binary = join(work, "sleep");
     copyFileSync("/bin/sleep", binary);
     chmodSync(binary, 0o700);
     const verifier = Bun.spawn([binary, "20"]);

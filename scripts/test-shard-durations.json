@@ -1,6 +1,6 @@
 {
   "schema": "hack.test-shard-durations.v1",
-  "source": "Sum of per-test times from the serial hosted test job (blacksmith-6vcpu-macos-15, Bun 1.4.2), CI run 39873410893 job 120153061379 on next 4e0bfa55; excludes per-file load and hook time; HACK-1811 adoption-generation family overrides: isolated Bun 1.4.4 test-process elapsed seconds on Linux x86_64, 2026-11-03 (790e1871 plus seven-file split; excludes launcher queue waits); recovery-file override after merging c0191243/HACK-1359: 36.80s isolated Bun elapsed (new case 5.35s), same Linux/Bun setup; GitHub macos-15/Bun 1.4.4 refresh: PASS file wall times (rounded log seconds) from CI run 41757517037, head a4a5a380, 2026-11-04; failed, interrupted and unmeasured files retain their earlier estimates",
+  "source": "Sum of per-test times from the serial hosted test job (blacksmith-6vcpu-macos-15, Bun 1.4.2), CI run 39873410893 job 120153061379 on next 4e0bfa55; excludes per-file load and hook time; HACK-1811 adoption-generation family overrides: isolated Bun 1.4.4 test-process elapsed seconds on Linux x86_64, 2026-11-03 (790e1871 plus seven-file split; excludes launcher queue waits); recovery-file override after merging c0191243/HACK-1359: 36.80s isolated Bun elapsed (new case 5.35s), same Linux/Bun setup; GitHub macos-15/Bun 1.4.4 refresh: PASS file wall times (rounded log seconds) from CI run 41757517037, head a4a5a380, 2026-11-04; failed, interrupted and unmeasured files retain their earlier estimates; authored-start split estimates: sums of unchanged case times from CI run 43135239769, job 130908976911, 2026-11-12; per-file startup overhead not measured",
   "seconds": {
     "packages/db/tests/smoke.test.ts": 0.1,
     "tests/aes-gcm-v1-context-binding.test.ts": 1.3,
@@ -224,7 +224,9 @@
     "tests/native-authored-project-recovery.test.ts": 12.7,
     "tests/native-authored-project-restart.test.ts": 0.5,
     "tests/native-authored-project-run.test.ts": 7.7,
-    "tests/native-authored-project-start.test.ts": 670,
+    "tests/native-authored-project-start-lifecycle.test.ts": 182,
+    "tests/native-authored-project-start-recovery.test.ts": 182,
+    "tests/native-authored-project-start.test.ts": 182,
     "tests/native-authored-recovery-protocol.test.ts": 0.1,
     "tests/native-authored-runtime-metadata.test.ts": 0.9,
     "tests/native-authored-storage-tool.test.ts": 1.7,

@@ -12,42 +12,34 @@ machine-local generated files that Hack keeps ignored.
 
 ## System overview
 
+The Compose view separates executable responsibilities: the CLI controls the engine,
+while DNS resolves proxy addresses, Caddy proxies requests and the optional daemon
+reads runtime state for cached queries.
+
 ```mermaid
 ---
-title: Hack on one developer machine
+title: Compose container responsibilities
 ---
-flowchart LR
-  Agent["Coding agent"] -->|"same CLI, --json"| CLI["hack CLI"]
-
-  subgraph Project["Project (.hack/ in the repo)"]
-    direction TB
-    Config["Compose file,<br/>config, env YAML"]
-    Services["Service containers"]
-    Helpers["Host helpers<br/>(tunnels, hooks)"]
-    Config -->|"Compose backend"| Services
-    Config -->|"lifecycle"| Helpers
-  end
-
-  subgraph Global["Global infrastructure (~/.hack)"]
-    direction TB
-    Caddy["Caddy proxy<br/>TLS + routing"]
-    CoreDNS["CoreDNS"]
-    Logs["Alloy → Loki → Grafana"]
-    Hackd["hackd (optional)"]
-  end
-
-  CLI -->|"hack up"| Config
-  CLI -->|"hack global install"| Global
-  Services -->|"labels"| Caddy
-  Services -->|"stdout/stderr"| Logs
-  CoreDNS -.->|"*.hack.local → Caddy"| Services
-  Hackd -.->|"docker events"| Services
-  Caddy -->|"https://myapp.hack.local"| Browser["Browser"]
-  Logs -->|"https://logs.hack.local"| Browser
-
-  classDef idle stroke-width:1.6px
-  class Hackd idle
+C4Container
+  Container_Boundary(local, "Local machine") {
+    Container(cli, "Hack CLI", "Bun", "Project commands")
+    Container(engine, "Compose engine", "Docker", "Container runtime")
+    Container(services, "Project services", "Containers", "Application workloads")
+    Container(proxy, "Caddy proxy", "Caddy", "TLS and routing")
+    Container(dns, "Container DNS", "CoreDNS", "Local hostnames")
+    Container(daemon, "Optional daemon", "hackd", "Runtime cache")
+  }
+  Rel(cli, engine, "Starts services")
+  Rel(engine, services, "Runs")
+  Rel(proxy, services, "Proxies HTTP")
+  Rel(dns, proxy, "Resolves names to")
+  Rel(daemon, engine, "Inspects runtime")
+  UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
 ```
+
+C4 containers here mean executable units, not only Docker containers. The CLI and
+optional daemon run on the host; Caddy and CoreDNS belong to global setup. The
+native backend has its own explicitly prepared routing path, described below.
 
 - **Caddy** terminates TLS with a locally trusted CA and routes
   `https://<service>.<project>.hack.local` to containers by their Docker labels.
@@ -114,7 +106,7 @@ in these docs does not imply native support.
 - Global scope (`~/.hack`)
   - Caddy proxy on 80/443, routing by Docker labels
   - CoreDNS for container DNS (`*.hack.local` and legacy `*.hack` → Caddy)
-  - macOS DNS helper: dnsmasq plus `/etc/resolver` entries pointing at Caddy
+  - macOS DNS helper: dnsmasq plus `/etc/resolver` entries selecting the local resolver
   - Logging stack (Alloy → Loki → Grafana)
   - Global config `hack.config.json` and the project registry `projects.json`
   - Networks `hack-dev` (ingress) and `hack-logging`
@@ -136,39 +128,9 @@ declared in `.hack/hack.config.json` run around the services, inside a dedicated
 tmux or zellij session that Hack owns and can tear down. The exact ordering is in
 [Lifecycle](lifecycle.md).
 
-```mermaid
----
-title: hack up and hack down
----
-stateDiagram-v2
-  direction TB
-  [*] --> ResolveEnv : hack up
-  ResolveEnv --> UpBefore : env contract ok
-  UpBefore --> Processes : hooks done
-  Processes --> ComposeUp : session owned
-  ComposeUp --> UpAfter : services started
-  UpAfter --> Running
-  state failure <<choice>>
-  UpBefore --> failure : hook failed
-  ComposeUp --> failure : compose failed
-  UpAfter --> failure : hook failed
-  failure --> Failed : own session removed
-  Running --> DownBefore : hack down
-  DownBefore --> ComposeDown : hooks done
-  DownBefore --> Running : hook failed, abort
-  ComposeDown --> StopProcesses : services stopped
-  StopProcesses --> DownAfter : session killed
-  DownAfter --> [*]
-  note right of Processes
-    Adopts a session only when its
-    ownership token, definition hash
-    and live windows all match.
-  end note
-  classDef live stroke-width:1.6px
-  classDef fail stroke-width:1.6px
-  class Running live
-  class Failed fail
-```
+The [lifecycle outcome and phase diagrams](lifecycle.md#runtime-behavior) distinguish
+failed startup, owned helper cleanup and an unconfirmed stop. They describe
+whole-project Compose operations; native limits and service-scoped commands differ.
 
 Lifecycle state is checkout-local at `.hack/.internal/lifecycle/state.json`, one
 entry per instance. A random token mirrored in the mux session and in that state
@@ -188,32 +150,9 @@ Compose, host commands and lifecycle processes. Nothing decrypted rests on disk:
 the generated Compose override holds only `${HACK_ENV_...}` references and the
 values travel through the `docker compose` process environment.
 
-```mermaid
----
-title: Env resolution order
----
-flowchart LR
-  subgraph Committed["Committed with the repo"]
-    direction TB
-    D["hack.env.default.yaml"] --> O["hack.env.&lt;overlay&gt;.yaml<br/>(--env)"]
-  end
-  subgraph Local["Machine-local overrides"]
-    direction TB
-    PL["primary checkout<br/>hack.env.local.yaml"] --> POL["primary checkout<br/>hack.env.&lt;overlay&gt;.local.yaml"]
-    POL --> L["this checkout<br/>hack.env.local.yaml"]
-    L --> OL["this checkout<br/>hack.env.&lt;overlay&gt;.local.yaml"]
-  end
-  subgraph Scope["Scope"]
-    direction TB
-    G["values.global"] --> S["values.&lt;service&gt;"]
-    S --> H["host values<br/>(host exec, hooks)"]
-  end
-  O --> PL
-  OL --> G
-  H --> R["Effective env"]
-  classDef idle stroke-width:1.6px
-  class PL,POL idle
-```
+The [environment resolution diagram](env.md#merge-rules) applies scopes inside each
+ordered file layer. A later file wins even when it supplies a global value over a
+service value from an earlier file; host scope is not delivered to containers.
 
 Later layers win. The primary-checkout layers apply only in a linked git worktree,
 which also inherits the primary checkout's secret key through the shared git
@@ -239,9 +178,12 @@ can then take the reserved address. `hack doctor` (`proxy network`) and
 takes the proxy stack down, moves any project container off the reserved
 addresses, and starts the stack again.
 
+A container resolves its peer through CoreDNS and receives the HTTPS response
+through Caddy, which forwards the request to the peer's service port.
+
 ```mermaid
 ---
-title: A request from one service to another
+title: Container HTTPS request
 ---
 sequenceDiagram
   autonumber
@@ -250,40 +192,54 @@ sequenceDiagram
   participant Caddy
   participant Api as api container
   Web->>DNS: resolve api.myapp.hack.local
-  DNS-->>Web: A record = Caddy IP
-  Web->>Caddy: HTTPS request (local CA trusted)
-  Caddy->>Api: route by container labels
-  Api-->>Web: response
+  DNS-->>Web: Proxy address
+  Web->>Caddy: HTTPS with verification
+  Caddy->>Api: Route by labels
+  Api-->>Caddy: Service response
+  Caddy-->>Web: HTTPS response
 ```
 
 ## Workflow: init, up, logs
 
+For detached Compose startup, the CLI owns sequencing while proxy discovery and the optional daemon
+observe the engine independently rather than coordinating the start.
+
 ```mermaid
 ---
-title: First run of a project
+title: Compose startup responsibilities
 ---
-sequenceDiagram
-  autonumber
-  participant User
-  participant CLI as hack
-  participant Docker
-  participant Caddy
-  participant Loki
-  User->>CLI: hack init
-  CLI-->>User: wrote .hack/ files
-  User->>CLI: hack up --detach
-  CLI->>CLI: resolve env, run up.before hooks
-  CLI->>Docker: docker compose up -d
-  Docker->>Caddy: labels → routes
-  Docker->>Loki: logs via Alloy
-  CLI-->>User: https://myapp.hack.local
-  User->>CLI: hack logs
-  alt compose backend
-    CLI->>Docker: docker compose logs
-  else loki backend
-    CLI->>Loki: LogQL query or tail
+swimlane-beta TB
+  subgraph CLI
+    Env[Resolve env]
+    Before[Before hooks]
+    Processes[Host processes]
+    Up[Start detached]
+    After[After hooks]
+    Verify[Check states]
+    Env --> Before --> Processes --> Up --> After --> Verify
   end
+  subgraph Engine
+    Services[Containers]
+  end
+  subgraph Proxy
+    Labels[Read labels]
+    Routes[Routes]
+    Labels --> Routes
+  end
+  subgraph Daemon
+    Events[Events]
+    Cache[Cache]
+    Events --> Cache
+  end
+  Up --> Services
+  Services -->|labels| Labels
+  Services -->|events| Events
 ```
+
+The daemon lane is optional. Observer arrows indicate metadata and event inputs,
+not a readiness acknowledgement: successful startup does not prove that a browser
+can reach a route. After hooks run before service-state verification; an after-hook
+failure ends startup there (see [Lifecycle](lifecycle.md#hack-up)).
 
 ## Branch instances
 

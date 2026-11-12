@@ -27,6 +27,7 @@ import {
   isPidInSystemdUnit,
   isSystemdReadOnly,
   LINGER_ENABLE_COMMAND,
+  MANAGER_STOPPABLE_STATES,
   probeSystemdUserManager,
   readLingerStatus,
   readSystemdServiceStatus,
@@ -425,14 +426,6 @@ async function checkUnitProgramTrusted(opts: {
     ? null
     : await checkServiceExecutableTrusted({ path: program });
 }
-
-/** systemd states in which the unit runs or will run hackd (a pending restart). */
-const MANAGER_STOPPABLE_STATES = new Set([
-  "active",
-  "activating",
-  "reloading",
-  "deactivating",
-]);
 
 /**
  * `hack daemon stop` when hackd.service is installed: stop through systemctl

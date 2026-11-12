@@ -603,7 +603,7 @@ linuxTest(
 );
 
 linuxTest(
-  "uninstall without a unit calls nothing; without a bus it still removes the file",
+  "uninstall without a unit changes nothing; without a bus it still removes the file",
   async () => {
     const fake = fakeSystemd();
     expect(
@@ -612,7 +612,12 @@ linuxTest(
       ok: true,
       notInstalled: true,
     });
-    expect(fake.calls).toEqual([]);
+    // It only asks the manager whether something still runs (read-only).
+    expect(
+      fake.calls.filter((call) =>
+        / (stop|disable|enable|start|restart|daemon-reload)( |$)/.test(call)
+      )
+    ).toEqual([]);
 
     await installSystemdUnit({
       unitPath,
@@ -3621,3 +3626,35 @@ linuxTest("a unit that runs in another file namespace is refused", async () => {
     "BindReadOnlyPaths"
   );
 });
+
+linuxTest(
+  "uninstall asks systemd even when the managed unit file is gone",
+  async () => {
+    // Codex review: with the unit file removed while systemd still ran it
+    // (or waited to restart it), uninstall reported success without asking.
+    const fake = fakeSystemd();
+    const uninstall = () =>
+      uninstallSystemdUnit({
+        unitPath,
+        deps: fake.deps,
+        hackHome: join(root, ".hack"),
+      });
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+    fake.activeState = "activating";
+    fake.calls.length = 0;
+    const pending = await uninstall();
+    expect(pending.ok).toBe(false);
+    if (!pending.ok) {
+      expect(pending.error).toContain("systemctl --user disable --now");
+      expect(pending.error).toContain(unitPath);
+    }
+    expect(fake.calls.some((call) => call.includes(" disable"))).toBe(false);
+    // Another home's unit: left to that home.
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1 HACK_HOME=/srv/other-home";
+    expect(await uninstall()).toMatchObject({ ok: true, notInstalled: true });
+    // Not running and no file: nothing to do, as before.
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+    fake.activeState = "inactive";
+    expect(await uninstall()).toMatchObject({ ok: true, notInstalled: true });
+  }
+);

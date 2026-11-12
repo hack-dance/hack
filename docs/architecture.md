@@ -359,7 +359,8 @@ cancels a restart systemd has scheduled after a crash. When systemd runs or is
 about to restart `hackd.service` but the managed unit file is gone (or the unit
 is loaded from another directory), `stop` refuses and prints the
 `systemctl --user` commands to review and stop it, instead of reporting hackd as
-stopped. `start` and `stop` act on the unit only when its effective environment
+stopped. `uninstall` does the same in that case instead of reporting
+that nothing was installed. `start` and `stop` act on the unit only when its effective environment
 serves the shell's Hack home. A unit that serves another Hack home is left alone:
 `start` starts this home's hackd directly (its socket, pid file and lock live in
 this home's `daemon/` directory), and `stop` stops only this home's own hackd.

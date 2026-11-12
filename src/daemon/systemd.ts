@@ -2476,6 +2476,14 @@ export async function systemdServiceAction(opts: {
   };
 }
 
+/** systemd states in which the unit runs or will run hackd (a pending restart). */
+export const MANAGER_STOPPABLE_STATES: ReadonlySet<string> = new Set([
+  "active",
+  "activating",
+  "reloading",
+  "deactivating",
+]);
+
 export type SystemdUninstallResult =
   | {
       readonly ok: true;
@@ -2509,12 +2517,19 @@ export async function uninstallSystemdUnit(opts: {
     return { ok: false, error: access.message };
   }
   if (!(await pathExists(opts.unitPath))) {
-    return {
-      ok: true,
-      notInstalled: true,
-      managerNotified: false,
-      reloadError: null,
-    };
+    const loaded = await refuseLoadedUnitWithoutFile({
+      unitPath: opts.unitPath,
+      deps: opts.deps,
+      hackHome: opts.hackHome,
+    });
+    return loaded === null
+      ? {
+          ok: true,
+          notInstalled: true,
+          managerNotified: false,
+          reloadError: null,
+        }
+      : { ok: false, error: loaded };
   }
   const availability = await probeSystemdUserManager(opts.deps);
   if (availability.available && opts.hackHome !== undefined) {
@@ -2563,6 +2578,39 @@ export async function uninstallSystemdUnit(opts: {
     managerNotified: availability.available,
     reloadError,
   };
+}
+
+/**
+ * No unit file at the managed path does not prove nothing runs (HACK-2052):
+ * the file may have been removed, or the unit loaded from another
+ * directory, while systemd still runs it or waits to restart it. Such a
+ * unit cannot be checked without its file, so uninstall refuses with the
+ * commands to use by hand, unless it clearly serves another Hack home
+ * (left to that home). Null when there is nothing to do here.
+ */
+async function refuseLoadedUnitWithoutFile(opts: {
+  readonly unitPath: string;
+  readonly deps: SystemdDeps;
+  readonly hackHome: string | undefined;
+}): Promise<string | null> {
+  const status = await readSystemdServiceStatus({
+    unitPath: opts.unitPath,
+    deps: opts.deps,
+  });
+  if (
+    !status?.availability.available ||
+    status.activeState === null ||
+    !MANAGER_STOPPABLE_STATES.has(status.activeState)
+  ) {
+    return null;
+  }
+  if (opts.hackHome !== undefined) {
+    const home = await readSystemdUnitHackHome({ deps: opts.deps });
+    if (home.kind === "home" && home.path !== resolve(opts.hackHome)) {
+      return null;
+    }
+  }
+  return `Not uninstalling ${SYSTEMD_UNIT_NAME}: systemd has it ${status.activeState}, but not from ${opts.unitPath}, the unit Hack manages (it was removed or is loaded from another directory), so it cannot be checked. Review it with systemctl --user status ${SYSTEMD_UNIT_NAME}; to remove it by hand, run: systemctl --user disable --now ${SYSTEMD_UNIT_NAME}`;
 }
 
 /**

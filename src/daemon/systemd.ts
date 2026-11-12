@@ -1876,9 +1876,12 @@ export async function checkSystemdServicePrograms(opts: {
   if ("error" in read) {
     return read.error;
   }
+  // The whole argument vector, not just its tail: `/bin/bash script daemon
+  // start --foreground` ends the same way and runs the script.
   const extra = read.entries.find(
     (entry) =>
-      entry.key !== "ExecStart" || !entry.argv.endsWith(DAEMON_ARGV_SUFFIX)
+      entry.key !== "ExecStart" ||
+      entry.argv !== `${entry.path}${DAEMON_ARGV_SUFFIX}`
   );
   if (extra) {
     return `hackd.service has ${extra.key}=${extra.argv}, which Hack does not run or vouch for; remove it from the unit or its drop-ins`;

@@ -2915,3 +2915,28 @@ linuxTest(
     expect(await Bun.file(unitPath).exists()).toBe(true);
   }
 );
+
+linuxTest(
+  "an ExecStart with arguments before `daemon start --foreground` is refused",
+  async () => {
+    // Codex review: `/bin/bash /shared/script daemon start --foreground`
+    // ended with the expected words, and bash runs the script.
+    const fake = fakeSystemd();
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    expect(await checkSystemdServicePrograms({ deps: fake.deps })).toBeNull();
+    await writeFile(
+      unitPath,
+      unitText().replace(
+        /^ExecStart=.*$/m,
+        () => "ExecStart=/bin/bash /srv/shared/script daemon start --foreground"
+      )
+    );
+    expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+      "does not run or vouch for"
+    );
+  }
+);

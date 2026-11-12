@@ -1,5 +1,15 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -127,5 +137,36 @@ test("a Hack home under a linked path is still repaired (HACK-2142)", async () =
   await chmod(daemonRoot, 0o775);
   await secureDaemonDirectory({ root: daemonRoot });
   expect((await stat(hackHome)).mode & 0o777).toBe(0o755);
+  expect((await stat(daemonRoot)).mode & 0o777).toBe(0o700);
+});
+
+test("planted entries in a repaired daemon directory are refused (HACK-2142)", async () => {
+  // Codex security review: a daemon directory others could write may hold
+  // a planted `hackd.log` link; the log writer would append to (or
+  // truncate) its target. After the repair, such entries are refused.
+  const hackHome = join(root, "home", ".hack");
+  const daemonRoot = join(hackHome, "daemon");
+  await mkdir(daemonRoot, { recursive: true });
+  await chmod(join(root, "home"), 0o755);
+  await chmod(hackHome, 0o755);
+  const victim = join(root, "victim.txt");
+  await writeFile(victim, "keep\n");
+  await chmod(daemonRoot, 0o777);
+  await symlink(victim, join(daemonRoot, "hackd.log"));
+  await expect(secureDaemonDirectory({ root: daemonRoot })).rejects.toThrow(
+    "a symbolic link"
+  );
+  await rm(join(daemonRoot, "hackd.log"));
+  // A hard link to a file elsewhere is the same plant without a link.
+  await link(victim, join(daemonRoot, "hackd.log"));
+  await expect(secureDaemonDirectory({ root: daemonRoot })).rejects.toThrow(
+    "other hard links"
+  );
+  expect(await readFile(victim, "utf8")).toBe("keep\n");
+  // Hack's own plain files are fine.
+  await rm(join(daemonRoot, "hackd.log"));
+  await writeFile(join(daemonRoot, "hackd.log"), "");
+  await writeFile(join(daemonRoot, "hackd.pid"), "1\n");
+  await secureDaemonDirectory({ root: daemonRoot });
   expect((await stat(daemonRoot)).mode & 0o777).toBe(0o700);
 });

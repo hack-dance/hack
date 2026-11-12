@@ -1,6 +1,6 @@
 import { constants, lstatSync } from "node:fs";
-import { chmod, type FileHandle, open } from "node:fs/promises";
-import { dirname } from "node:path";
+import { chmod, type FileHandle, lstat, open, readdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import { checkReplaceableChain } from "../lib/path-trust.ts";
 
@@ -81,6 +81,47 @@ export async function secureDaemonDirectory(opts: {
   } finally {
     await handle.close();
   }
+  // Now that nobody else can add entries, what is already there must be
+  // this user's own: a directory that was writable by others (and repaired
+  // above) may hold a planted `hackd.log` link to another file, which the
+  // log writer would append to or truncate (HACK-2142).
+  const planted = await findPlantedEntry({ root: opts.root, uid });
+  if (planted !== null) {
+    throw new Error(
+      `hackd state directory ${opts.root} holds ${planted}, which hackd did not create; review and remove it, then start hackd again`
+    );
+  }
+}
+
+/**
+ * An entry in the daemon directory hackd would not have created: another
+ * account's, a symlink, or a regular file with other hard links (a link to
+ * a file elsewhere). Null when every entry is plainly this user's.
+ */
+async function findPlantedEntry(opts: {
+  readonly root: string;
+  readonly uid: number;
+}): Promise<string | null> {
+  for (const name of await readdir(opts.root)) {
+    const path = join(opts.root, name);
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(path);
+    } catch {
+      // Removed meanwhile: nothing to open.
+      continue;
+    }
+    if (opts.uid >= 0 && info.uid !== opts.uid) {
+      return `${path}, owned by another user (uid ${info.uid})`;
+    }
+    if (info.isSymbolicLink()) {
+      return `${path}, a symbolic link`;
+    }
+    if (info.isFile() && info.nlink > 1) {
+      return `${path}, a file with other hard links`;
+    }
+  }
+  return null;
 }
 
 /**

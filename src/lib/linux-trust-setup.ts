@@ -12,6 +12,7 @@ import {
   findOtherCaddyRoots,
   hasTlsIssuerTrust,
   type LinuxDistroFamily,
+  type LinuxTrustToolPaths,
   linuxSystemBundlePath,
   linuxSystemTrustCommands,
   linuxSystemTrustInstallArgv,
@@ -25,6 +26,7 @@ import {
   parseNssTrustFlags,
   pemCertificateBodies,
   renderUnknownDistroTrustSteps,
+  requiredLinuxTrustTools,
   type ValidatedCa,
 } from "./linux-trust.ts";
 
@@ -117,13 +119,20 @@ export type LinuxSystemTrustOutcome =
       readonly bundlePath: string;
     };
 
-/** Every tool a family's root commands need. */
-const REQUIRED_TOOLS: Readonly<Record<LinuxDistroFamily, readonly string[]>> = {
-  debian: ["update-ca-certificates"],
-  fedora: ["update-ca-trust"],
-  suse: ["update-ca-certificates"],
-  arch: ["trust", "update-ca-trust"],
-};
+async function resolveTrustToolPaths(
+  host: LinuxTrustHost
+): Promise<LinuxTrustToolPaths> {
+  const [trust, caTrust, certificates] = await Promise.all([
+    host.resolveCommand("trust"),
+    host.resolveCommand("update-ca-trust"),
+    host.resolveCommand("update-ca-certificates"),
+  ]);
+  return {
+    trust,
+    "update-ca-trust": caTrust,
+    "update-ca-certificates": certificates,
+  };
+}
 
 const TOOL_PACKAGE: Readonly<Record<LinuxDistroFamily, string>> = {
   debian: "ca-certificates",
@@ -146,10 +155,8 @@ export async function applyLinuxSystemTrust(opts: {
   readonly host: LinuxTrustHost;
   readonly ca: ValidatedCa;
   /**
-   * Persistent CA path for commands the user runs later (pending or manual
-   * outcomes). The private staged copy is deleted when the command returns;
-   * the digest in each command still binds them to the approved bytes, so a
-   * changed file there is refused by root.
+   * Persistent CA path for pending/manual commands. The user's shell opens
+   * it before sudo; root accepts only bytes matching the approved digest.
    */
   readonly manualCertPath: string;
   readonly canPrompt: boolean;
@@ -164,6 +171,7 @@ export async function applyLinuxSystemTrust(opts: {
     await host.readFile("/etc/os-release")
   );
   const sudoPath = await host.resolveSudo();
+  const tools = await resolveTrustToolPaths(host);
   const sudoUnavailable = {
     status: "manual",
     code: "linux_trust_tool_missing",
@@ -185,6 +193,7 @@ export async function applyLinuxSystemTrust(opts: {
         sha256: ca.pemSha256,
         byteLength: Buffer.byteLength(ca.pem),
         sudoPath,
+        tools,
       }),
     };
   }
@@ -209,14 +218,14 @@ export async function applyLinuxSystemTrust(opts: {
   if (sudoPath === null) {
     return sudoUnavailable;
   }
-  for (const tool of REQUIRED_TOOLS[family]) {
-    if ((await host.resolveCommand(tool)) === null) {
+  for (const tool of requiredLinuxTrustTools(family)) {
+    if (tools[tool] === null) {
       return {
         status: "manual",
         code: "linux_trust_tool_missing",
         family,
         steps: [
-          `${tool} is not installed. Install the ${toolPackage(family, tool)} package, then rerun hack global trust.`,
+          `${tool} is unavailable as a trusted system executable. Install or repair the ${toolPackage(family, tool)} package and system bin/sbin permissions, then rerun hack global trust.`,
         ],
       };
     }
@@ -227,6 +236,7 @@ export async function applyLinuxSystemTrust(opts: {
     sha256: ca.pemSha256,
     byteLength: Buffer.byteLength(ca.pem),
     sudoPath,
+    tools,
   });
   const pending = {
     status: "pending",
@@ -238,6 +248,7 @@ export async function applyLinuxSystemTrust(opts: {
       sha256: ca.pemSha256,
       byteLength: Buffer.byteLength(ca.pem),
       sudoPath,
+      tools,
     }),
   } as const;
   // No root command runs without an interactive yes, and none at all when
@@ -254,8 +265,9 @@ export async function applyLinuxSystemTrust(opts: {
       family,
       sha256: ca.pemSha256,
       byteLength: Buffer.byteLength(ca.pem),
+      tools,
     }),
-    linuxSystemTrustRefreshArgv(family),
+    linuxSystemTrustRefreshArgv({ family, tools }),
   ];
   for (const [index, command] of rootCommands.entries()) {
     const exitCode = await host.runPrivileged(

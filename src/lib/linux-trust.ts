@@ -16,6 +16,33 @@ import { STDIN_INSTALL_SCRIPT } from "./privileged-install.ts";
 import { VETTED_HELPER_PATH, vettedRootCommand } from "./vetted-env.ts";
 
 export type LinuxDistroFamily = "debian" | "arch" | "fedora" | "suse";
+export type LinuxTrustTool =
+  | "trust"
+  | "update-ca-trust"
+  | "update-ca-certificates";
+export type LinuxTrustToolPaths = Readonly<
+  Record<LinuxTrustTool, string | null>
+>;
+
+export function requiredLinuxTrustTools(
+  family: LinuxDistroFamily
+): readonly LinuxTrustTool[] {
+  if (family === "arch") {
+    return ["trust", "update-ca-trust"];
+  }
+  return family === "fedora" ? ["update-ca-trust"] : ["update-ca-certificates"];
+}
+
+function trustToolPath(
+  tools: LinuxTrustToolPaths,
+  name: LinuxTrustTool
+): string {
+  const path = tools[name];
+  if (path === null || !path.startsWith("/")) {
+    throw new Error(`No vetted absolute ${name} path`);
+  }
+  return path;
+}
 
 /** Nickname for the NSS entry; stable so a rerun replaces, not duplicates. */
 export const NSS_CA_NICKNAME = "Hack Caddy Local CA";
@@ -116,13 +143,14 @@ export function linuxSystemBundlePath(family: LinuxDistroFamily): string {
 /** Fixed root-owned staging path for p11-kit's anchor reader. */
 export const ARCH_CA_STAGING_PATH = "/var/lib/hack/trust/caddy-local-ca.crt";
 export const VERIFIED_ANCHOR_INSTALL_SCRIPT = STDIN_INSTALL_SCRIPT;
-export const VERIFIED_TRUST_ANCHOR_SCRIPT = `${STDIN_INSTALL_SCRIPT}; trust anchor --store "$dest"`;
+export const VERIFIED_TRUST_ANCHOR_SCRIPT = `${STDIN_INSTALL_SCRIPT}; "$5" anchor --store "$dest"`;
 
 /** Root consumes only the exact validated bytes on stdin, under a size/time limit. */
 export function linuxSystemTrustInstallArgv(opts: {
   readonly family: LinuxDistroFamily;
   readonly sha256: string;
   readonly byteLength: number;
+  readonly tools: LinuxTrustToolPaths;
 }): readonly string[] {
   return [
     "/bin/sh",
@@ -135,15 +163,17 @@ export function linuxSystemTrustInstallArgv(opts: {
     opts.sha256,
     linuxAnchorPath(opts.family) ?? ARCH_CA_STAGING_PATH,
     "0644",
+    ...(opts.family === "arch" ? [trustToolPath(opts.tools, "trust")] : []),
   ];
 }
 
-export function linuxSystemTrustRefreshArgv(
-  family: LinuxDistroFamily
-): readonly string[] {
-  return family === "arch" || family === "fedora"
-    ? ["update-ca-trust", "extract"]
-    : ["update-ca-certificates"];
+export function linuxSystemTrustRefreshArgv(opts: {
+  readonly family: LinuxDistroFamily;
+  readonly tools: LinuxTrustToolPaths;
+}): readonly string[] {
+  return opts.family === "arch" || opts.family === "fedora"
+    ? [trustToolPath(opts.tools, "update-ca-trust"), "extract"]
+    : [trustToolPath(opts.tools, "update-ca-certificates")];
 }
 
 /** Manual commands redirect the user file before sudo; root never opens it. */
@@ -153,6 +183,7 @@ export function linuxSystemTrustCommands(opts: {
   readonly sha256: string;
   readonly byteLength: number;
   readonly sudoPath: string;
+  readonly tools: LinuxTrustToolPaths;
 }): readonly (readonly string[])[] {
   const clean = [
     "/usr/bin/env",
@@ -172,10 +203,7 @@ export function linuxSystemTrustCommands(opts: {
       ...privileged,
       ...vettedRootCommand(linuxSystemTrustInstallArgv(opts)),
     ],
-    [
-      ...privileged,
-      ...vettedRootCommand(linuxSystemTrustRefreshArgv(opts.family)),
-    ],
+    [...privileged, ...vettedRootCommand(linuxSystemTrustRefreshArgv(opts))],
   ];
 }
 
@@ -347,6 +375,7 @@ export function renderUnknownDistroTrustSteps(opts: {
   readonly sha256: string;
   readonly byteLength: number;
   readonly sudoPath: string;
+  readonly tools: LinuxTrustToolPaths;
 }): readonly string[] {
   const steps: string[] = [
     "Unknown distribution (no matching ID or ID_LIKE in /etc/os-release). Run the commands for your distribution family:",
@@ -359,12 +388,22 @@ export function renderUnknownDistroTrustSteps(opts: {
   ];
   for (const [label, family] of families) {
     steps.push(`  ${label}:`);
+    const missing = requiredLinuxTrustTools(family).filter(
+      (name) => opts.tools[name] === null
+    );
+    if (missing.length > 0) {
+      steps.push(
+        `    Missing trusted system tools: ${missing.join(", ")}; no root commands printed for this family.`
+      );
+      continue;
+    }
     for (const command of linuxSystemTrustCommands({
       family,
       certPath: opts.certPath,
       sha256: opts.sha256,
       byteLength: opts.byteLength,
       sudoPath: opts.sudoPath,
+      tools: opts.tools,
     })) {
       steps.push(`    ${renderLinuxManualTrustCommand(command)}`);
     }

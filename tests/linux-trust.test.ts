@@ -40,6 +40,11 @@ import {
 
 const UID = 1000;
 const HOME = "/fake-home";
+const TRUST_TOOLS = {
+  trust: "/usr/bin/trust",
+  "update-ca-trust": "/usr/bin/update-ca-trust",
+  "update-ca-certificates": "/usr/bin/update-ca-certificates",
+} as const;
 const STAGED = "/fake-private/caddy-local-ca.crt";
 const EXPORT = `${HOME}/.hack/caddy/pki/caddy-local-authority.crt`;
 const CERTUTIL = "/usr/bin/certutil";
@@ -235,10 +240,11 @@ function createFakeHost(init: {
     return nssOp(op, argv, db, input);
   };
   const plainRoot = (argv: readonly string[]) => {
-    if (argv[0] === "update-ca-certificates") {
+    const command = argv[0]?.split("/").at(-1);
+    if (command === "update-ca-certificates") {
       refresh("/etc/ssl/certs/ca-certificates.crt");
       refresh("/var/lib/ca-certificates/ca-bundle.pem");
-    } else if (argv[0] === "update-ca-trust") {
+    } else if (command === "update-ca-trust") {
       refresh("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem");
       refresh("/etc/ssl/certs/ca-certificates.crt");
     }
@@ -379,17 +385,17 @@ describe("system trust commands", () => {
     [
       "debian",
       "/usr/local/share/ca-certificates/hack-caddy-local-ca.crt",
-      ["update-ca-certificates"],
+      ["/usr/bin/update-ca-certificates"],
     ],
     [
       "fedora",
       "/etc/pki/ca-trust/source/anchors/hack-caddy-local-ca.crt",
-      ["update-ca-trust", "extract"],
+      ["/usr/bin/update-ca-trust", "extract"],
     ],
     [
       "arch",
       "/var/lib/hack/trust/caddy-local-ca.crt",
-      ["update-ca-trust", "extract"],
+      ["/usr/bin/update-ca-trust", "extract"],
     ],
   ] as const)("%s uses the approved sudo, anchor and refresh", (family, anchor, refresh) => {
     const commands = linuxSystemTrustCommands({
@@ -397,6 +403,7 @@ describe("system trust commands", () => {
       certPath: STAGED,
       sha256: sha256(CURRENT_CA_PEM),
       byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+      tools: TRUST_TOOLS,
       sudoPath: "/usr/bin/sudo",
     });
     expect(commands[0]).toContain(anchor);
@@ -437,6 +444,7 @@ describe("system trust commands", () => {
         certPath,
         sha256: sha256(CURRENT_CA_PEM),
         byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+        tools: TRUST_TOOLS,
         sudoPath: approved,
       })) {
         const child = Bun.spawn(
@@ -468,6 +476,7 @@ describe("system trust commands", () => {
       certPath,
       sha256: sha,
       byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+      tools: TRUST_TOOLS,
       sudoPath: "/usr/bin/sudo",
     }).join("\n");
     for (const command of linuxSystemTrustCommands({
@@ -475,6 +484,7 @@ describe("system trust commands", () => {
       certPath,
       sha256: sha,
       byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+      tools: TRUST_TOOLS,
       sudoPath: "/usr/bin/sudo",
     })) {
       expect(steps).toContain(renderLinuxManualTrustCommand(command));
@@ -514,6 +524,54 @@ describe("system trust commands", () => {
 });
 
 describe("applyLinuxSystemTrust", () => {
+  test.each([
+    false,
+    true,
+  ])("Arch keeps resolved absolute tools in automatic and manual argv (confirmed: %s)", async (confirmed) => {
+    const { host, state } = createFakeHost({
+      osRelease: OS_RELEASE.arch,
+      commands: ["trust", "update-ca-trust"],
+    });
+    const paths = {
+      trust: "/vetted-system/trust",
+      "update-ca-trust": "/vetted-system/update-ca-trust",
+    };
+    const outcome = await applyLinuxSystemTrust({
+      host: {
+        ...host,
+        resolveCommand: async (name) =>
+          name === "trust"
+            ? paths.trust
+            : name === "update-ca-trust"
+              ? paths["update-ca-trust"]
+              : null,
+      },
+      ca: await validated(CURRENT_CA_PEM),
+      manualCertPath: EXPORT,
+      canPrompt: confirmed,
+      show: noShow,
+      confirm: yes,
+    });
+    if (confirmed) {
+      expect(outcome.status).toBe("trusted");
+      expect(state.privileged[0]?.at(-1)).toBe(paths.trust);
+      expect(state.privileged[0]?.[2]).toContain('"$5" anchor --store');
+      expect(state.privileged[1]).toEqual([
+        paths["update-ca-trust"],
+        "extract",
+      ]);
+    } else {
+      if (outcome.status !== "pending") {
+        throw new Error("expected pending plan");
+      }
+      expect(outcome.commands.flat()).toContain(paths.trust);
+      expect(outcome.commands.flat()).toContain(paths["update-ca-trust"]);
+      expect(outcome.commands.flat()).not.toContain("trust");
+      expect(outcome.commands.flat()).not.toContain("update-ca-trust");
+      expect(state.privileged).toEqual([]);
+    }
+  });
+
   test.each([
     OS_RELEASE.ubuntu,
     OS_RELEASE.alpine,
@@ -735,6 +793,7 @@ describe("applyLinuxSystemTrust", () => {
         family,
         sha256: sha256(CURRENT_CA_PEM),
         byteLength: Buffer.byteLength(CURRENT_CA_PEM),
+        tools: TRUST_TOOLS,
       });
       expect(argv).not.toContain(STAGED);
       expect(argv).not.toContain(EXPORT);

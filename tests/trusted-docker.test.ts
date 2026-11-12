@@ -59,6 +59,9 @@ const tree = {
   "/": DIR,
   "/usr": DIR,
   "/usr/bin": DIR,
+  "/usr/sbin": DIR,
+  "/sbin": DIR,
+  "/bin": DIR,
   "/usr/bin/docker": DOCKER,
   "/run": DIR,
   "/run/docker.sock": SOCKET,
@@ -153,6 +156,19 @@ describe("resolveTrustedSystemTool", () => {
       await resolveTrustedSystemTool({
         name: "../user/certutil",
         fs: fakeFs(tree),
+      })
+    ).toBeNull();
+  });
+
+  test("an empty writable earlier PATH directory refuses even a safe later tool", async () => {
+    expect(
+      await resolveTrustedSystemTool({
+        name: "certutil",
+        fs: fakeFs({
+          ...tree,
+          "/usr/sbin": { ...DIR, uid: 1000, mode: 0o4_0777 },
+          "/usr/bin/certutil": DOCKER,
+        }),
       })
     ).toBeNull();
   });

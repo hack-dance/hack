@@ -142,8 +142,26 @@ export async function resolveTrustedSystemTool(opts: {
   if (!SYSTEM_TOOL_NAME.test(opts.name)) {
     return null;
   }
+  const fs = opts.fs ?? realFs;
+  // Root scripts also use the fixed PATH for core utilities. An empty but
+  // writable earlier directory must not become an injection point later.
+  for (const dir of SYSTEM_TOOL_DIRS) {
+    try {
+      const resolved = await fs.realpath(dir);
+      if (
+        !(
+          (await directoriesRootOwned({ fs, file: `${dir}/helper` })) &&
+          (await directoriesRootOwned({ fs, file: `${resolved}/helper` }))
+        )
+      ) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
   return await firstVetted({
-    fs: opts.fs ?? realFs,
+    fs,
     candidates: SYSTEM_TOOL_DIRS.map((dir) => `${dir}/${opts.name}`),
     accept: (facts) =>
       facts.isFile &&

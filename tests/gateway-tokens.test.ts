@@ -178,3 +178,25 @@ test("a token store others could write is not used (HACK-2142)", async () => {
   });
   expect(allowed.ok).toBe(true);
 });
+
+test("the token store is read through one open that neither follows a link nor blocks (HACK-2142)", async () => {
+  // Reviewer: checking the path and then reading it again left a gap; the
+  // store is now checked and read through the same no-follow open, which
+  // also must not hang on a planted FIFO.
+  rootDir = await mkdtemp(join(tmpdir(), "hack-gateway-"));
+  const gateway = join(rootDir, "gateway");
+  await mkdir(gateway, { recursive: true, mode: 0o700 });
+  const store = join(gateway, "tokens.json");
+  const fifo = Bun.spawnSync(["mkfifo", store]);
+  expect(fifo.exitCode).toBe(0);
+  await expect(listGatewayTokens({ rootDir })).rejects.toThrow(
+    "is not a plain file"
+  );
+  await rm(store);
+  const victim = join(rootDir, "victim.json");
+  await writeFile(victim, '{"version":1,"tokens":[]}\n', { mode: 0o600 });
+  await symlink(victim, store);
+  await expect(listGatewayTokens({ rootDir })).rejects.toThrow(
+    "is not a plain file"
+  );
+});

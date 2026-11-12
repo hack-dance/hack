@@ -1,8 +1,15 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import {
+  type FileHandle,
+  lstat,
+  mkdir,
+  open,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { readTextFile } from "../../../lib/fs.ts";
 import { getString, isRecord } from "../../../lib/guards.ts";
 
 export type GatewayTokenRecord = {
@@ -36,8 +43,7 @@ export async function readGatewayTokenStore(opts: {
   readonly rootDir: string;
 }): Promise<GatewayTokenStore> {
   const path = resolveGatewayTokensPath({ rootDir: opts.rootDir });
-  await assertTokenStoreTrusted({ path });
-  const text = await readTextFile(path);
+  const text = await readTrustedTokenStore({ path });
   if (!text) {
     return emptyTokenStore();
   }
@@ -88,23 +94,47 @@ export class GatewayTokenStoreUntrustedError extends Error {
   }
 }
 
-async function assertTokenStoreTrusted(opts: {
+/**
+ * The store's text, read through one open that does not follow a link
+ * (and does not block on a FIFO), with the checks applied to that open
+ * file: no gap between checking and reading (HACK-2142). Null when there
+ * is no store.
+ */
+async function readTrustedTokenStore(opts: {
   readonly path: string;
-}): Promise<void> {
-  const info = await lstat(opts.path).catch(() => null);
-  if (info === null) {
-    return;
+}): Promise<string | null> {
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      opts.path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    );
+  } catch (error: unknown) {
+    const code = (error as { readonly code?: unknown }).code;
+    if (code === "ENOENT") {
+      return null;
+    }
+    if (code === "ELOOP") {
+      throw new GatewayTokenStoreUntrustedError({
+        path: opts.path,
+        detail: "is not a plain file",
+      });
+    }
+    throw error;
   }
-  const detail = untrustedStoreDetail(info);
-  if (detail !== null) {
-    throw new GatewayTokenStoreUntrustedError({ path: opts.path, detail });
+  try {
+    const detail = untrustedStoreDetail(await handle.stat());
+    if (detail !== null) {
+      throw new GatewayTokenStoreUntrustedError({ path: opts.path, detail });
+    }
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
   }
 }
 
 /** Why a token store entry cannot be trusted, or null. */
-function untrustedStoreDetail(
-  info: Awaited<ReturnType<typeof lstat>>
-): string | null {
+function untrustedStoreDetail(info: Stats): string | null {
   const uid = process.getuid?.() ?? -1;
   if (info.isSymbolicLink() || !info.isFile()) {
     return "is not a plain file";

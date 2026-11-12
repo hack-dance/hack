@@ -17,6 +17,7 @@ import { authenticateGatewayRequest } from "../src/control-plane/extensions/gate
 import {
   createGatewayToken,
   listGatewayTokens,
+  listGatewayTokensForStatus,
   revokeGatewayToken,
   verifyGatewayToken,
 } from "../src/control-plane/extensions/gateway/tokens.ts";
@@ -198,5 +199,22 @@ test("the token store is read through one open that neither follows a link nor b
   await symlink(victim, store);
   await expect(listGatewayTokens({ rootDir })).rejects.toThrow(
     "is not a plain file"
+  );
+});
+
+test("status output reports an untrusted token store instead of failing (HACK-2142)", async () => {
+  // Codex review: hack global status (JSON and interactive) read the store
+  // unconditionally, so an upgraded 0664 store aborted a core command.
+  rootDir = await mkdtemp(join(tmpdir(), "hack-gateway-"));
+  await createGatewayToken({ rootDir, label: "phone" });
+  expect((await listGatewayTokensForStatus({ rootDir })).untrusted).toBeNull();
+  const store = join(rootDir, "gateway", "tokens.json");
+  await chmod(store, 0o664);
+  const status = await listGatewayTokensForStatus({ rootDir });
+  expect(status.tokens).toEqual([]);
+  expect(status.untrusted).toContain("hack x gateway token-create");
+  // Commands that act on tokens still refuse.
+  await expect(listGatewayTokens({ rootDir })).rejects.toThrow(
+    "cannot be trusted"
   );
 });

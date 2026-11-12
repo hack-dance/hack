@@ -60,6 +60,29 @@ export async function readGatewayTokenStore(opts: {
 }
 
 /**
+ * Gateway tokens for status output: never throws for an untrusted store
+ * ({@link GatewayTokenStoreUntrustedError}), which is reported as no
+ * tokens plus `untrusted`, so `hack global status`, `hack remote status`
+ * and doctor still finish when the gateway cannot use its store
+ * (HACK-2142). Authentication keeps refusing such a store.
+ */
+export async function listGatewayTokensForStatus(opts: {
+  readonly rootDir: string;
+}): Promise<{
+  readonly tokens: readonly GatewayTokenRecord[];
+  readonly untrusted: string | null;
+}> {
+  try {
+    return { tokens: await listGatewayTokens(opts), untrusted: null };
+  } catch (error: unknown) {
+    if (error instanceof GatewayTokenStoreUntrustedError) {
+      return { tokens: [], untrusted: error.message };
+    }
+    throw error;
+  }
+}
+
+/**
  * Write the gateway token store to disk.
  *
  * @param opts.rootDir - Daemon root directory.

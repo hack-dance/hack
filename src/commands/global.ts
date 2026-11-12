@@ -50,7 +50,7 @@ import {
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
-import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
+import { listGatewayTokensForStatus } from "../control-plane/extensions/gateway/tokens.ts";
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveDaemonAutostartAccess } from "../daemon/client.ts";
@@ -2753,7 +2753,8 @@ async function collectGatewayStatus(): Promise<GatewayStatusPayload> {
     daemonRunning: daemonStatus.running,
   });
 
-  const tokens = await listGatewayTokens({ rootDir: daemonPaths.root });
+  const { tokens, untrusted: untrustedTokenStore } =
+    await listGatewayTokensForStatus({ rootDir: daemonPaths.root });
   const activeTokens = tokens.filter((token) => !token.revokedAt);
   const revokedTokens = tokens.filter((token) => token.revokedAt);
   const writeTokens = activeTokens.filter((token) => token.scope === "write");
@@ -2781,7 +2782,10 @@ async function collectGatewayStatus(): Promise<GatewayStatusPayload> {
     tokens_read: readTokens.length,
     tokens: serializedTokens,
     exposures,
-    warnings: gatewayResolution.warnings,
+    warnings:
+      untrustedTokenStore === null
+        ? gatewayResolution.warnings
+        : [...gatewayResolution.warnings, untrustedTokenStore],
   };
 
   if (gatewayResolution.enabledProjects.length > 0) {

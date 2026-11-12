@@ -7,6 +7,7 @@ import {
 import {
   invokeNativeRuntime,
   isNativeRuntimeNotRunning,
+  NATIVE_PROVIDER_PIN_MESSAGE,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -48,6 +49,15 @@ const RUNTIME_NOT_RUNNING_MESSAGE =
   "Native runtime is not running; no dependency refresh or command was requested. Start the native runtime and retry.";
 
 function refused(cause?: unknown): Error {
+  if (
+    cause instanceof NativeRuntimeRequestError &&
+    cause.nativeCode === "provider_pin_changed"
+  ) {
+    return new NativeRuntimeRequestError({
+      nativeCode: "provider_pin_changed",
+      message: `Native runtime request refused (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`,
+    });
+  }
   if (isNativeRuntimeNotRunning(cause)) {
     return new HackCliError({
       code: "E_DOCKER_UNAVAILABLE",

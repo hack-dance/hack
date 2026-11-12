@@ -5,6 +5,7 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { nativeFrontendGone } from "./native-frontend-identity.ts";
 import { openNativeDownHookSession } from "./native-project-down-hooks.ts";
 import {
   captureNativeProjectFinalization,
@@ -99,15 +100,6 @@ function verify(value: unknown, run: NativeProjectRun, stopped: boolean): void {
 const RECEIPT_SHA = /^[a-f0-9]{64}$/;
 const RECOVERY_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
-/** Only ESRCH proves a recorded frontend exited; a live or inaccessible PID does not. */
-function processExited(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (error) {
-    return isRecord(error) && error.code === "ESRCH";
-  }
-}
 const FOREGROUND_STATES = new Set(["absent", "running", "exited", "uncertain"]);
 
 /** What `graph foreground-owner` selected; it grants no recovery authority. */
@@ -540,14 +532,12 @@ export async function nativeProjectDown(opts: {
   const finalization = opts.deferFinalization
     ? undefined
     : await captureFinalization({ scope: opts.scope, run });
-  // A frontend that has exited cannot finish later, so its finalization is read
-  // once before explicit retaining recovery. Only ESRCH proves the exit; PID reuse can only make
-  // an exited frontend look live, which keeps the ordinary wait. HACK-1968: a
-  // failed `hack up` that recorded its run for down exits without finishing it.
+  // The shared identity predicate also distinguishes a reused macOS PID. A
+  // frontend can exit during cleanup or the wait, so recheck before recovery.
   const frontendGone =
     finalization !== undefined &&
     finalization.version !== 1 &&
-    processExited(finalization.pid);
+    (await nativeFrontendGone(finalization));
   const wait = async () => {
     if (finalization === undefined) {
       return;
@@ -560,7 +550,10 @@ export async function nativeProjectDown(opts: {
         timeoutMs: frontendGone ? 1 : opts.finalizationTimeoutMs,
       });
     } catch {
-      if (!frontendGone) {
+      if (
+        finalization.version === 1 ||
+        !(await nativeFrontendGone(finalization))
+      ) {
         throw finalizationRefused();
       }
       if (opts.recover === true) {

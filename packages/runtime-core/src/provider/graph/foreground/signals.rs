@@ -6,20 +6,12 @@ use std::{
     time::Instant,
 };
 /// Marks EVFILT_PROC registrations for host dependency listeners. Publisher
-/// child watches keep a null tag, and their exit remains fatal to the owner.
+/// child watches keep a null tag; exit wakes the owner to reap and report it.
 const LISTENER_EXIT: usize = 1;
 const FRONTEND_EXIT: usize = 2;
 /// One foreground wake. `Ready` covers every readable descriptor (control
 /// listener and dependency notices); the caller re-reads them non-blockingly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::provider::graph) enum Wake {
-    Signal,
-    Ready,
-    ListenerExit,
-    Timeout,
-    PublisherExit,
-    FrontendExit,
-}
+pub(in crate::provider::graph) use crate::provider::graph::owner_loop::Wake;
 static OWNED: AtomicBool = AtomicBool::new(false);
 static PENDING: AtomicBool = AtomicBool::new(false);
 static FRONTEND: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);

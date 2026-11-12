@@ -43,10 +43,14 @@ if (role === "launcher") {
       timeoutMs: ["timeout", "late-ready"].includes(mode) ? 1000 : 10_000,
     });
   } catch (error) {
-    process.exitCode =
-      mode === "wrapped-failure"
-        ? await handleRunCliError({ error, jsonRequested: true })
-        : 1;
+    process.exitCode = [
+      "wrapped-failure",
+      "wrapped-static-failure",
+      "provider-pin",
+      "wrapped-provider-pin",
+    ].includes(mode)
+      ? await handleRunCliError({ error, jsonRequested: true })
+      : 1;
   }
 } else if (role === "owner") {
   process.exitCode = await runNativeDetachedOwner({
@@ -90,18 +94,36 @@ if (role === "launcher") {
       if (mode === "shell-names-empty") {
         nativeDetachedUpShellVariables([]);
       }
-      if (mode === "fail") {
+      if (["provider-pin", "wrapped-provider-pin"].includes(mode)) {
+        await nativeDetachedUpFailure(new Error("synthetic-private-value"));
+        const failure = new NativeRuntimeRequestError({
+          nativeCode: "provider_pin_changed",
+          message: "synthetic-private-value",
+        });
+        await nativeDetachedUpFailure(
+          mode === "wrapped-provider-pin"
+            ? retainNativeRuntimeFailure({
+                error: new ClosedCliError("synthetic-private-value"),
+                original: failure,
+              })
+            : failure
+        );
+      }
+      if (["fail", "provider-pin", "wrapped-provider-pin"].includes(mode)) {
         server.stop(true);
         process.off("SIGTERM", terminate);
         return 1;
       }
-      if (mode === "wrapped-failure") {
+      if (["wrapped-failure", "wrapped-static-failure"].includes(mode)) {
         const failure = new NativeRuntimeRequestError({
           message: "synthetic-private-value",
           nativeCode: "graph_port_publication",
           nativeMessage:
             "Native publishes only TCP ports; keep UDP publication on the Compose backend.",
           nativeService: "web",
+          ...(mode === "wrapped-static-failure"
+            ? { nativeStartupPhase: "static-preflight" as const }
+            : {}),
         });
         await nativeDetachedUpFailure(
           retainNativeRuntimeFailure({
@@ -145,6 +167,13 @@ if (role === "launcher") {
           {
             kind: "failure",
             data: { code: "graph_port_publication", message: "p".repeat(401) },
+          },
+          {
+            kind: "failure",
+            data: {
+              code: "graph_port_publication",
+              startupPhase: "unknown-phase",
+            },
           },
         ]) {
           process.send?.(value);

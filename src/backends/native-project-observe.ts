@@ -14,6 +14,7 @@ import {
   type NativePublishedPort,
   nativeDeclaredPorts,
   nativeObservedPorts,
+  nativePendingPublisherPorts,
 } from "./native-project-publications.ts";
 import {
   loadNativeProjectRun,
@@ -25,6 +26,7 @@ import {
 import {
   invokeNativeRuntime,
   isNativeRuntimeNotRunning,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -73,6 +75,7 @@ export type NativeProjectPsStatus =
   | "pending"
   | "runtime_not_running"
   | "runtime_busy"
+  | "provider_pin_changed"
   | "observed"
   | "owner_unconfirmed"
   | "runtime_degraded";
@@ -191,7 +194,13 @@ async function inspect(opts: Options, run: NativeProjectRun) {
 /** Ordinary states in which nothing was observed; every other refusal rethrows. */
 function unobservedStatus(
   error: unknown
-): "runtime_not_running" | "runtime_busy" {
+): "runtime_not_running" | "runtime_busy" | "provider_pin_changed" {
+  if (
+    error instanceof NativeRuntimeRequestError &&
+    error.nativeCode === "provider_pin_changed"
+  ) {
+    return "provider_pin_changed";
+  }
   if (isNativeRuntimeNotRunning(error)) {
     return "runtime_not_running";
   }
@@ -199,6 +208,61 @@ function unobservedStatus(
     return "runtime_busy";
   }
   throw error;
+}
+
+/** A pinned owner can report pending host exits while an unrelated guest lease is busy. */
+async function pendingPublisherObservation(
+  opts: Options,
+  run: NativeProjectRun
+): Promise<NativeProjectPsResult | null> {
+  try {
+    const owner = await (opts.invoke ?? invokeNativeRuntime)({
+      runtime: opts.runtime,
+      cwd: opts.scope.projectRoot,
+      args: ["graph", "owner-status", "--run-id", run.run, "--json"],
+      timeoutMs: 2000,
+    });
+    if (
+      !isRecord(owner) ||
+      owner.ok !== true ||
+      owner.run !== run.run ||
+      owner.plan !== run.planId ||
+      owner.phase !== "ready-observed" ||
+      owner.foreground_alive !== true ||
+      owner.runtime_verified !== false ||
+      owner.runtime_error !== "publisher_exit_pending"
+    ) {
+      return null;
+    }
+    const ports = nativePendingPublisherPorts(owner.publisher_ports);
+    return ports
+      ? {
+          backend: "native",
+          status: "runtime_degraded",
+          run: run.run,
+          phase: owner.phase,
+          items: [],
+          ports,
+        }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function unobservedProject(
+  opts: Options,
+  run: NativeProjectRun,
+  error: unknown
+): Promise<NativeProjectPsResult> {
+  const status = unobservedStatus(error);
+  if (status === "runtime_busy") {
+    const pending = await pendingPublisherObservation(opts, run);
+    if (pending) {
+      return pending;
+    }
+  }
+  return { backend: "native", status, run: run.run, phase: null, items: [] };
 }
 /**
  * Historical receipt phase is separated from current per-service observations.
@@ -224,13 +288,7 @@ export async function nativeProjectPs(
   try {
     snapshot = await inspect(opts, run);
   } catch (error: unknown) {
-    return {
-      backend: "native",
-      status: unobservedStatus(error),
-      run: run.run,
-      phase: null,
-      items: [],
-    };
+    return await unobservedProject(opts, run, error);
   }
   let status: "observed" | "owner_unconfirmed" | "runtime_degraded" =
     "observed";

@@ -6,7 +6,7 @@ use std::os::unix::fs::DirBuilderExt;
 mod restart_rebind;
 #[cfg(target_os = "macos")]
 pub(super) use restart_rebind::{
-    changed_publications, reserve_rebind, retire_rebind, supervise_probes,
+    changed_publications, reserve_rebind, retire_rebind, supervise_probes, supervised_service,
 };
 
 #[cfg(target_os = "macos")]

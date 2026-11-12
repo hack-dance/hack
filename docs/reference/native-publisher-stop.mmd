@@ -6,7 +6,17 @@ stateDiagram-v2
     [*] --> ready
     ready --> enrolled : Interrupt
     ready --> enrolled : FrontendLost [lifetime watch]
-    ready --> publisher_down : PublisherCrash [exact Child reaped]
+    ready --> publisher_pending : PublisherCrash
+    publisher_pending --> publisher_down : CommitExit [lease acquired]
+    publisher_pending --> enrolled : Interrupt or FrontendLost
+    publisher_pending --> intent : Recover [owner absent]
+    state "publisher-exit-pending" as publisher_pending
+    note left of publisher_pending
+        Port down; services remain running
+        Provider busy retains the zombie
+        No committed proof or notice yet
+        Retry without blocking stop control
+    end note
     publisher_down --> enrolled : Interrupt or SIGHUP
     publisher_down --> enrolled : FrontendLost [lifetime watch]
     publisher_down --> intent : Recover [owner absent]
@@ -20,7 +30,8 @@ stateDiagram-v2
     ready --> intent : Recover [owner absent]
     enrolled --> intent : Recover [owner absent]
     intent --> intent : StopPublisher [identity matches]
-    enrolled --> bridge_retired : ReleaseBridge [publisher absent]
+    enrolled --> enrolled : CommitExit [lease acquired]
+    enrolled --> bridge_retired : ReleaseBridge [exit proof committed]
     intent --> bridge_retired : ReleaseBridge [proof current]
     bridge_retired --> intent : Recover [owner absent]
     bridge_retired --> stopped : CleanupGuest [proof current]

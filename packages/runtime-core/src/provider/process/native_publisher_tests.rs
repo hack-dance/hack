@@ -108,6 +108,9 @@ impl NativePublisher {
 }
 #[cfg(target_os = "macos")]
 impl NativePublisher {
+    pub(crate) fn identity(&self) -> &crate::provider::identity::ProcessIdentity {
+        self.identity.as_ref().unwrap()
+    }
     pub(crate) fn confirm_crash(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {

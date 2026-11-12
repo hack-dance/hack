@@ -37,10 +37,14 @@ export function shouldRefreshForDockerEvent(opts: {
   return !ignoredContainerActions.has(action);
 }
 
+const MISSING_DOCKER_MAX_DELAY_MS = 30_000;
+
 export function startDockerEventWatcher(opts: {
   readonly onEvent: (event: DockerEvent) => void;
   readonly onError: (message: string) => void;
   readonly onExit: (exitCode: number) => void;
+  /** The Docker CLI to run (tests name one that does not exist). */
+  readonly dockerCommand?: string;
 }): DockerEventWatcher {
   let stopped = false;
   let current: Bun.Subprocess<"ignore", "pipe", "pipe"> | null = null;
@@ -48,17 +52,33 @@ export function startDockerEventWatcher(opts: {
   const runLoop = async () => {
     let attempt = 0;
     while (!stopped) {
-      const proc = Bun.spawn(
-        [
-          "docker",
-          "events",
-          "--filter",
-          "type=container",
-          "--format",
-          "{{json .}}",
-        ],
-        { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
-      );
+      let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+      try {
+        proc = Bun.spawn(
+          [
+            opts.dockerCommand ?? "docker",
+            "events",
+            "--filter",
+            "type=container",
+            "--format",
+            "{{json .}}",
+          ],
+          { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+        );
+      } catch (error: unknown) {
+        // Bun.spawn throws synchronously when `docker` is not on PATH (a
+        // host without Docker, or a service with a narrow PATH). Inside this
+        // un-awaited loop that rejection would crash hackd, so report it and
+        // retry slowly: Docker may be installed or started later.
+        opts.onError(
+          `docker events could not start: ${error instanceof Error ? error.message : String(error)}`
+        );
+        attempt += 1;
+        await sleep({
+          ms: Math.min(MISSING_DOCKER_MAX_DELAY_MS, 200 * 2 ** attempt),
+        });
+        continue;
+      }
       current = proc;
 
       const stdoutTask = (async () => {

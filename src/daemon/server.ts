@@ -42,6 +42,10 @@ import { handleNodeRoutes } from "./routes/node.ts";
 import { handleSessionRoutes } from "./routes/sessions.ts";
 import type { RuntimeHealth } from "./runtime-cache.ts";
 import { createRuntimeCache } from "./runtime-cache.ts";
+import {
+  restrictSocketMode,
+  secureDaemonDirectory,
+} from "./socket-permissions.ts";
 
 type PackageJsonType = {
   readonly name: string;
@@ -76,6 +80,8 @@ export async function runDaemon({
   process.title = DAEMON_PROCESS_TITLE;
 
   await ensureDir(paths.root);
+  // Before any socket is bound: the local API is unauthenticated.
+  await secureDaemonDirectory({ root: paths.root });
   await removeFileIfExists({ path: paths.socketPath });
   await writeDaemonPid({ pidPath: paths.pidPath, pid: process.pid });
 
@@ -273,11 +279,13 @@ export async function runDaemon({
       }),
     websocket: websocketHandlers,
   });
+  await restrictSocketMode({ path: daemonInternalSocketPath });
   try {
     daemonProxy = await startRequestTargetProxy({
       listen: { unix: paths.socketPath },
       target: { unix: daemonInternalSocketPath },
     });
+    await restrictSocketMode({ path: paths.socketPath });
   } catch (error) {
     server.stop();
     await removeFileIfExists({ path: daemonInternalSocketPath });
@@ -305,6 +313,7 @@ export async function runDaemon({
         },
         websocket: websocketHandlers,
       });
+      await restrictSocketMode({ path: gatewayInternalSocketPath });
       gatewayProxy = await startRequestTargetProxy({
         listen: {
           host: gatewayResolution.config.bind,

@@ -92,6 +92,76 @@ test("missing mapping gives native not-started without any runtime call", async 
     })
   ).rejects.toThrow("not been started");
 });
+test("ps reports provider pin mismatch as its own closed status without service claims", async () => {
+  const opts = await fixture();
+  const result = await nativeProjectPs({
+    ...opts,
+    invoke: async () => {
+      throw new NativeRuntimeRequestError({
+        nativeCode: "provider_pin_changed",
+        message: "untrusted text",
+      });
+    },
+  });
+  expect(result).toEqual({
+    backend: "native",
+    status: "provider_pin_changed",
+    run: run.run,
+    phase: null,
+    items: [],
+  });
+});
+
+test("a lease-busy ps still reports an authenticated pending publisher exit without guest claims", async () => {
+  const opts = await fixture();
+  const owner = {
+    ok: true,
+    run: run.run,
+    plan: run.planId,
+    phase: "ready-observed",
+    foreground_alive: true,
+    runtime_verified: false,
+    runtime_error: "publisher_exit_pending",
+    publisher_ports: [
+      { service: "web", port: 18_080, target: 8080, state: "down" },
+      { service: "healthy", port: 18_081, target: 8081, state: "observed" },
+    ],
+  };
+  let response: unknown = owner;
+  const invoke: typeof import("../src/backends/native-runtime-client.ts").invokeNativeRuntime =
+    async (request) => {
+      if (request.args[1] === "inspect") {
+        throw new NativeRuntimeRequestError({
+          nativeCode: "provider_busy",
+          message: "busy",
+        });
+      }
+      expect(request.args[1]).toBe("owner-status");
+      return response;
+    };
+  expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+    status: "runtime_degraded",
+    items: [],
+    ports: [
+      { service: "web", port: 18_080, state: "down" },
+      { service: "healthy", port: 18_081, state: "unconfirmed" },
+    ],
+  });
+  for (const changed of [
+    { run: "f".repeat(32) },
+    { plan: "f".repeat(64) },
+    { foreground_alive: false },
+    { runtime_verified: true },
+    { runtime_error: "unrelated" },
+    { publisher_ports: [{ ...owner.publisher_ports[0], target: -1 }] },
+  ]) {
+    response = { ...owner, ...changed };
+    expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+      status: "runtime_busy",
+      items: [],
+    });
+  }
+}, 20_000);
 test("ps returns current native observations and refuses each ownership mismatch", async () => {
   const opts = await fixture();
   expect(

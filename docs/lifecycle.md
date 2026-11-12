@@ -399,27 +399,27 @@ title: Compose startup phases
 ---
 stateDiagram-v2
   direction TB
-  state "Resolve environment" as Env
-  state "Before hooks" as Before
-  state "Host processes" as Processes
-  state "Compose startup" as Engine
-  state "After hooks" as After
-  state "Verify service states" as Verify
+  state "Detached startup" as Startup
   state "Startup accepted" as Ready
   state "Inspect failure" as Inspect
-  [*] --> Env
-  Env --> Before: valid contract
-  Before --> Processes: hooks succeed
-  Processes --> Engine: processes prepared
-  Engine --> After: command succeeds
-  After --> Verify: hooks succeed
-  Verify --> Ready: services acceptable
-  Env --> Inspect: contract refused
-  Before --> Inspect: hook failed
-  Processes --> Inspect: preparation failed
-  Engine --> Inspect: startup failed
-  After --> Inspect: hook failed
-  Verify --> Inspect: startup incomplete
+  [*] --> Startup
+  state Startup {
+    state "Resolve environment" as Env
+    state "Before hooks" as Before
+    state "Host processes" as Processes
+    state "Compose up" as Engine
+    state "After hooks" as After
+    state "Verify service states" as Verify
+    [*] --> Env
+    Env --> Before: valid contract
+    Before --> Processes: hooks succeed
+    Processes --> Engine: processes prepared
+    Engine --> After: command succeeds
+    After --> Verify: hooks succeed
+    Verify --> [*]: services acceptable
+  }
+  Startup --> Ready: all phases pass
+  Startup --> Inspect: any phase fails
   classDef ok stroke-width:1.6px
   classDef fail stroke-width:1.6px
   class Ready ok

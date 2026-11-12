@@ -36,6 +36,7 @@ export async function readGatewayTokenStore(opts: {
   readonly rootDir: string;
 }): Promise<GatewayTokenStore> {
   const path = resolveGatewayTokensPath({ rootDir: opts.rootDir });
+  await assertTokenStoreTrusted({ path });
   const text = await readTextFile(path);
   if (!text) {
     return emptyTokenStore();
@@ -70,6 +71,54 @@ export async function writeGatewayTokenStore(opts: {
     path,
     text: `${JSON.stringify(opts.store, null, 2)}\n`,
   });
+}
+
+/**
+ * The token store could have been changed by someone else (HACK-2142): it
+ * is not this user's plain file, or group or others can write it (a store
+ * written before 0600 stores, under umask 0002, is 0664). Its token hashes
+ * cannot be trusted, so the gateway refuses it; hackd itself still starts.
+ */
+export class GatewayTokenStoreUntrustedError extends Error {
+  constructor(opts: { readonly path: string; readonly detail: string }) {
+    super(
+      `${opts.path} ${opts.detail}, so its tokens cannot be trusted and the gateway does not use them. Remove it and issue tokens again: rm ${opts.path} && hack x gateway token-create`
+    );
+    this.name = "GatewayTokenStoreUntrustedError";
+  }
+}
+
+async function assertTokenStoreTrusted(opts: {
+  readonly path: string;
+}): Promise<void> {
+  const info = await lstat(opts.path).catch(() => null);
+  if (info === null) {
+    return;
+  }
+  const detail = untrustedStoreDetail(info);
+  if (detail !== null) {
+    throw new GatewayTokenStoreUntrustedError({ path: opts.path, detail });
+  }
+}
+
+/** Why a token store entry cannot be trusted, or null. */
+function untrustedStoreDetail(
+  info: Awaited<ReturnType<typeof lstat>>
+): string | null {
+  const uid = process.getuid?.() ?? -1;
+  if (info.isSymbolicLink() || !info.isFile()) {
+    return "is not a plain file";
+  }
+  if (info.nlink > 1) {
+    return "has other hard links";
+  }
+  if (uid >= 0 && info.uid !== uid) {
+    return `is owned by another user (uid ${info.uid})`;
+  }
+  const mode = Number(info.mode);
+  return (mode & 0o022) === 0
+    ? null
+    : `could be written by other users (mode ${(mode & 0o777).toString(8)})`;
 }
 
 /**

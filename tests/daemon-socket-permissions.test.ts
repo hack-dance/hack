@@ -206,10 +206,11 @@ test("planted entries one level down (gateway/) are refused (HACK-2142)", async 
   await secureDaemonDirectory({ root: daemonRoot });
 });
 
-test("a token store others could write is refused; hackd's own files are repaired (HACK-2142)", async () => {
+test("hackd's own writable files are repaired; a writable token store is left to the gateway (HACK-2142)", async () => {
   // Codex security review: a group member could rewrite a 0664
-  // gateway/tokens.json in place (same owner, one link) and plant a write
-  // token's hash, which the scan accepted.
+  // gateway/tokens.json in place (same owner, one link). Its contents
+  // cannot be trusted, so the scan neither blesses it (no repair) nor stops
+  // hackd for it; the gateway's own reader refuses it.
   const hackHome = join(root, "home", ".hack");
   const daemonRoot = join(hackHome, "daemon");
   const gateway = join(daemonRoot, "gateway");
@@ -226,11 +227,6 @@ test("a token store others could write is refused; hackd's own files are repaire
   await chmod(join(gateway, "audit.jsonl"), 0o664);
   await writeFile(join(gateway, "tokens.json"), "{}\n");
   await chmod(join(gateway, "tokens.json"), 0o664);
-  await expect(secureDaemonDirectory({ root: daemonRoot })).rejects.toThrow(
-    `${join(gateway, "tokens.json")}, which other users could write`
-  );
-  // Removed (tokens issued again later): the rest is repaired, not refused.
-  await rm(join(gateway, "tokens.json"));
   await secureDaemonDirectory({ root: daemonRoot });
   for (const file of [
     join(daemonRoot, "hackd.log"),
@@ -239,4 +235,5 @@ test("a token store others could write is refused; hackd's own files are repaire
   ]) {
     expect((await stat(file)).mode & 0o777).toBe(0o644);
   }
+  expect((await stat(join(gateway, "tokens.json"))).mode & 0o777).toBe(0o664);
 });

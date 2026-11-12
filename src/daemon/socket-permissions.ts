@@ -150,8 +150,10 @@ function plantedProblem(opts: {
 
 /**
  * State files whose contents decide who may use hackd: one others could
- * write may already say what they chose (a write token's hash), so it is
- * refused, not repaired (HACK-2142).
+ * write may already say what they chose (a write token's hash). The scan
+ * leaves it as it is (a repair would bless those contents); its own reader
+ * refuses it, so only that feature stays off and hackd still starts
+ * (HACK-2142).
  */
 const TRUSTED_CONTENT_FILES = new Set([join("gateway", "tokens.json")]);
 
@@ -160,7 +162,8 @@ const TRUSTED_CONTENT_FILES = new Set([join("gateway", "tokens.json")]);
  * file are created with the process umask (`0664` under `0002`); their
  * contents decide nothing (a pid is proven before any signal), so write
  * access is removed through a handle that does not follow a link. A file
- * in {@link TRUSTED_CONTENT_FILES} is refused instead. Null when fine.
+ * in {@link TRUSTED_CONTENT_FILES} is left alone for its reader to refuse.
+ * Null when fine.
  */
 async function checkWritableFile(opts: {
   readonly path: string;
@@ -171,7 +174,7 @@ async function checkWritableFile(opts: {
   }
   const relativePath = join(basename(dirname(opts.path)), basename(opts.path));
   if (TRUSTED_CONTENT_FILES.has(relativePath)) {
-    return `${opts.path}, which other users could write (mode ${(Number(opts.info.mode) & 0o777).toString(8)}), so its contents cannot be trusted (gateway tokens must be issued again once it is removed)`;
+    return null;
   }
   let handle: FileHandle;
   try {

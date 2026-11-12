@@ -341,7 +341,14 @@ authentication, so before it binds its sockets hackd makes `~/.hack/daemon`
 owner-only (`0700`), and it sets each socket to `0600`. It changes the mode only
 after checking that `daemon` is a real directory you own (not a link) under
 directories others cannot replace, and it refuses to start when the directory
-cannot be made private. Closing the terminal, or an agent
+cannot be made private. The same goes one level down (`gateway/`). Once the directory
+is private, hackd refuses to start if it holds anything it did not create
+(another account's entry, a symlink, a hard-linked file), and it removes
+group and other write from its own logs and pid file. The gateway token store
+is written owner-only (`0600`). A store that others could write, such as one
+written before this under umask `0002`, is not used: the gateway accepts no
+token from it until you remove it and issue tokens again
+(`rm ~/.hack/daemon/gateway/tokens.json && hack x gateway token-create`). Closing the terminal, or an agent
 harness killing the process group that ran the command, does not stop it. It does
 not survive logout or reboot. For that, install it as a login service with
 `hack daemon install`:

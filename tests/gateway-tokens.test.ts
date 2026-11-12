@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -147,4 +148,33 @@ test("the token store is never written through a planted link (HACK-2142)", asyn
   expect((await stat(join(gateway, "tokens.json"))).mode & 0o777).toBe(0o600);
   expect(await readdir(gateway)).toEqual(["tokens.json"]);
   expect((await listGatewayTokens({ rootDir })).length).toBe(1);
+});
+
+test("a token store others could write is not used (HACK-2142)", async () => {
+  // Codex security review: a 0664 store (written before 0600 stores, under
+  // umask 0002) could hold a planted write token's hash.
+  rootDir = await mkdtemp(join(tmpdir(), "hack-gateway-"));
+  const issued = await createGatewayToken({ rootDir, label: "phone" });
+  const store = join(rootDir, "gateway", "tokens.json");
+  await chmod(store, 0o664);
+  await expect(listGatewayTokens({ rootDir })).rejects.toThrow(
+    `rm ${store} && hack x gateway token-create`
+  );
+  await expect(createGatewayToken({ rootDir, label: "again" })).rejects.toThrow(
+    "cannot be trusted"
+  );
+  // Authentication grants nothing from it (and does not throw).
+  const denied = await authenticateGatewayRequest({
+    rootDir,
+    headers: new Headers({ authorization: `Bearer ${issued.token}` }),
+  });
+  expect(denied.ok).toBe(false);
+  // After the documented recovery, tokens work again.
+  await rm(store);
+  const reissued = await createGatewayToken({ rootDir, label: "phone" });
+  const allowed = await authenticateGatewayRequest({
+    rootDir,
+    headers: new Headers({ authorization: `Bearer ${reissued.token}` }),
+  });
+  expect(allowed.ok).toBe(true);
 });

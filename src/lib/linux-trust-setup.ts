@@ -389,8 +389,17 @@ export async function findNssDatabases(
   return dirs;
 }
 
+/**
+ * Identities a database check observed: the database directory and its
+ * resolved ancestors, and each NSS database file (`null` when absent).
+ */
+type NssDbSnapshot = {
+  readonly dirs: string;
+  readonly files: Readonly<Record<NssDbFile, string | null>>;
+};
+
 type OwnershipCheck =
-  | { readonly ok: true; readonly snapshot: string }
+  | { readonly ok: true; readonly snapshot: NssDbSnapshot }
   | { readonly ok: false; readonly reason: string };
 
 function ownedAndPrivate(info: ResolvedPathInfo, uid: number): boolean {
@@ -404,7 +413,11 @@ function ownedAndPrivate(info: ResolvedPathInfo, uid: number): boolean {
  * are owned by the current user and not group- or world-writable.
  * Symlinks are therefore allowed only when they stay inside those trees,
  * as snap's `current` revision link and Flatpak's per-app tree do; a link
- * to another user's or a shared database is refused.
+ * to another user's or a shared database is refused. The snapshot carries
+ * the identities of the directory, its ancestors and each database file, so
+ * a caller can detect replacement between checks (see
+ * {@link compareNssDbSnapshot}); it cannot detect a swap restored before the
+ * next check.
  */
 export async function checkNssDbOwnership(opts: {
   readonly host: LinuxTrustHost;
@@ -457,6 +470,10 @@ export async function checkNssDbOwnership(opts: {
   // The database files must live in that directory themselves: a cert9.db
   // or key4.db link that resolves elsewhere would let a write escape the
   // containment checked above.
+  const files: Record<NssDbFile, string | null> = {
+    "cert9.db": null,
+    "key4.db": null,
+  };
   for (const name of NSS_DB_FILES) {
     const expected = join(dir.realPath, name);
     const file = await host.inspectPath(expected);
@@ -476,12 +493,51 @@ export async function checkNssDbOwnership(opts: {
         reason: `${name} resolves outside the database directory, is not owned by you, or is group/world-writable`,
       };
     }
+    files[name] = file.identity;
   }
-  return { ok: true, snapshot: ancestors.join("\n") };
+  return { ok: true, snapshot: { dirs: ancestors.join("\n"), files } };
 }
 
 /** NSS sql database files Hack writes through certutil. */
 const NSS_DB_FILES = ["cert9.db", "key4.db"] as const;
+type NssDbFile = (typeof NSS_DB_FILES)[number];
+
+/**
+ * Compare a check against the pinned identities. Directories must not change.
+ * A database file that existed must keep its identity; one that was absent
+ * must stay absent, except across a certutil call (`created`), which may
+ * create it. Returns the identities to pin next, or a reason to stop.
+ */
+export function compareNssDbSnapshot(opts: {
+  readonly pinned: NssDbSnapshot;
+  readonly current: NssDbSnapshot;
+  readonly created: boolean;
+}):
+  | { readonly ok: true; readonly pinned: NssDbSnapshot }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+    } {
+  const { pinned, current } = opts;
+  if (current.dirs !== pinned.dirs) {
+    return { ok: false, reason: "database directory or ancestor changed" };
+  }
+  for (const name of NSS_DB_FILES) {
+    const before = pinned.files[name];
+    const after = current.files[name];
+    if (before === after || (before === null && opts.created)) {
+      continue;
+    }
+    return {
+      ok: false,
+      reason:
+        before === null
+          ? `${name} appeared outside a certutil call`
+          : `${name} was replaced or removed`,
+    };
+  }
+  return { ok: true, pinned: current };
+}
 
 /**
  * Add the CA to each owned NSS db (no root). A db that holds another
@@ -606,21 +662,41 @@ async function trustOneNssDb(opts: {
   if (!initial.ok) {
     return { dbDir, status: "refused", reason: initial.reason };
   }
-  const check = async (requireDb: boolean) => {
-    const current = await checkNssDbOwnership({ host, dbDir, requireDb });
-    if (!current.ok || current.snapshot !== initial.snapshot) {
-      throw new Error(
-        current.ok ? "database directory or ancestor changed" : current.reason
-      );
+  // Identities pinned at the first check; a database file certutil creates
+  // is pinned after the call that created it.
+  let pinned = initial.snapshot;
+  const check = async (opts: {
+    readonly requireDb: boolean;
+    readonly created: boolean;
+  }) => {
+    const current = await checkNssDbOwnership({
+      host,
+      dbDir,
+      requireDb: opts.requireDb,
+    });
+    if (!current.ok) {
+      throw new Error(current.reason);
     }
+    const compared = compareNssDbSnapshot({
+      pinned,
+      current: current.snapshot,
+      created: opts.created,
+    });
+    if (!compared.ok) {
+      throw new Error(compared.reason);
+    }
+    pinned = compared.pinned;
   };
   const guardedHost: LinuxTrustHost = {
     ...host,
     exec: async (argv, input) => {
       const initializing = argv[3] === "-N";
-      await check(!initializing);
+      await check({ requireDb: !initializing, created: false });
       const result = await host.exec(argv, input);
-      await check(!initializing || result.exitCode === 0);
+      await check({
+        requireDb: !initializing || result.exitCode === 0,
+        created: true,
+      });
       return result;
     },
   };

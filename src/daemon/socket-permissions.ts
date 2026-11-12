@@ -1,6 +1,6 @@
 import { constants, lstatSync } from "node:fs";
 import { chmod, type FileHandle, lstat, open, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { checkReplaceableChain } from "../lib/path-trust.ts";
 
@@ -88,7 +88,7 @@ export async function secureDaemonDirectory(opts: {
   const planted = await findPlantedEntry({ root: opts.root, uid });
   if (planted !== null) {
     throw new Error(
-      `hackd state directory ${opts.root} holds ${planted}, which hackd did not create; review and remove it, then start hackd again`
+      `hackd state directory ${opts.root} holds ${planted}. Review and remove it, then start hackd again`
     );
   }
 }
@@ -122,7 +122,7 @@ async function findPlantedEntry(opts: {
       plantedProblem({ path, info, uid: opts.uid }) ??
       (info.isDirectory()
         ? await checkSubdirectory({ path, uid: opts.uid, depth })
-        : null);
+        : await checkWritableFile({ path, info }));
     if (problem !== null) {
       return problem;
     }
@@ -144,6 +144,49 @@ function plantedProblem(opts: {
   }
   if (info.isFile() && info.nlink > 1) {
     return `${path}, a file with other hard links`;
+  }
+  return null;
+}
+
+/**
+ * State files whose contents decide who may use hackd: one others could
+ * write may already say what they chose (a write token's hash), so it is
+ * refused, not repaired (HACK-2142).
+ */
+const TRUSTED_CONTENT_FILES = new Set([join("gateway", "tokens.json")]);
+
+/**
+ * A regular file group or others could write. hackd's own logs and pid
+ * file are created with the process umask (`0664` under `0002`); their
+ * contents decide nothing (a pid is proven before any signal), so write
+ * access is removed through a handle that does not follow a link. A file
+ * in {@link TRUSTED_CONTENT_FILES} is refused instead. Null when fine.
+ */
+async function checkWritableFile(opts: {
+  readonly path: string;
+  readonly info: Awaited<ReturnType<typeof lstat>>;
+}): Promise<string | null> {
+  if (!opts.info.isFile() || (Number(opts.info.mode) & 0o022) === 0) {
+    return null;
+  }
+  const relativePath = join(basename(dirname(opts.path)), basename(opts.path));
+  if (TRUSTED_CONTENT_FILES.has(relativePath)) {
+    return `${opts.path}, which other users could write (mode ${(Number(opts.info.mode) & 0o777).toString(8)}), so its contents cannot be trusted (gateway tokens must be issued again once it is removed)`;
+  }
+  let handle: FileHandle;
+  try {
+    handle = await open(opts.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error: unknown) {
+    return `${opts.path}, a file that could not be opened (${error instanceof Error ? error.message : String(error)})`;
+  }
+  try {
+    const mode = Number((await handle.stat()).mode);
+    await handle.chmod(mode & 0o7755).catch(() => undefined);
+    if ((Number((await handle.stat()).mode) & 0o022) !== 0) {
+      return `${opts.path}, a file other users can write that could not be made owner-writable`;
+    }
+  } finally {
+    await handle.close();
   }
   return null;
 }

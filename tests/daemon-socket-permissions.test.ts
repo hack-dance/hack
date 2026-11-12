@@ -201,5 +201,42 @@ test("planted entries one level down (gateway/) are refused (HACK-2142)", async 
   await rm(join(gateway, "nested"), { recursive: true });
   await writeFile(join(gateway, "audit.jsonl"), "{}\n");
   await writeFile(join(gateway, "tokens.json"), "{}\n");
+  // The token store is written owner-only (0600 since HACK-2142).
+  await chmod(join(gateway, "tokens.json"), 0o600);
   await secureDaemonDirectory({ root: daemonRoot });
+});
+
+test("a token store others could write is refused; hackd's own files are repaired (HACK-2142)", async () => {
+  // Codex security review: a group member could rewrite a 0664
+  // gateway/tokens.json in place (same owner, one link) and plant a write
+  // token's hash, which the scan accepted.
+  const hackHome = join(root, "home", ".hack");
+  const daemonRoot = join(hackHome, "daemon");
+  const gateway = join(daemonRoot, "gateway");
+  await mkdir(gateway, { recursive: true });
+  await chmod(join(root, "home"), 0o755);
+  await chmod(hackHome, 0o755);
+  // What hackd itself leaves under umask 0002.
+  await writeFile(join(daemonRoot, "hackd.log"), "");
+  await writeFile(join(daemonRoot, "hackd.pid"), "1\n");
+  await writeFile(join(gateway, "audit.jsonl"), "{}\n");
+  for (const file of ["hackd.log", "hackd.pid"]) {
+    await chmod(join(daemonRoot, file), 0o664);
+  }
+  await chmod(join(gateway, "audit.jsonl"), 0o664);
+  await writeFile(join(gateway, "tokens.json"), "{}\n");
+  await chmod(join(gateway, "tokens.json"), 0o664);
+  await expect(secureDaemonDirectory({ root: daemonRoot })).rejects.toThrow(
+    `${join(gateway, "tokens.json")}, which other users could write`
+  );
+  // Removed (tokens issued again later): the rest is repaired, not refused.
+  await rm(join(gateway, "tokens.json"));
+  await secureDaemonDirectory({ root: daemonRoot });
+  for (const file of [
+    join(daemonRoot, "hackd.log"),
+    join(daemonRoot, "hackd.pid"),
+    join(gateway, "audit.jsonl"),
+  ]) {
+    expect((await stat(file)).mode & 0o777).toBe(0o644);
+  }
 });

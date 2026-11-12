@@ -16,7 +16,8 @@ is the runtime layer underneath and the product boundary around it.
 ## What is new
 
 - **Native backend (beta).** On Apple Silicon macOS, through the `hack-next`
-  channel, `HACK_RUNTIME_BACKEND=native` runs explicitly prepared projects without Docker. It supports a bounded command
+  channel, `HACK_RUNTIME_BACKEND=native` runs explicitly prepared projects without
+  Docker Desktop or OrbStack. It supports a bounded command
   subset and is qualified project by project. See
   [Native backend (beta)](native/overview.md).
 - **A config compiler.** `hack config validate`, `config plan`, `config import

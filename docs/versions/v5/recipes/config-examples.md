@@ -1,11 +1,11 @@
 # Config examples
 
-The commands and configuration on this page were audited against `v5.0.0-next.14`.
-The execution notes below come from the newer recipe source revision; the examples
-were not rerun with the pinned binary.
+The commands and configuration on this page were audited against `v5.0.0-next.15`.
+The execution notes retain their original scope; the examples were not rerun with
+the pinned binary.
 
 Copy-paste project setups for common shapes. Each one is a complete, working project in
-[`examples/configs`](https://github.com/hack-dance/hack/blob/4b400ea4d40acbff4ec00e37a3f288c67da55a03/examples/configs): `.hack/hack.config.json`, the env file,
+[`examples/configs`](https://github.com/hack-dance/hack/tree/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/examples/configs): `.hack/hack.config.json`, the env file,
 `.hack/docker-compose.yml` and a small app. Copy the directory, rename `name`, `dev_host`
 and the `caddy` labels, and replace the app.
 

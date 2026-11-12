@@ -70,7 +70,7 @@ flowchart LR
        command: ["bun", "run", "dev"]
        volumes:
          - ..:/app
-         - node_modules:/app/node_modules
+         - node_modules:/app/node_modules:ro
        depends_on:
          deps:
            condition: service_completed_successfully
@@ -91,7 +91,9 @@ flowchart LR
    ```
 
    The volume mounted over `/app/node_modules` hides any `node_modules` folder
-   in your checkout from the containers.
+   in your checkout from the containers. Only `deps` mounts it writable; app
+   services mount it read-only. Put tool caches and build output in separate
+   writable volumes.
 
 2. Use a locked install with your package manager:
 
@@ -154,8 +156,14 @@ volume. A linked worktree (or `--branch <name>`) installs into
 `<project>--<branch>_node_modules`. That is simple and safe, but every worktree
 installs from scratch once.
 
-To share one install between instances that have the same lockfile, label the
-`deps` service and set its platform:
+Share dependency caches only between worktrees you trust equally. Each worktree
+can run its own writable installer against the shared volume. A matching lockfile,
+a read-only app mount or the locked installer protocol does not establish trust
+in another worktree's code. Keep the default per-instance volumes for untrusted
+worktrees.
+
+To share one install between equally trusted instances that have the same
+lockfile, label the `deps` service and set its platform:
 
 ```yaml
   deps:
@@ -203,14 +211,16 @@ mount all of them in `deps` and in every app service. The
 does this with a YAML anchor:
 
 ```yaml
-x-workspace-volumes: &workspace-volumes
+x-app-volumes: &app-volumes
   - ..:/app
-  - node_modules:/app/node_modules
-  - web_node_modules:/app/apps/web/node_modules
-  - api_node_modules:/app/apps/api/node_modules
+  - node_modules:/app/node_modules:ro
+  - web_node_modules:/app/apps/web/node_modules:ro
+  - api_node_modules:/app/apps/api/node_modules:ro
 ```
 
-Add a volume when you add a workspace package that has dependencies. If you
+Use this read-only list for app services, and a separate writable list for
+`deps`, as the complete monorepo example does. Add a volume when you add a
+workspace package that has dependencies. If you
 miss one, the container writes that folder into your checkout.
 
 ## Recover a stale or half-written volume
@@ -246,6 +256,9 @@ leaves a damaged package in place.
 `hack down --prune-caches`.
 
 ## What was tested
+
+The read-only consumer mounts added later were checked statically, without a
+new Docker run. The execution results below describe the original writable mounts.
 
 Each step on this page was run with Docker Engine on Linux (amd64). The
 `platform: linux/arm64` value in the shared-volume example is for Apple

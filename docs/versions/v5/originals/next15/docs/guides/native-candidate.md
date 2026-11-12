@@ -189,6 +189,123 @@ finalization checks still apply. Fresh and already branch-scoped graphs keep
 their normal branch namespace. This compatibility path does not authorize
 adopting an unrelated branch or project.
 
+## Check a project before you start it
+
+`hack up` on the native backend checks a Compose project in two places and stops
+at the first refusal of each: the CLI's own admission, then the runtime review.
+To see the findings together, run the preflight:
+
+```sh
+hack doctor --native-preflight            # in the project, or with --path <root>
+hack doctor --native-preflight --profile dev,ops
+hack doctor --native-preflight --json
+```
+
+It lists the blockers and notes for the project's `.hack/docker-compose.yml`,
+each with a plain sentence and a fix. It judges what `hack up` judges: the
+Compose document after the selected native adaptation and the project-wide
+extra hosts are applied, reviewed with the profiles you pass.
+
+The Compose input must be a nonempty regular file of at most 256 KiB, not a
+symbolic link. Unreadable, changing or oversized input is reported as
+`compose_file_unreadable`; the check never waits for a FIFO writer.
+
+It changes nothing in the project and starts nothing: no VM, no image pull, no
+lifecycle hook. It accepts only `--path`, `--profile` and `--json`. The report
+never prints authored values. A finding names a closed code, a service and a
+field; environment values, label keys and values, paths and image names are
+left out.
+
+The runtime review half needs a native runtime, so run the preflight from the
+`hack-next` launcher for the full list. Without native selection only the CLI's
+checks run and the review is reported as `skipped`. The review needs no running
+VM.
+
+With `--json` the report is the `data` of the standard result envelope:
+
+```json
+{
+  "report_version": 1,
+  "backend": "native",
+  "compose_file": ".hack/docker-compose.yml",
+  "ready": false,
+  "runtime_review": { "status": "completed" },
+  "blockers": [
+    {
+      "severity": "blocker",
+      "gate": "cli",
+      "code": "env_file",
+      "service": "web",
+      "field": "env_file",
+      "message": "The service uses env_file, which native does not read.",
+      "fix": "Move its variables into Hack managed env with hack env set --service, or run hack doctor --migrate-env-config."
+    }
+  ],
+  "warnings": []
+}
+```
+
+- `ready` is true only when there is no blocker and the runtime review
+  completed.
+- The exit status follows the blockers: `0` with none, `1` otherwise. A skipped
+  or unavailable review is not a blocker, so that run exits `0` with
+  `ready: false`. With `--json` the envelope is `ok: true` in both cases; read
+  `ready` and `blockers` for the verdict.
+- `gate` is `cli` or `runtime`: which of the two checks reported the finding.
+- `runtime_review.status` is one of:
+  - `completed`: the review ran.
+  - `stopped`: the review met a project problem it cannot continue past, such as
+    an anonymous volume (`invalid_mount`) or a mount outside the project
+    (`source_escape`). `code` names it, it is listed as a blocker, and more
+    findings can appear once it is fixed.
+  - `skipped`: the review did not run. Without `code`, no native runtime is
+    selected. `code` is `native_selection_incomplete` when
+    `HACK_RUNTIME_BACKEND=native` is set without a candidate, and
+    `native_adaptation_invalid` when the adaptation was refused: the unadapted
+    document is not reviewed, because its findings would mislead.
+  - `unavailable`: the selected runtime did not return a review. `code`, when
+    present, is the runtime's own failure code. This says nothing about the
+    project.
+- Codes are stable. The CLI's codes are `compose_file_unreadable`,
+  `project_config_invalid`, `native_settings_invalid`,
+  `native_adaptation_invalid`, `internal_hosts_unreadable`,
+  `internal_hosts_without_dependencies`, `external_network`, `external_volume`,
+  `reserved_label`, `unsupported_build`, `foreign_platform`,
+  `invalid_service_name`, `invalid_service`, `build_requires_opt_in`,
+  `unsupported_build_form`, `emulated_build`, `env_file`, `missing_image`,
+  `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
+  `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
+  `dotenv_without_managed_env`, `shared_source_grant_required`,
+  `route_probe_required` and `too_many_bridges`. Runtime findings use the
+  review's own diagnostic codes, for example `privileged_service` or
+  `invalid_mount`, and `review_incompatible` when the review does not admit the
+  project and gives no finding this version can show. A code this version has
+  no sentence for is still listed, by its code and field.
+
+The preflight is a report, not an admission decision: `hack up` still runs its
+own checks, and a clean report starts nothing. It does not cover:
+
+- A project with native project inputs: a native project file
+  (`.hack/hack.project.json`) or a Compose file adopted into generated native
+  inputs. Those take another admission path, and the preflight refuses them
+  with a usage error.
+- `--env`, and a retained run's environment. It uses the project's default
+  environment to select the per-env adaptation and dependency files; `hack up`
+  uses `--env` when given, or the environment of a run it resumes.
+- Checks that need secret values or a resolved managed environment: a build
+  argument that carries a stored secret, a managed variable whose name is not
+  a valid environment name, and managed env that fails to resolve. `hack up`
+  also replaces the `environment` entries that managed env supplies before its
+  review, so a malformed authored value under such a key is a blocker here and
+  not there.
+- Image pinning. `hack up` reviews images by content ID after it has admitted
+  and pulled them; the preflight reviews the references as written.
+- What only a start can find: an image that cannot be pulled or admitted, a
+  source tree over the size limit, a process wrapper a service cannot run, a
+  host dependency without a binding, or a host port that is already in use.
+- More than the first problem of a kind that stops the review. See `stopped`
+  above.
+
 ## Compose projects that stay on the Compose backend
 
 In v5, an unchanged Compose project (`.hack/hack.config.json` with
@@ -755,6 +872,22 @@ profile unless you pass `--profile development`; the research profile can report
 hashes are listed under [network tool packages](#network-tool-packages), not in
 `provider-pins.json`.
 
+The current SmolVM pin is 1.34.1 (`smolvm-1.34.1-darwin-arm64.tar.gz`, SHA-256
+`8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9`, the value
+upstream publishes in the release's `checksums.sha256`). `provider-pins.json` is the
+source of truth; the executor refuses any other archive.
+
+**Provider pin changes need a fresh candidate home.** A home's guest rootfs copy,
+disks and provider database are made by the SmolVM release it was prepared with. When
+an executor pins a different release, every start and `runtime prepare` in that home
+refuses with `provider_pin_changed` and names both versions. Nothing in the home is
+changed: its volumes and prepared tree stay in place, and a build that pins the
+recorded release still runs it. `runtime probe` and `runtime repair-provider-tree`
+refuse the same way, and so does `runtime down` while the old provider runs, so stop a
+running pool (`hack down`, then `runtime down`) before installing a build with a new pin; a pool left running must be
+stopped with the build that started it. Prepare a new candidate home with the pinned
+archives instead; there is no in-place provider upgrade.
+
 Preparation keeps each archive it extracted (`providers/smolvm-installing/release.tar.gz`
 and `providers/docker-installing/release.tgz`). If something outside Hack changes a
 prepared tree, for example a cleanup or backup tool that prunes empty directories,
@@ -859,17 +992,25 @@ Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), wit
 regular, singly linked mode-`0600` files. Acquire the matching public package bytes;
 the command never downloads packages or accepts substitute versions.
 
-The pinned files come from the Alpine **v3.19** `main` repository for `aarch64`
-(`https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/`). Other Alpine
-releases, such as v3.20, publish packages with the same file names but different
-bytes; those fail the hash check below.
+The pinned files come from the Alpine **v3.24** `main` repository for `aarch64`
+(`https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/`), matching the Alpine
+3.24 guest in the pinned SmolVM release. Other Alpine releases publish packages with
+the same file names but different bytes; those fail the hash check below. A home
+prepared with the earlier v3.19 files is refused by the new provider pin (see the
+provider pin note above), so prepare the new files in a fresh candidate home.
 
 | File | SHA-256 |
 | --- | --- |
-| `iptables-1.8.10-r3.apk` | `31ab6343f1f3d0fbbf290c4dcf0430b2d08e8073e516e13530dfab25b097d467` |
-| `libmnl-1.0.5-r2.apk` | `d15e6313880bdd14959f42c1556b4a810ef4894992ae9f73b148126f0cc6021d` |
-| `libnftnl-1.2.6-r0.apk` | `ec1c2b02869fc65bcf7a1105e3a7ac5df1bd9a8bd8b399cb6cf650dd3112c021` |
-| `libxtables-1.8.10-r3.apk` | `f0accefde240ece6722479b46cb014d7d2f745af7d796e8eec3ced53571e1088` |
+| `iptables-1.8.13-r0.apk` | `9d22aef2e74346e9d537f6dc964786ab14b35580e3ccc0e4001dc3a725e8fe77` |
+| `libmnl-1.0.5-r2.apk` | `0ca382c70f78affef3a4a28016aab25ad8c3ccf1bcdad59f3968d4536a7b2478` |
+| `libnftnl-1.3.1-r0.apk` | `8b31395671e910c294d7f0e29d3ac3c7efe9d89264db255f39aa9944dd4b6cac` |
+| `libxtables-1.8.13-r0.apk` | `7535f18d9c7229178bc5e3809e5fea171033e33dfa054d88846512e1f25eefa8` |
+
+At each pool's first start the guest installs these files from the private copy and reads
+only its installed package database: it never contacts a package repository, so pools
+without internet access start the same way. An install that a failed first start
+interrupted resumes on the next start; a guest receipt that names another pool or package
+set is refused.
 
 All APKs are validated before candidate state is changed. Installation publishes a
 complete private directory atomically; an existing installation is revalidated and

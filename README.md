@@ -139,8 +139,8 @@ If something looks wrong, run `hack doctor` and read what it reports. Then run
 </picture>
 
 After global setup, `hack init` writes config, `hack up --detach` starts services
-and routes, `hack open` opens HTTPS, `hack logs` streams output until Ctrl-C,
-and `hack down` stops services while keeping data.
+that the shared proxy routes, `hack open` opens HTTPS, `hack logs` streams output
+until Ctrl-C, and `hack down` stops services while keeping data.
 
 ```bash
 hack up --detach                     # start the project (hack down stops it)

@@ -2179,9 +2179,48 @@ export async function checkSystemdServicePrograms(opts: {
   }
   const path = (starts[0] as SystemdExecEntry).path;
   return (
+    (await checkSystemdServiceNamespace({ deps: opts.deps })) ??
     (await checkHackExecutableIdentity({ path })) ??
     (await checkServiceExecutableTrusted({ path }))
   );
+}
+
+/**
+ * Settings that make systemd run the service in another file namespace: a
+ * different root, images or bind mounts. The paths `systemctl show`
+ * reports are then host paths that need not be what runs (HACK-2052), so
+ * Hack, which writes none of them, refuses rather than maps them.
+ */
+const NAMESPACE_PROPERTIES = [
+  "RootDirectory",
+  "RootImage",
+  "MountImages",
+  "ExtensionImages",
+  "ExtensionDirectories",
+  "BindPaths",
+  "BindReadOnlyPaths",
+  "TemporaryFileSystem",
+] as const;
+
+/** Null, or why the unit's file namespace cannot be vouched for. */
+async function checkSystemdServiceNamespace(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  const show = await opts.deps.run("systemctl", [
+    "--user",
+    "--no-pager",
+    "show",
+    SYSTEMD_UNIT_NAME,
+    `--property=${NAMESPACE_PROPERTIES.join(",")}`,
+  ]);
+  if (show.exitCode !== 0) {
+    return `systemd did not report the ${SYSTEMD_UNIT_NAME} file namespace (${firstLine(show.stderr) || `exit code ${show.exitCode}`})`;
+  }
+  const props = parseSystemdProperties(show.stdout);
+  const set = NAMESPACE_PROPERTIES.find((key) => (props[key] ?? "").length > 0);
+  return set === undefined
+    ? null
+    : `${SYSTEMD_UNIT_NAME} sets ${set}=${props[set]}, so the programs and PATH Hack checked on this host need not be what runs; remove it from the unit or its drop-ins`;
 }
 
 /** `hack` or `hack-<suffix>`, the names Hack installs its executable as. */

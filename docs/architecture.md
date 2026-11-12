@@ -474,7 +474,10 @@ add or create programs there either. Variables that load code before the checked
 (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `BASH_ENV`, `SHELLOPTS`, `NODE_OPTIONS`,
 `BUN_OPTIONS` and similar) are removed by an `UnsetEnvironment=` line in the unit
 Hack writes, so values from the user manager's environment never reach hackd,
-at login either. If a drop-in brings one back, `install` and `start` refuse. Put local settings, such as
+at login either. If a drop-in brings one back, `install` and `start` refuse. A unit
+that runs in another file namespace (`RootDirectory=`, `RootImage=`, bind mounts,
+images) is refused as well, because the paths Hack checked on the host need not
+be what systemd runs there. Put local settings, such as
 `DOCKER_HOST` for rootless Docker, in a drop-in (`systemctl --user edit hackd`).
 `install` writes the `hack` it was run from, and warns when that path is in a
 temporary directory, a package cache or a source checkout.

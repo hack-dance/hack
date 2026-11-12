@@ -114,6 +114,8 @@ type Fake = {
   managerEnvironment: string;
   /** The account's home in the password database (`getent passwd`). */
   passwdHome: string | null;
+  /** Namespace settings (`RootDirectory=...` lines) systemd reports. */
+  namespaceLines: string[];
 };
 
 /**
@@ -171,6 +173,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     extraExecLines: [],
     managerEnvironment: `HOME=${root}\nPATH=/usr/bin:/bin\n`,
     passwdHome: root,
+    namespaceLines: [],
     deps: undefined as unknown as SystemdDeps,
   };
   const ok = (stdout = ""): ServiceCommandResult => ({
@@ -232,6 +235,12 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
         ].filter((line) => wanted.has(line.slice(0, line.indexOf("="))));
         return ok(`${lines.join("\n")}\n`);
       })();
+    }
+    if (
+      verb === "show" &&
+      args.some((arg) => arg.startsWith("--property=RootDirectory,"))
+    ) {
+      return Promise.resolve(ok(`${state.namespaceLines.join("\n")}\n`));
     }
     if (verb === "show" && args.includes("--property=UnitPath")) {
       return Promise.resolve(
@@ -462,6 +471,7 @@ linuxTest(
       "systemctl --user --no-pager show hackd.service --property=Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment,ExecSearchPath",
       "systemctl --user show-environment",
       "systemctl --user --no-pager show hackd.service --property=ExecCondition,ExecStartPre,ExecStart,ExecStartPost,ExecReload,ExecStop,ExecStopPost",
+      "systemctl --user --no-pager show hackd.service --property=RootDirectory,RootImage,MountImages,ExtensionImages,ExtensionDirectories,BindPaths,BindReadOnlyPaths,TemporaryFileSystem",
       "systemctl --user enable hackd.service",
     ]);
 
@@ -3585,3 +3595,29 @@ linuxTest(
     ).toMatchObject({ error: expect.stringContaining("PassEnvironment") });
   }
 );
+
+linuxTest("a unit that runs in another file namespace is refused", async () => {
+  // Codex security review: RootDirectory= (or a bind mount) makes systemd
+  // run another file than the host path `systemctl show` reports.
+  const fake = fakeSystemd();
+  await installSystemdUnit({
+    unitPath,
+    unitText: unitText(),
+    deps: fake.deps,
+  });
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toBeNull();
+  fake.namespaceLines = ["RootDirectory=/srv/shared/root"];
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+    "RootDirectory=/srv/shared/root"
+  );
+  expect(
+    await checkSystemdLoadedUnitPaths({ unitPath, deps: fake.deps })
+  ).toContain("RootDirectory");
+  fake.namespaceLines = [
+    "RootDirectory=",
+    `BindReadOnlyPaths=/srv/shared/hack:${program}`,
+  ];
+  expect(await checkSystemdServicePrograms({ deps: fake.deps })).toContain(
+    "BindReadOnlyPaths"
+  );
+});

@@ -12,10 +12,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  mergeNativeShellEnvironment,
   nativeReviewedActiveServices,
   prepareNativeProjectInput,
+  requireNativeShellDeliveryFits,
   selectActiveNativeProjectInput,
 } from "../src/backends/native-project-input.ts";
+import { nativeEnvironmentDelivery } from "../src/backends/native-project-start.ts";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
@@ -406,4 +409,434 @@ test("a missing project env key is reported as such, not as invalid Compose", as
   } finally {
     restoreEnv("HACK_ENV_SECRET_KEY", oldKey);
   }
+});
+
+/** A Compose reference to `name`, built so this file has no template placeholders. */
+function reference(name: string, word?: string): string {
+  return word === undefined ? `$\{${name}}` : `$\{${name}:-${word}}`;
+}
+
+/** The normalized `environment` of each service. */
+function environments(result: { readonly normalizedComposeJson: string }) {
+  return (
+    JSON.parse(result.normalizedComposeJson) as {
+      services: Record<string, { environment?: unknown }>;
+    }
+  ).services;
+}
+
+/**
+ * Compose reads a `NAME` reference and a bare `NAME` entry from the caller's
+ * shell. Native does the same for a service's `environment`, without ever
+ * writing the value into the public document: the entry stays a reference and
+ * the value is kept apart, for the private delivery.
+ */
+test("plain shell references and bare names are resolved privately; everything else is left as written", async () => {
+  const PRIVATE = "synthetic-shell-value";
+  const opts = await fixture({
+    services: {
+      api: {
+        image: "bun:1",
+        environment: {
+          WHOLE: reference("SHELL_SET"),
+          UNBRACED: "$SHELL_SET",
+          UNSET: reference("SHELL_UNSET"),
+          PASSED: null,
+          NOT_PASSED: null,
+          // Forms that start today are not touched, whatever the shell holds.
+          WITH_DEFAULT: reference("SHELL_SET", "fallback"),
+          LITERAL: "plain",
+          PARTIAL: `http://${reference("SHELL_SET")}:80`,
+          ESCAPED: `$${reference("SHELL_SET")}`,
+          // Hack's own variables: the env decryption key must never be copyable.
+          LEAKED_KEY: reference("HACK_ENV_SECRET_KEY"),
+          HACK_ENV_SECRET_KEY: null,
+          HACK_GATEWAY_TOKEN: reference("HACK_GATEWAY_TOKEN"),
+          // Names the runtime supplies or the credential adapters own.
+          PROJECT: reference("COMPOSE_PROJECT_NAME"),
+          COMPOSE_PROJECT_NAME: reference("SHELL_SET"),
+          AWS_SECRET_ACCESS_KEY: reference("AWS_SECRET_ACCESS_KEY"),
+          COPIED_KEY: reference("AWS_ACCESS_KEY_ID"),
+          GOOGLE_APPLICATION_CREDENTIALS: null,
+          // Valid names that are also Object.prototype properties.
+          constructor: reference("constructor"),
+          INHERITED: reference("toString"),
+        },
+      },
+      worker: {
+        image: "bun:1",
+        environment: [
+          "PASSED",
+          "NOT_PASSED",
+          `WHOLE=${reference("SHELL_SET")}`,
+          "KEEP=1",
+        ],
+      },
+      plain: { image: "bun:1" },
+      literal: { image: "bun:1", environment: ["A=1", "B=two"] },
+      // Every entry commented out is YAML null; it must stay accepted.
+      empty: { image: "bun:1", environment: null },
+    },
+  });
+  const result = await prepareNativeProjectInput({
+    ...opts,
+    env: {
+      SHELL_SET: PRIVATE,
+      PASSED: `${PRIVATE}-passed`,
+      COMPOSE_PROJECT_NAME: "other-instance",
+      AWS_SECRET_ACCESS_KEY: "long-lived-credential",
+      AWS_ACCESS_KEY_ID: "long-lived-id",
+      GOOGLE_APPLICATION_CREDENTIALS: "credential-path",
+      HACK_ENV_SECRET_KEY: "project-env-decryption-key",
+      HACK_GATEWAY_TOKEN: "gateway-token",
+      // Never read: no entry references it.
+      UNRELATED: "unrelated-private",
+    },
+  });
+  // Shell values are kept apart from what Hack manages, and never fingerprinted.
+  expect(result.managedEnvironment).toEqual({});
+  expect(JSON.parse(JSON.stringify(result.shellEnvironment))).toEqual({
+    api: {
+      WHOLE: PRIVATE,
+      UNBRACED: PRIVATE,
+      // Compose substitutes an empty string for an unset variable.
+      UNSET: "",
+      PASSED: `${PRIVATE}-passed`,
+      // Delivered empty rather than left out, so the reviewed document is the
+      // same from a shell that sets it and one that does not.
+      NOT_PASSED: "",
+      // Unset in this shell, and not taken from Object.prototype.
+      constructor: "",
+      INHERITED: "",
+    },
+    worker: { PASSED: `${PRIVATE}-passed`, NOT_PASSED: "", WHOLE: PRIVATE },
+  });
+  expect(result.normalizedComposeJson).not.toContain(PRIVATE);
+  // Not read at all: neither public nor private.
+  for (const hidden of [
+    "unrelated-private",
+    "other-instance",
+    "long-lived-credential",
+    "long-lived-id",
+    "credential-path",
+    "project-env-decryption-key",
+    "gateway-token",
+  ]) {
+    expect(result.normalizedComposeJson).not.toContain(hidden);
+    expect(JSON.stringify(result.shellEnvironment)).not.toContain(hidden);
+  }
+  const services = environments(result);
+  expect(JSON.parse(JSON.stringify(services.api?.environment))).toEqual({
+    WHOLE: null,
+    UNBRACED: null,
+    UNSET: null,
+    PASSED: null,
+    NOT_PASSED: null,
+    constructor: null,
+    INHERITED: null,
+    WITH_DEFAULT: reference("SHELL_SET", "fallback"),
+    LITERAL: "plain",
+    PARTIAL: `http://${reference("SHELL_SET")}:80`,
+    ESCAPED: `$${reference("SHELL_SET")}`,
+    PROJECT: reference("COMPOSE_PROJECT_NAME"),
+    COMPOSE_PROJECT_NAME: reference("SHELL_SET"),
+    AWS_SECRET_ACCESS_KEY: reference("AWS_SECRET_ACCESS_KEY"),
+    COPIED_KEY: reference("AWS_ACCESS_KEY_ID"),
+    GOOGLE_APPLICATION_CREDENTIALS: null,
+    LEAKED_KEY: reference("HACK_ENV_SECRET_KEY"),
+    HACK_ENV_SECRET_KEY: null,
+    HACK_GATEWAY_TOKEN: reference("HACK_GATEWAY_TOKEN"),
+  });
+  expect(services.worker?.environment).toEqual({
+    PASSED: null,
+    NOT_PASSED: null,
+    WHOLE: null,
+    KEEP: "1",
+  });
+  expect(services.plain?.environment).toBeUndefined();
+  // No reference, no rewrite: the list form is exactly what was authored.
+  expect(services.literal?.environment).toEqual(["A=1", "B=two"]);
+  expect(services.empty?.environment).toBeNull();
+  // Names only, never values.
+  expect(result.environmentNotices).toEqual([
+    {
+      service: "api",
+      line: "Service api: UNSET is empty because SHELL_UNSET is not set in your shell.",
+    },
+    {
+      service: "api",
+      line: "Service api: NOT_PASSED is empty because it is not set in your shell.",
+    },
+    {
+      service: "api",
+      line: "Service api: constructor is empty because it is not set in your shell.",
+    },
+    {
+      service: "api",
+      line: "Service api: INHERITED is empty because toString is not set in your shell.",
+    },
+    {
+      service: "worker",
+      line: "Service worker: NOT_PASSED is empty because it is not set in your shell.",
+    },
+  ]);
+});
+
+test("the reviewed document does not depend on the shell, and nothing is read unless the caller passes an environment", async () => {
+  const compose = {
+    services: {
+      api: {
+        image: "bun:1",
+        environment: { TOKEN: reference("SHELL_TOKEN"), PASSED: null },
+      },
+    },
+  };
+  const set = await prepareNativeProjectInput({
+    ...(await fixture(compose)),
+    env: { SHELL_TOKEN: "shell-private", PASSED: "passed-private" },
+  });
+  const unset = await prepareNativeProjectInput({
+    ...(await fixture(compose)),
+    env: {},
+  });
+  // Same public document from a shell that sets the variables and one that does not.
+  expect(set.normalizedComposeJson).toBe(unset.normalizedComposeJson);
+  // Without `env`, as exec and the stale-env check call it, the process
+  // environment is not consulted.
+  const previous = process.env.SHELL_TOKEN;
+  process.env.SHELL_TOKEN = "ambient-private";
+  try {
+    const ambient = await prepareNativeProjectInput(await fixture(compose));
+    expect(ambient.shellEnvironment).toEqual({
+      api: { TOKEN: "", PASSED: "" },
+    });
+    expect(ambient.normalizedComposeJson).toBe(set.normalizedComposeJson);
+  } finally {
+    restoreEnv("SHELL_TOKEN", previous);
+  }
+});
+
+test("a key Hack manages is delivered from managed env, never from the shell", async () => {
+  const opts = await fixture({
+    services: {
+      api: {
+        image: "bun:1",
+        environment: [
+          "KEEP=tracked",
+          `TOKEN=${reference("SHELL_TOKEN")}`,
+          "FROM_MANAGED",
+          `COPY=${reference("TOKEN")}`,
+        ],
+      },
+    },
+  });
+  await env(opts.projectDir, "default", {
+    global: { TOKEN: "managed-private", FROM_MANAGED: "managed-too" },
+  });
+  const result = await prepareNativeProjectInput({
+    ...opts,
+    env: {
+      SHELL_TOKEN: "shell-private",
+      FROM_MANAGED: "shell-loses",
+      TOKEN: "shell-loses-too",
+    },
+  });
+  expect(result.managedEnvironment.api).toEqual({
+    TOKEN: "managed-private",
+    FROM_MANAGED: "managed-too",
+  });
+  // Nothing of this service is taken from the shell.
+  expect(result.shellEnvironment).toEqual({});
+  // A reference to a managed variable is left for the runtime to refuse.
+  expect(
+    (environments(result).api?.environment as Record<string, unknown>).COPY
+  ).toBe(reference("TOKEN"));
+  for (const hidden of ["shell-private", "shell-loses"]) {
+    expect(result.normalizedComposeJson).not.toContain(hidden);
+  }
+  expect(result.environmentNotices).toEqual([]);
+});
+
+test("merged shell values join the private delivery, and a delivery the runtime would refuse is refused first, naming the service", async () => {
+  const compose = (count: number) => ({
+    services: {
+      api: {
+        image: "bun:1",
+        environment: Object.fromEntries(
+          Array.from({ length: count }, (_, index) => [
+            `KEY_${index}`,
+            reference("BIG"),
+          ])
+        ),
+      },
+    },
+  });
+  const prepared = async (count: number, value: string) =>
+    await prepareNativeProjectInput({
+      ...(await fixture(compose(count))),
+      env: { BIG: value },
+    });
+  const merged = mergeNativeShellEnvironment(await prepared(2, "small"));
+  expect(merged.managedEnvironment).toEqual({
+    api: { KEY_0: "small", KEY_1: "small" },
+  });
+  expect(merged.shellEnvironment).toEqual({});
+  expect(merged.shellServices).toEqual(["api"]);
+  // Merging again changes nothing, and a delivery within the limits passes.
+  expect(mergeNativeShellEnvironment(merged)).toBe(merged);
+  expect(() => requireNativeShellDeliveryFits(merged)).not.toThrow();
+  // An input with nothing from the shell is returned as it is.
+  const untouched = await prepareNativeProjectInput(
+    await fixture({ services: { api: { image: "bun:1" } } })
+  );
+  expect(mergeNativeShellEnvironment(untouched)).toBe(untouched);
+  for (const [count, value, cause] of [
+    // Two values that each fit, but not together.
+    [2, "x".repeat(20 * 1024), "are over 32 KiB together"],
+    // JSON escaping counts: the runtime receives the escaped form.
+    [1, '"'.repeat(17 * 1024), "are over 32 KiB together"],
+    [257, "#", "more than 256 variables"],
+    [1, "bad\0value", "contains a NUL byte"],
+  ] as const) {
+    const input = await prepared(count, value);
+    const delivery = mergeNativeShellEnvironment(input);
+    let refusal: unknown;
+    try {
+      requireNativeShellDeliveryFits(delivery);
+    } catch (caught: unknown) {
+      refusal = caught;
+    }
+    // A service the selected profiles leave out is not delivered, so it is not counted.
+    expect(() =>
+      requireNativeShellDeliveryFits(
+        selectActiveNativeProjectInput({
+          input: delivery,
+          reviewedPlan: { services: { api: { active: false } } },
+        })
+      )
+    ).not.toThrow();
+    expect(refusal).toBeInstanceOf(HackCliError);
+    const message = String((refusal as Error).message);
+    expect(message).toContain("service api field environment");
+    expect(message).toContain(cause);
+    expect(message).toContain("values omitted");
+    expect(message).not.toContain(value.slice(0, 12));
+    expect(message).not.toContain("\0");
+  }
+});
+
+async function aggregateShellInput(count: number, value: string) {
+  return mergeNativeShellEnvironment(
+    await prepareNativeProjectInput({
+      ...(await fixture({
+        services: Object.fromEntries(
+          Array.from({ length: count }, (_, index) => [
+            `app${index}`,
+            { image: "bun:1", environment: { TOKEN: reference("BIG") } },
+          ])
+        ),
+      })),
+      env: { BIG: value },
+    })
+  );
+}
+
+const aggregateSelection = (count: number) => ({
+  planId: "f".repeat(64),
+  run: "a".repeat(32),
+  reviewedPlan: {
+    services: Object.fromEntries(
+      Array.from({ length: 9 }, (_, index) => [
+        `app${index}`,
+        { active: index < count },
+      ])
+    ),
+  },
+});
+
+test("aggregate private delivery counts active services and encoded file members", async () => {
+  const input = await aggregateShellInput(9, "p".repeat(30 * 1024));
+  for (const count of [8, 9]) {
+    const selection = aggregateSelection(count);
+    const active = selectActiveNativeProjectInput({ input, ...selection });
+    const bytes = nativeEnvironmentDelivery({ input: active, ...selection })
+      .payload?.length;
+    for (const values of Object.values(active.managedEnvironment)) {
+      expect(Buffer.byteLength(JSON.stringify(values))).toBeLessThan(32 * 1024);
+    }
+    if (count === 8) {
+      expect(bytes).toBeLessThan(256 * 1024);
+      expect(() => requireNativeShellDeliveryFits(active)).not.toThrow();
+    } else {
+      expect(bytes).toBeGreaterThan(256 * 1024);
+      expect(() => requireNativeShellDeliveryFits(active)).toThrow(
+        "over 256 KiB"
+      );
+    }
+  }
+  const members = [
+    {
+      name: "credential",
+      target: "/run/secrets/credential",
+      content: Buffer.alloc(16 * 1024, 0x66),
+    },
+  ];
+  const selection = aggregateSelection(8);
+  const inactiveFile = selectActiveNativeProjectInput({
+    input: { ...input, managedFiles: { app8: members } },
+    ...selection,
+  });
+  expect(
+    nativeEnvironmentDelivery({ input: inactiveFile, ...selection }).payload
+      ?.length
+  ).toBeLessThan(256 * 1024);
+  expect(() => requireNativeShellDeliveryFits(inactiveFile)).not.toThrow();
+  const activeFile = { ...inactiveFile, managedFiles: { app0: members } };
+  expect(
+    nativeEnvironmentDelivery({ input: activeFile, ...selection }).payload
+      ?.length
+  ).toBeGreaterThan(256 * 1024);
+  expect(() => requireNativeShellDeliveryFits(activeFile)).toThrow(
+    "over 256 KiB"
+  );
+});
+
+test("aggregate private delivery admits the exact wire limit and counts UTF-8 beyond it", async () => {
+  const input = await aggregateShellInput(8, "p".repeat(32_700));
+  const services = Object.fromEntries(
+    Object.entries(input.managedEnvironment).map(([name, values]) => [
+      name,
+      { ...values },
+    ])
+  );
+  const selection = aggregateSelection(8);
+  const delivery = { ...input, managedEnvironment: services };
+  const initialBytes =
+    nativeEnvironmentDelivery({ input: delivery, ...selection }).payload
+      ?.length ?? 0;
+  const padding = 256 * 1024 - initialBytes;
+  expect(padding).toBeGreaterThan(0);
+  for (const [index, values] of Object.values(services).entries()) {
+    values.TOKEN += "p".repeat(
+      Math.floor(padding / 8) + (index < padding % 8 ? 1 : 0)
+    );
+    expect(Buffer.byteLength(JSON.stringify(values))).toBeLessThanOrEqual(
+      32 * 1024
+    );
+  }
+  expect(
+    nativeEnvironmentDelivery({ input: delivery, ...selection }).payload?.length
+  ).toBe(256 * 1024);
+  expect(() => requireNativeShellDeliveryFits(delivery)).not.toThrow();
+  const first = Object.values(services)[0];
+  if (!first) {
+    throw new Error("Missing test service");
+  }
+  first.TOKEN += "é";
+  expect(
+    nativeEnvironmentDelivery({ input: delivery, ...selection }).payload?.length
+  ).toBe(256 * 1024 + 2);
+  expect(() => requireNativeShellDeliveryFits(delivery)).toThrow(
+    "over 256 KiB"
+  );
 });

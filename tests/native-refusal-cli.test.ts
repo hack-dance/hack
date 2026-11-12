@@ -17,6 +17,7 @@ import {
   type NativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { installNext13Frontend } from "./helpers/native-next13-state.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -859,6 +860,80 @@ test(
     } finally {
       await finish();
     }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "next.13 frontend: down --recover exits zero and plain up reaches a new ready lifetime",
+  async () => {
+    const f = await fixture();
+    const exited = Bun.spawn([process.execPath, "-e", ""], {
+      env: privateCliEnv({ root: f.root }),
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await exited.exited).toBe(0);
+    await installNext13Frontend({ scope: f.scope, exitedPid: exited.pid });
+    await f.reply("graph inspect", stoppedGraph);
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "stopped-data-retained",
+      receipt_sha256: "7".repeat(64),
+      foreground: "absent",
+      live_owner_recovery: null,
+    });
+    await f.reply("runtime managed-hostname-authority", {
+      authority: { present: false },
+    });
+    const stopped = await cli({
+      fixture: f,
+      args: ["down", "--recover"],
+      env: SHARED,
+    });
+    expect(stopped.code).toBe(0);
+    await scriptUpThroughReview(f);
+    const sha = createHash("sha256").update(f.compose).digest("hex");
+    await f.reply("project plan", {
+      plan_id: run.planId,
+      plan: {
+        namespace: run.namespace,
+        compose_sha256: sha,
+        enrollment_compatible: true,
+        services: { web: { active: true } },
+      },
+    });
+    await f.reply("graph retained-preflight", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan: run.planId,
+      live_resources_verified: false,
+      runtime_phase: "stopped",
+      selection: "8".repeat(64),
+    });
+    await f.reply("graph restore-selection", {
+      ...run,
+      plan: run.planId,
+      generation: "9".repeat(64),
+    });
+    await f.reply("graph dependency-plan", {
+      dependency_plan_id: "1".repeat(64),
+    });
+    await f.reply(
+      "graph serve-restore",
+      `${JSON.stringify({ kind: "graph_foreground_ready", run: run.run })}\n`
+    );
+    // This fake owner immediately finishes a retaining stop after its ready event.
+    // The frontend still checks its exact stopped graph and finalizes independently.
+    const started = await cli({ fixture: f, args: ["up"], env: SHARED });
+    expect(started).toMatchObject({ code: 0 });
+    expect(started.output).toContain("Project is ready");
+    expect(started.output).toContain("owned cleanup confirmed");
+    expect(await f.calls()).toContain("graph serve-restore");
   },
   SPAWN_TIMEOUT_MS
 );

@@ -1674,7 +1674,7 @@ mod owner_scope_tests {
     fn restored_owner_stops_without_replaying_legacy_pending_coordinator() {
         use crate::provider::relay_owner::lifecycle_intent::Coordinator;
         let state = std::env::temp_dir().join(format!("owner-restore-{}", std::process::id()));
-        state::private_directory(&state).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&state).unwrap();
         let run = "a".repeat(32);
         let owner = "b".repeat(32);
         let context = super::super::super::host_relay::context(&owner, "boot").unwrap();

@@ -22,6 +22,9 @@
     "run": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "owner": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "namespace": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "planId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    "planId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "effectiveEnvName": null,
+    "profiles": [],
+    "aws": null
   }
 }

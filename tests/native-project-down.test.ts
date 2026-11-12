@@ -1700,7 +1700,7 @@ for (const predecessor of [false, true]) {
     });
     expect(await child.exited).toBe(0);
     await installNext13Frontend({ scope: opts.scope, exitedPid: child.pid });
-    expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+    expect(await loadNativeProjectRun(opts.scope)).toMatchObject(run);
     let stopped = false;
     const calls: string[] = [];
     const inspect = () => ({

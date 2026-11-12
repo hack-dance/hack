@@ -6,7 +6,9 @@ not VM captures. No VM, Docker engine or host runtime was used to generate them.
 
 The tag was checked out separately. Its TypeScript `beginNativeProjectFinalization`
 and `saveNativeProjectRun` wrote `frontend.json` and `mapping.json` in an isolated
-home; that frontend then exited without calling `complete`. The fixture installer
+home; that frontend then exited without calling `complete`. The mapping
+uses the base-environment selection emitted by the tag's `selectedMapping`
+(`effectiveEnvName: null`, empty profiles, no AWS selection). The fixture installer
 replaces filesystem scope/inodes and the PID with the test's own exited child.
 It does not call the current mapping or finalization writers to create old state.
 

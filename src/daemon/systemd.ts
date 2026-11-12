@@ -427,6 +427,36 @@ function escapeSpecifiers(value: string): string {
 const UNREPRESENTABLE_PATH = /[\u0000-\u001f\u007f"\\$]/;
 
 /**
+ * Variables that make the dynamic loader or an interpreter run code before
+ * (or instead of) the program Hack checked (HACK-2052): `LD_PRELOAD` and
+ * the like for the `hack` binary, `BASH_ENV`, `NODE_OPTIONS`, `BUN_OPTIONS`
+ * and the like for a `#!` launcher. Their contents cannot be vouched for:
+ * the rendered unit unsets them all (`UnsetEnvironment=`, applied last, so
+ * login starts are covered too), and a service that still sets one (a
+ * drop-in overriding that) is refused, not inspected.
+ */
+const CODE_LOADING_ENV_KEYS = [
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "LD_AUDIT",
+  "GCONV_PATH",
+  "BASH_ENV",
+  "ENV",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "PS4",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "BUN_OPTIONS",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PERL5LIB",
+  "PERL5OPT",
+  "RUBYOPT",
+  "RUBYLIB",
+] as const;
+
+/**
  * Renders the unit file. Returns null for a program path the unit cannot
  * represent safely (relative, a compiled Bun virtual path, or containing
  * control, quote, backslash or `$` characters).
@@ -469,6 +499,9 @@ export function renderSystemdUnit(opts: {
     "WorkingDirectory=%h",
     `Environment="PATH=${path}"`,
     "Environment=HACK_NO_INTERACTIVE=1",
+    // Applied last by systemd, so it also strips what the user manager's
+    // environment carries at each login start (HACK-2052).
+    `UnsetEnvironment=${CODE_LOADING_ENV_KEYS.join(" ")}`,
     "StandardOutput=null",
     "StandardError=journal",
     "",
@@ -812,31 +845,6 @@ export type SystemdUnitHackHome =
   | { readonly kind: "unknown"; readonly detail: string };
 
 const ENV_WORD = /"([^"]*)"|(\S+)/g;
-
-/**
- * Variables that make the dynamic loader or an interpreter run code before
- * (or instead of) the program Hack checked (HACK-2052): `LD_PRELOAD` and
- * the like for the `hack` binary, `BASH_ENV`, `NODE_OPTIONS`, `BUN_OPTIONS`
- * and the like for a `#!` launcher. Their contents cannot be vouched for,
- * so a service that sets any of them is refused, not inspected.
- */
-const CODE_LOADING_ENV_KEYS = [
-  "LD_PRELOAD",
-  "LD_LIBRARY_PATH",
-  "LD_AUDIT",
-  "GCONV_PATH",
-  "BASH_ENV",
-  "ENV",
-  "NODE_OPTIONS",
-  "NODE_PATH",
-  "BUN_OPTIONS",
-  "PYTHONPATH",
-  "PYTHONSTARTUP",
-  "PERL5LIB",
-  "PERL5OPT",
-  "RUBYOPT",
-  "RUBYLIB",
-] as const;
 
 /** The variables Hack reads from the service environment. */
 const SERVICE_ENV_KEYS = [

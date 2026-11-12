@@ -3563,8 +3563,21 @@ linuxTest(
     expect(
       await readSystemdServicePathDirectories({ deps: fake.deps })
     ).toEqual({ dirs: ["/usr/bin", "/bin"] });
-    // PassEnvironment= of one cannot be read here: refused.
+    // bash runs PS4 under SHELLOPTS=xtrace: refused as well (a drop-in
+    // that drops the rendered UnsetEnvironment= and sets it again).
     fake.unsetEnvironment = "";
+    fake.managerEnvironment = `HOME=${root}\nPATH=/usr/bin:/bin\nSHELLOPTS=xtrace\n`;
+    expect(
+      await readSystemdServicePathDirectories({ deps: fake.deps })
+    ).toMatchObject({ error: expect.stringContaining("SHELLOPTS") });
+    // The rendered unit strips them all itself, login starts included.
+    const unset = unitText()
+      .split("\n")
+      .find((line) => line.startsWith("UnsetEnvironment="));
+    for (const key of ["LD_PRELOAD", "NODE_OPTIONS", "SHELLOPTS", "PS4"]) {
+      expect(unset?.split(/[= ]/)).toContain(key);
+    }
+    // PassEnvironment= of one cannot be read here: refused.
     fake.managerEnvironment = `HOME=${root}\nPATH=/usr/bin:/bin\n`;
     fake.passEnvironment = "LD_PRELOAD";
     expect(

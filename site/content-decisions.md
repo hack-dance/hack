@@ -35,6 +35,12 @@ differ.
 
 ## Style
 
+Recipes may be published as editorial pages before a re-pin when every shown
+Hack command, flag and configuration field exists in the pinned release. Give
+each page explicit source provenance and pin newer example links to that source
+commit. Keep a per-page audit in [recipe-compatibility.md](recipe-compatibility.md);
+leave recipes that need newer behavior out until the release pin advances.
+
 Plain English. Short pages that answer one question. Commands in fenced blocks
 with a sentence saying what to expect. No claims that a build, install or green
 check proves application behavior; say what was verified when it matters, and

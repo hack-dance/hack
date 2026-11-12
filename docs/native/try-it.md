@@ -15,7 +15,7 @@ run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.13/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.14/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -36,7 +36,7 @@ A `hack-next` install keeps each version in its own folder. The two paths you ne
 are the native program and its private home:
 
 ```sh
-V=5.0.0-next.13   # the version you installed; `hack-next --manager status` shows it
+V=5.0.0-next.14   # the version you installed; `hack-next --manager status` shows it
 NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
 NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 ```

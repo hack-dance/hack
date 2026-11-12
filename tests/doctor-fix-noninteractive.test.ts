@@ -158,6 +158,7 @@ let originalHome: string | undefined;
 let originalNoInteractive: string | undefined;
 let originalMutagenPath: string | undefined;
 let originalLogger: string | undefined;
+let originalDaemonAutostartDisable: string | undefined;
 
 beforeAll(() => {
   dnsMock.activate();
@@ -171,6 +172,10 @@ beforeEach(async () => {
   originalNoInteractive = process.env.HACK_NO_INTERACTIVE;
   originalMutagenPath = process.env.HACK_MUTAGEN_PATH;
   originalLogger = process.env.HACK_LOGGER;
+  originalDaemonAutostartDisable = process.env.HACK_DAEMON_AUTOSTART_DISABLE;
+  // This fixture exercises daemon repair through a mocked shell. Its own
+  // policy must be independent of the outer suite's daemon safety setting.
+  Reflect.deleteProperty(process.env, "HACK_DAEMON_AUTOSTART_DISABLE");
   tempDir = await mkdtemp(join(tmpdir(), "hack-doctor-fix-"));
   process.env.HOME = tempDir;
   process.env.HACK_NO_INTERACTIVE = "1";
@@ -204,6 +209,7 @@ afterEach(async () => {
     restoreEnv("HACK_MUTAGEN_PATH", originalMutagenPath);
   }
   restoreEnv("HACK_LOGGER", originalLogger);
+  restoreEnv("HACK_DAEMON_AUTOSTART_DISABLE", originalDaemonAutostartDisable);
 });
 
 afterAll(() => {

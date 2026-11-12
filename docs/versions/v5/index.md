@@ -16,6 +16,7 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 
 ## Understand the project
 
+- [Global settings](../guides/global-settings.md): machine-wide configuration and proxy bind addresses.
 - [Core concepts](../core.md): projects, services, instances and local URLs.
 - [Environment and secrets](../env.md): committed configuration with encrypted values.
 - [Lifecycle](../lifecycle.md): hooks, tunnels and host helpers that start with the project.
@@ -31,6 +32,14 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 - [Manage helpers and tunnels](guides/project-helpers.md)
 - [Use a cloud agent or another host](guides/cloud-environments.md)
 - [Try the native backend (beta)](../guides/native-candidate.md)
+
+## Recipes
+
+[Recipes](recipes/overview.md) has complete Compose projects for
+[common app configurations](recipes/config-examples.md),
+[environment overlays](recipes/environments.md), dependencies, migrations,
+tunnels and cleanup. Their footers identify the example source revision, and
+each page distinguishes the compatibility audit from its original execution notes.
 
 ## Native backend (beta)
 

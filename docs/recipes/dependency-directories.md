@@ -4,8 +4,8 @@ Use this to decide where `node_modules`, virtual environments, build output and
 tool caches live. The short rule: anything a container installs or generates
 goes in a named volume, not in your checkout.
 
-For installing packages, start with [Install dependencies in a deps
-service](deps-service.md). This page covers the other directories, how to share
+For installing packages, start with [Install dependencies in a deps service](deps-service.md).
+This page covers the other directories, how to share
 and clean them, and what changes on the native backend.
 
 ## Where each directory goes
@@ -31,7 +31,7 @@ services:
   web:
     volumes:
       - ..:/app
-      - node_modules:/app/node_modules
+      - node_modules:/app/node_modules:ro
       - build-cache:/app/.cache
 
 volumes:
@@ -61,6 +61,11 @@ fingerprint of the lockfiles, the runtime files you list in
 `hack.dependencies.runtime-files`, the installer image, the platform and the
 build settings. A different fingerprint gets a new volume. Old volumes are kept
 until you remove them.
+
+Only the installer should mount dependency volumes writable; app consumers use
+`:ro`, with tool caches in separate writable volumes. Share a dependency cache
+only across equally trusted worktrees. A worktree's installer can still change
+the shared volume, so use per-instance volumes for untrusted worktrees.
 
 The fingerprint does not see changes inside a mutable image tag. Pin the
 installer image by tag or digest.

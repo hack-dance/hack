@@ -34,7 +34,11 @@ afterEach(async () => {
  * real one does for a root-owned, non-writable directory). Every other tool
  * is the real one.
  */
-async function sandbox(opts?: { readonly realOwnershipCheck?: boolean }) {
+async function sandbox(opts?: {
+  readonly realOwnershipCheck?: boolean;
+  /** Replace `find` with one that fails without output. */
+  readonly failingFind?: boolean;
+}) {
   const root = await mkdtemp(join(tmpdir(), "hack-stdin-install-"));
   dirs.push(root);
   const bin = join(root, "bin");
@@ -56,7 +60,9 @@ async function sandbox(opts?: { readonly realOwnershipCheck?: boolean }) {
     ].join("\n"),
     { mode: 0o755 }
   );
-  if (!opts?.realOwnershipCheck) {
+  if (opts?.failingFind) {
+    await writeFile(join(bin, "find"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  } else if (!opts?.realOwnershipCheck) {
     await writeFile(join(bin, "find"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   }
   const run = async (args: {
@@ -101,7 +107,10 @@ describe("stdinInstallStep", () => {
     expect([...step.input]).toEqual([...new TextEncoder().encode("hi\n")]);
     // No source path anywhere: root reads only stdin.
     expect(STDIN_INSTALL_SCRIPT).not.toContain("$5");
-    expect(STDIN_INSTALL_SCRIPT).toContain('head -c "$n" > "$tmp"');
+    expect(STDIN_INSTALL_SCRIPT).toContain('sync -- "$tmp"; mv -fT');
+    expect(STDIN_INSTALL_SCRIPT).toContain(
+      'head -c "$((n + 1))" <&3 > "$tmp" & reader=$!'
+    );
     expect(STDIN_INSTALL_SCRIPT).toContain('mktemp -- "$dir/.hack-install.');
   });
 });
@@ -140,6 +149,28 @@ describe("root stdin install script", () => {
     const swapped = new TextEncoder().encode("swapped!\n");
     expect(swapped.byteLength).toBe(step.input.byteLength);
     expect(await box.run({ argv: step.argv, input: swapped })).toBe(67);
+    expect(await Bun.file(target).exists()).toBe(false);
+    expect(await leftovers(box.dest)).toEqual([]);
+  });
+
+  test("an ownership probe that fails without output refuses the directory", async () => {
+    const box = await sandbox({ failingFind: true });
+    const target = join(box.dest, "hack.rules");
+    expect(await box.run(stdinInstallStep({ target, content: "x\n" }))).toBe(
+      65
+    );
+    expect(await readdir(box.dest)).toEqual([]);
+  });
+
+  test("longer input is refused, not truncated", async () => {
+    const box = await sandbox();
+    const target = join(box.dest, "hack.rules");
+    const step = stdinInstallStep({ target, content: "approved\n" });
+    const longer = new Uint8Array([
+      ...step.input,
+      ...new TextEncoder().encode("extra"),
+    ]);
+    expect(await box.run({ argv: step.argv, input: longer })).toBe(66);
     expect(await Bun.file(target).exists()).toBe(false);
     expect(await leftovers(box.dest)).toEqual([]);
   });
@@ -183,6 +214,41 @@ describe("root stdin install script", () => {
     expect(await leftovers(box.dest)).toEqual([]);
   });
 
+  test("a signal during the stdin wait still removes the temporary file", async () => {
+    const box = await sandbox();
+    const target = join(box.dest, "hack.rules");
+    const step = stdinInstallStep({ target, content: "approved\n" });
+    const stalled = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("app"));
+      },
+    });
+    const [, , , ...rest] = step.argv;
+    // dash, as /bin/sh on Debian and Ubuntu, skips EXIT traps on signals
+    // unless the script traps them itself.
+    const shell = Bun.which("dash") ?? "sh";
+    const proc = Bun.spawn(
+      [shell, "-c", renderStdinInstallScript({ timeoutSeconds: 20 }), ...rest],
+      {
+        stdin: stalled,
+        stdout: "ignore",
+        stderr: "ignore",
+        env: { PATH: `${join(box.root, "bin")}:/usr/bin:/bin` },
+      }
+    );
+    for (let tries = 0; tries < 50; tries += 1) {
+      if ((await leftovers(box.dest)).length > 0) {
+        break;
+      }
+      await Bun.sleep(20);
+    }
+    expect(await leftovers(box.dest)).toHaveLength(1);
+    proc.kill("SIGTERM");
+    expect(await proc.exited).not.toBe(0);
+    expect(await leftovers(box.dest)).toEqual([]);
+    expect(await Bun.file(target).exists()).toBe(false);
+  });
+
   test("invalid arguments are refused before anything is created", async () => {
     const box = await sandbox();
     const good = stdinInstallStep({
@@ -203,6 +269,9 @@ describe("root stdin install script", () => {
     for (const argv of [
       withArgs("1", sum, "relative/a", "0644"),
       withArgs("1", sum, `${box.dest}/`, "0644"),
+      withArgs("1", sum, `${box.dest}/../etc/a`, "0644"),
+      withArgs("1", sum, `${box.dest}/./a`, "0644"),
+      withArgs("1", sum, `${box.dest}/..`, "0644"),
       withArgs("one", sum, join(box.dest, "a"), "0644"),
       withArgs(
         String(STDIN_INSTALL_MAX_BYTES + 1),

@@ -10,13 +10,16 @@
  *    checking the existing ancestors);
  * 2. creates its temporary file with `mktemp` inside that directory, so the
  *    file is root-owned and no other user can replace or redirect it;
- * 3. reads at most the declared number of bytes from stdin, within a time
- *    limit, and refuses any other length;
+ * 3. reads at most one byte more than declared from stdin, within a time
+ *    limit, and refuses any length other than the declared one (longer
+ *    input is refused, not truncated);
  * 4. checks the SHA-256 digest passed as an argument against those bytes;
  * 5. sets owner and mode, then renames the temporary file over the
  *    destination (a rename replaces a link at the destination; it never
  *    writes through it; a directory there fails the step).
- * The temporary file is removed on every failure. Arguments are positional
+ * The temporary file is removed on every failure, including a signal.
+ * `.` and `..` components are refused, and the file is synced before the
+ * rename. Arguments are positional
  * (`/bin/sh -c SCRIPT hack-install BYTES SHA256 DEST MODE`), never
  * interpolated.
  */
@@ -45,12 +48,16 @@ export function renderStdinInstallScript(opts?: {
     `case "$mode" in ${ALLOWED_MODES.join("|")}) ;; *) exit 64;; esac`,
     'case "$dest" in /*) ;; *) exit 64;; esac',
     'case "$dest" in */) exit 64;; esac',
+    // No `.` or `..` components: the ancestor walk below is lexical.
+    'case "$dest" in */./*|*/../*|*/.|*/..) exit 64;; esac',
     'dir="$(dirname -- "$dest")"',
     // A directory is safe when it is not a link, and is root-owned and not
     // writable by group or others; a chain is safe when every directory from
     // it up to / is. Then only root can rename or replace anything on the
     // path, so the temporary file below cannot be swapped or redirected.
-    'safe() { [ ! -L "$1" ] && [ -d "$1" ] && [ -z "$(find "$1" -maxdepth 0 \\( ! -user 0 -o -perm /022 \\) -print)" ]; }',
+    // The ownership probe fails closed: a failed or missing `find` (non-zero
+    // exit) refuses the directory instead of reading as "no violations".
+    'safe() { [ ! -L "$1" ] && [ -d "$1" ] || return 1; v="$(find "$1" -maxdepth 0 \\( ! -user 0 -o -perm /022 \\) -print)" || return 1; [ -z "$v" ]; }',
     'chain() { c="$1"; while :; do safe "$c" || return 1; [ "$c" = / ] && return 0; c="$(dirname -- "$c")"; done; }',
     // Check the nearest existing ancestor's chain before creating anything.
     'e="$dir"; while [ ! -e "$e" ] && [ ! -L "$e" ]; do e="$(dirname -- "$e")"; done',
@@ -59,12 +66,26 @@ export function renderStdinInstallScript(opts?: {
     'chain "$dir" || exit 65',
     'tmp="$(mktemp -- "$dir/.hack-install.XXXXXXXX")"',
     `trap 'rm -f -- "$tmp"' EXIT`,
-    `timeout -k 1 ${seconds} head -c "$n" > "$tmp"`,
+    // dash skips the EXIT trap when a signal kills it; make every signal a
+    // normal exit so the temporary file is always removed.
+    "trap 'exit 130' HUP INT TERM",
+    // One byte past the declared count, so longer input is seen and refused.
+    // The read runs in the background on a copy of stdin (an asynchronous
+    // list would otherwise read /dev/null) and the shell waits for it: a
+    // trapped signal interrupts `wait` at once, stops the reader and exits,
+    // and the EXIT trap removes the temporary file.
+    "exec 3<&0",
+    `timeout -k 1 ${seconds} head -c "$((n + 1))" <&3 > "$tmp" & reader=$!`,
+    `trap 'kill "$reader" 2>/dev/null; exit 130' HUP INT TERM`,
+    'wait "$reader" || exit 66',
     '[ "$(wc -c < "$tmp")" -eq "$n" ] || exit 66',
     'printf "%s  %s\\n" "$sum" "$tmp" | sha256sum -c --status || exit 67',
     'chown root:root -- "$tmp"',
     'chmod "$mode" -- "$tmp"',
     // -T: a directory at the destination fails instead of receiving the file.
+    // Flush the data before the rename, so a crash cannot leave the new name
+    // pointing at an empty file on filesystems without rename ordering.
+    'sync -- "$tmp"',
     'mv -fT -- "$tmp" "$dest"',
     "trap - EXIT",
   ].join("; ");

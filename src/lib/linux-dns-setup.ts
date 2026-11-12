@@ -11,7 +11,6 @@ import { DEFAULT_COREDNS_IP, DEFAULT_INGRESS_GATEWAY } from "../constants.ts";
 import {
   detectLinuxResolver,
   dnsmasqRoutesDomains,
-  hasLinuxDnsMarker,
   isResolvedKind,
   LINUX_DNS_MIN_SYSTEMD,
   LINUX_DNS_UDEV_RULE_PATH,
@@ -21,6 +20,7 @@ import {
   type LinuxResolverDetection,
   linkRouteMatches,
   NM_DNSMASQ_DIR,
+  readLinuxDnsMarker,
   renderLinuxDnsUdevRule,
   renderLinuxDnsUnit,
   renderLinuxManualDnsSteps,
@@ -357,23 +357,36 @@ function shellQuoteIfNeeded(word: string): string {
 const HEREDOC_END = "HACK_DNS_FILE_END";
 
 /**
- * The plan as commands a person can paste: each file through a quoted
- * heredoc (no expansion), then the commands. Used when Hack does not run it.
+ * The plan as commands a person can paste. Each file goes through the same
+ * root stdin installer Hack runs itself (same byte count, digest, directory
+ * checks and rename into place; a missing directory is created only by it),
+ * with the content as a quoted heredoc (no expansion). A heredoc adds one
+ * trailing newline, so the content must end with exactly one and must not
+ * contain the terminator line; Hack's rendered files satisfy both.
  */
 export function renderManualPlan(plan: LinuxDnsPlan): readonly string[] {
   return [
-    ...plan.files.flatMap((file) => [
-      `sudo install -d -m 0755 ${shellQuoteIfNeeded(dirnameOf(file.path))}`,
-      `sudo tee ${shellQuoteIfNeeded(file.path)} >/dev/null <<'${HEREDOC_END}'`,
-      ...file.content.trimEnd().split("\n"),
-      HEREDOC_END,
-    ]),
+    ...plan.files.flatMap((file) => {
+      const body = file.content.slice(0, -1).split("\n");
+      if (
+        !file.content.endsWith("\n") ||
+        file.content.endsWith("\n\n") ||
+        body.includes(HEREDOC_END)
+      ) {
+        throw new Error(`Cannot render ${file.path} as an exact heredoc`);
+      }
+      const step = stdinInstallStep({
+        target: file.path,
+        content: file.content,
+      });
+      return [
+        `${renderPrivilegedCommand(step.argv)} <<'${HEREDOC_END}'`,
+        ...body,
+        HEREDOC_END,
+      ];
+    }),
     ...plan.commands.map(renderPrivilegedCommand),
   ];
-}
-
-function dirnameOf(path: string): string {
-  return path.slice(0, path.lastIndexOf("/")) || "/";
 }
 
 export type LinuxDnsApplyOutcome =
@@ -443,6 +456,23 @@ function buildApplyPlan(opts: {
   return { files, commands };
 }
 
+/** Notes for plan files that would replace a file Hack did not write. */
+async function foreignFilesReplaced(opts: {
+  readonly host: LinuxDnsHost;
+  readonly plan: LinuxDnsPlan;
+}): Promise<readonly string[]> {
+  const notes: string[] = [];
+  for (const file of opts.plan.files) {
+    const existing = await opts.host.readFile(file.path);
+    if (existing !== null && readLinuxDnsMarker(existing).kind !== "known") {
+      notes.push(
+        `${file.path} exists without Hack's marker (Hack did not write it); installing replaces it.`
+      );
+    }
+  }
+  return notes;
+}
+
 /** Run a confirmed plan: installs via stdin, then the commands, in order. */
 async function runPlan(opts: {
   readonly host: LinuxDnsHost;
@@ -489,10 +519,14 @@ export async function applyLinuxDns(opts: {
     return { status: "manual", inspection };
   }
   const built = buildApplyPlan({ domains, inspection });
+  const replaced = await foreignFilesReplaced({ host, plan: built });
+  const withReplaced: LinuxDnsPlan =
+    replaced.length > 0 ? { ...built, notes: replaced } : built;
   const plan: LinuxDnsPlan = inspection.resolver.lookupsBypassResolved
     ? {
-        ...built,
+        ...withReplaced,
         notes: [
+          ...replaced,
           "Lookups on this host bypass systemd-resolved, so the route has no effect until they reach it:",
           ...renderLinuxManualDnsSteps({
             kind: inspection.resolver.kind,
@@ -500,7 +534,7 @@ export async function applyLinuxDns(opts: {
           }),
         ],
       }
-    : built;
+    : withReplaced;
   if (!opts.canPrompt) {
     return { status: "pending", code: inspection.code, plan, inspection };
   }
@@ -550,8 +584,13 @@ function classifyRouteFiles(opts: {
     if (text === null) {
       continue;
     }
-    if (hasLinuxDnsMarker(text)) {
+    const marker = readLinuxDnsMarker(text);
+    if (marker.kind === "known") {
       owned.push(path);
+    } else if (marker.kind === "unknown-format") {
+      foreign.push(
+        `${path} carries Hack's marker with format=${marker.format}, which this Hack does not know (a newer Hack wrote it), so it was left in place. Remove it with that Hack, or by hand: sudo rm -- ${path}`
+      );
     } else {
       foreign.push(
         `${path} does not carry Hack's marker, so it was left in place. If it is yours to remove: sudo rm -- ${path}`
@@ -638,16 +677,27 @@ export async function removeLinuxDns(opts: {
     leftInPlace.push(linkRoute.note);
   }
   const routeIsHacks = linkRoute.ours;
-  const commands: string[][] = [];
-  if (instance !== null && routeIsHacks) {
-    commands.push(["resolvectl", "revert", "--", instance]);
+  if (link !== null && instance === null) {
+    leftInPlace.push(
+      `Hack's bridge ${JSON.stringify(link)} has a name Hack does not configure automatically, so any route set on it by hand was left in place. To clear it: sudo resolvectl revert -- '${link.replaceAll("'", "'\\''")}'`
+    );
   }
+  // Order matters: remove the files that re-apply the route and reload, then
+  // stop any instance that is still running its wait loop, and only then
+  // revert the link, so nothing re-applies the route after the revert.
+  const commands: string[][] = [];
   if (owned.length > 0) {
     commands.push(
       ["rm", "-f", "--", ...owned],
       ["systemctl", "daemon-reload"],
       ["udevadm", "control", "--reload"]
     );
+  }
+  if (owned.length > 0 || routeIsHacks) {
+    commands.push(["systemctl", "stop", "--", "hack-dns@*.service"]);
+  }
+  if (instance !== null && routeIsHacks) {
+    commands.push(["resolvectl", "revert", "--", instance]);
   }
   if (commands.length === 0) {
     return { status: "absent", leftInPlace };

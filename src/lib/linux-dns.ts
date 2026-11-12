@@ -28,12 +28,29 @@ import { DEFAULT_COREDNS_IP, DEFAULT_INGRESS_GATEWAY } from "../constants.ts";
  */
 export const LINUX_DNS_FILE_FORMAT = 2;
 export const LINUX_DNS_MARKER = `# Managed by hack (hack global install), format=${LINUX_DNS_FILE_FORMAT}. Remove with: hack global down`;
+/**
+ * Formats this build knows: 1 is the unversioned first format (the marker
+ * line has no `format=`), 2 is the current one.
+ */
+export const LINUX_DNS_KNOWN_FORMATS: ReadonlySet<number> = new Set([1, 2]);
 const MARKER_LINE =
-  /^# Managed by hack \(hack global install\)(?:, format=\d+)?\. Remove with: hack global down$/;
+  /^# Managed by hack \(hack global install\)(?:, format=(\d{1,6}))?\. Remove with: hack global down$/;
 
-/** Whether `text` starts with Hack's marker line (any format version). */
-export function hasLinuxDnsMarker(text: string): boolean {
-  return MARKER_LINE.test(text.split("\n", 1)[0] ?? "");
+export type LinuxDnsMarker =
+  | { readonly kind: "known"; readonly format: number }
+  | { readonly kind: "unknown-format"; readonly format: number }
+  | { readonly kind: "none" };
+
+/** Read Hack's marker from the first line of `text`. */
+export function readLinuxDnsMarker(text: string): LinuxDnsMarker {
+  const match = MARKER_LINE.exec(text.split("\n", 1)[0] ?? "");
+  if (!match) {
+    return { kind: "none" };
+  }
+  const format = match[1] === undefined ? 1 : Number(match[1]);
+  return LINUX_DNS_KNOWN_FORMATS.has(format)
+    ? { kind: "known", format }
+    : { kind: "unknown-format", format };
 }
 
 /** Template unit started once per bridge interface by the udev rule. */

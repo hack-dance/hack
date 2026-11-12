@@ -71,11 +71,14 @@ then `systemctl daemon-reload`, `udevadm control --reload` and a restart of the
 unit, so a retry after a failed reload repeats the reload.
 
 Root never opens a file you can write. Hack sends each file's content to the
-root step on standard input; root reads exactly the declared number of bytes
-(within 30 seconds), checks them against the SHA-256 digest of the content you
-were shown, writes a root-owned temporary file in the destination directory
-(which must be root-owned and not writable by others) and renames it into
-place. Nothing is staged in your home or `/tmp`.
+root step on standard input; root accepts exactly the declared number of bytes
+(longer or shorter input is refused) within 30 seconds, checks them against the
+SHA-256 digest of the content you were shown, writes a root-owned temporary file
+in the destination directory and renames it into place. The destination
+directory and every directory above it must be root-owned, not writable by
+others and not links; if the ownership check itself cannot run, the step is
+refused. A missing directory is created only after that check. Nothing is
+staged in your home or `/tmp`.
 
 The route counts as configured only when both files match, the bridge carries
 exactly Hack's settings (CoreDNS as its only server, exactly Hack's suffixes,
@@ -88,8 +91,10 @@ a dnsmasq alternative. Docker Desktop and rootless Docker keep the bridge out of
 the host's reach, so Hack reports `linux_dns_bridge_missing` and writes nothing.
 
 If `hack global install` could not prompt, it printed the commands as one block
-without any prefix, with each file's content as a `sudo tee` heredoc; paste the
-block into a shell as it is, then check with `hack doctor`. A later `default_domain` change makes the installed unit
+without any prefix. Each file is installed by the same root step Hack runs
+itself (byte count, digest, directory checks, rename into place), with the
+file's content as a heredoc; paste the block into a shell as it is, then check
+with `hack doctor`. A later `default_domain` change makes the installed unit
 stale; rerun `hack global install` to update it.
 
 ### Check and remove
@@ -111,9 +116,11 @@ shows it under **Host DNS** (`host_dns` in `--json`). The codes are:
 
 `hack global down` offers to remove the route (the Linux counterpart of stopping
 dnsmasq on macOS). It defaults to no. It deletes a file at Hack's fixed path only
-when its first line is Hack's marker (`# Managed by hack (hack global install),
-format=N. ...`; files from older Hack versions carry the same line without
-`format=`), so an upgrade does not strand an older file. It reverts the bridge's
+when its first line is Hack's marker with a format this Hack knows
+(`# Managed by hack (hack global install), format=2. ...`; files from older
+Hack versions carry the same line without `format=`), so an upgrade does not
+strand an older file. A file with a format this Hack does not know (written by
+a newer Hack) is reported and left in place. It reverts the bridge's
 resolver settings when its DNS servers are exactly Hack's CoreDNS; because
 `resolvectl revert` clears every per-link setting, the confirmation lists any
 setting on that link that is not Hack's first. A file without the marker, or a

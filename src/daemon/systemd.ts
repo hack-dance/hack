@@ -1882,10 +1882,12 @@ export async function uninstallSystemdUnit(opts: {
 }
 
 /**
- * Disables the unit and stops it. `disable --now` runs the unit's ExecStop
- * hooks, so when what systemd has loaded cannot be vouched for
- * ({@link checkSystemdLoadedUnitPaths}) it is stopped without hooks
- * (`kill`) instead: removing a bad unit never runs its programs
+ * Disables and stops the unit (`disable --now`), which runs its ExecStop
+ * and ExecStopPost hooks. systemd runs those whenever the service stops,
+ * even after `systemctl kill`, so there is no hook-free way to stop it:
+ * when what systemd has loaded cannot be vouched for
+ * ({@link checkSystemdLoadedUnitPaths}) nothing is stopped, disabled or
+ * removed, and the error says to remove the unsafe entry and reload first
  * (HACK-2052). Returns null, or the error.
  */
 async function disableUnitSafely(opts: {
@@ -1896,18 +1898,13 @@ async function disableUnitSafely(opts: {
     unitPath: opts.unitPath,
     deps: opts.deps,
   });
-  const steps: readonly (readonly string[])[] =
-    untrusted === null
-      ? [["--user", "disable", "--now", SYSTEMD_UNIT_NAME]]
-      : [
-          ["--user", "disable", SYSTEMD_UNIT_NAME],
-          ["--user", "kill", SYSTEMD_UNIT_NAME],
-        ];
-  for (const args of steps) {
-    const result = await opts.deps.run("systemctl", args);
-    if (result.exitCode !== 0 && !isUnitMissingError(result.stderr)) {
-      return `systemctl ${args.join(" ")} failed: ${firstLine(result.stderr) || `exit code ${result.exitCode}`}`;
-    }
+  if (untrusted !== null) {
+    return `${untrusted}. Stopping it would run its stop hooks, so it was not stopped or removed: fix or remove that entry, run systemctl --user daemon-reload, then run hack daemon uninstall again`;
+  }
+  const args = ["--user", "disable", "--now", SYSTEMD_UNIT_NAME];
+  const result = await opts.deps.run("systemctl", args);
+  if (result.exitCode !== 0 && !isUnitMissingError(result.stderr)) {
+    return `systemctl ${args.join(" ")} failed: ${firstLine(result.stderr) || `exit code ${result.exitCode}`}`;
   }
   return null;
 }

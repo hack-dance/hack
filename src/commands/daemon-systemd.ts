@@ -437,7 +437,9 @@ export async function stopViaSystemdIfInstalled(opts: {
   if (hooksError !== null) {
     return {
       ...none,
-      refused: `${hooksError}. To stop it without running its stop hooks, run: systemctl --user kill ${SYSTEMD_UNIT_NAME}`,
+      // systemd runs stop hooks whenever the service stops (even after
+      // `systemctl kill`): the unsafe entry has to go first.
+      refused: `${hooksError}. Stopping it would run its stop hooks: fix or remove that entry, run systemctl --user daemon-reload, then run hack daemon stop again`,
     };
   }
   const stopped = await systemdServiceAction({ action: "stop", deps });

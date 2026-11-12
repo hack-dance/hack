@@ -1067,6 +1067,10 @@ linuxTest(
       await mkdir(join(root, "config", "systemd", "user"), { recursive: true });
       await writeFile(unitPath, unitText());
     });
+    // Whatever the runner's umask: these are the user's own directories.
+    for (const dir of ["config", "config/systemd", "config/systemd/user"]) {
+      await chmod(join(root, dir), 0o755);
+    }
     const result = await uninstallSystemdUnit({ unitPath, deps: fake.deps });
     expect(result).toEqual({
       ok: true,
@@ -2626,7 +2630,8 @@ linuxTest(
   "stop and uninstall never run stop hooks Hack cannot vouch for",
   async () => {
     // Codex security review: `systemctl stop` and `disable --now` run ExecStop
-    // hooks, which were not checked before stopping.
+    // hooks; `systemctl kill` does not avoid them either (systemd runs stop
+    // hooks whenever the service stops), so nothing that stops it may run.
     const fake = fakeSystemd({ active: true });
     await installSystemdUnit({
       unitPath,
@@ -2640,9 +2645,17 @@ linuxTest(
     await writeFile(hook, "#!/bin/sh\n");
     await chmod(hook, 0o755);
     fake.extraExecLines = [
-      `ExecStop={ path=${hook} ; argv[]=${hook} ; ignore_errors=no }`,
+      `ExecStopPost={ path=${hook} ; argv[]=${hook} ; ignore_errors=no }`,
     ];
     fake.active = true;
+    const stopping = ["stop", "kill", "disable", "restart"].map(
+      (verb) => `systemctl --user ${verb}`
+    );
+    const stopCalls = () =>
+      fake.calls.filter((call) =>
+        stopping.some((prefix) => call.startsWith(prefix))
+      );
+
     fake.calls.length = 0;
     const stop = await stopViaSystemdIfInstalled({
       pid: null,
@@ -2650,18 +2663,15 @@ linuxTest(
       deps: fake.deps,
     });
     expect(stop.handled).toBe(false);
-    expect(stop.refused).toContain("systemctl --user kill hackd.service");
-    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    expect(stop.refused).toContain("daemon-reload");
+    expect(stop.refused).not.toContain("systemctl --user kill");
+    expect(stopCalls()).toEqual([]);
 
-    // Uninstall still removes the unit, but stops it without hooks.
     fake.calls.length = 0;
     const removed = await uninstallSystemdUnit({ unitPath, deps: fake.deps });
-    expect(removed.ok).toBe(true);
-    expect(fake.calls).toContain("systemctl --user disable hackd.service");
-    expect(fake.calls).toContain("systemctl --user kill hackd.service");
-    expect(fake.calls).not.toContain(
-      "systemctl --user disable --now hackd.service"
-    );
-    expect(await Bun.file(unitPath).exists()).toBe(false);
+    expect(removed.ok).toBe(false);
+    expect(stopCalls()).toEqual([]);
+    expect(await Bun.file(unitPath).exists()).toBe(true);
+    expect(fake.active).toBe(true);
   }
 );

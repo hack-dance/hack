@@ -21,7 +21,7 @@
     "db:studio": "bunx drizzle-kit studio"
   },
   "dependencies": {
-    "@neondatabase/serverless": "^1.0.1",
+    "@neondatabase/serverless": "^1.2.0",
     "drizzle-orm": "0.45.2",
     "zod": "^4.1.12"
   },

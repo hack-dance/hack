@@ -28,6 +28,8 @@ graph follows relative imports, re-exports, literal dynamic imports, CommonJS
 imports and the current root/workspace path aliases. Unknown aliases, unresolved
 local imports and computed imports keep their dependent tests in the always-run
 set. External dependency changes are covered by the lockfile/manifest fallback.
+Suite preloads are implicit dependencies: changing one or a module it imports
+transitively selects every test. Unresolved preload dependencies also select all.
 
 The always-run set also includes source readers and subprocess-based test
 support, contract/protocol/transport/schema/DTO/compatibility tests, source,
@@ -53,7 +55,7 @@ duplicate and unknown selections fail, and every selected file runs exactly
 once across the active pool shards. Each file retains its suite working
 directory and Bun preload.
 
-The candidate job follows its crate, guest, launcher, helper/toolchain and CI
+The candidate job follows its crate, its config-compiler path dependency, guest, launcher, helper/toolchain and CI
 inputs. The compiler's native host matrix follows its crate/build/toolchain/CI
 inputs. Other compiler checks retain the previous Linux scope. These are job
 input gates, separate from the unit import graph.

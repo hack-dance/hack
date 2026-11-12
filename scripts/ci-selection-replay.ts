@@ -285,10 +285,11 @@ function snapshot(sha: string): {
     "scripts",
     "packages/db",
     "package.json",
+    "bunfig.toml",
   ]);
   const entries = tree.split("\0").flatMap((row) => {
     const match =
-      /^100[0-7]+ blob ([0-9a-f]{40})\t(.+(?:\.[cm]?[jt]sx?|package\.json)|package\.json)$/.exec(
+      /^100[0-7]+ blob ([0-9a-f]{40})\t(.+(?:\.[cm]?[jt]sx?|package\.json|bunfig\.toml)|package\.json|bunfig\.toml)$/.exec(
         row
       );
     return match?.[1] && match[2] ? [{ oid: match[1], path: match[2] }] : [];

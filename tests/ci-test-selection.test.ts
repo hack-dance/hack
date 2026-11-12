@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { COMPILER_HOSTS } from "../scripts/ci-change-scope.ts";
 import {
   fullPushPlan,
@@ -13,6 +13,7 @@ import {
   classifyTestPools,
   discoverTestFiles,
 } from "../scripts/test-shard-plan.ts";
+import { isRecord } from "../src/lib/guards.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const sources = {
@@ -89,6 +90,52 @@ describe("conservative dependency selection", () => {
         full: true,
       }).mode
     ).toBe("full");
+  });
+  test("suite preloads and their transitive helpers affect every test without explicit edges", () => {
+    const implicit = {
+      ...sources,
+      "bunfig.toml": '[test]\npreload=["./tests/preload.ts"]',
+      "tests/preload.ts": 'import "./helpers/preload-guard.ts";',
+      "tests/helpers/preload-guard.ts": 'import "../../src/preload-leaf.ts";',
+      "src/preload-leaf.ts": "export const value=1;",
+    };
+    for (const path of [
+      "tests/preload.ts",
+      "tests/helpers/preload-guard.ts",
+      "src/preload-leaf.ts",
+    ]) {
+      const result = selectTests({
+        repoRoot: "/fixture",
+        sources: implicit,
+        tests,
+        changed: [path],
+      });
+      expect(result.mode).toBe("full");
+      expect(result.files).toEqual([...tests].sort());
+    }
+    expect(
+      selectTests({
+        repoRoot: "/fixture",
+        sources: implicit,
+        tests,
+        changed: ["src/leaf.ts"],
+      }).files
+    ).not.toContain("tests/b.test.ts");
+  });
+  test("workspace preload dependencies also force the full set", () => {
+    const result = selectTests({
+      repoRoot: "/fixture",
+      tests,
+      sources: {
+        ...sources,
+        "packages/db/bunfig.toml": '[test]\npreload="./preload.ts"',
+        "packages/db/preload.ts": 'import "./src/guard.ts";',
+        "packages/db/src/guard.ts": "export {};",
+      },
+      changed: ["packages/db/src/guard.ts"],
+    });
+    expect(result.mode).toBe("full");
+    expect(result.files).toEqual([...tests].sort());
   });
   test.each([
     'import type {Value} from "@lib/leaf";',
@@ -203,8 +250,8 @@ describe("PR matrix policy", () => {
       compiler_hosts: JSON.stringify(COMPILER_HOSTS),
     });
   });
-  test("candidate/Intel inputs are independent", () => {
-    expect(touchesCandidate("packages/config-compiler/src/lib.rs")).toBe(false);
+  test("candidate inputs include the compiler consumer dependency", () => {
+    expect(touchesCandidate("packages/config-compiler/src/lib.rs")).toBe(true);
     expect(touchesCandidate("packages/runtime-core/src/main.rs")).toBe(true);
     expect(touchesCompilerHost("packages/config-compiler/src/lib.rs")).toBe(
       true
@@ -215,6 +262,34 @@ describe("PR matrix policy", () => {
     for (const path of ["mise.toml", ".github/workflows/ci.yml"]) {
       expect(touchesCandidate(path)).toBe(true);
       expect(touchesCompilerHost(path)).toBe(true);
+    }
+  });
+  test("every declared local candidate crate dependency is an admitted input", async () => {
+    const source = await Bun.file(
+      resolve(repoRoot, "packages/runtime-core/Cargo.toml")
+    ).text();
+    const cargo: unknown = Bun.TOML.parse(source);
+    const paths: string[] = [];
+    function visit(value: unknown): void {
+      if (!isRecord(value)) {
+        return;
+      }
+      if (typeof value.path === "string" && value.path.startsWith("..")) {
+        paths.push(
+          relative(
+            repoRoot,
+            resolve(repoRoot, "packages/runtime-core", value.path)
+          )
+        );
+      }
+      for (const child of Object.values(value)) {
+        visit(child);
+      }
+    }
+    visit(cargo);
+    expect(paths).toContain("packages/config-compiler");
+    for (const path of paths) {
+      expect(touchesCandidate(`${path}/Cargo.toml`), path).toBe(true);
     }
   });
   test("subset partition retains all selected files and rejects invalid selections", async () => {

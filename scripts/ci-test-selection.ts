@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import ts from "typescript";
 import { isRecord } from "../src/lib/guards.ts";
-import { discoverTestFiles } from "./test-shard-plan.ts";
+import { discoverTestFiles, TEST_SUITES } from "./test-shard-plan.ts";
 
 export type TestSelection = {
   readonly mode: "full" | "selected";
@@ -48,6 +48,51 @@ export type SelectionInputs = {
   readonly sources?: Readonly<Record<string, string>>;
   readonly tests?: readonly string[];
 };
+
+/** Bun loads these modules before every file, without explicit test imports. */
+function suitePreloads(opts: {
+  readonly root: string;
+  readonly read: (file: string) => string | undefined;
+}): readonly string[] | null {
+  const preloads = new Set<string>();
+  for (const suite of TEST_SUITES) {
+    const config = opts.read(
+      suite.cwd === "." ? "bunfig.toml" : `${suite.cwd}/bunfig.toml`
+    );
+    if (config === undefined) {
+      continue;
+    }
+    try {
+      const parsed: unknown = Bun.TOML.parse(config);
+      const value =
+        isRecord(parsed) && isRecord(parsed.test)
+          ? parsed.test.preload
+          : undefined;
+      if (value === undefined) {
+        continue;
+      }
+      const entries = typeof value === "string" ? [value] : value;
+      if (
+        !(
+          Array.isArray(entries) &&
+          entries.every((entry) => typeof entry === "string")
+        )
+      ) {
+        return null;
+      }
+      for (const entry of entries) {
+        const path = relative(opts.root, resolve(opts.root, suite.cwd, entry));
+        if (path.startsWith("../") || path.startsWith("/")) {
+          return null;
+        }
+        preloads.add(path);
+      }
+    } catch {
+      return null;
+    }
+  }
+  return [...preloads];
+}
 
 type Module = {
   readonly dependencies: readonly string[];
@@ -272,6 +317,27 @@ export function selectTests(opts: SelectionInputs): TestSelection {
     return result;
   }
   const changed = new Set(opts.changed);
+  const preloads = suitePreloads({ root, read });
+  if (!preloads) {
+    return full("suite preload configuration unavailable");
+  }
+  const preloadQueue = [...preloads];
+  const preloadSeen = new Set<string>();
+  while (preloadQueue.length) {
+    const file = preloadQueue.pop() as string;
+    if (preloadSeen.has(file)) {
+      continue;
+    }
+    preloadSeen.add(file);
+    if (changed.has(file)) {
+      return full(`suite preload dependency changed: ${file}`);
+    }
+    const input = module(file);
+    if (input.opaque) {
+      return full("suite preload dependency is opaque");
+    }
+    preloadQueue.push(...input.dependencies);
+  }
   const selected = files.filter((test) => {
     if (Object.hasOwn(ALWAYS_RUN_TESTS, test) || CONTRACT_PATH.test(test)) {
       return true;

@@ -199,7 +199,7 @@ import {
   type NativeProcessReport,
   nativeProcessCheckFromCompose,
 } from "../lib/native-process-wrappers.ts";
-import { isMac } from "../lib/os.ts";
+import { isLinux, isMac } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -267,6 +267,7 @@ import {
   resolvePreferredHostDnsTarget,
   resolverHasNameserver,
 } from "./doctor-utils.ts";
+import { inspectLinuxGlobalDns } from "./global-linux-dns.ts";
 import { inspectProxyNetwork } from "./global-proxy-network.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import {
@@ -443,6 +444,8 @@ const doctorSpec = defineCommand({
   subcommands: [],
 } as const);
 
+/** Linux resolver route for Hack's routed suffixes (HACK-2053). */
+const LINUX_DNS_ROUTE_CHECK = "linux dns route";
 /** Proxy containers that run without their ingress network (HACK-2056). */
 const PROXY_NETWORK_CHECK = "proxy network";
 
@@ -506,6 +509,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       `dnsmasq.conf:${DEFAULT_NEW_PROJECT_TLD}`,
       `dnsmasq.conf:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       "dnsmasq:53",
+      LINUX_DNS_ROUTE_CHECK,
       HACK_LOCAL_REPAIR_CHECK,
       HACK_LOCAL_ROUTE_CHECK,
       "native host dns",
@@ -905,6 +909,14 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     results.push(
       await runCheck(s, "dnsmasq:53", () => checkMacDnsmasqPort53(), {
         timeoutMs: 2000,
+      })
+    );
+  }
+  if (isLinux()) {
+    results.push(
+      await runCheck(s, LINUX_DNS_ROUTE_CHECK, () => checkLinuxDnsRoute(), {
+        // Up to four sequential probes with 3s timeouts each.
+        timeoutMs: 13_000,
       })
     );
   }
@@ -2015,6 +2027,21 @@ export async function checkCaddyLocalCa(): Promise<CheckResult> {
     name: "caddy local ca",
     status: identity.state === "current" ? "ok" : "warn",
     message: identity.message,
+  };
+}
+
+/** Linux resolver route for Hack's suffixes; see `lib/linux-dns.ts`. */
+async function checkLinuxDnsRoute(): Promise<CheckResult> {
+  const inspection = await inspectLinuxGlobalDns();
+  return {
+    name: LINUX_DNS_ROUTE_CHECK,
+    status: inspection.state === "configured" ? "ok" : "warn",
+    message: [
+      inspection.code
+        ? `${inspection.message} (code=${inspection.code})`
+        : inspection.message,
+      ...inspection.fix.map((line) => `fix: ${line}`),
+    ].join("\n"),
   };
 }
 

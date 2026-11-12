@@ -137,6 +137,31 @@ describe("conservative dependency selection", () => {
     expect(result.mode).toBe("full");
     expect(result.files).toEqual([...tests].sort());
   });
+  test("the Bun builtin is a known preload input rather than an opaque package", () => {
+    const result = selectTests({
+      repoRoot: "/fixture",
+      tests,
+      sources: {
+        ...sources,
+        "bunfig.toml": '[test]\npreload="./tests/preload.ts"',
+        "tests/preload.ts": 'import {secrets} from "bun";',
+      },
+      changed: ["docs/a.md"],
+    });
+    expect(result.mode).toBe("selected");
+    expect(result.files).not.toContain("tests/b.test.ts");
+  });
+  test("the actual repository graph can select a proper subset", () => {
+    const result = selectTests({
+      repoRoot,
+      changed: ["docs/reference/ci-test-selection.md"],
+    });
+    expect(result.mode).toBe("selected");
+    expect(result.files.length).toBeLessThan(
+      discoverTestFiles({ repoRoot }).length
+    );
+    expect(result.files).toContain("tests/cli-reference-docs.test.ts");
+  });
   test.each([
     'import type {Value} from "@lib/leaf";',
     'export {value} from "@/lib/leaf.ts";',

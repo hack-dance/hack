@@ -231,7 +231,9 @@ export function selectTests(opts: SelectionInputs): TestSelection {
         ) {
           return null;
         }
-        return name.startsWith("node:") || name.startsWith("bun:")
+        return name === "bun" ||
+          name.startsWith("node:") ||
+          name.startsWith("bun:")
           ? null
           : undefined;
       }
@@ -339,7 +341,7 @@ export function selectTests(opts: SelectionInputs): TestSelection {
     }
     const input = module(file);
     if (input.opaque) {
-      return full("suite preload dependency is opaque");
+      return full(`suite preload dependency is opaque: ${file}`);
     }
     preloadQueue.push(...input.dependencies);
   }

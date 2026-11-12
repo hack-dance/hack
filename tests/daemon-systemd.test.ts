@@ -112,6 +112,8 @@ type Fake = {
   extraExecLines: string[];
   /** `systemctl --user show-environment` output. */
   managerEnvironment: string;
+  /** The account's home in the password database (`getent passwd`). */
+  passwdHome: string | null;
 };
 
 /**
@@ -168,6 +170,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     unitSearchPath: null,
     extraExecLines: [],
     managerEnvironment: `HOME=${root}\nPATH=/usr/bin:/bin\n`,
+    passwdHome: root,
     deps: undefined as unknown as SystemdDeps,
   };
   const ok = (stdout = ""): ServiceCommandResult => ({
@@ -177,6 +180,13 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
   });
   const run: SystemdDeps["run"] = (command, args) => {
     calls.push(`${command} ${args.join(" ")}`);
+    if (command === "getent") {
+      return Promise.resolve(
+        state.passwdHome === null
+          ? { exitCode: 2, stdout: "", stderr: "" }
+          : ok(`user:x:1000:1000::${state.passwdHome}:/bin/sh\n`)
+      );
+    }
     if (command === "loginctl") {
       return Promise.resolve(
         opts.linger === null
@@ -3432,19 +3442,30 @@ linuxTest(
     });
     fake.active = true;
     fake.unsetEnvironment = "HOME";
-    const stop = (accountHome: () => string | null) =>
+    const stop = () =>
       stopViaSystemdIfInstalled({
         pid: null,
         hackHome: join(root, ".hack"),
-        deps: { ...fake.deps, accountHome },
+        deps: fake.deps,
       });
+    // The shell's HOME (deps.env.HOME) is root; the account's is not.
+    fake.passwdHome = "/srv/account";
     fake.calls.length = 0;
-    const other = await stop(() => "/srv/account");
+    const other = await stop();
     expect(other.refused).toContain("/srv/account/.hack");
+    expect(fake.calls).toContain("getent passwd 1000");
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
     // An account home that cannot be read: unknown, refused.
-    expect((await stop(() => null)).refused).toContain("could not be read");
+    fake.passwdHome = null;
+    expect((await stop()).refused).toContain("could not be read");
+    // A relative HOME in the service: hackd serves no home; unknown.
+    fake.unsetEnvironment = "";
+    fake.unitEnvironment = "HOME=rel";
+    expect((await stop()).refused).toContain("relative");
     // The account's home is this shell's: stopped.
-    expect((await stop(() => root)).handled).toBe(true);
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
+    fake.unsetEnvironment = "HOME";
+    fake.passwdHome = root;
+    expect((await stop()).handled).toBe(true);
   }
 );

@@ -11,7 +11,7 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
-import { homedir, tmpdir, userInfo } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import { GLOBAL_HACK_DIR_NAME } from "../constants.ts";
@@ -134,9 +134,9 @@ export type ServiceCommandResult = {
   readonly stderr: string;
 };
 
-/** The single boundary for `systemctl` and `loginctl`. */
+/** The single boundary for `systemctl`, `loginctl` and `getent`. */
 export type ServiceCommandRunner = (
-  command: "systemctl" | "loginctl",
+  command: "systemctl" | "loginctl" | "getent",
   args: readonly string[]
 ) => Promise<ServiceCommandResult>;
 
@@ -144,11 +144,6 @@ export interface SystemdDeps {
   readonly env: Env;
   readonly run: ServiceCommandRunner;
   readonly uid: number;
-  /**
-   * The account's home from the password database (never `$HOME`): what a
-   * service without HOME resolves. Defaults to `os.userInfo().homedir`.
-   */
-  readonly accountHome?: () => string | null;
 }
 
 /**
@@ -965,12 +960,17 @@ export async function readSystemdUnitHackHome(opts: {
       ? { kind: "home", path: resolve(override) }
       : { kind: "unknown", detail: `HACK_HOME=${override} is relative` };
   }
+  const serviceHome = (env.HOME ?? "").trim();
+  if (serviceHome.length > 0 && !isAbsolute(serviceHome)) {
+    // hackd rejects a relative HOME and has no Hack home to serve.
+    return { kind: "unknown", detail: `HOME=${serviceHome} is relative` };
+  }
   // With no HOME in the service (unset by UnsetEnvironment=, or never
   // set), hackd falls back to the account's home from the password
   // database, not to the invoking shell's HOME.
   const home =
-    normalizeHomeDir(env.HOME) ??
-    normalizeHomeDir((opts.deps.accountHome ?? readAccountHome)() ?? undefined);
+    normalizeHomeDir(serviceHome) ??
+    normalizeHomeDir((await readAccountHome({ deps: opts.deps })) ?? undefined);
   if (!home) {
     return {
       kind: "unknown",
@@ -981,13 +981,26 @@ export async function readSystemdUnitHackHome(opts: {
   return { kind: "home", path: resolve(home, GLOBAL_HACK_DIR_NAME) };
 }
 
-/** The account's home from the password database, or null. */
-function readAccountHome(): string | null {
-  try {
-    return userInfo().homedir;
-  } catch {
+/**
+ * The account's home from the password database (NSS included), or null:
+ * `getent passwd <uid>`, field 6. Not `os.userInfo()`, which under Bun
+ * returns `$HOME` when it is set.
+ */
+async function readAccountHome(opts: {
+  readonly deps: SystemdDeps;
+}): Promise<string | null> {
+  if (opts.deps.uid < 0) {
     return null;
   }
+  const result = await opts.deps.run("getent", [
+    "passwd",
+    String(opts.deps.uid),
+  ]);
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const fields = (result.stdout.split("\n")[0] ?? "").split(":");
+  return fields.length >= 7 ? (fields[5] ?? null) : null;
 }
 
 /**

@@ -12,8 +12,9 @@ hack doctor --native-preflight --path /absolute/project --json
 
 Use the profiles your project declares. This mode accepts only `--path`,
 `--profile` and `--json` beside `--native-preflight`; it does not run Doctor's
-other checks or repairs. Authored native project files take a separate admission
-path; use `hack config validate` for them.
+other checks or repairs. The global `--env` option is ignored in this mode;
+preflight reads the project's managed environment selection. Authored native
+project files take a separate admission path; use `hack config validate` for them.
 
 ## Read the result
 
@@ -31,8 +32,9 @@ on [Install](../install.md). The review needs no running VM.
 
 With `--json`, the report is inside `data` of the result envelope. Read `ready`,
 `blockers`, `warnings` and `runtime_review`; `ok: true` means the command produced
-a report. Exit status is 1 when blockers were found and 0 otherwise. An exit of
-0 can still have `ready: false` when the runtime review was skipped or unavailable.
+a report. For a produced report, exit status is 1 when blockers were found and
+0 otherwise. Usage refusals exit non-zero without producing a report. An exit
+of 0 can still have `ready: false` when the runtime review was skipped or unavailable.
 
 Findings name closed codes, services and fields, with fixed explanations and
 fixes; they do not print authored environment values or image names. Fix the

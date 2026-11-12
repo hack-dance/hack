@@ -3401,6 +3401,12 @@ linuxTest(
     expect(pending.refused).toContain("systemctl --user stop hackd.service");
     expect(pending.refused).toContain(unitPath);
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    // Another home's unit (loaded from its own directory) is left to that
+    // home: no refusal, so this shell's own direct hackd is still stopped.
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1 HACK_HOME=/srv/other-home";
+    expect((await stop()).refused).toBeNull();
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1";
     // Not running and no file: nothing to do, as before.
     fake.activeState = "inactive";
     expect(await stop()).toEqual({

@@ -409,6 +409,15 @@ export async function stopViaSystemdIfInstalled(opts: {
     ) {
       return none;
     }
+    // Another home's unit, loaded from its own directory: not this shell's
+    // to stop or refuse over; this shell's direct hackd is still stopped.
+    const loadedHome = await readSystemdUnitHackHome({ deps });
+    if (
+      loadedHome.kind === "home" &&
+      loadedHome.path !== resolve(opts.hackHome)
+    ) {
+      return none;
+    }
     return {
       ...none,
       refused: `Not stopping ${SYSTEMD_UNIT_NAME}: systemd has it ${status.activeState}, but not from ${unitPath}, the unit Hack manages (it was removed or is loaded from another directory), so it cannot be checked. Review it with systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,

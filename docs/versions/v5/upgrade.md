@@ -10,7 +10,8 @@ is the runtime layer underneath and the product boundary around it.
 
 - Docker Compose is still the default backend. `hack up`, `hack down`, `hack
   logs`, `hack env`, `hack host exec` and the rest behave as in v4.
-- Project configuration stays in `.hack/`. There is no required config rewrite.
+- Project configuration stays in `.hack/`. Legacy env files may need migration;
+  use the [machine upgrade checklist](guides/upgrade-from-v4.md) before running it.
 - Shared local routing, `.hack.local` names and certificate trust are unchanged.
 
 ## What is new
@@ -60,7 +61,8 @@ invoked.
    [Try the native backend](native/try-it.md).
 
 When 5.0.0 ships, `brew upgrade hack` or the release installer moves the stable
-executable to v5. Projects need no changes to keep running on Compose.
+executable to v5. Review legacy env migration before the Compose trial; the
+[machine upgrade checklist](guides/upgrade-from-v4.md) records the steps and open checks.
 
 ## The daemon after an upgrade
 

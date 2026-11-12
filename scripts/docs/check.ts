@@ -4,6 +4,7 @@ import { assertPinnedInstallers } from "./installer-pin";
 import {
   pinnedBootstrapText,
   prepare,
+  publishedTerminology,
   repositoryRoot,
   resolveEditorialSource,
   resolvePublicSource,
@@ -15,6 +16,17 @@ import versions from "./versions.json";
 
 await readmeDiagrams({ check: true });
 await prepare(true);
+// Prose labels are normalized; source citations and filenames retain their bytes.
+for (const [input, expected] of [
+  ["Dogfooding.", "native runtime use."],
+  ["Dogfooding guide", "native runtime use guide"],
+  ["docs/guides/v5-dogfooding.md", "docs/guides/v5-dogfooding.md"],
+  ["dogfooding.md", "dogfooding.md"],
+] as const) {
+  if (publishedTerminology(input) !== expected) {
+    throw new Error(`Editorial terminology boundary failed: ${input}`);
+  }
+}
 // Boundary checks: traversal, private evidence, untracked input must never become a link.
 const source = resolve(repositoryRoot, "docs/README.md");
 for (const target of [
@@ -124,7 +136,7 @@ for (const version of ["v4", "v5"]) {
   const other = version === "v4" ? "v5" : "v4";
   if (
     corpus.includes(`https://hack.foo/docs/${other}/`) ||
-    /dogfooding/i.test(corpus)
+    publishedTerminology(corpus) !== corpus
   ) {
     throw new Error(`Mixed or obsolete public corpus: ${version}`);
   }
@@ -265,6 +277,34 @@ for (const invalid of [
   if (!rejected) {
     throw new Error("Invalid editorial provenance accepted");
   }
+}
+
+/** Keep the upgrade checklist published, with its current-source citations intact. */
+const upgradeChecklist = await Bun.file(
+  resolve(v5Root, "guides/upgrade-from-v4.md")
+).text();
+for (const fact of [
+  "to be confirmed in the dogfood run",
+  "HACK_RUNTIME_BACKEND=compose",
+  "26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/v5-dogfooding.md",
+]) {
+  if (!upgradeChecklist.includes(fact)) {
+    throw new Error(`Upgrade checklist contract missing: ${fact}`);
+  }
+}
+const guideNavigation: unknown = JSON.parse(
+  await Bun.file(resolve(v5Root, "guides/meta.json")).text()
+);
+if (
+  !(
+    typeof guideNavigation === "object" &&
+    guideNavigation !== null &&
+    "pages" in guideNavigation &&
+    Array.isArray(guideNavigation.pages) &&
+    guideNavigation.pages.includes("upgrade-from-v4")
+  )
+) {
+  throw new Error("Upgrade checklist missing from guide navigation");
 }
 
 /** v5 leads with the default Compose backend and names native as opt-in. */

@@ -1,0 +1,392 @@
+# Upgrade a v4 machine to v5
+
+This is a working upgrade checklist, not a completed migration report. It was
+audited against `next` at `26a142921c` and the v4.3.0 reference on `main` at
+`b36275575c`. The site itself is pinned to **next.15**. Sections about newer
+source builds do not mean those features ship in next.15. Real-machine results
+are **to be confirmed in the dogfood run**.
+
+```mermaid
+---
+title: Choose an upgrade path
+---
+flowchart TD
+  start[Plan a v5 trial] --> stable{Need stable today?}
+  stable -->|Yes| wait[Keep v4]
+  stable -->|No| backup[Record and back up]
+  backup --> compose[Pilot on Compose]
+  compose --> check{Application checks pass?}
+  check -->|No| rollback[Return to v4]
+  check -->|Yes| eligible{Native beta eligible?}
+  eligible -->|No| keep[Continue Compose]
+  eligible -->|Yes| native[Disposable native trial]
+  class compose live
+  class backup,rollback wait
+  class wait,native idle
+  class keep ok
+```
+
+Keep v4 when stability is required; otherwise back up, try one project on
+Compose, check the application, and only then consider an eligible native trial.
+
+## 1. Who should upgrade now
+
+Try v5 on a project whose application data you can restore and whose important
+workflows you can exercise. Wait if you need a stable-only release, depend on a
+retired integration, or cannot qualify recovery. Compose remains the ordinary
+CLI's default backend. Native is an opt-in beta for Apple Silicon macOS through
+`hack-next`, with a bounded command and configuration surface.
+
+There is an important launcher exception: **`hack-next` defaults to native**.
+Use `HACK_RUNTIME_BACKEND=compose` explicitly for the first Compose trial. Keep
+stable `hack` installed. See [Install](../install.md) and
+[native limits](../native/limits.md).
+
+Sources: [candidate channel contract](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/candidate-install.md),
+[application qualification](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/v5-dogfooding.md).
+
+## 2. Before you start
+
+Keep the records and backups private: registry and doctor output can identify
+local projects, and ignored env files can contain plaintext secrets. Do not paste
+them into an issue. Use a new backup directory and record its location yourself:
+
+```sh
+BACKUP="$HOME/hack-upgrade-$(date +%Y%m%dT%H%M%S)"
+mkdir -m 700 "$BACKUP"
+hack --version > "$BACKUP/version.txt"
+command -v hack > "$BACKUP/executable-path.txt"
+hack doctor > "$BACKUP/doctor-before.txt" 2>&1
+hack daemon status --json > "$BACKUP/daemon-before.json"
+hack projects --json > "$BACKUP/projects-before.json"
+```
+
+Record each command's exit status too; a stopped or incompatible daemon can
+return nonzero. Record the installation method, host OS/architecture, project
+roots, branches, profiles, selected envs and whether a daemon service was enabled.
+
+Then stop stable daemon activity before the filesystem copy and candidate use:
+
+```sh
+hack daemon stop
+pgrep -fl "hack daemon start"
+```
+
+The process check must print nothing. On macOS a configured launchd service can
+start it again: record that service first, use stable `hack daemon uninstall`,
+then stop and check again. Do not stop an unrelated process. Do not invoke more
+stable commands against the shared home during the candidate run. The complete
+[stable-daemon stop procedure](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/candidate-install.md#stop-stable-hackd-before-a-compose-run)
+also explains which stable commands can start it again.
+
+Copy, and verify that you can read back:
+
+| Record or copy | Why it matters |
+| --- | --- |
+| Exact v4 executable, release archive and installer; preserve executable permissions | Re-select the version you actually used, including 4.2.1. |
+| The effective Hack home, normally `~/.hack/` | Includes global config, registry, installed assets and daemon records; copy only after quiescing writers. |
+| `hack.config.json` and `projects.json` in that home | Preserve global settings and registered checkout identities. |
+| Each project's working tree, including ignored `.hack/` files and overlays | Git alone does not back up local env values, keys or uncommitted changes. |
+| Configured external secret-store/key files and the means to unlock them | A copy of encrypted bytes is not proof that keychain or external-key access will work. |
+| Application-aware database/volume backups | Reinstalling an executable does not undo application data or schema changes. |
+
+`HACK_HOME` changes the global home; `HACK_GLOBAL_CONFIG_PATH` changes the config
+path and places the registry beside that file. Record both overrides if set and
+back up those actual locations. Check symlinks: a backup pointing back to the live
+directory is not an independent copy. Leave `.hack/.internal/` untracked.
+Backup/restore on a real 4.2.1 machine, custom homes and external secret stores:
+**to be confirmed in the dogfood run**.
+
+For an existing project with regular directories at the default locations, this
+gives the copies used by the rollback example below. Set `PROJECT` first. Stop
+here if a copy fails, a file was absent originally, or a source is a wrapper or
+symlink you have not accounted for; preserve that layout separately.
+
+```sh
+PROJECT=/absolute/project
+cp -pL "$(command -v hack)" "$BACKUP/hack-v4"
+cp -Rp "$HOME/.hack" "$BACKUP/hack-home"
+cp -Rp "$PROJECT/.hack" "$BACKUP/project-hack"
+```
+
+Sources: [global path resolution](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/lib/config-paths.ts),
+[registry paths](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/lib/projects-registry.ts),
+[secret-store ownership](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/lib/secret-store.ts),
+[data recovery prerequisites](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/v5-dogfooding.md).
+
+## 3. Choose the version and installation path
+
+`V5` below means the absolute path to the reviewed v5 executable. On Apple
+Silicon this can be `$HOME/.hack-next/bin/hack-next`; a current-source Linux
+trial needs a separately prepared executable. Do not replace stable `hack` just
+to try the prerelease.
+
+| Starting point | Today | What the dogfood run must establish |
+| --- | --- | --- |
+| 4.3.0 on Apple Silicon macOS | Keep v4; install the separate candidate, stop stable writers, then use the Compose pilot below. | End-to-end upgrade and rollback: **to be confirmed in the dogfood run**. |
+| Older 4.x, including 4.2.1 | Use the same backup and isolated-candidate sequence; inspect legacy env before any env-consuming command. Do not assume every project needs the same migration. | Direct 4.2.1 upgrade, or any need for an intermediate version: **to be confirmed in the dogfood run**. |
+| Homebrew install | Keep the installed v4 formula during the trial. `brew upgrade hack-dance/tap/hack` is the stable-release path, not the native-candidate installer. | Stable v5 formula availability and replacement/rollback: **to be confirmed in the dogfood run**. |
+| Script install | Use the separate reviewed candidate bootstrap on supported Macs. For stable software, the release downloader accepts `HACK_INSTALL_TAG` or `HACK_INSTALL_VERSION`. | Replacing an installed v4 with a stable v5 archive: **to be confirmed in the dogfood run**. |
+| Linux 4.x or a fresh Linux host | next.15 publishes no Linux candidate bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
+| Intel macOS or a fresh host | Native is unavailable. A fresh stable installation uses the normal Homebrew/release installer and Compose; use the candidate only on its supported host. | First stable v5 install and project initialization: **to be confirmed in the dogfood run**. |
+
+After backups and stable-daemon quiescence, the Compose pilot is:
+
+```sh
+HACK_RUNTIME_BACKEND=compose "$V5" --version
+HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project
+# Review the migration section before up: env-consuming commands can migrate.
+HACK_RUNTIME_BACKEND=compose "$V5" up --path /absolute/project
+```
+
+Check the actual application: sign-in, assets, data-backed pages, selected env,
+branch/worktree behavior, and a marker written before a retaining stop and read
+after restart. Record what failed, not just a green health endpoint.
+
+For a **current-source** Linux CLI, DNS and CA trust setup are implemented. Follow
+the [Linux DNS setup source](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-setup.md)
+and [Linux trust guide](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-certificate-trust.md).
+They postdate next.15. DNS host integration is bounded to a rootful Linux Docker
+bridge/systemd-resolved setup; trust has separate host and browser handling.
+Review the printed privileged steps and confirm them yourself. The Linux daemon
+service change is **not merged at this audit**: `daemon install` still refuses
+non-macOS. Its service setup and upgrade are **to be confirmed in the dogfood run**.
+
+Sources: [stable installation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/README.md#install),
+[release asset generation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/scripts/build-release.ts),
+[next.15 artifact contract](https://github.com/hack-dance/hack/blob/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/docs/guides/candidate-install.md),
+[daemon service platform gate](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/daemon.ts).
+
+## 4. What changes for a project
+
+### Config and env migration
+
+The project still uses `.hack/`, but this does **not** mean legacy env files are
+left untouched. The preferred explicit migration is:
+
+```sh
+HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project --migrate-env-config
+```
+
+This is a mutation, not a dry run. Review the tracked-file consent list and the
+diff afterward. `--json` cannot be combined with this repair. Without a prompt,
+tracked edits/deletions require explicit `--accept-tracked-env-changes`; do not
+add that flag just to get past an unfamiliar refusal.
+
+- The new model uses `hack.env.default.yaml`, named overlay YAML, and private
+  `hack.env.local.yaml` / `hack.env.<overlay>.local.yaml` layers. With a legacy
+  contract, tracked secret values become ciphertext, not legacy plaintext.
+- Without `hack.env.json`, legacy `.hack/.env` and overlay values go to private
+  local layers; tracked layers are empty. Teammates must migrate their own local
+  values after the shared change is committed.
+- Doctor can remove old contract/dotenv files and Compose `env_file` references
+  with the documented consent and delivery checks. Undelivered values and files
+  still needed for interpolation are retained. It can also rewrite legacy config
+  keys. Do not delete all `.env*` files by hand.
+- Env-consuming commands can migrate implicitly. The implicit path keeps the
+  contract and tracked files and does not edit Compose, but is still a write.
+- Migration has refusal paths for collisions, symlinks, unreadable files and
+  changed delivery semantics. Earlier layer or ignore-rule changes can remain
+  after a refusal; inspect before retrying. Secret-backend/keychain discovery has
+  limits. Follow the full audit rather than assuming every overlay was found.
+- Managed values containing `$` now reach containers literally. A previously
+  expanded `$VAR` or escaped `$$` can change the application value and cause
+  container recreation on the next start.
+
+Sources: [migration and refusal audit](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/env.md#legacy-repos-and-migration),
+[tracked-consent regression tests](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/tests/env-migration-tracked-consent.test.ts),
+[migration safety tests](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/tests/env-migration-safety.test.ts),
+[managed-dollar behavior](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/env.md#upgrading-managed-values-that-contain-),
+[Doctor mode validation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/doctor.ts).
+
+### Daemon, old lock and missing checkouts
+
+Installing another CLI does not replace an already running daemon. The current
+`daemon start` replaces a reachable incompatible daemon; `daemon restart` is the
+explicit replacement path. Keep this separate from a side-by-side candidate
+trial: the launcher disables daemon autostart, and stable `hackd` stays stopped
+while the candidate shares its home. Capture macOS service respawn and the exact
+old-daemon transition: **to be confirmed in the dogfood run**.
+
+The registry writer protocol changed. v4 writers do not honor the v5 lock, so
+never run both against the same home concurrently. A lock's age is not permission
+to remove it: current recovery requires a demonstrably dead owner. Empty,
+uncertain and interrupted-recovery receipts can refuse and need offline
+inspection. The old-lock recovery sequence on the upgraded machine is
+**to be confirmed in the dogfood run**; do not guess by deleting lock files.
+
+For folders that are gone, preview first:
+
+```sh
+HACK_RUNTIME_BACKEND=compose "$V5" projects prune --dry-run --json
+```
+
+`projects prune` also considers orphaned containers; `--json` **without**
+`--dry-run` applies the prune noninteractively. Review ownership and candidates
+before choosing an apply. Missing Docker skips only the container half, not
+registry pruning. Keep the registry backup for rollback.
+
+Sources: [daemon compatibility](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/daemon.ts),
+[registry lock contract](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/lib/projects-registry-lock.ts),
+[lock regressions](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/tests/projects-registry-lock.test.ts),
+[prune command](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/projects.ts).
+
+### Agent integration files
+
+Software upgrades do not opt you into agent integrations. `hack setup` is
+explicit. Existing agent files need their own review; do not regenerate or delete
+them as part of an upgrade. `hack setup migrate` defaults to a read-only preview;
+its explicit apply backs up selected legacy files and has a manifest-based
+rollback. Client loading on the upgraded machine is **to be confirmed in the
+dogfood run**.
+
+Sources: [explicit setup](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/setup.ts),
+[agent migration](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/setup-migrate.ts),
+[channel installation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/scripts/installer/channel.ts).
+
+## 5. Command-line compatibility checklist
+
+This compares the generated [v4.3.0 reference on main](https://github.com/hack-dance/hack/blob/b36275575c6bf75f35090ea7b762a45d77924470/docs/reference/cli.md)
+with the [current next reference](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/reference/cli.md).
+No command heading disappears in that comparison. A retained name can still
+refuse, be hidden from ordinary help, or change option behavior. The site's
+curated reference deliberately omits unsupported surfaces.
+
+| Surface | What to check in scripts |
+| --- | --- |
+| `exec`, `run`, `host exec`, `env exec`, `session exec`, `x` | Put Hack options before the child command or extension tail. Child `--help`, `--version` and `--json` are passed through. |
+| Env selection | `--env` documents `base` and `default` for base layers only; omission selects the configured default overlay. |
+| Init | `--with` lists `claude` or `codex`, not `both`; new-host guidance uses `hack.local`/global `default_domain`. |
+| Config | New `validate`, `plan`, `import --dry-run` and `adopt --dry-run` forms have bounded native admission/preview contracts. They are not a general v4 conversion switch. |
+| Discovery and env | New `project target`, `project task`, `env get`, `env hydrate`, `--value-stdin` and `setup migrate` surfaces are explicit; check the exact reference before adopting them. |
+| Doctor | New domain-migration, native-preflight, native-cleanup and native-run-mapping modes have separate inspection/repair contracts. `--accept-tracked-env-changes` is explicit consent for migration, not an ordinary diagnostic flag. |
+| Global setup | New `global dns preview/activate/deactivate` handles scoped native DNS. `global trust` adds Linux host/NSS trust; `global logs-reset` also resets Alloy read positions. |
+| Secret deletion | `secrets delete --yes` supplies deletion consent without a TTY or with `HACK_NO_INTERACTIVE`; review scripts that previously expected an implicit confirmation. |
+| Native commands | Native `down`/`restart` recovery flags, data deletion and followed-log selection are backend-specific; do not copy them into a Compose rollback. |
+| Agent setup | Candidate MCP setup adds explicit `--bundle`, `--cli` and `--runtime-directory` selection. `setup sync`, automatic client hooks/instruction injection and `agent prime` refuse; use explicit setup/onboarding. |
+| Retired product scope | Hosted accounts/dashboard, Hack Tickets and built-in GitHub/Linear integrations are retired. Remote/gateway/node/dispatch remain unsupported and hidden from normal help; retained names are not support guarantees. |
+| Exit codes and JSON | Do not infer a universal schema from `--json`. Usage-error `E_USAGE`/exit 1 already exists on main; v5 human handler errors now use a short usage hint. Doctor repairs reject `--json`; prune JSON can mutate; native preflight can emit `ok: true` with blockers and exit 1. |
+
+Sources for behavior beyond the generated tables: [parser/error handling](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/cli/run.ts),
+[v4 error handling](https://github.com/hack-dance/hack/blob/b36275575c6bf75f35090ea7b762a45d77924470/src/cli/run.ts),
+[help visibility](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/cli/help.ts),
+[release-scope summary](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/v5-release-notes.md),
+[preflight result contract](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/doctor-native-preflight.ts).
+The complete 4.2.1 automation/exit/JSON transcript is **to be confirmed in the dogfood run**.
+
+## 6. Try native, then return to Compose
+
+Only after the Compose pilot passes, use a disposable project and read
+[the limits](../native/limits.md). A build containing the merged runtime-setup
+feature provides one explicit preparation command:
+
+```sh
+/absolute/bundle/hack-native --candidate-root /absolute/private/native-home runtime setup
+```
+
+Setup previews the pinned downloads and asks for consent; ordinary `up` does not
+fetch provider artifacts. Do not assume a previously installed next.15 binary
+has this newer command. Use the [current setup instructions and older-build
+alternative](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/native/try-it.md).
+Setup success does not prove a project works. Native project admission, mounts,
+images and command support still have their own limits.
+
+Before switching back, stop native project runs with the same selected candidate
+and follow its runtime-stop/quiescence procedure. Select Compose explicitly:
+
+```sh
+HACK_RUNTIME_BACKEND=compose "$V5" up --path /absolute/project
+```
+
+Do not just unset the selector on `hack-next`: that returns to its native default.
+Native and Compose data are not automatically transferred. Native setup, retained
+data and the switch-back on the real machine are **to be confirmed in the dogfood run**.
+
+Sources: [setup implementation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/packages/runtime-core/src/provider/setup.rs),
+[backend switching and manager quiescence](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/candidate-install.md).
+
+## 7. Return to v4
+
+The recovery path deliberately keeps the original software and data backup.
+Rehearse it on disposable data first. Filesystem restoration below must happen
+with all Hack writers and service respawn stopped.
+
+1. Stop the v5 project with the same executable, backend, path, env, branch and
+   profile used to start it. For the Compose pilot:
+   `HACK_RUNTIME_BACKEND=compose "$V5" down --path /absolute/project`.
+   Do not add cache-prune or data-removal flags. Native runs need their separate
+   owned stop before changing channel selection.
+2. If using the candidate manager, run
+   `"$HOME/.hack-next/bin/hack-next" --manager stable` after its quiescence checks
+   pass. This deselects the candidate and retains its bundles/homes; it does not
+   restore shared Compose files or application data.
+3. Preserve the post-trial working tree and global state in a separate private
+   copy. Restore the saved project files, ignored env/key files, registry and
+   global configuration to their recorded locations. Never overwrite unrelated
+   work; do not revive copied daemon socket/PID files. If application data changed,
+   use its separately verified restore procedure.
+
+   For the default-location copies above, with the original config and registry
+   files present and all writers stopped, restore the project and those two
+   global files. This preserves the post-trial files instead of discarding them:
+
+   ```sh
+   STAMP=$(date +%Y%m%dT%H%M%S)
+   cp -Rp "$HOME/.hack" "$BACKUP/post-trial-home-$STAMP"
+   mv "$PROJECT/.hack" "$PROJECT/.hack.after-v5-$STAMP" &&
+     cp -Rp "$BACKUP/project-hack" "$PROJECT/.hack"
+   cp -p "$BACKUP/hack-home/projects.json" "$HOME/.hack/projects.json"
+   cp -p "$BACKUP/hack-home/hack.config.json" "$HOME/.hack/hack.config.json"
+   "$BACKUP/hack-v4" --version
+   ```
+
+   Do not run this template for custom paths or files that were absent before
+   the trial. Restore any other changed global files from their verified copies;
+   the template intentionally does not restore daemon socket/PID records.
+4. Return to the retained stable v4 executable and confirm `--version` matches
+   `version.txt`. If it was replaced, use the saved installation or a reviewed,
+   explicitly version-selected release installer. For example, to restore 4.2.1:
+
+   ```sh
+   curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+     https://github.com/hack-dance/hack/releases/download/v4.2.1/hack-4.2.1-install.sh \
+     --output hack-v4-install.sh
+   less hack-v4-install.sh
+   HACK_INSTALL_TAG=v4.2.1 bash hack-v4-install.sh
+   ```
+
+   The versioned script filename alone is not a selection guarantee: the downloader
+   otherwise resolves the latest stable release. Review installation/PATH prompts.
+   For a Homebrew trial, the preferred rollback is the v4 installation you kept;
+   a version-specific Homebrew replacement recipe is **to be confirmed in the dogfood run**.
+5. Verify v4's version, run its `doctor`, and inspect the restored registry.
+   Start its daemon with `hack daemon start` only after the candidate has stopped.
+   If you removed its macOS service, restore it with stable `hack daemon install`.
+   Start the same Compose project and check its application data again.
+
+Sources: [candidate stable/rollback semantics](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/candidate-install.md#upgrade-roll-back-and-return-to-stable),
+[v4.2.1 downloader and installer](https://github.com/hack-dance/hack/blob/v4.2.1/scripts/build-release.ts),
+[data-restore qualification](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/v5-dogfooding.md).
+The complete restore, including retained data and daemon/service recovery, is
+**to be confirmed in the dogfood run**; software selection alone is not a tested rollback.
+
+## Known problems and the dogfood record
+
+Stop on a lock/ownership refusal, an env-delivery mismatch, unreadable state, or
+application data that fails its restart check. Keep the pre-upgrade backup and
+the refused state; do not reset receipts, delete locks or prune volumes to force
+success. See [Doctor and architecture](../../architecture.md) and
+[the current qualification checklist](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/v5-dogfooding.md).
+
+For help, report versions, OS/architecture, backend, command form, exit code and a
+value-free error code in [a repository issue](https://github.com/hack-dance/hack/issues).
+Do not attach env values, keys, raw registry contents or private project paths.
+
+Tonight's record must fill these gaps, each **to be confirmed in the dogfood run**:
+
+- 4.2.1 and 4.3.0 installation path, exact version selections and daemon transitions.
+- Which migration prompts/files change, and whether every required overlay still reaches its target.
+- Missing-folder registry preview and the old-lock recovery outcome.
+- Application checks across start, retaining stop, restart and restored v4 data.
+- Linux DNS, host/browser trust and daemon service availability at the tested revision.
+- Explicit agent-client loading, native setup eligibility, and the actual rollback transcript.

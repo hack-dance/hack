@@ -1370,7 +1370,8 @@ describe("second-review blockers", () => {
     expect((await readFile(spent.paths.events, "utf8")).endsWith("\n")).toBe(
       true
     );
-    // The cut freed the bytes: recovery records its own end, once.
+    // After the cut, recovery records its own end, once (whether the cut
+    // freed enough space on a really full disk is not modelled here).
     await writeFile(spent.paths.owner, JSON.stringify(deadOwner), {
       mode: 0o600,
     });

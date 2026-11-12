@@ -566,7 +566,9 @@ export async function reconcileTail(
       next.seq === (committed.at(-1)?.seq ?? 0) + 1 &&
       (await commitNewline({ handle, paths, at: bytes.length, next, io })) &&
       // Some filesystems report a full disk only at fsync: then the record
-      // is not known to be durable and is cut like any other.
+      // is not known to be durable and is cut like any other. An unlocked
+      // reader may briefly see it before the cut; the sequence stays dense
+      // and only one final record is ever kept.
       (await syncUnlessNoSpace(handle, io))
     ) {
       return [...committed, next];

@@ -794,7 +794,7 @@ esac
       await verifier.exited;
       expect(run.runningProviders()).toEqual([]);
     } finally {
-      if (verifier.exitCode === null) {
+      if (verifier.exitCode === null && verifier.signalCode === null) {
         verifier.kill("SIGKILL");
       }
       await verifier.exited;

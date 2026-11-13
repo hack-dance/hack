@@ -594,7 +594,7 @@ function createEncryptedScopedStore(input: {
  * lock, so a concurrent writer's update is never lost. Reads take no lock:
  * writes replace the file atomically, so a reader sees a whole envelope.
  */
-async function withEncryptedStoreMutation<T>(input: {
+export async function withEncryptedStoreMutation<T>(input: {
   readonly filePath: string;
   readonly run: () => Promise<T>;
 }): Promise<T> {

@@ -861,6 +861,13 @@ copies remain until migration cleanup or explicit removal; encrypting a YAML ent
 does not erase those copies. `doctor --migrate-env-config` prints the remaining
 plaintext key names and a `hack env protect` command after migration.
 
+Migration cleanup keeps content and file-identity receipts from its source
+inventory. After confirmation, it takes the source writer locks, checks those
+receipts and rechecks current YAML delivery and Compose references before
+removing anything. Changed sources or delivery refuse cleanup with a retry
+message; migration writes already completed remain. Editors and older writers
+that do not take Hack's locks can still race a filesystem operation.
+
 ### Concurrent writes to one env file
 
 Hack env commands that change an env file never silently lose another command's change.
@@ -1556,6 +1563,7 @@ Some older surfaces are still compatibility-oriented:
   bound to a path, project or variable name beyond the scoped key inside the
   encrypted store plaintext
 - the daemon env GET response identifies the format. For YAML projects it returns names, scopes, encryption flags and availability without decrypting or presenting legacy state. Legacy projects keep the dotenv-shaped metadata response. Legacy set/unset mutations refuse YAML projects until those endpoints use canonical YAML mutation helpers; use the CLI instead.
+- legacy daemon unset reports HTTP 500 with `secret_delete_unconfirmed` and `secretDeleted: null` if backend deletion throws, including an unknown outcome. It preserves `dotenvChanged` for the completed dotenv update; this operation is not atomic across both stores. A failure does not confirm that a backend value is absent.
 
 If you are writing new docs or new project setup flows, document the YAML overlay model first and treat `.hack/hack.env.json` as legacy migration context.
 

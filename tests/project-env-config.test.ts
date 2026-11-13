@@ -1531,6 +1531,7 @@ test("migrateLegacyProjectEnv converts legacy base and overlay values into new c
   const removed = await removeLegacyProjectEnvArtifacts({
     projectRoot: repo.projectRoot,
     paths: [storePath],
+    context: migrated.cleanupContext,
   });
   expect(
     await dropRemovedLegacySecretStorePointer({

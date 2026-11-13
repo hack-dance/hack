@@ -4474,6 +4474,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     projectDir: project.projectDir,
     projectName,
     paths: cleanupCandidates,
+    context: migrated.cleanupContext,
     acceptTrackedChanges: opts.acceptTrackedChanges,
   });
   await printMigrationProtectionHint(project);
@@ -4520,6 +4521,7 @@ async function offerDoctorEnvCleanup(opts: {
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
   readonly acceptTrackedChanges: boolean;
 }): Promise<void> {
   const untracked: string[] = [];
@@ -4554,6 +4556,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: untracked,
+        context: opts.context,
       });
     }
   }
@@ -4577,6 +4580,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: tracked,
+        context: opts.context,
       });
     } else {
       note(
@@ -4597,10 +4601,12 @@ async function removeDoctorEnvCleanup(opts: {
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
 }): Promise<void> {
   const removed = await removeLegacyProjectEnvArtifacts({
     paths: opts.paths,
     projectRoot: opts.projectRoot,
+    context: opts.context,
   });
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");

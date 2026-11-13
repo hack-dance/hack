@@ -79,6 +79,11 @@ import {
   resolveHackEnv,
 } from "./hack-env.ts";
 import { resolveUserHomeDir } from "./home-dir.ts";
+import {
+  type LegacyEnvCleanupReceipt,
+  legacyEnvCleanupReceipt,
+  legacyEnvCleanupReceiptMatches,
+} from "./legacy-env-cleanup-receipt.ts";
 import { quoteShellWord } from "./logs.ts";
 import {
   isOwnedLegacyAdoptionManagedEnvAdmission,
@@ -119,6 +124,7 @@ import {
 import {
   type FileSecretStoreListing,
   listFileSecretStoreEntries,
+  withEncryptedStoreMutation,
 } from "./secret-store.ts";
 import {
   hasPrimaryLocalInputs,
@@ -5468,6 +5474,9 @@ async function ensureLegacyMigrationLocalLayersIgnored(opts: {
 
 /** Outcome of {@link migrateLegacyProjectEnv}. */
 export type LegacyProjectEnvMigration = {
+  /** Ephemeral authority from the source inventory, carried across confirmation prompts. */
+  readonly cleanupContext?: LegacyEnvCleanupContext;
+  readonly cleanupStore?: { readonly path: string; readonly keyPath: string };
   readonly wroteFiles: readonly string[];
   readonly migratedOverlays: readonly string[];
   readonly movedPlainValues: readonly {
@@ -5486,6 +5495,16 @@ export type LegacyProjectEnvMigration = {
    * Absent or null when no pointer was kept for that reason.
    */
   readonly keptSecretStorePointer?: KeptSecretStorePointer | null;
+};
+
+export type LegacyEnvCleanupContext = {
+  readonly projectDir: string;
+  readonly projectName: string;
+  readonly serviceNames: readonly string[];
+  readonly overlayNames: readonly string[];
+  readonly contract: HackEnvContract;
+  readonly receipts: readonly LegacyEnvCleanupReceipt[];
+  readonly store?: { readonly path: string; readonly keyPath: string };
 };
 
 /**
@@ -5580,7 +5599,48 @@ export function describeRetainedLegacyEnvFile(opts: {
  * callers in commands/project.ts, commands/doctor.ts, commands/session.ts,
  * and commands/env.ts (`maybeMigrateLegacyProjectEnv`).
  */
-export async function migrateLegacyProjectEnv(opts: {
+export async function migrateLegacyProjectEnv(
+  opts: Parameters<typeof migrateLegacyProjectEnvWithSources>[0]
+): Promise<LegacyProjectEnvMigration> {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  const planned = await planLegacyProjectConfigChanges(opts);
+  const names = await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+    includeSymlinks: false,
+  });
+  const paths = new Set([
+    resolve(opts.projectDir, PROJECT_ENV_CONTRACT_FILENAME),
+    resolve(opts.projectDir, PROJECT_ENV_FILENAME),
+    ...names.map((name) =>
+      resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${name}`)
+    ),
+    ...planned.cleanupCandidates,
+  ]);
+  const receipts: LegacyEnvCleanupReceipt[] = [];
+  for (const path of paths) {
+    const receipt = await legacyEnvCleanupReceipt(path);
+    if (receipt) {
+      receipts.push(receipt);
+    }
+  }
+  const contract = await readHackEnvContract({ projectDir: opts.projectDir });
+  const migrated = await migrateLegacyProjectEnvWithSources(opts);
+  return {
+    ...migrated,
+    cleanupContext: {
+      projectDir: opts.projectDir,
+      projectName: opts.projectName,
+      serviceNames: opts.serviceNames,
+      overlayNames: migrated.migratedOverlays,
+      contract: contract.contract,
+      receipts,
+      store: migrated.cleanupStore,
+    },
+  };
+}
+
+async function migrateLegacyProjectEnvWithSources(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly projectName: string;
@@ -5915,6 +5975,10 @@ export async function migrateLegacyProjectEnv(opts: {
     legacyDetected: true,
     updatedProjectConfig: configCleanup.changed,
     cleanupCandidates: cleanupCandidates.allowed,
+    cleanupStore: {
+      path: secretStoreListing.storePath,
+      keyPath: secretStoreListing.keyPath,
+    },
     blockedCleanupCandidates: cleanupCandidates.blocked,
     retainedEnvFiles: [
       ...cleanupCandidates.retainedEnvFiles,
@@ -6208,6 +6272,7 @@ export async function finishImplicitLegacyEnvMigration(opts: {
   const removed = await removeLegacyProjectEnvArtifacts({
     projectRoot: opts.projectRoot,
     paths: removable,
+    context: migrated.cleanupContext,
   });
   if (removed.length > 0) {
     lines.push(
@@ -8621,18 +8686,212 @@ async function readLegacyDotenvText(opts: {
 export async function removeLegacyProjectEnvArtifacts(opts: {
   readonly projectRoot: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyEnvCleanupContext;
 }): Promise<readonly string[]> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-  const removed: string[] = [];
-  for (const path of opts.paths) {
+  if (opts.paths.length === 0) {
+    return [];
+  }
+  const context = opts.context;
+  if (!context) {
+    throw legacyCleanupChanged();
+  }
+  // Take the same source and destination locks as their writers. Sorted order
+  // avoids competing cleanup calls taking these locks in opposite orders.
+  const layers = new Set([
+    ...opts.paths,
+    ...context.receipts.map((receipt) => receipt.path),
+  ]);
+  for (const envName of [null, ...context.overlayNames]) {
+    layers.add(
+      resolveProjectEnvConfigPath({ projectDir: context.projectDir, envName })
+    );
+    layers.add(
+      resolveProjectEnvLocalConfigPath({
+        projectDir: context.projectDir,
+        envName,
+      })
+    );
+    const metadata = await resolveProjectEnvMetadata({
+      ...opts,
+      ...context,
+      envName,
+    });
+    for (const file of Object.values(metadata?.files ?? {})) {
+      if (typeof file === "string") {
+        layers.add(file);
+      }
+    }
+  }
+  const paths = [...layers].sort();
+  const locked = async (index: number): Promise<readonly string[]> => {
+    const path = paths[index];
+    if (path === undefined) {
+      await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+      await assertLegacyCleanupReceipts({ paths: opts.paths, context });
+      await assertLegacyCleanupDelivery({ ...opts, context });
+      const removed: string[] = [];
+      // Keep a store readable if unlinking it fails: its key is always last.
+      const targets = [
+        ...opts.paths.filter((path) => path !== context.store?.keyPath),
+        ...opts.paths.filter((path) => path === context.store?.keyPath),
+      ];
+      for (const target of targets) {
+        if (!(await pathExists(target))) {
+          continue;
+        }
+        const receipt = context.receipts.find((entry) => entry.path === target);
+        if (!(receipt && (await legacyEnvCleanupReceiptMatches(receipt)))) {
+          throw legacyCleanupChanged();
+        }
+        await rm(target, { recursive: false, force: false });
+        removed.push(target);
+      }
+      return removed;
+    }
+    const run = () => locked(index + 1);
+    return path === context.store?.path
+      ? await withEncryptedStoreMutation({ filePath: path, run })
+      : await withEnvLayerLock({ layerPath: path, run });
+  };
+  return await locked(0);
+}
+
+function legacyCleanupChanged(): ClosedCliError {
+  return new ClosedCliError(
+    "Refusing legacy env cleanup: a source file changed, its inventory is unavailable, or current env delivery no longer preserves it. Kept remaining legacy files; earlier migration writes or cleanup removals may remain. Retry hack doctor --migrate-env-config after checking the files (values omitted)."
+  );
+}
+
+async function assertLegacyCleanupReceipts(opts: {
+  readonly paths: readonly string[];
+  readonly context: LegacyEnvCleanupContext;
+}): Promise<void> {
+  for (const path of new Set([
+    ...opts.paths,
+    ...opts.context.receipts.map((entry) => entry.path),
+  ])) {
     if (!(await pathExists(path))) {
       continue;
     }
-    await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-    await rm(path, { recursive: false, force: true });
-    removed.push(path);
+    const receipt = opts.context.receipts.find((entry) => entry.path === path);
+    if (!(receipt && (await legacyEnvCleanupReceiptMatches(receipt)))) {
+      throw legacyCleanupChanged();
+    }
   }
-  return removed;
+}
+
+/** Re-evaluate delivery and Compose references after prompts, while writer locks are held. */
+async function assertLegacyCleanupDelivery(opts: {
+  readonly projectRoot: string;
+  readonly paths: readonly string[];
+  readonly context: LegacyEnvCleanupContext;
+}): Promise<void> {
+  const { context } = opts;
+  const resolved = new Map<string | null, ProjectEnvResolvedConfig>();
+  const preserves = async (
+    key: string,
+    value: string,
+    envName: string | null
+  ) => {
+    let modern = resolved.get(envName);
+    if (!modern) {
+      modern =
+        (await resolveProjectEnvConfig({
+          ...context,
+          projectRoot: opts.projectRoot,
+          envName,
+        })) ?? undefined;
+      if (!modern) {
+        throw legacyCleanupChanged();
+      }
+      resolved.set(envName, modern);
+    }
+    const scopes = context.contract.vars.find((entry) => entry.key === key)
+      ?.services ?? ["global"];
+    for (const scope of scopes.length > 0 ? scopes : ["global"]) {
+      if (
+        selectProjectEnvValues({
+          resolved: modern,
+          scopeName: scope.trim() || "global",
+        })[key] !== value
+      ) {
+        throw legacyCleanupChanged();
+      }
+    }
+  };
+  const references = await inspectLegacyComposeEnvFileReferences({
+    projectDir: context.projectDir,
+    composeFile: resolve(context.projectDir, PROJECT_COMPOSE_FILENAME),
+  });
+  const contractSelected = opts.paths.includes(
+    resolve(context.projectDir, PROJECT_ENV_CONTRACT_FILENAME)
+  );
+  for (const envName of [null, ...context.overlayNames]) {
+    const path = resolveEnvFilePath({
+      projectDir: context.projectDir,
+      envName,
+    });
+    if (opts.paths.includes(path) && (await pathExists(path))) {
+      if (references.some((entry) => entry.resolvedPath === path)) {
+        throw legacyCleanupChanged();
+      }
+      for (const [key, value] of Object.entries(
+        await readLegacyDotenvCleanupEntries({ path })
+      )) {
+        await preserves(key, value, envName);
+      }
+    }
+    if (contractSelected || (envName === null && opts.paths.includes(path))) {
+      const legacy = await resolveHackEnv({ ...context, envName });
+      if (contractSelected) {
+        for (const entry of legacy.values) {
+          if (entry.value !== null) {
+            await preserves(entry.key, entry.value, envName);
+          }
+        }
+      }
+      if (envName === null && opts.paths.includes(path)) {
+        const interpolated = await composeInterpolatedServiceOnlyKeys({
+          projectDir: context.projectDir,
+          resolvedValues: legacy.values,
+        });
+        const entries = await readLegacyDotenvCleanupEntries({ path });
+        if (Object.keys(entries).some((key) => interpolated.has(key))) {
+          throw legacyCleanupChanged();
+        }
+      }
+    }
+  }
+  if (
+    !(
+      context.store &&
+      opts.paths.some(
+        (path) =>
+          path === context.store?.path || path === context.store?.keyPath
+      )
+    )
+  ) {
+    return;
+  }
+  if (!(await pathExists(context.store.path))) {
+    return;
+  }
+  if (!opts.paths.includes(context.store.path)) {
+    throw legacyCleanupChanged();
+  }
+  const listing = await listFileSecretStoreEntries(context);
+  if (
+    listing.storePath !== context.store.path ||
+    listing.kind !== "listed" ||
+    listing.foreignEntryCount > 0
+  ) {
+    throw legacyCleanupChanged();
+  }
+  for (const [storeKey, value] of listing.ownEntries) {
+    const parsed = parseStoreOverlayKey(storeKey);
+    await preserves(parsed?.key ?? storeKey, value, parsed?.envName ?? null);
+  }
 }
 
 /**

@@ -1532,7 +1532,10 @@ when the env layers now deliver every entry it holds for this project and it hol
 another; otherwise it keeps the store and names the entries that would be lost, never their
 values. A store it can't list (its key isn't available, it can't be read, or the backend is
 the keychain) is kept too. A store key file inside the project is offered only when no store
-that needs it stays behind. While a store exists, the migration keeps its pointer in
+that needs it stays behind. Project env keys (including the shared Git key), current
+YAML layers and project config files are never legacy cleanup targets, even when
+an old backend configuration names the same file. Cleanup refuses a request that
+includes one, because migrated values may still depend on it. While a store exists, the migration keeps its pointer in
 `hack.config.json` (`controlPlane.secrets.encryptedFile` and `backend: encrypted_file`) on
 every route, including implicit ones such as `hack env add`, so entries it still holds stay
 readable through the secret store without hand edits; Hack reports the kept pointer with the

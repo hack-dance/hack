@@ -101,7 +101,10 @@ export type SecretStoreReader = {
 export type SecretStoreUsers = {
   /** Names only, sorted. */
   readonly names: readonly string[];
-  /** The same readers as data, in the order of `names`. */
+  /**
+   * Every reading checkout as data, sorted by name and then by project.
+   * Readers that share a display name are all kept; `names` lists it once.
+   */
   readonly readers: readonly SecretStoreReader[];
   /** False when the registry could not be read or is not a valid registry. */
   readonly registryRead: boolean;
@@ -238,13 +241,16 @@ export async function listProjectsUsingSecretStore(opts: {
   readonly storePath: string;
 }): Promise<SecretStoreUsers> {
   const found = await storeContexts(opts);
-  const byName = new Map<string, SecretStoreReader>();
+  // One reader per checkout directory. Two checkouts can share a display
+  // name (two registered projects with one name, or a project named like
+  // another project's worktree label); neither may hide the other.
+  const byCheckout = new Map<string, SecretStoreReader>();
   for (const context of found.contexts) {
     if (
-      !byName.has(context.name) &&
+      !byCheckout.has(context.projectDir) &&
       (await projectUsesSecretStore({ projectDir: context.projectDir }))
     ) {
-      byName.set(context.name, {
+      byCheckout.set(context.projectDir, {
         name: context.name,
         project: context.project,
         projectName: context.projectName,
@@ -254,10 +260,19 @@ export async function listProjectsUsingSecretStore(opts: {
       });
     }
   }
-  const names = [...byName.keys()].sort();
+  const order = (left: string, right: string): number => {
+    if (left === right) {
+      return 0;
+    }
+    return left < right ? -1 : 1;
+  };
+  const readers = [...byCheckout.values()].sort(
+    (left, right) =>
+      order(left.name, right.name) || order(left.project, right.project)
+  );
   return {
-    names,
-    readers: names.flatMap((name) => byName.get(name) ?? []),
+    names: [...new Set(readers.map((reader) => reader.name))].sort(),
+    readers,
     registryRead: found.registryRead,
     unchecked: found.unchecked,
     missing: found.missing,

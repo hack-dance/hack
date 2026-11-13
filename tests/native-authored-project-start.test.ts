@@ -43,6 +43,78 @@ const {
   groupEnded,
 } = createNativeAuthoredStartHarness();
 
+const configurationRefusals = Array.from({ length: 12 }, (_, index) =>
+  ["lockfiles", "runtime-files", "cache-volume", "bootstrap"].map((field) => ({
+    text_fixed: true,
+    service: `service${index}`,
+    field: `labels.hack.dependencies.${field}`,
+    message: "The dependency cache field is invalid.",
+    fix: "Correct this field in the service configuration before starting the project. Use a declared, mounted named volume and relative file paths without variables or parent traversal.",
+  }))
+).flat();
+
+test("authored startup keeps validated configuration findings and drops malformed batches", () => {
+  expect(JSON.stringify(configurationRefusals).length).toBeGreaterThan(8192);
+  const error = new NativeAuthoredProjectStartError({
+    outcome: "not-started",
+    canceled: false,
+    stage: "native-plan",
+    nativeCode: "invalid_dependency_cache",
+    configurationRefusals,
+  });
+  expect(error.nativeCode).toBe("invalid_dependency_cache");
+  expect(error.nativeConfigurationRefusals).toHaveLength(48);
+  for (let index = 0; index < 12; index++) {
+    expect(error.message).toContain(
+      `Service service${index}, labels.hack.dependencies.`
+    );
+  }
+  const malformed = new NativeAuthoredProjectStartError({
+    outcome: "not-started",
+    canceled: false,
+    configurationRefusals: [...configurationRefusals, { message: CANARY }],
+  });
+  expect(malformed.nativeConfigurationRefusals).toBeUndefined();
+  expect(JSON.stringify(malformed)).not.toContain(CANARY);
+  expect(malformed.message).not.toContain(CANARY);
+});
+
+macTest(
+  "authored up preserves a configuration refusal larger than 8 KiB before reservation",
+  async () => {
+    const selected = await fixture({
+      planFailure: true,
+      planFailureCode: "invalid_dependency_cache",
+      planConfigurationRefusals: configurationRefusals,
+    });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
+      }),
+      "not-started"
+    );
+    expect(error).toHaveProperty("stage", "native-plan");
+    expect(error).toHaveProperty("nativeCode", "invalid_dependency_cache");
+    if (!(error instanceof NativeAuthoredProjectStartError)) {
+      throw new Error("Expected authored startup refusal");
+    }
+    expect(error.nativeConfigurationRefusals).toHaveLength(48);
+    for (let index = 0; index < 12; index++) {
+      expect(error.message).toContain(
+        `Service service${index}, labels.hack.dependencies.`
+      );
+    }
+    expect(await artifacts(selected.scope)).toEqual([]);
+    expect(await Bun.file(selected.delivery).exists()).toBe(false);
+    const calls = await Bun.file(selected.calls).text();
+    expect(calls).toContain('"plan","--source-file"');
+    expect(calls).not.toContain('"serve"');
+    expect(JSON.stringify(error)).not.toContain("private-rejected-plan-detail");
+  }
+);
+
 macTest(
   "HACK-1272: a consumer refused before journal reservation retires its exact start intent",
   async () => {

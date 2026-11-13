@@ -776,7 +776,7 @@ test("managed input uses stdin with EOF and is absent from argv and inherited en
   }
 });
 
-test("large configuration batches are limited to read-only plan errors", async () => {
+test("large configuration batches keep codes and services on every request path", async () => {
   const runtime = await fixture();
   const plan = await invokeNativeRuntime({
     runtime,
@@ -798,16 +798,42 @@ test("large configuration batches are limited to read-only plan errors", async (
   }
   expect(plan.nativeConfigurationRefusals).toHaveLength(128);
   expect(JSON.stringify(plan)).not.toContain("synthetic-secret-diagnostic");
-  const control = await invokeNativeRuntime({
-    runtime,
-    cwd: runtime.home,
-    args: ["graph", "configuration-batch"],
-  }).catch((error: unknown) => error);
-  expect(control).toBeInstanceOf(NativeRuntimeRequestError);
-  expect(control).toMatchObject({
-    nativeCode: undefined,
-    nativeConfigurationRefusals: undefined,
-  });
+  for (const args of [
+    ["graph", "configuration-batch"],
+    [
+      "graph",
+      "native",
+      "plan",
+      "--source-file",
+      "configuration-batch",
+      "--json",
+    ],
+    [
+      "graph",
+      "native",
+      "frontend-plan",
+      "--source-file",
+      "configuration-batch",
+      "--json",
+    ],
+  ]) {
+    const control = await invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args,
+    }).catch((error: unknown) => error);
+    expect(control).toBeInstanceOf(NativeRuntimeRequestError);
+    expect(control).toMatchObject({ nativeCode: "invalid_dependency_cache" });
+    if (!(control instanceof NativeRuntimeRequestError)) {
+      throw new Error("Expected configuration refusal");
+    }
+    expect(
+      control.nativeConfigurationRefusals?.map((item) => item.service)
+    ).toEqual(Array.from({ length: 128 }, (_, i) => `s${i}`));
+    expect(JSON.stringify(control)).not.toContain(
+      "synthetic-secret-diagnostic"
+    );
+  }
 });
 
 test("native failure preserves only its validated structured code", async () => {

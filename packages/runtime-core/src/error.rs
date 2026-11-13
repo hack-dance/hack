@@ -236,7 +236,8 @@ impl CandidateError {
     pub fn with_configuration_refusals(mut self, mut findings: Vec<ConfigurationRefusal>) -> Self {
         // Malformed lists can repeat the same field thousands of times. Keep
         // every distinct explanation, not one copy per authored value. This
-        // also bounds the serialized review error below the CLI pipe budget.
+        // also bounds current producers below the CLI's shared 1 MiB error
+        // envelope, including planning and startup consumers.
         let mut seen = std::collections::BTreeSet::new();
         findings.retain(|item| seen.insert((item.service.clone(), item.field, item.message)));
         self.refusals

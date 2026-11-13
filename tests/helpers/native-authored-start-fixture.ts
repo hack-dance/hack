@@ -270,6 +270,7 @@ export function createNativeAuthoredStartHarness() {
     readonly planFailure?: boolean;
     /** Closed native code for `planFailure` (default `native_graph_compile`). */
     readonly planFailureCode?: string;
+    readonly planConfigurationRefusals?: readonly unknown[];
     readonly failBeforeReceipt?: boolean;
     readonly removedBeforeReady?: boolean;
     readonly foreignRemovalReview?: boolean;
@@ -576,7 +577,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
   review.review_id=createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex');
  }
  if(planning){
-  if(${options.planFailure === true}){console.error(JSON.stringify({code:${JSON.stringify(options.planFailureCode ?? "native_graph_compile")},message:'private-rejected-plan-detail'}));process.exit(2)}
+  if(${options.planFailure === true}){console.error(JSON.stringify({code:${JSON.stringify(options.planFailureCode ?? "native_graph_compile")},message:'private-rejected-plan-detail',configuration_refusals:${JSON.stringify(options.planConfigurationRefusals)}}));process.exit(2)}
   if(${options.changeDuringPlan === true})await appendFile(${JSON.stringify(envFile)},'\\n');
   console.log(JSON.stringify(review));process.exit(0);
  }

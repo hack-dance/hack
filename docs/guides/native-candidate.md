@@ -263,6 +263,12 @@ Report version 2 moves `shared_source_grant_required` from `blockers` into
 `consent_needed`. Consumers should use `ready` for the overall verdict and
 inspect both lists for what remains to do.
 
+Configuration finding `field` paths are relative to the named service (for
+example, `labels.hack.dependencies.lockfiles`); plan diagnostics use absolute
+paths such as `services.api.privileged`. Large configuration refusal batches
+retain their code and service locations during authored startup as well as
+preflight. Raw runtime stderr and startup output are not configuration findings.
+
 ```json
 {
   "report_version": 2,

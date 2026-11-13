@@ -628,6 +628,7 @@ fn declared_configuration(
                     "graph_budget",
                     "A service exceeds the bounded graph profile.",
                 )
+                .with_service(name)
             });
         }
         // ShmSize is a tmpfs ceiling, not preallocated RSS. Its actual usage is
@@ -1285,10 +1286,9 @@ mod compose_field_tests {
         let first = plan.services.get_mut("api").unwrap();
         first.platform = None;
         first.network_mode = "project-networks".into();
-        assert_eq!(
-            declared_configuration(&plan, true, true).unwrap_err().code,
-            "graph_budget"
-        );
+        let budget = declared_configuration(&plan, true, true).unwrap_err();
+        assert_eq!(budget.code, "graph_budget");
+        assert_eq!(budget.service.as_deref(), Some("api"));
     }
 
     #[test]

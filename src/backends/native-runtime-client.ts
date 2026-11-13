@@ -296,18 +296,10 @@ export interface NativeRuntimeSelection {
 
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_PRIVATE_INPUT_BYTES = 256 * 1024;
-// A read-only Compose review can report cache-label errors for all 64 services.
-// Keep ordinary control errors at 8 KiB and never admit startup output here.
-const MAX_PLAN_FAILURE_BYTES = 1024 * 1024;
-
-function failureReplyBudget(
-  args: readonly string[],
-  privateInput?: Uint8Array
-): number {
-  return args[0] === "project" && args[1] === "plan" && !privateInput
-    ? MAX_PLAN_FAILURE_BYTES
-    : 8192;
-}
+// Configuration refusals can originate during planning or startup, including
+// authored graph native plan/frontend-plan. Keep the same bounded envelope for
+// every structured error; startup output still requires its explicit decoder.
+const MAX_NATIVE_FAILURE_BYTES = 1024 * 1024;
 
 /**
  * Exit-relative bound on draining an owned native child's stdout and stderr.
@@ -454,11 +446,7 @@ export async function invokeNativeRuntime(opts: {
       drainTimer = setTimeout(() => drain.abort(), exitDrainBoundMs);
     });
   }
-  const failureDetails = readNativeFailure(
-    child.stderr,
-    drain?.signal,
-    failureReplyBudget(opts.args, opts.privateInput)
-  );
+  const failureDetails = readNativeFailure(child.stderr, drain?.signal);
   let timedOut = false;
   let canceled = false;
   const cancel = () => {
@@ -906,7 +894,7 @@ function processRefusalsOf(value: unknown): {
 async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
-  limit = 8192,
+  limit = MAX_NATIVE_FAILURE_BYTES,
   startupLogs = false
 ): Promise<NativeFailure | undefined> {
   const reader = stream.getReader();
@@ -1004,7 +992,7 @@ export async function readNativeStartupFailure(
   const failure = await readNativeFailure(
     stream,
     signal,
-    NATIVE_STARTUP_FAILURE_REPLY_BYTES,
+    Math.max(NATIVE_STARTUP_FAILURE_REPLY_BYTES, MAX_NATIVE_FAILURE_BYTES),
     true
   );
   return failure === undefined

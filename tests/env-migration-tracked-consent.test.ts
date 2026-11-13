@@ -215,8 +215,11 @@ for (const backend of ["compose", "native"] as const) {
       expect(run.output).toContain(
         `Moved ${KEY} to .hack/hack.env.local.yaml (values omitted).`
       );
-      expect(run.output).toContain("tracked by git");
-      expect(run.output).toContain("and can now be removed");
+      expect(
+        run.output.replace(/[│\r\n]/g, " ").replace(/\s+/g, " ")
+      ).toContain(
+        "These legacy env files are tracked by git, or are keys kept with a tracked store, and can now be removed. Teammates share the tracked files, so commit their removal together with the new env layers:"
+      );
       expect(await status(project)).toEqual([
         " D .hack/hack.env.json",
         " M .hack/docker-compose.yml",

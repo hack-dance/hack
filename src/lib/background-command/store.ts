@@ -492,13 +492,6 @@ export function expiresAt(meta: CommandMeta): string {
 }
 
 /**
- * Retention. Only ended commands expire: their output and events are removed
- * `retentionMs` after the end (never more than 24 hours) and an `expired.json`
- * tombstone is left so a later read reports "expired" rather than "not
- * found". Tombstones and their request keys are removed after 7 days.
- * Running commands are never touched here.
- */
-/**
  * A running journal whose supervisor is gone, for a command that had values
  * to redact: take it over, which drops the output nobody scanned (see
  * `recoverLostOwner`). Never signals anything. Without values to redact
@@ -519,6 +512,16 @@ async function scrubOrphanedOutput(opts: {
   }
 }
 
+/**
+ * Retention. Only ended commands expire: their output and events are removed
+ * `retentionMs` after the end (never more than 24 hours) and an `expired.json`
+ * tombstone is left so a later read reports "expired" rather than "not
+ * found". Tombstones and their request keys are removed after 7 days.
+ * For commands with values to redact, the sweep also takes over a running
+ * journal whose supervisor is gone and cuts bytes appended after an end
+ * (never signalling anything). A failure there is skipped for that journal:
+ * one bad journal must not refuse every start.
+ */
 export async function pruneExpired(opts: {
   readonly root: string;
   readonly now: number;
@@ -544,16 +547,19 @@ export async function pruneExpired(opts: {
     const events = await readEvents(paths);
     const ended = endedEvent(events);
     if (!ended) {
-      await scrubOrphanedOutput({ paths, meta, events, now: opts.now });
+      await scrubOrphanedOutput({ paths, meta, events, now: opts.now }).catch(
+        () => undefined
+      );
       continue;
     }
     if (opts.now - Date.parse(ended.time) < meta.retentionMs) {
       if (needsAtRestScrub(meta)) {
         // After the end nothing scans output: bytes a descendant appended
-        // later are not kept.
+        // later were never readable and are not kept. Intentionally no
+        // event: an ended journal takes no more records.
         await withJournalLock(paths, async () => {
           await dropUnscannedOutput({ paths, events: await readEvents(paths) });
-        });
+        }).catch(() => undefined);
       }
       continue;
     }

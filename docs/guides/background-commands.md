@@ -271,7 +271,8 @@ the stored files and records one `command.output_truncated` with `reason:
 "redaction_unavailable"`; otherwise it announces it (marked `unsupervised:
 true`). Once the command is confirmed gone, the read writes the single final
 record with outcome `unknown`. Until then the command stays
-running: it keeps its admission slot, and its files are not truncated at the
+running and keeps its admission slot. For a command with values to redact its
+files are cut back at every takeover; otherwise they are not truncated at the
 capture limit (no owner is left to truncate them). If it is still running past
 its timeout, the next background start in the same Hack home stops its process
 group (only after checking its pid, start time and group), records `timed_out`
@@ -347,8 +348,9 @@ What the stored files (at rest) hold:
   "redaction_unavailable"`; until one of those runs it is on disk unredacted.
   Bytes a left-over process appends after the end are cut at the next sweep.
   For a command with no values to redact the output is kept and announced as
-  `unsupervised`. Reads of older journals still withhold such output with
-  `withheld: "redaction_unavailable"`.
+  `unsupervised`. Journals written before this behaviour still
+  withhold such output from reads with `withheld: "redaction_unavailable"`,
+  but keep it on disk until their retention ends.
 - **Native backend:** nothing is redacted, in reads or at rest (see below).
 
 - Full capture supports at most 1,024 distinct values to redact (values of

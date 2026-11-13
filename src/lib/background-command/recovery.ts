@@ -343,11 +343,6 @@ async function recoveredContainerProcess(opts: {
 }
 
 /**
- * Announce output the kernel appended since the last event, marked
- * `unsupervised` (no redaction values exist here). Returns whether capture
- * is truncated.
- */
-/**
  * Output that landed after the supervisor was lost. Without the redaction
  * values (only the supervisor ever held them, over a pipe), a command that
  * had values to redact cannot have that output stored safely: each stream
@@ -444,6 +439,11 @@ export async function dropUnscannedOutput(opts: {
   return dropped;
 }
 
+/**
+ * Announce output the kernel appended since the last event, marked
+ * `unsupervised` (no redaction values exist here). Returns whether capture
+ * is truncated.
+ */
 async function announceUnsupervisedOutput(opts: {
   readonly paths: JournalPaths;
   readonly meta: CommandMeta;

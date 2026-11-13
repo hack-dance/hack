@@ -137,7 +137,7 @@ for (const fs of FILESYSTEMS) {
       test("an event append is refused cleanly: no torn line, the journal stays readable", async () => {
         const root = await newRoot();
         const { meta, paths } = await acceptCommand({ input: input(), root });
-        const code = await fill(fs.dir as string);
+        await fill(fs.dir as string);
         const writer = new JournalWriter(paths, meta, 1);
         let refused: unknown = null;
         try {
@@ -150,7 +150,9 @@ for (const fs of FILESYSTEMS) {
         } catch (error: unknown) {
           refused = error;
         }
-        expect(noSpaceCode(refused)).toBe(code);
+        // A quota can fill the last page and then refuse the next: the short
+        // write is cut back and reported as ENOSPC, so either code is fine.
+        expect(noSpaceCode(refused)).not.toBeNull();
         const text = await readFile(paths.events, "utf8");
         expect(text.endsWith("\n")).toBe(true);
         expect((await readEvents(paths)).map((event) => event.type)).toEqual([
@@ -158,6 +160,34 @@ for (const fs of FILESYSTEMS) {
         ]);
         // The final record's reserve is untouched by a refused event.
         expect((await lstat(paths.reserve)).size).toBeGreaterThan(0);
+      });
+
+      test("an orphan's unscanned output is cut without new space, and the final record still lands", async () => {
+        const root = await newRoot();
+        const { meta, paths } = await acceptCommand({
+          input: { ...input(), redaction: { values: 1 } },
+          root,
+        });
+        await writeFile(paths.owner, JSON.stringify(deadOwner), {
+          mode: 0o600,
+        });
+        await writeFile(paths.stdout, "unscanned output\n".repeat(64), {
+          mode: 0o600,
+        });
+        await fill(fs.dir as string);
+        const events = await recoverLostOwner({
+          paths,
+          meta,
+          observe: nothingAlive,
+          readBootTime: noReboot,
+        });
+        expect((await lstat(paths.stdout)).size).toBe(0);
+        const ended = events.at(-1);
+        expect(ended?.type).toBe("command.ended");
+        expect(ended?.payload.truncated).toBe(true);
+        expect(
+          events.filter((event) => event.type === "command.ended")
+        ).toHaveLength(1);
       });
 
       test("recovery writes the final record from the reserve, once", async () => {

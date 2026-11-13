@@ -49,6 +49,13 @@ const optAccept = defineOption({
   description:
     "Consent to the displayed edits or removals of Git-tracked legacy env files",
 } as const);
+const optPreserve = defineOption({
+  name: "preserveChanges",
+  type: "boolean",
+  long: "--preserve-changes",
+  description:
+    "With rollback, restore originals and retain later edits privately in the snapshot",
+} as const);
 
 const options = [
   optPath,
@@ -57,6 +64,7 @@ const options = [
   optCleanup,
   optRollback,
   optAccept,
+  optPreserve,
 ] as const;
 const spec = defineCommand({
   name: "migrate",
@@ -68,14 +76,9 @@ const spec = defineCommand({
   subcommands: [],
 } as const);
 
-export async function handleEnvMigrate({
-  ctx,
-  args,
-}: {
-  readonly ctx: CliContext;
-  readonly args: CommandArgs<typeof options, readonly []>;
-}): Promise<number> {
-  const opts = args.options;
+function validateMigrationOptions(
+  opts: CommandArgs<typeof options, readonly []>["options"]
+): void {
   if (
     opts.rollbackManifest !== undefined &&
     (opts.apply || opts.cleanup || opts.acceptTrackedChanges)
@@ -87,6 +90,20 @@ export async function handleEnvMigrate({
   if (opts.acceptTrackedChanges && !opts.apply) {
     throw new CliUsageError("--accept-tracked-env-changes requires --apply.");
   }
+  if (opts.preserveChanges && !opts.rollbackManifest) {
+    throw new CliUsageError("--preserve-changes requires --rollback-manifest.");
+  }
+}
+
+export async function handleEnvMigrate({
+  ctx,
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: CommandArgs<typeof options, readonly []>;
+}): Promise<number> {
+  const opts = args.options;
+  validateMigrationOptions(opts);
   const context = await findProjectContext(resolve(ctx.cwd, opts.path ?? "."));
   if (!context) {
     throw new MissingProjectContextError();
@@ -116,6 +133,7 @@ export async function handleEnvMigrate({
       project,
       manifestPath: resolve(ctx.cwd, opts.rollbackManifest),
       snapshots: await envMigrationSnapshots(),
+      preserveChanges: opts.preserveChanges === true,
     });
   } else if (opts.apply) {
     data = await (opts.cleanup ? cleanupEnvMigration : applyEnvMigration)({

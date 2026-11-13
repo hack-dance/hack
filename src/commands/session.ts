@@ -14,7 +14,7 @@ import {
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPretty } from "../cli/options.ts";
 import {
-  hasPendingEnvMigration,
+  assertEnvMigrationFinished,
   migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
 } from "../lib/env-migration.ts";
 import {
@@ -1049,11 +1049,11 @@ async function maybeMigrateLegacySessionEnv(opts: {
   readonly project: ProjectContext;
   readonly projectName: string;
 }): Promise<void> {
+  await assertEnvMigrationFinished(opts.project);
   if (
-    !(await hasPendingEnvMigration(opts.project)) &&
-    (await projectEnvConfigExists({
+    await projectEnvConfigExists({
       projectDir: opts.project.projectDir,
-    }))
+    })
   ) {
     return;
   }

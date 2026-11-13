@@ -4248,10 +4248,12 @@ async function maybeMigrateProjectEnvConfig(opts: {
       : "Env migration completed. Legacy files were kept for a separate cleanup step.",
     "env migration"
   );
-  note(
-    `Journal: ${result.journalPath}\nRollback snapshot: ${result.manifestPath}\nAfter validating the project, preview cleanup with: hack env migrate --cleanup --path ${JSON.stringify(project.projectRoot)}`,
-    "env migration"
-  );
+  if (result.manifestPath) {
+    note(
+      `Journal: ${result.journalPath}\nRollback snapshot: ${result.manifestPath}\nAfter validating the project, preview cleanup with: hack env migrate --cleanup --path ${JSON.stringify(project.projectRoot)}`,
+      "env migration"
+    );
+  }
   await printMigrationProtectionHint(project);
 }
 

@@ -6252,6 +6252,8 @@ export type PreparedLegacyEnvMigration = {
   readonly removable: readonly string[];
   readonly overlayNames: readonly string[];
   readonly hasContract: boolean;
+  readonly retainedEnvFiles: readonly RetainedLegacyEnvFile[];
+  readonly blockedCleanupCandidates: readonly string[];
   readonly store?: { readonly path: string; readonly keyPath: string };
   /** Private in-memory payload: never serialize this return value. */
   readonly payload: (path: string) => string;
@@ -6682,6 +6684,24 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
     );
   };
   const layersExist = await projectEnvConfigExistsForMutation(opts);
+  if (
+    !contract.exists &&
+    layersExist &&
+    !(await canMigrateCheckoutLegacyDotenv(opts))
+  ) {
+    return {
+      files: [],
+      sourcePaths: [],
+      removable: [],
+      overlayNames: [],
+      hasContract: false,
+      retainedEnvFiles: [],
+      blockedCleanupCandidates: [],
+      payload: () => {
+        throw new ClosedCliError("No migration publication is required.");
+      },
+    };
+  }
   const { overlayNames, store, deliveredValues, configCandidates } =
     contract.exists
       ? await prepareContractMigration(
@@ -6778,6 +6798,8 @@ async function prepareLegacyProjectEnvMigrationInternal(opts: {
     removable,
     overlayNames,
     hasContract: contract.exists,
+    retainedEnvFiles: candidates.retainedEnvFiles,
+    blockedCleanupCandidates: candidates.blocked,
     ...(store ? { store } : {}),
     payload: (path) => {
       const text = texts.get(path);
@@ -10362,7 +10384,12 @@ export async function prepareLegacyEnvCleanupConfig(opts: {
   if (!existing) {
     return null;
   }
-  const parsed: unknown = JSON.parse(existing.text);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(existing.text);
+  } catch {
+    throw legacyCleanupChanged();
+  }
   if (!isRecord(parsed)) {
     throw legacyCleanupChanged();
   }

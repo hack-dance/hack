@@ -15,7 +15,7 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 /**
  * HACK-1904: the env migration never deletes or edits a git-tracked file
  * without consent, native doctor runs the same migration as Compose doctor,
- * and the implicit route reports moved keys and drops its plaintext copy.
+ * and every applying route retains legacy copies for a separate cleanup step.
  * Every case uses a real temporary git repository and synthetic values.
  */
 
@@ -181,7 +181,7 @@ for (const backend of ["compose", "native"] as const) {
       expect(run.output).not.toContain(VALUE);
       expect(run.output).toContain("E_INTERACTIVE_REQUIRED");
       expect(run.output).toContain(
-        "git-tracked files (edit .hack/docker-compose.yml; delete .hack/hack.env.json)"
+        "git-tracked files (edit .hack/docker-compose.yml)"
       );
       expect(run.output).toContain("--accept-tracked-env-changes");
       expect(run.output).not.toContain(
@@ -212,16 +212,10 @@ for (const backend of ["compose", "native"] as const) {
       expect(run.output).toContain(KEY);
       expect(run.output).not.toContain(VALUE);
       expect(run.output).not.toContain("E_INTERACTIVE_REQUIRED");
-      expect(run.output).toContain(
-        `Moved ${KEY} to .hack/hack.env.local.yaml (values omitted).`
-      );
       expect(
         run.output.replace(/[│\r\n]/g, " ").replace(/\s+/g, " ")
-      ).toContain(
-        "These legacy env files are tracked by git, or are keys kept with a tracked store, and can now be removed. Teammates share the tracked files, so commit their removal together with the new env layers:"
-      );
+      ).toContain("Legacy files were kept for a separate cleanup step.");
       expect(await status(project)).toEqual([
-        " D .hack/hack.env.json",
         " M .hack/docker-compose.yml",
         "?? .hack/.gitignore",
         "?? .hack/hack.env.default.yaml",
@@ -229,10 +223,13 @@ for (const backend of ["compose", "native"] as const) {
       expect(
         await readFile(join(project.projectDir, "hack.env.local.yaml"), "utf8")
       ).toContain(VALUE);
-      // The plaintext copy is gone once Compose no longer names it.
-      await expect(
-        readFile(join(project.projectDir, ".env"), "utf8")
-      ).rejects.toMatchObject({ code: "ENOENT" });
+      // Migration does not authorize removal, even when Compose no longer names it.
+      expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+        `${KEY}=${VALUE}\n`
+      );
+      expect(
+        await readFile(join(project.projectDir, "hack.env.json"), "utf8")
+      ).toBe(CONTRACT);
     },
     CLI_TEST_TIMEOUT_MS
   );
@@ -250,10 +247,11 @@ test(
 
     expect(run.exitCode, run.output).toBe(0);
     expect(run.output).not.toContain(VALUE);
-    expect(run.output).toContain(`Moved ${KEY} to .hack/hack.env.local.yaml`);
+    expect(run.output).toContain(KEY);
     expect(await status(project)).toEqual([
       "?? .hack/.gitignore",
       "?? .hack/hack.env.default.yaml",
+      "?? .hack/hack.env.json",
     ]);
   },
   CLI_TEST_TIMEOUT_MS
@@ -268,7 +266,7 @@ function runImplicit(project: Project, env: Record<string, string> = {}) {
 }
 
 test(
-  "implicit migration names moved keys, drops the plaintext copy and leaves tracked files alone",
+  "implicit migration names moved keys, retains the plaintext copy and leaves tracked files alone",
   async () => {
     const project = await createProject({ compose: COMPOSE_PLAIN });
 
@@ -279,7 +277,7 @@ test(
     expect(run.output).toContain(
       `Moved ${KEY} to .hack/hack.env.local.yaml (values omitted).`
     );
-    expect(run.output).toContain("Removed .hack/.env");
+    expect(run.output).toContain("Legacy env files were kept.");
     expect(await status(project)).toEqual([
       "?? .hack/.gitignore",
       "?? .hack/hack.env.default.yaml",
@@ -290,9 +288,9 @@ test(
     expect(
       await readFile(join(project.projectDir, "hack.env.local.yaml"), "utf8")
     ).toContain(VALUE);
-    await expect(
-      readFile(join(project.projectDir, ".env"), "utf8")
-    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+      `${KEY}=${VALUE}\n`
+    );
   },
   CLI_TEST_TIMEOUT_MS
 );
@@ -341,17 +339,15 @@ for (const route of ["implicit", "doctor"] as const) {
 
       expect(run.exitCode, run.output).toBe(0);
       expect(run.output).not.toContain(VALUE);
-      expect(run.output).toContain(
-        `Moved ${KEY} to .hack/hack.env.local.yaml (values omitted).`
-      );
-      // Doctor wraps notes in a box and names absolute paths, so compare words.
       const words = run.output.replace(/[\s\u2502]+/g, " ");
-      expect(words).toContain(
-        `Compose interpolates ${KEY}, which the env layers now set only for a service, and service values don't reach interpolation (values omitted).`
-      );
       if (route === "implicit") {
-        expect(run.output).toContain(
-          `Kept .hack/.env: Compose interpolates ${KEY}`
+        expect(words).toContain(
+          `Moved ${KEY} to .hack/hack.env.local.yaml (values omitted).`
+        );
+        expect(words).toContain(`Kept .hack/.env: Compose interpolates ${KEY}`);
+      } else {
+        expect(words).toContain(
+          "Legacy files were kept for a separate cleanup step."
         );
       }
       expect(words).not.toContain("Removed .hack/.env");
@@ -399,7 +395,7 @@ test(
 );
 
 test(
-  "a service-scoped key Compose doesn't interpolate still drops the plaintext copy",
+  "a service-scoped key Compose does not interpolate still retains the plaintext copy",
   async () => {
     const project = await createProject({
       compose: COMPOSE_PLAIN,
@@ -410,10 +406,10 @@ test(
 
     expect(run.exitCode, run.output).toBe(0);
     expect(run.output).not.toContain(VALUE);
-    expect(run.output).toContain("Removed .hack/.env");
-    await expect(
-      readFile(join(project.projectDir, ".env"), "utf8")
-    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(run.output).toContain("Legacy env files were kept.");
+    expect(await readFile(join(project.projectDir, ".env"), "utf8")).toBe(
+      `${KEY}=${VALUE}\n`
+    );
   },
   CLI_TEST_TIMEOUT_MS
 );

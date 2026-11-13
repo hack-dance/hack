@@ -10,19 +10,28 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import {
   applyEnvMigration,
   cleanupEnvMigration,
   type EnvMigrationProject,
+  envMigrationJournalPath,
   previewEnvMigration,
   recordEnvMigrationProjectRun,
   rollbackEnvMigration,
 } from "../src/lib/env-migration.ts";
-import { resolveProjectEnvConfig } from "../src/lib/project-env-config.ts";
+import { migrationDigest } from "../src/lib/env-migration-files.ts";
+import { stageMigrationPayloads } from "../src/lib/env-migration-payloads.ts";
+import {
+  resolveProjectEnvConfig,
+  resolveProjectEnvSharedKeyPath,
+  setProjectEnvValue,
+} from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureEnvSnapshots } from "./helpers/env-migration-fixture.ts";
+import { fixtureChildren } from "./helpers/fixture-children.ts";
+import { runFixtureGit } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const SENTINEL = "synthetic-upgrade-journal-value";
@@ -37,6 +46,7 @@ const isolated = [
 let root = "";
 let saved: (string | undefined)[] = [];
 let project: EnvMigrationProject;
+const commands = fixtureChildren("env-journal-command");
 
 beforeEach(async () => {
   saved = isolated.map((key) => process.env[key]);
@@ -73,6 +83,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await commands.stopAll();
   for (const [index, key] of isolated.entries()) {
     restoreEnv(key, saved[index]);
   }
@@ -80,6 +91,14 @@ afterEach(async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function apply(input: Parameters<typeof applyEnvMigration>[0]) {
+  const result = await applyEnvMigration(input);
+  if (!result.manifestPath) {
+    throw new Error("Fixture expected a snapshot-backed migration");
+  }
+  return { ...result, manifestPath: result.manifestPath };
+}
 
 async function projectFiles(): Promise<Map<string, string>> {
   const files = new Map<string, string>();
@@ -97,6 +116,37 @@ async function projectFiles(): Promise<Map<string, string>> {
   return files;
 }
 
+test("an already modern project without legacy inputs previews complete and applies without creating state", async () => {
+  for (const name of ["hack.env.json", ".env", ".env.qa"]) {
+    await rm(join(project.projectDir, name));
+  }
+  await writeFile(
+    join(project.projectDir, "hack.env.default.yaml"),
+    "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  const before = await projectFiles();
+  const preview = await previewEnvMigration(project);
+  expect(preview.status).toBe("complete");
+  expect(preview.files).toEqual([]);
+  const snapshots = {
+    ...fixtureEnvSnapshots(root),
+    capture: async (): Promise<{ manifestPath: string }> => {
+      throw new Error("No-op must not create snapshots");
+    },
+  };
+  expect(
+    (
+      await applyEnvMigration({
+        project,
+        snapshots,
+        acceptTrackedChanges: false,
+      })
+    ).status
+  ).toBe("already_complete");
+  expect(await projectFiles()).toEqual(before);
+  expect(await Bun.file(preview.journalPath).exists()).toBe(false);
+});
+
 test("preview makes no writes and exactly names what apply publishes; completed retry is a no-op", async () => {
   const before = await projectFiles();
   const preview = await previewEnvMigration(project);
@@ -104,7 +154,7 @@ test("preview makes no writes and exactly names what apply publishes; completed 
   expect(await Bun.file(preview.journalPath).exists()).toBe(false);
   expect(JSON.stringify(preview)).not.toContain(SENTINEL);
   const snapshots = fixtureEnvSnapshots(root);
-  const result = await applyEnvMigration({
+  const result = await apply({
     project,
     snapshots,
     acceptTrackedChanges: true,
@@ -137,12 +187,17 @@ test("preview makes no writes and exactly names what apply publishes; completed 
       .TOKEN
   ).toBe(QA);
   const journal = await readFile(result.journalPath, "utf8");
+  expect(
+    (await readdir(dirname(result.journalPath))).filter((name) =>
+      name.startsWith("payloads-")
+    )
+  ).toEqual([]);
   expect(journal).not.toContain(SENTINEL);
   expect(journal).not.toContain(QA);
   expect(await readFile(result.manifestPath, "utf8")).not.toContain(SENTINEL);
   expect(
     (
-      await applyEnvMigration({
+      await apply({
         project,
         snapshots,
         acceptTrackedChanges: true,
@@ -153,9 +208,36 @@ test("preview makes no writes and exactly names what apply publishes; completed 
   expect(await readFile(result.journalPath, "utf8")).toBe(journal);
 });
 
+test("retry sweeps only receipted staging artifacts and retains unknown contents", async () => {
+  const preview = await previewEnvMigration(project);
+  await mkdir(dirname(preview.journalPath), { recursive: true, mode: 0o700 });
+  const input = {
+    journalPath: preview.journalPath,
+    projectRoot: project.projectRoot,
+    files: [{ text: SENTINEL, sha256: migrationDigest(Buffer.from(SENTINEL)) }],
+  };
+  const orphan = await stageMigrationPayloads(input);
+  const kept = await stageMigrationPayloads(input);
+  await writeFile(
+    join(dirname(kept[0] ?? ""), "user-note"),
+    "synthetic user note"
+  );
+  const result = await apply({
+    project,
+    snapshots: fixtureEnvSnapshots(root),
+    acceptTrackedChanges: true,
+  });
+  expect(await Bun.file(orphan[0] ?? "").exists()).toBe(false);
+  expect(await readFile(kept[0] ?? "", "utf8")).toBe(SENTINEL);
+  expect(
+    await readFile(join(dirname(kept[0] ?? ""), "user-note"), "utf8")
+  ).toBe("synthetic user note");
+  expect("payloadCleanup" in result && result.payloadCleanup).toBe("kept");
+});
+
 test("cleanup is explicit, rechecks delivery, and requires intact snapshot payloads", async () => {
   const snapshots = fixtureEnvSnapshots(root);
-  const result = await applyEnvMigration({
+  const result = await apply({
     project,
     snapshots,
     acceptTrackedChanges: true,
@@ -177,7 +259,7 @@ test("cleanup is explicit, rechecks delivery, and requires intact snapshot paylo
 test("rollback restores original bytes and refuses a later user edit", async () => {
   const before = await projectFiles();
   const snapshots = fixtureEnvSnapshots(root);
-  const result = await applyEnvMigration({
+  const result = await apply({
     project,
     snapshots,
     acceptTrackedChanges: true,
@@ -201,10 +283,163 @@ test("rollback restores original bytes and refuses a later user edit", async () 
   expect(await projectFiles()).toEqual(before);
 });
 
+test("a partial publication refuses implicit commands before they can use incomplete layers", async () => {
+  await expect(
+    apply({
+      project,
+      snapshots: fixtureEnvSnapshots(root),
+      acceptTrackedChanges: true,
+      hooks: {
+        boundary: async ({ phase, index }) => {
+          if (phase === "published" && index === 1) {
+            throw new Error("synthetic interruption");
+          }
+        },
+      },
+    })
+  ).rejects.toThrow("synthetic interruption");
+  for (const args of [
+    ["env", "list"],
+    ["env", "get", "TOKEN"],
+    ["env", "exec", "--", "true"],
+  ]) {
+    const result = await commands.run({
+      cmd: [
+        process.execPath,
+        "--no-env-file",
+        join(import.meta.dir, "..", "index.ts"),
+        ...args,
+        "--path",
+        project.projectRoot,
+      ],
+      cwd: project.projectRoot,
+      env: privateCliEnv({
+        root,
+        env: {
+          HACK_HOME: process.env.HACK_HOME,
+          HACK_NO_INTERACTIVE: "1",
+          PATH: "/nonexistent",
+        },
+      }),
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain(
+      args[1] === "get"
+        ? "Unable to read env value."
+        : "An env migration is unfinished."
+    );
+    expect(result.stdout).not.toContain(SENTINEL);
+    expect(result.stdout + result.stderr).not.toContain(SENTINEL);
+  }
+});
+
+test("explicit preserve-changes rollback recovers from an edited pending migration and keeps the edited bytes privately", async () => {
+  const snapshots = fixtureEnvSnapshots(root);
+  await expect(
+    apply({
+      project,
+      snapshots,
+      acceptTrackedChanges: true,
+      hooks: {
+        boundary: async ({ phase }) => {
+          if (phase === "verified") {
+            throw new Error("synthetic interruption");
+          }
+        },
+      },
+    })
+  ).rejects.toThrow("synthetic interruption");
+  const result = JSON.parse(
+    await readFile(envMigrationJournalPath(project.projectRoot), "utf8")
+  );
+  expect(result.state).toBe("applying");
+  const edited = "version: 1\n# synthetic later user edit\n";
+  const layer = join(project.projectDir, "hack.env.local.yaml");
+  await writeFile(layer, edited);
+  await expect(
+    rollbackEnvMigration({
+      project,
+      snapshots,
+      manifestPath: result.manifestPath,
+    })
+  ).rejects.toThrow("changed target");
+  const restored = await rollbackEnvMigration({
+    project,
+    snapshots,
+    manifestPath: result.manifestPath,
+    preserveChanges: true,
+  });
+  expect(restored.status).toBe("restored");
+  expect(await readFile(join(project.projectDir, ".env"), "utf8")).toContain(
+    SENTINEL
+  );
+  const payloads = (await readdir(dirname(result.manifestPath))).filter(
+    (name) => name.startsWith("preserved-")
+  );
+  expect(
+    await Promise.all(
+      payloads.map((name) =>
+        readFile(join(dirname(result.manifestPath), name), "utf8")
+      )
+    )
+  ).toContain(edited);
+});
+
+test("incomplete rollback leaves its journal resumable and skips already restored files", async () => {
+  const before = await projectFiles();
+  const base = fixtureEnvSnapshots(root);
+  const result = await apply({
+    project,
+    snapshots: base,
+    acceptTrackedChanges: true,
+  });
+  let first = true;
+  const snapshots = {
+    ...base,
+    rollback: async (input: Parameters<typeof base.rollback>[0]) => {
+      if (!first) {
+        return await base.rollback(input);
+      }
+      first = false;
+      const index = input.expectedCurrent.findIndex((file) =>
+        file.path.endsWith("hack.env.qa.yaml")
+      );
+      expect(index).toBeGreaterThanOrEqual(0);
+      const partial = await base.rollback({
+        ...input,
+        expectedCurrent: input.expectedCurrent.slice(0, index + 1),
+      });
+      return { ...partial, status: "incomplete" as const };
+    },
+  };
+  expect(
+    (
+      await rollbackEnvMigration({
+        project,
+        snapshots,
+        manifestPath: result.manifestPath,
+      })
+    ).status
+  ).toBe("incomplete");
+  expect(JSON.parse(await readFile(result.journalPath, "utf8")).state).toBe(
+    "rolling_back"
+  );
+  expect(
+    (
+      await rollbackEnvMigration({
+        project,
+        snapshots,
+        manifestPath: result.manifestPath,
+      })
+    ).status
+  ).toBe("restored");
+  expect(await projectFiles()).toEqual(before);
+});
+
 test("cleanup snapshots must still hold every original; cleanup followed by rollback restores legacy files", async () => {
   const before = await projectFiles();
   const snapshots = fixtureEnvSnapshots(root);
-  const result = await applyEnvMigration({
+  const result = await apply({
     project,
     snapshots,
     acceptTrackedChanges: true,
@@ -234,7 +469,7 @@ test("cleanup snapshots must still hold every original; cleanup followed by roll
   expect(await projectFiles()).toEqual(before);
 });
 
-test("preview does not provision a new project key; apply encrypts with a private key and rollback retains every legacy value", async () => {
+async function addLegacySecret() {
   await writeFile(
     join(project.projectDir, "hack.config.json"),
     JSON.stringify({
@@ -259,6 +494,10 @@ test("preview does not provision a new project key; apply encrypts with a privat
   );
   const store = await resolveSecretStore(project);
   await store.set({ key: "SEC", value: SENTINEL });
+}
+
+test("preview does not provision a new project key; apply encrypts with a private key and rollback retains every legacy value", async () => {
+  await addLegacySecret();
   const before = await projectFiles();
   const keyPath = join(project.projectRoot, ".hack.secret.key");
   const preview = await previewEnvMigration(project);
@@ -270,7 +509,7 @@ test("preview does not provision a new project key; apply encrypts with a privat
     tracked: false,
   });
   const snapshots = fixtureEnvSnapshots(root);
-  const result = await applyEnvMigration({
+  const result = await apply({
     project,
     snapshots,
     acceptTrackedChanges: true,
@@ -285,12 +524,17 @@ test("preview does not provision a new project key; apply encrypts with a privat
   expect(
     await readFile(join(project.projectDir, "hack.config.json"), "utf8")
   ).not.toContain("encryptedFile");
-  await rollbackEnvMigration({
+  const restored = await rollbackEnvMigration({
     project,
     snapshots,
     manifestPath: result.manifestPath,
   });
-  expect(await projectFiles()).toEqual(before);
+  expect("retained" in restored && restored.retained).toContain(keyPath);
+  expect((await lstat(keyPath)).mode & 0o777).toBe(0o600);
+  const after = await projectFiles();
+  after.delete(keyPath);
+  after.delete(join(project.projectRoot, ".gitignore"));
+  expect(after).toEqual(before);
 });
 
 test("encrypted scoped values and store-only overlays survive; cleanup never removes their live project key", async () => {
@@ -334,7 +578,7 @@ test("encrypted scoped values and store-only overlays survive; cleanup never rem
       .map((file) => file.path)
   ).not.toContain(keyPath);
   const snapshots = fixtureEnvSnapshots(root);
-  const result = await applyEnvMigration({
+  const result = await apply({
     project,
     snapshots,
     acceptTrackedChanges: true,
@@ -362,106 +606,193 @@ test("encrypted scoped values and store-only overlays survive; cleanup never rem
   ).toBe(QA);
 });
 
+test("rollback retains a new shared key used by another checkout", async () => {
+  const primary = project;
+  const git = async (args: readonly string[]) => {
+    const result = await runFixtureGit({ cwd: primary.projectRoot, args });
+    expect(result.exitCode, result.stderr).toBe(0);
+  };
+  await git(["init", "--quiet"]);
+  await git([
+    "add",
+    ".hack/hack.config.json",
+    ".hack/docker-compose.yml",
+    ".hack/hack.env.json",
+  ]);
+  await git(["commit", "--quiet", "-m", "fixture"]);
+  const linked = join(root, "linked");
+  await git(["worktree", "add", "--quiet", "-b", "migration-fixture", linked]);
+  project = {
+    ...primary,
+    projectRoot: linked,
+    projectDir: join(linked, ".hack"),
+  };
+  await writeFile(join(project.projectDir, ".env"), `TOKEN=${SENTINEL}\n`);
+  await writeFile(join(project.projectDir, ".env.qa"), `TOKEN=${QA}\n`);
+  await addLegacySecret();
+  const shared = await resolveProjectEnvSharedKeyPath(project);
+  expect(shared).toBeString();
+  const snapshots = fixtureEnvSnapshots(root);
+  const result = await apply({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+  });
+  const keyBefore = await readFile(shared ?? "", "utf8");
+  await writeFile(
+    join(primary.projectDir, "hack.env.default.yaml"),
+    await readFile(join(project.projectDir, "hack.env.default.yaml"))
+  );
+  await setProjectEnvValue({
+    ...primary,
+    envName: null,
+    scope: "global",
+    key: "SIBLING",
+    value: QA,
+    secret: true,
+    local: false,
+  });
+  expect(
+    (await resolveProjectEnvConfig({ ...primary, envName: null }))?.globalEnv
+      .SIBLING
+  ).toBe(QA);
+  await rollbackEnvMigration({
+    project,
+    snapshots,
+    manifestPath: result.manifestPath,
+  });
+  expect(await readFile(shared ?? "", "utf8")).toBe(keyBefore);
+  expect(
+    (await resolveProjectEnvConfig({ ...primary, envName: null }))?.globalEnv
+      .SIBLING
+  ).toBe(QA);
+});
+
 test("SIGKILL at every journal/publication boundary resumes without losing an overlay value", async () => {
-  const preview = await previewEnvMigration(project);
-  const count = preview.files.filter(
-    (file) => file.action !== "removable"
-  ).length;
-  const boundaries = [
-    "prepared:-1",
-    ...Array.from({ length: count }, (_, index) => [
-      `before_publish:${index}`,
-      `published:${index}`,
-      `recorded:${index}`,
-    ]).flat(),
-    "verified:-1",
-    "complete:-1",
-  ];
-  // Each interruption owns a fresh HOME, data root, project and snapshot set.
-  for (const boundary of boundaries) {
-    const selected = join(root, boundary.replaceAll(":", "-"));
-    const selectedProject = {
-      ...project,
-      projectRoot: join(selected, "project"),
-      projectDir: join(selected, "project", ".hack"),
-    };
-    await mkdir(selectedProject.projectDir, { recursive: true });
-    for (const file of [
-      "hack.config.json",
-      "hack.env.json",
-      "docker-compose.yml",
-      ".env",
-      ".env.qa",
-    ]) {
-      await writeFile(
-        join(selectedProject.projectDir, file),
-        await readFile(join(project.projectDir, file))
-      );
+  for (const scenario of ["plain", "encrypted"] as const) {
+    if (scenario === "encrypted") {
+      await addLegacySecret();
     }
-    const dataHome = join(selected, "hack-home");
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        "--no-env-file",
-        join(import.meta.dir, "helpers", "env-migration-child.ts"),
-        selected,
-        boundary,
-      ],
-      {
-        env: privateCliEnv({ root: selected, env: { HACK_HOME: dataHome } }),
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-      }
-    );
-    const stderr = new Response(child.stderr).text();
-    let output = "";
-    let reached = false;
-    try {
-      const reader = child.stdout.getReader();
-      for (;;) {
-        const chunk = await reader.read();
-        if (chunk.done) {
-          break;
-        }
-        output += new TextDecoder().decode(chunk.value);
-        if (output.includes(`"phase":"${boundary.split(":")[0]}"`)) {
-          reached = true;
-          child.kill("SIGKILL");
-          break;
-        }
-      }
-      await child.exited;
-      expect(reached, `${boundary}: ${await stderr}`).toBe(true);
-      expect(output).not.toContain(SENTINEL);
-      const previousHome = process.env.HACK_HOME;
-      process.env.HACK_HOME = dataHome;
-      try {
-        await applyEnvMigration({
-          project: selectedProject,
-          snapshots: fixtureEnvSnapshots(selected),
-          acceptTrackedChanges: true,
+    const sources = await projectFiles();
+    const preview = await previewEnvMigration(project);
+    const count = preview.files.filter(
+      (file) => file.action !== "removable"
+    ).length;
+    const boundaries = [
+      "prepared:-1",
+      ...Array.from({ length: count }, (_, index) => [
+        `before_publish:${index}`,
+        `published:${index}`,
+        `recorded:${index}`,
+      ]).flat(),
+      "verified:-1",
+      "complete:-1",
+    ];
+    // Each interruption owns a fresh HOME, data root, project and snapshot set.
+    for (const boundary of boundaries) {
+      const selected = join(
+        root,
+        `${scenario}-${boundary.replaceAll(":", "-")}`
+      );
+      const selectedProject = {
+        ...project,
+        projectRoot: join(selected, "project"),
+        projectDir: join(selected, "project", ".hack"),
+      };
+      await mkdir(selectedProject.projectDir, { recursive: true });
+      for (const [path, encoded] of sources) {
+        const target = join(
+          selectedProject.projectRoot,
+          relative(project.projectRoot, path)
+        );
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, Buffer.from(encoded, "base64"), {
+          mode: (await lstat(path)).mode & 0o777,
         });
-        expect(
-          (await resolveProjectEnvConfig({ ...selectedProject, envName: null }))
-            ?.globalEnv.TOKEN
-        ).toBe(SENTINEL);
-        expect(
-          (await resolveProjectEnvConfig({ ...selectedProject, envName: "qa" }))
-            ?.globalEnv.TOKEN
-        ).toBe(QA);
-        expect(
-          await readFile(join(selectedProject.projectDir, ".env"), "utf8")
-        ).toContain(SENTINEL);
+      }
+      const dataHome = join(selected, "hack-home");
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          "--no-env-file",
+          join(import.meta.dir, "helpers", "env-migration-child.ts"),
+          selected,
+          boundary,
+        ],
+        {
+          env: privateCliEnv({ root: selected, env: { HACK_HOME: dataHome } }),
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+      const stderr = new Response(child.stderr).text();
+      let output = "";
+      let reached = false;
+      try {
+        const reader = child.stdout.getReader();
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            break;
+          }
+          output += new TextDecoder().decode(chunk.value);
+          if (output.includes(`"phase":"${boundary.split(":")[0]}"`)) {
+            reached = true;
+            child.kill("SIGKILL");
+            break;
+          }
+        }
+        await child.exited;
+        expect(reached, `${boundary}: ${await stderr}`).toBe(true);
+        expect(output).not.toContain(SENTINEL);
+        const previousHome = process.env.HACK_HOME;
+        process.env.HACK_HOME = dataHome;
+        try {
+          await apply({
+            project: selectedProject,
+            snapshots: fixtureEnvSnapshots(selected),
+            acceptTrackedChanges: true,
+          });
+          expect(
+            (
+              await resolveProjectEnvConfig({
+                ...selectedProject,
+                envName: null,
+              })
+            )?.globalEnv.TOKEN
+          ).toBe(SENTINEL);
+          expect(
+            (
+              await resolveProjectEnvConfig({
+                ...selectedProject,
+                envName: "qa",
+              })
+            )?.globalEnv.TOKEN
+          ).toBe(QA);
+          if (scenario === "encrypted") {
+            expect(
+              (
+                await resolveProjectEnvConfig({
+                  ...selectedProject,
+                  envName: null,
+                })
+              )?.serviceEnv.api?.SEC
+            ).toBe(SENTINEL);
+          }
+          expect(
+            await readFile(join(selectedProject.projectDir, ".env"), "utf8")
+          ).toContain(SENTINEL);
+        } finally {
+          restoreEnv("HACK_HOME", previousHome);
+        }
       } finally {
-        restoreEnv("HACK_HOME", previousHome);
+        if (child.exitCode === null) {
+          child.kill("SIGKILL");
+        }
+        await child.exited;
+        await stderr;
       }
-    } finally {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-      await child.exited;
-      await stderr;
     }
   }
-}, 60_000);
+}, 120_000);

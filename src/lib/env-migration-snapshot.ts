@@ -34,6 +34,7 @@ export type EnvMigrationSnapshots = {
   readonly rollback: (input: {
     readonly manifestPath: string;
     readonly expectedCurrent: readonly EnvMigrationFileState[];
+    readonly preserveChanges?: boolean;
   }) => Promise<{
     readonly status: "restored" | "incomplete";
     readonly results: readonly unknown[];
@@ -109,7 +110,9 @@ export function bindEnvMigrationSnapshots(
   };
   const collectPending = async (
     snapshot: Awaited<ReturnType<typeof load>>,
-    expectedCurrent: readonly EnvMigrationFileState[]
+    expectedCurrent: readonly EnvMigrationFileState[],
+    preserveChanges: boolean,
+    manifestPath: string
   ) => {
     const pending: EnvMigrationFileState[] = [];
     for (const expected of expectedCurrent) {
@@ -120,10 +123,12 @@ export function bindEnvMigrationSnapshots(
       if (isRecord(original) && matches(original.before, current)) {
         continue;
       }
-      if (!sameMigrationFile(current, expected)) {
-        throw migrationRefusal();
+      if (!(sameMigrationFile(current, expected) || preserveChanges)) {
+        throw new ClosedCliError(
+          `Env rollback refused a changed file: ${JSON.stringify(expected.path)}. Review it, or restore originals while keeping later bytes privately with hack env migrate --rollback-manifest ${JSON.stringify(manifestPath)} --preserve-changes (values omitted).`
+        );
       }
-      pending.push(expected);
+      pending.push(preserveChanges ? current : expected);
     }
     return pending;
   };
@@ -184,9 +189,14 @@ export function bindEnvMigrationSnapshots(
       }
       await verifyCurrent(files);
     },
-    rollback: async ({ manifestPath, expectedCurrent }) => {
+    rollback: async ({ manifestPath, expectedCurrent, preserveChanges }) => {
       const snapshot = await load(manifestPath);
-      const pending = await collectPending(snapshot, expectedCurrent);
+      const pending = await collectPending(
+        snapshot,
+        expectedCurrent,
+        preserveChanges === true,
+        manifestPath
+      );
       // A killed publication may predate the provider's after receipt; only journal-proven bytes may fill that gap.
       const recorded = await invoke("recordUpgradeSnapshotAfter", {
         manifestPath,

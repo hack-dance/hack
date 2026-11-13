@@ -2476,6 +2476,7 @@ hack env <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
+| `hack env migrate` | Preview, resume or undo project env migration; cleanup is a separate later step |
 | `hack env list` | List env names, scopes, layers and set state |
 | `hack env protect [keys...]` | List plaintext keys, or encrypt chosen keys in their existing layers |
 | `hack env get <key>` | Print one resolved env value without an added newline |
@@ -2494,6 +2495,31 @@ hack env <subcommand> [options]
 
 | Option | Description |
 | --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env migrate`
+
+Preview, resume or undo project env migration; cleanup is a separate later step
+
+### Usage
+
+```bash
+hack env migrate [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--json` | Output JSON (machine-readable) |
+| `--apply` | Apply the previewed migration with a snapshot and resumable journal |
+| `--cleanup` | Preview later legacy cleanup; combine with --apply only after migration has completed |
+| `--rollback-manifest <manifest>` | Restore the migration snapshot, refusing changes made afterward |
+| `--accept-tracked-env-changes` | Consent to the displayed edits or removals of Git-tracked legacy env files |
+| `--preserve-changes` | With rollback, restore originals and retain later edits privately in the snapshot |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

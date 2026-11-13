@@ -142,6 +142,23 @@ const restartPolicyStaleUses = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "env-migration",
+    module: "Migration",
+    states: 35,
+    invariant: "NoSameRunCleanup",
+    action: "UnsafeRemoveDuringApply",
+    fields: [
+      'phase = "apply"',
+      "legacy = FALSE",
+      "snapshot = TRUE",
+      "separate = FALSE",
+      "published = 0",
+      "recorded = 0",
+      "complete = FALSE",
+      "runProof = FALSE",
+    ],
+  },
+  {
     name: "shutdown-rebase",
     module: "ShutdownRebase",
     states: 43,

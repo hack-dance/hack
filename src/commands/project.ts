@@ -1,5 +1,5 @@
 import {
-  hasPendingEnvMigration,
+  assertEnvMigrationFinished,
   migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
   recordEnvMigrationProjectRun,
 } from "../lib/env-migration.ts";
@@ -1383,11 +1383,11 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
   readonly projectName: string;
   readonly serviceNames: readonly string[];
 }): Promise<boolean> {
+  await assertEnvMigrationFinished(opts.project);
   if (
-    !(await hasPendingEnvMigration(opts.project)) &&
-    (await projectEnvConfigExists({
+    await projectEnvConfigExists({
       projectDir: opts.project.projectDir,
-    }))
+    })
   ) {
     return false;
   }

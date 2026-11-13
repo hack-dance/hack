@@ -29,7 +29,7 @@ import {
   readEnvHydrateInput,
 } from "../lib/env-hydrate-input.ts";
 import {
-  hasPendingEnvMigration,
+  assertEnvMigrationFinished,
   migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
 } from "../lib/env-migration.ts";
 import {
@@ -741,9 +741,11 @@ async function resolveProjectForEnv(opts: {
   }
 
   if (opts.projectOpt !== undefined) {
-    return await resolveRegisteredProjectOption({
+    const registered = await resolveRegisteredProjectOption({
       projectOpt: opts.projectOpt,
     });
+    await assertEnvMigrationFinished(registered);
+    return registered;
   }
 
   const startDir = opts.pathOpt
@@ -753,6 +755,7 @@ async function resolveProjectForEnv(opts: {
   if (!project) {
     throw new MissingProjectContextError();
   }
+  await assertEnvMigrationFinished(project);
   return project;
 }
 
@@ -995,11 +998,11 @@ async function maybeMigrateLegacyProjectEnv(input: {
   readonly projectName: string;
   readonly reason: "mutation" | "runtime";
 }): Promise<boolean> {
+  await assertEnvMigrationFinished(input.project);
   if (
-    !(await hasPendingEnvMigration(input.project)) &&
-    (await projectEnvConfigExists({
+    await projectEnvConfigExists({
       projectDir: input.project.projectDir,
-    }))
+    })
   ) {
     return false;
   }

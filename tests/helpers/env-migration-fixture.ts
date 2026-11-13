@@ -14,6 +14,32 @@ type FixtureManifest = {
   })[];
 };
 
+async function restoreFixtureFile(
+  file: FixtureManifest["files"][number],
+  manifestPath: string,
+  preserveChanges: boolean
+): Promise<void> {
+  if (preserveChanges && (await Bun.file(file.path).exists())) {
+    await writeFile(
+      join(
+        dirname(manifestPath),
+        `preserved-${hash(await readFile(file.path))}`
+      ),
+      await readFile(file.path),
+      { mode: 0o600 }
+    );
+  }
+  if (file.payload === null) {
+    await rm(file.path, { force: true });
+    return;
+  }
+  await mkdir(dirname(file.path), { recursive: true });
+  await writeFile(file.path, await readFile(file.payload), {
+    mode: file.mode ?? 0o600,
+  });
+  await chmod(file.path, file.mode ?? 0o600);
+}
+
 /** Synthetic snapshot owner for migration tests; replaced by HACK-2189 in production. */
 export function fixtureEnvSnapshots(root: string): EnvMigrationSnapshots {
   const readManifest = async (path: string): Promise<FixtureManifest> =>
@@ -54,7 +80,7 @@ export function fixtureEnvSnapshots(root: string): EnvMigrationSnapshots {
       }
     },
     recordAfter: () => Promise.resolve(),
-    rollback: async ({ manifestPath, expectedCurrent }) => {
+    rollback: async ({ manifestPath, expectedCurrent, preserveChanges }) => {
       const manifest = await readManifest(manifestPath);
       const currentState = async (path: string) => {
         if (!(await Bun.file(path).exists())) {
@@ -81,7 +107,12 @@ export function fixtureEnvSnapshots(root: string): EnvMigrationSnapshots {
         );
         const current = await currentState(file.path);
         if (
-          !(original && (matches(current, file) || matches(current, original)))
+          !(
+            original &&
+            (matches(current, file) ||
+              matches(current, original) ||
+              preserveChanges)
+          )
         ) {
           throw new Error("Fixture rollback refuses changed target");
         }
@@ -96,15 +127,7 @@ export function fixtureEnvSnapshots(root: string): EnvMigrationSnapshots {
         if (matches(await currentState(file.path), file)) {
           continue;
         }
-        if (file.payload === null) {
-          await rm(file.path, { force: true });
-          continue;
-        }
-        await mkdir(dirname(file.path), { recursive: true });
-        await writeFile(file.path, await readFile(file.payload), {
-          mode: file.mode ?? 0o600,
-        });
-        await chmod(file.path, file.mode ?? 0o600);
+        await restoreFixtureFile(file, manifestPath, preserveChanges === true);
       }
       return {
         status: "restored",

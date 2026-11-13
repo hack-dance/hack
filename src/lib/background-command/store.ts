@@ -24,6 +24,7 @@ import {
   buildEnvelope,
   type CommandMeta,
   commandsRoot,
+  type EventEnvelope,
   endedEvent,
   formatCursor,
   HACK_VERSION,
@@ -40,6 +41,8 @@ import {
 } from "./journal.ts";
 import {
   assessOwner,
+  dropUnscannedOutput,
+  needsAtRestScrub,
   type ObserveIdentities,
   recoverLostOwner,
   withJournalLock,
@@ -341,6 +344,11 @@ export async function acceptCommand(opts: {
     // The journal lock is an flock on this file: created now, so locking
     // later never needs disk space.
     await createPrivateFileExclusive({ path: paths.lock, text: "" });
+    // Reserved now so recording a failed final fsync is a rename.
+    await createPrivateFileExclusive({
+      path: paths.endUnsyncedPending,
+      text: "",
+    });
     const accepted = buildEnvelope({
       meta,
       seq: 1,
@@ -490,6 +498,27 @@ export function expiresAt(meta: CommandMeta): string {
  * found". Tombstones and their request keys are removed after 7 days.
  * Running commands are never touched here.
  */
+/**
+ * A running journal whose supervisor is gone, for a command that had values
+ * to redact: take it over, which drops the output nobody scanned (see
+ * `recoverLostOwner`). Never signals anything. Without values to redact
+ * there is nothing unsafe at rest and nothing is done here.
+ */
+async function scrubOrphanedOutput(opts: {
+  readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+  readonly events: readonly EventEnvelope[];
+  readonly now: number;
+}): Promise<void> {
+  if (!needsAtRestScrub(opts.meta)) {
+    return;
+  }
+  const assessment = await assessOwner({ ...opts });
+  if (assessment.kind === "owner_lost") {
+    await recoverLostOwner({ paths: opts.paths, meta: opts.meta });
+  }
+}
+
 export async function pruneExpired(opts: {
   readonly root: string;
   readonly now: number;
@@ -512,11 +541,20 @@ export async function pruneExpired(opts: {
     if (!meta) {
       continue;
     }
-    const ended = endedEvent(await readEvents(paths));
+    const events = await readEvents(paths);
+    const ended = endedEvent(events);
     if (!ended) {
+      await scrubOrphanedOutput({ paths, meta, events, now: opts.now });
       continue;
     }
     if (opts.now - Date.parse(ended.time) < meta.retentionMs) {
+      if (needsAtRestScrub(meta)) {
+        // After the end nothing scans output: bytes a descendant appended
+        // later are not kept.
+        await withJournalLock(paths, async () => {
+          await dropUnscannedOutput({ paths, events: await readEvents(paths) });
+        });
+      }
       continue;
     }
     await expireJournal({ paths, meta, ended, now: opts.now });
@@ -735,6 +773,7 @@ async function removeJournalPayload(paths: JournalPaths): Promise<void> {
     paths.stopping,
     paths.exitConfirmed,
     paths.endUnsynced,
+    paths.endUnsyncedPending,
   ]) {
     await unlink(path).catch(() => undefined);
   }

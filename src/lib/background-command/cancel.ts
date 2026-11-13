@@ -2,6 +2,7 @@ import { lstat } from "node:fs/promises";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { appendCommandAudit, auditEnd } from "./audit.ts";
 import {
+  CAPTURE_LIMIT_BYTES,
   type EventEnvelope,
   emittedOffsets,
   endedEvent,
@@ -24,6 +25,9 @@ import {
 import type { LoadedJournal } from "./reader.ts";
 import {
   childState,
+  dropUnscannedOutput,
+  isNoSpaceError,
+  needsAtRestScrub,
   type ObserveIdentities,
   type ReadBootTime,
   withJournalLock,
@@ -556,13 +560,31 @@ async function finishWithoutSupervisor(opts: {
       return null;
     }
     const writer = new JournalWriter(paths, meta, current.at(-1)?.seq ?? 0);
+    // Output nobody scanned cannot be redacted here: cut it (as recovery
+    // does) before the final record.
+    const dropped =
+      needsAtRestScrub(meta) &&
+      (await dropUnscannedOutput({ paths, events: current }));
+    if (dropped) {
+      await writer
+        .write("command.output_truncated", {
+          reason: "redaction_unavailable",
+          capturedBytes: emittedOffsets(current).captured,
+          limitBytes: CAPTURE_LIMIT_BYTES,
+        })
+        .catch((error: unknown) => {
+          if (!isNoSpaceError(error)) {
+            throw error;
+          }
+        });
+    }
     const ended = await writer.write("command.ended", {
       outcome: "cancelled",
       reason: owner ? "supervisor_unresponsive" : "cancelled_before_start",
       exitCode: null,
       signal: null,
       durationMs: Math.max(0, Date.now() - Date.parse(meta.acceptedAt)),
-      truncated: emittedOffsets(current).truncated,
+      truncated: dropped || emittedOffsets(current).truncated,
       suppressed: meta.capture === "metadata",
       containerProcess: opts.containerProcess,
       ...(opts.descendants === "not_confirmed"

@@ -168,9 +168,12 @@ capture also stops and the command keeps running; its final record (written
 from space reserved at start) has `truncated: true` and `captureStopped:
 "no_space"`. A final record, once written, is never taken back or replaced. If the
 disk reports that it is full only when that record is flushed, the record
-stands and `hack commands show` adds `endDurability: "not_confirmed"` (best
-effort: recording that needs a directory entry, which a full disk can also
-refuse). Capture also stops, the same way, when it falls behind: when more
+stands and `hack commands show` adds `endDurability: "not_confirmed"`. The
+same happens for any other failed flush, such as an I/O error. Hack reserves
+the marker when it accepts the command, so recording it is a rename that
+normally needs no new space. An absent `endDurability` proves nothing: it
+means no failure was recorded, not that the flush was confirmed (an older
+journal, or a marker that could not be written, also leaves it absent). Capture also stops, the same way, when it falls behind: when more
 than 64 MiB of one stream is waiting to be scanned (a burst between two
 supervisor polls, or output faster than redaction can scan it), Hack records
 `command.output_truncated` with `reason: "capture_behind"` and from then on
@@ -262,9 +265,12 @@ not load a `.env` or `bunfig.toml` from the directory it runs in, so a project
 cannot configure the runtime that supervises it. The command's stdout and
 stderr are appended by the kernel to files; they do not pass through the
 supervisor. If the supervisor dies, the command keeps running and writing, and
-the next read takes over: it announces the output that landed (marked
-`unsupervised: true`) and, once the command is confirmed gone, writes the
-single final record with outcome `unknown`. Until then the command stays
+the next read takes over. Output that landed after the supervisor was lost
+was never scanned: if the command had values to redact, the read cuts it from
+the stored files and records one `command.output_truncated` with `reason:
+"redaction_unavailable"`; otherwise it announces it (marked `unsupervised:
+true`). Once the command is confirmed gone, the read writes the single final
+record with outcome `unknown`. Until then the command stays
 running: it keeps its admission slot, and its files are not truncated at the
 capture limit (no owner is left to truncate them). If it is still running past
 its timeout, the next background start in the same Hack home stops its process
@@ -319,17 +325,31 @@ A per-call flag wins over the project default, which wins over the global one.
 
 **Redaction is partial.** Before output is announced, Hack replaces values it
 had already resolved to inject into that command's Compose environment with
-`*`, in place in the stored file. Values shorter than 6 bytes are not redacted
-(too many false matches). The values reach the supervisor over an inherited
-pipe; they are never written to disk or put in an environment variable. The command writes to the
-file directly, so a value is on disk unredacted until the supervisor's next
-scan (about 200 ms), and the start of a value stays unredacted until the rest
-arrives or the command ends. It matches across separate writes, so a value split between
-two writes is still caught. It does not catch values Hack did not inject, values
-the command transforms (encodes, splits across lines, prints in parts), or
-values printed after the supervisor was lost (such output is withheld from reads
-with `withheld: "redaction_unavailable"`). Hack never loads or decrypts secrets
-only to redact. Treat stored output as sensitive.
+`*`, in place in the stored file. The values reach the supervisor over an
+inherited pipe; they are never written to disk or put in an environment
+variable, and Hack never loads or decrypts secrets only to redact. It matches
+across separate writes, so a value split between two writes is still caught.
+Treat stored output as sensitive.
+
+What the stored files (at rest) hold:
+
+- **Redacted on disk:** values of 6 bytes or more that Hack injected, once the
+  supervisor has scanned them. The command writes to the file directly, so a
+  value is on disk unredacted until the supervisor's next scan (about
+  200 ms), and the start of a value stays unredacted until the rest arrives or
+  the command ends.
+- **Never redacted:** values shorter than 6 bytes (too many false matches),
+  values Hack did not inject, and values the command transforms (encodes,
+  splits across lines, prints in parts).
+- **Output the supervisor never scanned** (it was lost): for a command with
+  values to redact, the next read, cancel, background start or sweep cuts it
+  from the stored files and records `command.output_truncated` with `reason:
+  "redaction_unavailable"`; until one of those runs it is on disk unredacted.
+  Bytes a left-over process appends after the end are cut at the next sweep.
+  For a command with no values to redact the output is kept and announced as
+  `unsupervised`. Reads of older journals still withhold such output with
+  `withheld: "redaction_unavailable"`.
+- **Native backend:** nothing is redacted, in reads or at rest (see below).
 
 - Full capture supports at most 1,024 distinct values to redact (values of
   6 bytes or more from the command's environment). A command with more is
@@ -351,7 +371,9 @@ arguments, never the arguments. New audit files are created mode 0600.
 On the native backend the same commands work, but output arrives in one batch
 when the command ends, so `liveOutput` and `stallDetection` are reported
 `unavailable`; nothing is simulated. Hack resolves no values in the launcher
-there, so nothing is redacted. Cancelling or timing out stops the host-side
+there, so nothing is redacted: the stored output is exactly what the command
+printed, at rest and in reads. Use `--capture metadata` for a native command
+that may print secrets. Cancelling or timing out stops the host-side
 `hack` process only; the native engine does not stop the command in the guest
 when its client goes away, and nothing confirms that it ended. A native end
 that Hack stopped (cancel, timeout) or whose client was killed by a signal

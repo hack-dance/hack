@@ -441,7 +441,7 @@ describe("lost owner", () => {
     expect(again.length).toBe(events.length);
   });
 
-  test("while the child lives, a reader announces its output unsupervised; when it is gone, one unknown end", async () => {
+  test("while the child lives, a reader drops unscanned output it cannot redact from disk; when it is gone, one unknown end", async () => {
     const { meta, paths } = await acceptCommand({
       input: input({ redaction: { values: 1 } }),
       root,
@@ -462,24 +462,27 @@ describe("lost owner", () => {
     const childOnly = fakeObserve([child]);
     const running = await recoverLostOwner({ paths, meta, observe: childOnly });
     expect(running.some((event) => event.type === "command.ended")).toBe(false);
-    const output = running.find((event) => event.type === "command.output");
-    expect(output?.payload).toMatchObject({
-      stream: "stdout",
-      offset: 0,
-      unsupervised: true,
-    });
-    const journal = await loadJournal({ commandId: meta.commandId, root });
-    const read = await readCommandEvents({
-      journal,
-      waitMs: 0,
-      maxBytes: 32_768,
-      observe: childOnly,
-    });
-    const projected = read.events.find(
-      (event) => event.type === "command.output"
+    // The values are not available here, so the unscanned bytes are cut from
+    // disk (never announced) and one marker says why.
+    expect(running.some((event) => event.type === "command.output")).toBe(
+      false
     );
-    // Redaction values existed but are not available to a reader: withheld.
-    expect(projected?.payload.withheld).toBe("redaction_unavailable");
+    expect(
+      running.filter((event) => event.type === "command.output_truncated")
+    ).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({ reason: "redaction_unavailable" }),
+      }),
+    ]);
+    expect((await stat(paths.stdout)).size).toBe(0);
+    // The still-running child keeps appending: the next takeover cuts again,
+    // without a second marker.
+    await writeFile(paths.stdout, "more\n", { flag: "a" });
+    const again = await recoverLostOwner({ paths, meta, observe: childOnly });
+    expect((await stat(paths.stdout)).size).toBe(0);
+    expect(
+      again.filter((event) => event.type === "command.output_truncated")
+    ).toHaveLength(1);
     const ended = await recoverLostOwner({
       paths,
       meta,
@@ -935,6 +938,116 @@ describe("review regressions", () => {
       );
       expect(ended?.payload.descendants).toBe("not_confirmed");
     }
+  });
+
+  test("with no values to redact, a reader announces an orphan's output unsupervised and leaves it on disk", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    const child = { pid: 210_002, birth: "c", processGroupId: 210_002 };
+    await writeFile(
+      paths.owner,
+      JSON.stringify({
+        ...{
+          pid: 210_001,
+          birth: "o",
+          processGroupId: 210_001,
+          sessionId: 210_001,
+          newSession: true,
+        },
+      }),
+      { mode: 0o600 }
+    );
+    await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+    await writeFile(paths.stdout, "plain output\n", { mode: 0o600 });
+    const running = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve([child]),
+    });
+    expect(
+      running.find((event) => event.type === "command.output")?.payload
+    ).toMatchObject({ stream: "stdout", offset: 0, unsupervised: true });
+    expect((await stat(paths.stdout)).size).toBe("plain output\n".length);
+  });
+
+  test("the retention sweep scrubs an orphan's unscanned output and bytes appended after an end", async () => {
+    // Accept everything first: admission itself recovers orphans, and this
+    // test is about the sweep.
+    const orphan = await acceptCommand({
+      input: input({ redaction: { values: 2 } }),
+      root,
+    });
+    const done = await acceptCommand({
+      input: input({ redaction: { values: 2 } }),
+      root,
+    });
+    const plain = await acceptCommand({ input: input(), root });
+    // An orphan whose owner record no longer verifies (its birth differs).
+    await writeFile(
+      orphan.paths.owner,
+      JSON.stringify({
+        pid: process.pid,
+        birth: "not-this-process",
+        processGroupId: process.pid,
+        sessionId: process.pid,
+        newSession: true,
+      }),
+      { mode: 0o600 }
+    );
+    await writeFile(orphan.paths.stdout, "unscanned\n", { mode: 0o600 });
+    // An ended command with values; a descendant wrote after the end.
+    await writeFile(done.paths.stdout, "seen\n", { mode: 0o600 });
+    const writer = new JournalWriter(done.paths, done.meta, 1);
+    await writer.write("command.output", {
+      stream: "stdout",
+      offset: 0,
+      length: 5,
+    });
+    await writer.write("command.ended", { outcome: "succeeded", exitCode: 0 });
+    await writeFile(done.paths.stdout, "late\n", { flag: "a" });
+    // No values: left alone.
+    await writeFile(plain.paths.stdout, "plain\n", { mode: 0o600 });
+
+    await pruneExpired({ root, now: Date.now() });
+
+    expect((await stat(orphan.paths.stdout)).size).toBe(0);
+    expect(
+      (await readEvents(orphan.paths)).some(
+        (event) =>
+          event.type === "command.output_truncated" &&
+          event.payload.reason === "redaction_unavailable"
+      )
+    ).toBe(true);
+    expect(await readFile(done.paths.stdout, "utf8")).toBe("seen\n");
+    expect(await readFile(plain.paths.stdout, "utf8")).toBe("plain\n");
+  });
+
+  test("a cancel that finishes an orphan itself cuts unscanned output it cannot redact before the final record", async () => {
+    const { meta, paths } = await acceptCommand({
+      input: input({ redaction: { values: 1 } }),
+      root,
+    });
+    const child = { pid: 420_002, birth: "c", processGroupId: 420_002 };
+    await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+    await writeFile(paths.stdout, "unscanned\n", { mode: 0o600 });
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    // Nothing is alive: the canceller writes the end itself.
+    const result = await cancelCommand({
+      journal,
+      root,
+      observe: fakeObserve(),
+      observeGroup: async () => [],
+      orphanGraceMs: 100,
+      signaller: { process: () => false, group: () => false },
+    });
+    expect(result.outcome).toBe("cancelled");
+    expect((await stat(paths.stdout)).size).toBe(0);
+    const events = await readEvents(paths);
+    expect(events.map((event) => event.type)).toEqual([
+      "command.accepted",
+      "command.output_truncated",
+      "command.ended",
+    ]);
+    expect(events.at(-1)?.payload.truncated).toBe(true);
   });
 
   test("admission stops an overdue orphaned child it can verify, then records timed_out; reads never do", async () => {
@@ -1468,8 +1581,10 @@ describe("second-review blockers", () => {
     const failingSync = (code: string) => async () => {
       throw Object.assign(new Error("fsync failed"), { code });
     };
-    // Another fsync error is not a full disk: no marker.
+    // Any failed fsync is recorded, an I/O error too; the reserved pending
+    // file becomes the marker (a rename, no new space needed).
     const other = await acceptCommand({ input: input(), root });
+    expect((await stat(other.paths.endUnsyncedPending)).size).toBe(0);
     await new JournalWriter(
       other.paths,
       other.meta,
@@ -1477,7 +1592,28 @@ describe("second-review blockers", () => {
       undefined,
       failingSync("EIO")
     ).write("command.ended", { outcome: "succeeded", exitCode: 0 });
-    expect(await lstat(other.paths.endUnsynced).catch(() => null)).toBeNull();
+    expect((await lstat(other.paths.endUnsynced)).isFile()).toBe(true);
+    expect(
+      await lstat(other.paths.endUnsyncedPending).catch(() => null)
+    ).toBeNull();
+    // A journal without the reserved file (older) still gets a marker.
+    const older = await acceptCommand({ input: input(), root });
+    await rm(older.paths.endUnsyncedPending);
+    await new JournalWriter(
+      older.paths,
+      older.meta,
+      1,
+      undefined,
+      failingSync("EIO")
+    ).write("command.ended", { outcome: "succeeded", exitCode: 0 });
+    expect((await lstat(older.paths.endUnsynced)).isFile()).toBe(true);
+    // A confirmed fsync leaves no marker.
+    const fine = await acceptCommand({ input: input(), root });
+    await new JournalWriter(fine.paths, fine.meta, 1).write("command.ended", {
+      outcome: "succeeded",
+      exitCode: 0,
+    });
+    expect(await lstat(fine.paths.endUnsynced).catch(() => null)).toBeNull();
     const ended = await new JournalWriter(
       paths,
       meta,
@@ -1494,6 +1630,77 @@ describe("second-review blockers", () => {
     // Retention removes the marker with the rest of the payload.
     await pruneExpired({ root, now: Date.now() + 5000 });
     expect(await lstat(paths.endUnsynced).catch(() => null)).toBeNull();
+  });
+
+  test("tail repair records any failed fsync of a published final record, an I/O error too, and never throws", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    const ended = buildEnvelope({
+      meta,
+      seq: 2,
+      type: "command.ended",
+      payload: { outcome: "failed", exitCode: 1 },
+    });
+    await writeFile(paths.events, JSON.stringify(ended), { flag: "a" });
+    const events = await reconcileTail(paths, {
+      sync: async () => {
+        throw Object.assign(new Error("I/O error"), { code: "EIO" });
+      },
+    });
+    expect(events.at(-1)).toEqual(ended);
+    expect((await lstat(paths.endUnsynced)).isFile()).toBe(true);
+  });
+
+  test("public cursor reads around a failed final fsync: the cursor a reader got is never reused for another end", async () => {
+    const { meta, paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.owner, JSON.stringify(deadOwner), { mode: 0o600 });
+    const ended = buildEnvelope({
+      meta,
+      seq: 2,
+      type: "command.ended",
+      payload: { outcome: "succeeded", exitCode: 0 },
+    });
+    // The supervisor died after the JSON and before its newline.
+    await writeFile(paths.events, JSON.stringify(ended), { flag: "a" });
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    const read = (after?: string) =>
+      readCommandEvents({
+        journal,
+        ...(after ? { after } : {}),
+        waitMs: 0,
+        maxBytes: 16_384,
+        observe: fakeObserve(),
+      });
+    // Reader A reads through the public API while recovery is between the
+    // newline write and the failing fsync.
+    let first: Awaited<ReturnType<typeof read>> | undefined;
+    await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      readBootTime: noReboot,
+      append: fullDiskAppend(paths),
+      tailIo: {
+        sync: async () => {
+          first = await read();
+          throw Object.assign(new Error("disk full"), { code: "EDQUOT" });
+        },
+      },
+    });
+    expect(first?.ended).toBe(true);
+    expect(first?.outcome).toBe("succeeded");
+    const endCursor = first?.nextCursor as string;
+    // Reader A resumes after its cursor: nothing new, the same end.
+    const resumed = await read(endCursor);
+    expect(resumed.events).toEqual([]);
+    expect(resumed.ended).toBe(true);
+    expect(resumed.outcome).toBe("succeeded");
+    // Reader B starts later from the beginning: same end at the same cursor.
+    const later = await read();
+    expect(later.nextCursor).toBe(endCursor);
+    expect(later.events.at(-1)).toEqual(first?.events.at(-1));
+    expect(later.events.filter((e) => e.type === "command.ended")).toHaveLength(
+      1
+    );
   });
 
   test("the file-based fallback lock takes a newly created journal's lock and excludes", async () => {

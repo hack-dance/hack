@@ -278,7 +278,7 @@ test("a late edit just before displacement goes back in place and is kept, for a
   expect(await readFile(paths.created, "utf8")).toBe("env: edited later\n");
 });
 
-test("when the snapshot cannot give the displaced file a name, the file stays beside its path and is named", async () => {
+test("when the snapshot's working directories cannot be prepared, nothing is touched", async () => {
   const paths = await fixture();
   const snapshot = await snapshotOf(paths);
   await writeFile(paths.config, '{"step":true}\n');
@@ -291,9 +291,78 @@ test("when the snapshot cannot give the displaced file a name, the file stays be
   });
   const entry =
     result.status === "invalid-manifest" ? undefined : result.results[0];
-  expect(entry?.status).toBe("restored");
-  expect(entry?.keptAs?.startsWith(join(work, "project", "."))).toBe(true);
-  expect(await readFile(entry?.keptAs ?? "", "utf8")).toBe('{"step":true}\n');
+  expect(entry?.status).toBe("error");
+  expect(await readFile(paths.config, "utf8")).toBe('{"step":true}\n');
+});
+
+test("no temporary or displaced file ever appears in the checkout", async () => {
+  // Codex review: a sibling beside the target (for example
+  // `..env.hack-displaced-…`) matched no ignore rule, so Git could commit
+  // its secret bytes.
+  const paths = await fixture();
+  const snapshot = await snapshotOf(paths);
+  await rm(paths.env);
+  await writeFile(paths.created, "env: migrated\n");
+  await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
+  const dir = join(work, "project");
+  const seen: string[][] = [];
+  const result = await restoreUpgradeSnapshot({
+    manifestPath: snapshot.manifestPath,
+    beforeReplace: async () => {
+      seen.push(await readdir(dir));
+    },
+    afterDisplace: async () => {
+      seen.push(await readdir(dir));
+    },
+  });
+  expect(result.status).toBe("restored");
+  for (const names of [...seen, await readdir(dir)]) {
+    expect(
+      names.filter(
+        (name) => ![".env", "hack.config.json", ".hack"].includes(name)
+      )
+    ).toEqual([]);
+  }
+});
+
+test("a target on another filesystem than the snapshot is refused untouched", async () => {
+  const shm = "/dev/shm";
+  const shmInfo = await lstat(shm).catch(() => null);
+  if (shmInfo === null || shmInfo.dev === (await lstat(work)).dev) {
+    return; // no second filesystem to test with on this host
+  }
+  const shmRoot = await mkdtemp(join(shm, "hack-upgrade-snapshot-"));
+  try {
+    const paths = await fixture();
+    const created = await createUpgradeSnapshot({
+      purpose: "cross-filesystem",
+      root: join(shmRoot, "snapshots"),
+      targets: [{ path: paths.config, label: "config" }],
+    });
+    if (created.status !== "created") {
+      throw new Error("snapshot refused");
+    }
+    await writeFile(paths.config, '{"step":true}\n');
+    await recordUpgradeSnapshotAfter({
+      manifestPath: created.snapshot.manifestPath,
+    });
+    const result = await restoreUpgradeSnapshot({
+      manifestPath: created.snapshot.manifestPath,
+    });
+    const entry =
+      result.status === "invalid-manifest" ? undefined : result.results[0];
+    expect(entry?.status).toBe("error");
+    expect(entry?.message).toContain("another filesystem");
+    expect(await readFile(paths.config, "utf8")).toBe('{"step":true}\n');
+    // Nothing was staged or displaced beside the target.
+    expect(
+      (await readdir(join(work, "project"))).filter(
+        (name) => name.includes(".hack-") || name.startsWith("restore-")
+      )
+    ).toEqual([]);
+  } finally {
+    await rm(shmRoot, { recursive: true, force: true });
+  }
 });
 
 test("a writer holding the displaced file open keeps its edit in a named file", async () => {

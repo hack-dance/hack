@@ -117,7 +117,11 @@ Rollback restores each file's exact bytes and mode. A file that changed since
 the snapshot is left as it is unless you add `--overwrite`. Whatever rollback
 replaces or removes is kept as itself (not as a copy) in the snapshot directory
 and named in the output; nothing is deleted. A file that appears at a path while
-rollback runs is left alone and reported as a conflict.
+rollback runs is left alone and reported as a conflict. Rollback keeps every
+temporary and replaced file inside the snapshot directory, never beside the
+file in your checkout, so Git cannot pick up their contents. It therefore
+needs the file and the snapshot on the same filesystem; a project on another
+disk than `~/.hack` is reported for you to restore by hand.
 `hack upgrade rollback` without a manifest lists the snapshots and changes
 nothing.
 

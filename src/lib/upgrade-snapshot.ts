@@ -61,18 +61,19 @@ import { isRecord } from "./guards.ts";
  * - Results and errors carry paths, labels, statuses and closed messages,
  *   never file content. Labels are caller input and must not hold values.
  *
- * Restore protocol, per target: stage the snapshot's copy beside the target
- * and check that hard links work there (otherwise restore nothing); move
- * whatever is at the target to an invocation-owned sibling name (one atomic
- * rename); give that same file a name in the snapshot's `displaced/`
- * directory (a hard link, so a writer that still holds it open keeps
- * writing into a named file) before dropping the sibling name, or keep the
- * sibling where the snapshot is on another filesystem; publish the staged
- * copy with a hard link, which fails if anything appeared at the target
- * meanwhile. A late edit found in the displaced file is linked back unless
- * `overwrite` is set. A displaced non-file is never renamed back (no
- * rename refuses an occupied name); its sibling path is reported. Not
- * atomic across targets.
+ * Restore protocol, per target, with every temporary and displaced file in
+ * the snapshot's private directory and none beside the target (a checkout's
+ * Git must never see secret bytes): stage the snapshot's copy in
+ * `staging/` and check that hard links work (otherwise restore nothing);
+ * move whatever is at the target into `displaced/` with one atomic rename
+ * (the same file, so a writer that still holds it open keeps writing into
+ * a named file); publish the staged copy with a hard link, which fails if
+ * anything appeared at the target meanwhile. A late edit found in the
+ * displaced file is linked back unless `overwrite` is set. A displaced
+ * non-file is never renamed back (no rename refuses an occupied name); it
+ * stays in `displaced/` and is reported. Because a rename and a hard link
+ * cross no filesystem, a target on another filesystem than the snapshot is
+ * refused untouched. Not atomic across targets.
  *
  * One writer per snapshot: `recordUpgradeSnapshotAfter` rewrites the
  * manifest (read, modify, atomic rename, best-effort directory fsync), so two
@@ -88,8 +89,10 @@ export const MAX_SNAPSHOT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MANIFEST_NAME = "manifest.json";
 const BLOBS_DIR = "blobs";
-/** Displaced files, kept as themselves (hard links), not copies. */
+/** Displaced files, moved in as themselves (same inode), not copies. */
 const DISPLACED_DIR = "displaced";
+/** The snapshot's copies staged for publication. */
+const STAGING_DIR = "staging";
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const SNAPSHOT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -349,6 +352,10 @@ const MESSAGES = {
   damaged:
     "The snapshot's copy of this file is missing or does not match its recorded digest; nothing was restored here.",
   error: "The file could not be restored at this path; left as it was.",
+  noWorkDir:
+    "The snapshot's private working directories could not be prepared; nothing was changed here.",
+  crossFilesystem:
+    "This file is on another filesystem than the snapshot, so it cannot be restored without leaving temporary copies of its contents beside it (where Git could pick them up); nothing was changed here. Put the file back by hand, or rerun with a snapshot on the same filesystem.",
   noHardLinks:
     "This directory's filesystem does not support hard links, so the snapshot's copy cannot be put back without risking a file that appears meanwhile; nothing was changed here.",
   putBackUnrestored:
@@ -701,6 +708,10 @@ async function restoreEntry(input: {
     return start.outcome;
   }
   const { current } = start;
+  const work = await restoreWorkDirs({ snapshot, path: entry.path });
+  if (work.kind === "refused") {
+    return work.outcome;
+  }
   let staged: string | null = null;
   if (entry.before.kind === "file") {
     const bytes = await readBlob({
@@ -711,7 +722,7 @@ async function restoreEntry(input: {
       return { status: "backup-damaged", message: MESSAGES.damaged };
     }
     staged = await stageFile({
-      path: entry.path,
+      dir: work.staging,
       bytes,
       mode: entry.before.mode,
     });
@@ -725,7 +736,7 @@ async function restoreEntry(input: {
   try {
     await input.beforeReplace?.(entry.path);
     const displaced = await displaceTarget({
-      snapshot,
+      displacedDir: work.displaced,
       path: entry.path,
       expected: current.state,
       overwrite: input.overwrite,
@@ -752,6 +763,153 @@ async function restoreEntry(input: {
       await unlink(staged).catch(() => undefined);
     }
   }
+}
+
+/**
+ * The snapshot's private `staging/` and `displaced/` directories, where
+ * every temporary and displaced file lives: never beside the target, where
+ * a checkout's Git could pick up secret bytes. They must be on the target's
+ * filesystem (an atomic rename and a hard link cross no filesystem); when
+ * they are not, nothing is touched and the target is refused.
+ */
+async function restoreWorkDirs(input: {
+  readonly snapshot: UpgradeSnapshot;
+  readonly path: string;
+}): Promise<
+  | {
+      readonly kind: "ready";
+      readonly staging: string;
+      readonly displaced: string;
+    }
+  | { readonly kind: "refused"; readonly outcome: RestoreOutcome }
+> {
+  const staging = join(input.snapshot.dir, STAGING_DIR);
+  const displaced = join(input.snapshot.dir, DISPLACED_DIR);
+  for (const dir of [staging, displaced]) {
+    try {
+      await mkdir(dir, { mode: 0o700 });
+    } catch (error: unknown) {
+      if (errorCode(error) !== "EEXIST") {
+        return {
+          kind: "refused",
+          outcome: { status: "error", message: MESSAGES.noWorkDir },
+        };
+      }
+    }
+    if ((await privateDirectoryProblem(dir)) !== null) {
+      return {
+        kind: "refused",
+        outcome: { status: "error", message: MESSAGES.noWorkDir },
+      };
+    }
+  }
+  const parent = dirname(input.path);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  const [work, target] = await Promise.all([lstat(staging), lstat(parent)]);
+  if (work.dev !== target.dev) {
+    return {
+      kind: "refused",
+      outcome: { status: "error", message: MESSAGES.crossFilesystem },
+    };
+  }
+  return { kind: "ready", staging, displaced };
+}
+
+/** Whether hard links can be made beside `staged` (probed, then removed). */
+async function hardLinksWork(staged: string): Promise<boolean> {
+  const probe = `${staged}.link-probe`;
+  try {
+    await link(staged, probe);
+  } catch {
+    return false;
+  }
+  await unlink(probe).catch(() => undefined);
+  return true;
+}
+
+/**
+ * Moves whatever is at `path` right now into the snapshot's private
+ * `displaced/` directory with one atomic rename: the same file (inode), so
+ * a writer that still holds it open keeps writing into a named file, and
+ * nothing is left beside the target. A late edit (not what was inspected),
+ * without `overwrite`, is linked back into place. A displaced link,
+ * directory or other entry stays in `displaced/` and is reported: it is
+ * never renamed back, since no rename refuses an occupied name.
+ */
+async function displaceTarget(input: {
+  readonly displacedDir: string;
+  readonly path: string;
+  readonly expected: UpgradeSnapshotState;
+  readonly overwrite: boolean;
+}): Promise<
+  | { readonly kind: "displaced"; readonly keptAs?: string }
+  | { readonly kind: "stopped"; readonly outcome: RestoreOutcome }
+> {
+  const kept = join(
+    input.displacedDir,
+    `${new Date().toISOString().replace(ISO_SEPARATORS, "")}-${randomBytes(4).toString("hex")}-${basename(input.path)}`
+  );
+  try {
+    await rename(input.path, kept);
+  } catch (error: unknown) {
+    if (errorCode(error) !== "ENOENT") {
+      throw error;
+    }
+    // Nothing is there now.
+    return input.expected.kind === "absent" || input.overwrite
+      ? { kind: "displaced" }
+      : {
+          kind: "stopped",
+          outcome: { status: "conflict", message: MESSAGES.conflict },
+        };
+  }
+  const moved = await readTargetBytes(kept);
+  if (moved.kind === "refused" || moved.state.kind !== "file") {
+    return {
+      kind: "stopped",
+      outcome: {
+        status: "not-a-file",
+        message: MESSAGES.nonFileAside,
+        keptAs: kept,
+      },
+    };
+  }
+  if (!(sameState(moved.state, input.expected) || input.overwrite)) {
+    // A late edit: link that same file back into place.
+    if (await linkBack({ from: kept, path: input.path })) {
+      return {
+        kind: "stopped",
+        outcome: { status: "conflict", message: MESSAGES.conflict },
+      };
+    }
+    return {
+      kind: "stopped",
+      outcome: {
+        status: "conflict",
+        message: MESSAGES.strandedAt,
+        keptAs: kept,
+      },
+    };
+  }
+  return { kind: "displaced", keptAs: kept };
+}
+
+/**
+ * Links a kept file back to `path`, refused when anything took the name
+ * meanwhile, then drops the kept name (the file is back in place). False
+ * when the name was taken or the link failed; the kept name stays.
+ */
+async function linkBack(input: {
+  readonly from: string;
+  readonly path: string;
+}): Promise<boolean> {
+  try {
+    await link(input.from, input.path);
+  } catch {
+    return false;
+  }
+  await unlink(input.from).catch(() => undefined);
+  return true;
 }
 
 /**
@@ -784,7 +942,10 @@ async function publishOrPutBack(input: {
   const kept = input.keptAs === undefined ? {} : { keptAs: input.keptAs };
   let published: boolean;
   try {
-    published = await publishStaged({ staged: input.staged, path: input.path });
+    published = await publishStaged({
+      staged: input.staged,
+      path: input.path,
+    });
   } catch {
     if (
       input.keptAs !== undefined &&
@@ -799,156 +960,18 @@ async function publishOrPutBack(input: {
     : { status: "conflict", message: MESSAGES.conflict, ...kept };
 }
 
-/** Whether hard links can be made beside `staged` (probed, then removed). */
-async function hardLinksWork(staged: string): Promise<boolean> {
-  const probe = `${staged}.link-probe`;
-  try {
-    await link(staged, probe);
-  } catch {
-    return false;
-  }
-  await unlink(probe).catch(() => undefined);
-  return true;
-}
-
 /**
- * Moves whatever is at `path` right now to an invocation-owned sibling
- * name (one atomic rename) and keeps that very file, not a copy: its inode
- * is hard-linked into the snapshot's `displaced/` directory before the
- * sibling name is removed, so a writer that still holds it open keeps
- * writing into a file that has a name. When the snapshot is on another
- * filesystem, the sibling itself is kept and named. A late edit (not what
- * was inspected), without `overwrite`, is linked back into place. A
- * displaced link, directory or other entry stays at its sibling name,
- * which is reported: it is never renamed back, since that could replace
- * something that appeared at the name meanwhile.
- */
-async function displaceTarget(input: {
-  readonly snapshot: UpgradeSnapshot;
-  readonly path: string;
-  readonly expected: UpgradeSnapshotState;
-  readonly overwrite: boolean;
-}): Promise<
-  | { readonly kind: "displaced"; readonly keptAs?: string }
-  | { readonly kind: "stopped"; readonly outcome: RestoreOutcome }
-> {
-  const sibling = join(
-    dirname(input.path),
-    `.${basename(input.path)}.hack-displaced-${randomBytes(6).toString("hex")}`
-  );
-  try {
-    await rename(input.path, sibling);
-  } catch (error: unknown) {
-    if (errorCode(error) !== "ENOENT") {
-      throw error;
-    }
-    // Nothing is there now.
-    return input.expected.kind === "absent" || input.overwrite
-      ? { kind: "displaced" }
-      : {
-          kind: "stopped",
-          outcome: { status: "conflict", message: MESSAGES.conflict },
-        };
-  }
-  const moved = await readTargetBytes(sibling);
-  if (moved.kind === "refused" || moved.state.kind !== "file") {
-    return {
-      kind: "stopped",
-      outcome: {
-        status: "not-a-file",
-        message: MESSAGES.nonFileAside,
-        keptAs: sibling,
-      },
-    };
-  }
-  const keptAs = await keepDisplacedInode({
-    snapshot: input.snapshot,
-    sibling,
-    name: basename(input.path),
-  });
-  if (!(sameState(moved.state, input.expected) || input.overwrite)) {
-    // A late edit: link that same file back into place.
-    if (await linkBack({ from: keptAs, path: input.path })) {
-      return {
-        kind: "stopped",
-        outcome: { status: "conflict", message: MESSAGES.conflict },
-      };
-    }
-    return {
-      kind: "stopped",
-      outcome: { status: "conflict", message: MESSAGES.strandedAt, keptAs },
-    };
-  }
-  return { kind: "displaced", keptAs };
-}
-
-/**
- * Gives the displaced file a name in the snapshot's private `displaced/`
- * directory (a hard link to the same inode), then removes its sibling
- * name. Where that link cannot be made (another filesystem), the sibling
- * stays and is the kept name. Never copies, never drops the last name.
- */
-async function keepDisplacedInode(input: {
-  readonly snapshot: UpgradeSnapshot;
-  readonly sibling: string;
-  readonly name: string;
-}): Promise<string> {
-  const dir = join(input.snapshot.dir, DISPLACED_DIR);
-  try {
-    await mkdir(dir, { mode: 0o700 });
-  } catch (error: unknown) {
-    if (errorCode(error) !== "EEXIST") {
-      return input.sibling;
-    }
-  }
-  if ((await privateDirectoryProblem(dir)) !== null) {
-    return input.sibling;
-  }
-  const kept = join(
-    dir,
-    `${new Date().toISOString().replace(ISO_SEPARATORS, "")}-${randomBytes(4).toString("hex")}-${input.name}`
-  );
-  try {
-    await link(input.sibling, kept);
-  } catch {
-    return input.sibling;
-  }
-  await unlink(input.sibling).catch(() => undefined);
-  return kept;
-}
-
-/**
- * Links a kept file back to `path`, refused when anything took the name
- * meanwhile, then drops the kept name (the file is back in place). False
- * when the name was taken or the link failed; the kept name stays.
- */
-async function linkBack(input: {
-  readonly from: string;
-  readonly path: string;
-}): Promise<boolean> {
-  try {
-    await link(input.from, input.path);
-  } catch {
-    return false;
-  }
-  await unlink(input.from).catch(() => undefined);
-  return true;
-}
-
-/**
- * Writes `bytes` with exactly `mode` to a new no-follow temporary file in
- * the target's directory (created 0700 when missing) and syncs it.
+ * Writes `bytes` with exactly `mode` to a new no-follow file in the
+ * snapshot's private staging directory and syncs it.
  */
 async function stageFile(input: {
-  readonly path: string;
+  readonly dir: string;
   readonly bytes: Buffer;
   readonly mode: number;
 }): Promise<string> {
-  const parent = dirname(input.path);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
   const temporary = join(
-    parent,
-    `.${basename(input.path)}.hack-restore-${randomBytes(6).toString("hex")}`
+    input.dir,
+    `restore-${randomBytes(8).toString("hex")}`
   );
   const handle = await open(
     temporary,

@@ -3951,8 +3951,12 @@ linuxTest(
     expect(foreign.handled).toBe(false);
     expect(foreign.refused).toContain("pid 4242");
     expect(foreign.refused).toContain(
-      "not proven to be the hackd of this Hack home"
+      "does not hold this Hack home's daemon socket"
     );
+    expect(foreign.refused).toContain(
+      "the unit's configuration names this home"
+    );
+    expect(foreign.refused).toContain("It may still be starting");
     expect(foreign.refused).toContain("systemctl --user status hackd.service");
     expect(foreign.refused).toContain("systemctl --user stop hackd.service");
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
@@ -3975,6 +3979,118 @@ linuxTest(
     fake.calls.length = 0;
     expect((await stop()).handled).toBe(true);
     expect(fake.calls).toContain("systemctl --user stop hackd.service");
+  }
+);
+
+linuxTest(
+  "a live daemon of another Hack home is left alone, not refused",
+  async () => {
+    // Lead review: a proven hackd holding another home's socket, under a
+    // unit whose configuration also names another home, is that home's
+    // daemon. Stop leaves the unit alone with no refusal; the caller then
+    // stops this home's own direct hackd (it exits 1 only on `refused`,
+    // and stops its pid itself when `ownedPid` is false).
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const stop = () =>
+      stopViaSystemdIfInstalled({
+        proveDaemon: proveFor(fake),
+        // This home's own hackd, started directly, outside the unit.
+        pid: 31_337,
+        isPidInUnit: () => Promise.resolve(false),
+        hackHome: join(root, ".hack"),
+        deps: fake.deps,
+      });
+    const leftAlone = async (configure: () => void) => {
+      fake.active = true;
+      fake.activeState = null;
+      fake.mainProcess = "foreign";
+      fake.unitEnvironment = "PATH=/usr/bin:/bin HACK_NO_INTERACTIVE=1";
+      fake.unsetEnvironment = "";
+      fake.managerEnvironment = `HOME=${root}\nPATH=/usr/bin:/bin\n`;
+      fake.passwdHome = root;
+      configure();
+      fake.calls.length = 0;
+      expect(await stop()).toEqual({
+        handled: false,
+        ownedPid: false,
+        failed: null,
+        refused: null,
+      });
+      expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+      expect(fake.active).toBe(true);
+    };
+    // Another home through a drop-in, the manager's environment, an
+    // UnsetEnvironment of this home, or the account's home.
+    await leftAlone(() => {
+      fake.unitEnvironment = "HACK_NO_INTERACTIVE=1 HACK_HOME=/srv/other-home";
+    });
+    await leftAlone(() => {
+      fake.managerEnvironment = `HOME=${root}\nHACK_HOME=/srv/other-home\n`;
+    });
+    await leftAlone(() => {
+      fake.unitEnvironment = `HACK_HOME=${join(root, ".hack")} HOME=/srv/other`;
+      fake.unsetEnvironment = "HACK_HOME";
+    });
+    await leftAlone(() => {
+      fake.unsetEnvironment = "HOME";
+      fake.passwdHome = "/srv/account";
+    });
+    // Still refused: a process that cannot be identified, even under
+    // another home's configuration.
+    fake.unitEnvironment = "HACK_NO_INTERACTIVE=1 HACK_HOME=/srv/other-home";
+    fake.unsetEnvironment = "";
+    fake.passwdHome = root;
+    fake.mainProcess = "unknown";
+    expect((await stop()).refused).toContain("not proven");
+    // No unit file, the unit loaded from another home's directory and
+    // running: left alone too, and refused when unidentifiable.
+    await rm(unitPath);
+    fake.active = true;
+    fake.mainProcess = "foreign";
+    fake.calls.length = 0;
+    expect((await stop()).refused).toBeNull();
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    fake.mainProcess = "unknown";
+    expect((await stop()).refused).toContain("cannot be checked");
+  }
+);
+
+linuxTest(
+  "stop refuses when the unit's main process changes while it is checked",
+  async () => {
+    // Lead review: the proof covers the main process seen first; the stop
+    // acts on whatever runs when it lands. A different MainPID just before
+    // the stop (a crash and restart meanwhile) is refused.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    let proofs = 0;
+    const proveDaemon = (pid: number) => {
+      proofs += 1;
+      // The process is replaced once it has been proven.
+      fake.mainPidReported = false;
+      return proveFor(fake)(pid);
+    };
+    fake.calls.length = 0;
+    const changed = await stopViaSystemdIfInstalled({
+      proveDaemon,
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(proofs).toBe(1);
+    expect(changed.handled).toBe(false);
+    expect(changed.refused).toContain("changed while it was being checked");
+    expect(changed.refused).toContain("hack daemon stop again");
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
   }
 );
 
@@ -4046,8 +4162,11 @@ linuxTest(
       socketOwners = new Set();
       fake.activeState = "activating";
       const starting = await stop();
-      expect(starting.refused).toContain("still starting");
-      expect(starting.refused).not.toContain("may serve another Hack home");
+      expect(starting.refused).toContain("may still be starting");
+      // Even once systemd reports it active (Type=simple), a hackd that has
+      // not bound its socket gets the same hint.
+      fake.activeState = "active";
+      expect((await stop()).refused).toContain("may still be starting");
     } finally {
       child.kill();
       await child.exited;

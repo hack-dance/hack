@@ -378,10 +378,19 @@ this home's `daemon/` directory), and `stop` stops only this home's own hackd. W
 process, `stop` proves from that process which Hack home it serves (a hackd
 holding a socket in this home's `daemon/` directory), not from the loaded
 configuration: a reload without a restart changes the configuration, not the
-running daemon. A main process that is not proven to be this home's hackd is
-refused, with the `systemctl --user status` and `stop` commands. With no live
-process (a pending restart), the configuration decides, and `stop` still
-cancels the restart.
+running daemon. A main process proven to be a hackd that holds another home's
+socket is that home's daemon when the configuration also names another home:
+the unit is left alone and this home's own hackd is still stopped, whether or
+not the managed unit file is present. When the configuration names this home
+instead (a reload without a restart), `stop` refuses: the daemon may still be
+starting (it has not bound its socket yet), so it says to run `stop` again,
+or it serves another home. A main process that cannot be identified (its
+process details cannot be read, or it is not a hackd) is refused, with the
+`systemctl --user status` and `stop` commands. With no live process (a pending
+restart), the configuration decides, and `stop` still cancels the restart.
+Just before `systemctl --user stop`, `stop` reads the unit's main process
+again and refuses if it changed (a crash and restart while it was checked);
+the window left is the few milliseconds between that read and the stop.
 When the Hack home cannot be read with certainty (for example an
 `EnvironmentFile=`, an `ExecSearchPath=`, a `PassEnvironment=` naming
 `HACK_HOME`, `HOME` or `PATH`, a relative `HOME`, or an escaped quote or

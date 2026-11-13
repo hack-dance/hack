@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,10 +45,10 @@ afterEach(async () => {
   }
 });
 
-async function fixture() {
+async function fixture(directory = ".hack") {
   const projectRoot = await mkdtemp(join(tmpdir(), "hack-live-env-inputs-"));
   roots.push(projectRoot);
-  const projectDir = join(projectRoot, ".hack");
+  const projectDir = join(projectRoot, directory);
   await mkdir(projectDir);
   await writeFile(
     join(projectDir, "docker-compose.yml"),
@@ -54,47 +62,53 @@ async function fixture() {
   };
 }
 
-test("legacy store cleanup preserves a project key reused by migrated YAML secrets", async () => {
-  const options = await fixture();
-  const keyPath = join(options.projectRoot, ".hack.secret.key");
-  const storePath = join(options.projectRoot, "legacy-store.json");
-  await writeFile(keyPath, `${KEY}\n`, { mode: 0o600 });
-  await writeFile(
-    join(options.projectDir, "hack.config.json"),
-    JSON.stringify({
-      name: "fixture",
-      controlPlane: {
-        secrets: {
-          backend: "encrypted_file",
-          encryptedFile: { path: storePath, keyPath: ".hack.secret.key" },
+for (const configuredKeyPath of [".hack.secret.key", "link/.hack.secret.key"]) {
+  test(`legacy cleanup preserves a YAML key reused through ${configuredKeyPath}`, async () => {
+    const options = await fixture();
+    await symlink(".", join(options.projectRoot, "link"));
+    const keyPath = join(options.projectRoot, ".hack.secret.key");
+    const storePath = join(options.projectRoot, "legacy-store.json");
+    await writeFile(keyPath, `${KEY}\n`, { mode: 0o600 });
+    await writeFile(
+      join(options.projectDir, "hack.config.json"),
+      JSON.stringify({
+        name: "fixture",
+        controlPlane: {
+          secrets: {
+            backend: "encrypted_file",
+            encryptedFile: { path: storePath, keyPath: configuredKeyPath },
+          },
         },
-      },
-    })
-  );
-  await writeFile(
-    join(options.projectDir, "hack.env.json"),
-    JSON.stringify({
-      version: 1,
-      vars: [{ key: "TOKEN", source: "keychain", required: false }],
-    })
-  );
-  const store = await resolveSecretStore(options);
-  await store.set({ key: "TOKEN", value: VALUE });
-  const migrated = await migrateLegacyProjectEnv({
-    ...options,
-    materialize: false,
+      })
+    );
+    await writeFile(
+      join(options.projectDir, "hack.env.json"),
+      JSON.stringify({
+        version: 1,
+        vars: [{ key: "TOKEN", source: "keychain", required: false }],
+      })
+    );
+    const store = await resolveSecretStore(options);
+    await store.set({ key: "TOKEN", value: VALUE });
+    const migrated = await migrateLegacyProjectEnv({
+      ...options,
+      materialize: false,
+    });
+    expect(migrated.cleanupCandidates).toContain(storePath);
+    await removeLegacyProjectEnvArtifacts({
+      projectRoot: options.projectRoot,
+      paths: migrated.cleanupCandidates,
+    });
+    const resolved = await resolveProjectEnvConfig({
+      ...options,
+      envName: null,
+    });
+    expect(resolved?.globalEnv.TOKEN).toBe(VALUE);
+    expect(await readFile(keyPath, "utf8")).toBe(`${KEY}\n`);
+    expect(migrated.cleanupCandidates).not.toContain(keyPath);
+    expect(await Bun.file(storePath).exists()).toBe(false);
   });
-  expect(migrated.cleanupCandidates).toContain(storePath);
-  await removeLegacyProjectEnvArtifacts({
-    projectRoot: options.projectRoot,
-    paths: migrated.cleanupCandidates,
-  });
-  const resolved = await resolveProjectEnvConfig({ ...options, envName: null });
-  expect(resolved?.globalEnv.TOKEN).toBe(VALUE);
-  expect(await readFile(keyPath, "utf8")).toBe(`${KEY}\n`);
-  expect(migrated.cleanupCandidates).not.toContain(keyPath);
-  expect(await Bun.file(storePath).exists()).toBe(false);
-});
+}
 
 test("candidate selection and deletion both reject project/shared keys and current env inputs", async () => {
   const options = await fixture();
@@ -117,6 +131,15 @@ test("candidate selection and deletion both reject project/shared keys and curre
   );
   expect(await resolveProjectEnvSharedKeyPath(options)).toBe(sharedKeyPath);
   const protectedPaths = [keyPath, sharedKeyPath, configPath, layerPath];
+  await symlink(".", join(options.projectRoot, "link"));
+  const alias = join(options.projectRoot, "link/.hack.secret.key");
+  const hardlink = join(options.projectRoot, "key-hardlink");
+  await link(keyPath, hardlink);
+  protectedPaths.push(alias, hardlink);
+  const caseAlias = join(options.projectRoot, ".HACK.SECRET.KEY");
+  if (await Bun.file(caseAlias).exists()) {
+    protectedPaths.push(caseAlias);
+  }
   const candidates = await collectLegacyProjectEnvCleanupCandidates({
     ...options,
     overlayNames: [],
@@ -139,4 +162,24 @@ test("candidate selection and deletion both reject project/shared keys and curre
     expect(await readFile(path)).toEqual(before);
     expect(await Bun.file(ordinary).exists()).toBe(true);
   }
+});
+
+test("deletion protects live inputs in a legacy .dev project", async () => {
+  const options = await fixture(".dev");
+  const layerPath = join(options.projectDir, "hack.env.default.yaml");
+  await writeFile(
+    join(options.projectDir, "hack.config.json"),
+    '{"name":"fixture"}\n'
+  );
+  await writeFile(
+    layerPath,
+    "version: 1\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  await expect(
+    removeLegacyProjectEnvArtifacts({
+      projectRoot: options.projectRoot,
+      paths: [layerPath],
+    })
+  ).rejects.toThrow("current project env key");
+  expect(await Bun.file(layerPath).exists()).toBe(true);
 });

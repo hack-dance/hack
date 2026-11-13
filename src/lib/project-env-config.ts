@@ -24,6 +24,7 @@ import {
 } from "node:path";
 import { YAML } from "bun";
 import {
+  HACK_PROJECT_DIR_LEGACY,
   HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
@@ -8324,7 +8325,10 @@ async function readLegacyDotenvText(opts: {
 async function legacyCleanupLiveInputs(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
-}): Promise<ReadonlySet<string>> {
+}): Promise<{
+  readonly paths: ReadonlySet<string>;
+  readonly identities: ReadonlySet<string>;
+}> {
   const paths = new Set([resolveProjectEnvKeyPath(opts)]);
   const shared = await resolveProjectEnvSharedKeyLocation(opts);
   if (shared) {
@@ -8333,10 +8337,15 @@ async function legacyCleanupLiveInputs(opts: {
   const primaryRoot = await resolveGitPrimaryWorktreeRoot({
     repoRoot: opts.projectRoot,
   });
-  const directories = new Set([opts.projectDir]);
+  const directories = new Set([
+    opts.projectDir,
+    resolve(opts.projectRoot, HACK_PROJECT_DIR_PRIMARY),
+    resolve(opts.projectRoot, HACK_PROJECT_DIR_LEGACY),
+  ]);
   if (primaryRoot && primaryRoot !== opts.projectRoot) {
     paths.add(resolveProjectEnvKeyPath({ projectRoot: primaryRoot }));
     directories.add(resolve(primaryRoot, HACK_PROJECT_DIR_PRIMARY));
+    directories.add(resolve(primaryRoot, HACK_PROJECT_DIR_LEGACY));
   }
   for (const directory of directories) {
     paths.add(resolve(directory, PROJECT_CONFIG_FILENAME));
@@ -8352,7 +8361,44 @@ async function legacyCleanupLiveInputs(opts: {
       }
     }
   }
-  return paths;
+  const identities = new Set<string>();
+  for (const path of paths) {
+    const info = await legacyCleanupInputStat({ path, follow: true });
+    if (info) {
+      identities.add(`${info.dev}:${info.ino}`);
+    }
+  }
+  return { paths, identities };
+}
+
+async function legacyCleanupInputStat(opts: {
+  readonly path: string;
+  readonly follow: boolean;
+}) {
+  try {
+    return await (opts.follow ? stat(opts.path) : lstat(opts.path));
+  } catch (error) {
+    if (
+      isRecord(error) &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    ) {
+      return null;
+    }
+    throw new ClosedCliError(
+      "Refusing legacy env cleanup: live input identity could not be verified. Keep the files and check their paths and permissions (values omitted)."
+    );
+  }
+}
+
+async function legacyCleanupIsLiveInput(opts: {
+  readonly path: string;
+  readonly live: Awaited<ReturnType<typeof legacyCleanupLiveInputs>>;
+}): Promise<boolean> {
+  if (opts.live.paths.has(resolve(opts.path))) {
+    return true;
+  }
+  const info = await legacyCleanupInputStat({ path: opts.path, follow: false });
+  return info !== null && opts.live.identities.has(`${info.dev}:${info.ino}`);
 }
 
 async function assertLegacyCleanupDoesNotRemoveLiveInputs(opts: {
@@ -8363,10 +8409,12 @@ async function assertLegacyCleanupDoesNotRemoveLiveInputs(opts: {
     ...opts,
     projectDir: resolve(opts.projectRoot, HACK_PROJECT_DIR_PRIMARY),
   });
-  if (opts.paths.some((path) => live.has(resolve(path)))) {
-    throw new ClosedCliError(
-      "Refusing legacy env cleanup: a target is a current project env key, configuration or YAML layer. Keep live env inputs; migrated values still need them (values omitted)."
-    );
+  for (const path of opts.paths) {
+    if (await legacyCleanupIsLiveInput({ path, live })) {
+      throw new ClosedCliError(
+        "Refusing legacy env cleanup: a target is a current project env key, configuration or YAML layer. Keep live env inputs; migrated values still need them (values omitted)."
+      );
+    }
   }
 }
 
@@ -8687,7 +8735,7 @@ export async function collectLegacyProjectEnvCleanupCandidates(opts: {
   const allowed: string[] = [];
   const blocked: string[] = [];
   for (const path of candidates) {
-    if (liveInputs.has(path)) {
+    if (await legacyCleanupIsLiveInput({ path, live: liveInputs })) {
       continue;
     }
     if (await pathExists(path)) {

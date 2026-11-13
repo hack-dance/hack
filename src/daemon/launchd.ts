@@ -1,8 +1,8 @@
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
-
 import { DAEMON_LAUNCHD_LABEL, GLOBAL_HACK_DIR_NAME } from "../constants.ts";
 import type { DaemonLaunchdConfig } from "../control-plane/sdk/config.ts";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
   ensureDir,
@@ -114,6 +114,7 @@ async function runLaunchctl(args: readonly string[]): Promise<LaunchctlRun> {
     return { exitCode: 1, stdout: "", stderr: access.message };
   }
   const proc = Bun.spawn(["launchctl", ...args], {
+    env: childEnvironment(),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

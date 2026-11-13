@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
@@ -170,7 +171,7 @@ const bunGumRunner: GumRunner = {
   runSync({ cmd, env, stdin, stdout }) {
     const res = Bun.spawnSync({
       cmd: [...cmd],
-      env: { ...env },
+      env: childEnvironment({ ...env }),
       stdin:
         typeof stdin === "string"
           ? stdin
@@ -182,7 +183,7 @@ const bunGumRunner: GumRunner = {
   },
   async run({ cmd, env, stdin, stdout }) {
     const proc = Bun.spawn([...cmd], {
-      env: { ...env },
+      env: childEnvironment({ ...env }),
       stdin: typeof stdin === "string" ? stdin : streamFromText(stdin.text),
       stdout,
       stderr: "inherit",

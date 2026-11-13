@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath, rmdir } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -138,6 +139,7 @@ async function noLifecycleEntries(projectDir: string): Promise<void> {
  */
 async function noOtherHackFrontends(): Promise<void> {
   const child = Bun.spawn(["/bin/ps", "-axo", "pid=,comm="], {
+    env: childEnvironment(),
     stdout: "pipe",
     stderr: "ignore",
   });

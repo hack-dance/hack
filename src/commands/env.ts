@@ -1440,7 +1440,7 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
   if (args.options.json) {
     command.push("--json");
   }
-  return await run(command, { cwd: project.projectRoot });
+  return await run(command, { cwd: project.projectRoot, hackReexec: true });
 };
 
 function maskModernEnvValue(input: {

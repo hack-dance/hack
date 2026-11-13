@@ -1,3 +1,4 @@
+import { childEnvironment } from "../lib/child-environment.ts";
 import { isRecord } from "../lib/guards.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 
@@ -63,7 +64,12 @@ export function startDockerEventWatcher(opts: {
             "--format",
             "{{json .}}",
           ],
-          { stdin: "ignore", stdout: "pipe", stderr: "pipe" }
+          {
+            env: childEnvironment(),
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          }
         );
       } catch (error: unknown) {
         // Bun.spawn throws synchronously when `docker` is not on PATH (a

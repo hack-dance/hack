@@ -121,6 +121,10 @@ const USE_COMPOSE =
   "Run this project on the Compose backend (HACK_RUNTIME_BACKEND=compose), or remove it.";
 
 const FEATURE_FINDINGS: Readonly<Record<ComposeBackendFeature, Explanation>> = {
+  duplicate_hack_network: {
+    message: "Several logical networks refer to the same Hack shared network.",
+    fix: "Keep one logical declaration for each of hack-dev and hack-logging and attach its services to that declaration.",
+  },
   external_network: {
     message: "The Compose file uses an external network.",
     fix: "Declare the network in this file, or list it under isolatedNetworks in .hack/native/adaptation.json so native replaces it with an isolated one.",
@@ -179,7 +183,7 @@ const PREPARATION_FINDINGS: Readonly<
   unsupported_label: {
     field: "labels",
     message:
-      "The service has a router, runtime or Hack label native does not accept. Plain metadata labels are fine; of the caddy, traefik, hack and com.docker.compose families only the reviewed caddy routing labels, dependency cache labels and the one-shot marker are admitted.",
+      "The service has a foreign router label or an unsupported semantic Hack label. Generated Hack and Compose metadata is ignored; Caddy routes, dependency caches and one-shot declarations keep their own checks.",
     fix: "Remove those labels, or run this project on the Compose backend if a router or tool needs them.",
   },
 };
@@ -283,6 +287,7 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     fix: "Create it, or correct the path. This includes env_file targets and bind mount sources.",
   },
   external_network: FEATURE_FINDINGS.external_network,
+  duplicate_hack_network: FEATURE_FINDINGS.duplicate_hack_network,
   external_volume: FEATURE_FINDINGS.external_volume,
   unsupported_volume_driver: {
     message: "A volume uses a driver other than local.",
@@ -320,7 +325,7 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   external_route_or_owner_label: {
     message:
       "The service has router or runtime labels native does not adopt, or its caddy routing labels are not in the reviewed form.",
-    fix: "Keep only caddy, caddy.reverse_proxy and caddy.tls for routing, and remove traefik, hack and com.docker.compose labels.",
+    fix: "Use caddy, caddy.reverse_proxy and caddy.tls for routing; remove unsupported router directives. Generated Hack and Compose metadata needs no adaptation.",
   },
   external_logging_driver: {
     message: "The service sends logs to an external logging driver.",

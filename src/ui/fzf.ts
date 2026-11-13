@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { ensureDir } from "../lib/fs.ts";
 import { execOrThrow } from "../lib/shell.ts";
@@ -198,7 +199,7 @@ export async function fzfFilter(
   });
 
   const proc = Bun.spawn(cmd, {
-    env: process.env,
+    env: childEnvironment(process.env),
     stdin: inputStream,
     stdout: "pipe",
     stderr: "inherit",

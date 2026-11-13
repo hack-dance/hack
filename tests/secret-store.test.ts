@@ -1222,3 +1222,17 @@ test("a git-tracked key reached through a directory symlink is refused (HACK-216
     "git tracks it"
   );
 });
+
+test("malformed secret-store JSON diagnostic has coordinates and no source text", async () => {
+  const { storePath } = await encryptedStoreFixture();
+  await writeFile(
+    storePath,
+    `{\n "ciphertext": "${STORE_SENTINEL}" invalid\n}`
+  );
+  const outcome = await readStoreToken();
+  const error = "error" in outcome ? outcome.error : null;
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain(storePath);
+  expect(String(error)).toMatch(/Invalid JSON syntax at line \d+, column \d+/);
+  expect(String(error)).not.toContain(STORE_SENTINEL);
+});

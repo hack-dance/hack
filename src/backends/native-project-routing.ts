@@ -1,9 +1,11 @@
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "../lib/hack-ownership-labels.ts";
+import { isIgnoredHackComposeLabel } from "../lib/native-hack-compose-conventions.ts";
 import { hasOnlyNativeCacheLabels } from "./native-project-cache.ts";
 
 const ROUTE_LABELS = new Set(["caddy", "caddy.reverse_proxy", "caddy.tls"]);
+const LABEL_KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 function refused(): Error {
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
@@ -61,13 +63,17 @@ const RESERVED_LABEL_NAMESPACES = ["hack", "com.docker.compose"] as const;
  * `packages/runtime-core/src/project/compose/mod.rs`.
  */
 export function isInertMetadataLabel(key: string): boolean {
-  return !(
-    HACK_OWNERSHIP_LABEL_NAMESPACES.some(
-      (namespace) => key.startsWith(namespace) || key === namespace.slice(0, -1)
-    ) ||
-    ROUTER_LABEL_WORDS.some((word) => key.startsWith(word)) ||
-    RESERVED_LABEL_NAMESPACES.some(
-      (prefix) => key === prefix || key.startsWith(`${prefix}.`)
+  return (
+    isIgnoredHackComposeLabel(key) ||
+    !(
+      HACK_OWNERSHIP_LABEL_NAMESPACES.some(
+        (namespace) =>
+          key.startsWith(namespace) || key === namespace.slice(0, -1)
+      ) ||
+      ROUTER_LABEL_WORDS.some((word) => key.startsWith(word)) ||
+      RESERVED_LABEL_NAMESPACES.some(
+        (prefix) => key === prefix || key.startsWith(`${prefix}.`)
+      )
     )
   );
 }
@@ -83,6 +89,15 @@ export function hasOnlyNativeSupportedLabels(labels: unknown): boolean {
         isInertMetadataLabel(key)
     ) ?? false
   );
+}
+
+/** Only bounded label keys are named in refusals; label values are never printed. */
+export function unsupportedNativeLabelKeys(labels: unknown): readonly string[] {
+  return (labelEntries(labels) ?? [])
+    .filter(([key, value]) => !hasOnlyNativeSupportedLabels({ [key]: value }))
+    .map(([key]) => (LABEL_KEY.test(key) ? key : "[invalid-label]"))
+    .slice(0, 32)
+    .sort();
 }
 
 /** Log drivers that keep logs in the engine; native reviews them and applies none. */

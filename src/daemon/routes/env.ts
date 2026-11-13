@@ -14,6 +14,7 @@ import {
   serializeEnvStorageForJson,
 } from "../../lib/hack-env-status.ts";
 import { parseEnvConfigSelection } from "../../lib/project.ts";
+import { projectEnvConfigExistsForMutation } from "../../lib/project-env-config.ts";
 import type { RegisteredProject } from "../../lib/projects-registry.ts";
 import {
   readProjectsRegistry,
@@ -227,6 +228,38 @@ async function handleGetEnv(opts: { readonly url: URL }): Promise<Response> {
   return jsonResponse(body as unknown as Record<string, unknown>);
 }
 
+/** Legacy mutation routes must never report success for unchanged YAML values. */
+async function refuseYamlEnvMutation(
+  projectDir: string
+): Promise<Response | null> {
+  try {
+    if (
+      await projectEnvConfigExistsForMutation({
+        projectDir,
+      })
+    ) {
+      return jsonResponse(
+        {
+          error: "yaml_env_mutation_unsupported",
+          message:
+            "This project uses YAML env layers. Use hack env set, hack env add or hack env unset instead.",
+        },
+        409
+      );
+    }
+  } catch {
+    return jsonResponse(
+      {
+        error: "yaml_env_layer_invalid",
+        message:
+          "Env layer paths could not be validated; no legacy env file was written.",
+      },
+      409
+    );
+  }
+  return null;
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Env mutation route keeps request parsing and repair-safe writeback together.
 async function handleSetEnv(opts: {
   readonly req: Request;
@@ -251,6 +284,10 @@ async function handleSetEnv(opts: {
 
   const { project, registration } = resolvedProject.value;
   const secret = parsed.value.secret === true;
+  const yamlRefusal = await refuseYamlEnvMutation(project.projectDir);
+  if (yamlRefusal) {
+    return yamlRefusal;
+  }
   const sourceValidation = await validateHackEnvMutationSource({
     projectDir: project.projectDir,
     key: parsed.value.key,
@@ -390,6 +427,10 @@ async function handleUnsetEnv(opts: {
   }
 
   const { project, registration } = resolvedProject.value;
+  const yamlRefusal = await refuseYamlEnvMutation(project.projectDir);
+  if (yamlRefusal) {
+    return yamlRefusal;
+  }
   let secretStore: Awaited<ReturnType<typeof resolveSecretStore>>;
   try {
     secretStore = await resolveSecretStore({

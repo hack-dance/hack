@@ -5,6 +5,7 @@ import {
   removeFileIfExists,
   waitForProcessExit,
 } from "../../../daemon/process.ts";
+import { childEnvironment } from "../../../lib/child-environment.ts";
 import { resolveGlobalHackDir } from "../../../lib/config-paths.ts";
 import {
   ensureDir,
@@ -204,6 +205,7 @@ export const CLOUDFLARE_COMMANDS: readonly ExtensionCommand[] = [
       const proc = Bun.spawn(
         ["cloudflared", "tunnel", "--config", configPath, "run", config.tunnel],
         {
+          env: childEnvironment(),
           stdin: "ignore",
           stdout: "ignore",
           stderr: "ignore",
@@ -1042,6 +1044,7 @@ async function runCloudflared(opts: {
   readonly inherit: boolean;
 }): Promise<{ readonly ok: boolean; readonly stdout?: string }> {
   const proc = Bun.spawn(["cloudflared", ...opts.args], {
+    env: childEnvironment(),
     stdin: opts.inherit ? "inherit" : "ignore",
     stdout: opts.inherit ? "inherit" : "pipe",
     stderr: "inherit",

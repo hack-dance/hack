@@ -1,9 +1,17 @@
+import {
+  childEnvironment,
+  hackReexecEnvironment,
+} from "./child-environment.ts";
 import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
 import { openTerminalControl } from "./tty-process-group.ts";
 
 export const TTY_SUPERVISOR_ARGUMENT = "--internal-tty-supervisor";
 
-type StartMessage = { readonly kind: "start"; readonly command: string[] };
+type StartMessage = {
+  readonly kind: "start";
+  readonly command: string[];
+  readonly hackReexec?: boolean;
+};
 function isStartMessage(value: unknown): value is StartMessage {
   return (
     typeof value === "object" &&
@@ -54,7 +62,10 @@ export async function runTtySupervisor(): Promise<number> {
           stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",
-          env: process.env,
+          env:
+            message.hackReexec === true
+              ? hackReexecEnvironment()
+              : childEnvironment(),
         });
         process.send?.({ kind: "spawn", pid: child.pid });
         child.exited.then((code) => {

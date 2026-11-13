@@ -7,16 +7,39 @@ use std::collections::BTreeMap;
 fn invalid() -> CandidateError {
     CandidateError::new(
         "native_log_arguments",
-        "Use graph logs-follow --run-id ID --service NAME --expect-owner ID --expect-plan SHA --expect-namespace SHA [--native] [--tail 0..1000] [--since UNIX_SECONDS].",
+        "Use graph logs-follow --run-id ID --service NAME --expect-owner ID --expect-plan SHA --expect-namespace SHA [--native] [--tail 0..1000] [--since UNIX_SECONDS] [--timestamps] [--from-start] [--expect-container <64-hex>] [--selection-only].",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateError> {
+    let options = parse(args)?;
+    if !options.selection_only {
+        watch_frontend()?;
+    }
+    graph::follow_logs(candidate, &options)
+}
+
+fn parse<'a>(args: &[&'a str]) -> Result<LogFollowOptions<'a>, CandidateError> {
     let mut values = BTreeMap::new();
     let mut native = false;
+    let mut timestamps = false;
+    let mut from_start = false;
+    let mut selection_only = false;
     let mut index = 0;
     while index < args.len() {
         let key = args[index];
         index += 1;
+        if key == "--selection-only" && !selection_only {
+            selection_only = true;
+            continue;
+        }
+        if key == "--from-start" && !from_start {
+            from_start = true;
+            continue;
+        }
+        if key == "--timestamps" && !timestamps {
+            timestamps = true;
+            continue;
+        }
         if key == "--native" && !native {
             native = true;
             continue;
@@ -29,6 +52,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateErro
             "--expect-namespace",
             "--tail",
             "--since",
+            "--expect-container",
         ]
         .contains(&key)
         {
@@ -41,6 +65,14 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateErro
         }
     }
     let get = |key| values.get(key).copied().ok_or_else(invalid);
+    if selection_only
+        && (timestamps
+            || from_start
+            || values.contains_key("--tail")
+            || values.contains_key("--since"))
+    {
+        return Err(invalid());
+    }
     let options = LogFollowOptions {
         run: get("--run-id")?,
         service: get("--service")?,
@@ -48,6 +80,10 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateErro
         plan: get("--expect-plan")?,
         namespace: get("--expect-namespace")?,
         native,
+        timestamps,
+        from_start,
+        selection_only,
+        expected_container: values.get("--expect-container").copied(),
         tail: values
             .get("--tail")
             .unwrap_or(&"200")
@@ -60,8 +96,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateErro
             .map_err(|_| invalid())?,
     };
     options.validate()?;
-    watch_frontend()?;
-    graph::follow_logs(candidate, &options)
+    Ok(options)
 }
 
 fn watch_frontend() -> Result<(), CandidateError> {
@@ -90,6 +125,48 @@ mod tests {
         process::{Command, Stdio},
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn finite_selection_rejects_stream_options_and_pins_container() {
+        let run = "a".repeat(32);
+        let digest = "b".repeat(64);
+        let args = [
+            "--run-id",
+            &run,
+            "--service",
+            "web",
+            "--expect-owner",
+            &run,
+            "--expect-plan",
+            &digest,
+            "--expect-namespace",
+            &digest,
+            "--selection-only",
+        ];
+        assert!(parse(&args).unwrap().selection_only);
+        for extra in [
+            vec!["--tail", "0"],
+            vec!["--since", "1"],
+            vec!["--timestamps"],
+            vec!["--from-start"],
+            vec!["--selection-only"],
+        ] {
+            assert_eq!(
+                parse(&[args.as_slice(), extra.as_slice()].concat())
+                    .err()
+                    .unwrap()
+                    .code,
+                "native_log_arguments"
+            );
+        }
+        let pin = [args.as_slice(), &["--expect-container", &digest]].concat();
+        assert_eq!(
+            parse(&pin).unwrap().expected_container,
+            Some(digest.as_str())
+        );
+        let invalid = [args.as_slice(), &["--expect-container", "invalid"]].concat();
+        assert!(parse(&invalid).is_err());
+    }
 
     #[test]
     fn lifetime_child() {

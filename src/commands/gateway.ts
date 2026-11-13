@@ -17,6 +17,7 @@ import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
+import { hackReexecEnvironment } from "../lib/child-environment.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import { getString, isRecord } from "../lib/guards.ts";
@@ -1400,6 +1401,7 @@ async function startDaemon(opts?: {
   const invocation = await resolveHackInvocation();
   const cmd = [...invocation.args, "daemon", "start"];
   const proc = Bun.spawn([invocation.bin, ...cmd], {
+    env: hackReexecEnvironment(),
     stdin: "ignore",
     stdout: "inherit",
     stderr: "inherit",
@@ -1412,6 +1414,7 @@ async function restartDaemon(): Promise<number> {
   const stop = Bun.spawn(
     [invocation.bin, ...invocation.args, "daemon", "stop"],
     {
+      env: hackReexecEnvironment(),
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
@@ -1427,6 +1430,7 @@ async function restartDaemon(): Promise<number> {
   const start = Bun.spawn(
     [invocation.bin, ...invocation.args, "daemon", "start"],
     {
+      env: hackReexecEnvironment(),
       stdin: "ignore",
       stdout: "inherit",
       stderr: "inherit",
@@ -1441,6 +1445,7 @@ async function runHackCommand(opts: {
 }): Promise<number> {
   const invocation = await resolveHackInvocation();
   const proc = Bun.spawn([invocation.bin, ...invocation.args, ...opts.args], {
+    env: hackReexecEnvironment(),
     cwd: opts.cwd,
     stdin: "inherit",
     stdout: "inherit",

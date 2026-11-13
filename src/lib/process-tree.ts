@@ -1,3 +1,4 @@
+import { childEnvironment } from "./child-environment.ts";
 export type ProcessIdentityRow = {
   readonly pid: number;
   readonly parentPid: number;
@@ -26,7 +27,7 @@ const IDENTITY_ROW = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/;
 export async function readProcessIdentities(): Promise<ProcessIdentityRow[]> {
   try {
     const proc = Bun.spawn(["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], {
-      env: { ...process.env, LC_ALL: "C", TZ: "UTC0" },
+      env: childEnvironment({ ...process.env, LC_ALL: "C", TZ: "UTC0" }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",

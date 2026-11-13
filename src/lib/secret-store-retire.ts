@@ -85,9 +85,24 @@ export async function secretStoreSelectionProblem(opts: {
 }
 
 /** Registered projects that read a store, and whether every one was checked. */
+/**
+ * One registered checkout that reads a store. `project` is the registered
+ * project's directory (its identity: two projects may share a name) and
+ * `worktree` is set for a linked worktree. Kept as data so a caller that
+ * groups readers never has to parse the display name.
+ */
+export type SecretStoreReader = {
+  readonly name: string;
+  readonly project: string;
+  readonly projectName: string;
+  readonly worktree?: string;
+};
+
 export type SecretStoreUsers = {
   /** Names only, sorted. */
   readonly names: readonly string[];
+  /** The same readers as data, in the order of `names`. */
+  readonly readers: readonly SecretStoreReader[];
   /** False when the registry could not be read or is not a valid registry. */
   readonly registryRead: boolean;
   /** Registered projects whose store selection could not be checked. */
@@ -102,11 +117,9 @@ export type SecretStoreUsers = {
 
 /** Registered checkouts that select one store file, and what could not be checked. */
 type StoreContexts = {
-  readonly contexts: readonly {
-    readonly name: string;
-    readonly projectDir: string;
+  readonly contexts: readonly (RegisteredCheckout & {
     readonly keyPath: string;
-  }[];
+  })[];
   readonly registryRead: boolean;
   readonly unchecked: number;
   readonly missing: number;
@@ -225,14 +238,26 @@ export async function listProjectsUsingSecretStore(opts: {
   readonly storePath: string;
 }): Promise<SecretStoreUsers> {
   const found = await storeContexts(opts);
-  const names = new Set<string>();
+  const byName = new Map<string, SecretStoreReader>();
   for (const context of found.contexts) {
-    if (await projectUsesSecretStore({ projectDir: context.projectDir })) {
-      names.add(context.name);
+    if (
+      !byName.has(context.name) &&
+      (await projectUsesSecretStore({ projectDir: context.projectDir }))
+    ) {
+      byName.set(context.name, {
+        name: context.name,
+        project: context.project,
+        projectName: context.projectName,
+        ...(context.worktree === undefined
+          ? {}
+          : { worktree: context.worktree }),
+      });
     }
   }
+  const names = [...byName.keys()].sort();
   return {
-    names: [...names].sort(),
+    names,
+    readers: names.flatMap((name) => byName.get(name) ?? []),
     registryRead: found.registryRead,
     unchecked: found.unchecked,
     missing: found.missing,
@@ -359,15 +384,26 @@ function envOnlyNames(names: readonly string[]): readonly string[] {
   return names.length > 0 ? names : ["this project"];
 }
 
+/** One checkout of a registered project: the primary one or a linked worktree. */
+type RegisteredCheckout = {
+  readonly name: string;
+  readonly projectDir: string;
+  /** The registered project's own directory: its identity. */
+  readonly project: string;
+  readonly projectName: string;
+  readonly worktree?: string;
+};
+
 /** A registered project's primary checkout and each of its linked worktrees. */
-function registeredCheckouts(
-  project: RegisteredProject
-): { readonly name: string; readonly projectDir: string }[] {
+function registeredCheckouts(project: RegisteredProject): RegisteredCheckout[] {
+  const owner = { project: project.projectDir, projectName: project.name };
   return [
-    { name: project.name, projectDir: project.projectDir },
+    { name: project.name, projectDir: project.projectDir, ...owner },
     ...(project.worktrees ?? []).map((worktree) => ({
       name: `${project.name} (worktree ${basename(worktree.path)})`,
       projectDir: resolve(worktree.path, project.projectDirName),
+      worktree: basename(worktree.path),
+      ...owner,
     })),
   ];
 }

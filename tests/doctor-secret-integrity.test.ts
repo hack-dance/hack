@@ -568,22 +568,68 @@ test("a layer that exists but cannot be read or parsed is an error, not success"
 test("store readers: a project with many worktrees is one entry with a count", () => {
   // Found while dogfooding: one project with thirty worktrees printed thirty
   // names. Up to three worktrees are still listed by name.
+  const primary = (projectName: string, project = `/repos/${projectName}`) => ({
+    name: projectName,
+    project,
+    projectName,
+  });
+  const tree = (
+    projectName: string,
+    worktree: string,
+    project = `/repos/${projectName}`
+  ) => ({
+    name: `${projectName} (worktree ${worktree})`,
+    project,
+    projectName,
+    worktree,
+  });
   expect(
     summarizeStoreReaders([
-      "app-a",
-      "app-b (worktree feature)",
-      "app-c",
-      "app-c (worktree w1)",
-      "app-c (worktree w2)",
-      "app-c (worktree w3)",
-      "app-c (worktree w4)",
-      "app-c (worktree w5)",
+      primary("app-a"),
+      tree("app-b", "feature"),
+      primary("app-c"),
+      ...["w1", "w2", "w3", "w4", "w5"].map((name) => tree("app-c", name)),
     ])
   ).toEqual([
     "app-a",
     "app-b (worktree feature)",
     "app-c",
     "app-c (5 worktrees, including w1, w2, w3)",
+  ]);
+  // Grouping follows the reader's fields, never its display name (second-family
+  // review): four primary projects named like worktree labels stay four entries.
+  const lookalikes = ["team1", "team2", "team3", "team4"].map((team) =>
+    primary(`app (worktree ${team})`)
+  );
+  expect(summarizeStoreReaders(lookalikes)).toEqual(
+    lookalikes.map((reader) => reader.name)
+  );
+  // A lookalike primary beside real worktrees of `app` is not counted as one.
+  expect(
+    summarizeStoreReaders([
+      primary("app (worktree zz)"),
+      ...["w1", "w2", "w3", "w4"].map((name) => tree("app", name)),
+    ])
+  ).toEqual(["app (4 worktrees, including w1, w2, w3)", "app (worktree zz)"]);
+  // A worktree directory whose name contains the label text keeps its whole name.
+  expect(
+    summarizeStoreReaders(
+      ["task (worktree p1)", "task (worktree p2)", "x", "y"].map((name) =>
+        tree("app", name)
+      )
+    )
+  ).toEqual([
+    "app (4 worktrees, including task (worktree p1), task (worktree p2), x)",
+  ]);
+  // Two registered projects that share a name are two groups.
+  expect(
+    summarizeStoreReaders([
+      ...["a1", "a2", "a3", "a4"].map((name) => tree("app", name, "/one/app")),
+      ...["b1", "b2", "b3", "b4"].map((name) => tree("app", name, "/two/app")),
+    ])
+  ).toEqual([
+    "app (4 worktrees, including a1, a2, a3)",
+    "app (4 worktrees, including b1, b2, b3)",
   ]);
   expect(summarizeStoreReaders([])).toEqual([]);
 });

@@ -155,6 +155,9 @@ function countHints(text: string): number {
  * any other key fails.
  */
 function expectOpenPayload(stdout: string, url: string): void {
+  // The Local Network hint belongs on stderr only, never in any payload field.
+  expect(stdout).not.toContain(LOCAL_NETWORK_HINT_MESSAGE);
+  expect(stdout).not.toContain("Local Network");
   const payload = JSON.parse(stdout) as Record<string, unknown>;
   expect(payload.url).toBe(url);
   const extra = Object.keys(payload)
@@ -166,6 +169,24 @@ function expectOpenPayload(stdout: string, url: string): void {
     expect(typeof payload.hint).toBe("string");
   }
 }
+
+test("the open payload check rejects a leaked hint and unknown keys", () => {
+  const url = "https://name-fixture.hack.gy";
+  const rejects = (payload: Record<string, unknown>) => {
+    expect(() => expectOpenPayload(JSON.stringify(payload), url)).toThrow();
+  };
+  rejects({ url, dns: "unresolved", hint: LOCAL_NETWORK_HINT_MESSAGE });
+  rejects({ url, dns: "unresolved" });
+  rejects({ url, hint: "text" });
+  rejects({ url, dns: "other", hint: "text" });
+  rejects({ url, extra: true });
+  rejects({ url: "https://other.example" });
+  expectOpenPayload(JSON.stringify({ url }), url);
+  expectOpenPayload(
+    JSON.stringify({ url, dns: "unresolved", hint: "No address found." }),
+    url
+  );
+});
 
 test("open --json keeps the hint out of the JSON payload", async () => {
   const result = await openJson(null);

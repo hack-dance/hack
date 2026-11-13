@@ -106,13 +106,17 @@ const hostSystemPathProblem =
         dirs: [...RENDERED_SYSTEM_PATH_DIRECTORIES, ...UNSET_PATH_LOOKUP_DIRS],
       })
     : null;
-if (hostSystemPathProblem !== null) {
+if (hostSystemPathProblem !== null && process.env.GITHUB_ACTIONS === "true") {
   console.warn(
     `daemon-systemd-cli: skipping the install flows on this host: ${hostSystemPathProblem}`
   );
 }
+// Skipped only on GitHub Actions, whose image is known to fail the check;
+// on any other host a refusal fails these flows instead of hiding a
+// regression in the check itself (HACK-2142).
 const installFlowTest = test.skipIf(
-  process.platform !== "linux" || hostSystemPathProblem !== null
+  process.platform !== "linux" ||
+    (hostSystemPathProblem !== null && process.env.GITHUB_ACTIONS === "true")
 );
 
 let fixture: Fixture | null = null;

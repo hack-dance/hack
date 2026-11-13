@@ -456,6 +456,13 @@ const CODE_LOADING_ENV_KEYS = [
   "RUBYLIB",
 ] as const;
 
+/** The system directories on the PATH the rendered unit gives hackd. */
+export const RENDERED_SYSTEM_PATH_DIRECTORIES = [
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+] as const;
+
 /**
  * Renders the unit file. Returns null for a program path the unit cannot
  * represent safely (relative, a compiled Bun virtual path, or containing
@@ -474,9 +481,7 @@ export function renderSystemdUnit(opts: {
   }
   const path = [
     escapeSpecifiers(dirname(bin)),
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
+    ...RENDERED_SYSTEM_PATH_DIRECTORIES,
     "%h/.local/bin",
     "%h/.bun/bin",
     "%h/.hack/bin",
@@ -1937,13 +1942,6 @@ export async function parseSystemdPathList(
   return { paths: pieces };
 }
 
-/** The system directories on the PATH the rendered unit gives hackd. */
-export const RENDERED_SYSTEM_PATH_DIRECTORIES = [
-  "/usr/local/bin",
-  "/usr/bin",
-  "/bin",
-] as const;
-
 /** The PATH directories the rendered unit gives hackd, `%h` expanded. */
 export function renderedServicePathDirectories(opts: {
   readonly hackBinPath: string;
@@ -2103,7 +2101,8 @@ async function checkPathLink(opts: {
     : `${opts.path}, a link to a missing target that other users could create in ${walk.existing} (${creatable})`;
 }
 
-function programFileProblem(opts: {
+/** Exported for tests of the system-directory rule. */
+export function programFileProblem(opts: {
   readonly path: string;
   readonly info: Stats;
   readonly uid: number;

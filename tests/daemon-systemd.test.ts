@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import type { Stats } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -43,6 +44,7 @@ import {
   parseSystemdExecProgram,
   parseSystemdPathList,
   probeSystemdUserManager,
+  programFileProblem,
   readSystemdServicePathDirectories,
   readSystemdServiceStatus,
   renderSystemdUnit,
@@ -3815,5 +3817,43 @@ linuxTest(
         notInstalled: true,
       });
     }
+  }
+);
+
+linuxTest(
+  "the system-directory rule for PATH programs, without the host (HACK-2142)",
+  () => {
+    // Reviewer: with every in-process test on a temp PATH directory, the
+    // root-owned system directory branch (setuid helpers owned by system
+    // accounts) had no test; it is exercised here with fixed file details.
+    const file = (fields: { readonly uid: number; readonly mode: number }) =>
+      fields as unknown as Stats;
+    const check = (opts: {
+      readonly owner: number;
+      readonly mode: number;
+      readonly systemDir: boolean;
+    }) =>
+      programFileProblem({
+        path: "/usr/bin/tool",
+        info: file({ uid: opts.owner, mode: 0o10_0000 | opts.mode }),
+        uid: 4321,
+        systemDir: opts.systemDir,
+      });
+    // Root's and this user's programs are fine anywhere.
+    expect(check({ owner: 0, mode: 0o755, systemDir: true })).toBeNull();
+    expect(check({ owner: 4321, mode: 0o755, systemDir: false })).toBeNull();
+    // A system account's setuid helper only in a protected system directory.
+    expect(check({ owner: 1, mode: 0o4755, systemDir: true })).toBeNull();
+    expect(check({ owner: 1, mode: 0o4755, systemDir: false })).toContain(
+      "owned by another user"
+    );
+    // Another regular user's program is never trusted.
+    expect(check({ owner: 54_321, mode: 0o755, systemDir: true })).toContain(
+      "owned by another user"
+    );
+    // A program others can write is refused even in a system directory.
+    expect(check({ owner: 0, mode: 0o775, systemDir: true })).toContain(
+      "writable by other users"
+    );
   }
 );

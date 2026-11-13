@@ -1,4 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import * as fsPromises from "node:fs/promises";
 import {
   chmod,
   lstat,
@@ -425,7 +426,7 @@ test("an in-checkout store configured through an alias spelling is still checked
   ]);
   // The untrack command names the path git tracks, relative to the root.
   expect(findings[0]?.message).toContain(
-    "git rm --cached -- 'secrets/store.key'"
+    "git --literal-pathspecs rm --cached -- 'secrets/store.key'"
   );
 });
 
@@ -509,7 +510,7 @@ test("names in findings are shell-quoted in commands and never printed with cont
   const findings = await inspectSecretsHygiene(f.scope);
   const text = findings.map((finding) => finding.message).join("\n");
   expect(text).toContain(
-    "git rm --cached -- '.hack/hack.env.it'\\''s;x.local.yaml'"
+    "git --literal-pathspecs rm --cached -- '.hack/hack.env.it'\\''s;x.local.yaml'"
   );
   expect(text).not.toContain("\u001b");
   expect(text).not.toContain("\u0007");
@@ -999,4 +1000,182 @@ test("a store inside a git directory itself is not in a work tree", async () => 
     ],
   };
   expect(await inspectSecretsHygiene(scope)).toEqual([]);
+});
+
+test.skipIf(process.platform === "win32")(
+  "a backslash in a configured name is part of it, never a separator, when git is asked",
+  async () => {
+    const f = await fixture();
+    // Tracked under its literal name; a slash spelling would be a different,
+    // ignored path (the decoy).
+    const keyPath = join(f.projectRoot, "key\\prod.key");
+    await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+    await writeFile(
+      join(f.projectRoot, ".gitignore"),
+      ".hack.secret.key\n/key/\n"
+    );
+    await git(f.projectRoot, ["add", "-f", "--", "./key\\prod.key"]);
+    const findings = await inspectSecretsHygiene({
+      ...f.scope,
+      stores: [{ storePath: join(f.home, "secrets.enc.json"), keyPath }],
+    });
+    expect(
+      findings.some(
+        (finding) => finding.path === keyPath && finding.status === "error"
+      )
+    ).toBe(true);
+  }
+);
+
+test("a containing repository whose root cannot be resolved is unknown, never skipped", async () => {
+  const f = await fixture();
+  const outer = join(f.root, "dotfiles");
+  await mkdir(outer);
+  await git(outer, ["init", "-q", "-b", "main"]);
+  const storePath = join(outer, "secrets", "store.enc.json");
+  const keyPath = join(outer, "secrets", "store.key");
+  // Resolving the repository root fails (an I/O error, say); its parent and
+  // everything else still resolve.
+  const original = fsPromises.realpath;
+  const spy = spyOn(fsPromises, "realpath").mockImplementation((async (
+    path: Parameters<typeof original>[0],
+    ...rest: unknown[]
+  ) => {
+    if (String(path) === outer) {
+      throw Object.assign(new Error("synthetic EIO"), { code: "EIO" });
+    }
+    return await Reflect.apply(original, fsPromises, [path, ...rest]);
+  }) as typeof original);
+  let findings: readonly SecretsHygieneFinding[];
+  try {
+    findings = await inspectSecretsHygiene({
+      ...f.scope,
+      stores: [{ storePath, keyPath }],
+    });
+  } finally {
+    spy.mockRestore();
+  }
+  for (const path of [storePath, keyPath]) {
+    expect(
+      findings.some(
+        (finding) => finding.path === path && finding.status === "error"
+      )
+    ).toBe(true);
+  }
+});
+
+test("the printed untrack command removes only the named file, even one that looks like a pathspec", async () => {
+  const f = await fixture();
+  const name = ":(glob)*.key";
+  const keyPath = join(f.projectRoot, name);
+  const other = join(f.projectRoot, "other.key");
+  for (const path of [keyPath, other]) {
+    await writeFile(path, `${SENTINEL}\n`, { mode: 0o600 });
+  }
+  await git(f.projectRoot, ["add", "-f", "--", `./${name}`, "other.key"]);
+  const findings = await inspectSecretsHygiene({
+    ...f.scope,
+    stores: [{ storePath: join(f.home, "secrets.enc.json"), keyPath }],
+  });
+  const message =
+    findings.find(
+      (finding) => finding.path === keyPath && finding.status === "error"
+    )?.message ?? "";
+  const command = /untrack it with (git .*?) \(from the project root\)/.exec(
+    message
+  )?.[1];
+  expect(command).toStartWith("git --literal-pathspecs rm --cached -- ");
+  const proc = Bun.spawn(["sh", "-c", command ?? "false"], {
+    cwd: f.projectRoot,
+    env: fixtureGitEnv(),
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  expect(await proc.exited).toBe(0);
+  const listed = Bun.spawn(["git", "ls-files"], {
+    cwd: f.projectRoot,
+    env: fixtureGitEnv(),
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const tracked = (await new Response(listed.stdout).text()).split("\n");
+  expect(tracked).toContain("other.key");
+  expect(tracked).not.toContain(name);
+});
+
+async function caseInsensitive(dir: string): Promise<boolean> {
+  const probe = join(dir, "CaseProbe");
+  await writeFile(probe, "");
+  const folded = await lstat(join(dir, "caseprobe")).then(
+    () => true,
+    () => false
+  );
+  await rm(probe);
+  return folded;
+}
+
+test("in another work tree an existing key is checked under its stored case", async () => {
+  const f = await fixture();
+  const outer = join(f.root, "dotfiles");
+  await mkdir(join(outer, "secrets"), { recursive: true });
+  if (!(await caseInsensitive(outer))) {
+    // Needs a case-insensitive filesystem (macOS by default).
+    return;
+  }
+  await git(outer, ["init", "-q", "-b", "main"]);
+  await writeFile(join(outer, "secrets", "Store.Key"), `${SENTINEL}\n`, {
+    mode: 0o600,
+  });
+  await git(outer, ["add", "-f", "--", "secrets/Store.Key"]);
+  await writeFile(join(outer, ".gitignore"), "/secrets/store.key\n");
+  const keyPath = join(outer, "secrets", "store.key");
+  const findings = await inspectSecretsHygiene({
+    ...f.scope,
+    stores: [{ storePath: join(f.home, "secrets.enc.json"), keyPath }],
+  });
+  expect(
+    findings.some(
+      (finding) => finding.path === keyPath && finding.status === "error"
+    )
+  ).toBe(true);
+});
+
+test("a store in a repository nested inside the project is checked against that repository", async () => {
+  const f = await fixture();
+  const inner = join(f.projectRoot, "vendor-app");
+  await mkdir(inner);
+  await git(inner, ["init", "-q", "-b", "main"]);
+  // The project ignores the nested repository; the nested one ignores
+  // nothing, so its own `git add -A` would collect the store and key.
+  await writeFile(
+    join(f.projectRoot, ".gitignore"),
+    ".hack.secret.key\n/vendor-app/\n"
+  );
+  const storePath = join(inner, "secrets", "store.enc.json");
+  const keyPath = join(inner, "secrets", "store.key");
+  const findings = await inspectSecretsHygiene({
+    ...f.scope,
+    stores: [{ storePath, keyPath }],
+  });
+  expect(paths(findings)).toEqual([keyPath, storePath].sort());
+  for (const finding of findings) {
+    expect(finding).toMatchObject({ status: "warn", fix: null });
+    expect(finding.message).toContain("by hand");
+  }
+});
+
+test("a project inside a larger repository keeps its own ignore repair", async () => {
+  const f = await fixture();
+  const mono = join(f.root, "mono");
+  const app = join(mono, "apps", "web");
+  await mkdir(join(app, ".hack"), { recursive: true });
+  await git(mono, ["init", "-q", "-b", "main"]);
+  const keyPath = join(app, "secrets", "store.key");
+  const findings = await inspectSecretsHygiene({
+    ...f.scope,
+    project: { projectRoot: app, projectDir: join(app, ".hack") },
+    stores: [{ storePath: join(app, "secrets", "store.enc.json"), keyPath }],
+  });
+  const key = findings.find((finding) => finding.path === keyPath);
+  expect(key?.fix?.kind).toBe("ignore");
 });

@@ -1,4 +1,4 @@
-import { lstat, stat } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   HACK_PROJECT_DIR_LEGACY,
@@ -259,7 +259,9 @@ export async function assertLegacyProjectDiscovery(opts: {
  */
 async function targetPresent(path: string): Promise<boolean> {
   try {
-    await stat(path);
+    // Through Bun.file, as pathExists did, so callers observe the same
+    // access (the adoption probes count it).
+    await Bun.file(path).stat();
     return true;
   } catch (error: unknown) {
     if (

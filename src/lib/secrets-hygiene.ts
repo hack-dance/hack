@@ -230,7 +230,7 @@ function shellQuote(text: string): string {
 function untrackAdvice(path: string, projectRoot: string): string {
   const rel = relative(projectRoot, path);
   return displayPath(rel) === rel
-    ? `untrack it with git rm --cached -- ${shellQuote(rel)} (from the project root)`
+    ? `untrack it with git --literal-pathspecs rm --cached -- ${shellQuote(rel)} (from the project root)`
     : "untrack it with git rm --cached (its name holds control characters, so no command is printed)";
 }
 
@@ -555,7 +555,10 @@ async function resolveExisting(path: string): Promise<string | null> {
   const missing: string[] = [];
   let current = path;
   while (true) {
-    const real = await realpath(current).catch(() => null);
+    const real = await realpathOrMissing(current);
+    if (real === "unknown") {
+      return null;
+    }
     if (real) {
       return join(real, ...missing.reverse());
     }
@@ -634,11 +637,36 @@ async function containingWorkTree(
     : "unknown";
 }
 
-/** The resolved nearest directory of `path` that exists (git runs there). */
+/**
+ * `path` resolved, null when it (or a directory on the way) does not exist,
+ * or "unknown" for any other failure: only confirmed absence lets a caller
+ * look at the parent instead (HACK-2165).
+ */
+async function realpathOrMissing(
+  path: string
+): Promise<string | null | "unknown"> {
+  try {
+    return await realpath(path);
+  } catch (error: unknown) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+    return code === "ENOENT" || code === "ENOTDIR" ? null : "unknown";
+  }
+}
+
+/**
+ * The resolved nearest directory of `path` that exists (git runs there); null
+ * when a directory on the way cannot be inspected.
+ */
 async function nearestExistingDirectory(path: string): Promise<string | null> {
   let current = path;
   while (true) {
-    const real = await realpath(current).catch(() => null);
+    const real = await realpathOrMissing(current);
+    if (real === "unknown") {
+      return null;
+    }
     if (real !== null) {
       return real;
     }
@@ -694,7 +722,15 @@ async function otherWorkTreeIgnore(opts: {
     };
   }
   const dir = await resolveExisting(dirname(opts.path));
-  const resolved = join(dir ?? dirname(opts.path), basename(opts.path));
+  // As in the project: an existing regular file is resolved itself, so its
+  // name is in its stored case; a final link is not followed.
+  const entry = await lstat(opts.path).catch(() => null);
+  const resolved =
+    entry?.isFile() === true
+      ? await realpath(opts.path).catch(() =>
+          join(dir ?? dirname(opts.path), basename(opts.path))
+        )
+      : join(dir ?? dirname(opts.path), basename(opts.path));
   const rel = relative(root, resolved);
   if (rel === "" || isOutside(rel)) {
     return null;
@@ -706,6 +742,35 @@ async function otherWorkTreeIgnore(opts: {
     entry: `/${rel.split(sep).map(gitignoreLiteral).join("/")}`,
     manual: true,
   };
+}
+
+/**
+ * Whether `path` is in a git work tree nested inside the project (a separate
+ * repository below the project root): then that repository, not the
+ * project's, decides whether git collects it. A work tree at or above the
+ * project root (the project itself, or a monorepo around it) is not nested.
+ * An unknown answer counts as nested, so the caller's checks report it.
+ */
+async function inNestedWorkTree(opts: {
+  readonly path: string;
+  readonly project: SecretsHygieneScope["project"];
+}): Promise<boolean> {
+  if (!opts.project) {
+    return false;
+  }
+  const top = await containingWorkTree(opts.path);
+  if (top === null) {
+    return false;
+  }
+  if (top === "unknown") {
+    return true;
+  }
+  const root = await realpath(opts.project.projectRoot).catch(() => null);
+  if (root === null) {
+    return true;
+  }
+  const rel = relative(root, top);
+  return rel !== "" && !isOutside(rel);
 }
 
 async function storeFindings(opts: {
@@ -723,7 +788,10 @@ async function storeFindings(opts: {
       path: candidate.path,
       project: opts.project,
     });
-    if (ignore === null) {
+    if (
+      ignore === null ||
+      (await inNestedWorkTree({ path: candidate.path, project: opts.project }))
+    ) {
       const other = await otherWorkTreeIgnore({
         path: candidate.path,
         name: shown(candidate.path, opts.project),

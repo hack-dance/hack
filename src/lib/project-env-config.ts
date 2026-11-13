@@ -756,7 +756,10 @@ function toGitRelativePath(opts: {
   readonly projectRoot: string;
   readonly path: string;
 }): string {
-  return relative(opts.projectRoot, opts.path).split("\\").join("/");
+  const rel = relative(opts.projectRoot, opts.path);
+  // Only the platform separator is one: on POSIX a backslash is part of the
+  // name, and rewriting it would ask git about a different file (HACK-2165).
+  return sep === "\\" ? rel.split(sep).join("/") : rel;
 }
 
 /**

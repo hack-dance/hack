@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   HACK_PROJECT_DIR_LEGACY,
@@ -8,7 +8,6 @@ import {
   PROJECT_CONFIG_LEGACY_FILENAME,
 } from "../constants.ts";
 import { HackCliError } from "./cli-result.ts";
-import { pathExists } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import { assertLegacyComposeAdoptionSelectionStable } from "./native-compose-adoption-marker.ts";
 import {
@@ -156,7 +155,7 @@ export async function inspectProjectInputsAtRoot(opts: {
         legacyFiles.push(file);
         // Presence still conflicts with native input, but legacy discovery keeps
         // its existing stat-based behavior for dangling Compose links.
-        if (name === PROJECT_COMPOSE_FILENAME && (await pathExists(file))) {
+        if (name === PROJECT_COMPOSE_FILENAME && (await targetPresent(file))) {
           composeDirectories.push(directory);
         }
       }
@@ -250,6 +249,26 @@ export async function assertLegacyProjectDiscovery(opts: {
   const selected = await discoverProjectInputs(opts);
   if (selected) {
     requireLegacyProjectInputs(selected);
+  }
+}
+
+/**
+ * Whether a present entry's target exists: a dangling link is absent, but a
+ * target that cannot be inspected is an access fault, never absence
+ * (HACK-2165), so it cannot drop a project from discovery.
+ */
+async function targetPresent(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error: unknown) {
+    if (
+      isRecord(error) &&
+      (error.code === "ENOENT" || error.code === "ENOTDIR")
+    ) {
+      return false;
+    }
+    throw projectInputAccessFault(error);
   }
 }
 

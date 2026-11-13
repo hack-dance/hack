@@ -752,17 +752,31 @@ function toGitRelativePath(opts: {
   return relative(opts.projectRoot, opts.path).split("\\").join("/");
 }
 
+/**
+ * The path as git must read it in a probe: `./`-prefixed, so a configured
+ * name that starts with `:` (`:(literal)x`, say) is never pathspec magic
+ * (HACK-2165). `ls-files` also gets `--literal-pathspecs` for glob characters.
+ */
+function toGitProbePath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): string {
+  const relativePath = toGitRelativePath(opts);
+  return relativePath.startsWith("../") ? relativePath : `./${relativePath}`;
+}
+
 async function isGitTrackedProjectEnvPath(opts: {
   readonly projectRoot: string;
   readonly path: string;
 }): Promise<boolean | null> {
-  const relativePath = toGitRelativePath(opts);
+  const relativePath = toGitProbePath(opts);
   let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
   try {
     proc = Bun.spawn({
       env: childEnvironment(),
       cmd: [
         "git",
+        "--literal-pathspecs",
         "-C",
         opts.projectRoot,
         "ls-files",
@@ -810,7 +824,7 @@ export async function isGitIgnoredProjectEnvPath(opts: {
         "-q",
         "--no-index",
         "--",
-        toGitRelativePath(opts),
+        toGitProbePath(opts),
       ],
       stderr: "ignore",
       stdin: "ignore",
@@ -9341,6 +9355,17 @@ export async function projectEnvLiveInputPaths(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
 }): Promise<ReadonlySet<string>> {
+  // Git names the shared and primary-worktree inputs. In a checkout (a `.git`
+  // marker, failing closed) where git cannot name them, the set is unknown,
+  // not smaller; a project outside git has none to name.
+  if (
+    (await resolveProjectEnvSharedKeyLocation(opts)) === null &&
+    (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
+    throw new Error(
+      "Project env inputs are unknown: git could not name this checkout's shared inputs"
+    );
+  }
   return (await legacyCleanupLiveInputs(opts)).paths;
 }
 

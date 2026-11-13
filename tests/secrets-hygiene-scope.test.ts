@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -13,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveSecretsHygieneScope } from "../src/commands/doctor.ts";
 import { STAGING_LEFTOVER_MIN_AGE_MS } from "../src/lib/private-staging.ts";
+import { discoverProjectInputs } from "../src/lib/project-input-selection.ts";
 import { resolveFileSecretStorePaths } from "../src/lib/secret-store.ts";
 import {
   applySecretsHygieneFixes,
@@ -27,16 +29,21 @@ import { restoreEnv } from "./helpers/env.ts";
 const SENTINEL = "synthetic-scope-sentinel";
 const UUID = "0f0e0d0c-0b0a-4908-8706-050403020100";
 let root = "";
-let saved: { home?: string; config?: string } = {};
+let saved: { home?: string; config?: string; tmp?: string } = {};
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "hack-hygiene-scope-"));
   saved = {
     home: process.env.HOME,
     config: process.env.HACK_GLOBAL_CONFIG_PATH,
+    tmp: process.env.TMPDIR,
   };
   process.env.HOME = join(root, "home");
   process.env.HACK_GLOBAL_CONFIG_PATH = join(root, "hack.config.json");
+  // Inspection looks for stale terminal payloads in the temporary
+  // directory: point it at this fixture, never the caller's.
+  process.env.TMPDIR = join(root, "tmp");
+  await mkdir(join(root, "tmp"));
   await mkdir(join(root, "home"));
   await mkdir(join(root, "start"));
 });
@@ -44,6 +51,7 @@ beforeEach(async () => {
 afterEach(async () => {
   restoreEnv("HOME", saved.home);
   restoreEnv("HACK_GLOBAL_CONFIG_PATH", saved.config);
+  restoreEnv("TMPDIR", saved.tmp);
   await chmod(join(root, "hack.config.json"), 0o600).catch(() => undefined);
   await rm(root, { recursive: true, force: true });
 });
@@ -106,6 +114,10 @@ test.skipIf(process.getuid?.() === 0)(
       { mode: 0o600 }
     );
     const findings = await inspectSecretsHygiene(await strictScope());
+    // Nothing outside this fixture is ever a candidate.
+    for (const finding of findings) {
+      expect(finding.path.startsWith(`${root}/`)).toBe(true);
+    }
     expect(
       findings.some(
         (finding) =>
@@ -129,5 +141,37 @@ test.skipIf(process.getuid?.() === 0)(
       currentScope: strictScope,
     });
     expect(await lstat(leftover).catch(() => null)).toBeNull();
+  }
+);
+
+test.skipIf(process.getuid?.() === 0)(
+  "a project whose Compose file cannot be inspected is unknown, not absent",
+  async () => {
+    const project = join(root, "start", "app");
+    const hackDir = join(project, ".hack");
+    await mkdir(hackDir, { recursive: true });
+    const hidden = join(root, "hidden");
+    await mkdir(hidden);
+    await writeFile(join(hidden, "docker-compose.yml"), "services: {}\n");
+    // Present as a link, but its target is behind a directory this user
+    // cannot search: stat fails with EACCES, not ENOENT.
+    await symlink(
+      join(hidden, "docker-compose.yml"),
+      join(hackDir, "docker-compose.yml")
+    );
+    await chmod(hidden, 0o000);
+    try {
+      await expect(
+        discoverProjectInputs({ startDir: project })
+      ).rejects.toThrow();
+      await expect(
+        resolveSecretsHygieneScope({ startDir: project, strict: true })
+      ).rejects.toThrow();
+    } finally {
+      await chmod(hidden, 0o700);
+    }
+    // A dangling Compose link stays an absent project, as before.
+    await rm(join(hidden, "docker-compose.yml"));
+    expect(await discoverProjectInputs({ startDir: project })).toBeNull();
   }
 );

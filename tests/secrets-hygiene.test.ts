@@ -840,3 +840,53 @@ test("a leftover the configuration selects after inspection is kept by --fix", a
   });
   expect(await lstat(leftover).catch(() => null)).toBeNull();
 });
+
+test("in a checkout whose git cannot name its shared inputs, no leftover is removed", async () => {
+  const f = await fixture();
+  const leftover = join(f.projectRoot, `..hack.secret.key.${UUID}.tmp`);
+  await writeFile(leftover, `${SENTINEL}\n`, { mode: 0o600 });
+  await backdate(leftover);
+  expect(paths(await inspectSecretsHygiene(f.scope))).toContain(leftover);
+  // Still a checkout (a .git marker), but git cannot read it.
+  await rm(join(f.projectRoot, ".git"), { recursive: true, force: true });
+  await writeFile(
+    join(f.projectRoot, ".git"),
+    `gitdir: ${join(f.root, "missing-git-dir")}\n`
+  );
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(
+    findings.some((finding) => finding.fix?.kind === "remove_leftover")
+  ).toBe(false);
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  expect(await readFile(leftover, "utf8")).toBe(`${SENTINEL}\n`);
+});
+
+test("a configured name that looks like git pathspec magic is checked as a literal path", async () => {
+  const f = await fixture();
+  // `:(literal)…` would be pathspec magic if passed as is: check-ignore
+  // refuses it (unknown) and ls-files matches nothing.
+  const storePath = join(f.projectRoot, ":(literal)store.enc.json");
+  const keyPath = join(f.projectRoot, ":(literal)legacy.key");
+  const scope: SecretsHygieneScope = {
+    ...f.scope,
+    stores: [{ storePath, keyPath }],
+  };
+  const findings = await inspectSecretsHygiene(scope);
+  expect(findings.map((finding) => finding.fix?.kind).sort()).toEqual([
+    "ignore",
+    "ignore",
+  ]);
+  expect(
+    await applySecretsHygieneFixes({ findings, report: () => undefined })
+  ).toEqual({ applied: 2, skipped: 0 });
+  expect(await inspectSecretsHygiene(scope)).toEqual([]);
+  // Tracked under that name: reported as tracked, never as clean.
+  await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+  await git(f.projectRoot, ["add", "-f", "--", `./${":(literal)legacy.key"}`]);
+  const tracked = await inspectSecretsHygiene(scope);
+  expect(
+    tracked.some(
+      (finding) => finding.path === keyPath && finding.status === "error"
+    )
+  ).toBe(true);
+});

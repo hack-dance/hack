@@ -3660,18 +3660,22 @@ const SECRETS_HYGIENE_CHECK = "secrets hygiene";
  * What the "secrets hygiene" section covers from `startDir`: the project, when
  * there is a legacy (not adopted) one, its shared key, and the encrypted-file
  * stores the global and project configuration name. Reads configuration and
- * git only.
+ * git only. A report tolerates what it cannot read; with `strict` (used to
+ * authorize a removal) any discovery, read or parse failure rejects instead,
+ * so an unknown configuration never looks like one that names nothing.
  */
-async function resolveSecretsHygieneScope(opts: {
+export async function resolveSecretsHygieneScope(opts: {
   readonly startDir: string;
+  readonly strict?: boolean;
 }): Promise<SecretsHygieneScope> {
-  const project = await findDoctorLegacyProjectContext(opts.startDir).catch(
-    () => null
-  );
+  const strict = opts.strict === true;
+  const tolerate = <T>(promise: Promise<T>): Promise<T | null> =>
+    strict ? promise : promise.catch(() => null);
+  const project = await tolerate(findDoctorLegacyProjectContext(opts.startDir));
   const stores = new Map<string, SecretsHygieneScope["stores"][number]>();
   for (const projectDir of [undefined, project?.projectDir]) {
-    const paths = await resolveFileSecretStorePaths({ projectDir }).catch(
-      () => null
+    const paths = await tolerate(
+      resolveFileSecretStorePaths({ projectDir, strict })
     );
     const key = paths ? `${paths.storePath}\0${paths.keyPath}` : null;
     if (!(paths && key) || stores.has(key)) {
@@ -3692,9 +3696,9 @@ async function resolveSecretsHygieneScope(opts: {
       ? { projectRoot: project.projectRoot, projectDir: project.projectDir }
       : null,
     sharedKeyPath: project
-      ? await resolveProjectEnvSharedKeyPath({
-          projectRoot: project.projectRoot,
-        }).catch(() => null)
+      ? await tolerate(
+          resolveProjectEnvSharedKeyPath({ projectRoot: project.projectRoot })
+        )
       : null,
     stores: [...stores.values()],
     storeKeyFromEnvironment:
@@ -5133,7 +5137,7 @@ async function maybeFixSecretsHygiene(opts: {
     findings,
     report: (line) => lines.push(line),
     // Removals check the configuration as it is then, not as inspected.
-    currentScope: () => resolveSecretsHygieneScope(opts),
+    currentScope: () => resolveSecretsHygieneScope({ ...opts, strict: true }),
   });
   note(lines.join("\n"), SECRETS_HYGIENE_CHECK);
 }

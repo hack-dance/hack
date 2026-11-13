@@ -1675,10 +1675,21 @@ function buildEncryptedBackendKeyRecoveryMessage(input: {
  */
 export async function resolveFileSecretStorePaths(input: {
   readonly projectDir?: string;
+  /**
+   * Reject, instead of falling back to the default paths, when the
+   * configuration cannot be read or does not parse (HACK-2165).
+   */
+  readonly strict?: boolean;
 }): Promise<{ readonly storePath: string; readonly keyPath: string }> {
   const controlPlane = await readControlPlaneConfig({
     projectDir: input.projectDir,
+    strict: input.strict === true,
   });
+  if (input.strict === true && controlPlane.parseError) {
+    throw new Error(
+      "Encrypted store paths are unknown: the configuration does not parse"
+    );
+  }
   const configured = controlPlane.config.secrets.encryptedFile;
   return {
     storePath: resolveConfiguredPath({

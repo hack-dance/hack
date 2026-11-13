@@ -1266,8 +1266,10 @@ async function canonicalPath(path: string): Promise<string | null> {
  * it, so its presence counts as inside one: fail closed.
  */
 function gitSelectedByEnvironment(): boolean {
+  // Defined at all counts: Git takes even " " as a literal path, and an
+  // empty value is refused too (fail closed).
   return ["GIT_DIR", "GIT_WORK_TREE"].some(
-    (key) => (process.env[key] ?? "").trim().length > 0
+    (key) => process.env[key] !== undefined
   );
 }
 

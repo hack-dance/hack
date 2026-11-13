@@ -593,9 +593,13 @@ test("Git selected through the environment refuses snapshot and restore", async 
   const ready = await snapshotOf(paths);
   await writeFile(paths.config, '{"step":true}\n');
   await recordUpgradeSnapshotAfter({ manifestPath: ready.manifestPath });
-  for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+  const cases = ["GIT_DIR", "GIT_WORK_TREE"].flatMap((key) =>
+    // Git takes " " as a literal path; an empty value is refused too.
+    [join(root, "elsewhere"), " ", ""].map((value) => ({ key, value }))
+  );
+  for (const { key, value } of cases) {
     const saved = process.env[key];
-    process.env[key] = join(root, "elsewhere");
+    process.env[key] = value;
     try {
       const created = await createUpgradeSnapshot({
         purpose: "t",

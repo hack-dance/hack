@@ -576,7 +576,7 @@ async function tightenUnchangedTarget(opts: {
   // did; the read-time report and `hack doctor` still name it.
   const file = await open(
     target,
-    constants.O_RDONLY | constants.O_NOFOLLOW
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
   ).catch(() => null);
   if (!file) {
     return;

@@ -280,7 +280,12 @@ async function ensureSelfIgnore(opts: {
 async function isOwnSelfIgnore(path: string): Promise<boolean> {
   let file: Awaited<ReturnType<typeof open>> | null = null;
   try {
-    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Non-blocking: a FIFO here would otherwise stall the open; it is then
+    // refused by the regular-file check below.
+    file = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    );
     const info = await file.stat();
     if (
       !info.isFile() ||

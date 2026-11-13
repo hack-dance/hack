@@ -87,6 +87,8 @@ export type SecretsHygieneFix =
       readonly kind: "ignore";
       readonly gitignorePath: string;
       readonly entry: string;
+      /** Asked again after the entry is added: the fix counts only if git now ignores it. */
+      readonly verify: { readonly projectRoot: string; readonly path: string };
     }
   | { readonly kind: "remove_leftover"; readonly leftover: StagingLeftover }
   | { readonly kind: "remove_mux"; readonly stale: StaleMuxEnvironment };
@@ -176,6 +178,23 @@ async function fixAllowed(opts: {
   return false;
 }
 
+/**
+ * A file or directory name as a literal `.gitignore` pattern: glob and
+ * escape characters (`\\ * ? [ ]`) are escaped everywhere, a leading `#` or
+ * `!` is escaped so the line is neither a comment nor a negation, and a
+ * trailing space is escaped so git keeps it.
+ */
+export function gitignoreLiteral(name: string): string {
+  return name
+    .replace(GITIGNORE_GLOB, "\\$&")
+    .replace(GITIGNORE_LEADING, "\\$&")
+    .replace(GITIGNORE_TRAILING_SPACE, "\\ ");
+}
+
+const GITIGNORE_GLOB = /[\\*?[\]]/g;
+const GITIGNORE_LEADING = /^[#!]/;
+const GITIGNORE_TRAILING_SPACE = / $/;
+
 function octal(mode: number): string {
   return (mode & 0o777).toString(8).padStart(4, "0");
 }
@@ -216,7 +235,11 @@ async function projectCandidates(opts: {
           {
             path: join(projectDir, name),
             holds,
-            ignore: { projectRoot, gitignorePath: hackGitignore, entry: name },
+            ignore: {
+              projectRoot,
+              gitignorePath: hackGitignore,
+              entry: gitignoreLiteral(name),
+            },
           },
         ]
       : [];
@@ -227,7 +250,7 @@ async function projectCandidates(opts: {
     ignore: {
       projectRoot,
       gitignorePath: join(projectRoot, ".gitignore"),
-      entry: PROJECT_ENV_KEY_FILENAME,
+      entry: gitignoreLiteral(PROJECT_ENV_KEY_FILENAME),
     },
   });
   return candidates;
@@ -312,6 +335,7 @@ async function gitFindings(opts: {
           kind: "ignore",
           gitignorePath: ignore.gitignorePath,
           entry: ignore.entry,
+          verify: target,
         },
       },
     ];
@@ -412,7 +436,7 @@ async function inProjectIgnore(opts: {
     projectRoot: root,
     gitPath: resolved,
     gitignorePath: join(opts.project.projectRoot, ".gitignore"),
-    entry: `/${rel.split(sep).join("/")}`,
+    entry: `/${rel.split(sep).map(gitignoreLiteral).join("/")}`,
   };
 }
 
@@ -657,7 +681,10 @@ async function guardHolds(guard: DirectoryGuard | undefined): Promise<boolean> {
 async function tightenMode(
   fix: Extract<SecretsHygieneFix, { kind: "chmod" }>
 ): Promise<boolean> {
-  const file = await open(fix.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const file = await open(
+    fix.path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+  );
   try {
     const current = await file.stat();
     if (
@@ -682,13 +709,13 @@ async function addIgnoreEntry(
   if (existing && !existing.isFile()) {
     return false;
   }
-  return (
-    await ensureGitignoreEntry({
-      gitignorePath: fix.gitignorePath,
-      entry: fix.entry,
-      comment: "# machine-local secrets (hack doctor --fix)",
-    })
-  ).changed;
+  await ensureGitignoreEntry({
+    gitignorePath: fix.gitignorePath,
+    entry: fix.entry,
+    comment: "# machine-local secrets (hack doctor --fix)",
+  });
+  // Applied only when git now ignores the file (a later rule may re-include it).
+  return (await isGitIgnoredProjectEnvPath(fix.verify)) === true;
 }
 
 /**

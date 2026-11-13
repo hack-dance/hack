@@ -144,7 +144,7 @@ test("an unignored overlay gets an ignore entry; a tracked layer and a link are 
 
   const findings = await inspectSecretsHygiene(f.scope);
   const byPath = new Map(findings.map((finding) => [finding.path, finding]));
-  expect(byPath.get(overlay)?.fix).toEqual({
+  expect(byPath.get(overlay)?.fix).toMatchObject({
     kind: "ignore",
     gitignorePath: join(f.projectDir, ".gitignore"),
     entry: ".env.qa",
@@ -265,7 +265,7 @@ test("a store and key configured inside the project are checked against git", as
   const findings = await inspectSecretsHygiene(scope);
   const byPath = new Map(findings.map((finding) => [finding.path, finding]));
   expect(byPath.get(keyPath)).toMatchObject({ status: "error", fix: null });
-  expect(byPath.get(storePath)?.fix).toEqual({
+  expect(byPath.get(storePath)?.fix).toMatchObject({
     kind: "ignore",
     gitignorePath: join(f.projectRoot, ".gitignore"),
     entry: "/secrets/store.enc.json",
@@ -417,4 +417,27 @@ test("an in-checkout store configured through an alias spelling is still checked
   expect(findings).toEqual([
     expect.objectContaining({ status: "error", path: aliasedKey, fix: null }),
   ]);
+});
+
+test("an ignore entry for a path with glob characters is literal and verified (git ignores the file after --fix)", async () => {
+  const f = await fixture();
+  const dir = join(f.projectRoot, "secrets[prod]");
+  await mkdir(dir);
+  const keyPath = join(dir, "store.key");
+  await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+  const scope: SecretsHygieneScope = {
+    ...f.scope,
+    stores: [{ storePath: join(dir, "absent.enc.json"), keyPath }],
+  };
+  const findings = await inspectSecretsHygiene(scope);
+  expect(findings.map((finding) => finding.fix)).toEqual([
+    expect.objectContaining({
+      kind: "ignore",
+      entry: "/secrets\\[prod\\]/store.key",
+    }),
+  ]);
+  expect(
+    await applySecretsHygieneFixes({ findings, report: () => undefined })
+  ).toEqual({ applied: 1, skipped: 0 });
+  expect(await inspectSecretsHygiene(scope)).toEqual([]);
 });

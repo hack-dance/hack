@@ -259,3 +259,16 @@ test("on a filesystem without Unix permissions (ExFAT, FAT) a staging directory 
     0o777
   );
 });
+
+test("a FIFO in place of the staging .gitignore is refused, not waited on", async () => {
+  const root = await tempDir();
+  const staging = join(root, PRIVATE_STAGING_DIRNAME);
+  await mkdir(staging, { mode: 0o700 });
+  const mkfifo = Bun.spawn(["mkfifo", join(staging, ".gitignore")]);
+  expect(await mkfifo.exited).toBe(0);
+  const started = Date.now();
+  await expect(
+    preparePrivateStaging({ target: join(root, ".env"), refusal })
+  ).rejects.toThrow("synthetic staging refusal");
+  expect(Date.now() - started).toBeLessThan(5000);
+}, 10_000);

@@ -6,9 +6,12 @@ import {
   open,
   readFile,
   rm,
+  stat,
+  statfs,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   buildEnvelope,
   JournalWriter,
@@ -88,7 +91,28 @@ function noSpaceCode(error: unknown): string | null {
  * Fill the filesystem: large chunks, then single bytes, until a write is
  * refused for lack of space. Returns the refusal code.
  */
+/** Largest filesystem the suite will fill: never a host disk. */
+const MAX_FILL_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Refuse to fill anything but a small dedicated filesystem: the directory
+ * must be a mount point of its own (a different device from its parent) and
+ * the filesystem at most {@link MAX_FILL_BYTES}. A wrong path fails the
+ * test instead of filling the host disk.
+ */
+async function assertSmallMount(dir: string): Promise<void> {
+  const info = await statfs(dir);
+  const total = info.blocks * info.bsize;
+  const own = (await stat(dir)).dev !== (await stat(dirname(dir))).dev;
+  if (!own || total > MAX_FILL_BYTES) {
+    throw new Error(
+      `Refusing to fill ${dir}: it must be its own mount point of at most ${MAX_FILL_BYTES} bytes (own mount: ${own}, size: ${total} bytes).`
+    );
+  }
+}
+
 async function fill(dir: string): Promise<string> {
+  await assertSmallMount(dir);
   const filler = join(dir, "filler");
   cleanup.push(filler);
   const handle = await open(
@@ -123,6 +147,13 @@ async function fill(dir: string): Promise<string> {
   }
   return code;
 }
+
+test("the suite refuses to fill a directory that is not a small dedicated mount", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "full-disk-guard-"));
+  cleanup.push(dir);
+  await expect(fill(dir)).rejects.toThrow("Refusing to fill");
+  expect(await lstat(join(dir, "filler")).catch(() => null)).toBeNull();
+});
 
 for (const fs of FILESYSTEMS) {
   describe.skipIf(!fs.dir)(

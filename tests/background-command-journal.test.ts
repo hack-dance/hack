@@ -1113,6 +1113,33 @@ describe("review regressions", () => {
     expect(events.at(-1)?.payload.truncated).toBe(true);
   });
 
+  test("a cancel that cannot confirm the child gone still cuts unscanned output it cannot redact", async () => {
+    const { meta, paths } = await acceptCommand({
+      input: input({ redaction: { values: 1 } }),
+      root,
+    });
+    const child = { pid: 430_002, birth: "c", processGroupId: 430_002 };
+    await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+    await writeFile(paths.stdout, "unscanned\n", { mode: 0o600 });
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    // The child ignores every signal: it stays alive.
+    const result = await cancelCommand({
+      journal,
+      root,
+      observe: fakeObserve([child]),
+      observeGroup: async () => [],
+      orphanGraceMs: 100,
+      signaller: { process: () => true, group: () => true },
+    });
+    expect(result.outcome).toBe("unconfirmed");
+    expect((await stat(paths.stdout)).size).toBe(0);
+    const events = await readEvents(paths);
+    expect(events.map((event) => event.type)).toEqual([
+      "command.accepted",
+      "command.output_truncated",
+    ]);
+  });
+
   test("admission stops an overdue orphaned child it can verify, then records timed_out; reads never do", async () => {
     const accepted = new Date(Date.now() - 120_000);
     const { meta, paths } = await acceptCommand({

@@ -561,6 +561,14 @@ async function finishWithoutSupervisor(opts: {
     if (late) {
       return late;
     }
+    // The supervisor is proven gone: output nobody scanned is cut now,
+    // whether or not the child is, so cancel never leaves it on disk.
+    const writer = new JournalWriter(paths, meta, current.at(-1)?.seq ?? 0);
+    const truncated = await truncatedBeforeEnd({
+      journal: opts.journal,
+      events: current,
+      writer,
+    });
     const child = await readChild(paths);
     const snapshot = await opts.observe(child ? [child.pid] : []);
     const state = snapshot
@@ -576,12 +584,6 @@ async function finishWithoutSupervisor(opts: {
       // treating the command as running.
       return null;
     }
-    const writer = new JournalWriter(paths, meta, current.at(-1)?.seq ?? 0);
-    const truncated = await truncatedBeforeEnd({
-      journal: opts.journal,
-      events: current,
-      writer,
-    });
     const ended = await writer.write("command.ended", {
       outcome: "cancelled",
       reason: owner ? "supervisor_unresponsive" : "cancelled_before_start",

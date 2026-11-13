@@ -1090,6 +1090,44 @@ describe("review regressions", () => {
     expect(await readFile(paths.stdout, "utf8")).toBe("seen\n");
   });
 
+  test("a cancel that repairs an unterminated final record cuts the raw tail and keeps the end", async () => {
+    const { meta, paths } = await acceptCommand({
+      input: input({ redaction: { values: 1 } }),
+      root,
+    });
+    // A supervised prefix, then raw bytes nobody scanned.
+    await writeFile(paths.stdout, "seen\nraw tail\n", { mode: 0o600 });
+    const writer = new JournalWriter(paths, meta, 1);
+    await writer.write("command.output", {
+      stream: "stdout",
+      offset: 0,
+      length: 5,
+    });
+    const ended = buildEnvelope({
+      meta,
+      seq: 3,
+      type: "command.ended",
+      payload: { outcome: "succeeded", exitCode: 0 },
+    });
+    // The supervisor died after the JSON and before its newline; no owner
+    // record is left, so it is provably gone.
+    await writeFile(paths.events, JSON.stringify(ended), { flag: "a" });
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    const result = await cancelCommand({
+      journal,
+      root,
+      observe: fakeObserve(),
+      observeGroup: async () => [],
+      orphanGraceMs: 100,
+      signaller: { process: () => false, group: () => false },
+    });
+    expect(result.outcome).toBe("succeeded");
+    const events = await readEvents(paths);
+    expect(events.map((event) => event.seq)).toEqual([1, 2, 3]);
+    expect(events.at(-1)).toEqual(ended);
+    expect(await readFile(paths.stdout, "utf8")).toBe("seen\n");
+  });
+
   test("output an older Hack announced as unsupervised is cut too when there were values to redact", async () => {
     const { meta, paths } = await acceptCommand({
       input: input({ redaction: { values: 1 } }),

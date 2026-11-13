@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  type FileHandle,
   lstat,
   mkdtemp,
   open,
@@ -8,6 +10,7 @@ import {
   rm,
   stat,
   statfs,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -108,18 +111,44 @@ async function assertSmallMount(dir: string): Promise<void> {
 }
 
 /**
+ * Create the filler exclusively, without following a link, and check the
+ * opened file is on the checked filesystem before anything is written. It
+ * is registered for cleanup only once this process created it.
+ */
+async function createFiller(opts: {
+  readonly dir: string;
+  readonly name: string;
+}): Promise<FileHandle> {
+  const path = join(opts.dir, opts.name);
+  const handle = await open(
+    path,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_APPEND |
+      constants.O_NOFOLLOW,
+    0o600
+  );
+  cleanup.push(path);
+  if ((await handle.stat()).dev !== (await stat(opts.dir)).dev) {
+    await handle.close();
+    throw new Error(
+      `Refusing to fill: ${path} is not on the checked filesystem.`
+    );
+  }
+  return handle;
+}
+
+/**
  * Fill the filesystem: large chunks, then single bytes, until a write is
  * refused for lack of space. Returns the refusal code.
  */
 async function fill(dir: string): Promise<string> {
   await assertSmallMount(dir);
-  const filler = join(dir, "filler");
-  cleanup.push(filler);
-  const handle = await open(
-    filler,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND,
-    0o600
-  );
+  const handle = await createFiller({
+    dir,
+    name: `filler-${randomUUID()}`,
+  });
   let code: string | null = null;
   try {
     for (const size of [1024 * 1024, 64 * 1024, 4096, 1]) {
@@ -147,6 +176,16 @@ async function fill(dir: string): Promise<string> {
   }
   return code;
 }
+
+test("the filler is never created through an existing entry, so nothing outside is written", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "full-disk-filler-"));
+  cleanup.push(dir);
+  const outside = join(dir, "outside.txt");
+  await writeFile(outside, "untouched\n");
+  await symlink(outside, join(dir, "planted"));
+  await expect(createFiller({ dir, name: "planted" })).rejects.toThrow();
+  expect(await readFile(outside, "utf8")).toBe("untouched\n");
+});
 
 test("the suite refuses to fill a directory that is not a small dedicated mount", async () => {
   const dir = await mkdtemp(join(tmpdir(), "full-disk-guard-"));

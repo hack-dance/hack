@@ -25,6 +25,7 @@ import type { LoadedJournal } from "./reader.ts";
 import {
   childState,
   cutUnscannedOutput,
+  dropUnscannedOutput,
   needsAtRestScrub,
   type ObserveIdentities,
   type ReadBootTime,
@@ -500,6 +501,24 @@ async function waitForEnd(opts: {
 }
 
 /**
+ * The end the dead supervisor wrote, if tail repair just published it. Its
+ * output nobody scanned is cut first, adding no record (as recovery does).
+ */
+async function lateEnd(opts: {
+  readonly journal: LoadedJournal;
+  readonly events: readonly EventEnvelope[];
+}): Promise<EventEnvelope | null> {
+  const ended = endedEvent(opts.events);
+  if (ended && needsAtRestScrub(opts.journal.meta)) {
+    await dropUnscannedOutput({
+      paths: opts.journal.paths,
+      events: opts.events,
+    });
+  }
+  return ended;
+}
+
+/**
  * Output nobody scanned cannot be redacted by a canceller: cut it (as
  * recovery does) before the final record. Returns the final record's
  * `truncated`.
@@ -557,7 +576,7 @@ async function finishWithoutSupervisor(opts: {
     }
     // The supervisor may have written up to the moment it died.
     const current = await reconcileTail(paths);
-    const late = endedEvent(current);
+    const late = await lateEnd({ journal: opts.journal, events: current });
     if (late) {
       return late;
     }

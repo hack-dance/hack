@@ -6,6 +6,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   unlink,
@@ -1120,7 +1121,13 @@ test("setProjectEnvValue --local refuses when git tracks a case variant of the l
     })
   ).rejects.toThrow(MACHINE_LOCAL_LAYER_REFUSALS.tracked(layer));
   expect(await readFile(variant, "utf8")).toBe(tracked);
-  expect(await Bun.file(layer).exists()).toBe(false);
+  // Only the tracked spelling exists. On a case-insensitive filesystem the
+  // two names are one file, so this, not an existence check, is portable.
+  expect(
+    (await readdir(repo.projectDir)).filter(
+      (name) => name.toLowerCase() === "hack.env.qa.local.yaml"
+    )
+  ).toEqual(["Hack.env.qa.local.yaml"]);
 });
 
 test("materializeProjectEnv keeps .hack/.env out of git status through info/exclude", async () => {

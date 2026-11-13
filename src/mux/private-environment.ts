@@ -92,13 +92,18 @@ export type StaleMuxEnvironment = {
  * The doctor reports these and removes them on `--fix`; staging itself uses
  * {@link sweepStaleMuxEnvironments}. Only
  * private directories with Hack's prefix and owned by this user qualify;
- * nothing is read.
+ * nothing is read. Roots are reported under the resolved `tmpDir`, the same
+ * spelling {@link stageMuxEnvironment} returns.
  */
 export async function findStaleMuxEnvironments(opts?: {
   readonly tmpDir?: string;
   readonly now?: number;
 }): Promise<readonly StaleMuxEnvironment[]> {
-  const base = opts?.tmpDir ?? tmpdir();
+  // Resolved once, as staging resolves the directory it creates, so a
+  // payload has one spelling whichever function names it (macOS keeps the
+  // temporary directory behind /var -> /private/var).
+  const given = opts?.tmpDir ?? tmpdir();
+  const base = await realpath(given).catch(() => given);
   const now = opts?.now ?? Date.now();
   const names = await readdir(base).catch(() => [] as string[]);
   const stale: StaleMuxEnvironment[] = [];

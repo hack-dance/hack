@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { STAGING_LEFTOVER_MIN_AGE_MS } from "../src/lib/private-staging.ts";
 import { projectEnvLiveInputPaths } from "../src/lib/project-env-config.ts";
 import {
@@ -1178,4 +1178,44 @@ test("a project inside a larger repository keeps its own ignore repair", async (
   });
   const key = findings.find((finding) => finding.path === keyPath);
   expect(key?.fix?.kind).toBe("ignore");
+});
+
+test("a configured key in a stale payload reached through a linked temp directory is never removed", async () => {
+  const f = await fixture();
+  // The temporary directory is reached through a link (macOS: /var ->
+  // /private/var); the key is configured by the linked spelling, while
+  // hygiene names payloads by the resolved one.
+  const linked = join(f.root, "tmp-link");
+  await symlink(f.muxDir, linked);
+  const payload = await stageMuxEnvironment(
+    { FAKE_KEY: "synthetic-linked" },
+    { tmpDir: linked }
+  );
+  await backdate(dirname(payload.path));
+  const store = join(f.home, "secrets.enc.json");
+  await writeFile(store, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  const keyByLink = join(linked, basename(dirname(payload.path)), "env.json");
+  const configured = {
+    ...f.scope,
+    tmpDir: linked,
+    stores: [{ storePath: store, keyPath: keyByLink }],
+  };
+  expect(
+    (await inspectSecretsHygiene(configured)).some(
+      (finding) => finding.fix?.kind === "remove_mux"
+    )
+  ).toBe(false);
+  const earlier = await inspectSecretsHygiene({ ...f.scope, tmpDir: linked });
+  expect(
+    earlier
+      .filter((finding) => finding.fix?.kind === "remove_mux")
+      .map((finding) => finding.path)
+  ).toEqual([dirname(payload.path)]);
+  await applySecretsHygieneFixes({
+    findings: earlier,
+    report: () => undefined,
+    currentScope: async () => configured,
+  });
+  expect(await readFile(payload.path, "utf8")).toContain("synthetic-linked");
+  await payload.cleanup();
 });

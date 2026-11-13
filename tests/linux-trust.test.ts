@@ -1070,26 +1070,95 @@ describe("applyLinuxNssTrust", () => {
   });
 
   test.each([
-    "directory",
-    "ancestor",
-  ])("replacement of a %s after export stops all writes", async (which) => {
+    ["directory", userDb],
+    ["ancestor", `${HOME}/.pki`],
+    // Same owner, same mode, same directories: only the file identity
+    // changes (HACK-2137).
+    ["cert9.db file", `${userDb}/cert9.db`],
+    ["key4.db file", `${userDb}/key4.db`],
+  ])("replacement of a %s after export stops all writes", async (_which, path) => {
     const { host, state } = createFakeHost({
       commands: ["certutil"],
-      dirs: { [userDb]: ["cert9.db"] },
+      dirs: { [userDb]: ["cert9.db", "key4.db"] },
     });
     const execute = host.exec;
     const outcome = await nss({
       ...host,
       exec: async (argv, input) => {
         const result = await execute(argv, input);
-        state.identities.set(
-          which === "directory" ? userDb : `${HOME}/.pki`,
-          "replaced"
-        );
+        state.identities.set(path, "replaced");
         return result;
       },
     });
     expect(outcome).toMatchObject({ databases: [{ status: "failed" }] });
+    expect(
+      state.execs.some((a) => ["-A", "-M", "-D"].includes(a[3] ?? ""))
+    ).toBe(false);
+  });
+
+  test("removal of a database file after export stops all writes", async () => {
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      dirs: { [userDb]: ["cert9.db", "key4.db"] },
+    });
+    const execute = host.exec;
+    const outcome = await nss({
+      ...host,
+      exec: async (argv, input) => {
+        const result = await execute(argv, input);
+        state.dirs.set(
+          userDb,
+          (state.dirs.get(userDb) ?? []).filter((name) => name !== "key4.db")
+        );
+        return result;
+      },
+    });
+    expect(outcome).toMatchObject({
+      databases: [
+        { status: "failed", reason: "key4.db was replaced or removed" },
+      ],
+    });
+    expect(
+      state.execs.some((a) => ["-A", "-M", "-D"].includes(a[3] ?? ""))
+    ).toBe(false);
+  });
+
+  test("a database file that appears between certutil calls stops all writes", async () => {
+    const { host, state } = createFakeHost({
+      commands: ["certutil"],
+      dirs: { [userDb]: ["cert9.db"] },
+    });
+    const inspect = host.inspectPath;
+    const key4 = `${userDb}/key4.db`;
+    let execs = 0;
+    let key4Looks = 0;
+    const outcome = await nss({
+      ...host,
+      exec: async (argv, input) => {
+        execs += 1;
+        return await host.exec(argv, input);
+      },
+      // key4.db shows up after the first call's post-check (its first look
+      // at key4.db after that call) and before the second call's pre-check:
+      // no certutil call created it.
+      inspectPath: async (path) => {
+        if (execs === 1 && path === key4) {
+          key4Looks += 1;
+          if (key4Looks === 2) {
+            state.dirs.get(userDb)?.push("key4.db");
+          }
+        }
+        return await inspect(path);
+      },
+    });
+    expect(outcome).toMatchObject({
+      databases: [
+        {
+          status: "failed",
+          reason: "key4.db appeared outside a certutil call",
+        },
+      ],
+    });
     expect(
       state.execs.some((a) => ["-A", "-M", "-D"].includes(a[3] ?? ""))
     ).toBe(false);

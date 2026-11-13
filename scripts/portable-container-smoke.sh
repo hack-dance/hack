@@ -28,10 +28,10 @@ cp -R "${repo_root}/examples/basic/." "${fixture_project}/"
 bun "${repo_root}/index.ts" env add \
   --path "${fixture_project}" \
   PORTABLE_PLAIN "portable-ready"
-bun "${repo_root}/index.ts" env add \
+printf '%s\n' 'portable-secret' | bun "${repo_root}/index.ts" env add \
   --path "${fixture_project}" \
-  --secret \
-  PORTABLE_SECRET "portable-secret"
+  --secret --value-stdin \
+  PORTABLE_SECRET
 
 secret_key="$(tr -d '\n' < "${fixture_project}/.hack.secret.key")"
 rm -f "${fixture_project}/.hack.secret.key"
@@ -47,13 +47,17 @@ docker run \
   -lc '
     set -euo pipefail
     test ! -f .hack.secret.key
-    hack env list --json --show-secrets > /tmp/hack-env.json
-    grep -q "\"PORTABLE_PLAIN\"" /tmp/hack-env.json
-    grep -q "\"portable-ready\"" /tmp/hack-env.json
-    grep -q "\"PORTABLE_SECRET\"" /tmp/hack-env.json
-    grep -q "\"portable-secret\"" /tmp/hack-env.json
+    env_json="$(mktemp)"
+    hack env list --json > "${env_json}"
+    grep -q "\"PORTABLE_PLAIN\"" "${env_json}"
+    grep -q "\"PORTABLE_SECRET\"" "${env_json}"
+    ! grep -q "\"value\"" "${env_json}"
+    ! grep -q -e portable-ready -e portable-secret "${env_json}"
+    test "$(hack env get PORTABLE_PLAIN)" = "portable-ready"
+    test "$(hack env get PORTABLE_SECRET)" = "portable-secret"
     test "$(hack host exec -- printenv PORTABLE_PLAIN)" = "portable-ready"
     test "$(hack host exec -- printenv PORTABLE_SECRET)" = "portable-secret"
+    rm -f "${env_json}"
   '
 
 echo "portable container smoke passed for ${image_tag} (${platform})"

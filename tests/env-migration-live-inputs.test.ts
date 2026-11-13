@@ -183,3 +183,22 @@ test("deletion protects live inputs in a legacy .dev project", async () => {
   ).rejects.toThrow("current project env key");
   expect(await Bun.file(layerPath).exists()).toBe(true);
 });
+
+test("an unrelated .dev file does not block cleanup in a .hack project", async () => {
+  const options = await fixture();
+  await writeFile(
+    join(options.projectRoot, ".dev"),
+    "unrelated fixture file\n"
+  );
+  const ordinary = join(options.projectRoot, "legacy-artifact");
+  await writeFile(ordinary, "fixture\n");
+  expect(
+    await removeLegacyProjectEnvArtifacts({
+      projectRoot: options.projectRoot,
+      paths: [ordinary],
+    })
+  ).toEqual([ordinary]);
+  expect(await readFile(join(options.projectRoot, ".dev"), "utf8")).toBe(
+    "unrelated fixture file\n"
+  );
+});

@@ -8349,7 +8349,11 @@ async function legacyCleanupLiveInputs(opts: {
   }
   for (const directory of directories) {
     paths.add(resolve(directory, PROJECT_CONFIG_FILENAME));
-    if (!(await pathExists(directory))) {
+    const directoryInfo = await legacyCleanupInputStat({
+      path: directory,
+      follow: true,
+    });
+    if (!directoryInfo?.isDirectory()) {
       continue;
     }
     for (const name of await readdir(directory)) {

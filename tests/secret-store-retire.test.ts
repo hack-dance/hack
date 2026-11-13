@@ -35,6 +35,7 @@ import {
 } from "../src/lib/secret-store.ts";
 import {
   describeRetireTarget,
+  planSecretStoreRetire,
   retireSecretStore,
 } from "../src/lib/secret-store-retire.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -958,4 +959,105 @@ test("a store reached through a symlinked directory is named and retired by its 
     join(`${fixture.storePath}.retired-20261113T120000Z`, "secrets.enc.json")
   );
   expect(await readFile(outcome.to)).toEqual(before);
+});
+
+/**
+ * Two keyless stores, A (the global store) and B (a copy elsewhere), and
+ * app-b configured through a repo-local symlinked directory that leads to
+ * A. Returns how to retarget that directory to B.
+ */
+async function aliasedStores(fixture: Fixture) {
+  const before = await readFile(fixture.storePath);
+  const otherDir = join(root, "other-store-dir");
+  await mkdir(otherDir);
+  const storeB = join(otherDir, "secrets.enc.json");
+  await writeFile(storeB, before);
+  const alias = join(fixture.bystander.projectRoot, "linked");
+  await symlink(fixture.hackHome, alias);
+  await writeFile(
+    join(fixture.bystander.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-b",
+      dev_host: "app-b.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: {
+            path: join(alias, "secrets.enc.json"),
+            keyPath: fixture.keyPath,
+          },
+        },
+      },
+    })}\n`
+  );
+  return {
+    before,
+    storeB,
+    retargetToB: async () => {
+      await rm(alias);
+      await symlink(otherDir, alias);
+    },
+  };
+}
+
+test("a target retargeted after confirmation is not retired", async () => {
+  // Second-family review: the prompt resolved the real path for display,
+  // and the retirement resolved it again; a symlink retargeted while the
+  // prompt waited made it retire a store the user had not approved.
+  const fixture = await setUp();
+  const { before, storeB, retargetToB } = await aliasedStores(fixture);
+  const planned = await planSecretStoreRetire({
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(planned.kind).toBe("plan");
+  if (planned.kind !== "plan") {
+    return;
+  }
+  expect(planned.plan.canonical).toBe(fixture.storePath);
+  // While the confirmation waits, the repo's symlink is pointed at B.
+  await retargetToB();
+  const outcome = await retireSecretStore({
+    projectDir: fixture.bystander.projectDir,
+    approved: planned.plan,
+  });
+  expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+    "changed after it was confirmed"
+  );
+  expect(await readFile(fixture.storePath)).toEqual(before);
+  expect(await readFile(storeB)).toEqual(before);
+});
+
+test("the locked eligibility check reads the pinned store, not the alias", async () => {
+  // Second-family review: under the lock, eligibility was read through the
+  // alias after the path check; a retarget then validated B while A (whose
+  // key had just come back) was moved.
+  const fixture = await setUp();
+  const { before, storeB, retargetToB } = await aliasedStores(fixture);
+  const planned = await planSecretStoreRetire({
+    projectDir: fixture.bystander.projectDir,
+  });
+  if (planned.kind !== "plan") {
+    throw new Error("expected a plan");
+  }
+  const outcome = await retireSecretStore({
+    projectDir: fixture.bystander.projectDir,
+    approved: planned.plan,
+    beforeEligibility: async () => {
+      // After the path check: A's key comes back, and the alias moves to B.
+      await writeFile(fixture.keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
+      await chmod(fixture.keyPath, 0o600);
+      await retargetToB();
+    },
+  });
+  expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+    "opens with the key in use"
+  );
+  // A, now recoverable, stays active; B is untouched.
+  expect(await readFile(fixture.storePath)).toEqual(before);
+  expect(await readFile(storeB)).toEqual(before);
+  expect(
+    (await readdir(fixture.hackHome)).filter((name) =>
+      name.includes(".retired-")
+    )
+  ).toEqual([]);
 });

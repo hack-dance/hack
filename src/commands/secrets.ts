@@ -11,9 +11,9 @@ import {
 } from "../lib/interactivity.ts";
 import { keychain } from "../lib/keychain.ts";
 import { quoteShellWord } from "../lib/logs.ts";
-import { findProjectContext, readProjectConfig } from "../lib/project.ts";
+import { findProjectContext } from "../lib/project.ts";
 import {
-  describeRetireTarget,
+  planSecretStoreRetire,
   retireSecretStore,
 } from "../lib/secret-store-retire.ts";
 import { logger } from "../ui/logger.ts";
@@ -271,24 +271,20 @@ async function handleSecretsRetireStore({
     ? resolve(process.cwd(), args.options.path)
     : process.cwd();
   const project = await findProjectContext(startDir);
-  let projectName = "project";
-  if (project) {
-    const cfg = await readProjectConfig(project);
-    projectName = (
-      cfg.name ??
-      project.projectRoot.split("/").at(-1) ??
-      "project"
-    ).trim();
-  }
-  // Name the real file in the prompt: the configured path is project input
-  // and may reach another store through a symlinked directory.
-  const target = await describeRetireTarget({
+  // Plan once: the confirmation names this exact target (its real path; the
+  // configured path is project input and may go through a symlinked
+  // directory), and the retirement refuses if the target changed since.
+  const planned = await planSecretStoreRetire({
     projectDir: project?.projectDir,
   });
+  if (planned.kind === "refused") {
+    logger.error({ message: planned.message });
+    return 1;
+  }
   const ok =
     args.options.yes === true ||
     (await confirmSafe({
-      message: `Move the encrypted secret store ${target ?? "(unknown path)"} aside? Its entries stay in the moved file, which can be put back.`,
+      message: `Move the encrypted secret store ${planned.plan.display} aside? Its entries stay in the moved file, which can be put back.`,
       initialValue: false,
       nonInteractive: "fail",
       hint: "Pass --yes to confirm (`hack secrets retire-store --yes`), or run it in a terminal.",
@@ -297,8 +293,8 @@ async function handleSecretsRetireStore({
     return 0;
   }
   const outcome = await retireSecretStore({
-    projectName,
     projectDir: project?.projectDir,
+    approved: planned.plan,
   });
   if (outcome.kind === "refused") {
     logger.error({ message: outcome.message });

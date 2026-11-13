@@ -8,9 +8,8 @@ import { readOptionalTextFile } from "./fs.ts";
 import { readHackEnvContract, readHackEnvRuntimeConfig } from "./hack-env.ts";
 import { readProjectsRegistryStrict } from "./projects-registry.ts";
 import {
-  type FileSecretStoreListing,
+  classifyEncryptedStoreAt,
   isEncryptedStoreFile,
-  listFileSecretStoreEntries,
   resolveFileSecretStorePaths,
   retireEncryptedStoreFile,
   SecretStoreRetireError,
@@ -205,17 +204,6 @@ async function sameStoreFile(input: {
     : "different";
 }
 
-/**
- * Where a project's store is, and whether its backend is active. The
- * listing reads the store only to classify it, and never provisions a key.
- */
-async function storeLocation(opts: {
-  readonly projectName: string;
-  readonly projectDir?: string;
-}): Promise<FileSecretStoreListing> {
-  return await listFileSecretStoreEntries(opts);
-}
-
 /** The outcome of `hack secrets retire-store` (paths only, never values). */
 export type SecretStoreRetireOutcome =
   | {
@@ -231,18 +219,34 @@ export type SecretStoreRetireOutcome =
   | { readonly kind: "refused"; readonly message: string };
 
 /**
- * Checks that the store selected for this context (a project, or the global
- * configuration when `projectDir` is omitted) is one retiring is for, then
- * moves it aside ({@link retireEncryptedStoreFile}). Refused, with the
- * reason and nothing moved, when no file store is configured, the store is
- * absent or empty, it opens with the key in use, or it cannot be read for
- * another reason (its key file refused, the store unreadable or a link).
+ * What retiring would act on, resolved once (HACK-2177): the configured
+ * store path (project input, possibly through a symlinked directory), its
+ * real path, and the key path. Shown before confirmation, and carried into
+ * {@link retireSecretStore}, which refuses if a fresh plan differs.
  */
-export async function retireSecretStore(opts: {
-  readonly projectName: string;
+export type SecretStoreRetirePlan = {
+  readonly configured: string;
+  readonly canonical: string;
+  readonly keyPath: string;
+  /** For the confirmation: the real path, and the configured one if it differs. */
+  readonly display: string;
+};
+
+/**
+ * Plans retiring the store this context selects (a project, or the global
+ * configuration when `projectDir` is omitted). Refused, with the reason,
+ * when the selecting config is unsure, no file store is configured, its
+ * real path cannot be resolved, or the store at that real path is not one
+ * to retire (absent or empty, opens with the key in use, unreadable for a
+ * reason other than a missing or wrong key, or not a store envelope).
+ * Every store read uses the real path, never the configured alias.
+ */
+export async function planSecretStoreRetire(opts: {
   readonly projectDir?: string;
-  readonly now?: Date;
-}): Promise<SecretStoreRetireOutcome> {
+}): Promise<
+  | { readonly kind: "plan"; readonly plan: SecretStoreRetirePlan }
+  | { readonly kind: "refused"; readonly message: string }
+> {
   const selection = await secretStoreSelectionProblem(opts);
   if (selection !== null) {
     return {
@@ -250,45 +254,78 @@ export async function retireSecretStore(opts: {
       message: `${selection} Nothing was moved. Fix that config, then run hack doctor and retry.`,
     };
   }
-  const listing = await storeLocation(opts);
-  const refusal =
-    retireRefusal(listing) ?? (await notAStoreRefusal(listing.storePath));
-  if (refusal !== null) {
-    return { kind: "refused", message: refusal };
+  const location = await resolveFileSecretStorePaths(opts).catch(() => null);
+  if (location === null || !location.active) {
+    return {
+      kind: "refused",
+      message:
+        "No encrypted file secret store is configured here (the backend is the OS keychain); nothing was moved.",
+    };
   }
-  // The configured path is project input and may reach the store through a
-  // symlinked directory: pin the real path, act only on it, and check under
-  // the lock that the configured path still leads there.
-  const canonical = await realpath(listing.storePath).catch(() => null);
+  const canonical = await realpath(location.storePath).catch(() => null);
   if (canonical === null) {
     return {
       kind: "refused",
-      message: `The real path of ${listing.storePath} could not be resolved; nothing was moved.`,
+      message: `There is no encrypted secret store with entries at ${location.storePath}; nothing was moved.`,
+    };
+  }
+  const refusal = await eligibilityRefusal({
+    storePath: canonical,
+    keyPath: location.keyPath,
+  });
+  if (refusal !== null) {
+    return { kind: "refused", message: refusal };
+  }
+  return {
+    kind: "plan",
+    plan: {
+      configured: location.storePath,
+      canonical,
+      keyPath: location.keyPath,
+      display:
+        canonical === resolve(location.storePath)
+          ? canonical
+          : `${canonical} (configured as ${location.storePath})`,
+    },
+  };
+}
+
+/**
+ * Retires the store this context selects ({@link retireEncryptedStoreFile}
+ * on its real path). With `approved` (the plan shown before confirmation),
+ * refuses unless a fresh plan names the same configured path, real path
+ * and key, so a target retargeted while the confirmation waited is not
+ * moved. Under the store's lock it checks again: the same config and
+ * paths, the configured path still leading to the same real path, and the
+ * store at that real path still one to retire.
+ */
+export async function retireSecretStore(opts: {
+  /** Unused: the store is the file, whichever project scope it holds. */
+  readonly projectName?: string;
+  readonly projectDir?: string;
+  readonly now?: Date;
+  readonly approved?: SecretStoreRetirePlan;
+  /** Test seam: runs under the lock after the path checks, before eligibility. */
+  readonly beforeEligibility?: () => Promise<void>;
+}): Promise<SecretStoreRetireOutcome> {
+  const planned = await planSecretStoreRetire(opts);
+  if (planned.kind === "refused") {
+    return planned;
+  }
+  const { plan } = planned;
+  if (opts.approved !== undefined && !samePlan(opts.approved, plan)) {
+    return {
+      kind: "refused",
+      message: `The store to retire changed after it was confirmed (confirmed: ${opts.approved.display}; now: ${plan.display}); nothing was moved. Run the command again to confirm the current target.`,
     };
   }
   try {
     const moved = await retireEncryptedStoreFile({
-      storePath: canonical,
-      keyPath: listing.keyPath,
+      storePath: plan.canonical,
+      keyPath: plan.keyPath,
       now: opts.now,
-      // Classified before the lock: classify again under it, so a store
-      // whose key came back, or that was replaced, is not retired.
       recheck: async () => {
-        if (
-          (await realpath(listing.storePath).catch(() => null)) !== canonical
-        ) {
-          return `${listing.storePath} no longer leads to ${canonical}; nothing was moved. (It changed while retiring.)`;
-        }
-        const unsure = await secretStoreSelectionProblem(opts);
-        if (unsure !== null) {
-          return `${unsure} Nothing was moved. (It changed while retiring.)`;
-        }
-        const current = await storeLocation(opts);
-        if (current.storePath !== listing.storePath) {
-          return "The secret store configuration changed while retiring; nothing was moved. Run hack doctor, then retry.";
-        }
-        const changed =
-          retireRefusal(current) ?? (await notAStoreRefusal(current.storePath));
+        const changed = await lockedRecheck({ opts, plan });
         return changed === null
           ? null
           : `${changed} (It changed while retiring.)`;
@@ -297,8 +334,8 @@ export async function retireSecretStore(opts: {
     return {
       kind: "retired",
       ...moved,
-      configured: listing.storePath,
-      keyPath: listing.keyPath,
+      configured: plan.configured,
+      keyPath: plan.keyPath,
     };
   } catch (error: unknown) {
     if (error instanceof SecretStoreRetireError) {
@@ -308,25 +345,83 @@ export async function retireSecretStore(opts: {
   }
 }
 
+function samePlan(a: SecretStoreRetirePlan, b: SecretStoreRetirePlan): boolean {
+  return (
+    a.configured === b.configured &&
+    a.canonical === b.canonical &&
+    a.keyPath === b.keyPath
+  );
+}
+
 /**
- * What `hack secrets retire-store` would move, for its confirmation: the
- * store's real path, and the configured path when that differs (a symlinked
- * directory on the way). Null when no file store is configured here.
+ * Under the store's lock: the selecting config is still sure, still names
+ * the same store and key paths, the configured path still leads to the
+ * pinned real path, and the store at that real path (never the alias) is
+ * still one to retire. A refusal message, or null to go on.
+ */
+async function lockedRecheck(input: {
+  readonly opts: {
+    readonly projectDir?: string;
+    readonly beforeEligibility?: () => Promise<void>;
+  };
+  readonly plan: SecretStoreRetirePlan;
+}): Promise<string | null> {
+  const { opts, plan } = input;
+  const unsure = await secretStoreSelectionProblem(opts);
+  if (unsure !== null) {
+    return `${unsure} Nothing was moved.`;
+  }
+  const location = await resolveFileSecretStorePaths(opts).catch(() => null);
+  if (
+    location === null ||
+    !location.active ||
+    location.storePath !== plan.configured ||
+    location.keyPath !== plan.keyPath
+  ) {
+    return "The secret store configuration changed; nothing was moved. Run hack doctor, then retry.";
+  }
+  if ((await realpath(plan.configured).catch(() => null)) !== plan.canonical) {
+    return `${plan.configured} no longer leads to ${plan.canonical}; nothing was moved.`;
+  }
+  await opts.beforeEligibility?.();
+  return await eligibilityRefusal({
+    storePath: plan.canonical,
+    keyPath: plan.keyPath,
+  });
+}
+
+/**
+ * Why the store at this (real) path is not one to retire, or null when it
+ * is: entries exist, the key that opens them is missing or wrong, and the
+ * file holds a store envelope.
+ */
+async function eligibilityRefusal(input: {
+  readonly storePath: string;
+  readonly keyPath: string;
+}): Promise<string | null> {
+  const state = await classifyEncryptedStoreAt(input);
+  if (state.kind === "empty") {
+    return `There is no encrypted secret store with entries at ${input.storePath}; nothing was moved.`;
+  }
+  if (state.kind === "opens") {
+    return `The encrypted secret store at ${input.storePath} opens with the key in use, so there is nothing to retire; nothing was moved.`;
+  }
+  if (!RETIRABLE_REASONS.has(state.reason)) {
+    return `The encrypted secret store at ${input.storePath} is not retired: it is not a missing or wrong key (${state.reason.replaceAll("_", " ")}). Run hack doctor for what to fix; nothing was moved.`;
+  }
+  return await notAStoreRefusal(input.storePath);
+}
+
+/**
+ * What `hack secrets retire-store` would move, for its confirmation; null
+ * when there is nothing to retire here. {@link planSecretStoreRetire}
+ * carries the same target into the retirement.
  */
 export async function describeRetireTarget(opts: {
   readonly projectDir?: string;
 }): Promise<string | null> {
-  const location = await resolveFileSecretStorePaths(opts).catch(() => null);
-  if (location === null || !location.active) {
-    return null;
-  }
-  const canonical = await realpath(location.storePath).catch(() => null);
-  if (canonical === null) {
-    return location.storePath;
-  }
-  return canonical === resolve(location.storePath)
-    ? canonical
-    : `${canonical} (configured as ${location.storePath})`;
+  const planned = await planSecretStoreRetire(opts);
+  return planned.kind === "plan" ? planned.plan.display : null;
 }
 
 /**
@@ -337,23 +432,4 @@ async function notAStoreRefusal(storePath: string): Promise<string | null> {
   return (await isEncryptedStoreFile(storePath))
     ? null
     : `${storePath} is not a Hack encrypted secret store (it does not hold the store's encrypted envelope), so it is not retired; nothing was moved. Check controlPlane.secrets.encryptedFile.path in the Hack config.`;
-}
-
-/**
- * Why a store is not one to retire, or null when it is (entries exist and
- * the key that opens them is missing or wrong).
- */
-function retireRefusal(listing: FileSecretStoreListing): string | null {
-  if (listing.kind === "inactive") {
-    return "No encrypted file secret store is configured here (the backend is the OS keychain); nothing was moved.";
-  }
-  if (listing.kind === "listed") {
-    return listing.ownEntries.size + listing.foreignEntryCount === 0
-      ? `There is no encrypted secret store with entries at ${listing.storePath}; nothing was moved.`
-      : `The encrypted secret store at ${listing.storePath} opens with the key in use, so there is nothing to retire; nothing was moved.`;
-  }
-  if (!RETIRABLE_REASONS.has(listing.reason)) {
-    return `The encrypted secret store at ${listing.storePath} is not retired: it is not a missing or wrong key (${listing.reason.replaceAll("_", " ")}). Run hack doctor for what to fix; nothing was moved.`;
-  }
-  return null;
 }

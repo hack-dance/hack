@@ -485,6 +485,41 @@ function errorCode(error: unknown): string {
 }
 
 /**
+ * Classifies the store file at an explicit `storePath` with an explicit
+ * `keyPath`, read-only (no key is provisioned): `empty` (absent or empty),
+ * `opens` (the available key decrypts it), or `unreadable` with the same
+ * reasons as {@link listFileSecretStoreEntries}. For a caller that has
+ * pinned a real path and must not follow a configured alias again
+ * (HACK-2177).
+ */
+export async function classifyEncryptedStoreAt(input: {
+  readonly storePath: string;
+  readonly keyPath: string;
+}): Promise<
+  | { readonly kind: "empty" }
+  | { readonly kind: "opens" }
+  | {
+      readonly kind: "unreadable";
+      readonly reason: Extract<
+        FileSecretStoreListing,
+        { kind: "unreadable" }
+      >["reason"];
+    }
+> {
+  const read = await readEncryptedStoreText(input.storePath);
+  if (read.kind === "refused" || read.kind === "unreadable") {
+    return { kind: "unreadable", reason: STORE_READ_FAILURE_REASON[read.kind] };
+  }
+  if (read.kind === "absent" || read.text.length === 0) {
+    return { kind: "empty" };
+  }
+  const opened = await openListedStore({ ...input, text: read.text });
+  return "reason" in opened
+    ? { kind: "unreadable", reason: opened.reason }
+    : { kind: "opens" };
+}
+
+/**
  * Whether the file at `storePath` is a Hack encrypted secret store: a
  * regular file (read without following a link) holding the store's JSON
  * envelope. Nothing is decrypted. A configured store path is project

@@ -742,7 +742,7 @@ test("host resolution separates a definite miss from an unknown lookup on both p
   ).toBe("unknown");
 });
 
-test("open warns only for a host that definitely has no address, and never for literals or localhost", async () => {
+test("open reports a definite miss as unresolved, and never for literals or localhost", async () => {
   let lookups = 0;
   const resolveAs = (answer: "resolves" | "no-answer" | "unknown") => () => {
     lookups += 1;
@@ -753,31 +753,20 @@ test("open warns only for a host that definitely has no address, and never for l
     resolve: resolveAs("no-answer"),
     platform: "linux",
   });
-  expect(miss).toContain("app.example.test has no address on this machine");
-  expect(miss).toContain("hack global install");
-  expect(miss).toContain("hack doctor");
+  expect(miss?.dns).toBe("unresolved");
+  expect(miss?.hint).toContain(
+    "app.example.test has no address on this machine"
+  );
+  expect(miss?.hint).toContain("hack global install");
+  expect(miss?.hint).toContain("hack doctor");
   expect(
     await openUnresolvedHostWarning({
       url: "https://app.example.test",
       resolve: resolveAs("resolves"),
-      platform: "linux",
+      platform: "darwin",
+      resolverFile: () => Promise.resolve("absent"),
     })
   ).toBeNull();
-  // Unknown is never reported as a miss off macOS or off .local names.
-  for (const [url, platform] of [
-    ["https://app.example.test", "linux"],
-    ["https://app.example.test", "darwin"],
-    ["https://app.hack.local", "linux"],
-  ] as const) {
-    expect(
-      await openUnresolvedHostWarning({
-        url,
-        resolve: resolveAs("unknown"),
-        platform,
-        resolverFileExists: () => Promise.resolve(false),
-      })
-    ).toBeNull();
-  }
   lookups = 0;
   for (const url of [
     "https://127.0.0.1",
@@ -793,29 +782,45 @@ test("open warns only for a host that definitely has no address, and never for l
   expect(lookups).toBe(0);
 });
 
-test("a .local host with no resolver file on macOS is a miss even when the bounded lookup times out", async () => {
-  // Without /etc/resolver/<suffix> macOS asks multicast DNS and takes about
-  // ten seconds to give up, so the bounded lookup reports unknown. Found on a
-  // machine set up by an earlier version that only resolves the older suffix.
+test("an unknown lookup is never a miss: only a missing Hack resolver on macOS is said, as unconfigured", async () => {
+  const unknown = () => Promise.resolve("unknown" as const);
+  // Second-family review: a slow multicast host (a printer) or a failed
+  // lookup must not be published as a definite miss or blamed on Hack's DNS.
+  for (const [url, platform, file] of [
+    ["https://printer.local", "darwin", "absent"],
+    ["https://app.example.test", "darwin", "absent"],
+    ["https://app.hack.local", "linux", "absent"],
+    ["https://app.hack.local", "darwin", "present"],
+    // The resolver file could not be observed: say nothing.
+    ["https://app.hack.local", "darwin", "unknown"],
+  ] as const) {
+    expect(
+      await openUnresolvedHostWarning({
+        url,
+        resolve: unknown,
+        platform,
+        resolverFile: () => Promise.resolve(file),
+      })
+    ).toBeNull();
+  }
+  // A host under a suffix Hack installs DNS for, with no resolver file for
+  // that suffix: the setup is missing. Said with its uncertainty.
   const asked: string[] = [];
-  const warning = await openUnresolvedHostWarning({
+  const notice = await openUnresolvedHostWarning({
     url: "https://app.hack.local",
-    resolve: () => Promise.resolve("unknown"),
+    resolve: unknown,
     platform: "darwin",
-    resolverFileExists: (domain) => {
+    resolverFile: (domain) => {
       asked.push(domain);
-      return Promise.resolve(false);
+      return Promise.resolve("absent");
     },
   });
-  expect(warning).toContain("app.hack.local has no address on this machine");
-  expect(asked).toEqual(["app.hack.local", "hack.local", "local"]);
-  // A resolver file for any parent domain means the suffix is set up: unknown stays unknown.
-  expect(
-    await openUnresolvedHostWarning({
-      url: "https://app.hack.local",
-      resolve: () => Promise.resolve("unknown"),
-      platform: "darwin",
-      resolverFileExists: (domain) => Promise.resolve(domain === "hack.local"),
-    })
-  ).toBeNull();
+  expect(asked).toEqual(["hack.local"]);
+  expect(notice?.dns).toBe("unconfigured");
+  expect(notice?.hint).toContain(
+    "Hack's DNS for the hack.local suffix is not set up on this Mac"
+  );
+  expect(notice?.hint).toContain("may not open");
+  expect(notice?.hint).not.toContain("has no address");
+  expect(notice?.hint).not.toContain("will not open");
 });

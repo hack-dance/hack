@@ -43,6 +43,10 @@ let failedStartupServices: readonly string[] = [];
  * owner has no terminal, and service output never crosses IPC.
  */
 export function nativeDetachedUpFailedServices(names: readonly string[]): void {
+  // Only a detached owner reports names; a foreground start keeps none.
+  if (!publishFailure) {
+    return;
+  }
   failedStartupServices = [...new Set(names)]
     .filter((name) => FAILURE_SERVICE.test(name))
     .sort()
@@ -244,6 +248,8 @@ export async function runNativeDetachedOwner(opts: {
       send({ kind: "shell-variables", names });
     }
   };
+  // A fresh owner starts with no names from any earlier attempt.
+  failedStartupServices = [];
   publishFailure = async (data) => {
     if (!(ready || stopping)) {
       await send({ kind: "failure", data });

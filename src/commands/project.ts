@@ -10528,7 +10528,7 @@ export async function emitOpenOrigin(opts: {
     process.stdout.write(
       `${JSON.stringify(
         unresolved
-          ? { url: opts.url, dns: "unresolved", hint: unresolved }
+          ? { url: opts.url, dns: unresolved.dns, hint: unresolved.hint }
           : { url: opts.url },
         null,
         2
@@ -10538,7 +10538,7 @@ export async function emitOpenOrigin(opts: {
     return 0;
   }
   if (unresolved) {
-    logger.warn({ message: unresolved });
+    logger.warn({ message: unresolved.hint });
   }
   logger.step({ message: `Opening ${opts.url}` });
   noteBrowserTargetsForLocalNetworkHint([opts.url]);

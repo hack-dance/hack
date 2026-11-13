@@ -54,14 +54,20 @@ direct-container DNS alternative preserves browser fallback; doctor still warns 
 individual failed bindings. An unavailable runtime CA remains a doctor warning rather than
 proof that a listener is foreign.
 
-`hack open` also warns when the selected host has no address on this machine. The URL is
-still printed or opened, because it is the right URL; text output adds one warning, and
-`--json` keeps `url` and adds `"dns": "unresolved"` and a `hint`. This is the usual sign
-that Hack's DNS for that suffix is not set up here, for example on a machine set up by an
-earlier version that only resolves the older suffix: run `hack global install`, or give
-the project a host under a suffix that already resolves with
-`hack config set dev_host <name>.<suffix>`. A lookup that fails or times out is not
-reported as a miss.
+`hack open` also says when DNS for the selected host looks wrong. The URL is still printed
+or opened, because it is the right URL; text output adds one warning, and `--json` keeps
+`url` and adds `dns` and a `hint`:
+
+- `"dns": "unresolved"`: the system resolver definitely has no address for the host.
+- `"dns": "unconfigured"` (macOS): the lookup did not answer in time and the host is under
+  a suffix Hack installs DNS for, but this Mac has no resolver file for that suffix, so
+  the URL may not open.
+
+Either is the usual sign of a machine set up by an earlier version that only resolves the
+older suffix: run `hack global install`, or give the project a host under a suffix that
+already resolves with `hack config set dev_host <name>.<suffix>`. A lookup that fails or
+times out is never reported as unresolved, and hosts outside Hack's own suffixes are left
+alone.
 
 Saved native origins retain their own routing behavior: opening them does not invoke
 the Compose proxy's system resolver, Docker inspections or CA-pinned TLS probe.

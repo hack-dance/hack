@@ -1,7 +1,12 @@
 import { stat } from "node:fs/promises";
 import { createConnection, isIP } from "node:net";
 import { connect } from "node:tls";
-import { LEGACY_SCHEMAS_HOST } from "../constants.ts";
+import {
+  DEFAULT_NEW_PROJECT_TLD,
+  DEFAULT_OAUTH_ALIAS_ROOT,
+  DEFAULT_PROJECT_TLD,
+  LEGACY_SCHEMAS_HOST,
+} from "../constants.ts";
 import {
   type CaddyCaIdentity,
   inspectCaddyCaIdentity,
@@ -337,36 +342,55 @@ export async function hostResolution(opts: {
   }
 }
 
-async function macResolverFileExists(domain: string): Promise<boolean> {
-  return (
-    (await stat(`/etc/resolver/${domain}`).catch(() => null))?.isFile() === true
-  );
+/** Whether a macOS resolver file exists for a domain; "unknown" when that cannot be observed. */
+export type ResolverFileState = "present" | "absent" | "unknown";
+
+async function macResolverFileState(
+  domain: string
+): Promise<ResolverFileState> {
+  try {
+    return (await stat(`/etc/resolver/${domain}`)).isFile()
+      ? "present"
+      : "unknown";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unknown";
+  }
 }
 
-/** True when any parent domain of the hostname has a resolver file. */
-async function hasResolverFile(opts: {
-  readonly hostname: string;
-  readonly exists: (domain: string) => Promise<boolean>;
-}): Promise<boolean> {
-  const labels = opts.hostname.split(".");
-  for (let start = 0; start < labels.length; start += 1) {
-    if (await opts.exists(labels.slice(start).join("."))) {
-      return true;
-    }
-  }
-  return false;
-}
+/** Suffixes whose DNS Hack itself installs (`hack global install`). */
+const HACK_MANAGED_SUFFIXES: readonly string[] = [
+  DEFAULT_NEW_PROJECT_TLD,
+  DEFAULT_PROJECT_TLD,
+  DEFAULT_OAUTH_ALIAS_ROOT,
+];
+
+/** What `hack open` could tell about the selected host's DNS, when it is not fine. */
+export type OpenDnsNotice = {
+  /**
+   * "unresolved": the system resolver definitely has no address.
+   * "unconfigured": the lookup did not answer in time and Hack's own DNS for
+   * this suffix is not installed on this Mac, so the URL may not open.
+   */
+  readonly dns: "unresolved" | "unconfigured";
+  readonly hint: string;
+};
+
+const DNS_FIX =
+  "hack doctor shows the DNS checks, and hack global install sets up Hack's domains (it asks for sudo once). A machine set up by an earlier Hack version may only resolve the older suffix: either run hack global install, or give the project a host under a suffix that already resolves here with hack config set dev_host <name>.<suffix>.";
 
 /**
- * One sentence for a URL whose host has no address on this machine, or null.
- * IP literals, localhost names and non-HTTP schemes are not checked.
+ * A notice for a URL whose host has no address, or whose Hack-managed suffix
+ * has no DNS installed on this Mac; null when there is nothing to say. IP
+ * literals, localhost names and non-HTTP schemes are not checked. A lookup
+ * that fails or times out is never reported as "unresolved".
  */
 export async function openUnresolvedHostWarning(opts: {
   readonly url: string;
   readonly resolve?: (hostname: string) => Promise<HostResolution>;
   readonly platform?: NodeJS.Platform;
-  readonly resolverFileExists?: (domain: string) => Promise<boolean>;
-}): Promise<string | null> {
+  readonly resolverFile?: (domain: string) => Promise<ResolverFileState>;
+}): Promise<OpenDnsNotice | null> {
   const url = new URL(opts.url);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (
@@ -377,27 +401,40 @@ export async function openUnresolvedHostWarning(opts: {
   ) {
     return null;
   }
-  let resolution = await (
+  const resolution = await (
     opts.resolve ?? ((name) => hostResolution({ hostname: name }))
   )(hostname);
-  // On macOS a multi-label .local name with no /etc/resolver file for any
-  // parent domain is asked over multicast DNS, which takes about ten seconds
-  // to give up: the bounded lookup above times out as "unknown". No resolver
-  // file means Hack's DNS for that suffix was never set up on this Mac.
-  if (
-    resolution === "unknown" &&
-    (opts.platform ?? process.platform) === "darwin" &&
-    hostname.endsWith(".local") &&
-    !(await hasResolverFile({
-      hostname,
-      exists: opts.resolverFileExists ?? macResolverFileExists,
-    }))
-  ) {
-    resolution = "no-answer";
+  if (resolution === "resolves") {
+    return null;
   }
-  return resolution === "no-answer"
-    ? `${hostname} has no address on this machine, so the URL will not open. Run hack doctor to see the DNS checks; hack global install sets up Hack's domains (it asks for sudo once). A machine set up by an earlier Hack version may only resolve the older suffix: either run hack global install, or give the project a host under a suffix that already resolves here with hack config set dev_host <name>.<suffix>.`
-    : null;
+  if (resolution === "no-answer") {
+    return {
+      dns: "unresolved",
+      hint: `${hostname} has no address on this machine, so the URL will not open. ${DNS_FIX}`,
+    };
+  }
+  // Unknown stays unknown. The one thing still worth saying: on macOS a name
+  // under a suffix Hack manages, with no resolver file for that suffix, is
+  // asked over multicast DNS and takes about ten seconds to give up, which is
+  // why the bounded lookup did not answer. That is a missing Hack setup, not
+  // proof that the name has no address, and it is said as such. Other .local
+  // names (a printer, a hosts-file entry) are left alone.
+  if ((opts.platform ?? process.platform) !== "darwin") {
+    return null;
+  }
+  const suffix = HACK_MANAGED_SUFFIXES.find((managed) =>
+    hostname.endsWith(`.${managed}`)
+  );
+  if (
+    !suffix ||
+    (await (opts.resolverFile ?? macResolverFileState)(suffix)) !== "absent"
+  ) {
+    return null;
+  }
+  return {
+    dns: "unconfigured",
+    hint: `Hack's DNS for the ${suffix} suffix is not set up on this Mac (no /etc/resolver/${suffix}), and the lookup for ${hostname} did not answer in time, so the URL may not open. ${DNS_FIX}`,
+  };
 }
 
 /**

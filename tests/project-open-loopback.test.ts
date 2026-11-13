@@ -48,28 +48,30 @@ test("native loopback origin bypasses Compose DNS, Docker and CA probes even if 
   }
 });
 
-test("open keeps the URL and adds a DNS hint when the host has no address", async () => {
+test("open keeps the URL and adds the DNS notice; a resolving host keeps the exact earlier JSON", async () => {
   const hint = "app.example.test has no address on this machine";
   const write = spyOn(process.stdout, "write").mockImplementation(() => true);
   try {
-    expect(
-      await emitOpenOrigin({
-        url: "https://app.example.test",
-        json: true,
-        origin: "compose",
-        checkLoopback: async () => null,
-        checkResolution: async () => hint,
-      })
-    ).toBe(0);
-    expect(write).toHaveBeenCalledWith(
-      `${JSON.stringify(
-        { url: "https://app.example.test", dns: "unresolved", hint },
-        null,
-        2
-      )}\n`
-    );
+    for (const dns of ["unresolved", "unconfigured"] as const) {
+      write.mockClear();
+      expect(
+        await emitOpenOrigin({
+          url: "https://app.example.test",
+          json: true,
+          origin: "compose",
+          checkLoopback: async () => null,
+          checkResolution: async () => ({ dns, hint }),
+        })
+      ).toBe(0);
+      expect(write).toHaveBeenCalledWith(
+        `${JSON.stringify(
+          { url: "https://app.example.test", dns, hint },
+          null,
+          2
+        )}\n`
+      );
+    }
     write.mockClear();
-    // A host that resolves keeps the exact earlier JSON shape.
     expect(
       await emitOpenOrigin({
         url: "https://app.example.test",
@@ -79,6 +81,31 @@ test("open keeps the URL and adds a DNS hint when the host has no address", asyn
         checkResolution: async () => null,
       })
     ).toBe(0);
+    expect(write).toHaveBeenCalledWith(
+      `${JSON.stringify({ url: "https://app.example.test" }, null, 2)}\n`
+    );
+  } finally {
+    write.mockRestore();
+  }
+});
+
+test("a native origin with a hostname never runs the DNS check", async () => {
+  const write = spyOn(process.stdout, "write").mockImplementation(() => true);
+  let checks = 0;
+  try {
+    expect(
+      await emitOpenOrigin({
+        url: "https://app.example.test",
+        json: true,
+        origin: "native",
+        checkLoopback: async () => null,
+        checkResolution: async () => {
+          checks += 1;
+          return { dns: "unresolved", hint: "must not be used" };
+        },
+      })
+    ).toBe(0);
+    expect(checks).toBe(0);
     expect(write).toHaveBeenCalledWith(
       `${JSON.stringify({ url: "https://app.example.test" }, null, 2)}\n`
     );

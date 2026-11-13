@@ -93,7 +93,7 @@ export type SecretStoreUsers = {
   /** Registered projects whose store selection could not be checked. */
   readonly unchecked: number;
   /**
-   * How many of the unchecked are registered at a path that is not there.
+   * How many of the unchecked are registered at a path confirmed absent.
    * Still unchecked (an unmounted volume is not "gone"), but the user can
    * clear entries of projects that no longer exist with `hack projects prune`.
    */
@@ -145,7 +145,7 @@ async function storeContexts(opts: {
     const location = await checkoutStoreLocation(checkout.projectDir);
     if (location === null) {
       unchecked += 1;
-      if (!(await checkoutIsThere(checkout.projectDir))) {
+      if ((await checkoutPresence(checkout.projectDir)) === "missing") {
         missing += 1;
       }
       continue;
@@ -173,8 +173,20 @@ async function storeContexts(opts: {
  * moved repo; absent files there are not "unconfigured"), or its selecting
  * config is unsure.
  */
-async function checkoutIsThere(projectDir: string): Promise<boolean> {
-  return (await stat(projectDir).catch(() => null))?.isDirectory() === true;
+/**
+ * "missing" only when the path is confirmed absent. A path that cannot be
+ * observed (permissions, I/O) or is not a directory is "unknown": it may be
+ * a live checkout, so it is never offered for pruning.
+ */
+async function checkoutPresence(
+  projectDir: string
+): Promise<"present" | "missing" | "unknown"> {
+  try {
+    return (await stat(projectDir)).isDirectory() ? "present" : "unknown";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+  }
 }
 
 /**
@@ -190,7 +202,7 @@ export function missingRegisteredProjectsHint(missing: number): string {
 async function checkoutStoreLocation(
   projectDir: string
 ): Promise<Awaited<ReturnType<typeof resolveFileSecretStorePaths>> | null> {
-  if (!(await checkoutIsThere(projectDir))) {
+  if ((await checkoutPresence(projectDir)) !== "present") {
     return null;
   }
   try {

@@ -909,6 +909,39 @@ describe("printed key recovery commands leave nothing git can collect (HACK-2165
     expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual([]);
   });
 
+  for (const [label, override] of [
+    [
+      "a stale GIT_DIR",
+      (root: string) => ({ GIT_DIR: join(root, "gone.git") }),
+    ],
+    [
+      "a discovery ceiling",
+      (root: string) => ({ GIT_CEILING_DIRECTORIES: join(root, "home") }),
+    ],
+    ["a stray GIT_WORK_TREE", (root: string) => ({ GIT_WORK_TREE: root })],
+  ] as const) {
+    test(`rotation finds a home checkout despite ${label} in the shell`, async () => {
+      const box = await sandbox();
+      await git(box.home, ["init", "-q", "-b", "main"]);
+      await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+      const proc = Bun.spawn(["sh", "-c", retiredKeyCopyCommand(KEY_FILE)], {
+        cwd: box.project,
+        env: {
+          ...fixtureGitEnv({ env: { HOME: box.home } }),
+          ...override(box.root),
+        },
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(await proc.exited).not.toBe(0);
+      expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+      expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual(
+        []
+      );
+      expect(await untracked(box.home)).toEqual([]);
+    });
+  }
+
   test("the symlink repair leaves a private regular key and no intermediate copy", async () => {
     const box = await sandbox();
     const target = join(box.root, "elsewhere.key");

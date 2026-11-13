@@ -955,6 +955,9 @@ async function addIgnoreEntry(
     const addition = `${base === "" ? "" : "\n"}# machine-local secrets (hack doctor --fix)\n${fix.entry}\n`;
     await writeTextFileAtomicIfChanged(fix.gitignorePath, base + addition, {
       expectedExisting: current,
+      // Publish onto the entry admitted above, never through a link put there
+      // since (by another user, in a shared directory).
+      noFollowTarget: true,
     });
   }
   // Applied only when git now ignores the file (a later rule may re-include it).

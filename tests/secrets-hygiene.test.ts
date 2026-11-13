@@ -678,3 +678,46 @@ test("an ignore file whose read fails while it is merged keeps its rules", async
   expect(await readFile(ignore, "utf8")).toStartWith(before);
   expect(result.applied + result.skipped).toBe(1);
 });
+
+test("ignore repair publishes onto the admitted file, never through a link swapped in after", async () => {
+  const f = await fixture();
+  const overlay = join(f.projectDir, ".env.qa");
+  await writeFile(overlay, "QA=1\n", { mode: 0o600 });
+  const ignore = join(f.projectDir, ".gitignore");
+  const before = await readFile(ignore, "utf8");
+  // A file outside the project with the same text, so a compare on content
+  // alone would accept it.
+  const outside = join(f.root, "outside.txt");
+  await writeFile(outside, before);
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(findings.map((finding) => finding.fix?.kind)).toEqual(["ignore"]);
+  // The admission read uses a descriptor; the writer's own read of the path
+  // comes after it. Swap the entry for a link at that point, as another user
+  // with write access to a shared directory could.
+  const original = Bun.file;
+  let swapped = false;
+  const swapping = ((path: unknown, ...rest: unknown[]) => {
+    const file = Reflect.apply(original, Bun, [path, ...rest]) as ReturnType<
+      typeof Bun.file
+    >;
+    if (String(path) !== ignore || swapped) {
+      return file;
+    }
+    return Object.assign(Object.create(file), {
+      text: async () => {
+        swapped = true;
+        await rm(ignore);
+        await symlink(outside, ignore);
+        return before;
+      },
+    });
+  }) as typeof Bun.file;
+  Bun.file = swapping;
+  try {
+    await applySecretsHygieneFixes({ findings, report: () => undefined });
+  } finally {
+    Bun.file = original;
+  }
+  expect(swapped).toBe(true);
+  expect(await readFile(outside, "utf8")).toBe(before);
+});

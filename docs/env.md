@@ -70,7 +70,8 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.internal/`
 - `.branch/`
 - `.env`
-- `.env.*` (legacy plaintext overlays such as `.env.qa`)
+- `.env.*` (legacy plaintext overlays such as `.env.qa`; `.env.example`,
+  `.env.sample`, `.env.template` and `.env.dist` remain visible as shared templates)
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
@@ -78,6 +79,11 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `tickets/` (retained only to contain retired machine-local ticket caches during upgrades)
 
 How it is maintained:
+
+Tracked legacy overlays are shared project inputs. `hack doctor --fix` leaves
+their index entries and tracked templates/backups alone. Run
+`hack doctor --migrate-env-config` to preserve overlay values before considering
+removal; committing an automatic index removal would delete teammates' copies.
 
 - created by `hack init` for a new project, and refreshed when you write
   machine-local env overrides (`hack env set --local`, `hack env hydrate`)

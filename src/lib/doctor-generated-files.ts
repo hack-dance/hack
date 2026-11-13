@@ -1,9 +1,10 @@
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
 import {
   type HackDirGitignoreState,
   inspectHackDirGitignore,
+  isExcludedLegacyDotenvName,
 } from "./project-env-config.ts";
 import { exec } from "./shell.ts";
 
@@ -14,11 +15,14 @@ export type TrackedGeneratedFilesInspection = {
   readonly secretKeyTracked: boolean;
   /** Legacy plaintext overlay files git currently offers for addition. */
   readonly unignoredOverlayPaths: readonly string[];
+  /** Shared legacy overlays require migration, never automatic index removal. */
+  readonly trackedOverlayPaths: readonly string[];
 };
 
 /**
- * Git pathspecs covering hack-generated, machine-local files that must never
- * be tracked. Patterns are repo-relative; `projectDirName` is usually
+ * Git pathspecs covering generated files and legacy dotenv copies. Overlays
+ * are reported separately for migration; templates/backups are excluded from
+ * automatic untracking. Patterns are repo-relative; `projectDirName` is usually
  * `.hack`.
  *
  * Intentionally excluded: `<dir>/hack.env.local.yaml` — older repos may track
@@ -67,11 +71,15 @@ export async function inspectTrackedGeneratedFiles(opts: {
     return null;
   }
 
-  const trackedPaths = result.stdout
+  const allTrackedPaths = result.stdout
     .split("\0")
     .map((path) => path.trim())
     .filter((path) => path.length > 0)
     .sort((a, b) => a.localeCompare(b));
+  const trackedOverlayPaths = allTrackedPaths.filter(isLegacyOverlayPath);
+  const trackedPaths = allTrackedPaths.filter(
+    (path) => !isLegacyDotenvCopy(path)
+  );
 
   let unignored: Awaited<ReturnType<typeof exec>>;
   try {
@@ -99,8 +107,25 @@ export async function inspectTrackedGeneratedFiles(opts: {
   return {
     trackedPaths,
     secretKeyTracked: trackedPaths.includes(PROJECT_ENV_KEY_FILENAME),
-    unignoredOverlayPaths: unignored.stdout.split("\0").filter(Boolean).sort(),
+    trackedOverlayPaths,
+    unignoredOverlayPaths: unignored.stdout
+      .split("\0")
+      .filter(isLegacyOverlayPath)
+      .sort(),
   };
+}
+
+/** State remains generated; templates/backups and overlays are not autofix targets. */
+function isLegacyDotenvCopy(path: string): boolean {
+  const name = basename(path);
+  return name.startsWith(".env.") && name !== ".env.state.json";
+}
+
+function isLegacyOverlayPath(path: string): boolean {
+  return (
+    isLegacyDotenvCopy(path) &&
+    !isExcludedLegacyDotenvName(basename(path).slice(".env.".length))
+  );
 }
 
 /**
@@ -114,6 +139,13 @@ export async function untrackGeneratedFiles(opts: {
 }): Promise<{ readonly ok: boolean; readonly error: string | null }> {
   if (opts.paths.length === 0) {
     return { ok: true, error: null };
+  }
+  if (opts.paths.some(isLegacyDotenvCopy)) {
+    return {
+      ok: false,
+      error:
+        "Legacy dotenv overlays, templates and backups are not automatic untracking targets. Migrate shared overlays with hack doctor --migrate-env-config before considering removal.",
+    };
   }
   let result: Awaited<ReturnType<typeof exec>>;
   try {

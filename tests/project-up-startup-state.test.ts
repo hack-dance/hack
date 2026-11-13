@@ -26,6 +26,7 @@ import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const psRows: string[] = [];
+const psSnapshots: string[][] = [];
 const errorMessages: string[] = [];
 const warnMessages: string[] = [];
 const upComposeContents: string[] = [];
@@ -125,7 +126,15 @@ const runtimeBackendMock = await registerScopedModuleMock({
         psEnvs.push(withoutComposeEnvReferences(opts.env));
         return {
           exitCode: 0,
-          stdout: psRows.join("\n"),
+          stdout: (psSnapshots.shift() ?? psRows)
+            .map((row) => {
+              const entry = JSON.parse(row);
+              return JSON.stringify({
+                ID: `container-${entry.Service}`,
+                ...entry,
+              });
+            })
+            .join("\n"),
           stderr: "",
         };
       },
@@ -188,6 +197,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   psRows.length = 0;
+  psSnapshots.length = 0;
   errorMessages.length = 0;
   warnMessages.length = 0;
   upEnvs.length = 0;
@@ -232,6 +242,7 @@ afterAll(() => {
 
 test("up returns failure when compose reports a created service after exit zero", async () => {
   const projectRoot = await createProject();
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   psRows.push(
     JSON.stringify({ Service: "api", State: "created", ExitCode: 0 })
   );
@@ -245,6 +256,7 @@ test("up returns failure when compose reports a created service after exit zero"
 });
 
 test("up returns failure when compose reports no services after exit zero", async () => {
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   const projectRoot = await createProject();
 
   const exitCode = await runDetachedUp({ projectRoot });
@@ -254,6 +266,48 @@ test("up returns failure when compose reports no services after exit zero", asyn
     "Startup incomplete for startup-state-test: Compose reported no services after startup"
   );
 });
+
+for (const sequence of [
+  ["created", "running", "exited"],
+  ["created", "exited", "exited"],
+  ["exited", "exited"],
+  ["old-exited", "created", "exited", "exited"],
+  ["old-exited", "created", "failed", "failed"],
+]) {
+  test(`up settles Docker one-shot observations: ${sequence.join(" -> ")}`, async () => {
+    const projectRoot = await createProject();
+    const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
+    const document = YAML.parse(await readFile(composeFile, "utf8"));
+    document.services.api.restart = "no";
+    await writeFile(composeFile, YAML.stringify(document));
+    for (const state of sequence) {
+      psSnapshots.push([
+        JSON.stringify({
+          ID:
+            state === "old-exited"
+              ? "previous-container"
+              : "replacement-container",
+          Service: "api",
+          State:
+            state === "old-exited" || state === "failed" ? "exited" : state,
+          ExitCode: state === "failed" ? 17 : 0,
+        }),
+      ]);
+    }
+    const final = sequence.at(-1);
+    psRows.push(
+      JSON.stringify({
+        ID: "replacement-container",
+        Service: "api",
+        State: "exited",
+        ExitCode: final === "failed" ? 17 : 0,
+      })
+    );
+    const exitCode = await runDetachedUp({ projectRoot });
+    expect(exitCode).toBe(final === "failed" ? 1 : 0);
+    expect(psEnvs.length).toBeGreaterThanOrEqual(2);
+  });
+}
 
 test("up accepts running services and successful Compose completion gates", async () => {
   const projectRoot = await createProject();
@@ -305,7 +359,7 @@ test("up accepts profiles delivered through COMPOSE_PROFILES", async () => {
   expect(upEnvs).toEqual([
     { COMPOSE_PROFILES: "benchmark,diagnostics", SHARED_MODE: "compose" },
   ]);
-  expect(psEnvs).toEqual(upEnvs);
+  expect(psEnvs).toEqual([...upEnvs, ...upEnvs]);
 });
 
 test("up accepts wildcard COMPOSE_PROFILES", async () => {
@@ -373,6 +427,7 @@ test("registry credentials must exist in the bootstrap service scope", async () 
 
 test("restart returns failure when compose reports a created service after exit zero", async () => {
   const projectRoot = await createProject();
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   psRows.push(
     JSON.stringify({ Service: "api", State: "created", ExitCode: 0 })
   );
@@ -411,6 +466,7 @@ test("targeted restart preserves delivered Compose environment", async () => {
   expect(errorMessages).toEqual([]);
   expect(upServiceSelections).toEqual([["migrate"]]);
   expect(psEnvs).toEqual([
+    { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
     { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
   ]);
 });
@@ -513,7 +569,9 @@ test("failed targeted restart does not record its service's env as applied", asy
 });
 
 test("up --json emits E_STARTUP_INCOMPLETE for a created service", async () => {
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   const projectRoot = await createProject();
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   psRows.push(
     JSON.stringify({ Service: "api", State: "created", ExitCode: 0 })
   );

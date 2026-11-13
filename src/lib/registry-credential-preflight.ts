@@ -140,10 +140,11 @@ export async function discoverSuccessfulCompletionServices(opts: {
       .filter(
         ([, value]) =>
           isRecord(value) &&
-          hasComposeLabel({
-            labels: value.labels,
-            name: "hack.service.one-shot",
-          })
+          (value.restart === "no" ||
+            hasComposeLabel({
+              labels: value.labels,
+              name: "hack.service.one-shot",
+            }))
       )
       .map(([service]) => service);
     const activeProfiles = new Set(opts.activeProfiles ?? []);

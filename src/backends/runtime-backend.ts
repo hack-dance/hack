@@ -66,6 +66,8 @@ export interface RuntimeDownOptions extends RuntimeBaseOptions {}
 
 export interface RuntimePsOptions extends RuntimeBaseOptions {
   readonly all?: boolean;
+  /** Remaining observation budget; never extends the detached start deadline. */
+  readonly timeoutMs?: number;
 }
 
 export interface RuntimeRunOptions extends RuntimeBaseOptions {
@@ -313,7 +315,10 @@ export const composeRuntimeBackend: RuntimeBackend = {
       cwd: opts.cwd,
       stdin: "ignore",
       env: opts.env,
-      timeoutMs: DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS,
+      timeoutMs: Math.min(
+        opts.timeoutMs ?? DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS,
+        DEFAULT_COMPOSE_INSPECTION_TIMEOUT_MS
+      ),
     });
   },
   async ps(opts) {

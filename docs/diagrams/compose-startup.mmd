@@ -1,0 +1,12 @@
+stateDiagram-v2
+    direction TB
+    [*] --> Observe
+    Observe --> Pending: created or missing
+    Observe --> Corroborate: running or exited
+    Pending --> Observe: budget remains
+    Pending --> Incomplete: budget exhausted
+    Corroborate --> Observe: identity changed
+    Corroborate --> Complete: same IDs, running or recognized exit 0
+    Corroborate --> Incomplete: same IDs, failed state
+    Complete --> [*]
+    Incomplete --> [*]

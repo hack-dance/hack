@@ -1,0 +1,32 @@
+---
+title: Compose lifecycle retirement
+---
+stateDiagram-v2
+  direction TB
+  [*] --> attached
+  attached --> captured : Compose exits
+  captured --> signalled : owned mux stop
+  signalled --> commandsAbsent : command groups absent
+  signalled --> escalated : grace expires
+  escalated --> commandsAbsent : absence confirmed
+  escalated --> retained : deadline or probe error
+  commandsAbsent --> wrappersAbsent : wrapper groups absent
+  commandsAbsent --> wrapperEscalated : grace expires
+  wrapperEscalated --> wrappersAbsent : absence confirmed
+  wrapperEscalated --> retained : deadline or probe error
+  wrappersAbsent --> retired : remove owned record
+  retired --> [*]
+  note right of retained
+    INV unknown is retained
+    Report unconfirmed retirement
+    Keep dependent helpers
+  end note
+  note right of signalled
+    Mux acknowledgement is not group exit
+    FIFO EOF is not group absence
+  end note
+  classDef live stroke-width:1.6px
+  class attached live
+  class signalled,escalated,commandsAbsent,wrapperEscalated wait
+  class wrappersAbsent,retired ok
+  class retained fail

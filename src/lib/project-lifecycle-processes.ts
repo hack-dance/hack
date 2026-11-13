@@ -186,6 +186,7 @@ export function resolveLifecycleStopProcessGroupIds(opts: {
 export async function readProcessSnapshot(): Promise<ProcessSnapshotRow[]> {
   const result = await exec(["ps", "-axo", "pid=,ppid=,pgid="], {
     stdin: "ignore",
+    timeoutMs: 1000,
   });
   if (result.exitCode !== 0) {
     return [];
@@ -197,6 +198,14 @@ export async function readProcessSnapshot(): Promise<ProcessSnapshotRow[]> {
 export async function terminateLifecycleProcessGroups(opts: {
   readonly processGroupIds: readonly number[];
   readonly assertFresh?: () => Promise<void>;
+  /** The mux already delivered HUP; give its wrapper time to reap children. */
+  readonly alreadySignalled?: boolean;
+  /** OS/time boundary, injectable for deterministic settlement tests. */
+  readonly runtime?: {
+    readonly signal: (group: number, signal: NodeJS.Signals | 0) => void;
+    readonly now: () => number;
+    readonly sleep: (ms: number) => Promise<void>;
+  };
 }): Promise<void> {
   const groups = [...new Set(opts.processGroupIds)].filter(
     (processGroupId) => processGroupId > 1
@@ -205,28 +214,110 @@ export async function terminateLifecycleProcessGroups(opts: {
     return;
   }
 
-  for (const processGroupId of groups) {
-    await opts.assertFresh?.();
+  const runtime = opts.runtime ?? {
+    signal: (group: number, signal: NodeJS.Signals | 0) => {
+      process.kill(-group, signal);
+    },
+    now: () => performance.now(),
+    sleep: async (ms: number) => {
+      await Bun.sleep(ms);
+    },
+  };
+  const signal = (group: number, name: NodeJS.Signals | 0): boolean => {
     try {
-      process.kill(-processGroupId, "SIGTERM");
-    } catch {
-      // Ignore groups that already exited between snapshot and shutdown.
+      runtime.signal(group, name);
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+        return false;
+      }
+      throw new Error(
+        `Could not confirm lifecycle process group ${group} stopped`,
+        { cause: error }
+      );
+    }
+  };
+  const wait = async (
+    pending: readonly number[],
+    timeoutMs: number
+  ): Promise<number[]> => {
+    const deadline = runtime.now() + timeoutMs;
+    let remaining = pending.filter((group) => signal(group, 0));
+    while (remaining.length > 0 && runtime.now() < deadline) {
+      await runtime.sleep(Math.min(25, deadline - runtime.now()));
+      remaining = remaining.filter((group) => signal(group, 0));
+    }
+    return remaining;
+  };
+  if (!opts.alreadySignalled) {
+    for (const group of groups) {
+      await opts.assertFresh?.();
+      signal(group, "SIGTERM");
     }
   }
-
-  await Bun.sleep(500);
-
-  for (const processGroupId of groups) {
+  const remaining = await wait(groups, 500);
+  for (const group of remaining) {
     await opts.assertFresh?.();
-    try {
-      process.kill(-processGroupId, 0);
-    } catch {
-      continue;
-    }
-    try {
-      process.kill(-processGroupId, "SIGKILL");
-    } catch {
-      // Ignore groups that exited after the SIGTERM grace period.
-    }
+    signal(group, "SIGKILL");
   }
+  const unconfirmed = await wait(remaining, 2000);
+  if (unconfirmed.length > 0) {
+    throw new Error(
+      `Could not confirm lifecycle process groups stopped after SIGKILL: ${unconfirmed.join(", ")}`
+    );
+  }
+}
+
+type LifecycleSessionRetirementOptions = {
+  readonly processes: readonly { readonly panePid?: number }[];
+  readonly stopSession: () => Promise<boolean>;
+};
+
+/**
+ * Capture owned descendants before removing their mux parent. A successful mux
+ * kill is signal delivery, not child exit. Keep the FIFO wrapper alive to reap
+ * the detached command before escalating against the wrapper's own group. Keep
+ * the captured groups across a retry if the mux exited but retirement failed.
+ */
+export function createLifecycleSessionRetirement(): (
+  opts: LifecycleSessionRetirementOptions
+) => Promise<boolean> {
+  let captured: { groups: number[]; paneGroups: Set<number> } | undefined;
+  return async (opts) => {
+    if (!captured) {
+      const roots = opts.processes.flatMap((process) =>
+        process.panePid ? [process.panePid] : []
+      );
+      const snapshot = roots.length > 0 ? await readProcessSnapshot() : [];
+      if (roots.length > 0 && snapshot.length === 0) {
+        throw new Error(
+          "Could not inspect lifecycle process groups before session teardown"
+        );
+      }
+      const groups = collectDescendantProcessGroupIds({
+        snapshot,
+        rootPids: roots,
+      });
+      const paneGroups = new Set(
+        snapshot
+          .filter((row) => roots.includes(row.pid))
+          .map((row) => row.processGroupId)
+      );
+      captured = { groups, paneGroups };
+    }
+    if (!(await opts.stopSession())) {
+      captured = undefined;
+      return false;
+    }
+    const { groups, paneGroups } = captured;
+    await terminateLifecycleProcessGroups({
+      processGroupIds: groups.filter((group) => !paneGroups.has(group)),
+      alreadySignalled: true,
+    });
+    await terminateLifecycleProcessGroups({
+      processGroupIds: groups.filter((group) => paneGroups.has(group)),
+      alreadySignalled: true,
+    });
+    return true;
+  };
 }

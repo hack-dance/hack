@@ -18,6 +18,7 @@ import {
   LifecycleSessionRetainedError,
   stopLifecycleProcessController,
 } from "../src/lib/project-lifecycle-controller.ts";
+import { readProcessSnapshot } from "../src/lib/project-lifecycle-processes.ts";
 import { createSharedHelperSessionOwnership } from "../src/lib/project-shared-helpers.ts";
 import {
   type MuxBackend,
@@ -223,6 +224,9 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
     readonly env?: Readonly<Record<string, string>>;
     /** Receives the cleanup the controller registers for SIGINT/SIGTERM. */
     readonly onSignalCleanup?: (cleanup: () => Promise<unknown>) => void;
+    readonly retireSession?: Parameters<
+      typeof createLifecycleProcessController
+    >[0]["retireSession"];
   }) =>
     createLifecycleProcessController({
       mux: resolvedMux,
@@ -242,6 +246,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
         opts.onSignalCleanup?.(cleanup);
         return { dispose: () => undefined };
       },
+      ...(opts.retireSession ? { retireSession: opts.retireSession } : {}),
       ...(opts.prepareLaunch
         ? {
             prepareLaunch: async () => {
@@ -286,6 +291,95 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
 }
 
 const PROCESS = { name: "helper-client", command: "sleep 600" };
+
+test("foreground operation cleanup awaits group retirement before removing ownership or resolving", async () => {
+  const { controller, entries, mux } = await fixture();
+  let release = () => {};
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered = false;
+  let settled = false;
+  const starter = controller({
+    sessionOwnership: undefined,
+    retireSession: async ({ stopSession }) => {
+      expect(await stopSession()).toBe(true);
+      entered = true;
+      await blocked;
+      return true;
+    },
+  });
+  await starter.startMany({ processes: [PROCESS] });
+  await starter.finalize();
+  const cleanup = starter
+    .getOperationCleanup()?.()
+    .then(() => {
+      settled = true;
+    });
+  try {
+    const deadline = performance.now() + 1000;
+    while (!(entered || settled) && performance.now() < deadline) {
+      await Bun.sleep(5);
+    }
+    expect(entered).toBe(true);
+    expect(mux.sessions.has(SESSION)).toBe(false);
+    expect(settled).toBe(false);
+    expect(await entries()).toHaveLength(1);
+  } finally {
+    release();
+    await cleanup;
+  }
+  expect(settled).toBe(true);
+  expect(await entries()).toEqual([]);
+});
+
+test("unconfirmed foreground group retirement keeps ownership and helper retention", async () => {
+  const { controller, entries } = await fixture();
+  const starter = controller({
+    sessionOwnership: undefined,
+    retireSession: async ({ stopSession }) => {
+      expect(await stopSession()).toBe(true);
+      throw new Error("synthetic-private-backend-detail");
+    },
+  });
+  setLoggerBackendOverride({ backend: "console" });
+  await starter.startMany({ processes: [PROCESS] });
+  await starter.finalize();
+  expect(await starter.getOperationCleanup()?.()).toBe("session-retained");
+  expect(await entries()).toHaveLength(1);
+});
+
+test("a missing mux cannot erase a retained record while a recorded group exists", async () => {
+  const { controller, entries, mux, projectDir, stop } = await fixture();
+  const starter = controller({ sessionOwnership: undefined });
+  await starter.startMany({ processes: [PROCESS] });
+  await starter.finalize();
+  const entry = (await entries())[0];
+  expect(entry).toBeDefined();
+  const group = (await readProcessSnapshot()).find(
+    (row) => row.pid === process.pid
+  )?.processGroupId;
+  expect(group).toBeDefined();
+  if (!(entry && group)) {
+    throw new Error("fixture ownership unavailable");
+  }
+  await upsertLifecycleStateEntry({
+    projectDir,
+    entry: {
+      ...entry,
+      processes: entry.processes.map((process) => ({
+        ...process,
+        processGroupId: group,
+      })),
+    },
+  });
+  mux.sessions.delete(SESSION);
+  await expect(stop()).rejects.toThrow(
+    "recorded process-group retirement is unconfirmed"
+  );
+  expect(await entries()).toHaveLength(1);
+  expect(mux.killed).toEqual([]);
+});
 
 test("a failed session epoch record stops the created session before removing its entry", async () => {
   const { mux, ownership, controller, entries } = await fixture();

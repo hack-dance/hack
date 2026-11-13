@@ -32,7 +32,14 @@ export const composeForegroundSignalScenario: Scenario = {
       const fixture = await createMonorepoFixture({
         parentDir: ctx.tempRoot,
         withHackConfig: true,
-        lifecycle: { disableInternal: true, persistentUpBefore },
+        lifecycle: {
+          disableInternal: true,
+          persistentUpBefore,
+          // A cooperative writer can take time to exit after TERM. Keep that
+          // interval visible so mux acknowledgement cannot masquerade as exit.
+          persistentUpBeforeCommand:
+            "bun -e 'process.on(\"SIGTERM\", () => setTimeout(() => process.exit(0), 1000)); setInterval(() => {}, 60000)'",
+        },
       });
       const service = {
         image: "alpine:3.20",
@@ -233,10 +240,23 @@ async function expectLifecycleProcessGone(opts: {
       groupAbsent =
         error instanceof Error && "code" in error && error.code === "ESRCH";
     }
+    let members = "";
+    if (!groupAbsent) {
+      const snapshot = await runCommand({
+        argv: ["ps", "-axo", "pid=,ppid=,pgid=,stat=,comm="],
+        cwd: opts.cwd,
+        timeoutMs: 1000,
+      });
+      members = snapshot.stdout
+        .split("\n")
+        .filter(
+          (row) => row.trim().split(/\s+/)[2] === String(opts.processGroup)
+        )
+        .join("\n");
+    }
     expect({
       that: groupAbsent,
-      message:
-        "persistent lifecycle command process group must be gone before CLI exit",
+      message: `persistent lifecycle command process group must be gone before CLI exit; pgid=${opts.processGroup}; members:\n${members}`,
     });
   }
 }

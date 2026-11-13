@@ -13,6 +13,27 @@ Repeated interrupts during lifecycle cleanup wait for that cleanup to finish.
 An interrupted foreground start reports cancellation rather than a Compose startup
 failure. `hack up --json` uses detached startup.
 
+For attached Compose, `lifecycle.up.after` runs only after `docker compose up`
+returns successfully. Container readiness does not release that wait, so a
+long-running foreground session does not run `up.after` while attached. Ctrl-C
+returns 130 and skips it. Ctrl-C also does not dispatch `lifecycle.down.before`
+or `down.after`; use explicit `hack down` or `hack restart` for those hooks.
+This ordering is inherited from v4.3.0. The native backend has its own documented
+hook contract.
+
+On foreground cleanup, Hack captures the owned lifecycle process groups before
+stopping their mux session. It waits for the detached commands to disappear before
+retiring the FIFO wrapper and its reader. Each phase allows 500 ms for graceful
+exit, escalates surviving groups once with SIGKILL, then waits up to 2 seconds for
+absence (at most 5 seconds across both phases, excluding the bounded mux command).
+Signal delivery and FIFO EOF alone do not confirm group exit. If confirmation
+fails, Hack reports it and retains the ownership record and dependent helpers;
+it does not silently report completed cleanup.
+
+![Foreground lifecycle retirement](diagrams/compose-lifecycle-retirement.svg)
+
+[Diagram source](diagrams/compose-lifecycle-retirement.mmd).
+
 You can also use a shorthand `startup` array for common `hack up` startup flows.
 
 For project-wide `up` and `restart`, Hack resolves hook environment and checks registry

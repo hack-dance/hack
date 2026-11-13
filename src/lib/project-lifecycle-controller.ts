@@ -30,6 +30,7 @@ import {
   sanitizeBranchSlug,
 } from "./project.ts";
 import {
+  createLifecycleSessionRetirement,
   readProcessSnapshot,
   resolveLifecycleProcessGroupIdsForTmuxState,
   resolveLifecycleStopProcessGroupIds,
@@ -256,6 +257,8 @@ export function createLifecycleProcessController(opts: {
    * server may still apply the command later (see runMuxCommand).
    */
   readonly muxCommandTimeoutMs?: number;
+  /** Process retirement boundary; must confirm groups before state removal. */
+  readonly retireSession?: ReturnType<typeof createLifecycleSessionRetirement>;
 }): {
   readonly sessionName: string;
   startFromCommand: (opts: {
@@ -277,6 +280,8 @@ export function createLifecycleProcessController(opts: {
     branch: opts.branch,
   });
   const startedProcesses: StartedLifecycleProcess[] = [];
+  const retireSession =
+    opts.retireSession ?? createLifecycleSessionRetirement();
   let backendName: MuxBackendName | null = null;
   let sessionReady = false;
   let sessionDispositionResolved = false;
@@ -820,19 +825,30 @@ export function createLifecycleProcessController(opts: {
       return undefined;
     }
     const backend = (await opts.mux()).backends.get(backendName);
-    const stopped = backend?.available
-      ? await killLifecycleSessionWithOwnership({
-          backend,
-          sessionName,
-          ownershipToken: createdOwnershipToken,
-        }).catch(() => false)
-      : false;
+    let stopped = false;
+    let failure = "";
+    if (backend?.available) {
+      const ownershipToken = createdOwnershipToken;
+      try {
+        stopped = await retireSession({
+          processes: startedProcesses,
+          stopSession: () =>
+            killLifecycleSessionWithOwnership({
+              backend,
+              sessionName,
+              ownershipToken,
+            }),
+        });
+      } catch {
+        failure = "Lifecycle process-group retirement could not be confirmed.";
+      }
+    }
     if (!stopped) {
       // The session may still run: keep its ownership entry (and this
       // operation's token) so a later abort, up or hack down can still prove
       // ownership and reclaim it. Removing it would orphan the session.
       logger.warn({
-        message: `Could not confirm that lifecycle session ${sessionName} stopped; kept its ownership record. Run hack down to stop it.`,
+        message: `Could not confirm that lifecycle session ${sessionName} stopped; kept its ownership record. Run hack down to stop it.${failure ? ` ${failure}` : ""}`,
       });
       return LIFECYCLE_SESSION_RETAINED;
     }
@@ -1121,6 +1137,9 @@ export async function stopLifecycleProcessController(opts: {
   }
 
   const matchedLiveSession = inspection.classification !== "absent";
+  if (!matchedLiveSession) {
+    await assertAbsentSessionGroupsRetired({ entry: lifecycleEntry });
+  }
   await opts.assertFresh?.();
   if (matchedLiveSession && backend.name === "tmux") {
     await interruptLifecycleTmuxProcesses({
@@ -1165,6 +1184,29 @@ export async function stopLifecycleProcessController(opts: {
       projectDir: opts.project.projectDir,
       composeProject: opts.composeProject,
     });
+  }
+}
+
+/** Missing mux state grants no authority to kill a possibly reused group ID. */
+async function assertAbsentSessionGroupsRetired(opts: {
+  readonly entry: LifecycleStateEntry;
+}): Promise<void> {
+  const recordedGroups = new Set(
+    opts.entry.processes.flatMap((process) =>
+      process.processGroupId ? [process.processGroupId] : []
+    )
+  );
+  if (recordedGroups.size === 0) {
+    return;
+  }
+  const snapshot = await readProcessSnapshot();
+  if (
+    snapshot.length === 0 ||
+    snapshot.some((row) => recordedGroups.has(row.processGroupId))
+  ) {
+    throw new Error(
+      "Lifecycle mux session is absent but recorded process-group retirement is unconfirmed; kept ownership state. Inspect the recorded groups before retrying cleanup."
+    );
   }
 }
 

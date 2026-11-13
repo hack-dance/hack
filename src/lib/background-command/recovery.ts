@@ -268,6 +268,12 @@ async function recoverLocked(
   }
   const events = await reconcileTail(opts.paths, opts.tailIo);
   if (endedEvent(events)) {
+    // Tail repair may have just published the dead supervisor's end: its
+    // takeover still cuts output nobody scanned, without any new record
+    // (an ended journal takes no more events).
+    if (needsAtRestScrub(opts.meta)) {
+      await dropUnscannedOutput({ paths: opts.paths, events });
+    }
     return events;
   }
   const writer = new JournalWriter(
@@ -396,7 +402,10 @@ export async function cutUnscannedOutput(opts: {
       event.type === "command.output_truncated" &&
       event.payload.reason === "redaction_unavailable"
   );
-  if (dropped && !marked) {
+  // A cut recorded only by its marker (the event's append failed, or the
+  // process died after the cut) gets its public event now.
+  const cut = dropped || (await outputWasCut(opts.paths));
+  if (cut && !marked) {
     await opts.writer
       .write("command.output_truncated", {
         reason: "redaction_unavailable",
@@ -410,12 +419,7 @@ export async function cutUnscannedOutput(opts: {
         }
       });
   }
-  return (
-    dropped ||
-    marked ||
-    emittedOffsets(opts.events).truncated ||
-    (await outputWasCut(opts.paths))
-  );
+  return cut || marked || emittedOffsets(opts.events).truncated;
 }
 
 /** Full capture with values to redact: unscanned output must not stay on disk. */
@@ -438,7 +442,12 @@ export async function dropUnscannedOutput(opts: {
    */
   readonly beforeCut?: () => Promise<void>;
 }): Promise<boolean> {
-  const offsets = emittedOffsets(opts.events);
+  // Only output the supervisor redacted counts: output an older Hack
+  // announced as `unsupervised` was never scanned and is cut too (reads
+  // already withhold it when there are values to redact).
+  const offsets = emittedOffsets(
+    opts.events.filter((event) => event.payload.unsupervised !== true)
+  );
   let dropped = false;
   for (const stream of ["stdout", "stderr"] as const) {
     const handle = await open(

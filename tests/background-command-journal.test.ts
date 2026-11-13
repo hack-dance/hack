@@ -1003,6 +1003,120 @@ describe("review regressions", () => {
     expect(ended.at(-1)?.payload.truncated).toBe(true);
   });
 
+  test("an interrupted cut publishes its redaction_unavailable event at the next takeover", async () => {
+    const { meta, paths } = await acceptCommand({
+      input: input({ redaction: { values: 1 } }),
+      root,
+    });
+    const owner = {
+      pid: 231_001,
+      birth: "o",
+      processGroupId: 231_001,
+      sessionId: 231_001,
+      newSession: true,
+    };
+    const child = { pid: 231_002, birth: "c", processGroupId: 231_002 };
+    await writeFile(paths.owner, JSON.stringify(owner), { mode: 0o600 });
+    await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+    await writeFile(paths.stdout, "unscanned\n", { mode: 0o600 });
+    const childOnly = fakeObserve([child]);
+    // First takeover: cut and marker placed, the event append fails.
+    await recoverLostOwner({
+      paths,
+      meta,
+      observe: childOnly,
+      append: async (path: string, line: string) => {
+        if (line.includes('"command.output_truncated"')) {
+          throw Object.assign(new Error("disk full"), { code: "EDQUOT" });
+        }
+        await writeFile(path, line, { flag: "a" });
+      },
+    });
+    // Next takeover, nothing more to cut: the event is published now and a
+    // public read shows it.
+    await recoverLostOwner({ paths, meta, observe: childOnly });
+    const journal = await loadJournal({ commandId: meta.commandId, root });
+    const read = await readCommandEvents({
+      journal,
+      waitMs: 0,
+      maxBytes: 16_384,
+      observe: childOnly,
+    });
+    const marker = read.events.filter(
+      (event) => event.type === "command.output_truncated"
+    );
+    expect(marker).toHaveLength(1);
+    expect(marker[0]?.payload.reason).toBe("redaction_unavailable");
+  });
+
+  test("a takeover that repairs an unterminated final record still cuts the raw tail, adding nothing", async () => {
+    const { meta, paths } = await acceptCommand({
+      input: input({ redaction: { values: 1 } }),
+      root,
+    });
+    await writeFile(
+      paths.owner,
+      JSON.stringify({
+        pid: 233_001,
+        birth: "o",
+        processGroupId: 233_001,
+        sessionId: 233_001,
+        newSession: true,
+      }),
+      { mode: 0o600 }
+    );
+    await writeFile(paths.stdout, "seen\nraw tail\n", { mode: 0o600 });
+    const writer = new JournalWriter(paths, meta, 1);
+    await writer.write("command.output", {
+      stream: "stdout",
+      offset: 0,
+      length: 5,
+    });
+    const ended = buildEnvelope({
+      meta,
+      seq: 3,
+      type: "command.ended",
+      payload: { outcome: "succeeded", exitCode: 0 },
+    });
+    // The supervisor died after the JSON and before its newline.
+    await writeFile(paths.events, JSON.stringify(ended), { flag: "a" });
+    const events = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+    });
+    expect(events.map((event) => event.seq)).toEqual([1, 2, 3]);
+    expect(events.at(-1)).toEqual(ended);
+    expect(await readFile(paths.stdout, "utf8")).toBe("seen\n");
+  });
+
+  test("output an older Hack announced as unsupervised is cut too when there were values to redact", async () => {
+    const { meta, paths } = await acceptCommand({
+      input: input({ redaction: { values: 1 } }),
+      root,
+    });
+    const owner = {
+      pid: 232_001,
+      birth: "o",
+      processGroupId: 232_001,
+      sessionId: 232_001,
+      newSession: true,
+    };
+    const child = { pid: 232_002, birth: "c", processGroupId: 232_002 };
+    await writeFile(paths.owner, JSON.stringify(owner), { mode: 0o600 });
+    await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+    await writeFile(paths.stdout, "never scanned\n", { mode: 0o600 });
+    // An earlier version announced it without redacting.
+    await new JournalWriter(paths, meta, 1).write("command.output", {
+      stream: "stdout",
+      offset: 0,
+      length: 14,
+      unsupervised: true,
+    });
+    await recoverLostOwner({ paths, meta, observe: fakeObserve([child]) });
+    expect((await stat(paths.stdout)).size).toBe(0);
+  });
+
   test("with no values to redact, a reader announces an orphan's output unsupervised and leaves it on disk", async () => {
     const { meta, paths } = await acceptCommand({ input: input(), root });
     const child = { pid: 210_002, birth: "c", processGroupId: 210_002 };

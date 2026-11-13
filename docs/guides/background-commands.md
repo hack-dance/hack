@@ -348,9 +348,11 @@ What the stored files (at rest) hold:
   "redaction_unavailable"`; until one of those runs it is on disk unredacted.
   Bytes a left-over process appends after the end are cut at the next sweep.
   For a command with no values to redact the output is kept and announced as
-  `unsupervised`. Journals written before this behaviour still
-  withhold such output from reads with `withheld: "redaction_unavailable"`,
-  but keep it on disk until their retention ends.
+  `unsupervised`. Output that an earlier Hack version (or an older Hack
+  process still running on the same Hack home) announced as `unsupervised`
+  for a command with values to redact is withheld from reads with
+  `withheld: "redaction_unavailable"` and cut from disk at the next takeover
+  or sweep, like any other unscanned output.
 - **Native backend:** nothing is redacted, in reads or at rest (see below).
 
 - Full capture supports at most 1,024 distinct values to redact (values of

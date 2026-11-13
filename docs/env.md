@@ -628,7 +628,7 @@ access. Treat explicit reads as plaintext sinks.
   legacy compatibility copies or make ordinary config entries secret by itself.
 
 The existing `env set KEY value` path can still replace an encrypted entry with
-plaintext when `--secret` is omitted; [HACK-2173](https://linear.app/hackdance/issue/HACK-2173)
+plaintext when `--secret` is omitted; HACK-2173
 tracks that follow-up. Use `--secret --value-stdin` when updating secrets.
 
 Read one value explicitly:

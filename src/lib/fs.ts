@@ -430,12 +430,11 @@ export async function writeTextFileAtomicIfChanged(
     throw new AtomicWriteConflictError();
   }
   if (existing.kind === "existing" && existing.text === content) {
-    if (options.tightenExisting === true && (existing.mode & 0o077) !== 0) {
-      await tightenUnchangedTarget({
-        path: absolutePath,
-        validatePath: options.validatePath,
-      });
-    }
+    await tightenUnchangedTarget({
+      path: absolutePath,
+      existing,
+      options,
+    });
     return { changed: false };
   }
   const target =
@@ -469,11 +468,7 @@ export async function writeTextFileAtomicIfChanged(
     if (existing.kind === "existing") {
       // chown can clear set-id bits, so the mode is applied after it.
       await preserveOwnership({ file, existing, path: absolutePath });
-      await file.chmod(
-        options.tightenExisting === true
-          ? existing.mode & ~0o077
-          : existing.mode
-      );
+      await file.chmod(replacementMode({ existing, options }));
     }
     await file.writeFile(content, "utf8");
     await file.sync();
@@ -502,6 +497,16 @@ export async function writeTextFileAtomicIfChanged(
   return { changed: true };
 }
 
+/** The mode a replacement of an existing target gets (see `tightenExisting`). */
+function replacementMode(opts: {
+  readonly existing: { readonly mode: number };
+  readonly options: { readonly tightenExisting?: boolean };
+}): number {
+  return opts.options.tightenExisting === true
+    ? opts.existing.mode & ~0o077
+    : opts.existing.mode;
+}
+
 /**
  * `tightenExisting` for a write that changes nothing: drops the group and
  * other bits of the resolved target in place, through a no-follow handle on
@@ -509,10 +514,20 @@ export async function writeTextFileAtomicIfChanged(
  */
 async function tightenUnchangedTarget(opts: {
   readonly path: string;
-  readonly validatePath?: (path: string) => Promise<void>;
+  readonly existing: { readonly mode: number };
+  readonly options: {
+    readonly tightenExisting?: boolean;
+    readonly validatePath?: (path: string) => Promise<void>;
+  };
 }): Promise<void> {
+  if (
+    opts.options.tightenExisting !== true ||
+    (opts.existing.mode & 0o077) === 0
+  ) {
+    return;
+  }
   const target = await realpath(opts.path);
-  await opts.validatePath?.(target);
+  await opts.options.validatePath?.(target);
   const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await file.stat();

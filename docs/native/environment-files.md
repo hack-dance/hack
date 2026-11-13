@@ -123,6 +123,16 @@ stay on the existing public path and retain their restart behavior and identity.
 Fresh `hack exec` resolves the selected service's file values again using the
 same allowed caller context and delivers them privately to that exec process.
 These fresh values may differ from the running container's startup values.
+
+Native builds read raw host contexts. Start and preflight therefore refuse a
+native build whose context, Dockerfile or Dockerfile-specific ignore input
+overlaps any declared env-file path or the selected automatic `.env` path.
+Optional absent and inactive-service declarations remain protected; authored
+ignore rules do not lift this refusal. ASCII paths compare without case, and
+non-ASCII components are treated as potentially aliased whenever disjointness
+cannot be proved. Use separate build inputs, a prebuilt image, or Compose for
+overlapping projects. Disjoint contexts and ordinary builds with no env-file or
+dotenv input retain their behavior. Fresh selected-service exec does not build.
 Managed-env stale checks remain advisory and do not read ephemeral file inputs;
 file-value-only changes are not detected by their managed fingerprints.
 

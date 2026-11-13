@@ -306,6 +306,44 @@ test("preflight and static start refuse oversized file delivery before pool effe
   ).toBe(true);
 });
 
+test(
+  "preflight and start refuse private sources in native build contexts before effects",
+  async () => {
+    const f = await fixture({
+      services: {
+        web: { image: IMAGE, env_file: "service.env" },
+        builder: { build: ".." },
+      },
+    });
+    await chmod(f.project, 0o700);
+    await writeFile(join(f.projectDir, "service.env"), `TOKEN=${PRIVATE}\n`, {
+      mode: 0o600,
+    });
+    await f.review([]);
+    const env = { ...f.native, ...GRANT, HACK_NATIVE_BUILDS: "1" };
+    const report = await preflight(f, env);
+    expect(report.code).toBe(1);
+    expect(report.report.ready).toBe(false);
+    expect(codes(report.report, "cli")).toContain(
+      "environment_file_input:builder"
+    );
+    expect(report.output).toContain("disjoint build inputs");
+    const before = await f.calls();
+    const up = await cli(f, ["up"], env);
+    expect(up.code).toBe(1);
+    expect(up.output).toContain("overlap an environment source");
+    expect((await f.calls()).slice(before.length)).toEqual([]);
+    expect(report.output).not.toContain(PRIVATE);
+    expect(up.output).not.toContain(PRIVATE);
+    expect((await f.argv()).join("\n")).not.toContain(PRIVATE);
+    const detached = await cli(f, ["up", "--json"], env);
+    expect(detached.code).toBe(1);
+    expect(detached.output).not.toContain(PRIVATE);
+    expect((await f.calls()).slice(before.length)).toEqual([]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
 test("preflight requires the same decryption key as start and closes key errors", async () => {
   const f = await fixture({ services: { web: { image: IMAGE } } });
   await writeFile(
@@ -419,7 +457,7 @@ test(
     expect(report.runtime_review).toEqual({ status: "completed" });
     expect(codes(report, "cli")).toEqual([
       "build_requires_opt_in:web",
-      "environment_file_input:api",
+      "environment_file_input:web",
       "external_network",
       "extra_hosts_without_dependencies:web",
       "invalid_restart:jobs",

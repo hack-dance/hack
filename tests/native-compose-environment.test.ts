@@ -658,6 +658,121 @@ test("only delivered private values join the build disclosure guard", async () =
   expect(input.managedSecretValues).toEqual([FILE]);
 });
 
+test.each([
+  { context: "..", path: "service.env" },
+  { context: ".", path: "service.env" },
+  { context: "../APP", path: "../app/secret.vars" },
+  { context: "../STRASSE", path: "../Straße/secret.vars" },
+  { context: "../café", path: "../cafe\u0301/secret.vars" },
+  { context: "../app", path: "../app/nested/secret.vars" },
+])("build contexts cannot overlap an optional env-file path (%s)", async ({
+  context,
+  path,
+}) => {
+  const f = await fixture(
+    {},
+    {
+      services: {
+        app: {
+          image: "alpine",
+          env_file: { path, required: false },
+          profiles: ["inactive"],
+        },
+        builder: { build: { context } },
+      },
+    }
+  );
+  const error: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(String(error)).toContain(
+    "native build inputs overlap an environment source"
+  );
+  expect(String(error)).toContain("service builder field build");
+  expect(String(error)).not.toContain(FILE);
+});
+
+test.each([
+  "../.hack/service.env",
+  "../.hack/service.env.dockerignore",
+])("build definition inputs outside the context cannot read env-file %s", async (path) => {
+  const f = await fixture(
+    {},
+    {
+      services: {
+        app: {
+          image: "alpine",
+          env_file: {
+            path: path.endsWith(".dockerignore")
+              ? "service.env.dockerignore"
+              : "service.env",
+            required: false,
+          },
+        },
+        builder: {
+          build: { context: "../app", dockerfile: "../.hack/service.env" },
+        },
+      },
+    }
+  );
+  const error: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(String(error)).toContain(
+    "native build inputs overlap an environment source"
+  );
+});
+
+test("a selected dotenv cannot enter the raw build context even with no delivered key", async () => {
+  const f = await fixture({}, { services: { builder: { build: ".." } } });
+  await f.source(".env", `# ${DOTENV}\n`);
+  const error: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(String(error)).toContain("overlap an environment source");
+  expect(String(error)).not.toContain(DOTENV);
+});
+
+test("env-file sources stay private with disjoint native build inputs", async () => {
+  const f = await fixture(
+    {},
+    {
+      services: {
+        app: { image: "alpine", env_file: "service.env" },
+        builder: { build: { context: "../app", dockerfile: "Dockerfile" } },
+      },
+    }
+  );
+  await f.source("service.env", `TOKEN=${FILE}\n`);
+  await f.source(".env", `UNUSED=${DOTENV}\n`);
+  const input = await prepareNativeProjectInput(f);
+  expect(input.shellEnvironment).toEqual({ app: { TOKEN: FILE } });
+  expect(publicService(input).environment).toEqual({ TOKEN: null });
+  expect(input.normalizedComposeJson).not.toContain(FILE);
+  expect(input.normalizedComposeJson).not.toContain(DOTENV);
+});
+
+test("source-free builds and selected-service exec retain their existing behavior", async () => {
+  const plain = await fixture({}, { services: { builder: { build: ".." } } });
+  expect((await prepareNativeProjectInput(plain)).shellEnvironment).toEqual({});
+  const f = await fixture(
+    {},
+    {
+      services: {
+        app: { image: "alpine", env_file: "service.env" },
+        builder: { build: ".." },
+      },
+    }
+  );
+  await f.source("service.env", `TOKEN=${FILE}\n`);
+  const input = await prepareNativeProjectInput({
+    ...f,
+    selectedServices: ["app"],
+  });
+  expect(input.shellEnvironment).toEqual({ app: { TOKEN: FILE } });
+  expect(input.normalizedComposeJson).not.toContain(FILE);
+});
+
 test("authored public runtime metadata literals survive while file/shell copies stay refused", async () => {
   const f = await fixture({
     environment: { HACK_SERVICE_URL: "author-owned" },

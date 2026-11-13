@@ -8,6 +8,7 @@ import {
   interpolateComposeEnvironment,
   parseComposeEnvironmentFile,
 } from "./native-compose-env-syntax.ts";
+import { requireNativeEnvBuildSeparation } from "./native-env-build-context.ts";
 import {
   NativeEnvFileRefusal,
   nativeEnvFileSourceLocation,
@@ -53,6 +54,7 @@ type Sources = {
   readonly read: (spec: FileSpec, service?: string) => Promise<Source>;
   readonly dotenv: ReadonlyMap<string, string>;
   readonly shellNames: Set<string>;
+  readonly automaticDotenv: string | undefined;
 };
 type Notice = { readonly service: string; readonly line: string };
 
@@ -375,6 +377,7 @@ async function environmentSources(opts: Options): Promise<Sources> {
   return {
     shellNames,
     dotenv,
+    automaticDotenv: cached.has(automatic) ? automatic : undefined,
     read,
     lookup: (name) => baseLookup(name) ?? dotenv.get(name),
   };
@@ -784,6 +787,40 @@ function resolveFileBindingDefaults(opts: {
   }
 }
 
+/** Fresh exec acquires selected-service values but cannot initiate a build. */
+function requireBuildSeparation(
+  opts: Options & { readonly sources: Sources }
+): void {
+  if (opts.selectedServices === undefined) {
+    const privatePaths = Object.entries(opts.services).flatMap(
+      ([service, value]) =>
+        fileSpecs(value.document.env_file, service).map(
+          (spec) =>
+            nativeEnvFileSourceLocation({
+              ...opts,
+              path: spec.path,
+              service,
+            }).path
+        )
+    );
+    if (privatePaths.length > 0 || opts.sources.automaticDotenv !== undefined) {
+      // Retain absent optional declarations and the automatic dotenv location.
+      // Nothing is read by this guard; ignore patterns do not grant exclusion.
+      privatePaths.push(join(dirname(opts.composeFile), ".env"));
+      requireNativeEnvBuildSeparation({
+        ...opts,
+        services: Object.fromEntries(
+          Object.entries(opts.services).map(([name, value]) => [
+            name,
+            value.document,
+          ])
+        ),
+        privatePaths,
+      });
+    }
+  }
+}
+
 /**
  * Native-only normalization. Public declarations contain names, never file or
  * shell values. Returned maps are private ephemeral inputs, not managed-env
@@ -798,7 +835,9 @@ export async function normalizeNativeComposeEnvironment(
   readonly privateValues: readonly string[];
   readonly fileServices: Readonly<Record<string, boolean>>;
 }> {
-  const sources = await environmentSources(await canonicalSourceOptions(opts));
+  const canonical = await canonicalSourceOptions(opts);
+  const sources = await environmentSources(canonical);
+  requireBuildSeparation({ ...canonical, sources });
   const privateValues = new Set<string>();
   for (const [field, value] of Object.entries(opts.compose)) {
     if (field !== "services" && !ignoredExtension(field)) {

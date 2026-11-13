@@ -572,17 +572,19 @@ export async function stopViaSystemdIfInstalled(opts: {
   // The checks above judged the main process systemd reported then; the
   // stop acts on whatever runs when it lands. Read it again just before: a
   // different main pid (a crash and restart meanwhile), or a read that
-  // fails, is refused. This narrows the gap without closing it: a change
+  // fails (the manager unavailable, or the unit's state not reported), is
+  // refused, also when no main process was seen (a pending restart). This narrows the gap without closing it: a change
   // after this read, or the same pid reused in between, is not detected.
   const latest = await readSystemdServiceStatus({ unitPath, deps });
   if (
     latest === null ||
+    !latest.availability.available ||
     latest.stateError !== null ||
     latest.mainPid !== status.mainPid
   ) {
     return {
       ...none,
-      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: its main process changed while it was being checked, or could not be read again (pid ${status.mainPid ?? "none"}, now ${latest === null || latest.stateError !== null ? "unknown" : (latest.mainPid ?? "none")}). Run hack daemon stop again; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
+      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: its main process changed while it was being checked, or could not be read again (pid ${status.mainPid ?? "none"}, now ${latest === null || !latest.availability.available || latest.stateError !== null ? "unknown" : (latest.mainPid ?? "none")}). Run hack daemon stop again; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
     };
   }
   const stopped = await systemdServiceAction({ action: "stop", deps });

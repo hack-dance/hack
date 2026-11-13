@@ -98,6 +98,11 @@ type Fake = {
   showFails: boolean;
   /** Only the unit-state query (ActiveState, MainPID...) fails. */
   stateShowFails: boolean;
+  /**
+   * When set, the manager probe (`show --property=Version`) succeeds this
+   * many more times and then fails, as if the user bus went away.
+   */
+  versionProbesBeforeFailure: number | null;
   /** Overrides ActiveState, e.g. "activating" during a restart delay. */
   activeState: string | null;
   needsReload: boolean;
@@ -186,6 +191,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     enableError: null,
     showFails: false,
     stateShowFails: false,
+    versionProbesBeforeFailure: null,
     activeState: null,
     needsReload: false,
     unitEnvironment: `PATH=${sysBin} HACK_NO_INTERACTIVE=1`,
@@ -228,6 +234,16 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     const verbs = args.filter((a) => !a.startsWith("--"));
     const verb = verbs[0];
     if (verb === "show" && args.includes("--property=Version")) {
+      if (state.versionProbesBeforeFailure !== null) {
+        if (state.versionProbesBeforeFailure <= 0) {
+          return Promise.resolve({
+            exitCode: 1,
+            stdout: "",
+            stderr: "Failed to connect to bus: No such file or directory",
+          });
+        }
+        state.versionProbesBeforeFailure -= 1;
+      }
       return Promise.resolve(
         opts.probeError
           ? {
@@ -1808,6 +1824,38 @@ linuxTest(
     });
     expect(reread.refused).toContain("could not be read again");
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    // Second-family review: a pending restart (no MainPID, configuration
+    // naming this home) whose final re-read finds the manager unavailable
+    // was stopped, since both reads had no main pid. Refused now.
+    fake.stateShowFails = false;
+    fake.mainPidReported = false;
+    fake.activeState = "activating";
+    fake.versionProbesBeforeFailure = 1;
+    fake.calls.length = 0;
+    const unavailable = await stopViaSystemdIfInstalled({
+      proveDaemon: proveFor(fake),
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(unavailable.handled).toBe(false);
+    expect(unavailable.refused).toContain("could not be read again");
+    expect(unavailable.refused).toContain(
+      "systemctl --user stop hackd.service"
+    );
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    // The same pending restart with the manager reachable: cancelled.
+    fake.versionProbesBeforeFailure = null;
+    expect(
+      (
+        await stopViaSystemdIfInstalled({
+          proveDaemon: proveFor(fake),
+          pid: null,
+          hackHome: join(root, ".hack"),
+          deps: fake.deps,
+        })
+      ).handled
+    ).toBe(true);
   }
 );
 

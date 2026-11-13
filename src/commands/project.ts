@@ -4287,8 +4287,18 @@ async function handleInitAuto({
     message: `Initialized ${HACK_PROJECT_DIR_PRIMARY}/ for ${slug}`,
   });
   const next = initNextSteps({ backend, devHost });
+  // Discovery ran and found nothing: the scaffold is a placeholder that only
+  // starts if the project happens to have a Bun "dev" script. Say so instead
+  // of sending the user straight to `up`. An explicit --manual or
+  // --no-discovery asked for the minimal scaffold and keeps its output.
+  const placeholder = !(useDiscovery || skipDiscovery);
+  if (placeholder) {
+    logger.warn({ message: initPlaceholderNotice() });
+  }
   logger.info({
-    message: `Next: ${next.autoCommand}`,
+    message: placeholder
+      ? `Next: edit ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME}, then ${next.autoCommand}`
+      : `Next: ${next.autoCommand}`,
   });
   logger.info({
     message: next.routing,
@@ -4303,6 +4313,11 @@ async function handleInitAuto({
   }
 
   return 0;
+}
+
+/** What a placeholder scaffold is and what to change, in one sentence. */
+export function initPlaceholderNotice(): string {
+  return `No runnable service was found in this repository, so ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME} has a placeholder service "app" (a Bun image running "bun run dev"). Set its image and command to how this project starts before hack up; hack init --with claude or --with codex hands that to an agent.`;
 }
 
 async function writeInitScaffoldFile(opts: {

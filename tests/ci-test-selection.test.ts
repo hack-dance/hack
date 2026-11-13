@@ -355,6 +355,29 @@ describe("conservative dependency selection", () => {
 });
 
 describe("PR matrix policy", () => {
+  test.each([
+    "src/commands/open.ts",
+    "src/ui/logger.ts",
+    "src/lib/local-network-hint.ts",
+  ])("light CLI change gates the portable open output contract on Linux: %s", async (path) => {
+    const selection = selectTests({ repoRoot, changed: [path] });
+    const file = "tests/local-network-hint.test.ts";
+    expect(selection.files).toContain(file);
+    const plan = await planPullRequest({
+      repoRoot,
+      changed: [path],
+      draft: false,
+      full: false,
+      selection,
+    });
+    expect(plan.test_files).toBe(JSON.stringify(selection.files));
+    expect(plan.test_shards).toBe("[4,5,6,7,8]");
+    expect(plan.defer_macos).toBe(true);
+    const pools = await classifyTestPools({ repoRoot, files: selection.files });
+    expect(pools.linux).toContain(file);
+    expect(pools.macos).toContain(file);
+    expect(pools.both).toContain(file);
+  }, 30_000);
   test("ordinary light PRs defer platform and Docker inputs until opt-in or integration", async () => {
     const selection = {
       mode: "selected",

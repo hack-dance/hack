@@ -55,6 +55,7 @@ import {
   nativeComposeAdoptionStringWorktreesScenario,
   nativeComposeAdoptionWorktreesScenario,
 } from "./scenarios/native-compose-adoption-worktrees.ts";
+import { nativeComposeEndpointSettlementScenario } from "./scenarios/native-compose-endpoint-settlement.ts";
 import { nativeConfigBuildScenario } from "./scenarios/native-config-build.ts";
 import { nativeConfigComposeScenario } from "./scenarios/native-config-compose.ts";
 import { nativeConfigDownHooksScenario } from "./scenarios/native-config-down-hooks.ts";
@@ -141,6 +142,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
 
   nativeConfigVmFilesScenario,
   nativeConfigProcessPolicyScenario,
+  nativeComposeEndpointSettlementScenario,
   nativeConfigRoutingScenario,
   ...nativeConfigNetworksScenarios,
   nativeComposeAdoptionWorktreesScenario,

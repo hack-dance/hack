@@ -5,20 +5,7 @@ import {
   commitAll,
   createMonorepoFixture,
 } from "../fixture.ts";
-import {
-  expect,
-  expectExit,
-  extractJsonObject,
-  runCommand,
-  type Scenario,
-} from "../harness.ts";
-
-type EnvListPayload = {
-  readonly vars?: readonly {
-    readonly key: string;
-    readonly value: string;
-  }[];
-};
+import { expect, expectExit, runCommand, type Scenario } from "../harness.ts";
 
 const PRIMARY_SECRET_KEY = "E2E_PRIMARY_SECRET";
 const PRIMARY_SECRET_VALUE = "primary-secret-value";
@@ -48,6 +35,7 @@ export const worktreeSecretsScenario: Scenario = {
         PRIMARY_SECRET_KEY,
         PRIMARY_SECRET_VALUE,
         "--secret",
+        "--allow-secret-argv",
       ],
       cwd: fixture.root,
     });
@@ -67,23 +55,16 @@ export const worktreeSecretsScenario: Scenario = {
     });
 
     const fromWorktree = await ctx.cli({
-      args: ["env", "list", "--json", "--show-secrets"],
+      args: ["env", "get", PRIMARY_SECRET_KEY],
       cwd: worktreePath,
     });
     expectExit({
       result: fromWorktree,
       codes: [0],
-      message:
-        "env list --show-secrets from the linked worktree should succeed",
+      message: "env get from the linked worktree should succeed",
     });
-    const worktreePayload = extractJsonObject<EnvListPayload>({
-      text: fromWorktree.stdout,
-    });
-    const primaryVar = worktreePayload?.vars?.find(
-      (entry) => entry.key === PRIMARY_SECRET_KEY
-    );
     expect({
-      that: primaryVar?.value === PRIMARY_SECRET_VALUE,
+      that: fromWorktree.stdout === PRIMARY_SECRET_VALUE,
       message:
         "secret encrypted in the primary checkout must decrypt from the linked worktree",
       result: fromWorktree,
@@ -96,6 +77,7 @@ export const worktreeSecretsScenario: Scenario = {
         WORKTREE_SECRET_KEY,
         WORKTREE_SECRET_VALUE,
         "--secret",
+        "--allow-secret-argv",
       ],
       cwd: worktreePath,
     });
@@ -106,17 +88,11 @@ export const worktreeSecretsScenario: Scenario = {
     });
 
     const roundtrip = await ctx.cli({
-      args: ["env", "list", "--json", "--show-secrets"],
+      args: ["env", "get", WORKTREE_SECRET_KEY],
       cwd: worktreePath,
     });
-    const roundtripPayload = extractJsonObject<EnvListPayload>({
-      text: roundtrip.stdout,
-    });
-    const worktreeVar = roundtripPayload?.vars?.find(
-      (entry) => entry.key === WORKTREE_SECRET_KEY
-    );
     expect({
-      that: worktreeVar?.value === WORKTREE_SECRET_VALUE,
+      that: roundtrip.stdout === WORKTREE_SECRET_VALUE,
       message:
         "secret encrypted from the worktree must decrypt with the shared key",
       result: roundtrip,

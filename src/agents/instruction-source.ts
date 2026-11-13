@@ -252,7 +252,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     bullets: [
       "Layer order: `.hack/hack.env.default.yaml`, the selected `.hack/hack.env.<overlay>.yaml`, then worktree-local `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`; service values override `global`, and host commands apply `host` values last.",
       "`hack.env*.local.yaml` files are local-only, can contain plaintext and must not be committed. Check existing file permissions and Git tracking; ignore rules do not untrack a file already in Git.",
-      "`hack env list` masks only entries stored as secrets (for example with `--secret`); plaintext values, including values migrated from a v4 `.hack/.env`, are shown. Prefer variable names and `hack env explain` when checking configuration without exposing values.",
+      "`hack env list` hides every value by default, including plaintext values migrated from a v4 `.hack/.env`; JSON contains metadata without values too. Prefer this inventory or `hack env explain` when checking configuration without exposing values.",
       "Omit `--env` to use the configured default overlay; `--env base` (or `default`/`none`) selects base layers only, the same on every command. An overlay name grants no production authority and no network or instance isolation.",
       "Use `hack env explain <KEY> --env <overlay> --service <service>` for provenance without the value; `hack env get <KEY>` and `hack secrets get <name>` print plaintext. Use them only when the value itself is explicitly needed, and treat their output as secret.",
       "Store a secret by piping it: `<secret-source> | hack env add <KEY> --service <service> --secret --value-stdin` (or the hidden prompt in a terminal); never pass secret values as command arguments, where shell history and process listings expose them.",
@@ -265,7 +265,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     title: "Env commands",
     surfaces: [],
     bullets: [
-      "`hack env list --env <overlay> --service <service>` shows resolved values, masking only entries stored with `--secret`; plain values migrated from v4 are shown. `--json` changes the format, not the disclosure.",
+      "`hack env list --env <overlay> --service <service>` shows names, scope, source layer and set/unset state without values; add `--json` for metadata. Plaintext values are hidden too, including migrated entries. Modern metadata inspection does not require the decryption key.",
       "`hack env set <key> <value> --local` writes a non-secret value to the worktree-local override file for the selected overlay; drop `--local` only when the request covers the shared, committed overlay.",
       "`hack env exec --env <overlay> --service <service> -- <cmd...>` runs one host command with the resolved env injected; use `hack env exec --env <overlay> --shell '<command>'` when `$VAR` must expand inside the child shell, and add `--timeout <seconds>` to bound a non-TTY job.",
       "`hack env apply --env <overlay> --service <service>` recreates that one service so it picks up changed values.",
@@ -277,7 +277,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     surfaces: [],
     bullets: [
       "A secret value never goes in command arguments or agent prompts. Store one with `hack env set <key> --secret` and no value, which the user runs in their own terminal and answers at its hidden prompt.",
-      "`hack env get`, `hack secrets get` and `hack env list --show-secrets` print plaintext: run them only when the user asks for the value itself, never to check that a key exists, and do not repeat their output in replies, logs or files.",
+      "`hack env protect` lists plaintext key names without values; `hack env protect KEY...` encrypts matching entries in their existing scopes and overlays. It does not move values or remove legacy compatibility copies. `--env` and `scope.KEY` narrow the conversion. `hack env add KEY --secret` and `hack env set KEY --secret` refuse positional values; use `--value-stdin` or the hidden prompt. Never use the unsafe `--allow-secret-argv` compatibility flag for real secrets. `hack env get`, `hack secrets get` and interactive `hack env list --show-values` are plaintext sinks: run them only when the user asks for the value itself, never to check that a key exists, and do not repeat their output in replies, logs or files.",
     ],
   },
 

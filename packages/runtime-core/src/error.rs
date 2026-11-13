@@ -130,9 +130,18 @@ pub struct PlanChangeDiagnostic {
     pub field: PlanChangeField,
 }
 
+/// Only the public reviewed port of an unhealthy inferred probe. No path,
+/// response, other configuration or application output crosses this boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteProbeDiagnostic {
+    pub version: u8,
+    pub port: u16,
+}
+
 /// Value-free refusal locations, boxed together so every
 /// `Result<_, CandidateError>` stays small; serialized flat as
-/// `process_refusals` and `plan_change`.
+/// `process_refusals`, `plan_change` and `route_probe`.
 #[derive(Debug, Default, Serialize)]
 pub struct RefusalDiagnostics {
     /// Value-free durable interactive-session UUID, never argv or environment.
@@ -145,6 +154,8 @@ pub struct RefusalDiagnostics {
     /// Value-free location of a refused retained-run edit; see [`PlanChangeDiagnostic`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_change: Option<PlanChangeDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_probe: Option<RouteProbeDiagnostic>,
 }
 
 /// Closed diagnostic vocabulary for the read-only log follower. No stream bytes.
@@ -241,6 +252,12 @@ impl CandidateError {
             service: service.to_owned(),
             field,
         });
+        self
+    }
+
+    pub fn with_route_probe(mut self, port: u16) -> Self {
+        self.refusals.get_or_insert_default().route_probe =
+            Some(RouteProbeDiagnostic { version: 1, port });
         self
     }
 

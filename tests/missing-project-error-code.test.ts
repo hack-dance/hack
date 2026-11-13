@@ -130,6 +130,10 @@ const COMMANDS: Readonly<Record<string, Expectation>> = {
     argv: ["env", "list", "-p", "DIR", "--json"],
   },
   "env explain": { kind: "line", argv: ["env", "explain", "K", "-p", "DIR"] },
+  "env protect": {
+    kind: "envelope",
+    argv: ["env", "protect", "-p", "DIR", "--json"],
+  },
   "env apply": {
     kind: "line",
     argv: ["env", "apply", "--service", "web", "-p", "DIR"],

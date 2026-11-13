@@ -23,6 +23,11 @@ terminal).
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
 - `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that
+
+Candidate `hack-next doctor` and `hack-v5 doctor` report a missing hackd as optional
+for Compose workflows. They do not recommend starting the stable daemon or
+installing its login service. Candidate `doctor --fix` keeps daemon repair disabled;
+stale or incompatible daemon state is still reported without a repair command.
 - `hack agent onboard` — print an onboarding prompt for an existing project
 - Optional agent interfaces — the [`hack` plugin, its skills and the separate MCP server](integrations.md)
 

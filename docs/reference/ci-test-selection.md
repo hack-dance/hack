@@ -109,9 +109,16 @@ prerelease gate requires that lane explicitly. macOS ARM qualification remains
 separate from candidate tests because their repeated setup is small compared with
 the compiler's transport and bundle checks.
 
-`next` pushes share a cancelling concurrency group; each new push cancels its
-predecessor. `main` pushes retain unique, non-cancelling groups. Manual full runs
-have unique groups and cannot be cancelled by a later `next` push.
+`next` pushes share a non-cancelling concurrency group: the active run finishes,
+including jobs waiting for macOS capacity. GitHub retains at most one pending run;
+a newer push replaces that pending run, so intermediate revisions may not run.
+As described above, a cancelled or missing predecessor forces full selection,
+so replacing a pending run cannot omit its merged changes from coverage.
+This preserves all selected macOS coverage without changing runner capacity or
+the PR layout. It does not reserve macOS slots or guarantee a queue wait bound.
+PRs still cancel stale runs for the same PR. `main` pushes retain unique,
+non-cancelling groups. Manual full runs have unique groups and cannot be cancelled
+by a later `next` push.
 
 ## Historical replay
 

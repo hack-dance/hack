@@ -23,6 +23,7 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import { parseDotEnv } from "../lib/env.ts";
 import {
   parseEnvHydrateInputFormat,
   readEnvHydrateInput,
@@ -32,6 +33,7 @@ import {
   readEnvValueFromStdin,
 } from "../lib/env-value-stdin.ts";
 import { readTextFile } from "../lib/fs.ts";
+import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import type {
@@ -74,6 +76,7 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
+  assertMachineLocalFileGitPrivate,
   assertProjectEnvLayerPaths,
   assertValidProjectEnvScopeName,
   describeUnmigratedLegacyDotenv,
@@ -83,14 +86,19 @@ import {
   finishImplicitLegacyEnvMigration,
   hasUnmigratedLegacyDotenv,
   hydrateProjectEnvLocalLayer,
+  listProjectEnvPlaintextEntries,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
+  type ProjectEnvResolvedMetadata,
   parseProjectEnvTarget,
   projectEnvConfigExists,
   projectEnvConfigExistsForMutation,
+  protectProjectEnvEntries,
   readMaterializedProjectEnv,
   resolveProjectEnvConfig,
+  resolveProjectEnvMetadata,
   resolveProjectEnvValue,
+  selectProjectEnvMetadata,
   selectProjectEnvValues,
   selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
@@ -110,7 +118,7 @@ const optShowSecrets = defineOption({
   name: "showSecrets",
   type: "boolean",
   long: "--show-secrets",
-  description: "Print secret values (keychain) in plaintext",
+  description: "Alias for --show-values (interactive terminal only)",
 } as const);
 
 const optSecret = defineOption({
@@ -118,6 +126,21 @@ const optSecret = defineOption({
   type: "boolean",
   long: "--secret",
   description: "Store value as an encrypted secure entry",
+} as const);
+
+const optShowValues = defineOption({
+  name: "showValues",
+  type: "boolean",
+  long: "--show-values",
+  description: "Reveal resolved values only in an interactive terminal",
+} as const);
+
+const optAllowSecretArgv = defineOption({
+  name: "allowSecretArgv",
+  type: "boolean",
+  long: "--allow-secret-argv",
+  description:
+    "Unsafe compatibility: allow secret values in process arguments and shell history",
 } as const);
 
 const optValueStdin = defineOption({
@@ -200,7 +223,6 @@ const optHostLifetime = defineOption({
     "Declare intended lifetime for diagnostics (default: command; does not detach)",
 } as const);
 
-const SECRET_MASK = "***";
 const MODERN_ENV_STATUS_CLASSIFICATION = {
   trust_model: "repo_managed_env_config",
   custody: "repo_tracked_env_config",
@@ -222,9 +244,17 @@ const MODERN_LOCAL_SECRET_CLASSIFICATION = {
 
 const listSpec = defineCommand({
   name: "list",
-  summary: "List resolved env values for the selected overlay",
+  summary: "List env names, scopes, layers and set state",
   group: "Project",
-  options: [optPath, optProject, optEnv, optJson, optShowSecrets, optService],
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optJson,
+    optShowValues,
+    optShowSecrets,
+    optService,
+  ],
   positionals: [],
   subcommands: [],
 } as const);
@@ -240,6 +270,18 @@ const getSpec = defineCommand({
   subcommands: [],
   sensitiveOutputError:
     "Unable to read env value. Check the key, arguments, project env configuration, and key/backend access. Use hack env get --help for usage.",
+} as const);
+
+const protectSpec = defineCommand({
+  name: "protect",
+  summary:
+    "List plaintext keys, or encrypt chosen keys in their existing layers",
+  description:
+    "With no keys, list names, scopes and layers only. With keys, encrypt each matching plaintext entry in this checkout without moving it. An unqualified key selects every scope; scope.KEY or --service selects one scope. Omit --env to cover all overlays. Files commit independently, so retry after a partial failure.",
+  group: "Project",
+  options: [optPath, optProject, optEnv, optService, optJson],
+  positionals: [{ name: "keys", required: false, multiple: true }],
+  subcommands: [],
 } as const);
 
 const explainSpec = defineCommand({
@@ -271,6 +313,7 @@ const addSpec = defineCommand({
     optProject,
     optEnv,
     optSecret,
+    optAllowSecretArgv,
     optValueStdin,
     optLocal,
     optService,
@@ -293,6 +336,7 @@ const setSpec = defineCommand({
     optProject,
     optEnv,
     optSecret,
+    optAllowSecretArgv,
     optValueStdin,
     optLocal,
     optService,
@@ -733,6 +777,24 @@ async function resolveConfiguredSecretStore(input: {
   }
 }
 
+/**
+ * The legacy `.hack/.env` (or overlay) a set or unset rewrites holds
+ * plaintext values, so it gets the machine-local git gate (HACK-2165): after
+ * the same `info/exclude` repair the writer makes, a file git tracks, can't
+ * report on, or does not ignore is refused before any value is written. A
+ * file that does not exist yet is checked by name too.
+ */
+async function assertLegacyDotenvGitPrivate(opts: {
+  readonly project: ProjectContext;
+  readonly envFile: string;
+}): Promise<void> {
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
+  await assertMachineLocalFileGitPrivate({
+    projectRoot: opts.project.projectRoot,
+    path: opts.envFile,
+  });
+}
+
 async function loadModernProjectEnv(input: {
   readonly project: ProjectContext;
   readonly envName: string | null | undefined;
@@ -1118,6 +1180,73 @@ const handleEnvGet: CommandHandlerFor<typeof getSpec> = async ({
   return 0;
 };
 
+const handleEnvProtect: CommandHandlerFor<typeof protectSpec> = async ({
+  ctx,
+  args,
+}) => {
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  if (
+    !(await projectEnvConfigExistsForMutation({
+      projectDir: project.projectDir,
+    }))
+  ) {
+    throw new CliUsageError(
+      "This command requires YAML env layers. Run hack doctor --migrate-env-config first."
+    );
+  }
+  const envName =
+    args.options.env === undefined
+      ? undefined
+      : resolveRequestedEnvName({ envOption: args.options.env });
+  const targets = (args.positionals.keys ?? []).map((key) => {
+    const target = parseProjectEnvTarget({
+      keyOrPath: key,
+      scopeOverride: args.options.service,
+    });
+    return {
+      key: target.key,
+      ...(args.options.service !== undefined || key.includes(".")
+        ? { scope: target.scope }
+        : {}),
+    };
+  });
+  const options = {
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName,
+  };
+  const entries =
+    targets.length > 0
+      ? await protectProjectEnvEntries({ ...options, targets })
+      : (await listProjectEnvPlaintextEntries(options)).filter(
+          (entry) =>
+            args.options.service === undefined ||
+            entry.scope ===
+              assertValidProjectEnvScopeName({
+                scopeName: args.options.service,
+              })
+        );
+  if (args.options.json) {
+    process.stdout.write(
+      `${JSON.stringify({ operation: targets.length > 0 ? "protect" : "inventory", entries }, null, 2)}\n`
+    );
+  } else {
+    for (const entry of entries) {
+      process.stdout.write(
+        `${entry.key}\t${entry.scope}\t${entry.environment ?? "default"}\t${entry.filePath}\n`
+      );
+    }
+    if (entries.length === 0) {
+      process.stdout.write("No matching plaintext entries.\n");
+    }
+  }
+  return 0;
+};
+
 const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
   ctx,
   args,
@@ -1128,24 +1257,61 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     projectOpt: args.options.project,
   });
   const projectName = await resolveProjectName(project);
-  const showSecrets = args.options.showSecrets === true;
+  const showSecrets =
+    args.options.showSecrets === true || args.options.showValues === true;
+  if (showSecrets && !canPrompt()) {
+    throw new CliUsageError(
+      "Revealing env values requires --show-values in an interactive terminal. Use hack env get KEY for an explicit single-value read."
+    );
+  }
   const json = args.options.json === true;
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
 
-  const modern = await loadModernProjectEnv({
-    project,
-    envName,
-  });
+  const revealedModern = showSecrets
+    ? await loadModernProjectEnv({ project, envName })
+    : null;
+  const modern = showSecrets
+    ? revealedModern
+    : await resolveProjectEnvMetadata({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        envName,
+        fileDiagnostics: true,
+        serviceNames: await discoverComposeServiceNames({
+          composeFile: project.composeFile,
+        }),
+      });
   if (modern) {
     const selectedScope = parseEnvScopeOption({
       scopeName: args.options.service,
     });
-    const envValues = selectProjectEnvValues({
+    const selectedMetadata = selectProjectEnvMetadata({
       resolved: modern,
       scopeName: selectedScope,
     });
+    const envValues = revealedModern
+      ? selectProjectEnvValues({
+          resolved: revealedModern,
+          scopeName: selectedScope,
+        })
+      : {};
+    const sourceFiles = Object.fromEntries(
+      await Promise.all(
+        Object.entries(selectedMetadata).map(
+          async ([key, entry]) =>
+            [
+              key,
+              await findModernEnvSourceFile({
+                files: modern.files,
+                scope: entry.scope,
+                key,
+              }),
+            ] as const
+        )
+      )
+    );
     const materialized = await readMaterializedProjectEnv({
       projectDir: project.projectDir,
     });
@@ -1159,6 +1325,7 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
             modern,
             selectedScope,
             envValues,
+            sourceFiles,
             showSecrets,
             materialized,
             materializedExists,
@@ -1188,15 +1355,10 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
       ],
     });
     await display.section("Resolved env vars");
-    for (const [key, value] of Object.entries(envValues)) {
+    for (const [key, entry] of Object.entries(selectedMetadata)) {
+      const value = showSecrets ? `\t${envValues[key] ?? ""}` : "";
       process.stdout.write(
-        `${key}\t${selectedScope}\t${maskModernEnvValue({
-          modern,
-          scope: selectedScope,
-          key,
-          value,
-          showSecrets,
-        })}\n`
+        `${key}\t${entry.scope}\tset\t${sourceFiles[key] ?? "unknown"}${value}\n`
       );
     }
     return 0;
@@ -1211,17 +1373,55 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     return 1;
   }
 
+  const selectedScope = parseEnvScopeOption({
+    scopeName: args.options.service,
+  });
+  const relevant = (value: { readonly services: readonly string[] | null }) =>
+    args.options.service === undefined ||
+    value.services === null ||
+    (selectedScope !== "global" && value.services.includes(selectedScope));
+  const selectedResolved = {
+    ...resolved,
+    values: resolved.values.filter(relevant),
+    missingRequired: resolved.missingRequired.filter(relevant),
+    contract: {
+      ...resolved.contract,
+      vars: resolved.contract.vars.filter(relevant),
+    },
+  };
+  const overlayKeys = new Set(
+    Object.keys(
+      resolved.envSelection.overlayPath
+        ? parseDotEnv(
+            (await readTextFile(resolved.envSelection.overlayPath)) ?? ""
+          )
+        : {}
+    )
+  );
+  const layersByKey = Object.fromEntries(
+    selectedResolved.values.map((value) => {
+      const dotenvLayer = overlayKeys.has(value.key)
+        ? resolved.envSelection.overlayPath
+        : resolved.envPath;
+      return [
+        value.key,
+        value.resolvedFrom === "dotenv" ? dotenvLayer : value.resolvedFrom,
+      ];
+    })
+  );
   if (json) {
     writeEnvListJson({
       projectName,
-      resolved,
+      resolved: selectedResolved,
+      layersByKey,
       showSecrets,
     });
-    return resolved.missingRequired.length > 0 ? 1 : 0;
+    return selectedResolved.missingRequired.length > 0 ? 1 : 0;
   }
 
   return await renderEnvListDisplay({
-    resolved,
+    resolved: selectedResolved,
+    layersByKey,
     projectDir: project.projectDir,
     showSecrets,
   });
@@ -1443,50 +1643,13 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
   return await run(command, { cwd: project.projectRoot, hackReexec: true });
 };
 
-function maskModernEnvValue(input: {
-  readonly modern: NonNullable<
-    Awaited<ReturnType<typeof loadModernProjectEnv>>
-  >;
-  readonly scope: string;
-  readonly key: string;
-  readonly value: string;
-  readonly showSecrets: boolean;
-}): string {
-  if (input.showSecrets) {
-    return input.value;
-  }
-  if (
-    isModernSecretAtScope({
-      modern: input.modern,
-      scope: input.scope,
-      key: input.key,
-    })
-  ) {
-    return SECRET_MASK;
-  }
-  return input.value;
-}
-
-function isModernSecretAtScope(input: {
-  readonly modern: NonNullable<
-    Awaited<ReturnType<typeof loadModernProjectEnv>>
-  >;
-  readonly scope: string;
-  readonly key: string;
-}): boolean {
-  return (
-    input.modern.effectiveMetadata[input.scope]?.[input.key]?.secret ?? false
-  );
-}
-
 function buildModernEnvJsonPayload(input: {
   readonly project: ProjectContext;
   readonly projectName: string;
-  readonly modern: NonNullable<
-    Awaited<ReturnType<typeof loadModernProjectEnv>>
-  >;
+  readonly modern: ProjectEnvResolvedMetadata;
   readonly selectedScope: string;
   readonly envValues: Readonly<Record<string, string>>;
+  readonly sourceFiles: Readonly<Record<string, string | null>>;
   readonly showSecrets: boolean;
   readonly materialized: Record<string, string>;
   readonly materializedExists: boolean;
@@ -1548,7 +1711,13 @@ function buildModernEnvJsonPayload(input: {
     scopes: input.modern.declaredScopes,
     unknown_scopes: input.modern.unknownScopes,
     selected_scope: input.selectedScope,
-    vars: Object.entries(input.envValues).map(([key, value]) => {
+    vars: Object.keys(
+      selectProjectEnvMetadata({
+        resolved: input.modern,
+        scopeName: input.selectedScope,
+      })
+    ).map((key) => {
+      const value = input.envValues[key];
       const resolvedValue = resolveModernStoredValue({
         modern: input.modern,
         scope: input.selectedScope,
@@ -1577,13 +1746,10 @@ function buildModernEnvJsonPayload(input: {
             ? MODERN_ENV_STATUS_CLASSIFICATION
             : MODERN_LOCAL_PLAINTEXT_CLASSIFICATION,
         },
-        value: maskModernEnvValue({
-          modern: input.modern,
-          scope: input.selectedScope,
-          key,
-          value,
-          showSecrets: input.showSecrets,
-        }),
+        has_value: true,
+        layer: input.sourceFiles[key],
+        scope: resolvedValue?.scope ?? input.selectedScope,
+        ...(input.showSecrets ? { value } : {}),
       };
     }),
     missing_required: [],
@@ -1594,9 +1760,7 @@ function buildModernEnvJsonPayload(input: {
 }
 
 function resolveModernStoredValue(input: {
-  readonly modern: NonNullable<
-    Awaited<ReturnType<typeof loadModernProjectEnv>>
-  >;
+  readonly modern: ProjectEnvResolvedMetadata;
   readonly scope: string;
   readonly key: string;
 }): { readonly scope: string; readonly secret: boolean } | null {
@@ -1633,6 +1797,7 @@ async function renderEnvListDisplay(input: {
   readonly resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
   readonly projectDir: string;
   readonly showSecrets: boolean;
+  readonly layersByKey: Readonly<Record<string, string | null>>;
 }): Promise<number> {
   await display.kv({
     title: "Env storage",
@@ -1685,10 +1850,8 @@ async function renderEnvListDisplay(input: {
   await display.section("Resolved env vars");
 
   for (const v of input.resolved.values) {
-    const value =
-      v.source === "keychain" && !input.showSecrets && v.value !== null
-        ? "***"
-        : (v.value ?? "");
+    const state = v.value === null ? "unset" : "set";
+    const value = input.showSecrets ? (v.value ?? "") : state;
     const required = v.required ? "required" : "optional";
     const source = v.source;
     const from = v.resolvedFrom ?? "missing";
@@ -1698,7 +1861,7 @@ async function renderEnvListDisplay(input: {
     });
     const services = v.services ? v.services.join(",") : "*";
     process.stdout.write(
-      `${v.key}\t${required}\t${source}\t${storage}\t${from}\t${services}\t${value}\n`
+      `${v.key}\t${required}\t${source}\t${storage}\t${from}\t${services}\t${value}\t${input.layersByKey[v.key] ?? "unknown"}\n`
     );
   }
 
@@ -1716,6 +1879,7 @@ function writeEnvListJson(input: {
   readonly projectName: string;
   readonly resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
   readonly showSecrets: boolean;
+  readonly layersByKey: Readonly<Record<string, string | null>>;
 }): void {
   process.stdout.write(
     `${JSON.stringify(
@@ -1751,10 +1915,10 @@ function writeEnvListJson(input: {
           }),
           services: v.services,
           resolved_from: v.resolvedFrom,
-          value:
-            v.source === "keychain" && !input.showSecrets && v.value !== null
-              ? "***"
-              : v.value,
+          has_value: v.value !== null,
+          scope: v.services ?? ["global"],
+          layer: input.layersByKey[v.key],
+          ...(input.showSecrets ? { value: v.value } : {}),
         })),
         missing_required: input.resolved.missingRequired.map((v) => v.key),
       },
@@ -1802,6 +1966,12 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
         keyOrPath: keyArg ?? "",
         scopeOverride: args.options.service,
       });
+  assertSecretArgvAllowed({
+    secret: args.options.secret === true,
+    hasPositionalValue:
+      valueArg !== undefined || keyArg?.includes("=") === true,
+    allow: args.options.allowSecretArgv === true,
+  });
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -1888,6 +2058,12 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
       hasPositionalValue: valueFromSpec !== null,
     });
   }
+  assertSecretArgvAllowed({
+    secret: args.options.secret === true,
+    hasPositionalValue: valueFromSpec !== null,
+    allow: args.options.allowSecretArgv === true,
+  });
+
   // Refuse an invalid scope in either env format before the project is read,
   // with the same closed one-line refusal as `env add`.
   const scope = assertValidProjectEnvScopeName({
@@ -1969,6 +2145,7 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     projectDir: project.projectDir,
     envName,
   });
+  await assertLegacyDotenvGitPrivate({ project, envFile });
   const [result, mirroredToBackend] = await Promise.all([
     upsertDotEnvValue({ envFile, key, value }),
     runtimeConfig.storePlaintextInBackend
@@ -2383,6 +2560,7 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
       projectDir: project.projectDir,
       envName,
     });
+    await assertLegacyDotenvGitPrivate({ project, envFile });
     const [dotenvResult, secretDeleted] = await Promise.all([
       removeDotEnvKey({ envFile, key }),
       store.delete({
@@ -2641,6 +2819,18 @@ async function resolveEnvKey(opts: { readonly key: string }): Promise<string> {
   return key.trim();
 }
 
+function assertSecretArgvAllowed(opts: {
+  readonly secret: boolean;
+  readonly hasPositionalValue: boolean;
+  readonly allow: boolean;
+}): void {
+  if (opts.secret && opts.hasPositionalValue && !opts.allow) {
+    throw new CliUsageError(
+      "Secret values cannot be passed as command arguments. Pipe the value with --value-stdin: <secret-source> | hack env add KEY --secret --value-stdin, or omit the value in a terminal for the hidden prompt."
+    );
+  }
+}
+
 async function resolveEnvValue(opts: {
   readonly key: string;
   readonly value: string | null;
@@ -2690,6 +2880,7 @@ export const envCommand = defineCommand({
   positionals: [],
   subcommands: [
     withHandler(listSpec, handleEnvList),
+    withHandler(protectSpec, handleEnvProtect),
     withHandler(getSpec, handleEnvGet),
     withHandler(explainSpec, handleEnvExplain),
     withHandler(applySpec, handleEnvApply),

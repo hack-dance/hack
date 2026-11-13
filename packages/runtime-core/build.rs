@@ -193,6 +193,21 @@ fn build_http_probe() {
         .status()
         .expect("build host HTTP probe test driver");
     assert!(result.success(), "host HTTP probe build failed");
+    println!("cargo:rerun-if-changed=tests/fixtures/http-probe-clock.c");
+    let result = Command::new("cc")
+        .args([
+            "-std=c11",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "tests/fixtures/http-probe-clock.c",
+            "-o",
+        ])
+        .arg(out.join("http-probe-clock-host"))
+        .status()
+        .expect("build fake-clock probe test driver");
+    assert!(result.success(), "fake-clock HTTP probe build failed");
 }
 
 fn build_loopback_identity() {

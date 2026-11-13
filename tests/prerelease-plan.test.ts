@@ -1892,6 +1892,30 @@ function prereleaseGuide() {
 }
 
 describe("published support list", () => {
+  test("next.17 release notes include the env breaking change, migration commands and preserved-key fix", () => {
+    const notes = prereleaseNotes(
+      createPrereleasePlan({
+        ...input,
+        version: "5.0.0-next.17",
+        publish: "true",
+      })
+    );
+    for (const detail of [
+      "Breaking env output",
+      "has_value",
+      "hack env get KEY",
+      "--value-stdin",
+      "only global values",
+      "hack env protect KEY...",
+      "HACK-2172",
+      "cannot recover",
+      "--show-values",
+      "GET /v1/env",
+      "409 yaml_env_mutation_unsupported",
+    ]) {
+      expect(notes).toContain(detail);
+    }
+  });
   test("release notes link to the support list pinned at the candidate tag", () => {
     const published = createPrereleasePlan({
       ...input,

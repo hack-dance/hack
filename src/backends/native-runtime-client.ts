@@ -33,7 +33,7 @@ interface NativeFailure {
   readonly code: string;
   readonly logPhase?: NativeLogFailurePhase;
   readonly causeCode?: string;
-  /** Runtime message the runtime marked as a compile-time literal (value-free). */
+  /** Fixed runtime text, or fixed guidance rendered from a validated diagnostic. */
   readonly message?: string;
   /** Admitted service the runtime named, as a plain service identifier. */
   readonly service?: string;
@@ -76,16 +76,43 @@ function fixedNativeMessage(
     : undefined;
 }
 
-/** The fixed message and validated service a runtime failure carries, if any. */
+/** Render only the closed inferred-route diagnostic; never runtime error text. */
+function routeProbeFailureMessage(
+  value: Record<string, unknown>,
+  service: string | undefined
+): string | undefined {
+  const probe = value.route_probe;
+  if (
+    !(
+      service &&
+      ["graph_service_failed", "graph_startup_application_failed"].includes(
+        typeof value.code === "string" ? value.code : ""
+      ) &&
+      isRecord(probe)
+    ) ||
+    Object.keys(probe).length !== 2 ||
+    probe.version !== 1 ||
+    typeof probe.port !== "number" ||
+    !Number.isSafeInteger(probe.port) ||
+    probe.port < 1 ||
+    probe.port > 65_535
+  ) {
+    return;
+  }
+  return `Inferred route probe on port ${probe.port} is unhealthy. Check hack logs ${service} in the same project/branch, fix the route port, or declare healthcheck.x-hack-http with a longer start_period_ms and a readiness path, within the 300-second graph budget.`;
+}
+
+/** Fixed/closed diagnostic text and the validated service a failure carries. */
 export function nativeFailureDetail(value: Record<string, unknown>): {
   message?: string;
   service?: string;
 } {
-  const message = fixedNativeMessage(value);
   const service =
     typeof value.service === "string" && NATIVE_SERVICE.test(value.service)
       ? value.service
       : undefined;
+  const message =
+    routeProbeFailureMessage(value, service) ?? fixedNativeMessage(value);
   return {
     ...(message ? { message } : {}),
     ...(service ? { service } : {}),
@@ -124,7 +151,7 @@ export function retainNativeRuntimeFailure<T extends Error>(opts: {
 
 /**
  * Value-free runtime detail appended after a closed native failure sentence:
- * the fixed runtime message and the service it concerns, when known.
+ * fixed runtime text or closed probe guidance, and its validated service.
  */
 export function nativeFailureNote(detail: {
   readonly message?: string;
@@ -148,7 +175,7 @@ export class NativeRuntimeRequestError extends ClosedCliError {
   readonly stopSignal: "SIGINT" | "SIGTERM" | undefined;
   readonly nativeCode: string | undefined;
   readonly nativeCauseCode: string | undefined;
-  /** Fixed (value-free) runtime message; see {@link nativeFailureNote}. */
+  /** Fixed/closed diagnostic text; see {@link nativeFailureNote}. */
   readonly nativeMessage: string | undefined;
   readonly nativeService: string | undefined;
   readonly nativeStopFailures: readonly NativeStopFailure[] | undefined;
@@ -158,7 +185,7 @@ export class NativeRuntimeRequestError extends ClosedCliError {
     readonly message: string;
     readonly nativeCode?: string;
     readonly nativeCauseCode?: string;
-    /** Only fixed text admitted by nativeFailureDetail; this can cross IPC. */
+    /** Only safe text admitted by nativeFailureDetail; this can cross IPC. */
     readonly nativeMessage?: string;
     readonly nativeService?: string;
     readonly nativeStopFailures?: readonly NativeStopFailure[];

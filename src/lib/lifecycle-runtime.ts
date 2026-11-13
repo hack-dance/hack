@@ -1,7 +1,13 @@
-import { appendFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ensureDir, pathExists, readTextFile, writeTextFile } from "./fs.ts";
+import { readLinesFromStream } from "../ui/lines.ts";
+import { pathExists, readTextFile, writeTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import {
+  appendPrivateFile,
+  ensurePrivateDirectory,
+  openPrivateAppend,
+  PrivatePathRefusedError,
+} from "./private-file.ts";
 
 export type LifecycleBackend = "tmux" | "zellij";
 
@@ -120,9 +126,25 @@ export async function appendLifecycleLogRecord(opts: {
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
   });
-  await ensureDir(root);
-  const line = `${formatLifecycleLogRecord(opts.record)}\n`;
-  await appendFile(logPath, line, "utf8");
+  await ensurePrivateDirectory(root);
+  await appendPrivateFile({
+    path: logPath,
+    data: `${formatLifecycleLogRecord(opts.record)}\n`,
+  });
+}
+
+/**
+ * Lifecycle output is stored verbatim and unredacted, so its directory and
+ * log are private (0700 and 0600, owner-checked, never through a symlink,
+ * an older broadly readable log moved aside and a new private one started). Called before the first record and before a
+ * persistent session's shell appends to the log.
+ */
+export async function ensurePrivateLifecycleLog(opts: {
+  readonly root: string;
+  readonly logPath: string;
+}): Promise<void> {
+  await ensurePrivateDirectory(opts.root);
+  await (await openPrivateAppend(opts.logPath)).close();
 }
 
 export async function readLifecycleState(opts: {
@@ -338,7 +360,7 @@ async function writeLifecycleStateFile(opts: {
 }): Promise<void> {
   const root = resolveLifecycleRootDir({ projectDir: opts.projectDir });
   const path = resolveLifecycleStatePath({ projectDir: opts.projectDir });
-  await ensureDir(root);
+  await ensurePrivateDirectory(root);
   await writeTextFile(path, `${JSON.stringify(opts.state, null, 2)}\n`);
 }
 
@@ -373,4 +395,75 @@ function normalizeLifecycleStream(value: string): LifecycleLogStream {
     return "meta";
   }
   return "stdout";
+}
+
+/**
+ * Where a running hook's output is persisted. `append` never throws: the
+ * first failure (a refused path, an I/O error) is reported once through
+ * `warn`, value-free, and persistence stops for this hook while its output
+ * keeps reaching the terminal. One sink is shared by a hook's stdout and
+ * stderr, so the refusal is reported once.
+ */
+export type LifecycleLogSink = {
+  readonly append: (record: LifecycleLogRecord) => Promise<void>;
+};
+
+export function createLifecycleLogSink(opts: {
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly warn: (message: string) => void;
+}): LifecycleLogSink {
+  let failed = false;
+  return {
+    append: async (record) => {
+      if (failed) {
+        return;
+      }
+      try {
+        await appendLifecycleLogRecord({ ...opts, record });
+      } catch (error: unknown) {
+        failed = true;
+        // A refusal names the path only; other errors are reported by code,
+        // never by message, since they may quote the record.
+        const reason =
+          error instanceof PrivatePathRefusedError
+            ? error.message
+            : `write failed (${isRecord(error) && typeof error.code === "string" ? error.code : "unknown error"})`;
+        opts.warn(
+          `Lifecycle output is no longer saved to the log for this hook: ${reason}`
+        );
+      }
+    },
+  };
+}
+
+/**
+ * Drain one stream of a running hook to the terminal and the log, line by
+ * line, until it ends. Persistence failures never stop the drain (see
+ * {@link LifecycleLogSink}), so the hook cannot block on a full pipe.
+ */
+export async function drainLifecycleOutput(opts: {
+  readonly stream: ReadableStream<Uint8Array> | number | null;
+  readonly output: "stdout" | "stderr";
+  readonly service: string;
+  readonly sink: LifecycleLogSink;
+  readonly write?: (output: "stdout" | "stderr", text: string) => void;
+}): Promise<void> {
+  if (!opts.stream || typeof opts.stream === "number") {
+    return;
+  }
+  const write =
+    opts.write ??
+    ((output: "stdout" | "stderr", text: string) => {
+      (output === "stderr" ? process.stderr : process.stdout).write(text);
+    });
+  for await (const line of readLinesFromStream(opts.stream)) {
+    write(opts.output, `${line}\n`);
+    await opts.sink.append({
+      timestamp: new Date().toISOString(),
+      service: opts.service,
+      stream: opts.output,
+      message: line,
+    });
+  }
 }

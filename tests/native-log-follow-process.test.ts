@@ -54,6 +54,10 @@ async function fixture(
     | "broken"
     | "slow"
     | "error"
+    | "diagnostic"
+    | "diagnostic-plain"
+    | "frame-diagnostic"
+    | "unsafe-diagnostic"
     | "malformed"
     | "flood"
     | "stopped-idle"
@@ -89,6 +93,13 @@ process.stdin.on("end", () => { writeFileSync(root + "/leash-ended", "yes"); pro
 process.stdin.resume();
 setTimeout(() => process.exit(91), ${mode === "flood" ? 10_000 : 5000});
 if (${JSON.stringify(mode)} === "error") { console.error(JSON.stringify({code:"native_log_tty_unsupported",message:"Fixture refusal."})); process.exit(2); }
+if (["diagnostic", "diagnostic-plain", "frame-diagnostic", "unsafe-diagnostic"].includes(${JSON.stringify(mode)})) {
+  console.log(${JSON.stringify(wire)});
+  const frame = ${JSON.stringify(mode)} === "frame-diagnostic";
+  const unsafe = ${JSON.stringify(mode)} === "unsafe-diagnostic";
+  console.error(JSON.stringify({ code: frame ? "native_log_stream_uncertain" : "engine_protocol", log_phase: unsafe ? "private-diagnostic-canary" : frame ? "frame-header" : "periodic-check", message_fixed: true, message: unsafe ? "private-diagnostic-canary\\nsecond line" : frame ? "Invalid Engine mux header: reserved bytes are nonzero; expected [stream, 0, 0, 0, length:u32be]. Stream bytes omitted." : "Engine request failed or timed out; its effect may be uncertain. No request was replayed." }));
+  process.exit(2);
+}
 if (${JSON.stringify(mode)} === "malformed") { console.log("invalid-wire"); process.exit(0); }
 if (${JSON.stringify(mode)} === "stopped-idle") {
   const partial = JSON.parse(${JSON.stringify(wire)});
@@ -149,7 +160,7 @@ const output = new Writable({ write(chunk, encoding, callback) {
   }
   process.stdout.write(chunk, callback);
 } });
-const code = await followNativeLogs({ runtime: { binary: ${JSON.stringify(binary)}, home: ${JSON.stringify(root)} }, cwd: ${JSON.stringify(root)}, selection: mode === "select-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : mode === "admission" ? async () => { throw new Error("private selection failure"); } : ${JSON.stringify(caseSelection)}, resume: mode === "restart-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : ["restart", "restored", "unchanged"].includes(mode) ? async () => ++attachments === 1 ? { ...${JSON.stringify(caseSelection)}, ...(mode === "restart" ? { run: "f".repeat(32), owner: "a".repeat(32) } : {}), container: mode === "unchanged" ? ${JSON.stringify(container)} : "9".repeat(64) } : null : undefined, service: "web-2", tail: mode === "long-partial" ? 0 : 12, since: "2026-01-01T00:00:00Z", timestamps: mode === "normal", json: !["plain", "pipe"].includes(mode), project: "fixture", branch: "topic", stdout: mode === "pipe" ? process.stdout : output });
+const code = await followNativeLogs({ runtime: { binary: ${JSON.stringify(binary)}, home: ${JSON.stringify(root)} }, cwd: ${JSON.stringify(root)}, selection: mode === "select-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : mode === "admission" ? async () => { throw new Error("private selection failure"); } : ${JSON.stringify(caseSelection)}, resume: mode === "restart-wait" ? async () => { writeFileSync(${JSON.stringify(join(root, "waiting"))}, "yes"); return await new Promise(() => {}); } : ["restart", "restored", "unchanged"].includes(mode) ? async () => ++attachments === 1 ? { ...${JSON.stringify(caseSelection)}, ...(mode === "restart" ? { run: "f".repeat(32), owner: "a".repeat(32) } : {}), container: mode === "unchanged" ? ${JSON.stringify(container)} : "9".repeat(64) } : null : undefined, service: "web-2", tail: mode === "long-partial" ? 0 : 12, since: "2026-01-01T00:00:00Z", timestamps: mode === "normal", json: !["plain", "pipe", "diagnostic-plain"].includes(mode), project: "fixture", branch: "topic", stdout: mode === "pipe" ? process.stdout : output });
 process.exit(code);
 `
   );
@@ -351,6 +362,73 @@ test("named runtime refusal survives the streaming stderr boundary", async () =>
     const errors = await new Response(f.child.stderr).text();
     expect(await f.child.exited).not.toBe(0);
     expect(errors).toContain("native_log_tty_unsupported");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test.each([
+  "diagnostic",
+  "diagnostic-plain",
+  "frame-diagnostic",
+  "unsafe-diagnostic",
+] as const)("native failure retains only fixed diagnostic detail: %s", async (mode) => {
+  const f = await fixture(mode);
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(f.child.stdout).text(),
+      new Response(f.child.stderr).text(),
+      f.child.exited,
+    ]);
+    expect(code).toBe(1);
+    expect(stderr.trim().split("\n")).toHaveLength(1);
+    expect(stdout + stderr).not.toContain("private-diagnostic-canary");
+    if (mode === "unsafe-diagnostic") {
+      expect(stderr).not.toContain("Phase:");
+      expect(stderr).not.toContain("Runtime:");
+    } else {
+      expect(stderr).toContain(
+        mode === "frame-diagnostic"
+          ? "Phase: frame-header."
+          : "Phase: periodic-check."
+      );
+      expect(stderr).toContain(
+        mode === "frame-diagnostic"
+          ? "expected [stream, 0, 0, 0, length:u32be]"
+          : "Engine request failed or timed out"
+      );
+    }
+    if (mode === "diagnostic-plain") {
+      expect(stdout).toBe("hello\n");
+    } else {
+      const events = stdout
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(events.map((event) => event.type)).toEqual([
+        "start",
+        "log",
+        "end",
+      ]);
+      const end = events.at(-1);
+      expect(end.reason).toBe(
+        mode === "frame-diagnostic"
+          ? "native_log_stream_uncertain"
+          : "engine_protocol"
+      );
+      expect(end.phase).toBe(
+        mode === "unsafe-diagnostic"
+          ? undefined
+          : mode === "frame-diagnostic"
+            ? "frame-header"
+            : "periodic-check"
+      );
+      if (mode === "unsafe-diagnostic") {
+        expect(end.message).toBeUndefined();
+      } else {
+        expect(end.message).toBeString();
+      }
+    }
   } finally {
     await f.dispose();
   }

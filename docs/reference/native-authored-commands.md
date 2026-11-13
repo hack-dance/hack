@@ -410,11 +410,22 @@ unexplained transport loss reports `native_log_stream_uncertain`, while changed
 ownership or generation refuses explicitly. No stream result grants cleanup
 authority.
 
+Native follow failures retain their named JSON `end.reason`. When available,
+`end.phase` identifies admission, periodic or final inspection, or the decoder
+boundary; `end.message` and stderr include only the runtime's bounded, fixed
+diagnostic. Malformed mux headers report the invalid field and expected header
+layout, never raw bytes: a misframed header may actually contain log payload.
+An `engine_protocol` during inspection does not identify a mux-decoder failure.
+Inspection failures still end the follow; no retries or identity checks are relaxed.
+
 After a project restart, the frontend attempts a fresh Ready admission for the same
 project, branch, namespace and service. A fresh owner is allowed; the previous
 selection grants no authority. An advisory restart notice (authored projects) or
 the existing restart intent (adopted projects) allows up to 30 seconds of read-only
-waiting, without a mutation lease. A normal down does not enter this wait. Notices expire after the stop timeout plus 30 seconds (at most 330 seconds); publishing or retiring one never changes the
+waiting, without a mutation lease. A normal down does not enter this wait.
+Authored restart publishes its notice only after stop admission, before sending the
+stop request. Admission refusals create no notice state. After an admitted attempt,
+the empty notice directory may remain. Notices expire after the remaining stop budget plus 30 seconds (at most 330 seconds); publishing or retiring one never changes the
 lifecycle command result. A recent stale notice can cause a bounded wait, ending with `native_log_restart_unavailable`
 and exit 1. Reattachment requires a different container ID; an adopted restore may
 retain both its run ID and provider owner. The old reader supplies its admitted

@@ -1,5 +1,8 @@
 //! Read-only Engine log transport. Buffers never grow with frame size or log rate.
-use crate::CandidateError;
+use crate::{CandidateError, LogFailurePhase};
+#[cfg(test)]
+#[path = "log_follow_fragmentation_tests.rs"]
+mod fragmentation_tests;
 #[path = "log_timestamp.rs"]
 mod timestamp;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -16,6 +19,20 @@ pub(in crate::provider) fn failure() -> CandidateError {
         "native_log_stream_uncertain",
         "Native log stream ended without a confirmed service stop; no cleanup was inferred.",
     )
+}
+
+fn frame_failure(message: &'static str) -> CandidateError {
+    CandidateError::new("native_log_stream_uncertain", message)
+        .with_log_phase(LogFailurePhase::FrameHeader)
+}
+
+fn body_failure(error: io::Error, phase: LogFailurePhase) -> CandidateError {
+    if error.kind() == io::ErrorKind::InvalidData {
+        CandidateError::new("native_log_stream_uncertain", "Invalid HTTP log body framing: expected a hexadecimal chunk size, declared bytes and CRLF, or the declared Content-Length. Body values omitted.")
+            .with_log_phase(LogFailurePhase::HttpFraming)
+    } else {
+        failure().with_log_phase(phase)
+    }
 }
 
 /// Emits at most 4096 payload bytes per envelope. The frontend owns line assembly.
@@ -38,7 +55,10 @@ fn copy_started(
     started: impl FnOnce(),
 ) -> Result<(), CandidateError> {
     let mut reader = io::BufReader::with_capacity(8192, input);
-    let head = headers(&mut reader)?;
+    let head = headers(&mut reader).map_err(|mut error| {
+        error.log_phase.get_or_insert(LogFailurePhase::Headers);
+        error
+    })?;
     started();
     serde_json::to_writer(
         &mut *output,
@@ -59,26 +79,43 @@ fn copy_started(
     };
     loop {
         let mut header = [0u8; 8];
-        if body.read(&mut header[..1]).map_err(|_| failure())? == 0 {
+        if body
+            .read(&mut header[..1])
+            .map_err(|e| body_failure(e, LogFailurePhase::FrameHeader))?
+            == 0
+        {
             return Ok(());
         }
-        body.read_exact(&mut header[1..]).map_err(|_| failure())?;
-        if !matches!(header[0], 1 | 2) || header[1..4] != [0, 0, 0] {
-            return Err(failure());
+        body.read_exact(&mut header[1..])
+            .map_err(|e| body_failure(e, LogFailurePhase::FrameHeader))?;
+        if !matches!(header[0], 1 | 2) {
+            return Err(frame_failure(
+                "Invalid Engine mux header: first byte is not stdout (1) or stderr (2); expected [stream, 0, 0, 0, length:u32be]. Stream bytes omitted.",
+            ));
+        }
+        if header[1..4] != [0, 0, 0] {
+            return Err(frame_failure(
+                "Invalid Engine mux header: reserved bytes are nonzero; expected [stream, 0, 0, 0, length:u32be]. Stream bytes omitted.",
+            ));
         }
         let mut remaining =
             u32::from_be_bytes(header[4..8].try_into().map_err(|_| failure())?) as usize;
         let timestamp = if timestamps && remaining > 0 {
-            Some(read_timestamp(&mut body, &mut remaining)?)
+            Some(
+                read_timestamp(&mut body, &mut remaining)
+                    .map_err(|e| e.with_log_phase(LogFailurePhase::Timestamp))?,
+            )
         } else {
             None
         };
         while remaining > 0 {
             let mut bytes = [0u8; 4096];
             let size = remaining.min(bytes.len());
-            let size = body.read(&mut bytes[..size]).map_err(|_| failure())?;
+            let size = body
+                .read(&mut bytes[..size])
+                .map_err(|e| body_failure(e, LogFailurePhase::Payload))?;
             if size == 0 {
-                return Err(failure());
+                return Err(CandidateError::new("native_log_stream_uncertain", "Engine mux payload ended before its declared length; the final log line may be incomplete.").with_log_phase(LogFailurePhase::Payload));
             }
             let event = serde_json::json!({"version":2,"kind":"native-log-chunk",
                 "timestamp": timestamp,
@@ -171,14 +208,18 @@ fn line(reader: &mut impl BufRead, limit: usize) -> Result<String, CandidateErro
     }
 }
 fn headers(reader: &mut impl BufRead) -> Result<Framing, CandidateError> {
-    let status = line(reader, 1024)?;
+    let status = line(reader, 1024).map_err(|e| e.with_log_phase(LogFailurePhase::StatusLine))?;
     if !status.starts_with("HTTP/1.1 200 ") {
-        return Err(failure());
+        return Err(CandidateError::new(
+            "native_log_stream_uncertain",
+            "Invalid Engine log status line: expected HTTP/1.1 200. Response values omitted.",
+        )
+        .with_log_phase(LogFailurePhase::StatusLine));
     }
     let mut budget = status.len();
     let (mut chunked, mut length) = (false, None);
     loop {
-        let value = line(reader, 8192)?;
+        let value = line(reader, 8192).map_err(|e| e.with_log_phase(LogFailurePhase::Headers))?;
         budget += value.len() + 2;
         if budget > 8192 {
             return Err(failure());
@@ -292,7 +333,8 @@ impl<F: Fn() -> Result<bool, CandidateError>> Read for Guarded<'_, F> {
             }
             if self.last.elapsed() >= Duration::from_secs(5) {
                 self.running = (self.check)().map_err(|error| {
-                    *self.check_error.borrow_mut() = Some(error);
+                    *self.check_error.borrow_mut() =
+                        Some(error.with_log_phase(LogFailurePhase::PeriodicCheck));
                     io::Error::other("Log selection changed")
                 })?;
                 self.last = Instant::now();
@@ -354,7 +396,7 @@ pub(in crate::provider) fn follow_socket(
     check: impl Fn() -> Result<bool, CandidateError>,
     output: &mut impl Write,
 ) -> Result<(), CandidateError> {
-    let running = check()?;
+    let running = check().map_err(|e| e.with_log_phase(LogFailurePhase::Admission))?;
     let mut stream =
         crate::provider::agent::connect_until(path, Instant::now() + Duration::from_secs(5))?;
     stream
@@ -394,7 +436,7 @@ pub(in crate::provider) fn follow_socket(
     }
     result?;
     // A socket ending while the selected service still runs is transport loss.
-    if check()? {
+    if check().map_err(|e| e.with_log_phase(LogFailurePhase::FinalCheck))? {
         return Err(failure());
     }
     Ok(())

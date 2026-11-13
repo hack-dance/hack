@@ -30,6 +30,11 @@ the adopted fixture as well:
    timestamp prefix and JSON `entry.timestamp`, including nanoseconds.
 4. Exercise `--since 1s`, `--tail 0`, a quiet service and a TTY-configured adopted
    service. Since and tail appear in the Engine request; TTY refuses by name.
+   Repeat the 70,000-byte stdout and stderr bursts while the guest is busy.
+   If a follower fails, record its end reason, phase and fixed diagnostic (no log
+   payload). `periodic-check` with a timeout points to container inspection;
+   `frame-header` or `http-framing` points to decoding. Fragmentation fixtures
+   passing does not qualify this busy-guest case or prove the observed failure fixed.
 5. Keep one JSON follower through `restart`. Require one `notice` with reason
    `native_log_restarted`, then fresh-container lines, with no second start or
    replay of the previous generation. Plain restart notices go to stderr.

@@ -138,10 +138,7 @@ export async function restartNativeAuthoredProject(
       canceled: opts.signal?.aborted === true,
     });
   }
-  const retireNotice = await publishLogRestart(
-    opts.scope,
-    opts.startupTimeoutMs + 30_000
-  );
+  let retireNotice: (() => Promise<void>) | undefined;
   let retired: Promise<void> | undefined;
   try {
     try {
@@ -149,6 +146,12 @@ export async function restartNativeAuthoredProject(
         scope: opts.scope,
         timeoutMs: opts.startupTimeoutMs,
         signal: opts.signal,
+        onStopping: async ({ remainingMs }) => {
+          retireNotice = await publishLogRestart(
+            opts.scope,
+            remainingMs + 30_000
+          );
+        },
       });
     } catch {
       throw new NativeAuthoredProjectRestartError({
@@ -176,8 +179,8 @@ export async function restartNativeAuthoredProject(
         signal: opts.signal,
         forceSignal: opts.forceSignal,
         onReady: (selection, identity) => {
-          retired = retireNotice();
-          void retired.catch(() => undefined);
+          retired = retireNotice?.();
+          void retired?.catch(() => undefined);
           return opts.onReady?.(selection, identity);
         },
         onExitDiagnostic: opts.onExitDiagnostic,
@@ -194,6 +197,6 @@ export async function restartNativeAuthoredProject(
       });
     }
   } finally {
-    await (retired ?? retireNotice());
+    await (retired ?? retireNotice?.());
   }
 }

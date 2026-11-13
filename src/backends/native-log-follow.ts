@@ -20,6 +20,7 @@ import {
 } from "./native-log-restart.ts";
 import {
   NATIVE_EXIT_DRAIN_BOUND_MS,
+  type NativeLogFailurePhase,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -91,19 +92,31 @@ export type NativeLogFollowSelection = {
 };
 class NativeLogError extends HackCliError {
   readonly reason: string;
-  constructor(code: string) {
+  readonly phase: NativeLogFailurePhase | undefined;
+  readonly runtimeMessage: string | undefined;
+  constructor(
+    code: string,
+    detail?: { message?: string; logPhase?: NativeLogFailurePhase }
+  ) {
     super({
       code: "E_LIFECYCLE_FAILED",
       message:
-        code === "native_log_stopped_idle"
+        (code === "native_log_stopped_idle"
           ? "Native logs ended after the stopped service was idle for five seconds without stream EOF (native_log_stopped_idle); the final tail may be incomplete."
-          : `Native logs failed (${code}); no cleanup was inferred.`,
+          : `Native logs failed (${code}); no cleanup was inferred.`) +
+        (detail?.logPhase ? ` Phase: ${detail.logPhase}.` : "") +
+        (detail?.message ? ` Runtime: ${detail.message}` : ""),
     });
     this.reason = code;
+    this.phase = detail?.logPhase;
+    this.runtimeMessage = detail?.message;
   }
 }
-function refused(code = "native_log_stream_uncertain"): never {
-  throw new NativeLogError(code);
+function refused(
+  code = "native_log_stream_uncertain",
+  detail?: { message?: string; logPhase?: NativeLogFailurePhase }
+): never {
+  throw new NativeLogError(code, detail);
 }
 /** Reject unsupported bounds explicitly before selecting or spawning the runtime. */
 export function nativeLogFollowOptions(input: {
@@ -445,12 +458,14 @@ function logOutput(
     async end(
       code: number,
       endSignal = signal,
-      reason = code === 0 ? "eof" : `exit:${code}`
+      reason = code === 0 ? "eof" : `exit:${code}`,
+      phase?: NativeLogFailurePhase,
+      message?: string
     ) {
       if (input.json) {
         await write(
           stdout,
-          `${JSON.stringify(buildLogStreamEndEvent({ context, reason }))}\n`,
+          `${JSON.stringify(buildLogStreamEndEvent({ context, reason, phase, message }))}\n`,
           endSignal
         );
       }
@@ -607,10 +622,19 @@ export async function followNativeLogs(input: FollowInput): Promise<number> {
       return canceled;
     }
     const reason = logErrorReason(error);
-    await output.end(1, controller.signal, reason).catch(() => undefined);
+    const diagnostic =
+      error instanceof NativeLogError ? error : new NativeLogError(reason);
+    await output
+      .end(
+        1,
+        controller.signal,
+        reason,
+        diagnostic.phase,
+        diagnostic.runtimeMessage
+      )
+      .catch(() => undefined);
     if (!consumerClosed) {
       // Fixed diagnostics: admission errors can contain paths or input values.
-      const diagnostic = new NativeLogError(reason);
       await output
         .notice(diagnostic.message, AbortSignal.timeout(1000))
         .catch(() => undefined);
@@ -750,7 +774,7 @@ async function readSelectedLogs({
         signal.throwIfAborted();
         await decoder.finish();
         if (code !== 0 || detail?.code) {
-          refused(detail?.code);
+          refused(detail?.code, detail);
         }
         return attachedContainer ?? refused("native_log_selection_changed");
       } catch (error) {

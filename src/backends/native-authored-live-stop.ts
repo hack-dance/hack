@@ -347,6 +347,7 @@ export async function requestNativeAuthoredLiveStop(input: {
   readonly run: string;
   readonly remaining: () => number;
   readonly signal?: AbortSignal;
+  readonly onStopping?: () => Promise<void>;
 }): Promise<boolean> {
   const { run, remaining, signal } = input;
   const store = {
@@ -386,6 +387,16 @@ export async function requestNativeAuthoredLiveStop(input: {
   await unchanged(source, 1024 * 1024);
   await unchanged(current);
   await available(store);
+  remaining();
+  if (input.onStopping) {
+    await input.onStopping();
+    await available(store);
+    await unchanged(ready);
+    await unchanged(start);
+    await unchanged(source, 1024 * 1024);
+    await unchanged(current);
+    await available(store);
+  }
   await requestNativeHookStop({
     run,
     port: value.port,

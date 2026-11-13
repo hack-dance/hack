@@ -145,7 +145,9 @@ fn imported(candidate: &Candidate, options: &LogFollowOptions<'_>) -> Result<(),
             Err(error) => Err(error),
         }
     };
-    let initial = state()?.ok_or_else(changed)?;
+    let initial = state()
+        .map_err(|e| e.with_log_phase(crate::LogFailurePhase::Admission))?
+        .ok_or_else(changed)?;
     let generation = initial["State"]["StartedAt"].clone();
     admit_container(options, container)?;
     if options.selection_only {

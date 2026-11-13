@@ -18,6 +18,7 @@ import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import { ensureDir } from "./fs.ts";
 import { resolveUserHomeDir } from "./home-dir.ts";
 import { isKeychainDisabled, keychain } from "./keychain.ts";
+import { quoteShellWord } from "./logs.ts";
 import { NativeKeychainTimeoutError } from "./native-keychain.ts";
 import {
   decodeCanonicalBase64,
@@ -295,7 +296,7 @@ export async function retireEncryptedStoreFile(input: {
         throw new SecretStoreRetireError(
           code === "EEXIST"
             ? `${to} already exists; nothing was moved. Retry in a second.`
-            : `Could not give ${storePath} the name ${to} (${code}); nothing was moved. To retire it by hand: mv '${storePath}' '${to}'`
+            : `Could not give ${storePath} the name ${to} (${code}); nothing was moved. To retire it by hand: mv ${quoteShellWord(storePath)} ${quoteShellWord(to)}`
         );
       }
       await unlink(storePath);

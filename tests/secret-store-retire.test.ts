@@ -272,9 +272,7 @@ test("retire-store refuses without --yes when it cannot prompt, then retires, an
   const retiredPath = join(fixture.hackHome, kept[0] ?? "");
   expect(await readFile(retiredPath)).toEqual(before);
   expect(retired.output).toContain(`to ${retiredPath}`);
-  expect(retired.output).toContain(
-    `mv '${retiredPath}' '${fixture.storePath}'`
-  );
+  expect(retired.output).toContain(`mv ${retiredPath} ${fixture.storePath}`);
   expect(retired.output).toContain("Nothing was deleted");
 
   // doctor afterwards: the retired file is information, not a problem.
@@ -289,7 +287,7 @@ test("retire-store refuses without --yes when it cannot prompt, then retires, an
       `Retired secret store kept at ~/.hack/${kept[0]}`
     );
     expect(after[0]?.message).toContain(
-      `mv '${retiredPath}' '${fixture.storePath}'`
+      `mv ${retiredPath} ${fixture.storePath}`
     );
   }
 
@@ -425,4 +423,64 @@ test("the retire command doctor and the recovery block name targets the diagnose
       projectRoot: "/srv/some project",
     }).join("\n")
   ).toContain("`hack secrets retire-store --path '/srv/some project'`");
+});
+
+test("printed restore commands quote a store path that holds a quote", async () => {
+  // Codex security review: a configured store path is project input; a
+  // quote in it must not end the shell literal of the printed mv command.
+  const fixture = await setUp();
+  const hostile = join(fixture.hackHome, "store'; touch PWNED; #'.enc.json");
+  await rename(fixture.storePath, hostile);
+  const configPath = join(fixture.hackHome, "hack.config.json");
+  await writeFile(
+    configPath,
+    `${JSON.stringify({
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: hostile, keyPath: fixture.keyPath },
+        },
+      },
+    })}\n`
+  );
+  const before = await readFile(hostile);
+  const outcome = await retireSecretStore({
+    projectName: "app-b",
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(outcome.kind).toBe("retired");
+  const info = (await inspect(fixture.bystander, "app-b")).find(
+    (finding) => finding.status === "info"
+  );
+  const command = info?.message.split(": ").at(-1) ?? "";
+  expect(command.startsWith("mv ")).toBe(true);
+  // Run exactly what was printed, in the fixture root.
+  const shell = Bun.spawn(["sh", "-c", command], {
+    cwd: root,
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  expect(await shell.exited).toBe(0);
+  expect(await readFile(hostile)).toEqual(before);
+  expect(await lstat(join(root, "PWNED")).catch(() => null)).toBeNull();
+  expect(
+    await lstat(join(fixture.hackHome, "PWNED")).catch(() => null)
+  ).toBeNull();
+  // The guidance extracts the scoped retire command whole.
+  const lines = buildRecoveryWorkflowLines({
+    guidance: buildDoctorRecoveryGuidance({
+      results: [
+        {
+          name: "secret integrity",
+          status: "warn",
+          message:
+            "Run hack secrets retire-store --path '/srv/it'\\''s here' now.",
+        },
+      ],
+    }),
+    projectRoot: null,
+  }).join("\n");
+  expect(lines).toContain(
+    "`hack secrets retire-store --path '/srv/it'\\''s here'`"
+  );
 });

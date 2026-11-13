@@ -25,7 +25,7 @@ const FIX_CHECKS = new Set(["caddy local ca", "dns:hack", "dns:hack.gy"]);
 const RETIRE_STORE_COMMAND = "hack secrets retire-store";
 /** The command as the finding names it, with the diagnosed project's `--path`. */
 const RETIRE_STORE_COMMAND_PATTERN =
-  /hack secrets retire-store(?: --path (?:'(?:[^']|'"'"')*'|[A-Za-z0-9_./:-]+))?/u;
+  /hack secrets retire-store(?: --path (?:'(?:[^']|'\\'')*'|[A-Za-z0-9_@%+=:,./-]+))?/u;
 
 /** The two ways forward for such a store, shown as one choice (HACK-2177). */
 function secretStoreChoices(command: string): readonly string[] {

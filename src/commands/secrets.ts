@@ -10,6 +10,7 @@ import {
   requireInteractive,
 } from "../lib/interactivity.ts";
 import { keychain } from "../lib/keychain.ts";
+import { quoteShellWord } from "../lib/logs.ts";
 import { findProjectContext, readProjectConfig } from "../lib/project.ts";
 import { retireSecretStore } from "../lib/secret-store-retire.ts";
 import { logger } from "../ui/logger.ts";
@@ -300,7 +301,7 @@ async function handleSecretsRetireStore({
     message: [
       `Moved the encrypted secret store ${outcome.from} to ${outcome.to}.`,
       "Nothing was deleted, and no entry was read or printed. The key file was left alone.",
-      `To put it back (while no store is at ${outcome.from}): mv '${outcome.to}' '${outcome.from}'`,
+      `To put it back (while no store is at ${outcome.from}): mv ${quoteShellWord(outcome.to)} ${quoteShellWord(outcome.from)}`,
     ].join("\n"),
   });
   return 0;

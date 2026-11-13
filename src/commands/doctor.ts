@@ -209,6 +209,7 @@ import {
   nativeProcessCheckFromCompose,
 } from "../lib/native-process-wrappers.ts";
 import { isLinux, isMac } from "../lib/os.ts";
+import { readPrivateEnvFile } from "../lib/private-env-file.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -4016,7 +4017,9 @@ async function checkComposeNetworkHygiene({
 }
 
 async function readLegacyEnvDevHost(envFile: string): Promise<string | null> {
-  const envText = await readTextFile(envFile);
+  // No-follow (HACK-2165): a linked .hack/.env is not read, so its values
+  // are never printed.
+  const envText = await readPrivateEnvFile({ envFile }).catch(() => null);
   if (!envText) {
     return null;
   }

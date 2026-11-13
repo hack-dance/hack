@@ -109,10 +109,12 @@ removal; committing an automatic index removal would delete teammates' copies.
   does not make it writable for Hack; add a write bit instead. When it lacks
   the managed block, `hack doctor` warns and names the fix (make it writable,
   then run
-  `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`
-  and `hack env hydrate` still write the local layer, print the same warning
-  on stderr (so `--json` output on stdout stays valid JSON), and leave the
-  file unchanged. Interactive `hack init` that overwrites an existing scaffold
+  `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`,
+  `add --local`, `unset --local` and `hack env hydrate` print the same warning
+  on stderr (so `--json` output on stdout stays valid JSON) and leave the
+  file unchanged; they write the local layer only when another rule (for
+  example a root `.gitignore` entry) still ignores it, and otherwise refuse
+  (see "Machine-local writes" below). Interactive `hack init` that overwrites an existing scaffold
   prints the same warning and leaves the file unchanged. A read-only file that
   already has the block is fine.
 - runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
@@ -402,8 +404,10 @@ so readers never see a partial file. An existing file with group or other access
 tightened to `0600` even when its contents are unchanged. These write and update paths
 refuse, with a fixed message that names no file or value, an env file that is a symlink
 (including a dangling one) or not a regular file, or one whose `.hack` directory is a
-symlink. Replace the link with a regular file or directory to continue. Code paths
-that only read an env file do not apply this check and still follow a symlink.
+symlink. Replace the link with a regular file or directory to continue. Reads of
+these files, including legacy resolution and `hack env list`, refuse the same links
+before reading, so a link to a dotenv file outside the project is never parsed or
+printed.
 
 For host execution, `hack host exec`, `hack host shell`, and lifecycle hooks/processes use a host-local view.
 That means Hack prefers host-usable values when it can:
@@ -739,6 +743,35 @@ a local destination already tracked by Git. Values declared as `keychain` migrat
 layers as ciphertext.
 Migration requires effective ignore protection before writing plaintext. It refuses
 an outdated read-only `.hack/.gitignore` or a local destination that Git does not ignore.
+
+Machine-local writes (`hack env set`, `add` and `unset` with `--local`, and `hack env
+hydrate`) apply the same protection before every write, to every local layer
+(`hack.env.local.yaml` and each `hack.env.<overlay>.local.yaml`). They refuse, with a
+message that names the file and no value:
+
+- a local layer that is a symbolic link, wherever it points (Git checks the link's
+  name, while a write would replace the file it names, which may be tracked);
+- a local layer that Git tracks, or one whose tracking Git cannot report inside a
+  checkout;
+- a local layer that no effective rule ignores, after Hack has tried once to restore
+  the managed `.hack/.gitignore` block (a read-only file, or a later rule that
+  re-includes the layer, leaves it unignored).
+
+Outside a Git checkout nothing can commit the layer, so these checks pass. Hack decides
+"outside a checkout" only on confirmed absence: it looks for a `.git` entry above both the
+project path you gave and its resolved path, and treats an entry it cannot inspect, or a
+path it cannot resolve, as inside. The same checks apply to a legacy `.hack/.env` (or
+overlay) that `hack env set` or `unset` rewrites in a project without env layers, after
+Hack adds its `info/exclude` entry. A machine-local write replaces the checked path
+itself: it never resolves the destination through a symbolic link.
+
+**What these protections cover.** Hack protects machine-local values and keys against
+accidental collection by Git and against other users of the machine: it refuses or
+reports a file Git tracks, cannot report on, or does not ignore; it keeps files private
+to your user; and it binds each check to the file it actually opens or replaces. A
+process already running as your user is out of scope: it can read the key and every
+machine-local file directly, so Hack adds no machinery whose only purpose is to defeat
+such a process racing its checks.
 Without `hack.env.json`, `set --local` still writes `.hack/.env`; if a contract is
 added later, migration keeps those values machine-local too.
 

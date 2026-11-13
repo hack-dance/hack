@@ -106,6 +106,8 @@ export type UpgradeCheckReport = {
 
 const PROJECT_CONCURRENCY = 8;
 const PROBE_TIMEOUT_MS = 12_000;
+/** No project check starts after this much time: the whole check stays under 30 s. */
+const PROJECT_BUDGET_MS = 24_000;
 
 /** Runs every check and builds the plan. */
 export async function runUpgradeCheck(opts: {
@@ -134,6 +136,7 @@ export async function runUpgradeCheck(opts: {
         project,
         homeDir: opts.homeDir,
         nativePreflight: opts.probes.nativePreflight,
+        deadline: started + PROJECT_BUDGET_MS,
       }),
     })
   );

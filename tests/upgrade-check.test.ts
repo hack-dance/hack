@@ -23,6 +23,7 @@ import {
   defaultUpgradeCheckProbes,
   type UpgradeCheckProbes,
 } from "../src/lib/upgrade-check-probes.ts";
+import { inspectUpgradeProject } from "../src/lib/upgrade-check-project.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -187,7 +188,7 @@ test("dead registry entries are counted apart from unreadable ones, and only liv
   expect(report.registry.missing).toHaveLength(77);
   expect(
     report.registry.missing.find((e) => e.name === "app-config-gone")?.reason
-  ).toBe("hack.config.json is gone");
+  ).toContain("is gone");
   expect(report.registry.unreadable.map((e) => e.name)).toEqual([
     "app-invalid",
   ]);
@@ -201,6 +202,42 @@ test("dead registry entries are counted apart from unreadable ones, and only liv
   expect(dead77?.summary).toContain("not live projects that failed to read");
   // A registry of mostly dead entries stays fast.
   expect(report.duration_ms).toBeLessThan(30_000);
+});
+
+test("a project with only the legacy TOML config or only a Compose file is live, not dead", async () => {
+  const toml = entry("app-toml");
+  await mkdir(toml.projectDir, { recursive: true });
+  await writeFile(join(toml.projectDir, "hack.toml"), 'name = "app-toml"\n');
+  const compose = entry("app-compose");
+  await mkdir(compose.projectDir, { recursive: true });
+  await writeFile(
+    join(compose.projectDir, "docker-compose.yml"),
+    "services: {}\n"
+  );
+  await writeRegistry([toml, compose]);
+  const report = await check(healthyProbes());
+  expect(report.registry.live).toBe(2);
+  expect(report.registry.missing).toEqual([]);
+});
+
+test("once the time budget is spent, project checks report not checked without running", async () => {
+  const project = await liveProject("app-late");
+  let ran = false;
+  const findings = await inspectUpgradeProject({
+    project,
+    homeDir: home,
+    deadline: Date.now() - 1,
+    nativePreflight: async () => {
+      ran = true;
+      return null;
+    },
+  });
+  expect(ran).toBe(false);
+  expect(findings.length).toBeGreaterThan(0);
+  for (const finding of findings) {
+    expect(finding.status).toBe("warn");
+    expect(finding.summary).toContain("ran out of time");
+  }
 });
 
 test("the plan puts blockers first, then the snapshot, then machine and project steps", async () => {

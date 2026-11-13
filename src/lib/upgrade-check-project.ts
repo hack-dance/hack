@@ -3,7 +3,9 @@ import { basename, resolve } from "node:path";
 
 import { inspectDoctorAgentIntegrations } from "../commands/doctor.ts";
 import {
+  PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
+  PROJECT_CONFIG_LEGACY_FILENAME,
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_FILENAME,
   PROJECT_ENV_STATE_FILENAME,
@@ -73,27 +75,60 @@ export async function classifyRegistryEntry(
       reason: `${project.projectDirName}/ cannot be read`,
     };
   }
-  const configPath = resolve(project.projectDir, PROJECT_CONFIG_FILENAME);
-  let text: string;
-  try {
-    text = await readFile(configPath, "utf8");
-  } catch (error: unknown) {
-    return errorCode(error) === "ENOENT"
-      ? { state: "missing", reason: `${PROJECT_CONFIG_FILENAME} is gone` }
-      : {
-          state: "unreadable",
-          reason: `${PROJECT_CONFIG_FILENAME} cannot be read`,
-        };
-  }
-  try {
-    JSON.parse(text);
-  } catch {
+  const config = await readConfigText(
+    resolve(project.projectDir, PROJECT_CONFIG_FILENAME)
+  );
+  if (config.kind === "unreadable") {
     return {
       state: "unreadable",
-      reason: `${PROJECT_CONFIG_FILENAME} is not valid JSON`,
+      reason: `${PROJECT_CONFIG_FILENAME} cannot be read`,
     };
   }
-  return { state: "live" };
+  if (config.kind === "text") {
+    try {
+      JSON.parse(config.text);
+    } catch {
+      return {
+        state: "unreadable",
+        reason: `${PROJECT_CONFIG_FILENAME} is not valid JSON`,
+      };
+    }
+    return { state: "live" };
+  }
+  // No JSON config: the legacy TOML config or a Compose file still makes it
+  // a project (the same inputs project discovery and prune accept).
+  for (const name of [
+    PROJECT_CONFIG_LEGACY_FILENAME,
+    PROJECT_COMPOSE_FILENAME,
+  ]) {
+    const other = await readConfigText(resolve(project.projectDir, name));
+    if (other.kind === "unreadable") {
+      return { state: "unreadable", reason: `${name} cannot be read` };
+    }
+    if (other.kind === "text") {
+      return { state: "live" };
+    }
+  }
+  return {
+    state: "missing",
+    reason: `its config (${PROJECT_CONFIG_FILENAME}, ${PROJECT_CONFIG_LEGACY_FILENAME} or ${PROJECT_COMPOSE_FILENAME}) is gone`,
+  };
+}
+
+async function readConfigText(
+  path: string
+): Promise<
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "absent" | "unreadable" }
+> {
+  try {
+    return { kind: "text", text: await readFile(path, "utf8") };
+  } catch (error: unknown) {
+    const code = errorCode(error);
+    return code === "ENOENT" || code === "ENOTDIR"
+      ? { kind: "absent" }
+      : { kind: "unreadable" };
+  }
 }
 
 /** Env formats a project's `.hack/` holds. */
@@ -330,12 +365,26 @@ function nativeFinding(
       };
 }
 
-/** A check that threw or ran out of time is reported, never a pass. */
+/**
+ * A check that threw or ran out of time is reported, never a pass. It gets
+ * at most `timeoutMs`, and never runs past `deadline` (epoch ms): once the
+ * whole check's budget is spent, it reports "not checked" without running.
+ */
 async function guarded(
   id: string,
-  timeoutMs: number,
+  limits: { readonly timeoutMs: number; readonly deadline: number },
   run: () => Promise<UpgradeFinding | null>
 ): Promise<UpgradeFinding | null> {
+  const timeoutMs = Math.min(limits.timeoutMs, limits.deadline - Date.now());
+  if (timeoutMs <= 0) {
+    return {
+      id,
+      status: "warn",
+      summary:
+        "Not checked: the upgrade check ran out of time before this project.",
+      fix: null,
+    };
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<"timeout">((done) => {
     timer = setTimeout(() => done("timeout"), timeoutMs);
@@ -371,30 +420,36 @@ export async function inspectUpgradeProject(opts: {
   readonly nativePreflight: (opts: {
     readonly projectRoot: string;
   }) => Promise<NativePreflightProbe | null>;
+  /** Epoch ms after which no further project check starts. */
+  readonly deadline: number;
 }): Promise<readonly UpgradeFinding[]> {
   const root = opts.project.repoRoot;
   const projectDir = opts.project.projectDir;
+  const limits = {
+    timeoutMs: PROJECT_CHECK_TIMEOUT_MS,
+    deadline: opts.deadline,
+  };
   const results = await Promise.all([
-    guarded("env-format", PROJECT_CHECK_TIMEOUT_MS, async () =>
+    guarded("env-format", limits, async () =>
       envFormatFinding({
         detected: await detectEnvFormats({ projectDir }),
         root,
       })
     ),
-    guarded("env-key", PROJECT_CHECK_TIMEOUT_MS, () => envKeyFinding({ root })),
-    guarded("tracked-files", PROJECT_CHECK_TIMEOUT_MS, () =>
+    guarded("env-key", limits, () => envKeyFinding({ root })),
+    guarded("tracked-files", limits, () =>
       trackedFilesFinding({
         root,
         projectDirName: basename(projectDir),
       })
     ),
-    guarded("ignore-rules", PROJECT_CHECK_TIMEOUT_MS, () =>
+    guarded("ignore-rules", limits, () =>
       ignoreRulesFinding({ root, projectDir })
     ),
-    guarded("agent-integrations", PROJECT_CHECK_TIMEOUT_MS, () =>
+    guarded("agent-integrations", limits, () =>
       agentFinding({ root, homeDir: opts.homeDir })
     ),
-    guarded("native-preflight", PROJECT_CHECK_TIMEOUT_MS, async () =>
+    guarded("native-preflight", limits, async () =>
       nativeFinding(await opts.nativePreflight({ projectRoot: root }))
     ),
   ]);

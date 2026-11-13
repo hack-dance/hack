@@ -1210,6 +1210,9 @@ test("a registered worktree that reads the store is named, even when its primary
   expect(partial?.message).toContain(
     "1 registered project(s) could not be checked"
   );
+  // The checkout exists, so pruning is not suggested for it.
+  expect(partial?.message).not.toContain("path that is not there");
+  expect(partial?.message).not.toContain("hack projects prune");
 });
 
 test("a registered checkout that is not available counts as unchecked", async () => {
@@ -1239,6 +1242,51 @@ test("a registered checkout that is not available counts as unchecked", async ()
   expect(finding?.message).toContain(
     "1 registered project(s) could not be checked"
   );
+  // Still unchecked, but the user is told the path is not there and how to
+  // list and clear entries of projects that are gone (found while dogfooding
+  // on a registry with dozens of entries left by deleted checkouts).
+  expect(finding?.message).toContain(
+    "1 of them are registered at a path that is not there"
+  );
+  expect(finding?.message).toContain("hack projects prune --dry-run");
+});
+
+test("a registered checkout that cannot be observed is unchecked but never called missing", async () => {
+  // Second-family review of the prune hint: a permission or I/O failure is
+  // not proof the path is gone, so it must not be offered for pruning.
+  if (process.getuid?.() === 0) {
+    return;
+  }
+  const fixture = await setUp();
+  const registry = join(fixture.hackHome, "projects.json");
+  const parsed = JSON.parse(await readFile(registry, "utf8")) as {
+    projects: { name: string; worktrees?: unknown[] }[];
+  };
+  const sealed = join(root, "sealed");
+  await mkdir(join(sealed, "app-a-feature"), { recursive: true });
+  for (const project of parsed.projects) {
+    if (project.name === "app-a") {
+      project.worktrees = [
+        {
+          path: join(sealed, "app-a-feature"),
+          branch: "feature",
+          lastSeenAt: "2026-11-13T12:00:00.000Z",
+        },
+      ];
+    }
+  }
+  await writeFile(registry, JSON.stringify(parsed));
+  await chmod(sealed, 0o000);
+  try {
+    const finding = (await inspect(fixture.bystander, "app-b"))[0];
+    expect(finding?.message).toContain(
+      "1 registered project(s) could not be checked"
+    );
+    expect(finding?.message).not.toContain("path that is not there");
+    expect(finding?.message).not.toContain("hack projects prune");
+  } finally {
+    await chmod(sealed, 0o755);
+  }
 });
 
 test("a store another registered project's key still opens is not retired", async () => {

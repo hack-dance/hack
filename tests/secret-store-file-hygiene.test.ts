@@ -96,9 +96,18 @@ async function configureEncryptedFileStore(): Promise<{
   return { storeDir, storePath };
 }
 
+/**
+ * Entries other than the store, with the private staging directory listed
+ * only when it holds more than its own `.gitignore` (a staging leftover).
+ */
 async function nonEnvelopeEntries(directory: string): Promise<string[]> {
+  const staged = await readdir(join(directory, ".hack-staging")).catch(
+    () => null
+  );
   return (await readdir(directory)).filter(
-    (name) => name !== "secrets.enc.json"
+    (name) =>
+      name !== "secrets.enc.json" &&
+      !(name === ".hack-staging" && staged?.join() === ".gitignore")
   );
 }
 

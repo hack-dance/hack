@@ -116,7 +116,7 @@ not evidence that the real-machine upgrade or rollback has passed.
 
 ## Preview, resume and undo env migration
 
-In builds containing HACK-2191, use `hack env migrate --json` to review names and
+HACK-2191 follows next.17. In a build containing it, use `hack env migrate --json` to review names and
 file paths before applying. `hack env migrate --apply` snapshots originals outside
 the working tree and records resumable steps; repeat the same command after an
 interruption. Add `--accept-tracked-env-changes` only when consenting to the
@@ -135,6 +135,30 @@ If later edits block rollback, `--rollback-manifest <path> --preserve-changes`
 explicitly restores originals and keeps those edits privately for recovery.
 Rollback retains project/shared keys and their required ignore entry because
 another checkout may already depend on them.
+
+## After upgrading, check secrets at rest
+
+Earlier versions could leave env values and keys more exposed than v5 does:
+machine-local env files created by hand or by an older release with mode 0644,
+staging copies of `.hack/.env` or the project key under names git does not
+ignore, env values staged for a terminal session that never ran, or an
+encrypted secret store whose key file is gone. After upgrading, run this once
+in each project, and once outside any project for the global Hack home:
+
+```bash
+hack doctor          # read the "secrets hygiene" section
+hack doctor --fix    # apply its safe fixes
+```
+
+The "secrets hygiene" section names each file and what it holds, never a value.
+`hack doctor --fix` sets loose env layers, `.hack/.env` files, keys and stores to
+mode 0600, adds a missing ignore entry for a secret-bearing file, and removes
+staging copies and terminal-session payloads that Hack left behind. It prints
+each change. It never deletes a store, a key or a file you wrote, and it does not
+untrack a file git already tracks: the section names the `git rm --cached`
+command, and what that file held should be treated as exposed. A store reported
+as "store present, key missing, cannot be read" stays where it is: restore its
+key file to read it, or remove the store yourself once you no longer need it.
 
 ## The daemon after an upgrade
 

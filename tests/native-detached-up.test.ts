@@ -219,6 +219,47 @@ for (const phase of ["static-preflight", "after-start"] as const) {
   });
 }
 
+test("detached failure names the services that failed during startup and how to see their output, never the output", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "native-detached-failed-services-")
+  );
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "failed-services"],
+    {
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  try {
+    const [code, stdout, stderr] = await Promise.all([
+      launcher.exited,
+      new Response(launcher.stdout).text(),
+      new Response(launcher.stderr).text(),
+    ]);
+    expect(code).toBe(1);
+    const message = JSON.parse(stdout).error.message as string;
+    expect(message).toContain(
+      "Native detached startup failed (engine_rejected)"
+    );
+    // Sorted, de-duplicated, and only names that pass the service-name rule.
+    expect(message).toContain("Failed during startup: api, web.");
+    expect(message).toContain("run hack up without -d in a terminal");
+    expect(message).toContain("inspect hack ps before retrying");
+    expect(stdout + stderr).not.toContain("synthetic-private-value");
+    expect(stdout + stderr).not.toContain("synthetic private value");
+    expect(stdout + stderr).not.toContain("break");
+    expect(stderr).toBe("");
+  } finally {
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("detached immediate exit drains its fixed failure before reporting an unconfirmed start", async () => {
   const modes = [
     "exit-first-failure",

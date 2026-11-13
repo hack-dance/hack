@@ -13,6 +13,7 @@ import {
 } from "../cli/command.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPretty } from "../cli/options.ts";
+import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvMigrationFinished,
   migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
@@ -1105,6 +1106,8 @@ async function resolveSessionInjectedEnv(opts: {
     envName: opts.envName,
     serviceNames,
   });
+  // After a successful read, so a refusal stays one line.
+  await reportLooseEnvLayerModes({ projectDir: opts.project.projectDir });
   if (modern) {
     return await appendHackHostTrustEnvironment(
       selectProjectEnvValues({

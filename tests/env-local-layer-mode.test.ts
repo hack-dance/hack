@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -106,21 +115,85 @@ test("env hydrate creates a machine-local layer as 0600 under umask 022 (HACK-16
   });
 });
 
-test("an existing machine-local layer keeps its own mode (HACK-1680)", async () => {
+// HACK-1680 kept an existing layer's mode; HACK-2165 tightens one that
+// predates private creation (or was made by hand) on its next write.
+test.each([
+  [0o644, 0o600],
+  [0o640, 0o600],
+  [0o600, 0o600],
+  [0o700, 0o700],
+])("an existing machine-local layer at %o is %o after a write (HACK-2165)", async (before, after) => {
   const repo = await layersRepo();
   const layer = resolve(repo.projectDir, "hack.env.local.yaml");
   await writeFile(layer, LAYER_TEXT);
-  await chmod(layer, 0o640);
+  await chmod(layer, before);
   await withUmask(0o022, async () => {
     await setProjectEnvValue({
       ...repo,
       envName: null,
       scope: "global",
-      key: "KEEP_MODE",
-      value: "synthetic-keep-mode",
+      key: "TIGHTEN_MODE",
+      value: "synthetic-tighten-mode",
       secret: false,
       local: true,
     });
   });
-  expect((await stat(layer)).mode & 0o777).toBe(0o640);
+  expect((await stat(layer)).mode & 0o777).toBe(after);
+});
+
+test("a write that changes nothing still tightens a loose machine-local layer (HACK-2165)", async () => {
+  const repo = await layersRepo();
+  const layer = resolve(repo.projectDir, "hack.env.local.yaml");
+  const write = () =>
+    setProjectEnvValue({
+      ...repo,
+      envName: null,
+      scope: "global",
+      key: "SAME_VALUE",
+      value: "synthetic-same-value",
+      secret: false,
+      local: true,
+    });
+  await write();
+  await chmod(layer, 0o644);
+  const before = await readFile(layer, "utf8");
+  await write();
+  expect((await stat(layer)).mode & 0o777).toBe(0o600);
+  expect(await readFile(layer, "utf8")).toBe(before);
+});
+
+test("a machine-local write stages in the private directory, never as a sibling (HACK-2165)", async () => {
+  const repo = await layersRepo();
+  await setProjectEnvValue({
+    ...repo,
+    envName: null,
+    scope: "global",
+    key: "STAGED_PRIVATELY",
+    value: "synthetic-staged",
+    secret: false,
+    local: true,
+  });
+  const names = await readdir(repo.projectDir);
+  expect(names.filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  expect(names).toContain(".hack-staging");
+  expect(await readdir(resolve(repo.projectDir, ".hack-staging"))).toEqual([
+    ".gitignore",
+  ]);
+});
+
+test("a tracked (shared) layer keeps its mode on a write", async () => {
+  const repo = await layersRepo();
+  const layer = resolve(repo.projectDir, "hack.env.yaml");
+  await writeFile(layer, LAYER_TEXT);
+  await chmod(layer, 0o644);
+  await setProjectEnvValue({
+    ...repo,
+    envName: null,
+    scope: "global",
+    key: "SHARED_MODE",
+    value: "synthetic-shared-mode",
+    secret: false,
+    local: false,
+  });
+  expect((await stat(layer)).mode & 0o777).toBe(0o644);
 });

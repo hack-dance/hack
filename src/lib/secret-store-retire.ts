@@ -575,8 +575,21 @@ async function lockedRecheck(input: {
 async function symlinkedStoreRefusal(
   configured: string
 ): Promise<string | null> {
-  const leaf = await lstat(configured).catch(() => null);
-  return leaf?.isSymbolicLink() === true
+  let leaf: Awaited<ReturnType<typeof lstat>>;
+  try {
+    leaf = await lstat(configured);
+  } catch (error: unknown) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+    // Absent is decided later (nothing to retire); anything else is unknown.
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return null;
+    }
+    return `The configured store path ${configured} could not be inspected (${String(code ?? "unknown")}), so whether it is a symlink is unknown; nothing was moved.`;
+  }
+  return leaf.isSymbolicLink()
     ? `The configured store path ${configured} is itself a symlink, which Hack refuses as a store; nothing was moved. Replace it with the regular store file it points to, or point controlPlane.secrets.encryptedFile.path at that file.`
     : null;
 }

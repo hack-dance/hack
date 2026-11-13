@@ -218,6 +218,10 @@ export async function readProjectsRegistryStrict(opts?: {
     const rawWorktrees = isRecord(item) ? item.worktrees : undefined;
     if (Array.isArray(rawWorktrees)) {
       rejected += rawWorktrees.length - (project.worktrees?.length ?? 0);
+    } else if (rawWorktrees !== undefined) {
+      // A present worktrees field that is not an array hides any checkouts
+      // it held: unknown, not "no worktrees".
+      rejected += 1;
     }
   }
   return { kind: "valid", registry, rejected };

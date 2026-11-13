@@ -1392,3 +1392,64 @@ test("an invalid worktree entry inside a valid project makes the reader scan inc
     "--allow-unchecked"
   );
 });
+
+test("a configured store path that cannot be inspected is refused, not taken as no symlink", async () => {
+  // Second-family review: an lstat failure other than "absent" fell
+  // through as "not a symlink".
+  const fixture = await setUp();
+  const unreadable = join(fixture.hackHome, `${"x".repeat(300)}.enc.json`);
+  await writeFile(
+    join(fixture.bystander.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-b",
+      dev_host: "app-b.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: unreadable, keyPath: fixture.keyPath },
+        },
+      },
+    })}\n`
+  );
+  const planned = await planSecretStoreRetire({
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(planned.kind === "refused" ? planned.message : "").toContain(
+    "could not be inspected (ENAMETOOLONG)"
+  );
+});
+
+test("a registry worktrees field that is not an array makes the reader scan incomplete", async () => {
+  // Second-family review: a present but malformed worktrees container was
+  // read as "no worktrees", hiding any checkout it held.
+  const fixture = await setUp();
+  const registry = join(fixture.hackHome, "projects.json");
+  const text = await readFile(registry, "utf8");
+  for (const malformed of [
+    {
+      path: join(root, "repos", "app-a-feature"),
+      lastSeenAt: "2026-11-13T12:00:00.000Z",
+    },
+    "not-a-list",
+  ]) {
+    const parsed = JSON.parse(text) as {
+      projects: { name: string; worktrees?: unknown }[];
+    };
+    for (const project of parsed.projects) {
+      if (project.name === "app-a") {
+        project.worktrees = malformed;
+      }
+    }
+    await writeFile(registry, JSON.stringify(parsed));
+    const finding = (await inspect(fixture.bystander, "app-b"))[0];
+    expect(finding?.message).toContain(
+      "1 registered project(s) could not be checked"
+    );
+    const outcome = await retireSecretStore({
+      projectDir: fixture.bystander.projectDir,
+    });
+    expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+      "--allow-unchecked"
+    );
+  }
+});

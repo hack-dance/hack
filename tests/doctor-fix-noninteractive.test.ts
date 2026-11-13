@@ -683,12 +683,42 @@ for (const docker of [
     expect(await readFile(layerPath, "utf8")).not.toContain(value);
     const notes = noteCalls.join("\n");
     expect(notes).toContain(`Wrote ${localPath}, ${layerPath}`);
+    expect(notes).toContain("Plaintext env keys remain (values omitted)");
+    expect(notes).toContain("hack env protect <KEY> [KEY...]");
+    expect(notes).toContain("LEGACY_SETTING");
     expect(notes).not.toContain(value);
     expect(notes.includes("Docker is not reachable")).toBe(
       docker.exitCode !== 0
     );
   }, 30_000);
 }
+
+test("doctor keeps completed repairs when the optional plaintext inventory is unreadable", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const projectDir = resolve(projectRoot, ".hack");
+  await writeFile(
+    resolve(projectDir, "hack.env.default.yaml"),
+    "version: 1\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  const sentinel = "synthetic-malformed-protection-hint";
+  await writeFile(
+    resolve(projectDir, "hack.env.qa.yaml"),
+    `broken: [${sentinel}`
+  );
+  const { runCli } = await import("../src/cli/run.ts");
+  expect(
+    await runCli([
+      "doctor",
+      "--migrate-env-config",
+      "--no-interactive",
+      "--path",
+      projectRoot,
+    ])
+  ).toBe(0);
+  const notes = noteCalls.join("\n");
+  expect(notes).toContain("Could not inspect plaintext env names");
+  expect(notes).not.toContain(sentinel);
+}, 30_000);
 
 test("doctor --migrate-env-config refuses a symlinked overlay with undelivered values and never writes through it (HACK-1370)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();

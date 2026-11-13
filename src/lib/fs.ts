@@ -422,6 +422,14 @@ export async function writeTextFileAtomicIfChanged(
      * bits are kept. Without it an existing file keeps its mode exactly.
      */
     readonly tightenExisting?: boolean;
+    /**
+     * Never resolve the destination through a symlink (HACK-2165): a link
+     * at `absolutePath` is refused, and the commit renames onto
+     * `absolutePath` itself, so the file replaced is the one the caller's
+     * checks admitted. A link swapped in after the check is replaced by the
+     * rename, never written through.
+     */
+    readonly noFollowTarget?: boolean;
   } = {}
 ): Promise<{ readonly changed: boolean }> {
   await options.validatePath?.(absolutePath);
@@ -438,8 +446,11 @@ export async function writeTextFileAtomicIfChanged(
     });
     return { changed: false };
   }
-  const target =
-    existing.kind === "absent" ? absolutePath : await realpath(absolutePath);
+  const target = await atomicWriteDestination({
+    path: absolutePath,
+    absent: existing.kind === "absent",
+    noFollow: options.noFollowTarget === true,
+  });
   await options.validatePath?.(target);
   if (existing.kind === "existing") {
     try {
@@ -561,6 +572,7 @@ async function tightenUnchangedTarget(opts: {
   readonly existing: { readonly mode: number };
   readonly options: {
     readonly tightenExisting?: boolean;
+    readonly noFollowTarget?: boolean;
     readonly validatePath?: (path: string) => Promise<void>;
   };
 }): Promise<void> {
@@ -570,7 +582,12 @@ async function tightenUnchangedTarget(opts: {
   ) {
     return;
   }
-  const target = await realpath(opts.path);
+  // With noFollowTarget the admitted path itself, never a link's target
+  // (the no-follow open below refuses a link that appears meanwhile).
+  const target =
+    opts.options.noFollowTarget === true
+      ? opts.path
+      : await realpath(opts.path);
   await opts.options.validatePath?.(target);
   // Best effort: a file another user owns (chmod EPERM) keeps working as it
   // did; the read-time report and `hack doctor` still name it.
@@ -589,6 +606,29 @@ async function tightenUnchangedTarget(opts: {
   } finally {
     await file.close();
   }
+}
+
+/**
+ * The file an atomic write replaces: the path itself when it is absent or
+ * when `noFollow` is set (a link there is then refused, never resolved);
+ * otherwise the file an existing link resolves to.
+ */
+async function atomicWriteDestination(opts: {
+  readonly path: string;
+  readonly absent: boolean;
+  readonly noFollow: boolean;
+}): Promise<string> {
+  if (opts.noFollow) {
+    const entry = await lstat(opts.path).catch(() => null);
+    if (entry?.isSymbolicLink()) {
+      throw new AtomicWriteRefusedError({
+        path: opts.path,
+        reason: "not_regular_file",
+      });
+    }
+    return opts.path;
+  }
+  return opts.absent ? opts.path : await realpath(opts.path);
 }
 
 /**

@@ -2,7 +2,6 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-
 import { resolveLifecycleEnvForProject } from "../src/commands/project.ts";
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -11,6 +10,7 @@ import {
   PROJECT_ENV_FILENAME,
 } from "../src/constants.ts";
 import type { ProjectContext } from "../src/lib/project.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const tempDirs = new Set<string>();
 
@@ -129,3 +129,60 @@ async function createProject(opts: {
     configFile,
   };
 }
+
+test("legacy lifecycle commands receive global contract values without other services' values", async () => {
+  const project = await createProject({ envConfig: "" });
+  await rm(resolve(project.projectDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME));
+  await writeFile(
+    resolve(project.projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [
+        { key: "GLOBAL", source: "plain_env", required: false },
+        {
+          key: "APP_TOKEN",
+          source: "plain_env",
+          required: false,
+          services: ["api"],
+        },
+        {
+          key: "OTHER_TOKEN",
+          source: "plain_env",
+          required: false,
+          services: ["worker"],
+        },
+      ],
+    })
+  );
+  await writeFile(
+    project.envFile,
+    "GLOBAL=kept\nAPP_TOKEN=synthetic-service-token\nOTHER_TOKEN=synthetic-other-token\n"
+  );
+  const saved = {
+    HOME: process.env.HOME,
+    HACK_GLOBAL_CONFIG_PATH: process.env.HACK_GLOBAL_CONFIG_PATH,
+    HACK_NO_INTERACTIVE: process.env.HACK_NO_INTERACTIVE,
+    HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK:
+      process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK,
+  };
+  try {
+    process.env.HOME = project.projectRoot;
+    process.env.HACK_GLOBAL_CONFIG_PATH = resolve(
+      project.projectRoot,
+      "global-config.json"
+    );
+    process.env.HACK_NO_INTERACTIVE = "1";
+    process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+    expect(
+      await resolveLifecycleEnvForProject({
+        project,
+        projectName: "fixture",
+        envName: null,
+      })
+    ).toEqual({ GLOBAL: "kept" });
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      restoreEnv(key, value);
+    }
+  }
+});

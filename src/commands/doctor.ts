@@ -209,6 +209,7 @@ import {
   nativeProcessCheckFromCompose,
 } from "../lib/native-process-wrappers.ts";
 import { isLinux, isMac } from "../lib/os.ts";
+import { readPrivateEnvFile } from "../lib/private-env-file.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -233,6 +234,7 @@ import {
   type LegacyComposeEnvFileReference,
   LegacyDotenvMigrationRefusalError,
   type LegacyProjectEnvMigration,
+  listProjectEnvPlaintextEntries,
   migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
   planTrackedEnvMigrationChanges,
@@ -4137,7 +4139,9 @@ async function checkComposeNetworkHygiene({
 }
 
 async function readLegacyEnvDevHost(envFile: string): Promise<string | null> {
-  const envText = await readTextFile(envFile);
+  // No-follow (HACK-2165): a linked .hack/.env is not read, so its values
+  // are never printed.
+  const envText = await readPrivateEnvFile({ envFile }).catch(() => null);
   if (!envText) {
     return null;
   }
@@ -4468,6 +4472,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
       projectDir: project.projectDir,
       acceptTrackedChanges: opts.acceptTrackedChanges,
     });
+    await printMigrationProtectionHint(project);
     return;
   }
 
@@ -4521,6 +4526,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
   });
   if (migrated.wroteFiles.length === 0) {
     note("Legacy env migration found nothing to write.", "doctor");
+    await printMigrationProtectionHint(project);
     return;
   }
   note(
@@ -4604,6 +4610,38 @@ async function maybeMigrateProjectEnvConfig(opts: {
     paths: cleanupCandidates,
     acceptTrackedChanges: opts.acceptTrackedChanges,
   });
+  await printMigrationProtectionHint(project);
+}
+
+/** End migration with names-only guidance for encrypting plaintext values in place. */
+async function printMigrationProtectionHint(project: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<void> {
+  let entries: Awaited<ReturnType<typeof listProjectEnvPlaintextEntries>>;
+  try {
+    entries = await listProjectEnvPlaintextEntries(project);
+  } catch {
+    note(
+      "Could not inspect plaintext env names. Check env layers, then run hack env protect to inspect names and choose keys (values omitted).",
+      "env protection"
+    );
+    return;
+  }
+  const keys = [...new Set(entries.map((entry) => entry.key))].sort();
+  if (keys.length === 0) {
+    note("No plaintext env entries remain.", "env protection");
+    return;
+  }
+  note(
+    [
+      "Plaintext env keys remain (values omitted):",
+      ...keys.map((key) => `- ${key}`),
+      "Encrypt chosen keys in their current scopes and overlays:",
+      "hack env protect <KEY> [KEY...]",
+    ].join("\n"),
+    "env protection"
+  );
 }
 
 /**

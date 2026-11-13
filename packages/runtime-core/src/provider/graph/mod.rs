@@ -66,7 +66,7 @@ pub mod foreground;
 #[cfg(any(target_os = "macos", test))]
 mod owner_loop;
 mod startup;
-pub(crate) use config::compose_start_refusals;
+pub(crate) use config::{compose_start_readiness, compose_start_refusals};
 mod startup_failure;
 #[cfg(any(target_os = "macos", test))]
 mod startup_logs;

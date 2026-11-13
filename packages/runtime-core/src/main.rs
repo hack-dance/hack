@@ -1201,6 +1201,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
     let mut file = None;
     let mut expected = None;
     let mut profiles = Vec::new();
+    let mut start_managed_services = Vec::new();
     let mut json = false;
     let mut watch = false;
     let mut reconcile = false;
@@ -1251,6 +1252,12 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
             "--file" if file.is_none() => file = Some(*value),
             "--expect-plan" if expected.is_none() => expected = Some(*value),
             "--profile" if profiles.len() < 64 => profiles.push((*value).to_owned()),
+            "--start-managed-service"
+                if *action == "plan"
+                    && start_managed_services.len() < project::MAX_COMPOSE_SERVICES =>
+            {
+                start_managed_services.push((*value).to_owned());
+            }
             _ => return Err(CandidateError::new("invalid_arguments", HELP)),
         }
     }
@@ -1369,7 +1376,8 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         if expected.is_some() {
             return Err(CandidateError::new("invalid_arguments", HELP));
         }
-        let report = normalized_cli::review(candidate, options, normalized.as_ref())?;
+        let mut report = normalized_cli::review(candidate, options, normalized.as_ref())?;
+        project::review_start_delivery(&mut report, &start_managed_services)?;
         if json {
             print_json(&report)?;
         } else {

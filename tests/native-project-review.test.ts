@@ -79,6 +79,43 @@ test("review pins native identities and removes its public temporary input", asy
   expect(await Bun.file(file).exists()).toBe(false);
 });
 
+test("normalized review names only services receiving private delivery, never their keys or values", async () => {
+  const options = await fixture();
+  const calls: string[][] = [];
+  await withNativeProjectReview({
+    ...options,
+    input: {
+      ...options.input,
+      managedEnvironment: {
+        web: { PRIVATE_KEY: "synthetic-private-value" },
+        empty: {},
+      },
+    },
+    invoke: async (request) => {
+      calls.push([...request.args]);
+      return {
+        plan_id: "b".repeat(64),
+        plan: {
+          namespace: "a".repeat(64),
+          compose_sha256: options.input.originalSha256,
+        },
+      };
+    },
+    run: async (review) => {
+      expect(review.projectArgs).not.toContain("--start-managed-service");
+    },
+  });
+  expect(calls[0]).not.toContain("--start-managed-service");
+  const normalized =
+    calls.find((args) => args.includes("--normalized-file")) ?? [];
+  const context = normalized.slice(
+    normalized.indexOf("--start-managed-service")
+  );
+  expect(context).toEqual(["--start-managed-service", "web", "--json"]);
+  expect(JSON.stringify(calls)).not.toContain("PRIVATE_KEY");
+  expect(JSON.stringify(calls)).not.toContain("synthetic-private-value");
+});
+
 test("an original edit after env preparation stops before the callback", async () => {
   const options = await fixture();
   await Bun.write(options.composeFile, '{"services":{"different":{}}}');

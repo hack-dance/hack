@@ -315,7 +315,19 @@ export async function withNativeProjectReview<T>(opts: {
     const report = await invoke({
       runtime: opts.runtime,
       cwd: opts.projectRoot,
-      args: ["project", "plan", ...normalizedArgs, "--json"],
+      args: [
+        "project",
+        "plan",
+        ...normalizedArgs,
+        ...Object.keys(opts.input.managedEnvironment)
+          .filter(
+            (name) =>
+              Object.keys(opts.input.managedEnvironment[name] ?? {}).length > 0
+          )
+          .sort()
+          .flatMap((name) => ["--start-managed-service", name]),
+        "--json",
+      ],
     });
     if (
       !(isRecord(report) && isRecord(report.plan)) ||

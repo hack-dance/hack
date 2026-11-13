@@ -13,6 +13,7 @@ import type {
   SecretsConfig,
 } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { childEnvironment } from "./child-environment.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import { ensureDir } from "./fs.ts";
@@ -1294,6 +1295,8 @@ async function isKeyFileTrackedByGit(path: string): Promise<boolean | null> {
         "--",
         basename(path),
       ],
+      // Never hand Hack's own key material to the git child (#756).
+      env: childEnvironment(),
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",

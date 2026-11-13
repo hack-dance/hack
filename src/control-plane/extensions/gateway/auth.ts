@@ -1,5 +1,8 @@
 import type { GatewayTokenScope } from "./tokens.ts";
-import { verifyGatewayToken } from "./tokens.ts";
+import {
+  GatewayTokenStoreUntrustedError,
+  verifyGatewayToken,
+} from "./tokens.ts";
 
 const BEARER_TOKEN_PATTERN = /^Bearer\s+(.+)$/i;
 const STATIC_GATEWAY_TOKEN_ENV = "HACK_GATEWAY_STATIC_TOKEN";
@@ -37,7 +40,17 @@ export async function authenticateGatewayRequest(opts: {
     return { ok: false, reason: "missing" };
   }
 
-  const verified = await verifyGatewayToken({ rootDir: opts.rootDir, token });
+  // An untrusted token store grants nothing (HACK-2142); a static token
+  // from the environment does not come from it and still applies.
+  const verified = await verifyGatewayToken({
+    rootDir: opts.rootDir,
+    token,
+  }).catch((error: unknown) => {
+    if (error instanceof GatewayTokenStoreUntrustedError) {
+      return null;
+    }
+    throw error;
+  });
   if (verified) {
     return { ok: true, tokenId: verified.id, scope: verified.scope };
   }

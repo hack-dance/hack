@@ -1,6 +1,6 @@
 import { constants, lstatSync } from "node:fs";
-import { chmod, type FileHandle, open } from "node:fs/promises";
-import { dirname } from "node:path";
+import { chmod, type FileHandle, lstat, open, readdir } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 import { checkReplaceableChain } from "../lib/path-trust.ts";
 
@@ -81,6 +81,156 @@ export async function secureDaemonDirectory(opts: {
   } finally {
     await handle.close();
   }
+  // Now that nobody else can add entries, what is already there must be
+  // this user's own: a directory that was writable by others (and repaired
+  // above) may hold a planted `hackd.log` link to another file, which the
+  // log writer would append to or truncate (HACK-2142).
+  const planted = await findPlantedEntry({ root: opts.root, uid });
+  if (planted !== null) {
+    throw new Error(
+      `hackd state directory ${opts.root} holds ${planted}. Review and remove it, then start hackd again`
+    );
+  }
+}
+
+/**
+ * An entry in the daemon directory hackd would not have created: another
+ * account's, a symlink, or a regular file with other hard links (a link to
+ * a file elsewhere). hackd also writes one level down (`gateway/`), so each
+ * subdirectory is made owner-only the same way (opened without following a
+ * link, this user's) and its entries get the same checks; Hack creates
+ * nothing deeper, so a directory there is refused. Null when every entry is
+ * plainly this user's.
+ */
+async function findPlantedEntry(opts: {
+  readonly root: string;
+  readonly uid: number;
+  /** Subdirectories still to descend into (1 at the daemon directory). */
+  readonly depth?: number;
+}): Promise<string | null> {
+  const depth = opts.depth ?? 1;
+  for (const name of await readdir(opts.root)) {
+    const path = join(opts.root, name);
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(path);
+    } catch {
+      // Removed meanwhile: nothing to open.
+      continue;
+    }
+    const problem =
+      plantedProblem({ path, info, uid: opts.uid }) ??
+      (info.isDirectory()
+        ? await checkSubdirectory({ path, uid: opts.uid, depth })
+        : await checkWritableFile({ path, info }));
+    if (problem !== null) {
+      return problem;
+    }
+  }
+  return null;
+}
+
+function plantedProblem(opts: {
+  readonly path: string;
+  readonly info: Awaited<ReturnType<typeof lstat>>;
+  readonly uid: number;
+}): string | null {
+  const { info, path } = opts;
+  if (opts.uid >= 0 && info.uid !== opts.uid) {
+    return `${path}, owned by another user (uid ${info.uid})`;
+  }
+  if (info.isSymbolicLink()) {
+    return `${path}, a symbolic link`;
+  }
+  if (info.isFile() && info.nlink > 1) {
+    return `${path}, a file with other hard links`;
+  }
+  return null;
+}
+
+/**
+ * State files whose contents decide who may use hackd: one others could
+ * write may already say what they chose (a write token's hash). The scan
+ * leaves it as it is (a repair would bless those contents); its own reader
+ * refuses it, so only that feature stays off and hackd still starts
+ * (HACK-2142).
+ */
+const TRUSTED_CONTENT_FILES = new Set([join("gateway", "tokens.json")]);
+
+/**
+ * A regular file group or others could write. hackd's own logs and pid
+ * file are created with the process umask (`0664` under `0002`); their
+ * contents decide nothing (a pid is proven before any signal), so write
+ * access is removed through a handle that does not follow a link. A file
+ * in {@link TRUSTED_CONTENT_FILES} is left alone for its reader to refuse.
+ * Null when fine.
+ */
+async function checkWritableFile(opts: {
+  readonly path: string;
+  readonly info: Awaited<ReturnType<typeof lstat>>;
+}): Promise<string | null> {
+  if (!opts.info.isFile() || (Number(opts.info.mode) & 0o022) === 0) {
+    return null;
+  }
+  const relativePath = join(basename(dirname(opts.path)), basename(opts.path));
+  if (TRUSTED_CONTENT_FILES.has(relativePath)) {
+    return null;
+  }
+  let handle: FileHandle;
+  try {
+    handle = await open(opts.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error: unknown) {
+    return `${opts.path}, a file that could not be opened (${error instanceof Error ? error.message : String(error)})`;
+  }
+  try {
+    const mode = Number((await handle.stat()).mode);
+    await handle.chmod(mode & 0o7755).catch(() => undefined);
+    if ((Number((await handle.stat()).mode) & 0o022) !== 0) {
+      return `${opts.path}, a file other users can write that could not be made owner-writable`;
+    }
+  } finally {
+    await handle.close();
+  }
+  return null;
+}
+
+/** A subdirectory: made owner-only, then its own entries checked. */
+async function checkSubdirectory(opts: {
+  readonly path: string;
+  readonly uid: number;
+  readonly depth: number;
+}): Promise<string | null> {
+  if (opts.depth < 1) {
+    return `${opts.path}, a nested directory`;
+  }
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      opts.path,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
+    );
+  } catch (error: unknown) {
+    return `${opts.path}, a directory that could not be opened (${error instanceof Error ? error.message : String(error)})`;
+  }
+  try {
+    const info = await handle.stat();
+    if (opts.uid >= 0 && info.uid !== opts.uid) {
+      return `${opts.path}, owned by another user (uid ${info.uid})`;
+    }
+    if ((info.mode & 0o077) !== 0) {
+      await handle.chmod(0o700).catch(() => undefined);
+      if (((await handle.stat()).mode & 0o077) !== 0) {
+        return `${opts.path}, a directory other users can reach that could not be made owner-only`;
+      }
+    }
+  } finally {
+    await handle.close();
+  }
+  return await findPlantedEntry({
+    root: opts.path,
+    uid: opts.uid,
+    depth: opts.depth - 1,
+  });
 }
 
 /**

@@ -262,6 +262,9 @@ async function ensureSelfIgnore(opts: {
           constants.O_WRONLY,
         0o600
       );
+      // The umask can only remove bits; a restrictive one would leave a file
+      // its owner cannot read back for the check below.
+      await file.chmod(0o600);
       await file.writeFile(SELF_IGNORE, "utf8");
       await file.sync();
       await file.close();

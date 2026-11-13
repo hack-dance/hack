@@ -272,3 +272,19 @@ test("a FIFO in place of the staging .gitignore is refused, not waited on", asyn
   ).rejects.toThrow("synthetic staging refusal");
   expect(Date.now() - started).toBeLessThan(5000);
 }, 10_000);
+
+test.skipIf(process.getuid?.() === 0)(
+  "a restrictive umask still leaves a readable self-ignore and a usable staging directory",
+  async () => {
+    const root = await tempDir();
+    const previous = process.umask(0o377);
+    try {
+      await preparePrivateStaging({ target: join(root, ".env"), refusal });
+    } finally {
+      process.umask(previous);
+    }
+    const ignore = join(root, PRIVATE_STAGING_DIRNAME, ".gitignore");
+    expect((await lstat(ignore)).mode & 0o777).toBe(0o600);
+    expect(await readFile(ignore, "utf8")).toBe("*\n");
+  }
+);

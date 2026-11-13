@@ -45,7 +45,7 @@ impl HttpProbe {
             interval_ms: 30_000,
             timeout_ms: 1_000,
             retries: 3,
-            start_period_ms: 60_000,
+            start_period_ms: 240_000,
             policy: Some(HttpProbePolicy::Route),
         }
     }

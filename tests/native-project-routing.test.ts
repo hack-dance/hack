@@ -171,7 +171,7 @@ test("a route without an authored healthcheck accepts only its exact reviewed in
     interval_ms: 30_000,
     timeout_ms: 1000,
     retries: 3,
-    start_period_ms: 60_000,
+    start_period_ms: 240_000,
   };
   const opts = {
     plan: {
@@ -208,6 +208,7 @@ test("a route without an authored healthcheck accepts only its exact reviewed in
     { ...inferred, path: "/health" },
     { ...inferred, policy: "anything" },
     { ...inferred, timeout_ms: 60_000 },
+    { ...inferred, start_period_ms: 60_000 },
     { ...inferred, extra: true },
     { port: 3000 },
   ]) {

@@ -30,7 +30,7 @@ export function isInferredNativeRouteProbe(
     probe.interval_ms === 30_000 &&
     probe.timeout_ms === 1000 &&
     probe.retries === 3 &&
-    probe.start_period_ms === 60_000
+    probe.start_period_ms === 240_000
   );
 }
 function bounded(value: unknown, min: number, max: number): boolean {

@@ -124,6 +124,19 @@ static bool publish(int directory, const char *name, const char *generation, uin
     // Ephemeral status is atomically replaced, never a durable readiness receipt.
     return ok && !renameat(directory, "status.pending", directory, name);
 }
+// Shared with the fake-clock harness: only success ends grace early. The clock
+// and request outcome come from the resident loop, not from retained samples.
+static void sample_health(bool success, uint64_t elapsed, uint64_t grace, uint64_t retries,
+        uint64_t *failures, int *health, bool *ever_healthy) {
+    if (success) { *failures = 0; *health = 1; *ever_healthy = true; }
+    else if (*ever_healthy || elapsed >= grace) {
+        if (*failures < retries) ++*failures;
+        if (*failures >= retries) *health = 0;
+    }
+}
+static uint64_t sample_period(bool route, bool ever_healthy, uint64_t interval) {
+    return route && !ever_healthy && interval > 1000 ? 1000 : interval;
+}
 int main(int argc, char **argv) {
     if (argc != 9 && argc != 10) return 125;
     bool route = argc == 10;
@@ -164,11 +177,7 @@ int main(int argc, char **argv) {
         bool success = request(port, argv[2], timeout, route);
         if (stopping) break;
         uint64_t finished = millis(CLOCK_MONOTONIC);
-        if (success) { failures = 0; health = 1; ever_healthy = true; }
-        else if (ever_healthy || finished - start >= grace) {
-            if (failures < retries) failures++;
-            if (failures >= retries) health = 0;
-        }
+        sample_health(success, finished - start, grace, retries, &failures, &health, &ever_healthy);
         ++sequence;
         // One bounded diagnostic survives later success; it never supplies current readiness.
         // On the first request only, health == 1 means success even during startup grace.
@@ -177,7 +186,7 @@ int main(int argc, char **argv) {
         // Generated route probes check quickly during initial compilation, then
         // use the reviewed steady interval for the rest of this exec generation.
         // An unhealthy sample never re-enables the fast startup cadence.
-        uint64_t period = route && !ever_healthy && interval > 1000 ? 1000 : interval;
+        uint64_t period = sample_period(route, ever_healthy, interval);
         uint64_t next = begun + period;
         while (!stopping && millis(CLOCK_MONOTONIC) < next) {
             uint64_t delay = next - millis(CLOCK_MONOTONIC);

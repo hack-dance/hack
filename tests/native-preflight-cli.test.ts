@@ -825,7 +825,7 @@ test(
               interval_ms: 30_000,
               timeout_ms: 1000,
               retries: 3,
-              start_period_ms: 60_000,
+              start_period_ms: 240_000,
             },
           },
         },

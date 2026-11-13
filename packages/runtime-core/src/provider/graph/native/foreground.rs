@@ -643,19 +643,27 @@ pub(in crate::provider) fn interactive(
         exec: Some(selected.clone()),
         one_off: None,
     };
-    transport::write(&mut stream, &input, Duration::from_secs(5))?;
+    // Once dispatch begins, a transport or binding failure cannot prove that
+    // the owner stopped before its durable intent. Correlate only this attempt;
+    // a validated pre-intent refusal below remains unscoped.
+    let uncertain = |error: CandidateError| error.with_session(options.session);
+    transport::write(&mut stream, &input, Duration::from_secs(5)).map_err(uncertain)?;
     let descriptor = crate::provider::interactive_handoff::receive(
         &stream,
         std::time::Instant::now() + Duration::from_secs(40),
-    )?;
-    let reply: Reply = transport::read(&mut stream, Duration::from_secs(5), LIMIT)?;
-    reply.validate(
-        &expected,
-        Action::InteractiveExec,
-        None,
-        Some(&selected),
-        None,
-    )?;
+    )
+    .map_err(uncertain)?;
+    let reply: Reply =
+        transport::read(&mut stream, Duration::from_secs(5), LIMIT).map_err(uncertain)?;
+    reply
+        .validate(
+            &expected,
+            Action::InteractiveExec,
+            None,
+            Some(&selected),
+            None,
+        )
+        .map_err(uncertain)?;
     match reply.result {
         Outcome::Interactive { session, .. } if session.session == options.session => {
             let result = (|| {
@@ -667,8 +675,8 @@ pub(in crate::provider) fn interactive(
             result.map_err(|_: CandidateError| CandidateError::new("session_cleanup_uncertain", "Interactive session handoff changed; the session was retained and no start was replayed.").with_session(&session.session))
         }
         Outcome::InteractiveRefused { session } if session == options.session => Err(CandidateError::new("session_cleanup_uncertain", "Interactive admission ended after its durable intent; the session was retained and no start was replayed.").with_session(&session)),
-        Outcome::Refused { code, .. } => Err(refused().with_cause_code(code)),
-        _ => Err(refused()),
+        Outcome::Refused { code, .. } if descriptor.is_none() => Err(refused().with_cause_code(code)),
+        _ => Err(uncertain(refused())),
     }
 }
 fn request_selected(

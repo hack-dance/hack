@@ -4117,6 +4117,9 @@ user's responsibility, as with Docker. Lost connections or processes before a
 known outcome, uncertain create/start dispatch and failed inspection retain a
 value-free receipt and `session_cleanup_uncertain` with the attempted session ID.
 No uncertain command is replayed.
+If an authored owner disconnects during handoff or its reply cannot be validated,
+Hack checks only the attempted session ID for retained evidence. A confirmed
+refusal before the intent does not query unrelated sessions.
 
 | stdin | stdout | Foreground group | `HACK_NO_INTERACTIVE` | Selection |
 | --- | --- | --- | --- | --- |

@@ -714,9 +714,77 @@ test(
 );
 
 test(
+  "route preflight gives a separate cause and remedy for each refused probe",
+  async () => {
+    const probe = {
+      port: 3000,
+      path: "/health",
+      interval_ms: 1000,
+      timeout_ms: 1000,
+      retries: 3,
+      start_period_ms: 0,
+    };
+    for (const entry of [
+      {
+        authored: { disable: true },
+        reviewed: { healthcheck: { disabled: true } },
+        message: "explicitly disables",
+        fix: "Replace the disabled healthcheck",
+      },
+      {
+        authored: { test: ["CMD", "true"] },
+        reviewed: { healthcheck: { test: ["CMD", "true"] } },
+        message: "command-only healthcheck",
+        fix: "Replace the command healthcheck",
+      },
+      {
+        authored: { "x-hack-http": probe },
+        reviewed: { healthcheck: { native_http: probe }, dependency_cache: {} },
+        message: "also declares a dependency cache",
+        fix: "Move the dependency cache",
+      },
+      {
+        authored: { "x-hack-http": probe },
+        reviewed: { healthcheck: { native_http: { ...probe, port: 3001 } } },
+        message: "no valid reviewed HTTP probe matching",
+        fix: "Check the route port",
+      },
+    ]) {
+      const project = await fixture({
+        services: {
+          web: {
+            image: IMAGE,
+            labels: {
+              caddy: "web.example.test",
+              "caddy.reverse_proxy": "{{upstreams 3000}}",
+              "caddy.tls": "internal",
+            },
+            healthcheck: entry.authored,
+          },
+        },
+      });
+      await project.review([], {
+        services: {
+          web: { active: true, routing: { port: 3000 }, ...entry.reviewed },
+        },
+      });
+      const result = await preflight(project, { ...project.native, ...GRANT });
+      expect(result.code).toBe(1);
+      const found = result.report.blockers.find(
+        (f) => f.code === "route_probe_required"
+      );
+      expect(found?.service).toBe("web");
+      expect(found?.message).toContain(entry.message);
+      expect(found?.fix).toContain(entry.fix);
+    }
+  },
+  SPAWN_TIMEOUT_MS * 2
+);
+
+test(
   "route admission, project-wide hosts and per-environment dependency files are checked as native up checks them",
   async () => {
-    // A routed service without a native HTTP probe: the review only warns, native up refuses.
+    // A route missing its reviewed probe still refuses; authored labels alone are insufficient.
     const routed = await fixture({
       services: {
         web: {
@@ -743,6 +811,30 @@ test(
     expect(route.code).toBe(1);
     expect(route.report.ready).toBe(false);
     expect(codes(route.report, "cli")).toEqual(["route_probe_required:web"]);
+    await routed.review([], {
+      services: {
+        web: {
+          active: true,
+          routing: { port: 3000 },
+          healthcheck: {
+            disabled: false,
+            native_http: {
+              policy: "route",
+              port: 3000,
+              path: "/",
+              interval_ms: 30_000,
+              timeout_ms: 1000,
+              retries: 3,
+              start_period_ms: 240_000,
+            },
+          },
+        },
+      },
+    });
+    const inferred = await preflight(routed, { ...routed.native, ...GRANT });
+    expect(codes(inferred.report, "cli")).toEqual([]);
+    expect(inferred.code).toBe(0);
+    expect(inferred.report.ready).toBe(true);
 
     // Routes plus published ports over the pool's bridge limit: native up
     // refuses before any runtime work, so no review is needed to see it.

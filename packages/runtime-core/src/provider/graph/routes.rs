@@ -56,6 +56,10 @@ fn validate_services(
             || service.network_mode != "project-networks"
             || service.networks.is_empty()
             || !probe.is_some_and(|probe| probe.port == route.port && probe.validate().is_ok())
+            || probe.is_some_and(|probe| {
+                probe.policy.is_some()
+                    && *probe != super::super::http_probe::HttpProbe::inferred_route(route.port)
+            })
             || !valid_intent(route)
             || !["caddy", "caddy.reverse_proxy", "caddy.tls"]
                 .iter()

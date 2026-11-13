@@ -11,6 +11,28 @@ const FIELDS = new Set([
   "start_period_ms",
 ]);
 const PATH = /^\/[\x21-\x22\x24-\x7e]*$/;
+
+/**
+ * Exact compiler-generated defaults; this policy is never an authored opt-in.
+ * These values bind retained route admission; changing them requires migration.
+ */
+export function isInferredNativeRouteProbe(
+  probe: unknown,
+  port: unknown
+): boolean {
+  return (
+    isRecord(probe) &&
+    bounded(port, 1, 65_535) &&
+    Object.keys(probe).length === 7 &&
+    probe.policy === "route" &&
+    probe.port === port &&
+    probe.path === "/" &&
+    probe.interval_ms === 30_000 &&
+    probe.timeout_ms === 1000 &&
+    probe.retries === 3 &&
+    probe.start_period_ms === 240_000
+  );
+}
 function bounded(value: unknown, min: number, max: number): boolean {
   return (
     typeof value === "number" &&

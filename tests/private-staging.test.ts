@@ -146,7 +146,7 @@ test("the sibling option keeps the previous staging location", async () => {
   expect(await readdir(root)).toEqual(["claim.json"]);
 });
 
-test("old leftovers are swept by the next staging write; recent ones are kept", async () => {
+test("the next staging write sweeps only its own old staging copies; recent ones and siblings are kept", async () => {
   const root = await tempDir();
   const target = join(root, ".env");
   const staging = join(root, PRIVATE_STAGING_DIRNAME);
@@ -175,9 +175,11 @@ test("old leftovers are swept by the next staging write; recent ones are kept", 
   expect((await readdir(staging)).sort()).toEqual(
     [".gitignore", `.env.${UUID.replace("0f", "1f")}.tmp`].sort()
   );
-  // Only this target's legacy sibling is swept; another name is left alone.
+  // A writer never removes siblings beside the target: it cannot tell an
+  // earlier version's leftover from a file configured under such a name, so
+  // those are left to `hack doctor` (HACK-2165).
   expect((await readdir(root)).sort()).toEqual(
-    [PRIVATE_STAGING_DIRNAME, `..envx.${UUID}.tmp`].sort()
+    [PRIVATE_STAGING_DIRNAME, `..env.${UUID}.tmp`, `..envx.${UUID}.tmp`].sort()
   );
 });
 

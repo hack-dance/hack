@@ -554,3 +554,88 @@ test("a project-configured store path not created yet keeps its ignore fix (fix 
   await applySecretsHygieneFixes({ findings, report: () => undefined });
   expect(await inspectSecretsHygiene(scope)).toEqual([]);
 });
+
+test("a configured key named like a staging leftover is live and never offered for removal", async () => {
+  const f = await fixture();
+  // Recovery pointed the backend at an old staging copy that still works.
+  const liveKey = join(f.projectRoot, `..hack.secret.key.${UUID}.tmp`);
+  const store = join(f.home, "secrets.enc.json");
+  await writeFile(liveKey, `${SENTINEL}\n`, { mode: 0o600 });
+  await writeFile(store, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  await backdate(liveKey);
+  // The same name reached through a link is the same live file.
+  const alias = join(f.root, "alias-key");
+  await symlink(liveKey, alias);
+  for (const keyPath of [liveKey, alias]) {
+    const findings = await inspectSecretsHygiene({
+      ...f.scope,
+      stores: [{ storePath: store, keyPath }],
+    });
+    expect(
+      findings.some((finding) => finding.fix?.kind === "remove_leftover")
+    ).toBe(false);
+    await applySecretsHygieneFixes({ findings, report: () => undefined });
+    expect(await readFile(liveKey, "utf8")).toBe(`${SENTINEL}\n`);
+  }
+  // Without that configuration the same file is an ordinary leftover.
+  const unconfigured = await inspectSecretsHygiene(f.scope);
+  expect(paths(unconfigured)).toContain(liveKey);
+});
+
+test.skipIf(process.getuid?.() === 0)(
+  "an ignore file the user cannot read is never rewritten",
+  async () => {
+    const f = await fixture();
+    const overlay = join(f.projectDir, ".env.qa");
+    await writeFile(overlay, "QA=1\n", { mode: 0o600 });
+    const ignore = join(f.projectDir, ".gitignore");
+    const before = await readFile(ignore, "utf8");
+    const findings = await inspectSecretsHygiene(f.scope);
+    expect(findings.map((finding) => finding.fix?.kind)).toEqual(["ignore"]);
+    // Write-only: the repair could append nothing without losing the rules.
+    await chmod(ignore, 0o200);
+    try {
+      expect(
+        await applySecretsHygieneFixes({ findings, report: () => undefined })
+      ).toEqual({ applied: 0, skipped: 1 });
+    } finally {
+      await chmod(ignore, 0o644);
+    }
+    expect(await readFile(ignore, "utf8")).toBe(before);
+  }
+);
+
+test.skipIf(process.getuid?.() === 0)(
+  "a store or project directory that cannot be inspected is an error, never a clean result",
+  async () => {
+    const f = await fixture();
+    const locked = join(f.root, "locked");
+    await mkdir(locked);
+    const storePath = join(locked, "secrets.enc.json");
+    const keyPath = join(locked, "secrets-file.key");
+    await writeFile(storePath, "{}\n", { mode: 0o600 });
+    await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+    await chmod(locked, 0o000);
+    await chmod(f.projectDir, 0o000);
+    try {
+      const findings = await inspectSecretsHygiene({
+        ...f.scope,
+        stores: [{ storePath, keyPath }],
+      });
+      const byPath = new Map(
+        findings.map((finding) => [finding.path, finding])
+      );
+      for (const path of [storePath, keyPath, f.projectDir]) {
+        expect(byPath.get(path)).toMatchObject({ status: "error", fix: null });
+        expect(byPath.get(path)?.message).toContain("could not be inspected");
+      }
+      // Never reported as a store whose key is missing.
+      expect(
+        findings.some((finding) => finding.message.includes("key missing"))
+      ).toBe(false);
+    } finally {
+      await chmod(locked, 0o700);
+      await chmod(f.projectDir, 0o755);
+    }
+  }
+);

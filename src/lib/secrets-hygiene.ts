@@ -390,6 +390,39 @@ async function gitFindings(opts: {
   return [];
 }
 
+/**
+ * An entry's metadata, `"absent"` only when the path does not exist, or the
+ * error code when it could not be inspected (for example a directory on the
+ * way the user cannot search): an inspection failure is never read as
+ * absence, so it can never produce a clean result (HACK-2165).
+ */
+async function inspectEntry(
+  path: string
+): Promise<Stats | "absent" | { readonly error: string }> {
+  try {
+    return await lstat(path);
+  } catch (error: unknown) {
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? String((error as { code: unknown }).code)
+        : "unknown";
+    return code === "ENOENT" || code === "ENOTDIR" ? "absent" : { error: code };
+  }
+}
+
+function uninspectableFinding(opts: {
+  readonly path: string;
+  readonly name: string;
+  readonly code: string;
+}): SecretsHygieneFinding {
+  return {
+    status: "error",
+    path: opts.path,
+    message: `${opts.name} could not be inspected (${displayPath(opts.code)}), so Hack cannot tell whether it is private and kept out of git. Make it and its directories readable by your user, then run hack doctor again.`,
+    fix: null,
+  };
+}
+
 async function candidateFindings(opts: {
   readonly candidate: Candidate;
   readonly project: SecretsHygieneScope["project"];
@@ -400,8 +433,18 @@ async function candidateFindings(opts: {
    */
   readonly beforeCreation?: boolean;
 }): Promise<SecretsHygieneFinding[]> {
-  const stats = await lstat(opts.candidate.path).catch(() => null);
+  const entry = await inspectEntry(opts.candidate.path);
   const name = shown(opts.candidate.path, opts.project);
+  if (typeof entry === "object" && "error" in entry) {
+    return [
+      uninspectableFinding({
+        path: opts.candidate.path,
+        name,
+        code: entry.error,
+      }),
+    ];
+  }
+  const stats = entry === "absent" ? null : entry;
   if (!stats) {
     return opts.beforeCreation === true && opts.candidate.ignore
       ? await gitFindings({ candidate: opts.candidate, name })
@@ -541,11 +584,13 @@ async function storeFindings(opts: {
     );
   }
   const store = await lstat(storePath).catch(() => null);
-  const key = await lstat(keyPath).catch(() => null);
+  // Only a key confirmed absent is "missing"; one that could not be
+  // inspected is already reported above.
+  const keyAbsent = (await inspectEntry(keyPath)) === "absent";
   if (
     store?.isFile() &&
     store.size > 0 &&
-    !key &&
+    keyAbsent &&
     !opts.storeKeyFromEnvironment
   ) {
     const keychainMayHoldKey =
@@ -582,6 +627,34 @@ async function projectFindings(opts: {
       message: `${shown(project.projectDir, project)} is a symbolic link or not a directory; Hack does not read, write or fix env files through it. Replace it with a regular directory.`,
       fix: null,
     });
+  }
+  if (inspectProjectDir) {
+    const listed = await readdir(project.projectDir).then(
+      () => null,
+      (error: unknown) =>
+        error && typeof error === "object" && "code" in error
+          ? String((error as { code: unknown }).code)
+          : "unknown"
+    );
+    if (listed !== null) {
+      findings.push(
+        uninspectableFinding({
+          path: project.projectDir,
+          name: shown(project.projectDir, project),
+          code: listed,
+        })
+      );
+    }
+  }
+  const projectDirEntry = await inspectEntry(project.projectDir);
+  if (typeof projectDirEntry === "object" && "error" in projectDirEntry) {
+    findings.push(
+      uninspectableFinding({
+        path: project.projectDir,
+        name: shown(project.projectDir, project),
+        code: projectDirEntry.error,
+      })
+    );
   }
   for (const candidate of await projectCandidates({
     project,
@@ -701,6 +774,19 @@ export async function inspectSecretsHygiene(
       : []),
     ...(await allStoreFindings({ scope, now })),
   ];
+  // A file the configuration uses is live, whatever its name looks like: it
+  // is never offered for removal as a leftover (HACK-2165).
+  const live = await livePaths(scope);
+  const kept: SecretsHygieneFinding[] = [];
+  for (const finding of findings) {
+    if (
+      finding.fix?.kind !== "remove_leftover" ||
+      !(await isLive({ path: finding.path, live }))
+    ) {
+      kept.push(finding);
+    }
+  }
+  findings.splice(0, findings.length, ...kept);
   for (const stale of await findStaleMuxEnvironments({
     ...(scope.tmpDir ? { tmpDir: scope.tmpDir } : {}),
     now,
@@ -713,6 +799,42 @@ export async function inspectSecretsHygiene(
     });
   }
   return await Promise.all(findings.map(withGuard));
+}
+
+/**
+ * Files the configuration uses (stores, keys, the project and shared keys),
+ * as given and resolved.
+ */
+async function livePaths(
+  scope: SecretsHygieneScope
+): Promise<ReadonlySet<string>> {
+  const paths = [
+    ...scope.stores.flatMap((store) => [store.storePath, store.keyPath]),
+    ...(scope.sharedKeyPath ? [scope.sharedKeyPath] : []),
+    ...(scope.project
+      ? [join(scope.project.projectRoot, PROJECT_ENV_KEY_FILENAME)]
+      : []),
+  ];
+  const live = new Set<string>();
+  for (const path of paths) {
+    live.add(resolve(path));
+    const real = await realpath(path).catch(() => null);
+    if (real) {
+      live.add(real);
+    }
+  }
+  return live;
+}
+
+async function isLive(opts: {
+  readonly path: string;
+  readonly live: ReadonlySet<string>;
+}): Promise<boolean> {
+  if (opts.live.has(resolve(opts.path))) {
+    return true;
+  }
+  const real = await realpath(opts.path).catch(() => null);
+  return real !== null && opts.live.has(real);
 }
 
 /** The directory a fix changes. */
@@ -779,12 +901,40 @@ async function tightenMode(
   }
 }
 
+/** Whether `path` opens (no-follow) and reads as a regular file. */
+async function isReadableRegularFile(path: string): Promise<boolean> {
+  const file = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+  ).catch(() => null);
+  if (!file) {
+    return false;
+  }
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) {
+      return false;
+    }
+    await file.readFile();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await file.close();
+  }
+}
+
 async function addIgnoreEntry(
   fix: Extract<SecretsHygieneFix, { kind: "ignore" }>
 ): Promise<boolean> {
-  // Never write through a linked ignore file.
+  // Never write through a linked ignore file, and never rewrite one whose
+  // bytes could not be read: the writer treats an unreadable file as absent
+  // and would replace the user's rules with this one entry.
   const existing = await lstat(fix.gitignorePath).catch(() => null);
   if (existing && !existing.isFile()) {
+    return false;
+  }
+  if (existing && !(await isReadableRegularFile(fix.gitignorePath))) {
     return false;
   }
   await ensureGitignoreEntry({

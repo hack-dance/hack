@@ -129,6 +129,14 @@ export async function findStagingLeftovers(opts: {
   readonly directory: string;
   readonly names: readonly string[];
   readonly now: number;
+  /**
+   * Only staging copies of `names` inside the staging directory, and no
+   * legacy siblings beside them. A writer sweeps this way: it cannot tell a
+   * sibling an earlier version left from a file someone configured under a
+   * similar name, so legacy siblings are left to `hack doctor`, which knows
+   * the configured files (HACK-2165).
+   */
+  readonly stagingOnly?: boolean;
 }): Promise<readonly StagingLeftover[]> {
   const found: StagingLeftover[] = [];
   const collect = async (dir: string, accept: (name: string) => boolean) => {
@@ -141,14 +149,23 @@ export async function findStagingLeftovers(opts: {
       }
     }
   };
-  const patterns = opts.names.map(legacyStagingSiblingPattern);
-  await collect(opts.directory, (name) =>
-    patterns.some((pattern) => pattern.test(name))
-  );
+  if (opts.stagingOnly !== true) {
+    const patterns = opts.names.map(legacyStagingSiblingPattern);
+    await collect(opts.directory, (name) =>
+      patterns.some((pattern) => pattern.test(name))
+    );
+  }
   const staging = join(opts.directory, PRIVATE_STAGING_DIRNAME);
   const stagingStats = await lstat(staging).catch(() => null);
   if (stagingStats && isOwnDirectory(stagingStats)) {
-    await collect(staging, isStagingFileName);
+    await collect(
+      staging,
+      opts.stagingOnly === true
+        ? (name) =>
+            isStagingFileName(name) &&
+            opts.names.some((target) => name.startsWith(`${target}.`))
+        : isStagingFileName
+    );
   }
   return found;
 }
@@ -190,7 +207,8 @@ export type PreparedStaging = {
  * self-ignoring `.gitignore`; an existing entry there that is a link, not a
  * directory, or not the user's own is refused with `refusal()`, so a staging
  * copy is never created through it (see {@link admitStagingDirectory}). Old leftovers
- * of this target are swept first.
+ * of this target in the staging directory are swept first; siblings an
+ * earlier version left are left to `hack doctor`.
  */
 export async function preparePrivateStaging(opts: {
   readonly target: string;
@@ -214,6 +232,7 @@ export async function preparePrivateStaging(opts: {
     directory: dirname(opts.target),
     names: [basename(opts.target)],
     now: opts.now ?? Date.now(),
+    stagingOnly: true,
   });
   for (const leftover of leftovers) {
     await removeStagingLeftover(leftover).catch(() => false);

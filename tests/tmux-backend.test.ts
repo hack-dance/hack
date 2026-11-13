@@ -1,9 +1,18 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { readFile, rm } from "node:fs/promises";
-import { dirname } from "node:path";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { HACK_KEY_MATERIAL_VARIABLES } from "../src/lib/child-environment.ts";
 
 import type { ExecOptions } from "../src/lib/shell.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const execCalls: Array<{
@@ -174,40 +183,59 @@ test("tmux keeps only the exact duplicate-session diagnostic from a failed creat
 });
 
 test("tmux sends command environment values over stdin with tmux quoting", async () => {
-  const backend = await loadTmuxBackend();
-  const fake = "fake-'\"$value\\line\nnext";
-  await backend.execInSession({
-    name: "demo",
-    command: "echo done",
-    env: { FAKE_API_KEY: fake },
-  });
-  expect(execCalls[0]?.command).toEqual([
-    "tmux",
-    "-u",
-    "start-server",
-    ";",
-    "source-file",
-    "-",
-  ]);
-  const input = execCalls[0]?.options.stdin;
-  if (!(input instanceof Blob)) {
-    throw new Error("Expected private stdin payload");
-  }
-  const source = await input.text();
-  expect(source).not.toContain("\\$value");
-  const path = source.match(/'([^']+\/env\.json)'/)?.[1];
-  if (!path) {
-    throw new Error("Expected a private input path");
-  }
+  // The staging sweep runs against the OS temporary directory: point it at
+  // a private one so no payload outside this test is ever considered, and
+  // keep an unrelated stale payload elsewhere as a control (HACK-2165).
+  const stageDir = await mkdtemp(join(tmpdir(), "tmux-backend-stage-"));
+  const outside = await mkdtemp(join(tmpdir(), "tmux-backend-outside-"));
+  const unrelated = join(outside, "hack-mux-env-unrelated");
+  await mkdir(unrelated, { mode: 0o700 });
+  await writeFile(join(unrelated, "env.json"), "{}", { mode: 0o600 });
+  const old = (Date.now() - 60 * 60_000) / 1000;
+  await utimes(unrelated, old, old);
+  const savedTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = stageDir;
   try {
-    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
-      FAKE_API_KEY: fake,
+    const backend = await loadTmuxBackend();
+    const fake = "fake-'\"$value\\line\nnext";
+    await backend.execInSession({
+      name: "demo",
+      command: "echo done",
+      env: { FAKE_API_KEY: fake },
     });
+    expect(execCalls[0]?.command).toEqual([
+      "tmux",
+      "-u",
+      "start-server",
+      ";",
+      "source-file",
+      "-",
+    ]);
+    const input = execCalls[0]?.options.stdin;
+    if (!(input instanceof Blob)) {
+      throw new Error("Expected private stdin payload");
+    }
+    const source = await input.text();
+    expect(source).not.toContain("\\$value");
+    const path = source.match(/'([^']+\/env\.json)'/)?.[1];
+    if (!path) {
+      throw new Error("Expected a private input path");
+    }
+    try {
+      expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+        FAKE_API_KEY: fake,
+      });
+    } finally {
+      await rm(dirname(path), { recursive: true, force: true });
+    }
+    expect(source.split("\n")).toHaveLength(2);
+    expect(execCalls[0]?.command.join(" ")).not.toContain(fake);
   } finally {
-    await rm(dirname(path), { recursive: true, force: true });
+    restoreEnv("TMPDIR", savedTmpdir);
+    expect(await readFile(join(unrelated, "env.json"), "utf8")).toBe("{}");
+    await rm(stageDir, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
-  expect(source.split("\n")).toHaveLength(2);
-  expect(execCalls[0]?.command.join(" ")).not.toContain(fake);
 });
 
 test("tmux presence uses an exact session target and distinguishes unknown failures", async () => {

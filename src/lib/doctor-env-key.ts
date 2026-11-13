@@ -231,11 +231,31 @@ const RETIRED_KEY_DIR = "~/.hack/retired-keys";
 const READD_SECRET =
   "re-add each secret with '<value-source> | hack env add KEY --secret --value-stdin' (or omit the value in a terminal for a hidden prompt)";
 
+/**
+ * Copies the key to a new private file under {@link RETIRED_KEY_DIR}, then
+ * removes it. The command checks, when it runs, that the directory is not
+ * inside a git work tree (a home directory kept in git, say) and stops
+ * before copying anything if it is. mktemp gives each copy its own name
+ * (0600), so a later rotation never overwrites an earlier one; the key is
+ * removed only once its copy is written.
+ */
+export function retiredKeyCopyCommand(key: string): string {
+  return `install -d -m 700 ${RETIRED_KEY_DIR} && ! git -C ${RETIRED_KEY_DIR} rev-parse --is-inside-work-tree >/dev/null 2>&1 && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
+}
+
+/**
+ * Replaces a key symlink with a private regular copy of its target, with no
+ * intermediate file (a `<key>.new` left by an interruption would not be
+ * ignored): the target is resolved, the link removed, and the bytes copied
+ * in under umask 077. If the copy fails the key's bytes are still at the
+ * printed target.
+ */
+export function symlinkKeyRepairCommand(key: string): string {
+  return `t="$(readlink -f ${key})" && [ -f "$t" ] && rm ${key} && (umask 077 && cp "$t" ${key}) && chmod 600 ${key}`;
+}
+
 function rotateRemedy(path: (suffix?: string) => string): string {
-  // mktemp gives each retired copy its own name (0600), so a second rotation,
-  // here or in another project, never overwrites the first; the key is only
-  // removed once its copy is written.
-  return `keep a recoverable copy of the old key outside the worktree, then remove it: 'install -d -m 700 ${RETIRED_KEY_DIR} && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${path()} > "$k" && rm ${path()}'. Then ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
+  return `keep a recoverable copy of the old key outside every git checkout, then remove it: '${retiredKeyCopyCommand(path())}' (it stops without copying if ${RETIRED_KEY_DIR} is inside a git work tree; then copy the key to a private directory outside any checkout yourself). Then ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
 }
 
 async function inspectCandidate(opts: {
@@ -273,7 +293,7 @@ async function inspectCandidate(opts: {
           remedy: remedyFor(
             role,
             (p) =>
-              `after confirming the link target is your key: cp -L ${p()} ${p(".new")} && mv -f ${p(".new")} ${p()} && chmod 600 ${p()}`
+              `after confirming the link target is your key: ${symlinkKeyRepairCommand(p())}`
           ),
         },
       ],

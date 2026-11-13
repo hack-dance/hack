@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
+  readdir,
+  readFile,
   rm,
   symlink,
   writeFile,
@@ -24,6 +27,8 @@ import {
   gitListTrackedKeyPaths,
   type InspectEnvKeyOptions,
   inspectProjectEnvKey,
+  retiredKeyCopyCommand,
+  symlinkKeyRepairCommand,
 } from "../src/lib/doctor-env-key.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
@@ -144,9 +149,11 @@ describe("env key doctor diagnostic", () => {
 
     expect(inspection.status).toBe("error");
     expect(codes(inspection)).toEqual(["env-key-symlink"]);
+    // HACK-2165: no `.new` intermediate, which git could collect.
     expect(inspection.findings[0]?.remedy).toContain(
-      `cp -L ${KEY_FILE} ${KEY_FILE}.new && mv -f ${KEY_FILE}.new ${KEY_FILE} && chmod 600 ${KEY_FILE}`
+      symlinkKeyRepairCommand(KEY_FILE)
     );
+    expect(inspection.findings[0]?.remedy).not.toContain(".new");
     expectValueFree({
       output: serialized(inspection),
       root,
@@ -801,4 +808,104 @@ describe("gitIsLocalKeyIgnored", () => {
       expect(await gitIsLocalKeyIgnored({ projectRoot: repo })).toBe(true);
     });
   });
+});
+
+describe("printed key recovery commands leave nothing git can collect (HACK-2165)", () => {
+  const KEY = "synthetic-recovery-key-material\n";
+
+  async function sandbox() {
+    const root = await mkdtemp(join(tmpdir(), "hack-key-recovery-"));
+    dirsForRecovery.push(root);
+    const home = join(root, "home");
+    const project = join(root, "project");
+    await mkdir(home);
+    await mkdir(project);
+    await git(project, ["init", "-q", "-b", "main"]);
+    await writeFile(join(project, ".gitignore"), ".hack.secret.key\n");
+    return { root, home, project };
+  }
+
+  async function git(cwd: string, args: readonly string[]): Promise<string> {
+    const proc = Bun.spawn(["git", ...args], {
+      cwd,
+      env: fixtureGitEnv(),
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    return out;
+  }
+
+  async function run(cwd: string, home: string, command: string) {
+    const proc = Bun.spawn(["sh", "-c", command], {
+      cwd,
+      env: fixtureGitEnv({ env: { HOME: home } }),
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    return await proc.exited;
+  }
+
+  const untracked = async (dir: string) =>
+    (await git(dir, ["status", "--porcelain", "--untracked-files=all"]))
+      .split("\n")
+      .filter(Boolean);
+
+  test("rotation copies the key outside the checkout, then removes it", async () => {
+    const box = await sandbox();
+    await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+    expect(
+      await run(box.project, box.home, retiredKeyCopyCommand(KEY_FILE))
+    ).toBe(0);
+    expect(
+      await lstat(join(box.project, KEY_FILE)).catch(() => null)
+    ).toBeNull();
+    const retired = await readdir(join(box.home, ".hack", "retired-keys"));
+    expect(retired).toHaveLength(1);
+    expect(
+      await readFile(
+        join(box.home, ".hack", "retired-keys", retired[0] ?? ""),
+        "utf8"
+      )
+    ).toBe(KEY);
+    expect(await untracked(box.project)).toEqual(["?? .gitignore"]);
+  });
+
+  test("rotation stops without copying when the retired-key directory is in a git checkout", async () => {
+    const box = await sandbox();
+    await git(box.home, ["init", "-q", "-b", "main"]);
+    await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+    expect(
+      await run(box.project, box.home, retiredKeyCopyCommand(KEY_FILE))
+    ).not.toBe(0);
+    expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+    expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual([]);
+    expect(await untracked(box.home)).toEqual([]);
+  });
+
+  test("the symlink repair leaves a private regular key and no intermediate copy", async () => {
+    const box = await sandbox();
+    const target = join(box.root, "elsewhere.key");
+    await writeFile(target, KEY, { mode: 0o600 });
+    await symlink(target, join(box.project, KEY_FILE));
+    expect(
+      await run(box.project, box.home, symlinkKeyRepairCommand(KEY_FILE))
+    ).toBe(0);
+    const key = await lstat(join(box.project, KEY_FILE));
+    expect(key.isFile()).toBe(true);
+    expect(key.mode & 0o777).toBe(0o600);
+    expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+    expect((await readdir(box.project)).sort()).toEqual(
+      [".git", ".gitignore", KEY_FILE].sort()
+    );
+    expect(await untracked(box.project)).toEqual(["?? .gitignore"]);
+  });
+});
+
+const dirsForRecovery: string[] = [];
+afterEach(async () => {
+  for (const dir of dirsForRecovery.splice(0)) {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -1904,7 +1904,7 @@ function parseNativeEnvLayer(opts: {
   try {
     parsed = YAML.parse(text);
   } catch {
-    throw new Error(envParseDiagnostic({ format: "YAML", text }));
+    throw new SyntaxError(envParseDiagnostic({ format: "YAML", text }));
   }
   const result = parseProjectEnvConfig({
     parsed,

@@ -132,6 +132,12 @@ const QUOTED_FIRST_WORD = /^"([^"]*)"/;
 let root: string;
 let unitPath: string;
 let program: string;
+/**
+ * The fake service PATH: a directory of this test's own, so the PATH
+ * checks never scan the host's /usr (GitHub's runner image leaves
+ * directories that /usr/bin links into writable by everyone, HACK-2142).
+ */
+let sysBin: string;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "hack-systemd-"));
@@ -145,6 +151,9 @@ beforeEach(async () => {
   await chmod(join(root, "bin"), 0o755);
   await writeFile(program, "#!/bin/sh\n");
   await chmod(program, 0o755);
+  sysBin = join(root, "sysbin");
+  await mkdir(sysBin);
+  await chmod(sysBin, 0o755);
 });
 
 afterEach(async () => {
@@ -162,7 +171,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     showFails: false,
     activeState: null,
     needsReload: false,
-    unitEnvironment: "PATH=/usr/bin:/bin HACK_NO_INTERACTIVE=1",
+    unitEnvironment: `PATH=${sysBin} HACK_NO_INTERACTIVE=1`,
     environmentFiles: "",
     unsetEnvironment: "",
     passEnvironment: "",
@@ -171,7 +180,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     dropInPaths: "",
     unitSearchPath: null,
     extraExecLines: [],
-    managerEnvironment: `HOME=${root}\nPATH=/usr/bin:/bin\n`,
+    managerEnvironment: `HOME=${root}\nPATH=${sysBin}\n`,
     passwdHome: root,
     namespaceLines: [],
     deps: undefined as unknown as SystemdDeps,
@@ -857,6 +866,7 @@ function startHooks(fake: Fake, hackBinPath = program) {
       const text = renderSystemdUnit({ hackBinPath });
       return Promise.resolve(text ? { hackBinPath, unitText: text } : null);
     },
+    systemPathDirectories: [sysBin],
   };
 }
 
@@ -2510,7 +2520,7 @@ linuxTest(
     await mkdir(own);
     await chmod(own, 0o755);
     expect(
-      await checkServicePathDirectories({ dirs: [own, "/usr/bin"] })
+      await checkServicePathDirectories({ dirs: [own, sysBin] })
     ).toBeNull();
 
     // A writable PATH directory, sticky or not: refused, unchanged.

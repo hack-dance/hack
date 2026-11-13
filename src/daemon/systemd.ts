@@ -1937,16 +1937,26 @@ export async function parseSystemdPathList(
   return { paths: pieces };
 }
 
+/** The system directories on the PATH the rendered unit gives hackd. */
+export const RENDERED_SYSTEM_PATH_DIRECTORIES = [
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+] as const;
+
 /** The PATH directories the rendered unit gives hackd, `%h` expanded. */
 export function renderedServicePathDirectories(opts: {
   readonly hackBinPath: string;
   readonly home: string;
+  /**
+   * Test seam: replaces {@link RENDERED_SYSTEM_PATH_DIRECTORIES} so tests
+   * do not depend on the host's own system directories.
+   */
+  readonly systemDirectories?: readonly string[];
 }): readonly string[] {
   return [
     dirname(opts.hackBinPath),
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
+    ...(opts.systemDirectories ?? RENDERED_SYSTEM_PATH_DIRECTORIES),
     resolve(opts.home, ".local/bin"),
     resolve(opts.home, ".bun/bin"),
     resolve(opts.home, ".hack/bin"),
@@ -1957,7 +1967,7 @@ export function renderedServicePathDirectories(opts: {
  * Where programs are looked up when the service has no PATH at all:
  * systemd's default search path and the C library's fallback (`/bin`).
  */
-const UNSET_PATH_LOOKUP = [
+export const UNSET_PATH_LOOKUP_DIRS = [
   "/usr/local/sbin",
   "/usr/local/bin",
   "/usr/sbin",
@@ -2142,7 +2152,9 @@ export async function readSystemdServicePathDirectories(opts: {
     };
   }
   const path = read.env.PATH;
-  return { dirs: path === undefined ? UNSET_PATH_LOOKUP : path.split(":") };
+  return {
+    dirs: path === undefined ? UNSET_PATH_LOOKUP_DIRS : path.split(":"),
+  };
 }
 
 /** Every property through which a unit (or a drop-in) runs a program. */

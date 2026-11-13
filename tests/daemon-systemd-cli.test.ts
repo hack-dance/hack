@@ -10,6 +10,12 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import {
+  checkServicePathDirectories,
+  RENDERED_SYSTEM_PATH_DIRECTORIES,
+  UNSET_PATH_LOOKUP_DIRS,
+} from "../src/daemon/systemd.ts";
+
 /**
  * `hack daemon install|status|uninstall` on Linux through the source CLI,
  * with fake `systemctl` and `loginctl` first on PATH (HACK-2052).
@@ -84,6 +90,30 @@ type Fixture = {
   readonly hackBin: string;
   readonly env: Record<string, string>;
 };
+
+/**
+ * These flows run the real CLI, which checks the host's own system PATH
+ * directories before it installs or starts the unit. Hosts whose system
+ * directories (or what /usr/bin links into) others can write, such as
+ * GitHub's Ubuntu runner image, make the CLI refuse, as it should; the
+ * flows then cannot be exercised there, and the in-process tests in
+ * daemon-systemd.test.ts cover the same logic with their own directories
+ * (HACK-2142). Null when this host's system PATH is safe.
+ */
+const hostSystemPathProblem =
+  process.platform === "linux"
+    ? await checkServicePathDirectories({
+        dirs: [...RENDERED_SYSTEM_PATH_DIRECTORIES, ...UNSET_PATH_LOOKUP_DIRS],
+      })
+    : null;
+if (hostSystemPathProblem !== null) {
+  console.warn(
+    `daemon-systemd-cli: skipping the install flows on this host: ${hostSystemPathProblem}`
+  );
+}
+const installFlowTest = test.skipIf(
+  process.platform !== "linux" || hostSystemPathProblem !== null
+);
 
 let fixture: Fixture | null = null;
 
@@ -225,7 +255,7 @@ async function calls(f: Fixture): Promise<string[]> {
   }
 }
 
-test.skipIf(process.platform !== "linux")(
+installFlowTest(
   "install, status and uninstall drive systemctl --user and agree on ownership",
   async () => {
     fixture = await createFixture();
@@ -357,7 +387,7 @@ test.skipIf(process.platform !== "linux")(
   90_000
 );
 
-test.skipIf(process.platform !== "linux")(
+installFlowTest(
   "install hands a directly started hackd over to systemd after proving it",
   async () => {
     fixture = await createFixture();
@@ -402,7 +432,7 @@ test.skipIf(process.platform !== "linux")(
   90_000
 );
 
-test.skipIf(process.platform !== "linux")(
+installFlowTest(
   "stop fails, without signalling hackd, when systemctl stop fails",
   async () => {
     fixture = await createFixture();

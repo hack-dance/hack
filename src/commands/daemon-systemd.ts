@@ -29,6 +29,7 @@ import {
   LINGER_ENABLE_COMMAND,
   MANAGER_STOPPABLE_STATES,
   probeSystemdUserManager,
+  RENDERED_SYSTEM_PATH_DIRECTORIES,
   readLingerStatus,
   readSystemdServiceStatus,
   readSystemdUnitHackHome,
@@ -82,6 +83,12 @@ export interface SystemdCommandHooks {
   readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
   /** Defaults to {@link resolveExpectedSystemdUnit}; tests pin the program. */
   readonly resolveExpected?: typeof resolveExpectedSystemdUnit;
+  /**
+   * The system directories install checks on the unit's PATH; defaults to
+   * {@link RENDERED_SYSTEM_PATH_DIRECTORIES}. Tests point it at their own
+   * directories so they do not depend on the host's.
+   */
+  readonly systemPathDirectories?: readonly string[];
 }
 
 /** Status for `daemon status` and doctor; null off Linux or when access is denied. */
@@ -706,6 +713,7 @@ export async function installDaemonSystemdService(
     unitPath,
     hackHome: dirname(hooks.paths.root),
     deps,
+    systemPathDirectories: hooks.systemPathDirectories,
   });
   if ("error" in start) {
     logger.error({ message: start.error });
@@ -798,12 +806,14 @@ async function readInstallStartingPoint(opts: {
   readonly unitPath: string;
   readonly hackHome: string;
   readonly deps: SystemdDeps;
+  readonly systemPathDirectories?: readonly string[];
 }): Promise<
   { readonly before: SystemdServiceStatus | null } | { readonly error: string }
 > {
   const program = await checkInstallPrograms({
     hackBinPath: opts.hackBinPath,
     deps: opts.deps,
+    systemPathDirectories: opts.systemPathDirectories,
   });
   if (program !== null) {
     return { error: program };
@@ -865,6 +875,7 @@ async function refuseForeignRunningUnit(opts: {
 async function checkInstallPrograms(opts: {
   readonly hackBinPath: string;
   readonly deps: SystemdDeps;
+  readonly systemPathDirectories?: readonly string[];
 }): Promise<string | null> {
   return (
     (await checkServiceExecutableTrusted({ path: opts.hackBinPath })) ??
@@ -872,6 +883,7 @@ async function checkInstallPrograms(opts: {
       dirs: renderedServicePathDirectories({
         hackBinPath: opts.hackBinPath,
         home: normalizeHomeDir(opts.deps.env.HOME) ?? homedir(),
+        systemDirectories: opts.systemPathDirectories,
       }),
     }))
   );

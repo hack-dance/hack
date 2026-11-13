@@ -15,7 +15,7 @@ type Step = {
   readonly shell?: string;
   readonly run?: string;
   readonly env?: Record<string, string>;
-  readonly with?: Record<string, string>;
+  readonly with?: Record<string, string | boolean | number>;
   readonly "continue-on-error"?: boolean;
 };
 type Job = {

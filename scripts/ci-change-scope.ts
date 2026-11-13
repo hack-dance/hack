@@ -360,6 +360,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       changed: paths,
       draft: event === "pull_request" && process.env.PR_DRAFT === "true",
       full: event === "pull_request" && process.env.PR_FULL === "true",
+      baseRef: process.env.PR_BASE_REF,
       releaseHosts: false,
       pullRequest: event === "pull_request",
       mac: process.env.PR_MAC === "true",

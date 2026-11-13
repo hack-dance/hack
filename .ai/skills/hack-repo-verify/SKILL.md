@@ -133,8 +133,11 @@ does not mean CI ran.
 Hosted CI runs the `bun run test` file set on eight `test shard i/8` jobs;
 light PRs run only the five Linux shards and report selected macOS paths as
 deferred to the integration run. `ci:mac`/`ci:e2e` opt into selected tiers;
-`ci:full` opts into all ordinary PR tiers. Platform and Docker integration
-evidence comes from next pushes. Lead readiness requires green Linux jobs,
+`ci:full` opts into all ordinary PR tiers. Full tiers also run automatically on
+ready PRs changing protected CI inputs or targeting
+`main`; the latter retains Intel. Light PRs skip build smoke, macOS and Docker;
+ordinary `next` integrations defer Intel to explicit release qualification. Deferred
+platform/Docker evidence comes from next pushes. Lead readiness requires green Linux jobs,
 clean persistent review and handled bot findings; list pending Mac/Docker jobs.
 The required `test` check is their fan-in. Every planned shard must succeed;
 failure, cancellation or skipped shards fail. Drafts deliberately fail with

@@ -3,7 +3,11 @@
 A PR uses a light tier by default: typecheck, lint/privacy, secret scan, docs
 checks when relevant, and selected Linux unit files on five Linux shards. It runs
 no macOS jobs, Docker E2E shards, candidate/compiler host qualification, state-model
-job or CLI/release build smoke, whatever files changed. Linux unit-test preflight
+job or CLI/release build smoke. Ready PRs that change protected CI inputs (including
+workflows, selectors, scripts, suite helpers, manifests and lockfiles) automatically
+run every ordinary PR tier, as `ci:full` would. Ready PRs targeting `main` retain
+the full tier, including the Intel compiler. Missing diffs or an unavailable base
+policy also fall back to full tiers. Linux unit-test preflight
 still prepares its matching compiler. The last Linux shard lists selected macOS
 files in its summary as **deferred to the integration run**, before typecheck or
 tests can fail. A green test check qualifies only the tests actually run.
@@ -13,14 +17,16 @@ passes an expected out-of-scope skip. Adding ci:mac enables the selected macOS
 unit pool and native host jobs under their usual input gates; ci:e2e enables the
 Docker/runtime-image/lifetime tier under its usual gates. The labels combine.
 ci:full selects every unit file and ordinary native/Docker tier, state models and
-build smoke. Intel compiler qualification remains release-only. Removing a label
-restores the light tier. Uncertainty widens file selection without buying another
-tier. Adding/removing labels, pushing, changing readiness or retargeting recomputes
+build smoke. Ordinary `next` pushes and PRs into `next` omit the Intel compiler;
+`main` PRs/pushes and explicit full dispatches retain it. Removing a label restores
+the default tier, including the protected-input and `main` exceptions. A selector
+fallback alone widens files; the independent shell guard also enables full tiers.
+Adding/removing labels, pushing, changing readiness or retargeting recomputes
 scope; metadata edits can cancel the active run.
 
 Drafts keep the same deferrals even when labeled and both fan-ins fail with
 skipped: draft. GitHub accepts skipped required jobs, so a skipped job alone is
-not merge protection. Marking ready recomputes the light or labeled plan. Linux
+not merge protection. Marking ready recomputes the default or labeled plan. Linux
 results never qualify deferred macOS evidence.
 
 ## Selection and uncertainty
@@ -58,7 +64,8 @@ successful completed `next` push CI run: missing, running, failed or cancelled
 predecessors and API errors force full, so supersession cannot lose coverage.
 If the base predates the selector, bootstrap selects the full set. The independent
 shell applies PR tiers after either policy path, including old base policies.
-Forced full selection still defers expensive tiers by default; draft fan-ins fail.
+On ready PRs its full guard also enables native hosts, macOS shards, Docker, state
+models and build smoke; draft fan-ins fail and keep heavy tiers disabled.
 No PR install script executes while computing scope. The base archive supplies
 the working directory, Bun configuration and dependency lockfile for the policy.
 Retargeting (`edited`) recomputes scope; other PR metadata edits also cancel
@@ -72,7 +79,7 @@ cannot represent a dependency.
 
 Selected files retain their macOS/Linux pools. Light PRs run only selected Linux
 files; selected macOS paths remain in the plan and deferral summary. Integration
-pushes and ci:mac/ci:full PRs admit macOS shards when their selected pool is
+pushes and opted-in or automatically full-tier PRs admit macOS shards when their selected pool is
 nonempty. Full discovery and independent Git enumeration still agree before
 filtering. Duplicate/unknown selections fail. Every selected file runs exactly
 once in its active pool or is explicitly deferred. Each file retains its suite
@@ -83,9 +90,10 @@ inputs. The compiler's native host matrix follows its crate/build/toolchain/CI
 inputs. Other compiler checks retain the previous Linux scope. These are job
 input gates, separate from the unit import graph.
 
-The Intel compiler lane runs on `main` pushes and explicit full dispatches. Ready
-PRs opting into native jobs and `next` full selections retain ARM macOS and both Linux compiler hosts.
-Intel-specific regressions therefore surface during release qualification; the
+The Intel compiler lane runs on ready PRs into `main`, `main` pushes and explicit
+full dispatches. Native-tier PRs into `next` and ordinary `next` integration runs
+retain ARM macOS and both Linux compiler hosts. Intel-specific regressions on
+`next` therefore surface during release qualification; the
 prerelease gate requires that lane explicitly. macOS ARM qualification remains
 separate from candidate tests because their repeated setup is small compared with
 the compiler's transport and bundle checks.
@@ -156,7 +164,10 @@ and prints the full-dispatch command. Required CI statuses must belong to that
 run's suite and the exact jobs of its latest attempt; cancelled/failed full
 attempts cannot expose an older green result. Newer failed, cancelled or unfinished
 scoped attempts also block older full evidence; only successful scoped runs may
-be skipped. External app requirements retain
+be skipped. For a newer scoped push at the same SHA, the refusal also names the
+run and tells the operator to wait for success or use `gh run rerun RUN_ID`.
+A full dispatch alone cannot clear that newer red or unfinished evidence.
+External app requirements retain
 their own exact-head/app identity checks. Stable release preparation remains
 push-only on `main` and rejects cancellation.
 

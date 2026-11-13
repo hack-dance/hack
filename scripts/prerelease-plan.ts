@@ -382,9 +382,16 @@ export function requireExactHeadCi({
 
 export type Api = (path: string, allowMissing?: boolean) => Promise<unknown>;
 
-function missingFullCi(sourceRevision: string, reason: string): Error {
+function missingFullCi(
+  sourceRevision: string,
+  reason: string,
+  pushRunId?: number
+): Error {
+  const pushRecovery = pushRunId
+    ? ` Wait for the scoped push run ${pushRunId} at this commit to succeed, or rerun it with: gh run rerun ${pushRunId} . A newer running, failed or cancelled scoped run blocks older full evidence; a full dispatch alone does not clear it.`
+    : "";
   return new Error(
-    `${reason}. A release-full CI run is required at next@${sourceRevision}; a green subset is insufficient. Freeze next at this SHA, run: gh workflow run ci.yml --ref next -f full=true ; wait for success, then retry the prerelease plan.`
+    `${reason}.${pushRecovery} A release-full CI run is required at next@${sourceRevision}; a green subset is insufficient. Freeze next at this SHA, run: gh workflow run ci.yml --ref next -f full=true ; wait for success, then retry the prerelease plan.`
   );
 }
 
@@ -485,7 +492,8 @@ export async function selectPrereleaseCiRun(opts: {
     ) {
       throw missingFullCi(
         opts.sourceRevision,
-        "The newest CI attempt has incomplete release evidence"
+        "The newest CI attempt has incomplete release evidence",
+        evidence.scoped && run.event === "push" ? Number(run.id) : undefined
       );
     }
   }

@@ -68,6 +68,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
+          PR_BASE_REF: ${{ github.base_ref }}
           PR_FULL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full') }}
           PR_MAC: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:mac') }}
           PR_E2E: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:e2e') }}
@@ -86,7 +87,7 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             parents=$(git rev-list --parents -n 1 HEAD) || parents=""
             read -r tip base head extra <<< "$parents"
-            if [ "$PR_FULL" = "true" ] || [ -z "$base" ] || [ -z "$head" ] || [ -n "$extra" ]; then
+            if [ "$PR_FULL" = "true" ] || [ "$PR_BASE_REF" = "main" ] || [ -z "$base" ] || [ -z "$head" ] || [ -n "$extra" ]; then
               full=true
             fi
           elif [ "$EVENT_NAME" = "push" ] && [ "$CI_REF" = "refs/heads/next" ]; then
@@ -104,6 +105,7 @@ jobs:
             if ! git diff --name-only --no-renames -z "$base" HEAD > "$RUNNER_TEMP/ci-paths"; then
               full=true
             else
+              if [ ! -s "$RUNNER_TEMP/ci-paths" ]; then full=true; fi
               while IFS= read -r -d '' path; do
                 case "$path" in
                   scripts/*|.github/*|tests/preload.ts|tests/helpers/*|src/lib/guards.ts|src/lib/cli-result.ts|\
@@ -131,6 +133,8 @@ jobs:
             compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"macos-latest","platform":"darwin","arch":"arm64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"}]'
             if { [ "$EVENT_NAME" = "push" ] && [ "$CI_REF" = "refs/heads/main" ]; } || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
               evidence=release-full
+            fi
+            if [ "$evidence" = "release-full" ] || { [ "$EVENT_NAME" = "pull_request" ] && [ "$PR_BASE_REF" = "main" ]; }; then
               compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"macos-latest","platform":"darwin","arch":"arm64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"},{"os":"macos-15-intel","platform":"darwin","arch":"x64"}]'
             fi
             native=true
@@ -157,7 +161,7 @@ jobs:
           defer_macos=false
           build_smoke=true
           EOF
-            echo 'Full selection: main, explicit dispatch, protected input, unavailable diff, or policy bootstrap. Intel is release-only.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Full selection: main, explicit dispatch, protected input, unavailable diff, or policy bootstrap. Intel runs for main and explicit dispatch.' >> "$GITHUB_STEP_SUMMARY"
           else
             # Only base code and base dependencies execute; the merge tree is data.
             policy="$RUNNER_TEMP/ci-policy"
@@ -168,14 +172,14 @@ jobs:
             bun --no-env-file "$policy/scripts/ci-change-scope.ts" --event="$EVENT_NAME" --repo-root="$GITHUB_WORKSPACE" --ref="$CI_REF" --base-revision="$base"
             echo 'ci_evidence=scoped' >> "$GITHUB_OUTPUT"
           fi
-          # PR tiers are independent of dependency uncertainty. Even a protected
-          # input or an old base policy cannot silently buy macOS or Docker.
+          # The independent full guard must also qualify the heavy tiers on ready
+          # PRs, including policy changes and stable-line PRs. Drafts stay light.
           if [ "$EVENT_NAME" = "pull_request" ]; then
             mac=false; e2e=false; builds=false
             if [ "$PR_DRAFT" != "true" ]; then
-              if [ "$PR_FULL" = "true" ] || [ "$PR_MAC" = "true" ]; then mac=true; fi
-              if [ "$PR_FULL" = "true" ] || [ "$PR_E2E" = "true" ]; then e2e=true; fi
-              if [ "$PR_FULL" = "true" ]; then builds=true; fi
+              if [ "$full" = "true" ] || [ "$PR_MAC" = "true" ]; then mac=true; fi
+              if [ "$full" = "true" ] || [ "$PR_E2E" = "true" ]; then e2e=true; fi
+              if [ "$full" = "true" ]; then builds=true; fi
             fi
             if [ "$mac" != "true" ]; then
               printf 'compiler_hosts=[]\nruntime_core=false\ntest_shards=[4,5,6,7,8]\ndefer_macos=true\n' >> "$GITHUB_OUTPUT"
@@ -184,7 +188,7 @@ jobs:
             fi
             if [ "$e2e" != "true" ]; then echo 'docker_suite=false' >> "$GITHUB_OUTPUT"; fi
             printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
-            echo 'PR checks qualify Linux evidence. macOS and Docker are deferred to the integration run unless their tier is labeled.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Light PRs defer macOS, Docker and build smoke to integration. Labels opt in; protected inputs, unavailable policy/diff and ready PRs into main automatically run full tiers.' >> "$GITHUB_STEP_SUMMARY"
           else
             printf 'defer_macos=false\nbuild_smoke=true\n' >> "$GITHUB_OUTPUT"
           fi
@@ -193,7 +197,7 @@ jobs:
     name: Config compiler (${{ matrix.os }})
     needs: changes
     # Relevant compiler/toolchain/CI changes check native hosts on ready PRs.
-    # Intel qualifies explicit release-full dispatches and stable main pushes.
+    # Intel qualifies explicit release-full dispatches and stable main PRs/pushes.
     if: ${{ needs.changes.outputs.compiler_hosts != '[]' }}
     strategy:
       matrix:
@@ -282,7 +286,8 @@ jobs:
 
   state-models:
     name: Runtime state models
-    if: ${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
+    needs: changes
+    if: ${{ needs.changes.outputs.build_smoke == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

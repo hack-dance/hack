@@ -60,6 +60,8 @@ export async function planPullRequest(opts: {
   readonly changed: readonly string[] | null;
   readonly draft: boolean;
   readonly full: boolean;
+  /** Stable-line PRs retain the complete tier, including Intel compiler coverage. */
+  readonly baseRef?: string;
   /** Next integrations retain platform pools; PRs opt into expensive tiers. */
   readonly pullRequest?: boolean;
   readonly mac?: boolean;
@@ -69,7 +71,8 @@ export async function planPullRequest(opts: {
   /** Selection seam for policy tests. */
   readonly selection?: TestSelection;
 }): Promise<PullRequestPlan> {
-  const full = opts.full || requiresWorkflowFull(opts.changed);
+  const stablePr = opts.pullRequest !== false && opts.baseRef === "main";
+  const full = opts.full || stablePr || requiresWorkflowFull(opts.changed);
   const selection =
     opts.selection ??
     selectTests({
@@ -83,14 +86,14 @@ export async function planPullRequest(opts: {
     files: selection.files,
   });
   const integration = opts.pullRequest === false;
-  const mac = !opts.draft && (integration || opts.full || opts.mac === true);
-  const e2e = !opts.draft && (integration || opts.full || opts.e2e === true);
+  const mac = !opts.draft && (integration || full || opts.mac === true);
+  const e2e = !opts.draft && (integration || full || opts.e2e === true);
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
   const allJobs = full;
   const nativeHosts = allJobs || opts.changed?.some(touchesCompilerHost);
   const compiler = mac
-    ? compilerHosts(opts.releaseHosts === true).filter(
+    ? compilerHosts(stablePr || opts.releaseHosts === true).filter(
         (host) =>
           nativeHosts || coarse.compiler_hosts.includes(JSON.stringify(host.os))
       )
@@ -111,6 +114,6 @@ export async function planPullRequest(opts: {
     selection_mode: selection.mode,
     docker_suite: e2e && coarse.suite,
     defer_macos: !mac,
-    build_smoke: !opts.draft && (integration || opts.full),
+    build_smoke: !opts.draft && (integration || full),
   };
 }

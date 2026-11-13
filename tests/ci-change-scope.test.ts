@@ -391,7 +391,7 @@ describe("CI workflow wiring", () => {
       "${{ needs.changes.outputs.suite == 'true' }}"
     );
     expect(jobs["state-models"]?.if).toBe(
-      "${{ github.event_name != 'pull_request' || (!github.event.pull_request.draft && contains(github.event.pull_request.labels.*.name, 'ci:full')) }}"
+      "${{ needs.changes.outputs.build_smoke == 'true' }}"
     );
     for (const name of ["secret-scan"]) {
       expect(jobs[name]?.needs, name).toBeUndefined();

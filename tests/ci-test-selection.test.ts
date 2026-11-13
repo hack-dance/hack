@@ -352,7 +352,7 @@ describe("conservative dependency selection", () => {
 });
 
 describe("PR matrix policy", () => {
-  test("light PRs defer every platform and Docker input until opt-in or integration", async () => {
+  test("ordinary light PRs defer platform and Docker inputs until opt-in or integration", async () => {
     const selection = {
       mode: "selected",
       reason: "fixture",
@@ -364,7 +364,6 @@ describe("PR matrix policy", () => {
     for (const changed of [
       ["docs/a.md"],
       ["src/a.ts"],
-      [".github/workflows/ci.yml"],
       ["packages/runtime-core/src/main.rs"],
     ]) {
       const plan = await planPullRequest({
@@ -386,7 +385,7 @@ describe("PR matrix policy", () => {
     }
     const input = {
       repoRoot,
-      changed: [".github/workflows/ci.yml"],
+      changed: ["packages/config-compiler/src/lib.rs"],
       draft: false,
       full: false,
       selection,
@@ -422,6 +421,30 @@ describe("PR matrix policy", () => {
       test_shards: "[1,2,3,4,5,6,7,8]",
     });
   });
+  test("protected inputs and main PRs automatically run full tiers", async () => {
+    for (const input of [
+      { changed: [".github/workflows/ci.yml"] },
+      { changed: ["scripts/ci-test-selection.ts"] },
+      { changed: ["docs/a.md"], baseRef: "main" },
+    ]) {
+      const plan = await planPullRequest({
+        repoRoot,
+        ...input,
+        draft: false,
+        full: false,
+      });
+      expect(plan).toMatchObject({
+        selection_mode: "full",
+        runtime_core: true,
+        test_shards: "[1,2,3,4,5,6,7,8]",
+        docker_suite: true,
+        defer_macos: false,
+        build_smoke: true,
+        compiler_hosts: fullPushPlan({ releaseHosts: input.baseRef === "main" })
+          .compiler_hosts,
+      });
+    }
+  });
   test("drafts keep Linux shards but suppress native jobs, even with ci:full", async () => {
     const plan = await planPullRequest({
       repoRoot,
@@ -442,7 +465,7 @@ describe("PR matrix policy", () => {
   test("only selected macOS files admit macOS unit jobs", async () => {
     const input = {
       repoRoot,
-      changed: ["src/lib/cli-result.ts"],
+      changed: ["src/a.ts"],
       draft: false,
       full: false,
       mac: true,
@@ -495,7 +518,7 @@ describe("PR matrix policy", () => {
       COMPILER_HOSTS.filter((host) => host.os !== "macos-15-intel")
     );
   });
-  test("empty PR diffs preserve full selection within the light tier", async () => {
+  test("empty PR diffs fail safe to full tiers", async () => {
     const plan = await planPullRequest({
       repoRoot,
       changed: [],
@@ -503,10 +526,12 @@ describe("PR matrix policy", () => {
       full: false,
       selection: { mode: "full", reason: "empty diff", files: [] },
     });
-    expect(plan.runtime_core).toBe(false);
-    expect(plan.compiler_hosts).toBe("[]");
-    expect(plan.defer_macos).toBe(true);
-    expect(plan.docker_suite).toBe(false);
+    expect(plan.runtime_core).toBe(true);
+    expect(plan.compiler_hosts).toBe(
+      fullPushPlan({ releaseHosts: false }).compiler_hosts
+    );
+    expect(plan.defer_macos).toBe(false);
+    expect(plan.docker_suite).toBe(true);
   });
   test("candidate inputs include the compiler consumer dependency", () => {
     expect(touchesCandidate("packages/config-compiler/src/lib.rs")).toBe(true);

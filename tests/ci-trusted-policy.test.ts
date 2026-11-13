@@ -31,7 +31,10 @@ async function scope(opts: {
   legacy?: boolean;
   tamper?: boolean;
   noMerge?: boolean;
+  emptyDiff?: boolean;
   ref?: string;
+  baseRef?: string;
+  tierPlan?: boolean;
   before?: string;
   predecessor?: string;
   dispatchFull?: boolean;
@@ -54,6 +57,7 @@ async function scope(opts: {
         DISPATCH_FULL: String(opts.dispatchFull ?? true),
         GITHUB_REPOSITORY: "fixture/repository",
         PR_DRAFT: String(opts.draft ?? false),
+        PR_BASE_REF: opts.baseRef ?? "next",
         PR_FULL: String(opts.full ?? false),
         PR_MAC: String(opts.mac ?? false),
         PR_E2E: String(opts.e2e ?? false),
@@ -77,9 +81,12 @@ async function scope(opts: {
       await mkdir(dirname(join(root, path)), { recursive: true });
       await writeFile(join(root, path), source);
     };
+    const tierPlan = opts.tierPlan
+      ? ` await Bun.write(process.env.GITHUB_OUTPUT!, await Bun.file(process.env.GITHUB_OUTPUT!).text() + ${JSON.stringify(`compiler_hosts=${fullPushPlan({ releaseHosts: false }).compiler_hosts}\nruntime_core=true\ntest_shards=[1,2,3,4,5,6,7,8]\ndocker_suite=true\n`)});`
+      : "";
     const policy = opts.legacy
       ? 'throw Error("legacy policy must not execute");'
-      : '/* --base-revision= */ const root=process.argv.find(a=>a.startsWith("--repo-root="))?.slice(12); if(!root)throw Error("missing merge data"); await Bun.write(process.env.GITHUB_OUTPUT!, "policy=base\\ndata="+await Bun.file(root+"/src/value.ts").text()+"\\n");';
+      : `/* --base-revision= */ const root=process.argv.find(a=>a.startsWith("--repo-root="))?.slice(12); if(!root)throw Error("missing merge data"); await Bun.write(process.env.GITHUB_OUTPUT!, "policy=base\\ndata="+await Bun.file(root+"/src/value.ts").text()+"\\n");${tierPlan}`;
     const path = opts.path ?? "src/value.ts";
     await put(path, path.endsWith(".json") ? "{}" : "# base");
     await put("src/value.ts", "base");
@@ -98,16 +105,18 @@ async function scope(opts: {
     }).stdout.trim();
     env.BEFORE_SHA = opts.before ?? base;
     git("checkout", "--quiet", "-b", "topic");
-    await put(
-      path,
-      path === "scripts/ci-change-scope.ts"
-        ? `${policy}\n// topic`
-        : path.endsWith(".json")
-          ? '{"topic":true}'
-          : "topic"
-    );
+    if (!opts.emptyDiff) {
+      await put(
+        path,
+        path === "scripts/ci-change-scope.ts"
+          ? `${policy}\n// topic`
+          : path.endsWith(".json")
+            ? '{"topic":true}'
+            : "topic"
+      );
+    }
     git("add", ".");
-    git("commit", "--quiet", "-m", "topic");
+    git("commit", "--quiet", "--allow-empty", "-m", "topic");
     if (!opts.noMerge) {
       git("checkout", "--quiet", "base");
       git("merge", "--quiet", "--no-ff", "--no-edit", "topic");
@@ -195,16 +204,20 @@ for (const path of [
   "packages/config-compiler/Cargo.toml",
   "packages/runtime-core/Cargo.lock",
 ]) {
-  test(`protected input ${path} selects all files without escalating the PR tier`, async () => {
+  test(`protected input ${path} automatically qualifies every ordinary PR tier`, async () => {
     const outputs = await scope({ path });
     expect(requiresWorkflowFull([path])).toBe(true);
     expect(outputs.selection_mode).toBe("full");
     expect(outputs.test_files).toBe("");
-    expect(outputs.compiler_hosts).toBe("[]");
-    expect(outputs.test_shards).toBe("[4,5,6,7,8]");
-    expect(outputs.docker_suite).toBe("false");
-    expect(outputs.defer_macos).toBe("true");
-    expect(outputs.build_smoke).toBe("false");
+    expect(outputs.compiler_hosts).toBe(
+      fullPushPlan({ releaseHosts: false }).compiler_hosts
+    );
+    expect(outputs.runtime_core).toBe("true");
+    expect(outputs.test_shards).toBe("[1,2,3,4,5,6,7,8]");
+    expect(outputs.docker_suite).toBe("true");
+    expect(outputs.defer_macos).toBe("false");
+    expect(outputs.build_smoke).toBe("true");
+    expect(outputs.ci_evidence).toBe("scoped");
   });
 }
 test("bootstrap, pushes and ci:full never execute a PR selector", async () => {
@@ -214,21 +227,12 @@ test("bootstrap, pushes and ci:full never execute a PR selector", async () => {
     { event: "push" },
     { full: true },
     { noMerge: true },
+    { emptyDiff: true },
   ]) {
     expect(await scope(options)).toEqual(
       Object.fromEntries(
         Object.entries({
           ...fullPushPlan({ releaseHosts: false }),
-          ...("event" in options || "full" in options
-            ? {}
-            : {
-                compiler_hosts: "[]",
-                runtime_core: false,
-                test_shards: "[4,5,6,7,8]",
-                docker_suite: false,
-                defer_macos: true,
-                build_smoke: false,
-              }),
           ci_evidence: "scoped",
         }).map(([key, value]) => [key, String(value)])
       )
@@ -243,6 +247,24 @@ test("independent full guard preserves the non-mergeable draft tier", async () =
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
     test_files: "",
+  });
+});
+test("ready PRs into main retain every tier and Intel without release evidence", async () => {
+  expect(await scope({ baseRef: "main" })).toEqual(
+    Object.fromEntries(
+      Object.entries({ ...fullPushPlan(), ci_evidence: "scoped" }).map(
+        ([key, value]) => [key, String(value)]
+      )
+    )
+  );
+  expect(await scope({ baseRef: "main", draft: true })).toMatchObject({
+    compiler_hosts: "[]",
+    runtime_core: "false",
+    docker_suite: "false",
+    build_smoke: "false",
+    test_shards: "[4,5,6,7,8]",
+    draft: "true",
+    ci_evidence: "scoped",
   });
 });
 test("retargeting reclassifies through the ordinary pull_request event", () => {
@@ -332,8 +354,8 @@ test("manual qualification refuses full=false before launching a suite", async (
 });
 
 test("PR labels opt into independent tiers without widening the other tier", async () => {
-  const path = "scripts/ci-test-selection.ts";
-  expect(await scope({ path, mac: true })).toMatchObject({
+  const input = { path: "src/value.ts", tierPlan: true };
+  expect(await scope({ ...input, mac: true })).toMatchObject({
     compiler_hosts: fullPushPlan({ releaseHosts: false }).compiler_hosts,
     runtime_core: "true",
     test_shards: "[1,2,3,4,5,6,7,8]",
@@ -341,7 +363,7 @@ test("PR labels opt into independent tiers without widening the other tier", asy
     defer_macos: "false",
     build_smoke: "false",
   });
-  expect(await scope({ path, e2e: true })).toMatchObject({
+  expect(await scope({ ...input, e2e: true })).toMatchObject({
     compiler_hosts: "[]",
     runtime_core: "false",
     test_shards: "[4,5,6,7,8]",
@@ -349,7 +371,7 @@ test("PR labels opt into independent tiers without widening the other tier", asy
     defer_macos: "true",
     build_smoke: "false",
   });
-  expect(await scope({ path, full: true })).toMatchObject({
+  expect(await scope({ ...input, full: true })).toMatchObject({
     compiler_hosts: fullPushPlan({ releaseHosts: false }).compiler_hosts,
     runtime_core: "true",
     test_shards: "[1,2,3,4,5,6,7,8]",
@@ -358,7 +380,7 @@ test("PR labels opt into independent tiers without widening the other tier", asy
     build_smoke: "true",
   });
   expect(
-    await scope({ path, draft: true, full: true, mac: true, e2e: true })
+    await scope({ ...input, draft: true, full: true, mac: true, e2e: true })
   ).toMatchObject({
     compiler_hosts: "[]",
     runtime_core: "false",

@@ -224,18 +224,23 @@ describe("prerelease decision boundary", () => {
         id: 78,
         updated_at: "2026-11-12T21:00:00Z",
       };
-      await expect(
-        selectPrereleaseCiRun({
-          api: gateApi({
-            [runListPath]: { workflow_runs: [ciRun, newer] },
-            "actions/runs/78": newer,
-            "actions/runs/78/attempts/1/jobs?per_page=100&page=1": {
-              jobs: scopedJobs,
-            },
-          }),
-          sourceRevision: sha,
-        })
-      ).rejects.toThrow("gh workflow run ci.yml --ref next -f full=true");
+      const refusal = selectPrereleaseCiRun({
+        api: gateApi({
+          [runListPath]: { workflow_runs: [ciRun, newer] },
+          "actions/runs/78": newer,
+          "actions/runs/78/attempts/1/jobs?per_page=100&page=1": {
+            jobs: scopedJobs,
+          },
+        }),
+        sourceRevision: sha,
+      });
+      await expect(refusal).rejects.toThrow(
+        "gh workflow run ci.yml --ref next -f full=true"
+      );
+      await expect(refusal).rejects.toThrow(
+        "Wait for the scoped push run 78 at this commit to succeed"
+      );
+      await expect(refusal).rejects.toThrow("gh run rerun 78");
     }
     const newer = { ...ciRun, id: 78, updated_at: "2026-11-12T21:00:00Z" };
     expect(

@@ -2,12 +2,16 @@ flowchart TD
   event{CI event}
   event -->|Main or full dispatch| full[Every test and release host]
   full --> release[Exact-head release-full gate]
-  event -->|PR| labels{Tier labels}
+  event -->|Ready PR| guard{Main or protected inputs?}
+  guard -->|No| labels{Tier labels}
+  guard -->|Yes or unavailable policy| allpr
+  event -->|Draft PR| draft[Draft Linux tier]
+  draft --> draftgate[Fan-ins fail: skipped draft]
   labels -->|Default| light[Selected Linux tests and static checks]
   light --> deferred[Name deferred macOS files]
   deferred --> prgate[Required test and docs checks]
   labels -->|ci:mac or ci:e2e| tier[Selected opted-in tier]
-  labels -->|ci:full| allpr[Full ordinary PR tiers]
+  labels -->|ci:full| allpr[Full PR tiers]
   tier --> prgate
   allpr --> prgate
   event -->|Next push| before{Before push passed?}
@@ -18,4 +22,5 @@ flowchart TD
   integration --> gate[Integration fan-ins]
   class light,tier,allpr,integration,full live
   class deferred wait
+  class draftgate fail
   class prgate,gate,release ok

@@ -132,7 +132,11 @@ release certificate. Every prerelease needs an explicit full dispatch. Its
 and every shard and compiler host must succeed. Both plan and publish recheck
 that evidence, the latest attempt and the selected run's required-check identities.
 Cancelled runs never qualify. If only scoped evidence exists, the plan refuses
-before building and prints this full-dispatch command. Manual full runs have a
+before building and prints this full-dispatch command. If a newer scoped push
+run at the same SHA is running, failed or cancelled, wait for it to succeed or
+rerun it with `gh run rerun RUN_ID` (the refusal names the run). A full dispatch
+alone cannot clear that newer evidence; only successful scoped runs are ignored.
+Manual full runs have a
 separate concurrency group, so a new `next` push cannot cancel one; moving the
 head still invalidates its release eligibility.
 

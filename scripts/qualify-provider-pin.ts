@@ -986,6 +986,11 @@ export class Qualification {
       sha256File(this.options.engineArchive) ===
         (pins.docker as Record<string, string>).archive_sha256
     );
+    this.check(
+      "buildx SHA-256 matches the bundle pin",
+      sha256File(this.options.builderArchive) ===
+        (pins.buildx as Record<string, string>).archive_sha256
+    );
     if (this.options.upstreamChecksums) {
       const name = String(smolvm.url).split("/").pop();
       const line = readFileSync(this.options.upstreamChecksums, "utf8")

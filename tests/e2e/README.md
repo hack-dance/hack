@@ -23,50 +23,70 @@ failed (nothing ran) or the launchd canary saw the real hackd plist change.
 
 ## CI tiering
 
-The workflow defines `test` as the required branch-check fan-in; repository rules
-control which checks block a merge. Full-suite runs use eight `test shard i/8`
-jobs. Shard 8 also runs typecheck, privacy, quality checks and builds.
-`scripts/test-shard-plan.ts` assigns the test files; the workflow owns job
-conditions and aggregate results.
+The required names `test` and `docs site` always report. The workflow owns job
+conditions and fan-in results; repository rules decide which checks block a merge.
+A full unit run uses eight `test shard i/8` jobs: macOS 1–3 and Linux 4–8.
+Shard 8 runs typecheck, privacy and lint; CLI/release build smoke runs only on
+integration/full tiers. Unit-test preflight still prepares its matching compiler.
 
-Pushes to `next`/`main` run the full suite. Pushes and eligible pull requests use
-the pooled layout with unit shards 1–3 on macOS and 4–8 on Linux.
-Pull requests use `scripts/ci-change-scope.ts`: documentation-only changes
-(including the root README, changelog, security/packaging documents and license)
-and runtime-core-only changes run focused tests instead of the eight unit shards
-and Docker E2E. A mix of documentation and runtime-core changes selects both
-focuses. TypeScript/code changes and unknown or unavailable diffs retain the
-full test set. Other jobs, including compiler and candidate-core checks, have
-their own scope conditions; they do not all run on every PR. Every job has a
-`timeout-minutes` budget.
+PRs use the light tier by default: selected Linux unit files, static checks,
+secret scan and relevant docs checks. No macOS, Docker E2E, native compiler/
+candidate qualification, state-model job or build smoke runs, regardless of paths
+changed. Shard 8 lists selected macOS files as **deferred to the integration run**
+before typecheck. A green PR `test` check qualifies Linux only; those macOS files
+run nowhere on that PR.
 
-The `test` aggregate checks the unit shards or the selected focused tests.
-It accepts cancellation as a non-failure, including cancellation of scope
-classification; failures and unexpected skips fail it. A green aggregate alone
-does not prove that the selected tests completed.
+Add `ci:mac` to opt into selected macOS/native jobs, or `ci:e2e` to opt into the
+Docker/runtime-image/lifetime tier under their usual input gates. Labels combine.
+`ci:full` selects every unit file and every ordinary native/Docker tier, state
+models and build smoke. Intel compiler qualification remains on `main` pushes and
+explicit release-full dispatches. Drafts keep the light deferrals even when
+labeled and both `test` and `docker-e2e` fail with `skipped: draft`. Marking ready or
+changing a tier label recomputes scope.
 
-`docker-e2e` is a fan-in job. The scenarios run on four parallel
-`docker-e2e shard i/4` runners, each with `bun tests/e2e/run.ts --shard=i/4`.
-`tests/e2e/shard.ts` splits the default scenario set deterministically: it puts
-each scenario in the lightest shard, longest first, using the checked-in
-duration hints. Every scenario runs in exactly one shard, and
-`tests/e2e-shard.test.ts` proves that for the current list. The custom-network
-qualification runs as three parts (`native-config-networks-lifecycle`,
-`-policy`, `-ingress`), each with its own three-checkout startup and cleanup, so
-the parts land on separate shards; `native-config-compose` and `-routing` share
-the fourth. The slowest shard sets the wall time. The `docker-e2e` aggregate is
-scheduled with `always()`. It accepts successful shards, an intentional scope
-skip, or cancellation without failure. Failed scope classification, failed shards
-and unexpected skips fail it. The matrix result does not identify why a run was
-cancelled, so an accepted cancellation is not evidence of successful execution.
+The unit selector follows import dependencies plus its conservative always-run
+set. Unknown/protected inputs and unavailable diffs widen the selected file set,
+without opting PRs into expensive tiers. Light files retain their platform pools;
+they are not redistributed from macOS onto Linux. See
+[selection and deferral rules](../../docs/reference/ci-test-selection.md).
 
-Release eligibility is stricter than aggregate status.
-`scripts/prerelease-plan.ts` requires a successful exact-source-SHA push CI run
-on `next` for prerelease, and `scripts/release-prepare-gate.ts` applies the same
-check to `main` for stable release preparation. Every required named job,
-including all four Docker shards and all eight unit shards, must have succeeded;
-every observed job in that CI run must also have completed successfully without
-skips. PR runs and green aggregates alone cannot satisfy this contract.
+Next pushes are integration runs. They select from the diff against the before
+revision only when it is a known ancestor with a successful completed push run;
+missing, running, failed or cancelled predecessors and failed API reads force full
+selection. That keeps changes from a cancelled run covered. Newer `next` pushes
+cancel superseded ones. Main pushes retain the full suite with unique,
+non-cancelling groups; manual full runs have their own independent groups.
+
+Both fan-ins use `always()`. Every planned unit or Docker shard must succeed.
+Failure, cancellation, failed scope classification and unexpected skips fail.
+Docker's intentional out-of-scope skip passes its named fan-in. A green selected
+integration run qualifies its selected evidence, not an unrun full release suite.
+
+Docker scenarios run on four `docker-e2e shard i/4` runners via
+`bun tests/e2e/run.ts --shard=i/4`. `tests/e2e/shard.ts` partitions the default scenario
+set deterministically, longest first into the lightest shard using checked-in
+hints. Every scenario runs exactly once, as `tests/e2e-shard.`test`.ts` verifies.
+The custom-network qualification has three parts with independent three-checkout
+startup and cleanup; the planner keeps them on separate shards. The slowest shard
+sets integration wall time.
+
+Prerelease preparation and publication require stronger exact-source evidence:
+freeze `next`, run `gh workflow run ci.yml --ref `next` -f full=true`, wait for success,
+then dispatch the prerelease. Both gates require executed `selection_mode=full` and
+`ci_evidence=release-full` markers, every required job (including eight unit shards,
+four Docker shards and all four compiler hosts) and every observed job successful,
+without skips. Required CI check IDs must belong to that run's suite and latest
+attempt jobs. Newer failed/cancelled/unfinished evidence cannot expose an older
+green run. Missing full evidence prints the dispatch recipe. Stable release
+preparation remains exact-main-head push-only. PR checks and selected integration
+checks alone cannot qualify a release; see the
+[prerelease runbook](../../docs/guides/prereleases.md).
+
+Lead readiness uses green Linux jobs, a clean persistent review and resolved bot
+findings, listing pending Mac/Docker work. The lead qualifies combined heads on a
+Mac, merges batches and fixes integration failures forward. CI gating changes
+still need the independent second review arranged by the lead before merge. Nothing merges to
+`next` between a prerelease dispatch and publish.
 
 [CI result flow](ci-results.svg) · [Mermaid source](ci-results.mmd)
 

@@ -1,18 +1,20 @@
 flowchart TD
-    event{CI event}
-    event -->|Push next or main| full[Eight unit shards\nFour Docker shards]
-    event -->|Pull request| scope{Suite in scope?}
-    scope -->|Yes| full
-    scope -->|No| focus[Focused tests\nDocker scope skip]
-    full --> aggregates[Aggregate checks]
-    focus --> aggregates
-    aggregates --> status[Success can include\ncancellation or scope skip]
-    full --> exact{Exact source SHA\nPush on release branch?}
-    exact -->|Yes| jobs{Every required job present\nEvery observed job successful?}
-    jobs -->|Yes| proof[CI evidence accepted]
-    jobs -->|No| reject[CI evidence rejected]
-    exact -->|No| reject
-    class full,focus live
-    class status wait
-    class proof ok
-    class reject fail
+  event{CI event}
+  event -->|PR| pr[Light or labeled tiers]
+  pr --> linux[Linux checks and deferral report]
+  linux --> ready[Lead readiness]
+  event -->|Next push| integration[Selected or full platform and Docker jobs]
+  integration --> fanins[Integration fan-ins]
+  fanins --> selected[Selected evidence only]
+  event -->|Main or full dispatch| full[Full release-host suite]
+  full --> exact{Exact source and full proof?}
+  exact -->|Yes| jobs{Every required and observed job passed?}
+  exact -->|No| reject[Release refused]
+  jobs -->|Yes| proof[Release evidence accepted]
+  jobs -->|No| reject
+  linux -->|Failure or cancellation| failed[Checks fail]
+  fanins -->|Failure or cancellation| failed
+  class pr,linux,integration,full live
+  class selected wait
+  class ready,proof ok
+  class reject,failed fail

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import {
   chmod,
@@ -16,6 +16,21 @@ import {
   runMuxEnvironment,
   stageMuxEnvironment,
 } from "../src/mux/private-environment.ts";
+import { restoreEnv } from "./helpers/env.ts";
+
+// Staging sweeps the temp directory for stale payloads: give this file its
+// own, so a run never touches the developer's real temp directory.
+let savedTmp: string | undefined;
+let testTmp = "";
+beforeAll(async () => {
+  savedTmp = process.env.TMPDIR;
+  testTmp = await mkdtemp(join(tmpdir(), "mux-env-tmp-"));
+  process.env.TMPDIR = testTmp;
+});
+afterAll(async () => {
+  restoreEnv("TMPDIR", savedTmp);
+  await rm(testTmp, { recursive: true, force: true });
+});
 
 test("private mux payload is owner-only, consumed before spawn, and preserves assignments", async () => {
   const root = await mkdtemp(join(tmpdir(), "mux-env-test-"));

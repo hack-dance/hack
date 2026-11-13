@@ -4616,3 +4616,19 @@ test("a migrated legacy file whose values its env now receives isn't retained, a
   expect(migrated.blockedCleanupCandidates).toContain(envPath);
   expect(migrated.cleanupCandidates).not.toContain(envPath);
 });
+
+test("a .hack/.env linked outside the project is reported unreadable, never read (HACK-2165)", async () => {
+  const repo = await createLegacyRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.default.yaml"),
+    LAYER_EMPTY
+  );
+  const outside = resolve(repo.root, "outside.env");
+  await writeFile(outside, "OUTSIDE_ONLY_KEY=synthetic-outside\n");
+  await symlink(outside, resolve(repo.projectDir, ".env"));
+  expect(await unmigratedIn(repo)).toEqual({
+    keys: [],
+    malformedCount: 0,
+    unreadableFiles: [".env"],
+  });
+});

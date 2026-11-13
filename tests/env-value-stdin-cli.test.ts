@@ -388,19 +388,11 @@ test(
     ).not.toContain(SENTINEL);
 
     const list = await runHack({
-      args: ["env", "list", "--show-secrets", "--json"],
+      args: ["env", "get", "API_KEY"],
       cwd: projectRoot,
     });
     expect(list.exitCode).toBe(0);
-    const payload = JSON.parse(list.stdout) as {
-      readonly vars: ReadonlyArray<{
-        readonly key: string;
-        readonly value: string | null;
-      }>;
-    };
-    expect(payload.vars.find((entry) => entry.key === "API_KEY")?.value).toBe(
-      SENTINEL
-    );
+    expect(list.stdout).toBe(SENTINEL);
   },
   { timeout: 60_000 }
 );

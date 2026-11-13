@@ -2,9 +2,9 @@
  * Value-free projections for the MCP inspection tools (HACK-1133).
  *
  * `hack.project.env.explain` and `hack.project.env.keys` run `hack env explain
- * --json` and `hack env list --json`. The CLI payloads are not guaranteed to be
- * value-free (`env list --json` carries plaintext values), so the MCP server
- * never forwards their raw stdout or stderr. Each projection below copies only
+ * --json` and `hack env list --json`. These commands default to metadata, and
+ * the MCP server independently enforces that boundary instead of forwarding
+ * raw stdout or stderr. Each projection below copies only
  * an allowlisted set of metadata fields with narrowed types; a field that is
  * missing, unexpected or of the wrong type is dropped, never passed through.
  *

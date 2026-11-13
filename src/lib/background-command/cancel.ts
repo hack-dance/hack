@@ -24,6 +24,9 @@ import {
 import type { LoadedJournal } from "./reader.ts";
 import {
   childState,
+  cutUnscannedOutput,
+  dropUnscannedOutput,
+  needsAtRestScrub,
   type ObserveIdentities,
   type ReadBootTime,
   withJournalLock,
@@ -498,6 +501,43 @@ async function waitForEnd(opts: {
 }
 
 /**
+ * The end the dead supervisor wrote, if tail repair just published it. Its
+ * output nobody scanned is cut first, adding no record (as recovery does).
+ */
+async function lateEnd(opts: {
+  readonly journal: LoadedJournal;
+  readonly events: readonly EventEnvelope[];
+}): Promise<EventEnvelope | null> {
+  const ended = endedEvent(opts.events);
+  if (ended && needsAtRestScrub(opts.journal.meta)) {
+    await dropUnscannedOutput({
+      paths: opts.journal.paths,
+      events: opts.events,
+    });
+  }
+  return ended;
+}
+
+/**
+ * Output nobody scanned cannot be redacted by a canceller: cut it (as
+ * recovery does) before the final record. Returns the final record's
+ * `truncated`.
+ */
+async function truncatedBeforeEnd(opts: {
+  readonly journal: LoadedJournal;
+  readonly events: readonly EventEnvelope[];
+  readonly writer: JournalWriter;
+}): Promise<boolean> {
+  return needsAtRestScrub(opts.journal.meta)
+    ? await cutUnscannedOutput({
+        paths: opts.journal.paths,
+        events: opts.events,
+        writer: opts.writer,
+      })
+    : emittedOffsets(opts.events).truncated;
+}
+
+/**
  * No supervisor recorded the end in time. Re-verify identities, force-stop
  * what still verifies, and write `cancelled` ourselves only once the
  * supervisor is provably gone (a live supervisor stays the only writer).
@@ -536,10 +576,18 @@ async function finishWithoutSupervisor(opts: {
     }
     // The supervisor may have written up to the moment it died.
     const current = await reconcileTail(paths);
-    const late = endedEvent(current);
+    const late = await lateEnd({ journal: opts.journal, events: current });
     if (late) {
       return late;
     }
+    // The supervisor is proven gone: output nobody scanned is cut now,
+    // whether or not the child is, so cancel never leaves it on disk.
+    const writer = new JournalWriter(paths, meta, current.at(-1)?.seq ?? 0);
+    const truncated = await truncatedBeforeEnd({
+      journal: opts.journal,
+      events: current,
+      writer,
+    });
     const child = await readChild(paths);
     const snapshot = await opts.observe(child ? [child.pid] : []);
     const state = snapshot
@@ -555,14 +603,13 @@ async function finishWithoutSupervisor(opts: {
       // treating the command as running.
       return null;
     }
-    const writer = new JournalWriter(paths, meta, current.at(-1)?.seq ?? 0);
     const ended = await writer.write("command.ended", {
       outcome: "cancelled",
       reason: owner ? "supervisor_unresponsive" : "cancelled_before_start",
       exitCode: null,
       signal: null,
       durationMs: Math.max(0, Date.now() - Date.parse(meta.acceptedAt)),
-      truncated: emittedOffsets(current).truncated,
+      truncated,
       suppressed: meta.capture === "metadata",
       containerProcess: opts.containerProcess,
       ...(opts.descendants === "not_confirmed"

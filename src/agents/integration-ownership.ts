@@ -124,6 +124,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "f86b0f8e139cc45f518a8998", // af71a840: explicit integrations, no automatic freshness guidance
     "6dafad529aaf5b1b8b31496e", // HACK-2167: accurate env/output security guidance
     "37aa309a4918e62e24e397d8", // HACK-2167: accurate env/output security guidance
+    "d36febde4c0ef56eb4f46ff3", // HACK-2166: value-free env listing guidance
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -171,6 +172,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "653d1069201bf4e1d3095257", // af71a840: retained legacy rule renderer without freshness guidance
     "6669bc4f42a5bd9942631946", // HACK-2167: accurate env/output security guidance
     "184c83fdac4d052587059eda", // HACK-2167: accurate env/output security guidance
+    "c60f5a6609978cbffda4cb6c", // HACK-2166: value-free env listing guidance
   ]),
 };
 

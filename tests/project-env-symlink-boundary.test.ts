@@ -15,6 +15,7 @@ import { basename, join, resolve } from "node:path";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
 import {
   hydrateProjectEnvLocalLayer,
+  MACHINE_LOCAL_LAYER_REFUSALS,
   resolveProjectEnvConfig,
   setProjectEnvValue,
   unsetProjectEnvValue,
@@ -306,27 +307,25 @@ for (const phase of ["resolve", "stage"] as const) {
   });
 }
 
-test("hydrate and unset preserve an allowed local-layer link and update its in-project target", async () => {
+test("hydrate and unset refuse a local-layer link, even to an in-project target (HACK-2165)", async () => {
   const repo = await fixture();
   const target = resolve(repo.projectRoot, "local-target.yaml");
   await writeFile(target, ORIGINAL);
   const layer = resolve(repo.projectDir, "hack.env.local.yaml");
   await symlink("../local-target.yaml", layer);
   const options = { ...mutation(repo), local: true };
-  expect(
-    (
-      await hydrateProjectEnvLocalLayer({
-        ...options,
-        entries: new Map([["SETTING", "synthetic-hydrated"]]),
-        secret: false,
-      })
-    ).changed
-  ).toBe(true);
+  await expect(
+    hydrateProjectEnvLocalLayer({
+      ...options,
+      entries: new Map([["SETTING", "synthetic-hydrated"]]),
+      secret: false,
+    })
+  ).rejects.toThrow(MACHINE_LOCAL_LAYER_REFUSALS.linked(layer));
+  await expect(unsetProjectEnvValue(options)).rejects.toThrow(
+    MACHINE_LOCAL_LAYER_REFUSALS.linked(layer)
+  );
   expect((await lstat(layer)).isSymbolicLink()).toBe(true);
-  expect(await readFile(target, "utf8")).toContain("synthetic-hydrated");
-  expect((await unsetProjectEnvValue(options)).changed).toBe(true);
-  expect((await lstat(layer)).isSymbolicLink()).toBe(true);
-  expect(await readFile(target, "utf8")).not.toContain("SETTING");
+  expect(await readFile(target, "utf8")).toBe(ORIGINAL);
   await assertOutsideUntouched(repo);
 });
 

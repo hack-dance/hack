@@ -1,5 +1,6 @@
 """Private controlling PTY for the real Bun frontend, including compiled Bun."""
 import fcntl
+import json
 import os
 import pty
 import select
@@ -10,7 +11,9 @@ import termios
 import time
 
 root = sys.argv[1]
-command = sys.argv[2:]
+protected_keys = json.loads(sys.argv[2])
+command = sys.argv[3:]
+assert all(os.environ.get(key) == "synthetic-parent-key-canary" for key in protected_keys)
 for mode in ("normal", "child-kill", "frontend-kill", "cancel"):
     for name in ("reader.pid", "reader.closed"):
         try:
@@ -55,6 +58,7 @@ for mode in ("normal", "child-kill", "frontend-kill", "cancel"):
         while select.select([master], [], [], 0)[0]:
             output.extend(os.read(master, 8192))
         assert b"synthetic-private-envelope-canary" not in output
+        assert b"synthetic-parent-key-canary" not in output
         if mode != "frontend-kill":
             assert b"session_cleanup_uncertain: session 00000000-0000-4000-8000-000000000001" in output, repr(output)
             assert b"hack down --path" in output and b"--branch 'topic'" in output

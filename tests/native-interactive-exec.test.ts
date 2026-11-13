@@ -3,6 +3,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseInteractiveReport } from "../src/backends/native-interactive-exec.ts";
+import { HACK_KEY_MATERIAL_VARIABLES } from "../src/lib/child-environment.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const session = "00000000-0000-4000-8000-000000000001";
@@ -56,7 +57,7 @@ test("interactive report is closed, value-free and preserves command status", ()
 });
 
 test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
-  "source and compiled frontend preserve fd3, reap the reader and restore the PTY",
+  "source and compiled frontend contain keys, preserve fd3, reap the reader and restore the PTY",
   async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "hack-interactive-frontend-"))
@@ -67,9 +68,14 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       if (!python) {
         throw new Error("PTY contract requires python3");
       }
+      const protectedKeys = JSON.stringify([...HACK_KEY_MATERIAL_VARIABLES]);
+      const runtimeSource = await readFile(
+        resolve("tests/fixtures/native-interactive-runtime.py"),
+        "utf8"
+      );
       await writeFile(
         join(root, "runtime"),
-        `#!${python}\n${await readFile(resolve("tests/fixtures/native-interactive-runtime.py"), "utf8")}`,
+        `#!${python}\n${runtimeSource.replace('["__PROTECTED_KEYS__"]', protectedKeys)}`,
         { mode: 0o700 }
       );
       const source = resolve("tests/fixtures/native-interactive-frontend.ts");
@@ -81,6 +87,7 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
           python,
           resolve("tests/fixtures/native-interactive-frontend.py"),
           root,
+          protectedKeys,
           process.execPath,
           source,
         ],
@@ -88,12 +95,21 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
           python,
           resolve("tests/fixtures/native-interactive-frontend.py"),
           root,
+          protectedKeys,
           compiled,
         ],
       ];
       for (const cmd of commands) {
         const child = Bun.spawn(cmd, {
-          env,
+          env: {
+            ...env,
+            ...Object.fromEntries(
+              [...HACK_KEY_MATERIAL_VARIABLES].map((name) => [
+                name,
+                "synthetic-parent-key-canary",
+              ])
+            ),
+          },
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",

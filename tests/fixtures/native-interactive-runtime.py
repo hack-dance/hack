@@ -8,6 +8,9 @@ import sys
 import termios
 import tty
 
+protected_keys = ["__PROTECTED_KEYS__"]  # Replaced by the test from the production key set.
+assert "__PROTECTED_KEYS__" not in protected_keys
+assert not any(key in os.environ for key in protected_keys)
 session = "00000000-0000-4000-8000-000000000001"
 if "interactive-sessions" in sys.argv:
     print(json.dumps({"version": 1, "sessions": [session]}))

@@ -147,6 +147,11 @@ Start with a disposable project. See
 [Native config import](../reference/native-config-import.md) and the staged plan in
 [Qualify a project on v5](v5-dogfooding.md).
 
+### Prerelease behavior changes
+
+Plain native `hack logs --follow` output omits the service prefix (such as `web | `)
+and writes both service stdout and stderr to the CLI's stdout, so pipes receive both.
+
 ## Retired and unsupported
 
 | Retired in v5 | Use instead |

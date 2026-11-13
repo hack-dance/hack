@@ -1,8 +1,10 @@
 import { isRecord } from "../lib/guards.ts";
 import {
   type NativeAuthoredReceipt,
+  type NativeAuthoredReview,
   nativeAuthoredReceiptBinding,
   parseNativeAuthoredReceipt,
+  parseNativeAuthoredReview,
 } from "./native-authored-graph-protocol.ts";
 
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -45,7 +47,7 @@ function fields(
 function hash(value: unknown): value is string {
   return typeof value === "string" && HEX64.test(value);
 }
-function ready(value: unknown): NativeAuthoredReceipt {
+function settled(value: unknown): NativeAuthoredReceipt {
   const receipt = parseNativeAuthoredReceipt(value);
   if (
     !(
@@ -58,6 +60,29 @@ function ready(value: unknown): NativeAuthoredReceipt {
           (reference) => reference.state.status === "enrolled"
         ))
     ) ||
+    receipt.phase === "preparing" ||
+    (receipt.phase === "ready-observed" && receipt.failure !== undefined) ||
+    Object.values(receipt.resources).some((resource) => {
+      if (receipt.phase === "removed" && resource.phase !== "removed") {
+        return true;
+      }
+      if (resource.id === null) {
+        return resource.phase !== "reserved" && resource.phase !== "removed";
+      }
+      return !(
+        resource.kind === "container"
+          ? ["created", "started", "stopped", "removed"]
+          : ["created", "remove-intent", "removed"]
+      ).includes(resource.phase);
+    })
+  ) {
+    return refused();
+  }
+  return receipt;
+}
+function ready(value: unknown): NativeAuthoredReceipt {
+  const receipt = settled(value);
+  if (
     receipt.phase !== "ready-observed" ||
     receipt.failure !== undefined ||
     Object.values(receipt.resources).some((resource) => resource.id === null)
@@ -69,11 +94,18 @@ function ready(value: unknown): NativeAuthoredReceipt {
 
 /** Raw selectors belong to Rust's secure reader. This copied, closed envelope
  * binds the original durable frontend Ready membership; it grants no effects. */
-export function parseNativeAuthoredRecoverySelection(opts: {
-  readonly value: unknown;
-  readonly admitted: NativeAuthoredReceipt;
-}): NativeAuthoredRecoverySelection {
-  const admitted = ready(opts.admitted);
+export function parseNativeAuthoredRecoverySelection(
+  opts: {
+    readonly value: unknown;
+  } & (
+    | { readonly admitted: NativeAuthoredReceipt }
+    | { readonly start: NativeAuthoredReview }
+  )
+): NativeAuthoredRecoverySelection {
+  const admitted = "admitted" in opts ? ready(opts.admitted) : undefined;
+  const review =
+    admitted?.review ??
+    ("start" in opts ? parseNativeAuthoredReview(opts.start) : refused());
   const value = opts.value;
   const qualifier =
     isRecord(value) && Object.hasOwn(value, "host_boot_uuid")
@@ -91,16 +123,18 @@ export function parseNativeAuthoredRecoverySelection(opts: {
     ]) ||
     (value.version !== 1 && value.version !== 2) ||
     value.kind !== "native-graph-recovery-selection" ||
-    value.run !== admitted.review.provenance.run ||
+    value.run !== review.provenance.run ||
     !hash(value.receipt_sha256) ||
     !hash(value.owner_sha256)
   ) {
     return refused();
   }
-  const receipt = ready(value.receipt);
+  const receipt = admitted ? ready(value.receipt) : settled(value.receipt);
   if (
-    nativeAuthoredReceiptBinding(receipt) !==
-    nativeAuthoredReceiptBinding(admitted)
+    JSON.stringify(receipt.review) !== JSON.stringify(review) ||
+    (admitted &&
+      nativeAuthoredReceiptBinding(receipt) !==
+        nativeAuthoredReceiptBinding(admitted))
   ) {
     return refused();
   }
@@ -140,7 +174,7 @@ export function parseNativeAuthoredRecoveryResult(opts: {
 }): NativeAuthoredRecoveryResult {
   const expected = parseNativeAuthoredRecoverySelection({
     value: opts.expected,
-    admitted: opts.expected.receipt,
+    start: opts.expected.receipt.review,
   });
   const value = opts.value;
   if (

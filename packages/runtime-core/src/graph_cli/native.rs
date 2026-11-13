@@ -160,6 +160,7 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
             .ok_or_else(refused)?;
         let action = match singles.get("--action").copied() {
             Some("status") => "status",
+            Some("observe") => "observe",
             Some("cleanup") => "cleanup",
             _ => return Err(refused()),
         };
@@ -172,6 +173,8 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
                     run,
                     action: if action == "status" {
                         Action::Status
+                    } else if action == "observe" {
+                        Action::Observe
                     } else {
                         Action::Cleanup
                     },

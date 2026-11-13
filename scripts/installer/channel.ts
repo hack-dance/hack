@@ -300,7 +300,7 @@ export class Channel {
     this.initializationPreflight();
   }
   /** Kernel flock is shared for launches, exclusive for mutations, and never waits. */
-  lock(shared = false, managerUpgrade = false) {
+  lock(shared = false, managerUpgrade = false, receiptRoot = this.root) {
     owned(this.root, true, 0o700);
     this.refuseLegacy();
     const before = owned(this.path(".manager.lock"), false, 0o600);
@@ -334,7 +334,7 @@ export class Channel {
           after.ino === opened.ino,
         "Manager lock changed."
       );
-      this.validate(managerUpgrade);
+      this.validate(managerUpgrade, receiptRoot);
     } catch (error) {
       closeSync(fd);
       library.close();
@@ -345,7 +345,8 @@ export class Channel {
       library.close();
     };
   }
-  validate(managerUpgrade = false) {
+  /** receiptRoot differs only while validating an uninstalled retained sibling. */
+  validate(managerUpgrade = false, receiptRoot = this.root) {
     const info = owned(this.root, true, 0o700);
     this.refuseLegacy();
     const pending = lexists(this.path(JOURNAL));
@@ -366,7 +367,7 @@ export class Channel {
     ]);
     requireThat(
       marker.schema === "hack.prerelease-install/v2" &&
-        marker.root === this.root &&
+        marker.root === receiptRoot &&
         marker.uid === process.getuid?.() &&
         marker.device === info.dev &&
         marker.inode === info.ino,
@@ -599,6 +600,47 @@ export class Channel {
     atomicJson(this.path(".selection.json"), state, this.hooks.checkpoint);
     this.state = state;
   }
+  /** Read-only by default; applying retains the complete channel and user homes for rollback. */
+  uninstall(apply = false) {
+    this.validate();
+    const backup = join(
+      dirname(this.root),
+      `.${basename(this.root)}.uninstalled-${nonce()}`
+    );
+    const info = owned(this.root, true, 0o700);
+    const plan = {
+      schema: "hack.prerelease-uninstall/v1",
+      from: this.root,
+      to: backup,
+      device: info.dev,
+      inode: info.ino,
+      manager_sha256: digest(this.path("manager")),
+      versions: Object.keys(this.state.installed).sort(),
+      manifest: `${backup}.json`,
+    };
+    if (!apply) {
+      return { ...plan, applied: false };
+    }
+    for (const version of plan.versions) {
+      this.requireQuiescent(version);
+    }
+    this.validate();
+    const current = owned(this.root, true, 0o700);
+    requireThat(
+      current.dev === info.dev && current.ino === info.ino,
+      "Candidate root changed; uninstall refused."
+    );
+    writeFile(plan.manifest, jsonBytes(plan));
+    syncDirectory(dirname(this.root));
+    this.hooks.checkpoint?.("uninstall-manifest");
+    if (!publishDirectoryExclusive(this.root, backup)) {
+      unlinkSync(plan.manifest);
+      syncDirectory(dirname(this.root));
+      throw new Error("Uninstall destination exists; channel preserved.");
+    }
+    syncDirectory(dirname(this.root));
+    return { ...plan, applied: true };
+  }
   async install(
     version: string,
     archive?: string,
@@ -648,6 +690,17 @@ export class Channel {
       "Retained manager differs from this installer; use the retained manager or a separate --root. Replacement requires a future reviewed compiled predecessor digest; none is currently approved."
     );
     this.requireQuiescent(current);
+    // The exclusive manager lock excludes another installer. A killed download's
+    // private stage is disposable; published versions and user homes are not.
+    for (const name of readdirSync(this.root)) {
+      if (!STAGE.test(name)) {
+        continue;
+      }
+      const abandoned = this.path(name);
+      owned(abandoned, true, 0o700);
+      rmSync(abandoned, { recursive: true });
+      syncDirectory(this.root);
+    }
     const stage = this.path(`.stage-${nonce()}`);
     mkdirSync(stage, { mode: 0o700 });
     const created = lstatSync(stage);
@@ -962,3 +1015,66 @@ export class Channel {
 }
 
 import { parseJson as parseJsonStatus } from "./integrity.ts";
+
+/** Restore only the exact retained channel; an occupied original root is never replaced. */
+export function rollbackUninstall(
+  root: string,
+  manifestPath: string,
+  source: string
+) {
+  canonical(root);
+  canonical(manifestPath);
+  canonical(source);
+  const plan = privateJson(manifestPath);
+  exact(plan, [
+    "schema",
+    "from",
+    "to",
+    "device",
+    "inode",
+    "manager_sha256",
+    "versions",
+    "manifest",
+  ]);
+  requireThat(
+    plan.schema === "hack.prerelease-uninstall/v1" &&
+      plan.from === root &&
+      plan.manifest === manifestPath &&
+      typeof plan.to === "string",
+    "Invalid uninstall manifest."
+  );
+  const backup = canonical(plan.to as string);
+  requireThat(
+    dirname(backup) === dirname(root) &&
+      basename(backup).startsWith(`.${basename(root)}.uninstalled-`) &&
+      /^[a-f0-9]{32}$/.test(basename(backup).slice(-32)) &&
+      manifestPath === `${backup}.json`,
+    "Uninstall manifest target is not its retained sibling."
+  );
+  const retained = new Channel(backup, source);
+  const release = retained.lock(false, false, root);
+  try {
+    const info = owned(backup, true, 0o700);
+    const marker = privateJson(join(backup, ".channel.json"));
+    requireThat(
+      info.dev === plan.device &&
+        info.ino === plan.inode &&
+        marker.root === root &&
+        marker.device === info.dev &&
+        marker.inode === info.ino &&
+        marker.uid === process.getuid?.() &&
+        digest(join(backup, "manager")) === plan.manager_sha256 &&
+        digest(source) === plan.manager_sha256,
+      "Retained channel identity changed; rollback refused."
+    );
+    requireThat(
+      publishDirectoryExclusive(backup, root),
+      "Original channel path is occupied; nothing replaced."
+    );
+    syncDirectory(dirname(root));
+    new Channel(root, join(root, "manager")).validate();
+    return { restored: root, manifest: manifestPath };
+  } finally {
+    release();
+  }
+}

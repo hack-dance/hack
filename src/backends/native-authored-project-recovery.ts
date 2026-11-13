@@ -66,7 +66,7 @@ type Identity = NativeAuthoredProjectRunSelection["identity"];
 type IntentFields = {
   readonly kind: "native-authored-project-recovery";
   readonly phase: Phase;
-  readonly ready: NativeAuthoredProjectRunSelection;
+  readonly ready: NativeAuthoredProjectRunSelection | null;
   readonly start: NativeAuthoredProjectStartSelection;
   readonly source: Identity;
   readonly admission: NativeComposeInterruptedLockSelection;
@@ -78,28 +78,54 @@ type IntentFields = {
   readonly next_lease: NativeComposeInterruptedLockSelection | null;
   readonly next_mutation: NativeComposeInterruptedLockSelection | null;
 };
-type Intent = IntentFields &
-  (
-    | {
-        readonly version: 1;
-        readonly live_stop?: never;
-        readonly live_stop_retiring?: never;
-        readonly live_stop_retired?: never;
-      }
-    | {
-        readonly version: 2;
-        readonly live_stop: NativeAuthoredLiveStopRecovery;
-        readonly live_stop_retiring: boolean;
-        readonly live_stop_retired: boolean;
-      }
-  );
+type IntentKind =
+  | {
+      readonly version: 1;
+      readonly live_stop?: never;
+      readonly live_stop_retiring?: never;
+      readonly live_stop_retired?: never;
+    }
+  | {
+      readonly version: 2;
+      readonly live_stop: NativeAuthoredLiveStopRecovery;
+      readonly live_stop_retiring: boolean;
+      readonly live_stop_retired: boolean;
+    }
+  | {
+      readonly version: 3;
+      readonly admission_held: boolean;
+      readonly admission_releasing: boolean;
+    };
+type Intent = IntentFields & IntentKind;
+function selectedIntentKind(opts: {
+  readonly ready: NativeAuthoredProjectRunSelection | null;
+  readonly liveStop: NativeAuthoredLiveStopRecovery | null;
+  readonly held?: NativeComposeMutationLease;
+}): IntentKind {
+  if (!opts.ready) {
+    return {
+      version: 3,
+      admission_held: opts.held !== undefined,
+      admission_releasing: false,
+    };
+  }
+  if (opts.liveStop) {
+    return {
+      version: 2,
+      live_stop: opts.liveStop,
+      live_stop_retiring: false,
+      live_stop_retired: false,
+    };
+  }
+  return { version: 1 };
+}
 type Store = Parameters<
   Parameters<typeof withNativeAuthoredProjectRecoveryStorage>[1]
 >[0];
 type Saved = { readonly record: Intent; readonly identity: Identity };
 function refused(): never {
   throw new Error(
-    "Native frontend recovery is retained or changed; values omitted. No startup was replayed."
+    "Native frontend recovery is retained or changed; run hack ps to inspect the selected attempt. Values omitted. No startup was replayed."
   );
 }
 function hash(text: string): string {
@@ -130,18 +156,69 @@ function freeze<T>(value: T): T {
   }
   return value;
 }
+function intentKeys(version: unknown): string {
+  if (version === 3) {
+    return "admission,admission_held,admission_releasing,kind,lease,lease_releasing,mutation,mutation_releasing,native,next_lease,next_mutation,phase,ready,source,start,version";
+  }
+  if (version === 2) {
+    return "admission,kind,lease,lease_releasing,live_stop,live_stop_retired,live_stop_retiring,mutation,mutation_releasing,native,next_lease,next_mutation,phase,ready,source,start,version";
+  }
+  return "admission,kind,lease,lease_releasing,mutation,mutation_releasing,native,next_lease,next_mutation,phase,ready,source,start,version";
+}
+function parseIntentKind(
+  value: Record<string, unknown>,
+  admission: NativeComposeInterruptedLockSelection
+): IntentKind {
+  if (value.version === 2) {
+    const stop = value.live_stop;
+    if (
+      !(isRecord(stop) && keys(stop, "identity,original,settled")) ||
+      typeof value.live_stop_retiring !== "boolean" ||
+      typeof value.live_stop_retired !== "boolean" ||
+      (value.live_stop_retired && !value.live_stop_retiring)
+    ) {
+      return refused();
+    }
+    const original = parseNativeAuthoredProcessIncarnation(stop.original);
+    if (
+      original.boot !== admission.owner.bootId ||
+      original.parent !== admission.owner.pid ||
+      original.uid !== admission.owner.uid
+    ) {
+      return refused();
+    }
+    return {
+      version: 2 as const,
+      live_stop: {
+        identity: copyIdentity(stop.identity),
+        original,
+        settled: stop.settled === null ? null : copyIdentity(stop.settled),
+      },
+      live_stop_retiring: value.live_stop_retiring,
+      live_stop_retired: value.live_stop_retired,
+    };
+  }
+  if (value.version === 3) {
+    if (
+      typeof value.admission_held !== "boolean" ||
+      typeof value.admission_releasing !== "boolean" ||
+      (value.admission_releasing &&
+        (!value.admission_held || PHASES.indexOf(value.phase as Phase) < 8))
+    ) {
+      return refused();
+    }
+    return {
+      version: 3 as const,
+      admission_held: value.admission_held,
+      admission_releasing: value.admission_releasing,
+    };
+  }
+  return { version: 1 };
+}
 function parseIntent(value: unknown): Intent {
   if (
-    !(
-      isRecord(value) &&
-      keys(
-        value,
-        value.version === 2
-          ? "admission,kind,lease,lease_releasing,live_stop,live_stop_retired,live_stop_retiring,mutation,mutation_releasing,native,next_lease,next_mutation,phase,ready,source,start,version"
-          : "admission,kind,lease,lease_releasing,mutation,mutation_releasing,native,next_lease,next_mutation,phase,ready,source,start,version"
-      )
-    ) ||
-    (value.version !== 1 && value.version !== 2) ||
+    !(isRecord(value) && keys(value, intentKeys(value.version))) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== 3) ||
     value.kind !== "native-authored-project-recovery" ||
     typeof value.phase !== "string" ||
     !PHASES.includes(value.phase as Phase) ||
@@ -150,7 +227,10 @@ function parseIntent(value: unknown): Intent {
   ) {
     return refused();
   }
-  const ready = parseNativeAuthoredProjectRunSelection(value.ready);
+  const ready =
+    value.version === 3 && value.ready === null
+      ? null
+      : parseNativeAuthoredProjectRunSelection(value.ready);
   const start = parseNativeAuthoredProjectStartSelection(value.start);
   const admission = parseNativeComposeInterruptedLockSelection(value.admission);
   const lease = parseNativeComposeInterruptedLockSelection(value.lease);
@@ -164,8 +244,10 @@ function parseIntent(value: unknown): Intent {
       ? null
       : parseNativeComposeInterruptedLockSelection(value.next_mutation);
   if (
-    JSON.stringify(start.record.review) !==
-      JSON.stringify(ready.record.receipt.review) ||
+    (value.version === 3 && ready !== null) ||
+    (ready &&
+      JSON.stringify(start.record.review) !==
+        JSON.stringify(ready.record.receipt.review)) ||
     lease.owner.bootId !== admission.owner.bootId ||
     mutation.owner.bootId !== admission.owner.bootId ||
     (nextLease !== null && nextLease.owner.bootId !== admission.owner.bootId) ||
@@ -174,39 +256,7 @@ function parseIntent(value: unknown): Intent {
   ) {
     return refused();
   }
-  const extra =
-    value.version === 2
-      ? (() => {
-          const stop = value.live_stop;
-          if (
-            !(isRecord(stop) && keys(stop, "identity,original,settled")) ||
-            typeof value.live_stop_retiring !== "boolean" ||
-            typeof value.live_stop_retired !== "boolean" ||
-            (value.live_stop_retired && !value.live_stop_retiring)
-          ) {
-            return refused();
-          }
-          const original = parseNativeAuthoredProcessIncarnation(stop.original);
-          if (
-            original.boot !== admission.owner.bootId ||
-            original.parent !== admission.owner.pid ||
-            original.uid !== admission.owner.uid
-          ) {
-            return refused();
-          }
-          return {
-            version: 2 as const,
-            live_stop: {
-              identity: copyIdentity(stop.identity),
-              original,
-              settled:
-                stop.settled === null ? null : copyIdentity(stop.settled),
-            },
-            live_stop_retiring: value.live_stop_retiring,
-            live_stop_retired: value.live_stop_retired,
-          };
-        })()
-      : { version: 1 as const };
+  const extra = parseIntentKind(value, admission);
   return freeze({
     ...extra,
     kind: "native-authored-project-recovery",
@@ -217,7 +267,9 @@ function parseIntent(value: unknown): Intent {
     admission,
     native: parseNativeAuthoredRecoverySelection({
       value: value.native,
-      admitted: ready.record.receipt,
+      ...(ready
+        ? { admitted: ready.record.receipt }
+        : { start: start.record.review }),
     }),
     lease,
     mutation,
@@ -489,16 +541,23 @@ async function stopBindings(
 async function bindings(
   store: Store,
   record: Intent,
-  remaining: () => number
+  remaining: () => number,
+  held?: NativeComposeMutationLease
 ): Promise<void> {
   await stopBindings(store, record, remaining);
+  if (record.version === 3) {
+    if (!(await absent(`${store.liveStop}.settled`))) {
+      return refused();
+    }
+    await store.assertPreReadyHosts(record.native.run);
+  }
   const phase = rank(record);
   for (const [path, expected, retirement] of [
-    [store.ready, record.ready.identity, 2],
+    [store.ready, record.ready?.identity ?? null, 2],
     [store.start, record.start.identity, 4],
     [store.sourcePath(record.native.run), record.source, 6],
   ] as const) {
-    if (phase > retirement) {
+    if (phase > retirement || expected === null) {
       if (!(await absent(path))) {
         return refused();
       }
@@ -506,7 +565,25 @@ async function bindings(
       await expectedFile(path, expected, phase === retirement);
     }
   }
-  if (phase < 8) {
+  await admissionBinding(store, record, held);
+}
+
+async function admissionBinding(
+  store: Store,
+  record: Intent,
+  held?: NativeComposeMutationLease
+): Promise<void> {
+  const phase = rank(record);
+  if (held) {
+    await held.assertHeld();
+    if (
+      record.version !== 3 ||
+      !record.admission_held ||
+      JSON.stringify(held.selection) !== JSON.stringify(record.admission)
+    ) {
+      return refused();
+    }
+  } else if (phase < 8) {
     const selected = await lock(
       store,
       store.admission,
@@ -515,8 +592,19 @@ async function bindings(
     if (JSON.stringify(selected) !== JSON.stringify(record.admission)) {
       return refused();
     }
-  } else if (phase === 9 && !(await absent(store.admission))) {
-    return refused();
+  } else if (phase >= 8) {
+    const missing = await absent(store.admission);
+    if (phase === 9 && !missing) {
+      return refused();
+    }
+    if (
+      missing &&
+      record.version === 3 &&
+      record.admission_held &&
+      !record.admission_releasing
+    ) {
+      return refused();
+    }
   }
 }
 
@@ -533,7 +621,7 @@ async function retireFiles(
 ): Promise<void> {
   const selected = retirement.record();
   for (const [path, expected, phase] of [
-    [store.ready, selected.ready.identity, 2],
+    [store.ready, selected.ready?.identity ?? null, 2],
     [store.start, selected.start.identity, 4],
     [store.sourcePath(selected.native.run), selected.source, 6],
   ] as const) {
@@ -548,7 +636,7 @@ async function retireFiles(
     }
     await retirement.inspect();
     await retirement.check();
-    if (await expectedFile(path, expected, true)) {
+    if (expected !== null && (await expectedFile(path, expected, true))) {
       retirement.active();
       await unlink(path);
       await synchronizeDirectories(store.held);
@@ -601,7 +689,8 @@ async function retireLiveStop(
 async function retireAdmission(
   store: Store,
   retirement: Retirement,
-  lease: NativeComposeMutationLease
+  lease: NativeComposeMutationLease,
+  held?: NativeComposeMutationLease
 ): Promise<void> {
   if (rank(retirement.record()) < 8) {
     await retirement.commit({
@@ -614,7 +703,38 @@ async function retireAdmission(
   }
   await retirement.inspect();
   await retirement.check();
+  if (held) {
+    const selected = retirement.record();
+    if (
+      selected.version !== 3 ||
+      !selected.admission_held ||
+      JSON.stringify(selected.admission) !== JSON.stringify(held.selection)
+    ) {
+      return refused();
+    }
+    await held.assertHeld();
+    await retirement.commit({ ...selected, admission_releasing: true });
+    return;
+  }
   if (!(await absent(store.admission))) {
+    const selected = retirement.record();
+    if (
+      selected.version === 3 &&
+      selected.admission_held &&
+      !selected.admission_releasing
+    ) {
+      // A crashed fresh holder is now an interrupted selection. Prove that
+      // exact dead owner before recording permission to retire its admission.
+      const interrupted = await lock(
+        store,
+        store.admission,
+        `${store.admission}.verification`
+      ).selectInterruptedLock();
+      if (JSON.stringify(interrupted) !== JSON.stringify(selected.admission)) {
+        return refused();
+      }
+      await retirement.commit({ ...selected, admission_releasing: true });
+    }
     await lock(
       store,
       store.admission,
@@ -634,14 +754,116 @@ async function retireAdmission(
 
 /** Explicit stored-generation cleanup only. No compilation, value acquisition,
  * serve, allocation or automatic startup takeover exists in this owner. */
-export async function recoverNativeAuthoredProject(opts: {
+type RecoveryOptions = {
   readonly scope: NativeAuthoredProjectRunScope;
   readonly runtime: NativeRuntimeSelection;
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
   /** Exact public native-request seam for isolated owner tests. */
   readonly request?: typeof invokeNativeRuntime;
-}): Promise<NativeAuthoredRecoveryResult> {
+};
+async function selectInitialIntent(opts: {
+  readonly store: Store;
+  readonly held?: NativeComposeMutationLease;
+  readonly runtime: NativeRuntimeSelection;
+  readonly remaining: () => number;
+  readonly request: typeof invokeNativeRuntime;
+  readonly signal?: AbortSignal;
+  readonly lease: NativeComposeMutationLease;
+  readonly mutationLease: NativeComposeMutationLease;
+}): Promise<Intent> {
+  const {
+    store,
+    held,
+    runtime,
+    remaining,
+    request,
+    signal,
+    lease,
+    mutationLease,
+  } = opts;
+  const ready = (await absent(store.ready)) ? null : await store.readReady();
+  const start = await store.readStart();
+  if (held && ready) {
+    return refused();
+  }
+  const run = start.record.review.provenance.run;
+  const source = await store.readSource(run);
+  const admission =
+    held?.selection ??
+    (await lock(
+      store,
+      store.admission,
+      `${store.admission}.verification`
+    ).selectInterruptedLock());
+  const liveStop = ready
+    ? await selectLiveStop({
+        store,
+        ready,
+        admission,
+        runtime,
+        remaining,
+      })
+    : null;
+  if (!ready) {
+    if (
+      !(
+        (await absent(store.liveStop)) &&
+        (await absent(`${store.liveStop}.settled`))
+      )
+    ) {
+      return refused();
+    }
+    await store.assertPreReadyHosts(run);
+  }
+  const native = parseNativeAuthoredRecoverySelection({
+    value: await request({
+      runtime,
+      cwd: store.projectRoot,
+      args: [
+        "graph",
+        "native",
+        "recovery-selection",
+        "--run-id",
+        run,
+        "--json",
+      ],
+      timeoutMs: remaining(),
+      signal,
+      boundNativeAuthoredRecoveryDrain: "selection",
+    }),
+    ...(ready
+      ? { admitted: ready.record.receipt }
+      : { start: start.record.review }),
+  });
+  remaining();
+  return {
+    ...selectedIntentKind({ ready, liveStop, held }),
+    kind: "native-authored-project-recovery",
+    phase: "prepared",
+    ready,
+    start,
+    source,
+    admission,
+    native,
+    lease: lease.selection,
+    mutation: mutationLease.selection,
+    lease_releasing: false,
+    mutation_releasing: false,
+    next_lease: null,
+    next_mutation: null,
+  };
+}
+
+export async function recoverNativeAuthoredProject(
+  opts: RecoveryOptions
+): Promise<NativeAuthoredRecoveryResult> {
+  return await recoverUsing(opts);
+}
+async function recoverUsing(
+  opts: RecoveryOptions,
+  held?: NativeComposeMutationLease
+): Promise<NativeAuthoredRecoveryResult> {
   const runtime = { ...opts.runtime };
   const timeoutMs = opts.timeoutMs;
   const signal = opts.signal;
@@ -667,6 +889,42 @@ export async function recoverNativeAuthoredProject(opts: {
     opts.scope,
     async (store) => {
       let saved = await readIntent(store);
+      if (
+        !(saved || held) &&
+        (await absent(store.ready)) &&
+        (await absent(store.admission))
+      ) {
+        // A fresh recovery admission uses the established verification guard;
+        // the ordinary guard is the recovery lock we are about to hold.
+        const admission = lock(
+          store,
+          store.admission,
+          `${store.admission}.verification`
+        );
+        await admission.withFreshRecoveryLock(
+          {
+            release: async (lease) => {
+              const current = await readIntent(store);
+              if (
+                current &&
+                (current.record.version !== 3 ||
+                  !current.record.admission_held ||
+                  !current.record.admission_releasing ||
+                  JSON.stringify(current.record.admission) !==
+                    JSON.stringify(lease.selection))
+              ) {
+                // Keep the exact lease if its durable release is unconfirmed.
+                return refused();
+              }
+            },
+          },
+          async (lease) =>
+            await recoverUsing({ ...opts, timeoutMs: remaining() }, lease)
+        );
+        // The release marker permits absence only after the actual held lease
+        // has gone. Resume the same intent to commit completion under its locks.
+        return await recoverUsing({ ...opts, timeoutMs: remaining() });
+      }
       if (saved?.record.version === 1 && !(await absent(store.liveStop))) {
         return refused();
       }
@@ -712,6 +970,7 @@ export async function recoverNativeAuthoredProject(opts: {
             remaining();
             await check();
             await mutationLease.assertHeld();
+            await held?.assertHeld();
             if (saved?.record.version === 2) {
               await assertNativeAuthoredProcessRuntime(
                 saved.record.live_stop.original,
@@ -741,66 +1000,17 @@ export async function recoverNativeAuthoredProject(opts: {
                 mutationLease
               );
             } else {
-              const ready = await store.readReady();
-              const start = await store.readStart();
-              const source = await store.readSource(
-                ready.record.receipt.review.provenance.run
-              );
-              const admission = await lock(
-                store,
-                store.admission,
-                `${store.admission}.verification`
-              ).selectInterruptedLock();
-              const liveStop = await selectLiveStop({
-                store,
-                ready,
-                admission,
-                runtime,
-                remaining,
-              });
-              const native = parseNativeAuthoredRecoverySelection({
-                value: await request({
-                  runtime,
-                  cwd: store.projectRoot,
-                  args: [
-                    "graph",
-                    "native",
-                    "recovery-selection",
-                    "--run-id",
-                    ready.record.receipt.review.provenance.run,
-                    "--json",
-                  ],
-                  timeoutMs: remaining(),
-                  signal,
-                  boundNativeAuthoredRecoveryDrain: "selection",
-                }),
-                admitted: ready.record.receipt,
-              });
-              remaining();
               await commit(
-                {
-                  ...(liveStop
-                    ? {
-                        version: 2 as const,
-                        live_stop: liveStop,
-                        live_stop_retiring: false,
-                        live_stop_retired: false,
-                      }
-                    : { version: 1 as const }),
-                  kind: "native-authored-project-recovery",
-                  phase: "prepared",
-                  ready,
-                  start,
-                  source,
-                  admission,
-                  native,
-                  lease: lease.selection,
-                  mutation: mutationLease.selection,
-                  lease_releasing: false,
-                  mutation_releasing: false,
-                  next_lease: null,
-                  next_mutation: null,
-                },
+                await selectInitialIntent({
+                  store,
+                  held,
+                  runtime,
+                  remaining,
+                  request,
+                  signal,
+                  lease,
+                  mutationLease,
+                }),
                 mutationLease
               );
             }
@@ -808,7 +1018,7 @@ export async function recoverNativeAuthoredProject(opts: {
               return refused();
             }
             await both();
-            await bindings(store, saved.record, remaining);
+            await bindings(store, saved.record, remaining, held);
             await both();
             const selected = saved.record.native;
             if (saved.record.phase === "prepared") {
@@ -835,7 +1045,7 @@ export async function recoverNativeAuthoredProject(opts: {
                 }),
               });
               await both();
-              await bindings(store, saved.record, remaining);
+              await bindings(store, saved.record, remaining, held);
               await both();
               await commit(
                 { ...saved.record, phase: "native-removed" },
@@ -871,7 +1081,7 @@ export async function recoverNativeAuthoredProject(opts: {
                 return refused();
               }
               await both();
-              await bindings(store, record(), remaining);
+              await bindings(store, record(), remaining, held);
               await both();
               return snapshot.receipt;
             };
@@ -891,9 +1101,9 @@ export async function recoverNativeAuthoredProject(opts: {
             await store.retireHooks(selected.run);
             await retireLiveStop(store, retirement, remaining);
             await retireFiles(store, retirement);
-            await retireAdmission(store, retirement, lease);
+            await retireAdmission(store, retirement, lease, held);
             const removed = await inspect();
-            await bindings(store, saved.record, remaining);
+            await bindings(store, saved.record, remaining, held);
             await both();
             return {
               version: 1,

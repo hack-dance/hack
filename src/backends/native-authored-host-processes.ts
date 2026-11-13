@@ -418,6 +418,8 @@ export async function retireNativeAuthoredHostProcesses(opts: {
   readonly scope: NativeAuthoredProjectRunScope;
   readonly run: string;
   readonly assertFresh: () => Promise<void>;
+  /** Pre-Ready recovery may only observe an already stopped, absent group. */
+  readonly checkOnly?: boolean;
 }): Promise<void> {
   if (!RUN.test(opts.run)) {
     return refuse();
@@ -511,10 +513,15 @@ export async function retireNativeAuthoredHostProcesses(opts: {
     for (const process of savedEntry?.processes ?? []) {
       await absentGroup(process.processGroupId ?? refuse());
     }
+  } else if (opts.checkOnly) {
+    return refuse();
   } else {
     await stopKnown({ scope: opts.scope, owner, savedEntry, check });
   }
   await check();
+  if (opts.checkOnly) {
+    return;
+  }
   await unlink(path);
   const held = await holdDirectory(root, false);
   try {

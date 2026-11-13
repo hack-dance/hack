@@ -884,6 +884,31 @@ describe("printed key recovery commands leave nothing git can collect (HACK-2165
     expect(await untracked(box.home)).toEqual([]);
   });
 
+  test("rotation stops without copying when git cannot tell (not a confirmed non-repository)", async () => {
+    const box = await sandbox();
+    await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+    // A git that fails for another reason: unavailable metadata, say.
+    const bin = join(box.root, "bin");
+    await mkdir(bin);
+    await writeFile(
+      join(bin, "git"),
+      "#!/bin/sh\necho 'fatal: unable to inspect' >&2\nexit 128\n",
+      { mode: 0o755 }
+    );
+    const proc = Bun.spawn(["sh", "-c", retiredKeyCopyCommand(KEY_FILE)], {
+      cwd: box.project,
+      env: {
+        ...fixtureGitEnv({ env: { HOME: box.home } }),
+        PATH: `${bin}:/usr/bin:/bin`,
+      },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await proc.exited).not.toBe(0);
+    expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+    expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual([]);
+  });
+
   test("the symlink repair leaves a private regular key and no intermediate copy", async () => {
     const box = await sandbox();
     const target = join(box.root, "elsewhere.key");

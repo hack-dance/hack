@@ -639,3 +639,42 @@ test.skipIf(process.getuid?.() === 0)(
     }
   }
 );
+
+test("an ignore file whose read fails while it is merged keeps its rules", async () => {
+  const f = await fixture();
+  const overlay = join(f.projectDir, ".env.qa");
+  await writeFile(overlay, "QA=1\n", { mode: 0o600 });
+  const ignore = join(f.projectDir, ".gitignore");
+  const before = await readFile(ignore, "utf8");
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(findings.map((finding) => finding.fix?.kind)).toEqual(["ignore"]);
+  // Every path-based read of the ignore file fails (an I/O error, say); a
+  // reader that turned that into "absent" would replace the rules.
+  const original = Bun.file;
+  const failing = ((path: unknown, ...rest: unknown[]) => {
+    const file = Reflect.apply(original, Bun, [path, ...rest]) as ReturnType<
+      typeof Bun.file
+    >;
+    if (String(path) !== ignore) {
+      return file;
+    }
+    const error = Object.assign(new Error("synthetic EIO"), { code: "EIO" });
+    return Object.assign(Object.create(file), {
+      text: async () => {
+        throw error;
+      },
+    });
+  }) as typeof Bun.file;
+  Bun.file = failing;
+  let result: { applied: number; skipped: number };
+  try {
+    result = await applySecretsHygieneFixes({
+      findings,
+      report: () => undefined,
+    });
+  } finally {
+    Bun.file = original;
+  }
+  expect(await readFile(ignore, "utf8")).toStartWith(before);
+  expect(result.applied + result.skipped).toBe(1);
+});

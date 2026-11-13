@@ -207,8 +207,7 @@ export type PreparedStaging = {
  * self-ignoring `.gitignore`; an existing entry there that is a link, not a
  * directory, or not the user's own is refused with `refusal()`, so a staging
  * copy is never created through it (see {@link admitStagingDirectory}). Old leftovers
- * of this target in the staging directory are swept first; siblings an
- * earlier version left are left to `hack doctor`.
+ * are never removed here; `hack doctor --fix` removes them.
  */
 export async function preparePrivateStaging(opts: {
   readonly target: string;
@@ -228,15 +227,10 @@ export async function preparePrivateStaging(opts: {
     throw opts.refusal();
   }
   await ensureSelfIgnore({ directory, refusal: opts.refusal });
-  const leftovers = await findStagingLeftovers({
-    directory: dirname(opts.target),
-    names: [basename(opts.target)],
-    now: opts.now ?? Date.now(),
-    stagingOnly: true,
-  });
-  for (const leftover of leftovers) {
-    await removeStagingLeftover(leftover).catch(() => false);
-  }
+  // No sweep here: a writer cannot tell a leftover from a file someone
+  // configured at a staging-shaped path (a recovered key, say), so removing
+  // leftovers is left to `hack doctor --fix`, which excludes every configured
+  // file. Leftovers here are invisible to git meanwhile (HACK-2165).
   return {
     path: join(directory, `${basename(opts.target)}.${randomUUID()}.tmp`),
     recheck: async () => {

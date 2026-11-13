@@ -464,8 +464,9 @@ store, a key or a file you wrote, and never untracks a file.
 
 Hack writes a file that holds a secret by staging the complete contents first. Those
 staging copies live in a private directory next to the file, `.hack-staging/`, which
-holds a `.gitignore` of `*`, so git never lists anything in it; the next write there
-removes copies older than 10 minutes. A machine-local layer that a write changes, or
+holds a `.gitignore` of `*`, so git never lists anything in it. `hack doctor --fix`
+removes copies older than 10 minutes (never a file your configuration uses as a store or
+key); writes themselves remove nothing there. A machine-local layer that a write changes, or
 leaves unchanged, is set to 0600 if other users could read it. Commands that read env
 layers warn on stderr about a machine-local file other users can read.
 

@@ -233,14 +233,15 @@ const READD_SECRET =
 
 /**
  * Copies the key to a new private file under {@link RETIRED_KEY_DIR}, then
- * removes it. The command checks, when it runs, that the directory is not
- * inside a git work tree (a home directory kept in git, say) and stops
- * before copying anything if it is. mktemp gives each copy its own name
+ * removes it. The command copies only when git itself answers that the
+ * directory is not in a repository; inside a work tree (a home directory
+ * kept in git, say), or when git is missing or cannot tell, it stops before
+ * copying anything. mktemp gives each copy its own name
  * (0600), so a later rotation never overwrites an earlier one; the key is
  * removed only once its copy is written.
  */
 export function retiredKeyCopyCommand(key: string): string {
-  return `install -d -m 700 ${RETIRED_KEY_DIR} && ! git -C ${RETIRED_KEY_DIR} rev-parse --is-inside-work-tree >/dev/null 2>&1 && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
+  return `install -d -m 700 ${RETIRED_KEY_DIR} && case "$(LC_ALL=C git -C ${RETIRED_KEY_DIR} rev-parse --is-inside-work-tree 2>&1)" in *"not a git repository"*) true ;; *) false ;; esac && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
 }
 
 /**
@@ -255,7 +256,7 @@ export function symlinkKeyRepairCommand(key: string): string {
 }
 
 function rotateRemedy(path: (suffix?: string) => string): string {
-  return `keep a recoverable copy of the old key outside every git checkout, then remove it: '${retiredKeyCopyCommand(path())}' (it stops without copying if ${RETIRED_KEY_DIR} is inside a git work tree; then copy the key to a private directory outside any checkout yourself). Then ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
+  return `keep a recoverable copy of the old key outside every git checkout, then remove it: '${retiredKeyCopyCommand(path())}' (it stops without copying unless git confirms ${RETIRED_KEY_DIR} is outside every repository; then copy the key to a private directory outside any checkout yourself). Then ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
 }
 
 async function inspectCandidate(opts: {

@@ -146,7 +146,7 @@ test("the sibling option keeps the previous staging location", async () => {
   expect(await readdir(root)).toEqual(["claim.json"]);
 });
 
-test("the next staging write sweeps only its own old staging copies; recent ones and siblings are kept", async () => {
+test("doctor finds old staging copies and siblings; the next staging write removes none of them", async () => {
   const root = await tempDir();
   const target = join(root, ".env");
   const staging = join(root, PRIVATE_STAGING_DIRNAME);
@@ -171,16 +171,26 @@ test("the next staging write sweeps only its own old staging copies; recent ones
     [oldSibling, oldStaged].sort()
   );
 
+  // A writer removes nothing, in the staging directory or beside it: it
+  // cannot tell a leftover from a file configured at a staging-shaped path,
+  // so removal is left to `hack doctor --fix` (HACK-2165).
+  const before = (await readdir(staging)).sort();
   await preparePrivateStaging({ target, refusal });
-  expect((await readdir(staging)).sort()).toEqual(
-    [".gitignore", `.env.${UUID.replace("0f", "1f")}.tmp`].sort()
-  );
-  // A writer never removes siblings beside the target: it cannot tell an
-  // earlier version's leftover from a file configured under such a name, so
-  // those are left to `hack doctor` (HACK-2165).
+  expect((await readdir(staging)).sort()).toEqual(before);
   expect((await readdir(root)).sort()).toEqual(
     [PRIVATE_STAGING_DIRNAME, `..env.${UUID}.tmp`, `..envx.${UUID}.tmp`].sort()
   );
+});
+
+test("staging for one target never touches a live file staged under a longer name", async () => {
+  const root = await tempDir();
+  await preparePrivateStaging({ target: join(root, ".env"), refusal });
+  // A recovered key kept where it was staged for a target `.env.key`.
+  const liveKey = join(root, PRIVATE_STAGING_DIRNAME, `.env.key.${UUID}.tmp`);
+  await writeFile(liveKey, "synthetic-live-key\n", { mode: 0o600 });
+  await backdate(liveKey);
+  await preparePrivateStaging({ target: join(root, ".env"), refusal });
+  expect(await readFile(liveKey, "utf8")).toBe("synthetic-live-key\n");
 });
 
 test("a linked staging directory is refused; a loose one of the user's own is made private", async () => {

@@ -21,7 +21,7 @@ import {
   MACHINE_LOCAL_LAYER_NAME,
   PLAINTEXT_DOTENV_NAME,
 } from "./env-layer-modes.ts";
-import { ensureGitignoreEntry } from "./fs.ts";
+import { gitignoreLinePattern, writeTextFileAtomicIfChanged } from "./fs.ts";
 import { isKeychainDisabled } from "./keychain.ts";
 import {
   findStagingLeftovers,
@@ -901,47 +901,62 @@ async function tightenMode(
   }
 }
 
-/** Whether `path` opens (no-follow) and reads as a regular file. */
-async function isReadableRegularFile(path: string): Promise<boolean> {
+/**
+ * The text of a regular file read through a no-follow, non-blocking handle;
+ * null when it cannot be opened or read as one (never "absent": a caller
+ * checked that it exists).
+ */
+async function readRegularFileText(path: string): Promise<string | null> {
   const file = await open(
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
   ).catch(() => null);
   if (!file) {
-    return false;
+    return null;
   }
   try {
     const info = await file.stat();
-    if (!info.isFile()) {
-      return false;
-    }
-    await file.readFile();
-    return true;
+    return info.isFile() ? await file.readFile("utf8") : null;
   } catch {
-    return false;
+    return null;
   } finally {
     await file.close();
   }
 }
 
+/**
+ * Adds the entry to the ignore file, merging into exactly the bytes read
+ * here: an existing file that cannot be read is never rewritten (a reader
+ * that turned the failure into "absent" would replace the user's rules
+ * with this one entry), and the write is a compare-and-swap against those
+ * bytes, so a file that changed meanwhile is left alone.
+ */
 async function addIgnoreEntry(
   fix: Extract<SecretsHygieneFix, { kind: "ignore" }>
 ): Promise<boolean> {
-  // Never write through a linked ignore file, and never rewrite one whose
-  // bytes could not be read: the writer treats an unreadable file as absent
-  // and would replace the user's rules with this one entry.
   const existing = await lstat(fix.gitignorePath).catch(() => null);
   if (existing && !existing.isFile()) {
     return false;
   }
-  if (existing && !(await isReadableRegularFile(fix.gitignorePath))) {
+  const current = existing
+    ? await readRegularFileText(fix.gitignorePath)
+    : null;
+  if (existing && current === null) {
     return false;
   }
-  await ensureGitignoreEntry({
-    gitignorePath: fix.gitignorePath,
-    entry: fix.entry,
-    comment: "# machine-local secrets (hack doctor --fix)",
-  });
+  const present = (current ?? "")
+    .split("\n")
+    .some((line) => gitignoreLinePattern(line) === fix.entry);
+  if (!present) {
+    const base =
+      current === null || current === "" || current.endsWith("\n")
+        ? (current ?? "")
+        : `${current}\n`;
+    const addition = `${base === "" ? "" : "\n"}# machine-local secrets (hack doctor --fix)\n${fix.entry}\n`;
+    await writeTextFileAtomicIfChanged(fix.gitignorePath, base + addition, {
+      expectedExisting: current,
+    });
+  }
   // Applied only when git now ignores the file (a later rule may re-include it).
   return (await isGitIgnoredProjectEnvPath(fix.verify)) === true;
 }

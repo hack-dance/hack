@@ -953,7 +953,7 @@ const GITIGNORE_TRAILING_SPACES = / +$/;
  * pattern (`  .hack.secret.key` names a file that starts with two spaces).
  * Escaped trailing spaces (`\ `) are not unescaped: no Hack entry ends in one.
  */
-function gitignoreLinePattern(line: string): string {
+export function gitignoreLinePattern(line: string): string {
   return line
     .replace(GITIGNORE_LINE_CR, "")
     .replace(GITIGNORE_TRAILING_SPACES, "");

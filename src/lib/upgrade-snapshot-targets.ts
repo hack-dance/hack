@@ -218,8 +218,27 @@ async function projectCandidates(opts: {
   const keys = await resolveEnvKeyCandidates({ projectRoot: opts.root }).catch(
     () => []
   );
+  // The encrypted store and key this project's config selects (it may name
+  // its own): migration cleanup can remove them once their values are in
+  // env layers, so a rollback needs them back.
+  const backend = await resolveFileSecretStorePaths({
+    projectDir: opts.projectDir,
+  }).catch(() => null);
+  const backendTargets = backend?.active
+    ? [
+        {
+          path: backend.storePath,
+          label: `project ${opts.name}: secret store`,
+        },
+        {
+          path: backend.keyPath,
+          label: `project ${opts.name}: secret store key`,
+        },
+      ]
+    : [];
   return {
     targets: [
+      ...backendTargets,
       ...files.map((file) => ({
         path: resolve(opts.projectDir, file),
         label: label(file),

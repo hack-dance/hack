@@ -908,6 +908,34 @@ test("the snapshot covers overlays only the store holds, and reports when it can
   ]);
 });
 
+test("the snapshot keeps a project's own secret store and key", async () => {
+  // Codex review: migration cleanup can remove a project-selected store and
+  // key; only the global backend was kept.
+  const project = await liveProject("app-own-store");
+  const storePath = join(project.projectDir, "secrets.enc.json");
+  const keyPath = join(project.repoRoot, ".store.key");
+  await writeFile(
+    join(project.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-own-store",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath, keyPath },
+        },
+      },
+    })}\n`
+  );
+  await writeFile(storePath, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  await writeFile(keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
+  await writeRegistry([project]);
+  const collected = await collectUpgradeSnapshotTargets();
+  const byLabel = new Map(collected.targets.map((t) => [t.label, t.path]));
+  expect(byLabel.get("project app-own-store: secret store")).toBe(storePath);
+  expect(byLabel.get("project app-own-store: secret store key")).toBe(keyPath);
+  expect(JSON.stringify(collected)).not.toContain(SENTINEL);
+});
+
 test("a config path that is a FIFO is refused at once, never waited on", async () => {
   const project = entry("app-fifo");
   await mkdir(project.projectDir, { recursive: true });

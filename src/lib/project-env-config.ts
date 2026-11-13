@@ -757,7 +757,23 @@ function toGitRelativePath(opts: {
   readonly projectRoot: string;
   readonly path: string;
 }): string {
-  return relative(opts.projectRoot, opts.path).split("\\").join("/");
+  const rel = relative(opts.projectRoot, opts.path);
+  // Only the platform separator is one: on POSIX a backslash is part of the
+  // name, and rewriting it would ask git about a different file (HACK-2165).
+  return sep === "\\" ? rel.split(sep).join("/") : rel;
+}
+
+/**
+ * The path as git must read it in a probe: `./`-prefixed, so a configured
+ * name that starts with `:` (`:(literal)x`, say) is never pathspec magic
+ * (HACK-2165). `ls-files` also gets `--literal-pathspecs` for glob characters.
+ */
+function toGitProbePath(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): string {
+  const relativePath = toGitRelativePath(opts);
+  return relativePath.startsWith("../") ? relativePath : `./${relativePath}`;
 }
 
 /** Bound on a git ignore/tracking probe; a slower git reads as unknown. */
@@ -775,13 +791,14 @@ async function isGitTrackedProjectEnvPath(opts: {
   readonly projectRoot: string;
   readonly path: string;
 }): Promise<boolean | null> {
-  const relativePath = toGitRelativePath(opts);
+  const relativePath = toGitProbePath(opts);
   let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
   try {
     proc = Bun.spawn({
       env: childEnvironment(),
       cmd: [
         "git",
+        "--literal-pathspecs",
         "-C",
         opts.projectRoot,
         "ls-files",
@@ -832,7 +849,7 @@ export async function isGitIgnoredProjectEnvPath(opts: {
         "-q",
         "--no-index",
         "--",
-        toGitRelativePath(opts),
+        toGitProbePath(opts),
       ],
       stderr: "ignore",
       stdin: "ignore",
@@ -867,7 +884,7 @@ export async function isGitIgnoredProjectEnvPath(opts: {
  * but "absent"), counts as inside, since only confirmed absence may exempt a
  * write from git's privacy checks.
  */
-async function isInsideGitCheckoutMarker(opts: {
+export async function isInsideGitCheckoutMarker(opts: {
   readonly startDir: string;
 }): Promise<boolean> {
   if ((process.env.GIT_DIR ?? "").trim().length > 0) {
@@ -4518,9 +4535,11 @@ async function writeProjectEnvConfigFile(opts: {
   readonly expectedExisting?: string | null;
   /**
    * A machine-local layer, which may hold plaintext values: when this write
-   * creates it, it is private (0600) from creation. An existing layer keeps
-   * its mode. The write is refused unless
-   * {@link assertMachineLocalLayerWriteDestination} admits the path.
+   * creates it, it is private (0600) from creation, and an existing layer
+   * that predates that rule (or was made by hand) loses its group and other
+   * permission bits when this write changes it (HACK-2165). The write is
+   * refused unless {@link assertMachineLocalLayerWriteDestination} admits the
+   * path.
    */
   readonly machineLocal?: boolean;
 }): Promise<boolean> {
@@ -4539,7 +4558,7 @@ async function writeProjectEnvConfigFile(opts: {
         ? {}
         : { expectedExisting: opts.expectedExisting }),
       ...(opts.machineLocal === true
-        ? { createMode: 0o600, noFollowTarget: true }
+        ? { createMode: 0o600, noFollowTarget: true, tightenExisting: true }
         : {}),
       validatePath: async (path) => {
         await assertProjectEnvLayerPath({
@@ -9371,21 +9390,62 @@ async function readLegacyDotenvText(opts: {
 }
 
 /** Keys and YAML inputs remain live after legacy migration, even if a backend named them. */
+/**
+ * The git-named inputs' locations: the shared key and the primary worktree.
+ * With the family known, the primary worktree comes from the same common
+ * directory (as resolveGitPrimaryWorktreeRoot derives it), never from a second
+ * git call that could fail on its own. With `strictGit`, a checkout whose
+ * family git cannot name throws instead of naming nothing.
+ */
+async function liveInputGitFamily(opts: {
+  readonly projectRoot: string;
+  readonly strictGit?: boolean;
+}): Promise<{
+  readonly shared: ProjectEnvSharedKeyLocation | null;
+  readonly primaryRoot: string | null;
+}> {
+  const shared = await resolveProjectEnvSharedKeyLocation(opts);
+  if (shared) {
+    const commonDir = dirname(shared.path);
+    return {
+      shared,
+      primaryRoot: commonDir.endsWith("/.git") ? dirname(commonDir) : null,
+    };
+  }
+  if (opts.strictGit !== true) {
+    return {
+      shared: null,
+      primaryRoot: await resolveGitPrimaryWorktreeRoot({
+        repoRoot: opts.projectRoot,
+      }),
+    };
+  }
+  if (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot })) {
+    throw new Error(
+      "Project env inputs are unknown: git could not name this checkout's shared inputs"
+    );
+  }
+  return { shared: null, primaryRoot: null };
+}
+
 async function legacyCleanupLiveInputs(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
+  /**
+   * Refuse instead of omitting git-named inputs (HACK-2165): in a checkout (a
+   * `.git` marker, failing closed) git must name the repository family, and
+   * that one answer names both the shared key and the primary worktree.
+   */
+  readonly strictGit?: boolean;
 }): Promise<{
   readonly paths: ReadonlySet<string>;
   readonly identities: ReadonlySet<string>;
 }> {
   const paths = new Set([resolveProjectEnvKeyPath(opts)]);
-  const shared = await resolveProjectEnvSharedKeyLocation(opts);
+  const { shared, primaryRoot } = await liveInputGitFamily(opts);
   if (shared) {
     paths.add(shared.path);
   }
-  const primaryRoot = await resolveGitPrimaryWorktreeRoot({
-    repoRoot: opts.projectRoot,
-  });
   const directories = new Set([
     opts.projectDir,
     resolve(opts.projectRoot, HACK_PROJECT_DIR_PRIMARY),
@@ -9422,6 +9482,20 @@ async function legacyCleanupLiveInputs(opts: {
     }
   }
   return { paths, identities };
+}
+
+/**
+ * The paths current env resolution reads for a project: its key, the shared
+ * key, the primary worktree's key, `hack.config.json` and every YAML layer in
+ * the project and primary-worktree `.hack` directories (HACK-2165, the same
+ * set legacy cleanup keeps). Any cleanup that deletes files must keep these.
+ * Throws when an input cannot be inspected; a caller must then delete nothing.
+ */
+export async function projectEnvLiveInputPaths(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<ReadonlySet<string>> {
+  return (await legacyCleanupLiveInputs({ ...opts, strictGit: true })).paths;
 }
 
 async function legacyCleanupInputStat(opts: {

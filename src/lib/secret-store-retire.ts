@@ -92,6 +92,12 @@ export type SecretStoreUsers = {
   readonly registryRead: boolean;
   /** Registered projects whose store selection could not be checked. */
   readonly unchecked: number;
+  /**
+   * How many of the unchecked are registered at a path confirmed absent.
+   * Still unchecked (an unmounted volume is not "gone"), but the user can
+   * clear entries of projects that no longer exist with `hack projects prune`.
+   */
+  readonly missing: number;
 };
 
 /** Registered checkouts that select one store file, and what could not be checked. */
@@ -144,7 +150,7 @@ async function storeContexts(opts: {
     const location = await checkoutStoreLocation(checkout.projectDir);
     if (location === null) {
       unchecked += 1;
-      if (await directoryMissing(checkout.projectDir)) {
+      if ((await checkoutPresence(checkout.projectDir)) === "missing") {
         missing += 1;
       }
       continue;
@@ -166,30 +172,42 @@ async function storeContexts(opts: {
   return { contexts, registryRead: true, unchecked, missing };
 }
 
-/** Whether `dir` does not exist (as opposed to existing but unreadable). */
-async function directoryMissing(dir: string): Promise<boolean> {
-  try {
-    await stat(dir);
-    return false;
-  } catch (error: unknown) {
-    const code =
-      typeof error === "object" && error !== null && "code" in error
-        ? error.code
-        : undefined;
-    return code === "ENOENT" || code === "ENOTDIR";
-  }
-}
-
 /**
  * A checkout's store location from its configuration, or null when that
  * cannot be established: the checkout is not there (an unmounted volume, a
  * moved repo; absent files there are not "unconfigured"), or its selecting
  * config is unsure.
  */
+/**
+ * "missing" only when the path is confirmed absent. A path that cannot be
+ * observed (permissions, I/O) or is not a directory is "unknown": it may be
+ * a live checkout, so it is never offered for pruning.
+ */
+async function checkoutPresence(
+  projectDir: string
+): Promise<"present" | "missing" | "unknown"> {
+  try {
+    return (await stat(projectDir)).isDirectory() ? "present" : "unknown";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+  }
+}
+
+/**
+ * One sentence for entries registered at a path that is not there, or "".
+ * Names the read-only listing first: pruning is the user's decision.
+ */
+export function missingRegisteredProjectsHint(missing: number): string {
+  return missing > 0
+    ? ` ${missing} of them are registered at a path that is not there; if those projects are gone, hack projects prune --dry-run lists them and hack projects prune removes the entries.`
+    : "";
+}
+
 async function checkoutStoreLocation(
   projectDir: string
 ): Promise<Awaited<ReturnType<typeof resolveFileSecretStorePaths>> | null> {
-  if (!(await stat(projectDir).catch(() => null))?.isDirectory()) {
+  if ((await checkoutPresence(projectDir)) !== "present") {
     return null;
   }
   try {
@@ -222,6 +240,7 @@ export async function listProjectsUsingSecretStore(opts: {
     names: [...names].sort(),
     registryRead: found.registryRead,
     unchecked: found.unchecked,
+    missing: found.missing,
   };
 }
 
@@ -305,7 +324,7 @@ async function otherOpenersRefusal(input: {
     return `No configured key file or keychain entry opens ${input.canonical}, but HACK_SECRETS_FILE_KEY overrides both, and ${envOnly.join(", ")} may still open it with that variable set in another shell, which cannot be checked from here; nothing was moved. If you have confirmed none does, pass --allow-unchecked to retire it.`;
   }
   if (found.unchecked > 0) {
-    return `${found.unchecked} registered project(s) could not be checked (not available, or their Hack config or store file could not be read), so whether one still opens ${input.canonical} is unknown; nothing was moved. Run hack doctor to see them, or pass --allow-unchecked to retire it anyway.`;
+    return `${found.unchecked} registered project(s) could not be checked (not available, or their Hack config or store file could not be read), so whether one still opens ${input.canonical} is unknown; nothing was moved.${missingRegisteredProjectsHint(found.missing)} Run hack doctor to see them, or pass --allow-unchecked to retire it anyway.`;
   }
   return null;
 }

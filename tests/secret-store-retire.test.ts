@@ -1210,6 +1210,9 @@ test("a registered worktree that reads the store is named, even when its primary
   expect(partial?.message).toContain(
     "1 registered project(s) could not be checked"
   );
+  // The checkout exists, so pruning is not suggested for it.
+  expect(partial?.message).not.toContain("path that is not there");
+  expect(partial?.message).not.toContain("hack projects prune");
 });
 
 test("a registered checkout that is not available counts as unchecked", async () => {
@@ -1239,6 +1242,13 @@ test("a registered checkout that is not available counts as unchecked", async ()
   expect(finding?.message).toContain(
     "1 registered project(s) could not be checked"
   );
+  // Still unchecked, but the user is told the path is not there and how to
+  // list and clear entries of projects that are gone (found while dogfooding
+  // on a registry with dozens of entries left by deleted checkouts).
+  expect(finding?.message).toContain(
+    "1 of them are registered at a path that is not there"
+  );
+  expect(finding?.message).toContain("hack projects prune --dry-run");
 });
 
 test("a store another registered project's key still opens is not retired", async () => {

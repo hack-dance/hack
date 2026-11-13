@@ -277,6 +277,37 @@ test("a late edit just before displacement goes back in place and is kept, for a
   );
 });
 
+test("when the current file cannot be kept, it is put back and nothing is restored", async () => {
+  if (process.getuid?.() === 0) {
+    return; // root ignores the read-only blobs directory
+  }
+  const paths = await fixture();
+  const snapshot = await snapshotOf(paths);
+  await writeFile(paths.config, '{"step":true}\n');
+  await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
+  const blobs = join(snapshot.dir, "blobs");
+  await chmod(blobs, 0o500);
+  try {
+    const result = await restoreUpgradeSnapshot({
+      manifestPath: snapshot.manifestPath,
+      paths: [paths.config],
+    });
+    const entry =
+      result.status === "invalid-manifest" ? undefined : result.results[0];
+    expect(entry?.status).toBe("error");
+    expect(entry?.message).toContain("put back");
+  } finally {
+    await chmod(blobs, 0o700);
+  }
+  // The step's output is still at its path; no displaced sibling is left.
+  expect(await readFile(paths.config, "utf8")).toBe('{"step":true}\n');
+  expect(
+    (await readdir(join(work, "project"))).filter((name) =>
+      name.includes(".hack-")
+    )
+  ).toEqual([]);
+});
+
 test("a restore of a path the snapshot does not hold is refused, not reported as restored", async () => {
   const paths = await fixture();
   const snapshot = await snapshotOf(paths);

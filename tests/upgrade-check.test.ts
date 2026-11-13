@@ -443,6 +443,33 @@ test("tracked machine-local files and a missing .hack/.gitignore are steps, a tr
   expect(JSON.stringify(blocked)).not.toContain(SENTINEL);
 });
 
+test("a checkout Git fails on is incomplete, not a directory without Git", async () => {
+  if (process.getuid?.() === 0) {
+    return; // root reads an unreadable index anyway
+  }
+  const project = await liveProject("app-broken-git");
+  const git = (args: string[]) =>
+    Bun.spawnSync(["git", "-C", project.repoRoot, ...args], {
+      env: fixtureGitEnv({ env: { HOME: home } }),
+    });
+  git(["init", "-q"]);
+  git(["add", "-f", ".hack/hack.config.json"]);
+  git(["commit", "-q", "-m", "fixture"]);
+  const index = join(project.repoRoot, ".git", "index");
+  await chmod(index, 0o000);
+  await writeRegistry([project]);
+  try {
+    const report = await check(healthyProbes());
+    const tracked = report.projects[0]?.findings.find(
+      (f) => f.id === "tracked-files"
+    );
+    expect(tracked?.status).toBe("incomplete");
+    expect(report.ready).toBe(false);
+  } finally {
+    await chmod(index, 0o644);
+  }
+});
+
 test("a registered linked worktree is checked on its own and can block", async () => {
   const project = await liveProject("app-wt");
   const worktreeRoot = join(root, "worktrees", "feature");

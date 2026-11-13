@@ -343,13 +343,24 @@ async function trackedFilesFinding(opts: {
   });
   const args = ["doctor", "--fix", "--path", opts.root];
   if (tracked === null) {
-    return {
-      id: "tracked-files",
-      status: "info",
-      summary: "Not a Git checkout, or Git could not list tracked files.",
-      args: null,
-      action: null,
-    };
+    // A checkout Git failed on is not a directory without Git: whether
+    // sensitive files are tracked there is unknown.
+    return (await insideGitWorkTree(opts.root))
+      ? {
+          id: "tracked-files",
+          status: "incomplete",
+          summary:
+            "Git could not list this checkout's tracked files (an unreadable index, or a repository Git refuses), so whether sensitive files are tracked is unknown.",
+          args: ["doctor", "--path", opts.root],
+          action: null,
+        }
+      : {
+          id: "tracked-files",
+          status: "info",
+          summary: "Not a Git checkout; no tracked files to check.",
+          args: null,
+          action: null,
+        };
   }
   if (tracked.secretKeyTracked) {
     return {
@@ -558,6 +569,21 @@ export async function inspectUpgradeProject(opts: {
     ),
   ]);
   return results.filter((finding) => finding !== null);
+}
+
+/** Whether `path` or a directory above it holds a `.git` entry. */
+async function insideGitWorkTree(path: string): Promise<boolean> {
+  let current = resolve(path);
+  for (;;) {
+    if ((await statState(resolve(current, ".git"))) !== "absent") {
+      return true;
+    }
+    const parent = resolve(current, "..");
+    if (parent === current) {
+      return false;
+    }
+    current = parent;
+  }
 }
 
 async function statState(

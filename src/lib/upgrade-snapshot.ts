@@ -341,6 +341,10 @@ const MESSAGES = {
   damaged:
     "The snapshot's copy of this file is missing or does not match its recorded digest; nothing was restored here.",
   error: "The file could not be restored at this path; left as it was.",
+  notKept:
+    "The current file could not be kept in the snapshot (is its disk full?), so it was put back and nothing was restored here.",
+  strandedAt:
+    "The current file could not be kept in the snapshot, and another file appeared at this path meanwhile; the current file is at keptAs. Nothing was deleted.",
 } as const;
 
 /**
@@ -772,11 +776,27 @@ async function displaceTarget(input: {
       outcome: { status: "not-a-file", message: MESSAGES.notAFile },
     };
   }
-  const keptAs = await writeBlob({
-    dir: input.snapshot.dir,
-    sha256: moved.state.sha256,
-    bytes: moved.bytes ?? Buffer.alloc(0),
-  });
+  let keptAs: string;
+  try {
+    keptAs = await writeBlob({
+      dir: input.snapshot.dir,
+      sha256: moved.state.sha256,
+      bytes: moved.bytes ?? Buffer.alloc(0),
+    });
+  } catch {
+    // Its bytes could not be kept: put it back, never leave the name empty.
+    const back = await putBack({ sibling, path: input.path, file: true });
+    return {
+      kind: "stopped",
+      outcome: back
+        ? { status: "error", message: MESSAGES.notKept }
+        : {
+            status: "error",
+            message: MESSAGES.strandedAt,
+            keptAs: sibling,
+          },
+    };
+  }
   if (!(sameState(moved.state, input.expected) || input.overwrite)) {
     // A late edit: it goes back where it was (and is kept as a blob too).
     await putBack({ sibling, path: input.path, file: true });
@@ -799,20 +819,24 @@ async function putBack(input: {
   readonly sibling: string;
   readonly path: string;
   readonly file: boolean;
-}): Promise<void> {
+}): Promise<boolean> {
   if (input.file) {
     try {
       await link(input.sibling, input.path);
-      await unlink(input.sibling);
     } catch {
-      // The name was taken: the displaced file stays at its sibling name
-      // (and in the snapshot).
+      // The name was taken: the displaced file stays at its sibling name.
+      return false;
     }
-    return;
+    await unlink(input.sibling).catch(() => undefined);
+    return true;
   }
-  if ((await lstatOrNull(input.path)) === null) {
-    await rename(input.sibling, input.path).catch(() => undefined);
+  if ((await lstatOrNull(input.path)) !== null) {
+    return false;
   }
+  return await rename(input.sibling, input.path).then(
+    () => true,
+    () => false
+  );
 }
 
 /**

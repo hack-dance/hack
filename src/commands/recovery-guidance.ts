@@ -31,7 +31,7 @@ const RETIRE_STORE_COMMAND_PATTERN =
 function secretStoreChoices(command: string): readonly string[] {
   return [
     "Restore the encrypted secret store's key: put the key file back where the secret integrity check says (mode 600), or set HACK_SECRETS_FILE_KEY to the same key.",
-    `Or, if the key is gone for good, retire the store: \`${command}\` moves it aside to a timestamped name beside it, deletes nothing, and prints how to put it back.`,
+    `Or, if the key is gone for good, retire the store: \`${command}\` moves it aside to a timestamped name beside it, deletes nothing, and prints how to put it back. It needs --allow-unchecked, your confirmation that no shell for a project that selects the store sets HACK_SECRETS_FILE_KEY to its key, which Hack cannot inspect.`,
   ];
 }
 const SAFE_SHELL_ARG_PATTERN = /^[A-Za-z0-9_./:-]+$/u;

@@ -51,7 +51,7 @@ const optAllowUnchecked = defineOption({
   type: "boolean",
   long: "--allow-unchecked",
   description:
-    "Retire even when some registered projects could not be checked for another key that opens the store",
+    "Accept what cannot be checked: a HACK_SECRETS_FILE_KEY set in another shell for a project that selects the store, and registered projects that could not be checked. Retiring needs it; a key known to open the store still refuses",
 } as const);
 
 const secretsOptions = [optService] as const;
@@ -111,7 +111,9 @@ const retireStoreSpec = defineCommand({
     "and the key file is left alone. It prints how to put the store back. The store is the one this project",
     "selects (--path or the current directory), or the global one outside a project. Refused for a store that",
     "opens with the key in use, that another registered project's key still opens, or that is unreadable for",
-    "another reason; when some registered projects could not be checked, pass --allow-unchecked. Without a TTY (or with",
+    "another reason. HACK_SECRETS_FILE_KEY set in another shell cannot be inspected, so retiring needs --allow-unchecked:",
+    "pass it once you have confirmed no shell for a project that selects the store sets it (it also covers registered",
+    "projects that could not be checked). Without a TTY (or with",
     "HACK_NO_INTERACTIVE / --no-interactive) it is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.",
   ].join("\n"),
   options: retireStoreOptions,

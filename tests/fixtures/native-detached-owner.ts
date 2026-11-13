@@ -1,7 +1,15 @@
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  NativeRuntimeRequestError,
+  retainNativeRuntimeFailure,
+} from "../../src/backends/native-runtime-client.ts";
+import { handleRunCliError } from "../../src/cli/run.ts";
+import { ClosedCliError } from "../../src/lib/cli-result.ts";
+import {
+  nativeDetachedUpFailure,
   nativeDetachedUpReady,
+  nativeDetachedUpShellVariables,
   runNativeDetachedOwner,
   startNativeDetachedUp,
 } from "../../src/lib/native-detached-up.ts";
@@ -34,8 +42,15 @@ if (role === "launcher") {
       ],
       timeoutMs: ["timeout", "late-ready"].includes(mode) ? 1000 : 10_000,
     });
-  } catch {
-    process.exitCode = 1;
+  } catch (error) {
+    process.exitCode = [
+      "wrapped-failure",
+      "wrapped-static-failure",
+      "provider-pin",
+      "wrapped-provider-pin",
+    ].includes(mode)
+      ? await handleRunCliError({ error, jsonRequested: true })
+      : 1;
   }
 } else if (role === "owner") {
   process.exitCode = await runNativeDetachedOwner({
@@ -63,10 +78,107 @@ if (role === "launcher") {
       process.stderr.write(
         "synthetic hook output must not reach launcher stderr\n"
       );
-      if (mode === "fail") {
+      if (mode === "shell-names") {
+        process.send?.({
+          kind: "shell-variables",
+          names: ["invalid\nsynthetic-private-value"],
+        });
+        process.send?.({
+          kind: "shell-variables",
+          names: ["EXTRA_FIELD_MUST_NOT_PRINT"],
+          output: "synthetic-private-value",
+        });
+        nativeDetachedUpShellVariables(["Z_TOKEN", "A_TOKEN", "A_TOKEN"]);
+        nativeDetachedUpShellVariables(["DUPLICATE_NOTICE"]);
+      }
+      if (mode === "shell-names-empty") {
+        nativeDetachedUpShellVariables([]);
+      }
+      if (["provider-pin", "wrapped-provider-pin"].includes(mode)) {
+        await nativeDetachedUpFailure(new Error("synthetic-private-value"));
+        const failure = new NativeRuntimeRequestError({
+          nativeCode: "provider_pin_changed",
+          message: "synthetic-private-value",
+        });
+        await nativeDetachedUpFailure(
+          mode === "wrapped-provider-pin"
+            ? retainNativeRuntimeFailure({
+                error: new ClosedCliError("synthetic-private-value"),
+                original: failure,
+              })
+            : failure
+        );
+      }
+      if (["fail", "provider-pin", "wrapped-provider-pin"].includes(mode)) {
         server.stop(true);
         process.off("SIGTERM", terminate);
         return 1;
+      }
+      if (["wrapped-failure", "wrapped-static-failure"].includes(mode)) {
+        const failure = new NativeRuntimeRequestError({
+          message: "synthetic-private-value",
+          nativeCode: "graph_port_publication",
+          nativeMessage:
+            "Native publishes only TCP ports; keep UDP publication on the Compose backend.",
+          nativeService: "web",
+          ...(mode === "wrapped-static-failure"
+            ? { nativeStartupPhase: "static-preflight" as const }
+            : {}),
+        });
+        await nativeDetachedUpFailure(
+          retainNativeRuntimeFailure({
+            error: new ClosedCliError("synthetic-private-value"),
+            original: failure,
+          })
+        );
+        server.stop(true);
+        process.off("SIGTERM", terminate);
+        return 1;
+      }
+      if (mode === "unsafe-failure") {
+        for (const value of [
+          {
+            kind: "failure",
+            data: { code: "invalid\ncode", message: "synthetic-private-value" },
+          },
+          {
+            kind: "failure",
+            data: {
+              code: "graph_port_publication",
+              message: "synthetic-private-value\nline",
+            },
+          },
+          {
+            kind: "failure",
+            data: {
+              code: "graph_port_publication",
+              message: "synthetic-private-value",
+              output: "extra",
+            },
+          },
+          {
+            kind: "failure",
+            data: {
+              code: "graph_port_publication",
+              message: "synthetic-private-value",
+            },
+            output: "extra",
+          },
+          {
+            kind: "failure",
+            data: { code: "graph_port_publication", message: "p".repeat(401) },
+          },
+          {
+            kind: "failure",
+            data: {
+              code: "graph_port_publication",
+              startupPhase: "unknown-phase",
+            },
+          },
+        ]) {
+          process.send?.(value);
+        }
+        await nativeDetachedUpFailure(new Error("synthetic-private-value"));
       }
       const notifyReady = () =>
         nativeDetachedUpReady({
@@ -86,7 +198,15 @@ if (role === "launcher") {
         // handoff, with the real owner handler still processing that accept.
         process.prependListener("message", cancelAtAccept);
       }
-      if (mode === "ready" || mode === "cancel-at-accept") {
+      if (
+        [
+          "ready",
+          "cancel-at-accept",
+          "shell-names",
+          "shell-names-empty",
+          "unsafe-failure",
+        ].includes(mode)
+      ) {
         notifyReady();
       }
       const code = await done.promise;

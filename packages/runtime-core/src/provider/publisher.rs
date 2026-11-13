@@ -21,10 +21,29 @@ fn refused() -> CandidateError {
     )
 }
 
+/// Scope an unreadable incarnation to publisher recovery. Provider-process
+/// identity failures elsewhere must keep their own diagnostic and guidance.
+pub(crate) fn incarnation_gone(recorded: &ProcessIdentity) -> Result<bool, CandidateError> {
+    super::identity::incarnation_gone(recorded).map_err(|error| {
+        if error.code == "process_identity_unavailable" {
+            CandidateError::new("publisher_identity_unconfirmed", "Publisher identity cannot be confirmed; recovery waits for the process holding its recorded PID to exit. Then rerun hack down --recover.")
+        } else {
+            error
+        }
+    })
+}
+
 /// Send a private stop request only after binding a native exit watch to exact identity.
 /// Success proves process absence/exit, not receipt retirement or filesystem cleanup.
 #[cfg(target_os = "macos")]
 pub fn stop(options: StopOptions<'_>) -> Result<StopOutcome, CandidateError> {
+    stop_with_exit(options, None)
+}
+#[cfg(target_os = "macos")]
+pub(crate) fn stop_with_exit(
+    options: StopOptions<'_>,
+    reaped: Option<&ProcessIdentity>,
+) -> Result<StopOutcome, CandidateError> {
     use super::{identity, state};
     use std::{
         fs,
@@ -48,7 +67,7 @@ pub fn stop(options: StopOptions<'_>) -> Result<StopOutcome, CandidateError> {
     {
         return Err(refused());
     }
-    if !identity::alive(options.process.pid)? {
+    if reaped == Some(options.process) || incarnation_gone(options.process)? {
         return Ok(StopOutcome::AlreadyAbsent);
     }
     // Register before checking identity so PID reuse cannot swap the watched process afterward.
@@ -295,11 +314,15 @@ mod tests {
     #[test]
     fn stale_process_or_socket_identity_never_sends_a_stop_request() {
         let mut fixture = Fixture::new();
+        let old = ProcessIdentity {
+            start_micros: fixture.process.start_micros + 1,
+            ..fixture.process.clone()
+        };
+        let mut options = fixture.options();
+        options.process = &old;
+        assert_eq!(stop(options).unwrap(), StopOutcome::AlreadyAbsent);
+        assert!(fixture.child.try_wait().unwrap().is_none());
         for changed in [
-            ProcessIdentity {
-                start_micros: fixture.process.start_micros + 1,
-                ..fixture.process.clone()
-            },
             ProcessIdentity {
                 uid: fixture.process.uid + 1,
                 ..fixture.process.clone()

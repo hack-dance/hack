@@ -1,0 +1,18 @@
+flowchart TD
+  event{CI event}
+  event -->|Push to next or main| full[Every job and every test]
+  event -->|Pull request| draft{Draft?}
+  draft -->|Yes| light[Selected Linux tests and static checks]
+  light --> blocked[Fan-ins fail: skipped draft]
+  draft -->|No| select{Full label or uncertain input?}
+  select -->|Yes| all[All unit tests]
+  select -->|No| imports[Imports plus always-run tests]
+  all --> pools[Selected platform pools]
+  imports --> pools
+  pools --> gate[Required test fan-in]
+  select --> native[Native jobs follow input scope]
+  select --> docker[Docker follows existing scope]
+  full --> release[Exact-head full push gate]
+  class light,pools,full live
+  class blocked fail
+  class gate,release ok

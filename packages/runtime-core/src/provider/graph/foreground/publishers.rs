@@ -1,5 +1,6 @@
 //! Owned foreground publisher children. Graph journals, never child PIDs, authorize
 //! publication retirement. Caller must retain this set across partial failures.
+use super::super::owner_loop::PublisherReadiness;
 use super::{Candidate, CandidateError, Receipt, signals};
 use crate::provider::{graph, publication};
 use std::{
@@ -8,6 +9,8 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+#[cfg(all(test, feature = "native-stream-relay"))]
+mod exit_tests;
 
 fn refused() -> CandidateError {
     CandidateError::new(
@@ -20,9 +23,20 @@ struct Owned {
     child: Child,
     run: String,
     reservation: String,
+    service: String,
     hostnames: Vec<String>,
     /// Reviewed host port of a loopback TCP publication; `None` for a route.
     port: Option<u16>,
+    target: Option<u16>,
+    exited: Option<std::process::ExitStatus>,
+    exit_proof: Option<publication::ChildExit>,
+    /// Exit observed with WNOWAIT; no persisted reaping proof or notice yet.
+    exit_pending: bool,
+}
+impl Owned {
+    fn down(&self) -> bool {
+        self.exit_pending || self.exited.is_some() || self.exit_proof.is_some()
+    }
 }
 
 /// What one publisher child serves: a route's hostname set over Unix, or one
@@ -36,6 +50,8 @@ enum Frontend<'a> {
 pub(super) struct Publishers {
     children: Vec<Owned>,
     probe_generations: BTreeMap<String, String>,
+    owner: String,
+    announce: bool,
 }
 
 fn command(
@@ -46,7 +62,7 @@ fn command(
     reservation: &str,
     frontend: Frontend<'_>,
 ) -> Command {
-    let mut command = Command::new(executable);
+    let mut command = crate::provider::process::publisher_command(executable);
     command
         .env_clear()
         .stdin(Stdio::null())
@@ -72,6 +88,22 @@ fn command(
 }
 
 impl Publishers {
+    /// Notices may follow only the successfully flushed foreground readiness frame.
+    pub(super) fn announce(&mut self) {
+        self.announce = true;
+    }
+
+    pub(super) fn cleanup(
+        &mut self,
+        candidate: &Candidate,
+        runtime: &mut graph::HostRelayRuntime,
+        remove_data: bool,
+    ) -> Result<Receipt, CandidateError> {
+        self.reap_exited_with(candidate, true, |run, port| {
+            exit_notice(&mut std::io::stdout().lock(), run, port)
+        })?;
+        runtime.cleanup(candidate, remove_data)
+    }
     /// The caller must hold no Engine/provider lease. The provider reserves the
     /// complete reviewed route set atomically against pool-wide bridge capacity.
     /// On error, call enrolled graph cleanup and then reap this same set.
@@ -86,6 +118,7 @@ impl Publishers {
         if !self.children.is_empty() || receipt.phase != "ready-observed" {
             return Err(refused());
         }
+        self.owner.clone_from(&receipt.owner);
         let routes = receipt
             .resources
             .values()
@@ -135,6 +168,7 @@ impl Publishers {
             &receipt.run,
             &mut self.probe_generations,
             true,
+            &BTreeSet::new(),
             &|| check_deadline(signals, deadline),
         )?;
         if !routes.is_empty() {
@@ -199,10 +233,15 @@ impl Publishers {
                 child,
                 run: receipt.run.clone(),
                 reservation: assignment.reservation.clone(),
+                service: assignment.service.clone(),
                 hostnames: Vec::new(),
                 port: Some(port),
+                target: assignment.loopback_port.map(|binding| binding.target),
+                exited: None,
+                exit_proof: None,
+                exit_pending: false,
             });
-            self.await_published(candidate, signals, deadline)?;
+            self.await_published(candidate, signals, deadline, PublisherReadiness::Startup)?;
         }
         Ok(())
     }
@@ -212,28 +251,43 @@ impl Publishers {
         candidate: &Candidate,
         signals: &signals::Events,
         deadline: Instant,
+        scope: PublisherReadiness,
     ) -> Result<(), CandidateError> {
-        let owned = self.children.last().ok_or_else(refused)?;
-        signals.watch_child(&owned.child)?;
+        let selected = self.children.len().checked_sub(1).ok_or_else(refused)?;
+        signals.watch_child(&self.children[selected].child)?;
         loop {
             check_deadline(signals, deadline)?;
-            if self
-                .children
-                .last_mut()
-                .ok_or_else(refused)?
-                .child
-                .try_wait()
-                .map_err(|_| refused())?
-                .is_some()
-            {
-                return Err(refused());
-            }
-            let owned = self.children.last().ok_or_else(refused)?;
-            if published(candidate, owned).is_ok() {
+            if self.publication_ready_with(candidate, selected, scope, published)? {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The publication observer is fixed to `published` in production. Tests
+    /// replace only that read boundary, retaining real native child reaping.
+    fn publication_ready_with(
+        &mut self,
+        candidate: &Candidate,
+        selected: usize,
+        scope: PublisherReadiness,
+        observe: impl FnOnce(&Candidate, &Owned) -> Result<(), CandidateError>,
+    ) -> Result<bool, CandidateError> {
+        let any_down = self.reap_exited(candidate)?;
+        let owned = self.children.get(selected).ok_or_else(refused)?;
+        if scope.blocked_by_exit(owned.down(), any_down) {
+            return Err(refused());
+        }
+        Ok(observe(candidate, owned).is_ok())
+    }
+
+    fn replacement_port_busy(&self, selected: usize) -> Result<bool, CandidateError> {
+        let owned = self.children.get(selected).ok_or_else(refused)?;
+        Ok(owned.exited.is_some()
+            && owned.port.is_some_and(|port| {
+                publication::require_loopback_port_free(port)
+                    .is_err_and(|error| error.code == "published_port_in_use")
+            }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -271,23 +325,106 @@ impl Publishers {
                 child,
                 run: receipt.run.clone(),
                 reservation: assignment.reservation.clone(),
+                service: assignment.service.clone(),
                 hostnames: route.hostnames.clone(),
                 port: None,
+                target: None,
+                exited: None,
+                exit_proof: None,
+                exit_pending: false,
             });
-            self.await_published(candidate, signals, deadline)?;
+            self.await_published(candidate, signals, deadline, PublisherReadiness::Startup)?;
         }
         Ok(())
     }
 
     /// Point-in-time publisher ownership, not guest health or TLS request proof.
     pub(super) fn verify_live(&mut self, candidate: &Candidate) -> Result<(), CandidateError> {
-        for owned in &mut self.children {
-            if owned.child.try_wait().map_err(|_| refused())?.is_some() {
-                return Err(refused());
-            }
-            published(candidate, owned)?;
+        if !self.observe_live(candidate)? {
+            return Err(refused());
         }
         Ok(())
+    }
+    pub(super) fn observe_live(&mut self, candidate: &Candidate) -> Result<bool, CandidateError> {
+        let exited = self.reap_exited(candidate)?;
+        for owned in &mut self.children {
+            if !owned.down() {
+                published(candidate, owned)?;
+            }
+        }
+        Ok(!exited)
+    }
+    pub(super) fn reap_exited(&mut self, candidate: &Candidate) -> Result<bool, CandidateError> {
+        self.reap_exited_with_notice(candidate, |run, port| {
+            exit_notice(&mut std::io::stdout().lock(), run, port)
+        })
+    }
+
+    fn reap_exited_with_notice(
+        &mut self,
+        candidate: &Candidate,
+        notice: impl FnMut(&str, Option<u16>) -> std::io::Result<()>,
+    ) -> Result<bool, CandidateError> {
+        self.reap_exited_with(candidate, false, notice)
+    }
+
+    fn reap_exited_with(
+        &mut self,
+        candidate: &Candidate,
+        wait: bool,
+        mut notice: impl FnMut(&str, Option<u16>) -> std::io::Result<()>,
+    ) -> Result<bool, CandidateError> {
+        let mut exited = false;
+        for owned in &mut self.children {
+            if owned.exited.is_none() {
+                if owned.exit_proof.is_none() {
+                    owned.exit_pending |= publication::child_exit_pending(&owned.child)?;
+                }
+                let reap = if wait {
+                    publication::reap_child
+                } else {
+                    publication::try_reap_child
+                };
+                owned.exited = match reap(
+                    candidate,
+                    &self.owner,
+                    &owned.run,
+                    &owned.reservation,
+                    &mut owned.child,
+                    &mut owned.exit_proof,
+                ) {
+                    Err(error) if !wait && error.code == "provider_busy" => None,
+                    outcome => outcome?,
+                };
+                if owned.exited.is_some() {
+                    owned.exit_pending = false;
+                }
+                if self.announce && owned.exited.is_some() {
+                    // A dead frontend can close stdout before its publisher is
+                    // reaped. Presentation must not prevent retaining cleanup;
+                    // identity and journal errors above still refuse normally.
+                    let _ = notice(&owned.run, owned.port);
+                }
+            }
+            exited |= owned.down();
+        }
+        Ok(exited)
+    }
+
+    pub(super) fn has_pending_reap(&self) -> bool {
+        self.children.iter().any(|owned| owned.exit_pending)
+    }
+
+    /// Presentation only; each entry belongs to this owner's retained child.
+    pub(super) fn port_status(&self) -> Vec<serde_json::Value> {
+        self.children
+            .iter()
+            .filter_map(|owned| {
+                owned.port.map(|port| {
+            serde_json::json!({"service":owned.service,"port":port,"target":owned.target,"state":if owned.down() {"down"} else {"observed"}})
+        })
+            })
+            .collect()
     }
 
     /// The foreground owner alone follows engine restart generations. Fully
@@ -301,11 +438,19 @@ impl Publishers {
     ) -> Result<(), CandidateError> {
         let deadline = Instant::now() + Duration::from_secs(30);
         let check = || check_deadline(signals, deadline);
+        self.reap_exited(candidate)?;
+        let excluded = self
+            .children
+            .iter()
+            .filter(|child| child.down())
+            .map(|child| child.service.clone())
+            .collect();
         graph::bridges::supervise_probes(
             candidate,
             run,
             &mut self.probe_generations,
             false,
+            &excluded,
             &check,
         )?;
         for selected in graph::bridges::changed_publications(candidate, run)? {
@@ -316,6 +461,13 @@ impl Publishers {
                     child.run == run && child.reservation == selected.previous.reservation
                 })
                 .ok_or_else(refused)?;
+            // A service generation does not grant resurrection of its exited
+            // host publisher. Other owned publishers keep following restarts.
+            if self.children[index].down()
+                || !graph::bridges::supervised_service(&excluded, &selected.previous.service)
+            {
+                continue;
+            }
             check_deadline(signals, deadline)?;
             if !graph::bridges::retire_rebind(candidate, &selected, &check)? {
                 continue;
@@ -347,35 +499,35 @@ impl Publishers {
             )
             .spawn()
             .map_err(|_| refused())?;
+            let replacement = self.children.len();
             self.children.push(Owned {
                 child,
                 run: run.into(),
                 reservation: assignment.reservation,
+                service: assignment.service,
                 port: frontend.0,
+                target: assignment.loopback_port.map(|binding| binding.target),
                 hostnames: frontend.1,
+                exited: None,
+                exit_proof: None,
+                exit_pending: false,
             });
-            if let Err(error) = self.await_published(candidate, signals, deadline) {
+            if let Err(error) = self.await_published(
+                candidate,
+                signals,
+                deadline,
+                PublisherReadiness::Replacement,
+            ) {
                 // The listener can be taken after reservation. Never reuse this
                 // launch intent: fully retire it and retain unrelated children.
-                let exited = self
-                    .children
-                    .last_mut()
-                    .ok_or_else(refused)?
-                    .child
-                    .try_wait()
-                    .map_err(|_| refused())?
-                    .is_some();
-                let busy = exited
-                    && frontend.0.is_some_and(|port| {
-                        publication::require_loopback_port_free(port)
-                            .is_err_and(|e| e.code == "published_port_in_use")
-                    });
+                self.reap_exited(candidate)?;
+                let busy = self.replacement_port_busy(replacement)?;
                 if !busy {
                     return Err(error);
                 }
                 graph::release_bridge(candidate, run, selected.slot, &reservation)?;
                 self.reap_one_after_cleanup(
-                    self.children.len() - 1,
+                    replacement,
                     signals,
                     Instant::now() + Duration::from_secs(5),
                 )?;
@@ -440,6 +592,11 @@ impl Publishers {
         signals: &signals::Events,
         deadline: Instant,
     ) -> Result<(), CandidateError> {
+        // cleanup() must persist each already-observed exit before guest effects.
+        // Never let try_wait below consume an uncommitted pending proof.
+        if self.has_pending_reap() {
+            return Err(refused());
+        }
         for owned in &self.children {
             signals.unwatch_child(&owned.child)?;
         }
@@ -458,6 +615,21 @@ impl Publishers {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+fn exit_notice(
+    output: &mut impl std::io::Write,
+    run: &str,
+    port: Option<u16>,
+) -> std::io::Result<()> {
+    let notice = serde_json::json!({"kind":"graph_publisher_exit","run":run,"port":port});
+    serde_json::to_writer(&mut *output, &notice).map_err(|error| {
+        std::io::Error::new(
+            error.io_error_kind().unwrap_or(std::io::ErrorKind::Other),
+            error,
+        )
+    })?;
+    writeln!(output).and_then(|_| output.flush())
 }
 
 const PENDING_ENDPOINT_POLL: Duration = Duration::from_millis(100);

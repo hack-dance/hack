@@ -44,6 +44,7 @@ import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { createNativeDependencyOwnerResolver } from "../backends/native-dependency-owners.ts";
 import { parseNativeGcloudSelection } from "../backends/native-gcloud-environment.ts";
+import { assertNativeLogFlags } from "../backends/native-log-follow.ts";
 import { nativeBuildsEnabled } from "../backends/native-project-builds.ts";
 import {
   nativeDownEnvironment,
@@ -55,6 +56,7 @@ import {
 } from "../backends/native-project-internal-hosts.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import {
+  followNativeProjectLogs,
   nativeProjectLogs,
   nativeProjectPs,
   requireComposeOperationAvailable,
@@ -190,6 +192,11 @@ import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprin
 import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import {
+  composeEnvValuesToRedact,
+  composePsTextFallbackAllowed,
+  readComposePs,
+} from "../lib/compose-ps-result.ts";
+import {
   type ComposeStartupBudgets,
   type ComposeStartupFailure,
   type ComposeStartupPhase,
@@ -235,6 +242,7 @@ import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
+import { initProjectExistsError } from "../lib/init-existing-project.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
@@ -381,6 +389,7 @@ import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
+import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
 import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
@@ -4159,9 +4168,10 @@ async function handleInitAuto({
       });
       return 0;
     }
-    throw new Error(
-      `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Run without --auto to overwrite.`
-    );
+    throw initProjectExistsError({
+      projectDirName: HACK_PROJECT_DIR_PRIMARY,
+      nextCommand: initNextSteps({ backend, devHost }).autoCommand,
+    });
   }
 
   const compose = useDiscovery
@@ -6310,10 +6320,8 @@ async function handleUp({
     // Once per `hack up`, whichever native start path follows (HACK-2026).
     noteNativeBackendBeta({ json: args.options.json === true });
   }
-  if (
-    (args.options.detach || args.options.json) &&
-    resolveNativeRuntimeSelection()
-  ) {
+  const native = resolveNativeRuntimeSelection();
+  if ((args.options.detach || args.options.json) && native) {
     refuseUnsupportedNativeUpOptions({
       restart: false,
       target: args.options.target,
@@ -6330,6 +6338,41 @@ async function handleUp({
       if (value !== undefined) {
         childArgs.push(`--${name}=${value}`);
       }
+    }
+    const alreadyRunning = await answerNativeAlreadyRunning({
+      native,
+      json: args.options.json === true,
+      selection: {
+        path: args.options.path,
+        project: args.options.project,
+        branch: args.options.branch,
+        env: resolveRequestedEnvName({ envOption: args.options.env }),
+        profiles:
+          args.options.profile === undefined
+            ? undefined
+            : parseCsvList(args.options.profile),
+      },
+      resolveProject: () =>
+        resolveProjectForArgs({
+          ctx,
+          pathOpt: args.options.path,
+          projectOpt: args.options.project,
+          touchRegistration: false,
+        }),
+      resolveBranch: (project) =>
+        resolveEffectiveBranchForCommand({
+          project,
+          branchOption: args.options.branch,
+          noticeToStderr: args.options.json === true,
+        }),
+      onBranchResolved: (branch) => {
+        if (args.options.branch === undefined && branch !== null) {
+          childArgs.push(`--branch=${branch}`);
+        }
+      },
+    });
+    if (alreadyRunning !== null) {
+      return alreadyRunning;
     }
     return await startNativeDetachedUp({
       cwd: ctx.cwd,
@@ -6353,7 +6396,6 @@ async function handleUp({
   if (authored !== null) {
     return authored;
   }
-  const native = resolveNativeRuntimeSelection();
   if (native) {
     return await handleNativeUp({ ctx, args, native });
   }
@@ -8861,18 +8903,22 @@ async function handlePs({
 
   // Read Compose directly: the daemon cache omits state and exit codes and can
   // lag behind a failed startup. Both formats must observe the same containers.
-  const res = await composeRuntimeBackend.psJson({
-    composeFiles: [project.composeFile],
-    composeProject: composeProjectName,
-    profiles,
-    cwd,
-    all: true,
+  // A failed or unparsable read throws a coded error with the engine's cause
+  // (envelope under --json, one line otherwise); see compose-ps-result.ts.
+  // Text mode keeps the plain `ps` fallback for Compose without JSON output.
+  const read = await readComposePs({
+    run: () =>
+      composeRuntimeBackend.psJson({
+        composeFiles: [project.composeFile],
+        composeProject: composeProjectName,
+        profiles,
+        cwd,
+        all: true,
+      }),
   });
-
-  if (res.exitCode !== 0) {
-    if (json) {
-      process.stderr.write("Failed to read docker compose ps JSON output.\n");
-      return res.exitCode;
+  if (!read.ok) {
+    if (json || !composePsTextFallbackAllowed(read.error)) {
+      throw read.error;
     }
     return await composeRuntimeBackend.ps({
       composeFiles: [project.composeFile],
@@ -8882,8 +8928,7 @@ async function handlePs({
       all: true,
     });
   }
-
-  const entries = parseJsonLines(res.stdout);
+  const entries = read.entries;
   if (json) {
     const payload = {
       project: baseProjectName,
@@ -9412,22 +9457,23 @@ async function resolveExecTargetReady(opts: {
     };
   }
 
-  const psResult = await composeRuntimeBackend.psJson({
-    composeFiles: opts.composeFiles,
-    composeProject: opts.composeProject,
-    profiles: opts.profiles,
-    cwd: dirname(opts.project.composeFile),
-    env: opts.env,
+  const read = await readComposePs({
+    run: () =>
+      composeRuntimeBackend.psJson({
+        composeFiles: opts.composeFiles,
+        composeProject: opts.composeProject,
+        profiles: opts.profiles,
+        cwd: dirname(opts.project.composeFile),
+        env: opts.env,
+      }),
+    redactValues: composeEnvValuesToRedact({ env: opts.env }),
   });
-  if (psResult.exitCode !== 0) {
-    return {
-      ok: false,
-      message:
-        "Unable to inspect running services for this project. Start the stack with `hack up -d` before using `hack exec`.",
-    };
+  if (!read.ok) {
+    // An engine or Compose failure, not a usage problem: keep its code and cause.
+    throw read.error;
   }
 
-  const runningServices = parseJsonLines(psResult.stdout);
+  const runningServices = read.entries;
   const targetIsRunning = runningServices.some((entry) => {
     const service = getString(entry, "Service")?.trim();
     const state = getString(entry, "State")?.trim().toLowerCase();
@@ -9813,22 +9859,23 @@ async function handleNativeLogs({
   const json = args.options.json === true;
   const service = args.positionals.service;
   const tail = args.options.tail ?? 200;
+  assertNativeLogFlags(args.options);
   const follow = !args.options.noFollow;
-  if (
-    [
-      args.options.profile,
-      args.options.compose,
-      args.options.loki,
-      args.options.services,
-      args.options.query,
-      args.options.since,
-      args.options.until,
-      args.options.pretty,
-    ].some(Boolean)
-  ) {
-    throw new CliUsageError(
-      "Native logs support only a service, --no-follow, --tail and --json."
-    );
+  if (follow) {
+    return await followNativeProjectLogs({
+      runtime: native,
+      scope: {
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        nativeHome: native.home,
+        branch,
+      },
+      service,
+      tail,
+      since: args.options.since,
+      json,
+      project: args.options.project,
+    });
   }
   const result = await nativeProjectLogs({
     runtime: native,
@@ -9868,7 +9915,6 @@ function logsHaveUnsupportedNativeOptions(
         options.pretty ||
         options.query !== undefined ||
         options.services !== undefined ||
-        options.since !== undefined ||
         options.until !== undefined ||
         (options.follow && options.noFollow)
     );
@@ -9889,6 +9935,9 @@ async function handleLogs({
   readonly ctx: CliContext;
   readonly args: LogsArgs;
 }): Promise<number> {
+  if (process.env.HACK_RUNTIME_BACKEND === "native") {
+    assertNativeLogFlags(args.options);
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -9903,6 +9952,7 @@ async function handleLogs({
     json: args.options.json,
     follow: !args.options.noFollow,
     tail: args.options.tail,
+    since: args.options.since,
     logFormat: resolveLogFormat({
       json: args.options.json,
       pretty: args.options.pretty,

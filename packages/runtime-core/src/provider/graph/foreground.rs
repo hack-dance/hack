@@ -16,11 +16,14 @@ mod native_test;
 mod publishers;
 pub(in crate::provider::graph) mod redelivery;
 pub use dependency_refresh::request as refresh_dependencies_request;
+#[cfg(all(test, feature = "native-stream-relay"))]
+mod lifetime_tests;
 mod retained_data;
 pub(in crate::provider::graph) mod signals;
 #[cfg(test)]
 mod tests;
 pub(in crate::provider::graph) mod transport;
+use super::owner_loop::{Action, OwnerLoop};
 pub(in crate::provider::graph) use transport::DeadOwner;
 pub(in crate::provider::graph) use transport::retire_recovered_publisher as retire_publisher_path;
 use transport::{Publication, WireRequest};
@@ -311,12 +314,12 @@ fn serve_input<'a>(
         }
     };
     let mut publishers = publishers::Publishers::default();
-    let mut cleanup_attempted = false;
+    let mut lifecycle = OwnerLoop::default();
     let mut restore_recovery_error = None;
     let result = (|| {
         if signals.pending() {
-            cleanup_attempted = true;
-            return runtime.cleanup(candidate, false);
+            lifecycle.cleanup_attempted = true;
+            return publishers.cleanup(candidate, &mut runtime, false);
         }
         publishers.start(candidate, &receipt, &signals, deadline, route_slots)?;
         signals.watch_read(runtime.dependency_notification_fd())?;
@@ -328,6 +331,7 @@ fn serve_input<'a>(
             .and_then(|_| stdout.flush())
             .map_err(|_| refused())?;
         drop(stdout);
+        publishers.announce();
         let mut queued = None;
         let supervise_restarts = receipt.resources.values().any(|r| {
             r.restart_policy.is_some() && (r.routing.is_some() || !r.loopback_ports.is_empty())
@@ -340,7 +344,7 @@ fn serve_input<'a>(
         }
         loop {
             if queued.is_none() {
-                let wake = if supervise_restarts {
+                let mut wake = if supervise_restarts {
                     Some(
                         automatic
                             .deadline()
@@ -349,16 +353,28 @@ fn serve_input<'a>(
                 } else {
                     automatic.deadline()
                 };
-                match signals.wait_until(wake)? {
-                    signals::Wake::Signal => {
-                        cleanup_attempted = true;
-                        return runtime.cleanup(candidate, false);
+                if publishers.has_pending_reap() {
+                    let retry = Instant::now() + Duration::from_millis(100);
+                    wake = Some(wake.map_or(retry, |due| due.min(retry)));
+                }
+                match lifecycle.step(signals.wait_until(wake)?) {
+                    Action::Cleanup => {
+                        return publishers.cleanup(candidate, &mut runtime, false);
+                    }
+                    Action::ReapPublisher => {
+                        // Reap and report, but keep the graph observable and its
+                        // authenticated down control available. A dead publisher
+                        // is not authority to replace it or replay guest work.
+                        publishers.reap_exited(candidate)?;
                     }
                     // A watched refreshable listener exited: a stale notice
                     // without traffic. Its replacement may still be starting.
-                    signals::Wake::ListenerExit => automatic.stale(Instant::now()),
-                    signals::Wake::Ready | signals::Wake::Timeout => {}
+                    Action::RefreshDependencies => automatic.stale(Instant::now()),
+                    Action::Continue => {}
                 }
+            }
+            if publishers.has_pending_reap() {
+                publishers.reap_exited(candidate)?;
             }
             if queued.is_none() && supervise_restarts && Instant::now() >= restart_tick {
                 publication.verify()?;
@@ -462,7 +478,7 @@ fn serve_input<'a>(
                 .and_then(|restored| {
                     publishers
                         .reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))?;
-                    cleanup_attempted = false;
+                    lifecycle.cleanup_attempted = false;
                     publishers.start(
                         candidate,
                         &restored,
@@ -478,7 +494,7 @@ fn serve_input<'a>(
                         json!({"ok":true,"run":restored.run,"phase":restored.phase,"plan":restored.plan_id,"generation":redelivery::generation(&restored)?,"receipt":restored})
                     }
                     Err(error) => {
-                        cleanup_attempted |= effects_started;
+                        lifecycle.cleanup_attempted |= effects_started;
                         if effects_started {
                             restore_recovery_error = Some(error.code);
                         }
@@ -490,8 +506,8 @@ fn serve_input<'a>(
                 continue;
             }
             if let Some(remove_data) = request.remove_data {
-                cleanup_attempted = true;
-                match runtime.cleanup(candidate, remove_data) {
+                lifecycle.cleanup_attempted = true;
+                match publishers.cleanup(candidate, &mut runtime, remove_data) {
                     Ok(cleaned) => {
                         publishers.reap_after_cleanup(
                             &signals,
@@ -523,7 +539,15 @@ fn serve_input<'a>(
                     );
                 }
                 // inspect releases its Engine lease before the fresh runtime check.
-                publishers.verify_live(candidate)?;
+                let publishers_live = publishers.observe_live(candidate)?;
+                if publishers.has_pending_reap() {
+                    // Host child observations do not need a guest lease. Keep
+                    // pending ports visible even when guest inspection is busy;
+                    // this response makes no readiness or guest-health claim.
+                    return Ok(
+                        json!({"ok":true,"run":receipt.run,"phase":receipt.phase,"plan":receipt.plan_id,"generation":redelivery::generation(&receipt)?,"foreground_alive":true,"runtime_verified":false,"runtime_error":"publisher_exit_pending","publisher_ports":publishers.port_status()}),
+                    );
+                }
                 let mut snapshot = super::inspect(candidate, &receipt.run)?;
                 let engine = Engine::connect(candidate)?;
                 let (current, root) = super::load(candidate, &engine, &receipt.run)?;
@@ -531,7 +555,7 @@ fn serve_input<'a>(
                 let checked =
                     startup::Driver::verify(&mut runtime, &engine, &mut snapshot.receipt, &root);
                 Ok::<_, CandidateError>(
-                    json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":checked.is_ok(),"runtime_error":checked.err().map(|error|error.code)}),
+                    json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":publishers_live && checked.is_ok(),"runtime_error":if !publishers_live {Some("publisher_exited")} else {checked.err().map(|error|error.code)},"publisher_ports":publishers.port_status()}),
                 )
             })();
             let value = match status {
@@ -550,7 +574,10 @@ fn serve_input<'a>(
         // A failed explicit cleanup may already have an EffectStarted journal; do
         // not replay it here. Retain publication and graph evidence for recovery.
         Err(error) => {
-            if !cleanup_attempted && runtime.cleanup(candidate, false).is_ok() {
+            publishers.reap_exited(candidate)?;
+            if !lifecycle.cleanup_attempted
+                && publishers.cleanup(candidate, &mut runtime, false).is_ok()
+            {
                 publishers.reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))?;
                 publication.finish()?;
             }

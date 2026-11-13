@@ -257,6 +257,8 @@ export function buildCliEnv(opts: {
   // that daemon with the scenario (HACK-1696). Unlike the launchd guard below,
   // a scenario that stops its own daemon may opt in through `extra`.
   env.HACK_DAEMON_AUTOSTART_DISABLE = "1";
+  // The hackd systemd user unit belongs to the real user, as launchd does.
+  env.HACK_SYSTEMD_DISABLE = "1";
   env.NO_COLOR = "1";
   env.CLICOLOR = "0";
   env.TERM = "dumb";

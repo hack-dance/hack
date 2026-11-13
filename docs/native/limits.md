@@ -17,11 +17,11 @@ does not fall back to Docker without telling you.
 
 | You want to | Native today |
 | --- | --- |
-| Start the whole project | `hack up` in the foreground. Prereleases after next.12 also accept `hack up -d` to run it in the background. |
-| Restart the whole project | `hack restart` |
+| Start the whole project | `hack up` in the foreground, or `hack up -d` in the background |
+| Restart the whole project | `hack restart`, in the foreground only |
 | Stop the project | `hack down`, and `hack down --recover` after a crash |
 | See what is running | `hack ps` |
-| Read logs | `hack logs <service> --no-follow` |
+| Read recent logs | `hack logs <service> --no-follow`, a bounded snapshot |
 | Run a command in a running service | `hack exec`, without an interactive terminal |
 | Run a one-off command | `hack run`, for services without source, data or private env mounts |
 | Preview without starting | `hack config validate`, `hack config plan`, `hack config import --dry-run`, `hack config adopt --dry-run` |
@@ -31,7 +31,22 @@ The exact rules for each command are in
 
 ## Not supported yet
 
-- Following logs live, or querying log history with Loki.
+- Verified live log following. `hack logs <service> --follow` is available under
+  verification, with `--tail`, `--since` and `--json`; real-VM acceptance for both
+  authored and adopted projects remains pending. The following limits apply to
+  this candidate command.
+- Querying log history with Loki. Native live logs select one service; services configured with a TTY are currently refused by name.
+- Following through a container restart. Native follows one start generation;
+  a confirmed stop ends the follow, or an already visible restart reports
+  `native_log_container_restarted`. Start a new follower after restart.
+- Following a service before its graph is ready. Startup refuses with
+  `native_log_selection_changed`.
+- Complete oversized lines. Lines over 64 Ki characters retain only that
+  prefix with `[truncated]`; following continues. A trailing fragment is marked
+  `[partial]`. JSON entries also carry `truncated: true` or `partial: true`.
+- Proving a complete tail without transport EOF. A stopped service whose stream
+  stays open for five idle seconds ends with `native_log_stopped_idle` and exit 1,
+  not a clean EOF. The final tail may be incomplete.
 - Interactive `exec` sessions.
 - Changing the env overlay, profiles or target of a project that is already
   running. Stop it and start it again.
@@ -39,7 +54,6 @@ The exact rules for each command are in
   project.
 - UDP ports. Only TCP ports with an explicit host port are published.
 - Automatic restart for services that publish a port.
-- A one-command setup. Preparing the runtime is manual.
 
 ## Compose features that stay on Compose
 
@@ -61,6 +75,14 @@ Details and the exact checks:
 
 - **Shared machine.** All native projects run in one virtual machine. They are
   separated the way Compose projects are, not by a machine each.
+- **Images that declare a volume.** Some images, such as the stock Redis and
+  database images, declare a data folder with `VOLUME`. On native the service must
+  mount a named volume at that path, for example `redis-data:/data`. Without one
+  the project refuses with `graph_image_volume_uncovered`. A bind mount or a
+  read-only mount there does not count.
+- **Stopping with Ctrl-C.** In this prerelease, Ctrl-C may not stop a foreground
+  project cleanly when it publishes ports. Use `hack down` from another terminal,
+  and `hack down --recover` if it reports that the owner is gone.
 - **Images.** Images need a Linux arm64 variant. Local registries need an explicit
   opt-in. Registries signed by a private certificate authority are not supported.
 - **Data.** Data does not move between backends, or between prerelease versions.

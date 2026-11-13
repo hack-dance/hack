@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { ClosedCliError } from "../lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { requireWrappableNativeProcesses } from "../lib/native-process-wrappers.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
@@ -27,7 +27,12 @@ import {
   provisionalNativeHostDependencies,
   readNativeHostDependencies,
 } from "./native-project-dependencies.ts";
-import { prepareNativeProjectInput } from "./native-project-input.ts";
+import {
+  mergeNativeShellEnvironment,
+  prepareNativeProjectInput,
+  requireNativeShellDeliveryFits,
+  selectActiveNativeProjectInput,
+} from "./native-project-input.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import {
   applyNativeInternalHostAliases,
@@ -80,6 +85,7 @@ import {
 } from "./native-project-start.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeStopError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 import {
@@ -154,7 +160,10 @@ async function verifyNativeRestartListeners(opts: {
         cwd: opts.projectRoot,
         args: ["graph", "dependency-plan", "--dependencies", path, "--json"],
       });
-    } catch {
+    } catch (error) {
+      if (isNativeRuntimeStopError(error)) {
+        throw error;
+      }
       throw new ClosedCliError(
         "Native restart host dependency listener is unavailable or changed; refresh its private selection before restart. The current graph was not stopped."
       );
@@ -274,7 +283,10 @@ async function inspectRestartGraph(opts: {
       run: opts.run.run,
       invoke: opts.invoke,
     });
-  } catch {
+  } catch (error) {
+    if (isNativeRuntimeStopError(error)) {
+      throw error;
+    }
     throw new ClosedCliError(
       "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
     );
@@ -434,11 +446,15 @@ export async function preflightNativeRestart(opts: {
       "Native restart admission failed before cleanup; inspect runtime probe --profile development. The current graph was not stopped."
     );
   }
-  let input = await deps.prepare({
-    ...opts.scope,
-    composeFile: opts.composeFile,
-    envName: selected.envName,
-  });
+  let input = mergeNativeShellEnvironment(
+    await deps.prepare({
+      ...opts.scope,
+      composeFile: opts.composeFile,
+      envName: selected.envName,
+      // As native start: `environment` references read the caller's shell.
+      env: process.env,
+    })
+  );
   const environmentChange = nativeRunEnvironmentChange({
     run: opts.run,
     environmentFiles: input.environmentFiles,
@@ -633,6 +649,21 @@ export async function preflightNativeRestart(opts: {
     invoke: deps.invoke,
     input: { ...input, normalizedComposeJson: JSON.stringify(compose) },
     run: async (review) => {
+      try {
+        requireNativeShellDeliveryFits(
+          selectActiveNativeProjectInput({
+            input,
+            reviewedPlan: review.report.plan,
+          })
+        );
+      } catch (error: unknown) {
+        if (error instanceof HackCliError) {
+          throw new ClosedCliError(
+            `${error.message}. The current graph was not stopped.`
+          );
+        }
+        throw error;
+      }
       if (review.namespace !== opts.run.namespace) {
         throw new ClosedCliError(
           "Native restart configuration changed; the current graph was not stopped."

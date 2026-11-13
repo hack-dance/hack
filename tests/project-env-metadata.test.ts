@@ -190,9 +190,19 @@ test("metadata selection matches default, explicit and null overlays without exp
     await Bun.file(join(f.projectRoot, PROJECT_ENV_KEY_FILENAME)).exists()
   ).toBe(false);
   // Positive control: the ordinary resolver still requires a key for these entries.
-  await expect(resolveProjectEnvConfig(f)).rejects.toThrow(
-    "Missing project env key"
+  const missing = await resolveProjectEnvConfig(f).catch(
+    (error: unknown) => error
   );
+  expect(missing).toBeInstanceOf(Error);
+  const message = (missing as Error).message;
+  expect(message).toContain("Missing project env key");
+  // HACK-2069: with encrypted values present, creating a key is wrong advice.
+  expect(message).toContain(
+    "This project already has encrypted env values, and only the key that encrypted them can decrypt them."
+  );
+  expect(message).toContain("HACK_ENV_SECRET_KEY");
+  expect(message).not.toContain("to generate it");
+  expect(message).not.toContain(cipherSentinel);
 });
 
 test("metadata does not read project keys, decrypt invalid ciphertext or materialize env files", async () => {

@@ -1,16 +1,19 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
 import { findOrphanDaemonProcesses } from "../src/daemon/process.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { spawnHackdLikeFixture } from "./helpers/hackd-fixture.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
 let originalLogger: string | undefined;
 let foreignDaemon: ReturnType<typeof Bun.spawn> | null = null;
+// Outside the PID ranges allocated by supported Linux and macOS hosts.
+const STALE_PID_FILE = "2147483647\n";
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
@@ -42,22 +45,15 @@ test.skipIf(!Bun.which("lsof"))(
     }
     const foreignRoot = join(tempDir, "foreign-daemon");
     await mkdir(foreignRoot);
-    const binary = join(tempDir, "hack-foreign-fixture");
-    await symlink(process.execPath, binary);
     const socket = join(foreignRoot, "hackd.sock");
     const ready = join(foreignRoot, "ready");
-    foreignDaemon = Bun.spawn(
-      [
-        binary,
-        "-e",
-        `Bun.serve({ unix: ${JSON.stringify(socket)}, fetch() { return new Response("fixture"); } }); await Bun.write(${JSON.stringify(ready)}, "ready");`,
-        "--",
-        "daemon",
-        "start",
-        "--foreground",
-      ],
-      { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
-    );
+    const fixture = await spawnHackdLikeFixture({
+      dir: tempDir,
+      socket,
+      ready,
+    });
+    const daemon = fixture.child;
+    foreignDaemon = daemon;
     for (let attempt = 0; attempt < 100; attempt++) {
       if (await Bun.file(ready).exists()) {
         break;
@@ -65,21 +61,21 @@ test.skipIf(!Bun.which("lsof"))(
       await Bun.sleep(20);
     }
     expect(await Bun.file(ready).exists()).toBe(true);
-    expect(
-      await findOrphanDaemonProcesses({
-        trackedPid: null,
-        daemonRoot: foreignRoot,
-      })
-    ).toContain(foreignDaemon.pid);
+    const scan = await findOrphanDaemonProcesses({
+      trackedPid: null,
+      daemonRoot: foreignRoot,
+      expectation: fixture.expectation,
+    });
+    expect(scan.orphans.map((orphan) => orphan.pid)).toContain(daemon.pid);
 
     const paths = resolveDaemonPaths({});
     await mkdir(paths.root, { recursive: true });
-    await writeFile(paths.pidPath, "999999\n");
+    await writeFile(paths.pidPath, STALE_PID_FILE);
     const { runCli } = await import("../src/cli/run.ts");
     expect(await runCli(["daemon", "clear"])).toBe(0);
     await Bun.sleep(100);
-    expect(foreignDaemon.exitCode).toBeNull();
-    expect(process.kill(foreignDaemon.pid, 0)).toBe(true);
+    expect(daemon.exitCode).toBeNull();
+    expect(process.kill(daemon.pid, 0)).toBe(true);
   },
   10_000
 );
@@ -87,7 +83,7 @@ test.skipIf(!Bun.which("lsof"))(
 test("daemon clear removes stale pid and socket files", async () => {
   const paths = resolveDaemonPaths({});
   await mkdir(paths.root, { recursive: true });
-  await writeFile(paths.pidPath, "999999\n");
+  await writeFile(paths.pidPath, STALE_PID_FILE);
   await writeFile(paths.socketPath, "");
 
   const { runCli } = await import("../src/cli/run.ts");
@@ -99,4 +95,37 @@ test("daemon clear removes stale pid and socket files", async () => {
 
   expect(pidExists).toBe(false);
   expect(socketExists).toBe(false);
+});
+
+test("a stop whose termination is not confirmed fails and keeps hackd's files", async () => {
+  // Review r2 #6: stop, restart and the install handover must not go on as
+  // if hackd had stopped.
+  const { stopProvenDaemon } = await import("../src/commands/daemon.ts");
+  const paths = resolveDaemonPaths({});
+  await mkdir(paths.root, { recursive: true });
+  await writeFile(paths.pidPath, `${process.pid}\n`);
+  await writeFile(paths.socketPath, "");
+  const proof = {
+    kind: "owned",
+    pid: process.pid,
+    birth: "b",
+    image: {
+      executable: "/usr/local/bin/hack",
+      argv: ["/usr/local/bin/hack", "daemon", "start", "--foreground"],
+    },
+  } as const;
+  for (const reason of [
+    "still-running",
+    "changed",
+    "identity-unknown",
+  ] as const) {
+    expect(
+      await stopProvenDaemon({
+        proof,
+        paths,
+        terminate: () => Promise.resolve({ kind: "not-confirmed", reason }),
+      })
+    ).toBe(false);
+    expect(await Bun.file(paths.pidPath).exists()).toBe(true);
+  }
 });

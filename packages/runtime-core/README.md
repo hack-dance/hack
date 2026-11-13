@@ -316,8 +316,19 @@ missing ready files, expired timeouts and dead processes do not grant cleanup or
 replay. The strict Compose v1 reader and its artifact path remain unchanged.
 The macOS Bun frontend selects these owners through explicit native backend
 foreground `up`, owner-mediated `down` and `down --recover`, saved-run `ps`,
-finite `logs --no-follow` and noninteractive `exec`; installed live provider
+single-service `logs --follow`, finite `logs --no-follow` and noninteractive `exec`; installed live provider
 acceptance remains the gate.
+
+Live logs use a separate `graph logs-follow` reader over the existing Engine relay.
+It pins the admitted container and start generation through `ObservedGuest`, without
+a mutation lease or the serial foreground control loop. A stdin lifetime pipe ends
+the reader on frontend death. Bounded HTTP/multiplex decoding and output writes
+apply backpressure; stream EOF plus stopped/absent selection ends normally. A
+five-second stopped-service idle cutoff reports `native_log_stopped_idle` and
+does not claim a complete tail. Unexplained EOF
+or a changed generation reports a named refusal. These reads grant no cleanup
+authority. See [the command contract](../../docs/reference/native-authored-commands.md)
+for flags, output limits and remaining live Mac acceptance.
 
 Held startup admission can also publish the exact public source envelope in that
 excluded storage. It captures profiles, overlay and closed names-only metadata
@@ -372,7 +383,7 @@ source files, arguments, stdout or journal records.
 
 The Bun project frontend selects this consumer only through the explicit native
 backend macOS slices: foreground `up`, owner-mediated `down` and `down --recover`,
-saved-run `ps`, finite `logs --no-follow` and noninteractive `exec`; `run`,
+saved-run `ps`, single-service `logs --follow`, finite `logs --no-follow` and noninteractive `exec`; `run`,
 `restart`, detached startup and service subsets still refuse. Installed live
 provider acceptance of those slices remains the gate, and full network acceptance
 and the source/storage/routing/host contracts remain separate qualification gates.
@@ -487,6 +498,27 @@ pinned package preparation, ownership, resource admission, lifecycle commands, a
 The default private build includes native HTTP graph probes (local `_docs/docs/plans/v5/native-http-probe-20260915.md`)
 and requires Zig 0.15.2 plus a host C compiler.
 [Provider pins](provider-pins.json) record the exact package inputs; the engine runs inside the VM.
+A weekly workflow (`.github/workflows/provider-pin-watch.yml`, `scripts/provider-pin-watch.ts`;
+weekly once it is on `main`, by dispatch before that) compares these pins with upstream releases
+and published security advisories. It keeps one issue, "Provider pins behind upstream" (label
+`provider-pin-watch`), listing each newer release, which watched SmolVM interfaces its notes
+mention (libkrun, vsock, virtiofs, balloon or reclaim, disks and templates, the `machine`
+subcommands, flags and `SMOLVM_*` variables the runtime passes; a test keeps that list and the
+runtime source in step), and every security advisory the three upstream repositories published
+whose vulnerable range contains a pinned version and whose fix the pin has not reached. The
+issue carries the `security` label exactly while such an advisory exists. Not covered: advisories
+for components SmolVM bundles (libkrun, libkrunfw, the guest kernel and rootfs packages) or
+published only in the global advisory database. It never changes a pin; bumps are qualified by
+hand. The workflow also checks every pinned download URL, including guest
+packages, with bounded unauthenticated HEAD requests and a comparison of a 200
+reply's `Content-Length` with `size_bytes`. Only 404 and 410 mean the pinned file
+is no longer served and can reopen an issue closed as not planned. Timeouts,
+other HTTP errors (including 403, 429 and 5xx), and a missing `Content-Length`
+are transient failures: they are reported but never create or reopen
+an issue by themselves, and an open issue is not closed while availability is
+unknown. Size mismatches and refused redirects are reported as invalid pins.
+Availability alone never authorizes archive use or changes pins. Alpine package
+revisions may be retired upstream.
 The pinned host BuildKit client (`runtime prepare-builder`) and the pure Dockerfile
 image-reference scanner (`provider/build_scan.rs`) back `runtime build-image`
 (`provider/image_build.rs`), which builds one Compose-style image in the guest engine
@@ -640,6 +672,43 @@ identity and named data remain outside history retirement. Archive/export retain
 the bounded window rather than a complete lifetime log. Use the current candidate
 for migrated private state; older experimental candidates do not understand this
 history format. Stable v4 uses its separate state and is unaffected.
+
+## How a provider pin bump is qualified
+
+[`provider-pins.json`](provider-pins.json) pins SmolVM, the guest Docker engine and
+the BuildKit client by version, SHA-256 and exact `size_bytes`. Bump about every four weeks, or sooner
+for a security fix, so each bump stays small enough to review against upstream notes.
+
+1. Read every upstream release note since the current pin and record, for each
+   provider interface the runtime uses (`machine` subcommands and flags, `SMOLVM_*`
+   variables, the machine database and running configuration, the agent protocol,
+   templates, the guest rootfs release), whether it changed and what was done.
+2. Update each changed pin's SHA-256 and exact compressed `size_bytes` together;
+   measure the downloaded file rather than copying an HTTP header. Keep
+   `max_bytes` as a sanity ceiling. Update `artifact::{VERSION, ARCHIVE_SHA256}`, the expanded template
+   digests in `disk_template::PINNED` (decode the archive's `*.ext4.zst` with an
+   independent decoder and apply the `content_digest` definition), the network-tool
+   packages when the guest Alpine release moves, and the audit lists in
+   `config_audit.rs` for any new machine-record capability.
+3. On an Apple Silicon Mac, run [`scripts/qualify-provider-pin.ts`](../../scripts/qualify-provider-pin.ts)
+   once with a bundle built from the current pin (baseline) and once with the bump,
+   each in its own empty private root. Supply `--provider-archive`,
+   `--engine-archive`, `--builder-archive` (the pinned host buildx file) and
+   `--network-tools` so all seven input files have their actual lengths checked
+   against the bundle's `size_bytes` before extraction or preparation. A correct
+   hash with a stale or missing length fails qualification. The builder file is
+   measured here without installing it. It checks the archive and signature, prepare,
+   a prepared base built and verified (its overlay inventory), a pool without internet,
+   template expansion and digests, exact disk identity, restart, down and up, network
+   modes, the dependency-socket relay, Rosetta and a web-plus-database project, then
+   prints the timing and idle-footprint measurements to compare. What `down --recover`
+   does after a lost foreground, and how the pool recovers from an unclean provider
+   stop, are recorded in `qualification.json` but not asserted: exit 0 does not show
+   that recovery works, so read those recorded outcomes. With `--keep-going`, a failed
+   step's pools are stopped and shown gone before the next step; if that cannot be
+   shown, the remaining steps are skipped.
+4. A home prepared under one pin refuses another pin (`provider_pin_changed`);
+   say so in the release notes, because users prepare a fresh candidate home.
 
 ## Provider owner receipt compatibility
 
@@ -816,6 +885,26 @@ Same-boot reads may use guest page cache: this fixture does not qualify VM-shutd
 durability, crash/power-loss safety, framework concurrency or application readiness.
 
 ## Foreground graph dependency owner (candidate macOS path)
+
+Compose foreground graph owners run outside the terminal process group even
+without hooks; `process::publisher_command` gives each host port/route publisher
+its own group. Terminal group SIGINT cannot retire a publisher ahead of the
+owner's authenticated cleanup. Portable process tests exercise a real group
+signal; a macOS cross-check is compilation evidence, not real-VM acceptance.
+
+Same-boot dead-owner cleanup also accepts the unchanged ready receipt and Pending
+relay enrollment left when an older publisher exited before cleanup. The old
+coordinator must be EffectStarted for the exact dead owner, graph, operation,
+effect and saved bridge/environment inventories. Recovery pins its bytes in a
+new version3/4 intent (present/absent relay respectively); version1/2 recovery
+records remain unchanged. After an audited immediate successor boot, the frontend
+selects `recover-cleanup` followed by publication retirement. Its new version2
+intent pins the legacy Ready/Pending coordinator; ordinary version1 predecessor
+recovery records remain unchanged. The old coordinator is retained without an ACK or
+admission replay. Publisher shutdown keeps the native PID/birth/UID/executable
+and socket/inode proofs; guest effects follow confirmed publisher exit, held
+dead-owner witnesses and independently rechecked inventories. Changed evidence
+refuses. This does not add VM-loss detection or infer authority for an unrecorded boot.
 
 If an interrupted foreground owner leaves private dependency socket paths after
 the provider has stopped, normal `hack up` still refuses to adopt or replace them.
@@ -1374,6 +1463,71 @@ disk-size identity. Automatic trim remains disabled until safe disk reclamation
 is supported and qualified. This does not relax disk identity checks or repair
 previously shortened files, and does not change the separate memory-reclamation
 policy. Already running providers require an owned stop/start to receive the setting.
+
+### Memory reclamation
+
+Every launch also sets `SMOLVM_BALLOON_RECLAIM=1` and `SMOLVM_IDLE_RECLAIM` from the
+pool's recorded reclamation policy: by default `state::IDLE_RECLAIM_MINUTES` (2),
+the minutes of provider CPU idleness before SmolVM pulses the balloon to hand an
+idle guest's page cache back to the host. The value is explicit so a provider pin
+bump cannot change it silently; 2 matches the SmolVM default since 1.34.1. A
+disabled policy passes `0`. The guest agent's own page-cache trim
+(`SMOLVM_MEMORY_TRIM`, new in 1.34.1) is a deliberate exception: it is left at the
+provider default (one quiet minute) because it has not been measured on this runtime
+yet, and pinning an unmeasured value could do worse than upstream's. The provider pin
+qualification script measures idle footprint at 0, 3 and 10 minutes; pin it
+explicitly once those numbers are recorded.
+
+### Starting a pool that is already running
+
+`runtime up` on a pool that is already running and owned by this home (every warm frontend
+`up` and `restart`) takes a named fast path, `lifecycle::running_start`. It allocates
+nothing, so it skips the host admission windows, which guard memory, swapout, thermal and
+disk headroom for a VM allocation (four one-second sampling pauses for Development, two
+fifteen-second pauses for Research). Under the startup lease it re-checks the receipt, the
+provider identity, disk identity and size, the request (bridges, dependency sockets,
+network, project share and translation), the owner registry, dependency sockets, network
+tools and the provider configuration. One behaviour changes: a running Research pool used to
+be sampled on the fresh-pool budget and could be refused on a busy host; it is now reported
+like any running pool.
+
+Provider trees are proven by content once per boot. A successful boot records a witness
+(`run/smolvm/provider-trees.json`) bound to its provider process: for the SmolVM tree, the
+engine tree and the guest rootfs copy, a metadata digest taken around the content proof and
+the content digest it was proven against. Later commands of that running pool, including
+retained preflight, accept a tree whose metadata digest and content anchor are unchanged
+(paths, types, modes, owners, inodes, link counts, sizes, modification and status-change
+times, symlink targets) and prove it by content again on any difference. A stopped pool, a
+new boot and `runtime repair-provider-tree` always prove by content. Warm starts now also
+check the guest rootfs copy, which the running path never did.
+
+Two limits on when the witness is used (decided for HACK-2092; the owner can revisit them):
+
+- **Qualified filesystems only.** The witness is accepted only when all three trees are on a
+  filesystem whose change-time behaviour was qualified: APFS today, checked with `statfs`
+  at each tree root, with device checks in the metadata walk. Any device change within a
+  tree disables the witness, including a mount of another APFS volume. APFS keeps nanosecond
+  ctime that user space cannot set back, and stores through a shared mapping update it
+  (both observed on Apple Silicon with SmolVM 1.34.1). On any other filesystem, or when the
+  type cannot be read, every start proves the trees by content and no witness is written.
+- **Bound to the runtime build.** The witness names the build that recorded it: the runtime
+  version plus a hash of source, compiler identity and build options embedded at compile
+  time, including dirty source inputs. Replacing the executable on disk does not change an
+  already running image's identity. A build with different inputs proves by content once,
+  then records its witness.
+
+The witness is read without blocking, so a FIFO or other special file at its path is
+refused like any unsafe receipt and the trees are proven by content. It is written through a
+temporary under the lifecycle lease and replaces the committed witness only by rename; a
+temporary left by an interrupted write is removed by the next write under the lease only
+when it is a regular file owned by this user, mode 0600, with one link. Any other entry is
+left in place and prevents publication; full content hashing remains available.
+
+Both proofs guard against drift (damage, cleanup tools, interrupted writers), not a
+same-user adversary who knows the scheme: the content anchors and the witness are writable
+by the same user. `tree_witness` lists what the metadata check gives up relative to the
+content proof (writes that keep size and ctime, such as raw device writes, clock changes,
+shared-mapping stores not yet reflected in ctime, and filesystems without fine ctime).
 
 ### Extending a stopped pool's approved hosts
 
@@ -2120,3 +2274,85 @@ prove fresh requests succeed on the original port and hostname. Also replace an
 owned container with a foreign/copied-label container and occupy a host port
 after retirement: no forwarding may reach the replacement, and the busy bridge
 must remain retired. Stop must disarm policies and leave no publisher or relay.
+
+### Legacy published-port cleanup acceptance
+
+The opt-in tests under
+`provider::graph::foreground::native_test::same_boot_absent_relay::legacy_enrollment`
+construct the legacy Ready/Pending state through the actual failed cleanup:
+they signal only their exact publisher child and observe its exit with WNOWAIT,
+so the unreaped publisher makes native stop fail before its owner exits. Both
+SIGINT-cleaned endpoints and SIGKILL-left socket/identity files are exercised.
+A separate live-orphan variant pauses cleanup before retiring the publisher and
+kills only its owned owner process. They
+exercise same-boot recovery, a retry after publisher exit but before registry
+publication, the audited successor-boot path, retained volume contents and a new
+graph reusing the released port/bridge. No old receipt or coordinator is fabricated.
+Both boot paths also interrupt the publication registry after its pending bytes
+are synchronized but before rename. The predecessor path additionally interrupts
+after the stopped receipt commits and before the recovery-intent completion
+digest, then verifies that cleanup resumes before publication retirement. It also
+interrupts after the completion digest commits and before dependency release;
+the dependency-free fixture verifies publication retirement across that boundary.
+It does not exercise a held dependency reservation. The macOS reservation-file
+unit tests cover that tail and its capacity reuse/refusal checks. The completion
+digest proves guest cleanup, not this host-side tail.
+They need a caller-prepared disposable capacity-one pool, a matching all-feature
+CLI, a pinned BusyBox image with `sh`, `httpd` and `sleep`, an exclusive host port
+and an external 300-second watchdog. Set `HACK_LOCAL_TEST_ROOT`,
+`HACK_LOCAL_TEST_BINARY`, `HACK_LOCAL_TEST_IMAGE` and `HACK_LOCAL_TEST_PORT` as for
+other isolated native fixtures. The tests retain their generated data receipts
+for inspection; stop the disposable pool after qualification. They are ignored
+on ordinary test runs and do not qualify recovery until executed on Apple Silicon.
+
+
+### Foreground lifetime and retained owner control generations
+
+The native foreground event queue watches the exact frontend parent and every
+retained publisher Child. SIGHUP is handled by both frontend and owner as a
+retaining stop request, including restored/restarted owners. Frontend loss requests ordinary retaining cleanup.
+A non-reaping child-exit check takes no provider lease, so healthy publishers do
+not contend with launch or status. Publisher exit is reaped promptly; before
+reaping, the owner pins the exact
+native birth and any committed/pending registry generation. Its exact exit proof
+is retained in memory across a failed registry write and durably recorded before
+cleanup. A readable different birth at a reused PID proves the recorded publisher
+gone, without authorizing a signal to the replacement; unreadable birth refuses.
+
+Each new owner process derives a control generation from its native PID, birth
+time and UID. Executable-path changes do not change that lifetime identity. The startup receipt binds that generation to its control directory.
+Retained restore therefore cannot reuse the predecessor's unfinished coordinator,
+even on the same guest boot. Missing generation selects the unchanged legacy
+run/boot directory. Pre-admission recovery derives the new directory from the
+exact recorded dead process, falling back to the legacy directory for old owners.
+Neither path overwrites or acknowledges an old coordinator.
+
+After graph recovery, frontend `down --recover` also recovers its captured dead
+frontend finalization under the existing exact-attempt lock and side-effect
+proofs. It exits zero with data retained and permits plain `up`. An external down
+also produces the confirmed-stop closing line in the original foreground.
+
+
+A publisher-only exit after readiness is reported as a bounded, run-bound frontend notice once
+its exact direct child has been reaped. It leaves the project's compute running
+and the authenticated owner available for `hack down`; it does not trigger a
+long guest cleanup or automatically recreate the publisher. `owner-status`
+reports retained port children as down, and ps/status preserve service rows and
+show that publication state. The owner enables notices only after flushing its
+readiness frame; startup reaping still records exit proof without emitting a
+notice. The frontend ignores a bounded, run-matching notice before readiness so
+it can await startup cleanup and report the native failure code and log tails.
+It decodes notices after readiness,
+including multiple frames in a chunk and partial frames across chunks. Notices
+and status are presentation, not cleanup or replacement authority. Notice delivery
+is best-effort: a frontend may close its stdout pipe before the owner reaps an
+exited publisher. A failed notice must not prevent authenticated retaining cleanup;
+native identity and journal failures still refuse. Healthy
+siblings still require their current publication proof.
+
+When a retained provider process names an earlier versioned executable, lifecycle
+verification first checks the matching prepared-provider record. A confirmed pin
+mismatch reports `provider_pin_changed`, rather than interpreting that path as a
+changed PID file. This diagnostic grants no cross-version recovery authority;
+use the release that started the pool for recovery and stop, then prepare a fresh
+home for the current pin.

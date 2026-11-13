@@ -407,6 +407,14 @@ export async function readComposeBackendReading(
   } & ComposeBackendFeatureOptions
 ): Promise<ComposeBackendReading> {
   const compose = await readNativeComposeDocument(composeFile);
+  return await classifyComposeBackendReading(compose, opts);
+}
+
+/** Classifies a captured document without reopening its Compose path. */
+export async function classifyComposeBackendReading(
+  compose: unknown,
+  opts?: Parameters<typeof readComposeBackendReading>[1]
+): Promise<ComposeBackendReading> {
   const buildsEnabled = opts?.buildsEnabled === true;
   return {
     features: await classifyAdapted(

@@ -19,11 +19,13 @@ guessing a port or hostname.
 ## Backends
 
 The **Compose backend** is the default. It runs services with Docker Compose behind
-shared local routing. Every command on this site works there.
+shared local routing. General project examples use Compose unless they explicitly
+select native.
 
 The **native backend** is beta and opt-in. On Apple Silicon macOS it runs an
-explicitly prepared project without Docker, with a bounded command subset. Select it
-with `HACK_RUNTIME_BACKEND=native`. Read [the native backend overview](native/overview.md)
+explicitly prepared project without Docker Desktop or OrbStack, with a bounded
+command subset. Select it with `HACK_RUNTIME_BACKEND=native`.
+Read [the native backend overview](native/overview.md)
 before using it; a Compose example does not imply native support for the same flag.
 
 ## Start, inspect and stop

@@ -59,7 +59,7 @@ function fixedNativeMessage(
 }
 
 /** The fixed message and validated service a runtime failure carries, if any. */
-function nativeFailureDetail(value: Record<string, unknown>): {
+export function nativeFailureDetail(value: Record<string, unknown>): {
   message?: string;
   service?: string;
 } {
@@ -72,6 +72,36 @@ function nativeFailureDetail(value: Record<string, unknown>): {
     ...(message ? { message } : {}),
     ...(service ? { service } : {}),
   };
+}
+
+type SafeNativeFailure = Readonly<{
+  code: string;
+  message?: string;
+  service?: string;
+  /** Set only by the frontend's effect-free static review, never runtime output. */
+  startupPhase?: "static-preflight";
+}>;
+/** Opaque association: never retain an error, its text, logs, causes or getters. */
+const retainedFailures = new WeakMap<object, SafeNativeFailure>();
+
+export function nativeRuntimeFailure(
+  error: unknown
+): SafeNativeFailure | undefined {
+  return typeof error === "object" && error !== null
+    ? retainedFailures.get(error)
+    : undefined;
+}
+
+/** Preserve safe detail through a closed cleanup wrapper without an Error cause. */
+export function retainNativeRuntimeFailure<T extends Error>(opts: {
+  readonly error: T;
+  readonly original: unknown;
+}): T {
+  const detail = nativeRuntimeFailure(opts.original);
+  if (detail) {
+    retainedFailures.set(opts.error, detail);
+  }
+  return opts.error;
 }
 
 /**
@@ -96,6 +126,8 @@ export function nativeFailureNote(detail: {
  * diagnostics. The message is closed, so the CLI prints it without a stack.
  */
 export class NativeRuntimeRequestError extends ClosedCliError {
+  /** Owned request child ended by a terminal stop signal, independent of frontend event ordering. */
+  readonly stopSignal: "SIGINT" | "SIGTERM" | undefined;
   readonly nativeCode: string | undefined;
   readonly nativeCauseCode: string | undefined;
   /** Fixed (value-free) runtime message; see {@link nativeFailureNote}. */
@@ -104,19 +136,58 @@ export class NativeRuntimeRequestError extends ClosedCliError {
   readonly nativeStopFailures: readonly NativeStopFailure[] | undefined;
 
   constructor(opts: {
+    readonly stopSignal?: "SIGINT" | "SIGTERM";
     readonly message: string;
     readonly nativeCode?: string;
     readonly nativeCauseCode?: string;
     readonly nativeMessage?: string;
     readonly nativeService?: string;
     readonly nativeStopFailures?: readonly NativeStopFailure[];
+    readonly nativeStartupPhase?: "static-preflight";
   }) {
     super(opts.message);
+    this.stopSignal = opts.stopSignal;
     this.nativeCode = opts.nativeCode;
     this.nativeCauseCode = opts.nativeCauseCode;
     this.nativeMessage = opts.nativeMessage;
     this.nativeService = opts.nativeService;
     this.nativeStopFailures = opts.nativeStopFailures;
+    if (opts.nativeCode && ERROR_CODE.test(opts.nativeCode)) {
+      retainedFailures.set(
+        this,
+        Object.freeze({
+          code: opts.nativeCode,
+          ...(opts.nativeStartupPhase === "static-preflight"
+            ? { startupPhase: "static-preflight" as const }
+            : {}),
+          ...nativeFailureDetail({
+            message: opts.nativeMessage,
+            message_fixed: true,
+            service: opts.nativeService,
+          }),
+        })
+      );
+    }
+  }
+}
+
+/** Preserve owned-child stop evidence through wrappers that replace other runtime failures. */
+export function isNativeRuntimeStopError(
+  error: unknown
+): error is NativeRuntimeRequestError {
+  return (
+    error instanceof NativeRuntimeRequestError && error.stopSignal !== undefined
+  );
+}
+
+/** Classify a child stop independently of when the frontend's signal handler is scheduled. */
+function throwIfNativeRuntimeStopped(signal: NodeJS.Signals | null): void {
+  if (signal === "SIGINT" || signal === "SIGTERM") {
+    throw new NativeRuntimeRequestError({
+      message:
+        "Native runtime request was interrupted; its outcome may be uncertain. No request was replayed.",
+      stopSignal: signal,
+    });
   }
 }
 
@@ -346,6 +417,7 @@ export async function invokeNativeRuntime(opts: {
           "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
       });
     }
+    throwIfNativeRuntimeStopped(child.signalCode);
     if (outputBound(bound) && drain?.signal.aborted) {
       throw new NativeRuntimeRequestError({
         message:
@@ -560,7 +632,13 @@ function validNativeAuthoredRecoveryDrainSelection(
   );
 }
 
+export const NATIVE_PROVIDER_PIN_MESSAGE =
+  "This native home was prepared with a different provider version than this build's pin. Use the native executor from the release that started its pool to run runtime down --json on this home. Preserve the home for its retained data and prepare a fresh home for this build; see docs/guides/native-candidate.md.";
+
 function nativeFailureMessage(failure: NativeFailure | undefined): string {
+  if (failure?.code === "provider_pin_changed") {
+    return `Native runtime request failed (provider_pin_changed); ${NATIVE_PROVIDER_PIN_MESSAGE}`;
+  }
   const code = failure
     ? ` (${failure.code}${failure.causeCode ? `: ${failure.causeCode}` : ""})`
     : "";
@@ -585,7 +663,7 @@ function completionResponse(
       message: timedOut
         ? "Native runtime request timed out; inspect owned state before retrying."
         : nativeFailureMessage(failure),
-      nativeCode: timedOut ? undefined : failure?.code,
+      nativeCode: timedOut ? "native_request_timeout" : failure?.code,
       nativeCauseCode: timedOut ? undefined : failure?.causeCode,
       nativeMessage: timedOut ? undefined : failure?.message,
       nativeService: timedOut ? undefined : failure?.service,

@@ -5,13 +5,21 @@ import { join } from "node:path";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
-  PROJECT_ENV_SECRET_KEY_ENV,
+  missingProjectEnvKeyHint,
   ProjectEnvKeyMissingError,
   resolveProjectEnvConfig,
   resolveProjectEnvSelection,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import {
+  MAX_NATIVE_PRIVATE_INPUT_BYTES,
+  nativePrivateEnvironmentPayload,
+} from "./native-private-environment-payload.ts";
 import type { NativeEmulationPolicy } from "./native-project-platform.ts";
+import {
+  resolveShellEnvironment,
+  shellDeliveryProblem,
+} from "./native-shell-environment.ts";
 
 const LIMIT = 256 * 1024;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -24,6 +32,12 @@ export type NativeManagedFile = {
   readonly name: string;
   readonly target: string;
   readonly content: Buffer;
+};
+
+/** One value-free note about a service's `environment`: names only. */
+export type NativeEnvironmentNotice = {
+  readonly service: string;
+  readonly line: string;
 };
 
 export type NativeProjectInput = {
@@ -51,6 +65,26 @@ export type NativeProjectInput = {
   readonly effectiveEnvName: string | null;
   readonly environmentFiles: readonly string[];
   readonly serviceNames: readonly string[];
+  /**
+   * Private in-memory transport only: values read from the caller's shell for
+   * service `environment` references, by service. Kept apart from
+   * `managedEnvironment` so they are never fingerprinted or treated as values
+   * Hack stores; see {@link mergeNativeShellEnvironment}. Never log this map.
+   */
+  readonly shellEnvironment?: Readonly<
+    Record<string, Readonly<Record<string, string>>>
+  >;
+  /** Services whose private delivery includes a value from the shell, once merged. */
+  readonly shellServices?: readonly string[];
+  /** Forwarded source names by service, for value-free operator notices only. */
+  readonly forwardedShellVariables?: Readonly<
+    Record<string, readonly string[]>
+  >;
+  /**
+   * Value-free notes about shell references in service `environment`, such as
+   * a referenced variable that is not set. Names only.
+   */
+  readonly environmentNotices?: readonly NativeEnvironmentNotice[];
   /**
    * Emulation policy of each service the native adaptation opted in to `linux/amd64`
    * (`amd64Emulation`); absent when none did. See `native-project-platform.ts`.
@@ -97,7 +131,7 @@ function composeFileRefused(): Error {
 function environmentRefused(error: unknown): Error {
   if (error instanceof ProjectEnvKeyMissingError) {
     return refused(
-      `Hack managed env has secret entries but the project env key is missing. Run "hack env add --secret ..." to generate it, restore the key file, or set ${PROJECT_ENV_SECRET_KEY_ENV}`,
+      `Hack managed env has secret entries but the project env key is missing. ${missingProjectEnvKeyHint()}`,
       "E_CONFIG_INVALID"
     );
   }
@@ -107,7 +141,8 @@ function environmentRefused(error: unknown): Error {
   );
 }
 
-async function readCompose(path: string): Promise<Buffer> {
+/** Bounded, nonblocking regular Compose snapshot shared by start and preflight. */
+export async function readNativeComposeBytes(path: string): Promise<Buffer> {
   const file = await open(
     path,
     constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW
@@ -213,6 +248,140 @@ function normalizeManagedEnvironment(
   return managedEnvironment;
 }
 
+/**
+ * Resolves the shell references in each service's `environment` (see
+ * `native-shell-environment.ts`). The public document keeps only bare
+ * references; the values are returned separately and are not part of
+ * `managedEnvironment` until {@link mergeNativeShellEnvironment}.
+ */
+function resolveServiceShellEnvironment(opts: {
+  readonly services: Record<string, unknown>;
+  readonly managedEnvironment: Record<string, Record<string, string>>;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+}): {
+  readonly shellEnvironment: Record<string, Record<string, string>>;
+  readonly notices: NativeEnvironmentNotice[];
+  readonly forwardedNames: Readonly<Record<string, readonly string[]>>;
+} {
+  const shellEnvironment: Record<string, Record<string, string>> = {};
+  const notices: NativeEnvironmentNotice[] = [];
+  const forwardedNames: Record<string, readonly string[]> = {};
+  for (const [name, service] of Object.entries(opts.services)) {
+    // An `environment:` key with every entry commented out is YAML null.
+    if (
+      !isRecord(service) ||
+      service.environment === undefined ||
+      service.environment === null
+    ) {
+      continue;
+    }
+    const resolution = resolveShellEnvironment({
+      service: name,
+      environment: environment(service.environment, name),
+      env: opts.env,
+      managed: new Set(Object.keys(opts.managedEnvironment[name] ?? {})),
+    });
+    if (resolution === null) {
+      continue;
+    }
+    service.environment = resolution.environment;
+    shellEnvironment[name] = resolution.delivered;
+    forwardedNames[name] = resolution.forwardedNames;
+    if (SERVICE_NAME.test(name)) {
+      notices.push(
+        ...resolution.notices.map((line) => ({ service: name, line }))
+      );
+    }
+  }
+  return { shellEnvironment, notices, forwardedNames };
+}
+
+/**
+ * Adds the values read from the caller's shell to the private delivery. Native
+ * start and restart call this once, after the env fingerprints are taken, so a
+ * shell value is delivered to its service and never digested to disk. Commands
+ * that prepare input without calling it (exec, stale-env checks) deliver no
+ * shell value. Calling it again changes nothing.
+ */
+export function mergeNativeShellEnvironment(
+  input: NativeProjectInput
+): NativeProjectInput {
+  const shell = input.shellEnvironment ?? {};
+  const fromShell = Object.keys(shell).filter(
+    (name) => Object.keys(shell[name] ?? {}).length > 0
+  );
+  if (fromShell.length === 0) {
+    return input;
+  }
+  const managedEnvironment: Record<string, Readonly<Record<string, string>>> = {
+    ...input.managedEnvironment,
+  };
+  for (const name of fromShell) {
+    managedEnvironment[name] = {
+      ...(input.managedEnvironment[name] ?? {}),
+      ...shell[name],
+    };
+  }
+  return {
+    ...input,
+    managedEnvironment,
+    shellEnvironment: {},
+    shellServices: fromShell,
+  };
+}
+
+/**
+ * Refuses when a delivery containing shell values exceeds the runtime's service
+ * limits or complete stdin limit. Service-level refusals name the service.
+ * Call it on the input that is about to be delivered: after the credential adapters added
+ * theirs, and after {@link selectActiveNativeProjectInput}, because the runtime
+ * receives nothing for a service the selected profiles leave out.
+ */
+export function requireNativeShellDeliveryFits(
+  input: NativeProjectInput
+): void {
+  const fromShell = new Set(
+    (input.shellServices ?? []).filter((name) =>
+      Object.hasOwn(input.managedEnvironment, name)
+    )
+  );
+  const problem = shellDeliveryProblem({
+    services: input.managedEnvironment,
+    fromShell,
+  });
+  if (problem !== null) {
+    throw refused(shellDeliveryRefusal(problem));
+  }
+  if (
+    fromShell.size > 0 &&
+    nativePrivateEnvironmentPayload({
+      services: input.managedEnvironment,
+      files: input.managedFiles,
+      planId: "0".repeat(64),
+      run: "0".repeat(32),
+    }).byteLength > MAX_NATIVE_PRIVATE_INPUT_BYTES
+  ) {
+    throw refused(
+      "the complete private environment delivery, counting values read from your shell, is over 256 KiB"
+    );
+  }
+}
+
+function shellDeliveryRefusal(
+  problem: NonNullable<ReturnType<typeof shellDeliveryProblem>>
+): string {
+  if (problem.kind === "services") {
+    return "more than 32 services receive private environment values, counting those read from your shell";
+  }
+  const label = serviceLabel(problem.service);
+  if (problem.kind === "value") {
+    return `${label} field environment: a value read from your shell contains a NUL byte`;
+  }
+  return problem.kind === "keys"
+    ? `${label} field environment: more than 256 variables are delivered privately, counting those read from your shell`
+    : `${label} field environment: the values delivered privately, counting those read from your shell, are over 32 KiB together`;
+}
+
 /** Every value the resolved project env stores as a secret, for any scope or target. */
 function managedSecretValues(
   resolved: Awaited<ReturnType<typeof resolveProjectEnvConfig>>
@@ -284,6 +453,15 @@ export function selectActiveNativeProjectInput(opts: {
         active.has(service)
       )
     ),
+    ...(opts.input.managedFiles === undefined
+      ? {}
+      : {
+          managedFiles: Object.fromEntries(
+            Object.entries(opts.input.managedFiles).filter(([service]) =>
+              active.has(service)
+            )
+          ),
+        }),
   };
 }
 
@@ -297,9 +475,16 @@ export async function prepareNativeProjectInput(opts: {
   readonly projectDir: string;
   readonly composeFile: string;
   readonly envName?: string | null;
+  /**
+   * The caller's environment, read only for the variables that service
+   * `environment` entries reference. Omitted, nothing is read and a shell
+   * reference resolves as unset: only native start and restart pass the
+   * process environment.
+   */
+  readonly env?: Readonly<Record<string, string | undefined>>;
 }): Promise<NativeProjectInput> {
   try {
-    const bytes = await readCompose(opts.composeFile);
+    const bytes = await readNativeComposeBytes(opts.composeFile);
     let compose: unknown;
     try {
       compose = Bun.YAML.parse(
@@ -342,6 +527,11 @@ export async function prepareNativeProjectInput(opts: {
       compose.services,
       resolved
     );
+    const shell = resolveServiceShellEnvironment({
+      services: compose.services,
+      managedEnvironment,
+      env: opts.env,
+    });
     const normalizedComposeJson = JSON.stringify(compose);
     if (Buffer.byteLength(normalizedComposeJson) > LIMIT) {
       throw refused("the normalized Compose project exceeds 256 KiB");
@@ -370,6 +560,9 @@ export async function prepareNativeProjectInput(opts: {
       effectiveEnvName: selection.effectiveEnv,
       environmentFiles: resolved?.files ?? [],
       serviceNames,
+      shellEnvironment: shell.shellEnvironment,
+      forwardedShellVariables: shell.forwardedNames,
+      environmentNotices: shell.notices,
     };
   } catch (error: unknown) {
     // Only this module's closed refusals carry a cause; anything else stays generic.

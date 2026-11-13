@@ -12,6 +12,8 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+#[cfg(any(target_os = "macos", test))]
+pub(in crate::provider) mod log_follow;
 #[cfg(any(all(target_os = "macos", feature = "environment-launcher"), test))]
 mod private_service_exec;
 #[cfg(any(target_os = "macos", test))]
@@ -678,6 +680,10 @@ pub(super) struct Observer<'a> {
     transport: Transport,
 }
 impl<'a> Observer<'a> {
+    #[cfg(target_os = "macos")]
+    pub(in crate::provider) fn guest(&self) -> &ObservedGuest<'a> {
+        &self.guest
+    }
     pub(super) fn connect(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         let guest = ObservedGuest::connect(candidate)?;
         let transport = Transport::new(&guest.engine_socket()?, Duration::from_secs(10))?;

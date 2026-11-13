@@ -1,4 +1,5 @@
 import type { NativeProjectPsResult } from "../backends/native-project-observe.ts";
+import { NATIVE_PROVIDER_PIN_MESSAGE } from "../backends/native-runtime-client.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
@@ -42,6 +43,8 @@ export async function displayNativePs(
       message:
         "Native runtime is busy with another operation, such as a starting hack up; service state is available once it finishes or reports ready.",
     });
+  } else if (result.status === "provider_pin_changed") {
+    logger.warn({ message: NATIVE_PROVIDER_PIN_MESSAGE });
   } else if (result.status === "owner_unconfirmed") {
     logger.warn({
       message:
@@ -50,7 +53,7 @@ export async function displayNativePs(
   } else if (result.status === "runtime_degraded") {
     logger.warn({
       message:
-        "Native graph owner reported a degraded runtime. Service rows do not prove usable readiness; inspect graph owner-status.",
+        "Native graph owner reported a degraded runtime. Service rows do not prove usable readiness. Run hack down to stop this project with data retained.",
     });
   }
   await display.table({
@@ -62,4 +65,14 @@ export async function displayNativePs(
       item.health ?? "",
     ]),
   });
+  if (result.ports?.length) {
+    await display.table({
+      columns: ["NATIVE SERVICE", "PUBLISHED PORT", "STATE"],
+      rows: result.ports.map((port) => [
+        port.service,
+        `127.0.0.1:${port.port}`,
+        port.state,
+      ]),
+    });
+  }
 }

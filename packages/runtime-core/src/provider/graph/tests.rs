@@ -305,6 +305,147 @@ fn image_architecture_admission_follows_the_reviewed_emulation_policy() {
     }
 }
 
+/// A Compose file's `logging:` block and its ordinary metadata labels used to
+/// pass review and then stop the start with the generic `graph_subset`. Neither
+/// reaches the engine (graph labels are ownership-only, and native keeps its
+/// own bounded container logs), so they are reviewed as warnings and admitted.
+/// Router, runtime and ownership labels and external log drivers still refuse.
+#[test]
+fn inert_logging_and_metadata_labels_are_admitted_with_review_warnings() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let prepare = |web: &dyn Fn(&mut Value)| {
+        let mut document = compose(&image, "marker", false);
+        web(&mut document["services"]["web"]);
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let codes: Vec<(String, String)> = review
+            .plan
+            .diagnostics
+            .iter()
+            .map(|d| (d.severity.clone(), d.code.clone()))
+            .collect();
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        );
+        let admitted = inputs.and_then(|inputs| {
+            config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32), None)
+        });
+        (codes, admitted.map(|_| ()).map_err(|error| error.code))
+    };
+    let warned = |codes: &[(String, String)], code: &str| {
+        codes
+            .iter()
+            .filter(|(severity, found)| severity == "warning" && found == code)
+            .count()
+    };
+
+    let (codes, admitted) = prepare(&|web| {
+        web["logging"] = json!({"driver":"json-file","options":{"max-size":"10m"}});
+        web["labels"] =
+            json!({"com.example.team":"web","org.opencontainers.image.source":"synthetic"});
+    });
+    assert_eq!(admitted, Ok(()), "{codes:?}");
+    assert_eq!(warned(&codes, "logging_not_applied"), 1);
+    // One warning per service, however many labels it carries.
+    assert_eq!(warned(&codes, "labels_not_applied"), 1);
+    assert!(codes.iter().all(|(severity, _)| severity != "error"));
+
+    // Control: without them there is nothing to warn about.
+    let (codes, admitted) = prepare(&|_| {});
+    assert_eq!(admitted, Ok(()));
+    assert_eq!(warned(&codes, "logging_not_applied"), 0);
+    assert_eq!(warned(&codes, "labels_not_applied"), 0);
+
+    // An external log sink is still an error at review and is not admitted.
+    let (codes, admitted) = prepare(&|web| {
+        web["logging"] = json!({"driver":"syslog"});
+    });
+    assert!(codes.contains(&("error".into(), "external_logging_driver".into())));
+    assert!(admitted.is_err());
+
+    // Router, runtime and ownership labels are never treated as inert.
+    for key in [
+        "traefik.enable",
+        "caddy.header",
+        "caddy_ingress_network",
+        "caddy_0",
+        "com.docker.compose.project",
+        "hack.custom",
+        "io.hack-local.owner",
+    ] {
+        let (codes, admitted) = prepare(&|web| {
+            web["labels"] = json!({ key: "x" });
+        });
+        assert!(
+            codes.contains(&("error".into(), "external_route_or_owner_label".into())),
+            "{key}: {codes:?}"
+        );
+        assert!(admitted.is_err(), "{key}");
+        assert_eq!(warned(&codes, "labels_not_applied"), 0, "{key}");
+    }
+}
+
+/// A routed service has its own label check (`routes::validate_plan`). Plain
+/// metadata beside valid routing labels must not turn into a route refusal.
+#[test]
+fn a_routed_service_may_carry_metadata_labels() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let outcome = |extra: Option<(&str, &str)>| {
+        let mut document = compose(&image, "marker", false);
+        let mut labels = json!({"caddy":"web.example.test",
+            "caddy.reverse_proxy":"{{upstreams 3000}}","caddy.tls":"internal"});
+        if let Some((key, value)) = extra {
+            labels[key] = json!(value);
+        }
+        document["services"]["web"]["labels"] = labels;
+        document["services"]["web"]["healthcheck"] = json!({"x-hack-http":{"port":3000,
+            "path":"/health","interval_ms":100,"timeout_ms":500,"retries":3,"start_period_ms":0}});
+        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let compatible = review.plan.enrollment_compatible;
+        let inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        );
+        let prepared = inputs.and_then(|inputs| {
+            config::prepare_delivery(
+                inputs,
+                &goals(),
+                &"a".repeat(32),
+                &"b".repeat(32),
+                None,
+                config::DeliveryOptions {
+                    routing_enrolled: true,
+                    ..Default::default()
+                },
+            )
+        });
+        (compatible, prepared.map(|_| ()).map_err(|error| error.code))
+    };
+    let plain = outcome(None);
+    assert!(plain.0);
+    // Lowering the route's HTTP probe needs the native-http-probe build, so the
+    // baseline itself may stop later; it never stops at the route check.
+    assert_ne!(plain.1, Err("graph_route_binding"));
+    // Metadata changes nothing: same review verdict, same preparation outcome.
+    assert_eq!(outcome(Some(("com.example.team", "web"))), plain);
+    // Control: another router label beside the route is still refused at review.
+    let extra_router_label = outcome(Some(("caddy.header", "X")));
+    assert!(!extra_router_label.0);
+    assert!(extra_router_label.1.is_err());
+}
+
 #[test]
 fn declared_amd64_requires_the_explicit_emulation_opt_in() {
     let fixture = Fixture::new();
@@ -3228,6 +3369,19 @@ fn loopback_ports_are_admitted_only_for_the_foreground_owner() {
             "execution_incompatible"
         };
         assert_eq!(code, Some(expected), "{ports}");
+        if check == "web" {
+            let review = project::plan(&candidate, fixture.options()).unwrap();
+            let start = config::loopback_publications(&review.plan, true).unwrap_err();
+            let preflight = review
+                .start_refusals
+                .iter()
+                .find(|e| e.code == start.code)
+                .unwrap();
+            assert_eq!(preflight.message, start.message);
+            assert!(preflight.message_fixed);
+            assert_eq!(preflight.service.as_deref(), Some("web"));
+            assert_eq!(review.plan_id, project::identity(&review.plan).unwrap());
+        }
     }
     let mut many = compose(&image, "marker", false);
     many["services"]["web"]["ports"] = json!(

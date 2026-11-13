@@ -2,6 +2,7 @@ import { mkdir, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { curateCliReference } from "./curate-cli";
 import { embedDiagrams } from "./diagrams";
+import { pinInstallerExamples } from "./installer-pin";
 import versions from "./versions.json";
 
 let activeRevision = versions.v5.revision;
@@ -62,11 +63,13 @@ export function rewriteTarget(target: string, source: string): string {
   if (routes.has(absolute)) {
     return `${routes.get(absolute)}${fragment}`;
   }
-  if (!activeFiles.includes(local)) {
+  const isFile = activeFiles.includes(local);
+  const isDirectory = activeFiles.some((path) => path.startsWith(`${local}/`));
+  if (!(isFile || isDirectory)) {
     throw new Error(`Missing public source at pinned revision: ${local}`);
   }
   const encoded = local.split("/").map(encodeURIComponent).join("/");
-  return `https://github.com/hack-dance/hack/blob/${activeRevision}/${encoded}${fragment}`;
+  return `https://github.com/hack-dance/hack/${isFile ? "blob" : "tree"}/${activeRevision}/${encoded}${fragment}`;
 }
 
 async function rewriteLinks(content: string, source: string): Promise<string> {
@@ -142,6 +145,7 @@ async function writeDocuments(
 const nativeSectionOrder = [
   "overview",
   "try-it",
+  "preflight",
   "limits",
   "install",
   "reference",
@@ -149,6 +153,24 @@ const nativeSectionOrder = [
   "config-import",
   "full-reference",
 ];
+/** Keep recipes in reading order when snapshot and editorial sources are mixed. */
+const recipeSectionOrder = [
+  "overview",
+  "cli-sign-in",
+  "tunnels",
+  "remote-database",
+  "migrations",
+  "environments",
+  "deps-service",
+  "dependency-directories",
+  "cleanup",
+  "config-examples",
+  "common-pitfalls",
+];
+const sectionOrders: Record<string, readonly string[]> = {
+  native: nativeSectionOrder,
+  recipes: recipeSectionOrder,
+};
 const diagramsOutput = resolve(repositoryRoot, "site/public/diagrams");
 
 /** Rendered diagrams are generated output: the directory holds exactly this run's set. */
@@ -237,6 +259,18 @@ async function readSnapshot(
   return raw;
 }
 
+/**
+ * A snapshot is taken at the release commit, before that release's tag exists,
+ * so its installer artifacts and shell version variable can still name the
+ * previous prerelease. Published examples use the corpus's pinned release.
+ */
+export function pinnedBootstrapText(text: string, label: string): string {
+  const prerelease = /next\.(\d+)/.exec(label)?.[1];
+  return prerelease
+    ? pinInstallerExamples({ text, tag: `v5.0.0-next.${prerelease}` })
+    : text;
+}
+
 function publishedCliText(text: string, version: "v4" | "v5"): string {
   let curated = curateCliReference(text, { version });
   if (version === "v5") {
@@ -258,6 +292,20 @@ function editorialProvenanceLabel(source: {
   return source.explicit ? `; source label: ${source.label}` : "";
 }
 
+/** Site discovery links supplement the hashed environment guide across pins. */
+function recipeLinksForPage(
+  version: "v4" | "v5",
+  slug: string
+): { markdown: string; provenance: string } {
+  if (version !== "v5" || slug !== "env") {
+    return { markdown: "", provenance: "" };
+  }
+  return {
+    markdown: `\n\n## Copy-paste recipes\n\nStart with [Environments](${documentRoute(version, "recipes/environments")}) for overlays,\n[Remote database](${documentRoute(version, "recipes/remote-database")}) for service and host scopes,\nor [Config examples](${documentRoute(version, "recipes/config-examples")}) for complete project files.\n`,
+    provenance: "; site recipe links appended",
+  };
+}
+
 /** Write the sidebar order of each folder that has pages in this version. */
 function stageFolderNavigation(
   version: string,
@@ -266,6 +314,7 @@ function stageFolderNavigation(
 ): void {
   for (const [folder, title] of [
     ["guides", "Guides"],
+    ["recipes", "Recipes"],
     ["reference", "Reference"],
     ["native", "Native backend (beta)"],
   ] as const) {
@@ -275,8 +324,7 @@ function stageFolderNavigation(
     if (slugs.length === 0) {
       continue;
     }
-    // The native section reads in order: introduction first, reference last.
-    const order = folder === "native" ? nativeSectionOrder : [];
+    const order = sectionOrders[folder] ?? [];
     staged.set(
       `${version}/${folder}/meta.json`,
       JSON.stringify({
@@ -305,6 +353,11 @@ async function stageVersion(
     await readSnapshot(entry.snapshot, entry.sha256);
     routes.set(
       resolvePublicSource(entry.file),
+      documentRoute(version, entry.slug)
+    );
+    // Editorial links address site slugs even after a snapshot replaces a fork.
+    routes.set(
+      resolvePublicSource(`docs/site/${entry.slug}.md`),
       documentRoute(version, entry.slug)
     );
   }
@@ -356,10 +409,13 @@ async function stageVersion(
     if (entry.slug === "reference/cli") {
       text = publishedCliText(text, version);
     }
+    text = pinnedBootstrapText(text, manifest.label);
+    const additions = recipeLinksForPage(version, entry.slug);
+    text += additions.markdown;
     const url = `https://hack.foo/docs/${version}${entry.slug === "index" ? "" : `/${entry.slug}`}`;
     const provenance = entry.editorial
       ? `Editorial source: ${entry.snapshot}; based on ${entry.source.revision}${editorialProvenanceLabel(entry.source)}`
-      : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}`;
+      : `Original: ${entry.file}; revision: ${manifest.revision}; SHA-256: ${entry.sha256}${additions.provenance}`;
     const page = await embedDiagrams(
       text.replace(heading, "").trim(),
       diagrams,
@@ -374,6 +430,9 @@ async function stageVersion(
     );
     corpus.push(`<!-- ${provenance}; URL: ${url} -->\n${text}`);
   }
+  // Pages only some versions publish appear in the sidebar only where they exist.
+  const optional = (slug: string): string[] =>
+    pages.some((entry) => entry.slug === slug) ? [slug] : [];
   staged.set(
     `${version}/meta.json`,
     JSON.stringify({
@@ -382,13 +441,18 @@ async function stageVersion(
         "index",
         "install",
         "getting-started",
+        ...optional("release-notes"),
         "upgrade",
         "core",
         "env",
         "lifecycle",
         "sessions",
+        ...optional("dev"),
         "agent-handoff",
         "guides",
+        ...(pages.some((entry) => entry.slug.startsWith("recipes/"))
+          ? ["recipes"]
+          : []),
         "integrations",
         ...(pages.some((entry) => entry.slug.startsWith("native/"))
           ? ["native"]

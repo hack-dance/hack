@@ -189,6 +189,144 @@ finalization checks still apply. Fresh and already branch-scoped graphs keep
 their normal branch namespace. This compatibility path does not authorize
 adopting an unrelated branch or project.
 
+## Check a project before you start it
+
+`hack up` on the native backend checks a Compose project in two places and stops
+at the first refusal of each: the CLI's own admission, then the runtime review.
+To see the findings together, run the preflight:
+
+```sh
+hack doctor --native-preflight            # in the project, or with --path <root>
+hack doctor --native-preflight --profile dev,ops
+hack doctor --native-preflight --json
+```
+
+It lists the blockers and notes for the project's `.hack/docker-compose.yml`,
+each with a plain sentence and a fix. It judges what `hack up` judges: the
+Compose document after the selected native adaptation and the project-wide
+extra hosts are applied, reviewed with the profiles you pass.
+
+The review includes the graph driver's own file-local start admission. A UDP
+publication is a `graph_port_publication` blocker with the same reason as
+foreground `up`; native publishes TCP only. Graph budgets, readiness, probes
+and restart restrictions use the same admission checks. Inactive profile
+services do not contribute publication blockers.
+
+The Compose input must be a nonempty regular file of at most 256 KiB, not a
+symbolic link. Unreadable, changing or oversized input is reported as
+`compose_file_unreadable`; the check never waits for a FIFO writer.
+
+It changes nothing in the project and starts nothing: no VM, no image pull, no
+lifecycle hook. It accepts only `--path`, `--profile` and `--json`. The report
+never prints authored values. A finding names a closed code, a service and a
+field; environment values, label keys and values, paths and image names are
+left out.
+
+The runtime review half needs a native runtime, so run the preflight from the
+`hack-next` launcher for the full list. Without native selection only the CLI's
+checks run and the review is reported as `skipped`. The review needs no running
+VM.
+
+Use a matching updated CLI and runtime. A runtime without start-admission review
+is reported as `unavailable` with an update hint and cannot produce `ready: true`.
+Image acquisition, private delivery, verified source/cache bindings, retained
+ownership and actual service readiness are checked during `up`.
+
+With `--json` the report is the `data` of the standard result envelope:
+
+```json
+{
+  "report_version": 1,
+  "backend": "native",
+  "compose_file": ".hack/docker-compose.yml",
+  "ready": false,
+  "runtime_review": { "status": "completed" },
+  "blockers": [
+    {
+      "severity": "blocker",
+      "gate": "cli",
+      "code": "env_file",
+      "service": "web",
+      "field": "env_file",
+      "message": "The service uses env_file, which native does not read.",
+      "fix": "Move its variables into Hack managed env with hack env set --service, or run hack doctor --migrate-env-config."
+    }
+  ],
+  "warnings": []
+}
+```
+
+- `ready` is true only when there is no blocker and the runtime review
+  completed.
+- The exit status follows the blockers: `0` with none, `1` otherwise. A skipped
+  or unavailable review is not a blocker, so that run exits `0` with
+  `ready: false`. With `--json` the envelope is `ok: true` in both cases; read
+  `ready` and `blockers` for the verdict.
+- `gate` is `cli` or `runtime`: which of the two checks reported the finding.
+- `runtime_review.status` is one of:
+  - `completed`: the review ran.
+  - `stopped`: the review met a project problem it cannot continue past, such as
+    an anonymous volume (`invalid_mount`) or a mount outside the project
+    (`source_escape`). `code` names it, it is listed as a blocker, and more
+    findings can appear once it is fixed.
+  - `skipped`: the review did not run. Without `code`, no native runtime is
+    selected. `code` is `native_selection_incomplete` when
+    `HACK_RUNTIME_BACKEND=native` is set without a candidate, and
+    `native_adaptation_invalid` when the adaptation was refused: the unadapted
+    document is not reviewed, because its findings would mislead.
+  - `unavailable`: the selected runtime did not return a review. `code`, when
+    present, is the runtime's own failure code. This says nothing about the
+    project.
+- Codes are stable. The CLI's codes are `compose_file_unreadable`,
+  `project_config_invalid`, `native_settings_invalid`,
+  `native_adaptation_invalid`, `internal_hosts_unreadable`,
+  `internal_hosts_without_dependencies`, `external_network`, `external_volume`,
+  `reserved_label`, `unsupported_build`, `foreign_platform`,
+  `invalid_service_name`, `invalid_service`, `build_requires_opt_in`,
+  `unsupported_build_form`, `emulated_build`, `env_file`, `missing_image`,
+  `extra_hosts_without_dependencies`, `unsupported_logging`, `invalid_restart`,
+  `unsupported_label`, `invalid_http_probe`, `managed_env_unreadable`,
+  `dotenv_without_managed_env`, `shared_source_grant_required`,
+  `route_probe_required` and `too_many_bridges`. Runtime findings use the
+  review's own diagnostic codes, for example `privileged_service` or
+  `invalid_mount`, and `review_incompatible` when the review does not admit the
+  project and gives no finding this version can show. A code this version has
+  no sentence for is still listed, by its code and field.
+
+The preflight is a report, not an admission decision: `hack up` still runs its
+own checks, and a clean report starts nothing. Foreground and detached `up`
+also run the shared file-local start checks on the selected, adapted Compose
+input before hooks, image acquisition or VM boot. A known static blocker such
+as UDP publication refuses without starting a cold pool. Admitted builds use
+review-only image placeholders for this check; startup still builds or selects
+the real image and repeats its review before graph admission. Missing or invalid
+static-review metadata refuses before boot and names the preflight command.
+Detached `up` identifies a static refusal as “nothing was started” and names the
+configuration fix and preflight command. Failures after startup begins retain
+the guidance to inspect the run and preserve its recovery evidence.
+The standalone preflight does not cover:
+
+- A project with native project inputs: a native project file
+  (`.hack/hack.project.json`) or a Compose file adopted into generated native
+  inputs. Those take another admission path, and the preflight refuses them
+  with a usage error.
+- `--env`, and a retained run's environment. It uses the project's default
+  environment to select the per-env adaptation and dependency files; `hack up`
+  uses `--env` when given, or the environment of a run it resumes.
+- Checks that need secret values or a resolved managed environment: a build
+  argument that carries a stored secret, a managed variable whose name is not
+  a valid environment name, and managed env that fails to resolve. `hack up`
+  also replaces the `environment` entries that managed env supplies before its
+  review, so a malformed authored value under such a key is a blocker here and
+  not there.
+- Image pinning. `hack up` reviews images by content ID after it has admitted
+  and pulled them; the preflight reviews the references as written.
+- What only a start can find: an image that cannot be pulled or admitted, a
+  source tree over the size limit, a process wrapper a service cannot run, a
+  host dependency without a binding, or a host port that is already in use.
+- More than the first problem of a kind that stops the review. See `stopped`
+  above.
+
 ## Compose projects that stay on the Compose backend
 
 In v5, an unchanged Compose project (`.hack/hack.config.json` with
@@ -239,8 +377,16 @@ The bundle's `hack-v5` entrypoint and the `hack-next` launcher accept the same
 selection; see [Test both backends](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends).
 
 Other labels keep their native behavior. Routing (`caddy*`) and dependency cache
-(`hack.dependencies.*`) labels are reviewed as before, and other ordinary labels
-are refused with the general native configuration refusal.
+(`hack.dependencies.*`) labels are reviewed as before. Other ordinary labels, such
+as `com.example.team` or `org.opencontainers.image.*`, are plain metadata: native
+does not apply them to containers and reports the warning `labels_not_applied`.
+Router and runtime labels outside those forms (`traefik.*`, other `caddy.*`,
+`hack.*`) still refuse with `external_route_or_owner_label`.
+
+A `logging:` block with the `json-file`, `local` or `none` driver is accepted and
+not applied (warning `logging_not_applied`): native keeps its own bounded container
+logs, read with `hack logs`. Any other driver still refuses with
+`external_logging_driver`.
 
 Hack's own one-shot marker is not an ownership label. A service labeled exactly
 `hack.service.one-shot: "true"` (or `hack.service.one-shot=true` in list form),
@@ -332,7 +478,8 @@ bridge to the container's target port, after the graph is ready. The rules:
 
 - Only TCP with an explicit host port is published. UDP, an engine-assigned host
   port (a bare `"3000"`), and IPv6 loopback (`::1`) publication are refused with
-  `graph_port_publication`; keep those projects on the Compose backend.
+  `graph_port_publication` before VM boot, including detached `up`; keep those
+  projects on the Compose backend.
 - One graph publishes at most 16 ports. Routes and published ports share the
   pool's 32 application bridge sockets.
 - Two active services, two graphs in the same pool, or a graph and any other
@@ -396,11 +543,35 @@ frontend and Rust foreground owners in a background session, returning after
 readiness and up-after hooks. The frontend keeps host lifecycle processes and
 down hooks alive. From any terminal, use `hack ps`, `hack logs`, `hack exec`,
 `hack restart` or `hack down` through the existing authenticated controls.
+When the project is already up, `hack up -d` starts nothing and succeeds: it
+prints `Project is already running.` and exits `0`, and with
+`--json` returns the same result shape as a start, with `alreadyRunning: true`
+and the running and completed services. That answer is given only for a ready
+graph whose foreground owner answers and whose runtime it verified; any other
+state launches a start as before. This no-op applies no configuration edits;
+the message gives the `hack restart` command for the same project and branch
+to apply them. Explicit `--env` and `--profile` must match the saved run. A
+different selection, or a legacy record whose selection is unknown, refuses
+instead of reporting success; stop that instance before starting a different
+selection. When the graph is live but some services have not reached their
+required state, `hack up -d` refuses with `E_STARTUP_INCOMPLETE`, names them,
+and gives one shell-quoted `hack restart` command preserving the selected
+`--path`, `--project` and `--branch`: native `up`
+cannot start part of a running project. Nothing is started or stopped.
+Completion is accepted only when the runtime receipt requires the service to
+complete and its current observation is exit `0`. A long-running service that
+exits `0`, or an exited service with an unknown readiness goal, is still down.
+A ready graph containing only completed one-shots also succeeds without
+launching another start. A running one-shot has not completed its required state.
+
 Restart starts a new foreground generation; `restart --detach` remains unsupported.
 Without these flags, `hack up` stays attached and Ctrl-C requests ordinary stop.
 Detached startup has no terminal stdin and suppresses hook/owner output rather
 than persisting potentially private values. Service logs remain available through
 `hack logs`. Its JSON result uses the v4 lifecycle envelope.
+When startup fails, the launcher reports the runtime's validated code and fixed
+reason, including the service when available, in human and JSON output. Hook
+output and arbitrary owner diagnostics remain suppressed.
 
 A private IPC readiness/acceptance exchange transfers only launcher responsibility;
 it creates no new runtime authority. Launcher loss before acceptance requests
@@ -729,15 +900,117 @@ compatibility. V4 and candidate homes remain separate; this procedure does not
 migrate V4 data into the candidate or replace the installed `hack`. DNS, trust and
 client configuration are outside this bundle-selection procedure.
 
-Provider setup is separate and explicit. Obtain the exact archives identified in
-`provider-pins.json`, then run:
+Provider setup is separate and explicit. Prepare the native runtime with:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime setup
+```
+
+`runtime setup` lists the pinned SmolVM, Docker engine and four Alpine guest
+packages with their exact compressed byte lengths, source hosts, SHA-256 hashes, private cache and
+install destination, then asks once when preparation is needed. `--no-interactive` (or
+truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case and
+surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
+`--accept-downloads` explicitly consents. No provider download happens from `up`,
+the installer, the probe or any other implicit path. The optional BuildKit client
+is still prepared separately below.
+
+The executable embeds `provider-pins.json` and checks its hashes against the
+manual preparation pins. HTTPS redirects may use only the original host and the
+pin's explicit `redirect_hosts`. The GitHub release pin allows
+`release-assets.githubusercontent.com`. Connections have a 15-second timeout;
+each network read has a 60-second timeout. An explicit 30-minute overall deadline
+per file spans all redirect headers and body reads; progress does not renew it.
+`size_bytes` pins the exact compressed length, shown in the prompt and checked on
+responses, streamed bytes and complete-file verification. `max_bytes` remains a
+separate sanity ceiling. Either a length or hash mismatch refuses publication.
+Downloads never pass through a shell, proxy configuration, keychain or admin prompt.
+Networks that require an HTTP proxy must use the offline form below; setup ignores
+proxy environment variables.
+
+Private partial files and verified archives stay under
+`<candidate-home>/.hack-local/setup/downloads`. A rerun resumes a partial download
+when the server supports ranges, otherwise restarts it. Every complete file is
+hashed before any extraction; a mismatch reports `setup_hash_mismatch` with the
+filename and publishes no provider. A corrupt complete cache file is preserved
+and reports `setup_cache_invalid` with its filename and recovery instructions;
+setup error messages omit full local paths. `setup_pin_unavailable` means a pinned
+URL returned 404 or 410: upstream no longer serves this pinned file; update Hack
+or use the offline form. Alpine repositories can retire package revisions. The
+weekly provider pin watch checks every pinned URL with bounded HEAD requests and
+compares successful replies' `Content-Length` with `size_bytes`. Only 404 and 410
+mean a file is no longer served. Timeouts, other HTTP errors (403, 429 or 5xx),
+and a missing `Content-Length` are transient failures
+and never reopen a closed issue by themselves. Size mismatches and policy
+refusals are reported separately. The watch never changes pins or mirrors files;
+availability checks do not verify archive contents.
+The current pins do not record external signature/checksum files: the repository
+hashes decide acceptance, and the existing SmolVM prepare step also checks its
+code signature. The qualification script's optional upstream checksum comparison
+remains a separate check.
+
+Setup calls the same three manual prepare functions in a private staging home,
+verifies the complete provider set, syncs it, then publishes the provider directory
+under the lifecycle lock. Interrupted staging is rebuilt on rerun. A complete
+matching install is verified before consent and reused without a prompt, consent
+flag, network or preparation; setup
+ends with `runtime probe --profile development`. An existing incomplete, changed
+or differently pinned provider directory is preserved and refused as
+`setup_existing_invalid`: finish the manual steps, repair a changed tree, or use
+a fresh home. Setup never upgrades a home's provider pin in place.
+If another runtime operation holds the lock, `provider_busy` asks you to rerun;
+verified downloads stay cached.
+
+![Native setup decisions](../diagrams/native-setup.svg)
+
+For offline setup, supply every input together; this form never constructs a
+network client:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime setup \
+  --archive /absolute/smolvm-archive.tar.gz \
+  --engine-archive /absolute/docker-archive.tgz \
+  --network-tools-directory /absolute/private/pinned-apks
+```
+
+Or obtain the exact archives identified in `provider-pins.json` and run the
+unchanged individual manual commands (also supported by earlier prereleases):
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare --archive /absolute/smolvm-archive.tar.gz
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-engine --archive /absolute/docker-archive.tgz
 ./hack-native --candidate-root /absolute/private/candidate-home runtime prepare-network-tools --directory /absolute/private/pinned-apks
-./hack-native --candidate-root /absolute/private/candidate-home runtime probe --json
+./hack-native --candidate-root /absolute/private/candidate-home runtime probe --profile development --json
 ```
+
+For a `hack-next` install, `hack-native` is
+`~/.hack-next/versions/<version>/bundle/hack-native` and its home is
+`~/.hack-next/versions/<version>/native-home`. `runtime probe` checks the research
+profile unless you pass `--profile development`; the research profile can report
+"not admitted" on a Mac that the development profile admits. The Alpine package
+hashes are listed in `provider-pins.json` and under
+[network tool packages](#network-tool-packages).
+
+The current SmolVM pin is 1.34.1 (`smolvm-1.34.1-darwin-arm64.tar.gz`, SHA-256
+`8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9`, the value
+upstream publishes in the release's `checksums.sha256`). `provider-pins.json` is the
+source of truth; the executor refuses any other archive.
+
+**Provider pin changes need a fresh candidate home.** A home's guest rootfs copy,
+disks and provider database are made by the SmolVM release it was prepared with. When
+an executor pins a different release, every start and `runtime prepare` in that home
+refuses with `provider_pin_changed` and names both versions. Nothing in the home is
+changed: its volumes and prepared tree stay in place, and a build that pins the
+recorded release still runs it. `runtime probe` and `runtime repair-provider-tree`
+refuse the same way, and so does `runtime down` while the old provider runs, so stop a
+running pool (`hack down`, then `runtime down`) before installing a build with a new pin; a pool left running must be
+stopped with the build that started it. For an incompatible stranded home, use the native executor from the release that
+started its pool to run `runtime down --json` on that home. Preserve the home for
+its retained data, then prepare a fresh home for the new build.
+A retained earlier provider path is diagnosed as `provider_pin_changed`, not as a
+changed PID file. Recovery across provider versions is not supported.
+Prepare a new candidate home with the pinned
+archives instead; there is no in-place provider upgrade.
 
 Preparation keeps each archive it extracted (`providers/smolvm-installing/release.tar.gz`
 and `providers/docker-installing/release.tgz`). If something outside Hack changes a
@@ -836,22 +1109,32 @@ runtime's. Each removal deletes that one image only, never its untagged parent
 images. It refuses while a build runs, and removes nothing if it cannot read all
 saved run state. The report lists removed images and why each other one was kept.
 
+### Network tool packages
+
 Before startup, network-tool preparation additionally requires all four pinned
 Alpine aarch64 APKs in a current-user-owned private directory (mode `0700`), with
 regular, singly linked mode-`0600` files. Acquire the matching public package bytes;
 the command never downloads packages or accepts substitute versions.
 
-The pinned files come from the Alpine **v3.19** `main` repository for `aarch64`
-(`https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/`). Other Alpine
-releases, such as v3.20, publish packages with the same file names but different
-bytes; those fail the hash check below.
+The pinned files come from the Alpine **v3.24** `main` repository for `aarch64`
+(`https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/`), matching the Alpine
+3.24 guest in the pinned SmolVM release. Other Alpine releases publish packages with
+the same file names but different bytes; those fail the hash check below. A home
+prepared with the earlier v3.19 files is refused by the new provider pin (see the
+provider pin note above), so prepare the new files in a fresh candidate home.
 
 | File | SHA-256 |
 | --- | --- |
-| `iptables-1.8.10-r3.apk` | `31ab6343f1f3d0fbbf290c4dcf0430b2d08e8073e516e13530dfab25b097d467` |
-| `libmnl-1.0.5-r2.apk` | `d15e6313880bdd14959f42c1556b4a810ef4894992ae9f73b148126f0cc6021d` |
-| `libnftnl-1.2.6-r0.apk` | `ec1c2b02869fc65bcf7a1105e3a7ac5df1bd9a8bd8b399cb6cf650dd3112c021` |
-| `libxtables-1.8.10-r3.apk` | `f0accefde240ece6722479b46cb014d7d2f745af7d796e8eec3ced53571e1088` |
+| `iptables-1.8.13-r0.apk` | `9d22aef2e74346e9d537f6dc964786ab14b35580e3ccc0e4001dc3a725e8fe77` |
+| `libmnl-1.0.5-r2.apk` | `0ca382c70f78affef3a4a28016aab25ad8c3ccf1bcdad59f3968d4536a7b2478` |
+| `libnftnl-1.3.1-r0.apk` | `8b31395671e910c294d7f0e29d3ac3c7efe9d89264db255f39aa9944dd4b6cac` |
+| `libxtables-1.8.13-r0.apk` | `7535f18d9c7229178bc5e3809e5fea171033e33dfa054d88846512e1f25eefa8` |
+
+At each pool's first start the guest installs these files from the private copy and reads
+only its installed package database: it never contacts a package repository, so pools
+without internet access start the same way. An install that a failed first start
+interrupted resumes on the next start; a guest receipt that names another pool or package
+set is refused.
 
 All APKs are validated before candidate state is changed. Installation publishes a
 complete private directory atomically; an existing installation is revalidated and
@@ -1227,6 +1510,85 @@ by an older bundle, so clean up such a graph with the bundle that started it.
   default is never used in their place. Declare the key bare (`TOKEN:` or `- TOKEN`)
   to receive the managed value.
 
+### Shell variables in service environment
+
+Compose reads a variable reference from the shell that runs it. The native runtime
+reads no ambient environment, so two forms of a service `environment` entry could
+never start on native. `hack up` and `hack restart` resolve those forms from the
+caller's environment. Only source variables named by the project's Compose file
+are read; the ambient environment is never forwarded as a whole.
+
+Every native start prints one line to stderr naming the forwarded source
+variables, or `(none)`, including detached and JSON starts. Names are deduplicated
+and sorted; values are never printed. Foreground starts also report unset
+references separately. There is no consent prompt in this feature.
+
+| Entry | Shell has the variable | Shell does not |
+| --- | --- | --- |
+| `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose. |
+| `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The service gets an empty value. Compose would leave it unset instead. |
+
+A value read from the shell is never written to the reviewed Compose document, a
+plan, a receipt, an env fingerprint or a log. The entry stays a reference and the
+value travels in the same private delivery as Hack managed env. Only the variables
+these entries name are read; nothing else of your environment is. The reviewed
+document is the same whether or not the variable is set, so a start from another
+shell resumes the same plan.
+
+What stays as it was:
+
+- **A reference with a default or another operator** (`${PORT:-3000}`, `${X:+alt}`,
+  `${X-d}`, `${X:?err}`). The runtime resolves it without your shell, so
+  `${PORT:-3000}` is `3000` even when your shell sets `PORT`. Compose would use the
+  shell's value. Write `PORT: ${PORT}` to take the value from the shell.
+- **A reference inside a longer string** (`http://${HOST}:3000`), and a reference in
+  any other field (`image`, `ports`, `command`, `volumes`, labels). A reference with
+  no default there still fails the start with `execution_environment_missing`.
+- **A variable Hack manages for the service.** It comes from managed env, never from
+  the shell, and an entry that references a managed variable is still refused by the
+  runtime (`execution_environment_owner`).
+- **`COMPOSE_PROJECT_NAME`.** The runtime supplies it; it is not read from the shell.
+- **Hack's own variables** (`HACK_*`), as the entry's name or as the variable it
+  references. They include the key that decrypts a project's managed secrets, so a
+  Compose file can never copy one into a container.
+- **Cloud names** (`AWS_*`, `GOOGLE_*`, `CLOUDSDK_*`). Long-lived shell credentials
+  are not copied into containers; use the scoped AWS and gcloud delivery described
+  below. The rule goes by prefix, so it also covers non-secret names such as
+  `AWS_REGION` and `GOOGLE_CLOUD_PROJECT`.
+
+  An entry under either rule is left as written. It does not pass through as it
+  would with Compose: the start still fails with `execution_environment_missing`,
+  as it did before.
+- **A project `.env` file.** Hack does not parse it for shell references. A launch
+  runtime such as Bun may preload dotenv into its process environment. Only
+  explicitly referenced, non-excluded names are read from that environment;
+  a missing reference is reported as unset.
+
+Three consequences of the private delivery:
+
+- A service that receives a value this way runs under the native process launcher,
+  like a service with managed env. The launcher refuses a non-numeric `user`, an
+  empty entrypoint and a few other settings; `hack up` names the service.
+- The entry's own name, the variable the container receives, may not be referenced
+  by another field of the same service. `PORT: ${PORT}` with
+  `command: ... --port ${PORT:-3000}` is refused with `execution_environment_owner`,
+  whose text says "Hack-managed"; here it means the value came from your shell.
+- All private values of one service, counting managed env and delivered credential
+  values, must fit in 32 KiB as JSON, in at most 256 variables, and at most 32
+  services that run may receive any. `hack up` refuses a project over these limits
+  and names the service. Services the selected profiles leave out are not counted.
+  Delivered credential files share the same 32 KiB; only the runtime counts those,
+  and its refusal does not name the service.
+
+When shell values are forwarded, the complete private stdin envelope across active services must also fit in
+256 KiB, including encoded credential files and envelope metadata. Both `hack up`
+and `hack restart` check it after credential adaptation and profile selection.
+Restart refuses an oversized envelope before stopping the current graph.
+
+`hack exec` and a one-off `hack run` do not read your shell for these entries, so a
+command started with either does not receive these values. The containers keep the values they started with
+until the next `hack up` or `hack restart`.
+
 ## Registry image acquisition without Docker
 
 The candidate can fetch a **digest-pinned image from any OCI distribution registry**
@@ -1445,7 +1807,8 @@ Two native frontends exist. An authored `.hack/hack.project.json` project is own
 by `src/lib/native-authored-command.ts`, which admits only the bounded macOS slices
 in the [authored command contract](../reference/native-authored-commands.md):
 foreground `up` and `restart`, owner-mediated `down` and `down --recover`, saved-run
-`ps`, finite `logs --no-follow`, noninteractive `exec` and bounded one-off `run`.
+`ps`, single-service `logs --follow`, finite `logs --no-follow`, noninteractive
+`exec` and bounded one-off `run`.
 One-off `run` refuses members with source, persistent-data or private-env mounts;
 `restart` requires a proven stop before a fresh foreground start. The
 rest of this section describes the older Compose-file native frontend for
@@ -1469,11 +1832,15 @@ line naming the native backend as a beta for Apple Silicon macOS, delivered by t
 
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps`, for
-`hack status` and for bounded `hack logs SERVICE --no-follow`. `hack status`
+`hack status`, `hack logs SERVICE --follow` and bounded `logs --no-follow`. `hack status`
 observes one project, the cwd project or `--project <name>`, with the same
 output and `--json` envelope as native `hack ps`; outside a project it refuses
 instead of listing Compose state, which cannot see native graphs (HACK-1988). They verify the project/branch run mapping
-against the current native graph. Logs do not support following or Loki options.
+against the current native graph. Live logs follow one admitted start generation
+without a mutation lease, with bounded buffers and explicit refusals for unsupported
+flags or TTY services. Loki queries remain unsupported. See the
+[live log contract](../reference/native-authored-commands.md#followed-service-logs)
+for limits and stop behavior.
 A project with no admitted mapping reports not started. `hack ps` keeps container
 observations separate from the last graph receipt; an exited container's state
 shows its exit code, as in Compose (`exited (1)`). For a ready foreground graph,
@@ -1702,13 +2069,17 @@ requires ownership inspection rather than automatic removal.
 Ctrl-C while restart stops the previous run lets that stop finish: the stop's
 runtime requests run in their own process group, so the terminal's interrupt
 reaches only the restart. It then exits 130 as a stopped project with data
-retained, and a plain `up` resumes it. If the stop cannot be confirmed (for
-example the restart itself was killed, or a down hook failed), the saved intent
-stays and `up` refuses with `use hack restart`. Run `hack restart` then: it
-resumes the exact saved run, owner and plan, stopping the previous run if it is
-still active or confirming from fresh native observations that its own owner
-already stopped it, and it waits for that owner's frontend to finish before
-starting the replacement. Restart does not
+retained, and a plain `up` resumes it. A preflight runtime child ended by SIGINT
+or SIGTERM cancels before cleanup with exit 130 or 143, even if its exit is
+observed before the frontend signal handler runs. A stop request child ended
+by either signal reports `stopping` and the interrupted-stop guidance, retaining
+the prepared intent and exit 1 because cleanup is unconfirmed. If the stop cannot
+be confirmed (for example the restart itself was killed, or a down hook failed),
+the saved intent stays and `up` refuses with `use hack restart`. Run `hack restart`
+then: it resumes the exact saved run, owner and plan, stopping the previous run
+if it is still active or confirming from fresh native observations that its
+own owner already stopped it, and it waits for that owner's frontend to finish
+before starting the replacement. Restart does not
 implicitly migrate a shared pool's network policy or interrupt other projects.
 When an interrupted frontend cannot write that final acknowledgement, an explicit
 `restart --recover-frontend --expect-finalization-attempt <32-hex>` can resume
@@ -2313,9 +2684,9 @@ may ask for again after a failed attempt; nothing is stopped or started. `hack d
 selects this recovery on the same guest boot, and `hack doctor --native-cleanup
 inspect` reports such a run as `interrupted_startup_candidate` with a `dead` count.
 If the engine still cannot remove the container, `hack down` refuses and keeps the
-run. Once the graph is stopped with data retained, `hack down` names the
-`hack restart --recover-frontend --expect-finalization-attempt` command that
-finishes the failed `hack up`'s own finalization. A run restored from that
+run. Once the graph is stopped with data retained, `hack down` names
+`hack down --recover`, which verifies and retires the failed `hack up`'s
+recorded dead frontend attempt in the same command. A run restored from that
 retained data that fails again treats the earlier, finished recovery journal as
 history (`interrupted-start-cleanup-retired-<selection>.json`).
 Likewise, a pending guest helper, probe or environment deletion advances only
@@ -2688,6 +3059,7 @@ merged. For example, `HACK_NATIVE_ADAPTATION` replaces the committed adaptation,
 non-empty `HACK_NATIVE_AWS_PROFILE` selects the AWS variables; `HACK_NATIVE_AWS_REGION`
 without it is ignored, as before. Existing scripts that export the variables keep
 their exact behavior.
+
 
 **Per-env files.** `adaptation.<env>.json` and `dependenciesByEnv.<env>` replace the
 base file for runs whose effective env is `<env>`: the `--env` you pass, the env a
@@ -3276,15 +3648,35 @@ separately after restart.
 
 ### Explicit cleanup after a dead foreground owner
 
+![Foreground publisher shutdown and recovery](../reference/native-publisher-stop.svg)
+
+Foreground Compose `up` and `restart` isolate their graph owner from the
+terminal's process group, including projects without hooks. Each port publisher
+also has its own group. Ctrl-C asks the owner to stop through the frontend;
+publisher retirement must still prove exit before graph cleanup is confirmed.
+If the frontend is killed or its terminal closes, the owner observes its exact
+parent's exit and requests retaining cleanup, including authenticated publisher
+retirement. A publisher crash also wakes the owner: it reaps its direct child
+and persists the exact incarnation's exit proof before cleanup. Frontend death
+alone never proves that services stopped.
+
+`hack down --recover` uses the ordinary authenticated stop when the graph owner
+is still running, including when its frontend was lost. It does not treat a live
+owner as dead or bypass its cleanup checks.
+
 `hack up` and `hack restart` refuse a run whose foreground publication is still
 present and name the next step: a running owner must be stopped with Ctrl-C or
 `hack down`; an owner that exited while its services were running is stopped by
 `hack down --recover`. That command selects the run's exact receipt with the
 read-only `graph foreground-owner --run-id RUN --json` and then uses the
 same-boot `graph recover-live-owner` described below, retaining data and
-retiring the stale publication. If the frontend that owned the run also exited
-before confirming its cleanup, `hack down --recover` prints the exact
-`hack restart --recover-frontend --expect-finalization-attempt ATTEMPT` step.
+retiring the stale publication. If its recorded frontend also exited before
+confirming cleanup, the same command verifies the exact captured attempt,
+stopped graph, HTTPS ownership and lifecycle-process absence, then records
+frontend recovery. Success exits zero with data retained; plain `hack up` can
+start it again. Recovery remains distinct from the old frontend completing its
+own finalizers. Legacy finalization tokens without a recorded PID still require
+the existing explicit operator proof.
 
 An owner of a retained run that exited before the runtime admitted its restore
 is also retired by `hack down --recover`. The admission's first durable write
@@ -3312,8 +3704,33 @@ make them fail or strand a foreground publication.
 For a fully ready graph whose foreground owner died while its pool remains on the
 same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects
 only that graph. It requires matching dead foreground and relay-owner identities,
-unchanged receipt and resource inventories, and exclusive publication locks. The
-relay endpoint may also be absent after the managed owner exited: both relay files
+unchanged receipt and resource inventories, and exclusive publication locks.
+A ready graph left by an older build may already have a pending cleanup
+enrollment. Recovery binds that exact coordinator's raw bytes, operation, effect,
+graph and process incarnation to the saved bridge and environment inventories.
+It writes a distinct recovery intent and preserves the old coordinator; it
+never replays its admission or invents an acknowledgement. Recorded publishers
+are retired only through their original authenticated stop and native exit
+proof, before guest cleanup. Live or reused process identities, changed journals,
+partial publications and unknown inventories still refuse. Recovery resumes its
+own durable intent after an interruption and releases bridge capacity only after
+confirmed publisher/bridge-helper absence; compute absence is verified separately.
+If interruption leaves a synchronized publication-registry removal pending,
+recovery validates the existing single-entry journal and rechecks its recovery
+fence before completing the rename. Malformed journals, live publisher identities,
+changed entries and changed recovery evidence retain both registry files.
+
+If the pool already has an audited immediate successor boot, `down --recover`
+selects `graph recover-cleanup` and then retires the recovered publication. For a
+legacy Ready/Pending enrollment, that path pins the old boot's exact coordinator
+and dead process before any effect. It does not restart the pool, infer an
+arbitrary older boot or treat uncertain publisher exit as absence.
+After interruption, a stopped receipt alone does not complete recovery: `down
+--recover` resumes the selected cleanup until its exact completion digest is
+committed. Once committed, retries resume publication retirement without replaying
+guest cleanup, including an interrupted publication rename.
+
+The relay endpoint may also be absent after the managed owner exited: both relay files
 must be absent under the original held operation lock, and the exact dead
 foreground process and ready receipt must select the control root derived for
 this run, runtime owner, and current guest boot. Recovery persists that absence
@@ -3440,11 +3857,19 @@ has already restarted once, the same explicit command can select recovery on tha
 immediate successor boot. It requires the retained dead-owner identity, exact receipt
 hash, and bridge assignments belonging to the recorded previous boot. The recovery
 intent pins those assignments before effects and refuses replacements on retry.
+A remaining legacy device-rebound dependency reservation also requires the
+original recovery boot and host-pin witness. A further boot change refuses its
+release; no automatic recovery command for that state is implemented.
 Do not restart again to attempt this path: another boot rollover invalidates the
 previous-boot evidence. Old guest helper absence follows the verified boot transition;
 it is not recorded as a live helper acknowledgement.
 
-Recovery retains its own durable intent and completion evidence. It does not forge
+Recovery retains its own durable intent and completion evidence. A guest completion
+commit can precede host dependency-reservation release. Repeating `down --recover`
+finishes that release during publisher retirement, including after its publication
+paths have been archived. Success requires reservation absence under the exact
+retired owner, receipt and provider proofs; a changed proof retains evidence and
+refuses. It does not forge
 a relay acknowledgement. A normalized graph can explicitly retire its recovered
 publisher and select a fresh foreground restore using the retained data. Missing
 or replaced foreground evidence, pending graph journals, unfinished explicit page-cache release, changed
@@ -3650,3 +4075,41 @@ acknowledgements, or turns an uncertain stop into success. It archives the old
 shutdown observations before replacing only the proven retired entries. If repair
 refuses, preserve the native home and follow the existing owned recovery process;
 do not delete `shutdown.json` or drop current container evidence.
+
+
+For native foreground `up` and `restart`, closing the terminal (SIGHUP) requests
+the same retaining cleanup as Ctrl-C. The frontend waits for confirmed cleanup
+and exits 129; an owner whose frontend disappears also requests retaining cleanup.
+A publisher crash has a different effect: the owner reports the exit and keeps
+the services running, with that published port marked down in `ps` and `status`.
+Run `hack down` to stop the project with data retained. A publication notice is
+not evidence that cleanup completed, and no publisher is restarted automatically.
+
+Publisher exit observation never waits for the provider lease in the owner's
+event loop. If another operation holds that lease, `ps` already marks the port
+down and the runtime degraded. The owner retains the unreaped child and retries
+the identity-bound journal commit; it announces the exit only after that commit.
+Ctrl-C and authenticated `down` remain available. Healthy sibling publications
+keep following their admitted restart policies; an exited publisher's own service
+generation cannot recreate that publisher or rearm its route probe.
+If one service has several publications, losing one pauses restart following for
+all that service's publications until an explicit restart; other services continue.
+Replacement readiness checks that replacement's own child and publication, so a
+retained sibling exit (pending or committed) does not stop unrelated services.
+Fresh startup still requires every publisher live. A replacement port conflict
+requires that replacement's committed exit and an occupied port; its own live
+listener is never classified as a conflict because another publisher exited.
+
+New macOS frontend finalization records include the process birth time. Retaining
+recovery can distinguish a reused PID without signalling its replacement. A
+matching zombie also counts as exited. Unreadable identities refuse; records
+without a birth retain their PID-only behavior. Linux does not compare `ps`
+births because clock corrections can change that observation. Failure to capture
+the frontend's own birth falls back to the legacy behavior instead of failing up.
+
+A pool started by a different provider version reports `provider_pin_changed`
+through `ps --json`, detached `up` and `exec`, with the same original-release or
+home-retirement guidance. This does not migrate the pool or permit cleanup by a
+different provider version. When publisher identity cannot be confirmed, recovery
+explains that it waits for the process holding that PID to exit and names
+`hack down --recover` as the retaining retry.

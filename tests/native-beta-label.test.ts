@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,6 @@ import {
 import { resolveNativeRuntimeSelection } from "../src/backends/native-runtime-client.ts";
 import { noteNativeBackendBeta } from "../src/commands/native-beta-notice.ts";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
-import { logger } from "../src/ui/logger.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -124,15 +123,17 @@ test("the beta notice is one line and stays out of --json output", () => {
   expect(nativeBetaNotice()).not.toContain("\n");
   expect(nativeBetaNotice()).toContain("Apple Silicon macOS");
   expect(nativeBetaNotice()).toContain(NATIVE_BETA_DOCS_URL);
-  const info = spyOn(logger, "info").mockImplementation(() => undefined);
-  try {
-    noteNativeBackendBeta({ json: true });
-    expect(info).toHaveBeenCalledTimes(0);
-    noteNativeBackendBeta({ json: false });
-    expect(info.mock.calls).toEqual([[{ message: nativeBetaNotice() }]]);
-  } finally {
-    info.mockRestore();
-  }
+  // An injected sink, not a spy on the shared logger: with every test file
+  // in one process, the logger this file imports is not always the object
+  // the command module calls, and the spy then sees nothing.
+  const lines: { readonly message: string }[] = [];
+  const info = (line: { readonly message: string }) => {
+    lines.push(line);
+  };
+  noteNativeBackendBeta({ json: true, info });
+  expect(lines).toEqual([]);
+  noteNativeBackendBeta({ json: false, info });
+  expect(lines).toEqual([{ message: nativeBetaNotice() }]);
 });
 
 for (const command of ["up", "status", "doctor"] as const) {

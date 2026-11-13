@@ -11,7 +11,7 @@
  * | scope          | when                                              |
  * | -------------- | ------------------------------------------------- |
  * | `full`         | not a pull request, or the diff is unavailable    |
- * | `docs`         | every path is documentation                       |
+ * | `docs`         | every path is documentation or docs site tooling  |
  * | `runtime-core` | every path is documentation or runtime core Rust  |
  * | `typescript`   | no path is Rust, toolchain or workflow            |
  * | `code`         | anything else                                     |
@@ -22,10 +22,10 @@
  * The outputs written to `$GITHUB_OUTPUT` are the job switches in
  * `.github/workflows/ci.yml`. Only `full` runs every job and every config
  * compiler host; pushes to `next`/`main` are always `full`, so the prerelease
- * exact-head gate keeps its complete evidence. Every scope runs the bun shards
- * in the `pooled` layout: platform-sensitive files on macOS, the rest on Linux
- * (HACK-2028). Any doubt widens the scope: an unknown path is TypeScript at
- * least, and a failed or empty diff is `full`.
+ * exact-head gate keeps its complete evidence. `ci-pr-plan.ts` layers the
+ * conservative unit subset and draft policy over these coarse switches.
+ * Ready PRs retain platform pools; drafts run their subset on Linux and fail
+ * the required fan-in. A failed or empty diff selects every unit test.
  */
 import { appendFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -39,8 +39,13 @@ export type ChangeScope =
   | "runtime-core"
   | "docs";
 
-/** Documentation that no build reads; tests that read it run in `docs` scope. */
-const DOCS_PATHS = [/^docs\//, /^site\//] as const;
+/**
+ * Documentation that no build reads; tests that read it run in `docs` scope.
+ * `scripts/docs/` is the docs site tooling: only the `docs site` job and the
+ * `docs:*` package scripts run it, so a change there needs no bun shards,
+ * Docker e2e or compiler build.
+ */
+const DOCS_PATHS = [/^docs\//, /^site\//, /^scripts\/docs\//] as const;
 const DOCS_FILES = new Set([
   "README.md",
   "CHANGELOG.md",
@@ -89,9 +94,11 @@ export function pathKind(path: string): PathKind {
 
 /**
  * Inputs of the documentation site job: the docs corpus and its pins, the site,
- * the scripts that stage and check them, and the workflow that defines the job.
+ * the scripts that stage and check them, the README picture references, and
+ * the workflow that defines the job.
  */
 const DOCS_SITE_PATHS = [
+  /^README\.md$/,
   /^docs\//,
   /^site\//,
   /^scripts\/docs\//,
@@ -281,7 +288,7 @@ function formatOutputs(outputs: ScopeOutputs): string {
     .join("\n")}\n`;
 }
 
-export function main(argv: readonly string[]): number {
+export async function main(argv: readonly string[]): Promise<number> {
   const event = argv
     .find((arg) => arg.startsWith("--event="))
     ?.slice("--event=".length);
@@ -289,15 +296,19 @@ export function main(argv: readonly string[]): number {
     console.error("ci-change-scope: --event=<GitHub event name> is required.");
     return 2;
   }
-  const repoRoot = resolve(import.meta.dir, "..");
-  let outputs = scopeOutputs("full");
+  // CI executes this policy from the base archive against the merge tree's data.
+  const rootArgument = argv.find((arg) => arg.startsWith("--repo-root="));
+  const repoRoot = rootArgument
+    ? resolve(rootArgument.slice("--repo-root=".length))
+    : resolve(import.meta.dir, "..");
+  const { fullPushPlan, planPullRequest } = await import("./ci-pr-plan.ts");
+  let outputs = fullPushPlan();
   let reason = `event ${event} always runs the full matrix`;
   if (event === "pull_request") {
     const paths = pullRequestPaths(repoRoot);
     if (paths === null) {
       reason = "the pull request diff is unavailable; running the full matrix";
     } else {
-      outputs = planScope(paths);
       const counts = new Map<PathKind, number>();
       for (const path of paths) {
         counts.set(pathKind(path), (counts.get(pathKind(path)) ?? 0) + 1);
@@ -306,6 +317,15 @@ export function main(argv: readonly string[]): number {
         .map(([kind, count]) => `${kind} ${count}`)
         .join(", ")})`;
     }
+    outputs = await planPullRequest({
+      repoRoot,
+      changed: paths,
+      draft: process.env.PR_DRAFT === "true",
+      full: process.env.PR_FULL === "true",
+    });
+    console.log(
+      `test selection: ${outputs.selection_mode}; draft: ${outputs.draft}; shard indices: ${outputs.test_shards}`
+    );
   }
   console.log(`change scope: ${outputs.scope}; ${reason}`);
   process.stdout.write(formatOutputs(outputs));
@@ -324,5 +344,5 @@ export function main(argv: readonly string[]): number {
 }
 
 if (import.meta.main) {
-  process.exit(main(process.argv.slice(2)));
+  process.exit(await main(process.argv.slice(2)));
 }

@@ -12,6 +12,7 @@ import {
   DEFAULT_SCHEMAS_HOST,
   GLOBAL_ALLOY_FILENAME,
   GLOBAL_CADDY_COMPOSE_FILENAME,
+  GLOBAL_CADDY_PROJECT_NAME,
   GLOBAL_COREDNS_FILENAME,
   GLOBAL_GRAFANA_DASHBOARD_FILENAME,
   GLOBAL_GRAFANA_DASHBOARDS_DIR,
@@ -24,15 +25,19 @@ import {
   LEGACY_SCHEMAS_HOST,
 } from "./constants.ts";
 import { parseDefaultDomain } from "./lib/default-domain.ts";
+import { PROXY_PORTS, renderProxyPortMapping } from "./lib/proxy-bind.ts";
 
 export function renderGlobalCaddyCompose(opts?: {
   readonly useStaticCoreDnsIp?: boolean;
   readonly useStaticCaddyIp?: boolean;
+  /** Host address for ports 80/443; `null` or absent publishes on all interfaces. */
+  readonly bindAddress?: string | null;
 }): string {
   const useStaticCoreDnsIp = opts?.useStaticCoreDnsIp === true;
   const useStaticCaddyIp = opts?.useStaticCaddyIp === true;
+  const bindAddress = opts?.bindAddress ?? null;
   return [
-    "name: hack-dev-proxy",
+    `name: ${GLOBAL_CADDY_PROJECT_NAME}`,
     "services:",
     "  caddy:",
     "    image: lucaslorentz/caddy-docker-proxy:2.10.0-alpine",
@@ -41,8 +46,9 @@ export function renderGlobalCaddyCompose(opts?: {
     "      - --polling-interval",
     "      - 5s",
     "    ports:",
-    '      - "80:80"',
-    '      - "443:443"',
+    ...PROXY_PORTS.map(
+      (port) => `      - ${renderProxyPortMapping({ bindAddress, port })}`
+    ),
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock",
     "      - caddy_data:/data",
@@ -110,6 +116,15 @@ export function renderGlobalCoreDnsConfig(opts?: {
           "  template IN A {",
           `    match ${pattern}`,
           `    answer "{{ .Name }} 30 IN A ${DEFAULT_CADDY_IP}"`,
+          "    fallthrough",
+          "  }",
+          // Routed names have no IPv6 address. Answer AAAA with an empty
+          // NOERROR (NODATA) here; without it the query falls through to the
+          // forwarder, which cannot answer these names, and clients wait for
+          // its timeout (about 2s) before using the A record.
+          "  template IN AAAA {",
+          `    match ${pattern}`,
+          "    rcode NOERROR",
           "    fallthrough",
           "  }",
         ]

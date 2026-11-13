@@ -47,6 +47,7 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
  */
 
 const runCalls: string[][] = [];
+const runEnvs: (Record<string, string> | undefined)[] = [];
 const execCalls: string[][] = [];
 const noteCalls: string[] = [];
 /**
@@ -124,8 +125,12 @@ const shellMock = await registerScopedModuleMock({
       return { exitCode: 1, stdout: "", stderr: "" };
     },
     execOrThrow: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
-    run: async (cmd: readonly string[]) => {
+    run: async (
+      cmd: readonly string[],
+      opts?: { readonly env?: Record<string, string> }
+    ) => {
       runCalls.push([...cmd]);
+      runEnvs.push(opts?.env);
       return 0;
     },
     findExecutableInPath: (name?: string) => {
@@ -153,6 +158,7 @@ let originalHome: string | undefined;
 let originalNoInteractive: string | undefined;
 let originalMutagenPath: string | undefined;
 let originalLogger: string | undefined;
+let originalDaemonAutostartDisable: string | undefined;
 
 beforeAll(() => {
   dnsMock.activate();
@@ -166,6 +172,10 @@ beforeEach(async () => {
   originalNoInteractive = process.env.HACK_NO_INTERACTIVE;
   originalMutagenPath = process.env.HACK_MUTAGEN_PATH;
   originalLogger = process.env.HACK_LOGGER;
+  originalDaemonAutostartDisable = process.env.HACK_DAEMON_AUTOSTART_DISABLE;
+  // This fixture exercises daemon repair through a mocked shell. Its own
+  // policy must be independent of the outer suite's daemon safety setting.
+  Reflect.deleteProperty(process.env, "HACK_DAEMON_AUTOSTART_DISABLE");
   tempDir = await mkdtemp(join(tmpdir(), "hack-doctor-fix-"));
   process.env.HOME = tempDir;
   process.env.HACK_NO_INTERACTIVE = "1";
@@ -174,6 +184,7 @@ beforeEach(async () => {
   process.env.HACK_MUTAGEN_PATH = "/usr/local/bin/mutagen";
   process.env.HACK_LOGGER = "console";
   runCalls.length = 0;
+  runEnvs.length = 0;
   execCalls.length = 0;
   noteCalls.length = 0;
   trackedGeneratedPaths = [];
@@ -198,6 +209,7 @@ afterEach(async () => {
     restoreEnv("HACK_MUTAGEN_PATH", originalMutagenPath);
   }
   restoreEnv("HACK_LOGGER", originalLogger);
+  restoreEnv("HACK_DAEMON_AUTOSTART_DISABLE", originalDaemonAutostartDisable);
 });
 
 afterAll(() => {
@@ -218,15 +230,18 @@ async function createProjectWithStaleDaemonPid(): Promise<string> {
     "services:\n  api:\n    image: alpine:3.19\n    env_file:\n      - path: .env\n        required: false\n"
   );
 
-  // Stale daemon pid: a pid that cannot be running (very large, unlikely to
-  // exist) with no socket file, so buildDaemonStatusReport resolves "stale".
+  // Outside supported Linux/macOS PID ranges, with no socket, so the status
+  // resolves "stale" without ever identifying an unrelated live process.
   const daemonDir = resolve(
     tempDir,
     GLOBAL_HACK_DIR_NAME,
     GLOBAL_DAEMON_DIR_NAME
   );
   await mkdir(daemonDir, { recursive: true });
-  await writeFile(resolve(daemonDir, GLOBAL_DAEMON_PID_FILENAME), "999999\n");
+  await writeFile(
+    resolve(daemonDir, GLOBAL_DAEMON_PID_FILENAME),
+    "2147483647\n"
+  );
 
   return projectRoot;
 }
@@ -249,6 +264,15 @@ test("doctor --fix under HACK_NO_INTERACTIVE clears a stale daemon pid without p
   expect(runCalls).toEqual(
     expect.arrayContaining([expect.arrayContaining(["daemon", "clear"])])
   );
+  // HACK-2052 owner decision: without a TTY the hackd repair may start the
+  // daemon but never writes or reloads the systemd unit.
+  const daemonEnvs = runCalls.flatMap((cmd, index) =>
+    cmd.includes("daemon") ? [runEnvs[index]] : []
+  );
+  expect(daemonEnvs.length).toBeGreaterThan(0);
+  for (const env of daemonEnvs) {
+    expect(env?.HACK_DAEMON_SERVICE_READ_ONLY).toBe("1");
+  }
 }, 30_000);
 
 test("doctor --fix under HACK_NO_INTERACTIVE skips macOS keychain repair and reports it", async () => {

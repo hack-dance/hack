@@ -1368,3 +1368,79 @@ and recreated services. Its 43-state positive bound separates stopped history,
 evidence reset, receipt publication and crash/retry. The two negative controls
 remove reset and fresh old-ID absence respectively. Source mapping, regression
 coverage and native proof limits are in `docs/reference/v5-model-coverage.md`.
+
+## Foreground port publisher shutdown
+
+`native-publisher-stop/PublisherStop.tla` bounds one graph and publisher, one
+owner crash, one incarnation replacement and one audited successor boot. Its six
+initial states include live ready/enrolled owners and the actual legacy state:
+a dead owner with an exited or still-live publisher on either admitted boot. `Interrupt` maps to the
+frontend's group isolation; `StopPublisher` abstracts authenticated control plus
+kernel exit proof; `Recover` pins the exact old owner/coordinator/inventories;
+`ReleaseBridge` maps to confirmed publisher/guest-helper retirement and registry
+release, before `CleanupGuest` removes compute. `Retire` represents command success
+after compute absence, publication retirement and dependency-reservation release
+are verified. Publication archival itself is abstracted and may precede dependency
+release in the implementation. `ReleaseDependencies` is separate from guest completion: an
+interrupted release is retried during `retire_recovered_publisher` under the exact
+retired owner, completion digest, provider lease and any enrolled host-pin guard. A failed or stale proof preserves capacity and evidence.
+The positive configuration explores 168 states. The two guard-removal controls
+must violate `NoUnsafeCleanup` at `ReleaseBridge` and `NoInterruptRace` at
+`Interrupt`. The `NeverComplete` control must reach `Retire`, establishing that
+the positive guards permit completion. A fifth configuration removes the
+frontend lifetime watch and must violate `NoSilentOrphan` at `FrontendLost`.
+A sixth configuration omits reservation release before `Retire` and must violate
+`NoStrandedReservation` with `reservation = TRUE`. Real reservation-file tests
+check capacity reuse, idempotent retry, stale-process refusal and preserved bytes
+when the caller fence fails. The predecessor VM fixture also pauses after the
+completion commit for its dependency-free project; it covers publication retry,
+not reservation release. The real-file reservation tests execute on macOS CI.
+A seventh configuration omits committed owner exit proof and must violate
+`NoUncommittedExit` at `ReleaseBridge`. SIGHUP follows the same stop transition
+as SIGINT/SIGTERM. `PublisherCrash` enters `publisher-exit-pending`: the port is
+down but the child stays unreaped while the provider lease is busy. `CommitExit`
+binds its identity and persists proof before entering `publisher-down` and
+announcing. Services stay up until explicit stop or frontend loss. Lease contention
+may stutter indefinitely; signals and control remain available. Notice emission
+is abstracted with the successful commit; stream framing and ps port projection
+are implementation-test obligations. Notices begin only after readiness is
+flushed; startup reaping does not emit a notice or grant readiness. An early
+notice must not interrupt startup cleanup or hide its failure diagnostics.
+Notice delivery can fail after frontend
+loss without gating cleanup; a closed-stream implementation regression covers
+that boundary outside the model. Watch delivery plus stop initiation and
+exact child reaping plus durable journal publication are atomic assumptions; native event/reaping tests exercise these boundaries.
+No fairness/eventual recovery is claimed.
+Atomic journal steps, identity and exit observations are assumptions here; real
+process tests, legacy journal and opt-in published-port VM fixtures, source
+compilation and Apple Silicon VM qualification remain separate evidence. This
+model abstracts the audited predecessor-boot proof and does not cover provider-loss
+detection, concrete boot identity, host frontend hooks or filesystem power-loss
+durability.
+
+The model collapses the stopped receipt and recovery-intent completion commits.
+It does not check frontend dispatch between them. TypeScript predecessor-recovery
+tests cover stopped receipts with pending, completed and absent completion hints;
+Rust `current_recovery_dispatch_does_not_select_historical_completion` checks the
+exact completion digest rather than treating a stopped receipt as completion.
+Publication-registry sync/rename is also abstracted: portable retirement tests
+exercise the real writer's synchronized pending-removal boundary, fenced
+reconciliation and unchanged evidence on refusal. The opt-in legacy VM fixtures
+interrupt this registry commit on both admitted boots, and the predecessor
+fixture also interrupts between stopped receipt and intent completion.
+
+The publisher model permits reselecting a same-boot intent on the successor boot
+as a permissive safety abstraction. The implementation refuses that unfinished
+cross-boot takeover; the qualified predecessor slice starts from the legacy
+Ready/Pending state before any new recovery intent. No completion claim covers
+that abstract reselection. `startup::cleanup_guest(..., false)` checks startup
+artifacts/listener state without removing containers; bridge release then
+precedes `shutdown::stop_owned` and container DELETE in `cleanup_owned_fenced`.
+
+
+A new owner process for a retained run receives a distinct native-incarnation
+control generation in its startup receipt. Legacy receipts still select their
+original deterministic path. This avoids admitting a new owner into an old
+pending coordinator's directory; it does not acknowledge or roll over that
+coordinator. Directory derivation and a real coordinator start/stop regression
+cover this restored-owner boundary outside the finite publisher model.

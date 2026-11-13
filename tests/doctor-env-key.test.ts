@@ -953,6 +953,59 @@ describe("printed key recovery commands leave nothing git can collect (HACK-2165
     });
   }
 
+  // The command is printed for a person to paste into their own shell; zsh
+  // (the macOS default) does not word-split a parameter the way sh does.
+  for (const shell of [["sh"], ["bash"], ["zsh", "-f"]] as const) {
+    const name = shell.join(" ");
+    const runIn = async (
+      box: { project: string; home: string; root: string },
+      extra: Record<string, string>
+    ) => {
+      const proc = Bun.spawn(
+        [...shell, "-c", retiredKeyCopyCommand(KEY_FILE)],
+        {
+          cwd: box.project,
+          env: { ...fixtureGitEnv({ env: { HOME: box.home } }), ...extra },
+          stdout: "ignore",
+          stderr: "ignore",
+        }
+      );
+      return await proc.exited;
+    };
+    test.skipIf(Bun.which(shell[0]) === null)(
+      `rotation under ${name} retires the key when the directory is outside every checkout`,
+      async () => {
+        const box = await sandbox();
+        await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+        expect(await runIn(box, {})).toBe(0);
+        expect(
+          await lstat(join(box.project, KEY_FILE)).catch(() => null)
+        ).toBeNull();
+        expect(
+          await readdir(join(box.home, ".hack", "retired-keys"))
+        ).toHaveLength(1);
+      }
+    );
+    test.skipIf(Bun.which(shell[0]) === null)(
+      `rotation under ${name} stops for a home checkout despite a stale GIT_DIR and GIT_OBJECT_DIRECTORY`,
+      async () => {
+        const box = await sandbox();
+        await git(box.home, ["init", "-q", "-b", "main"]);
+        await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+        expect(
+          await runIn(box, {
+            GIT_DIR: join(box.root, "gone.git"),
+            GIT_OBJECT_DIRECTORY: join(box.root, "gone-objects"),
+          })
+        ).not.toBe(0);
+        expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+        expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual(
+          []
+        );
+      }
+    );
+  }
+
   test("the symlink repair leaves a private regular key and no intermediate copy", async () => {
     const box = await sandbox();
     const target = join(box.root, "elsewhere.key");

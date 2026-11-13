@@ -242,12 +242,13 @@ const READD_SECRET =
  * `GIT_WORK_TREE` and the rest) plus the discovery ceiling, and with
  * discovery across file systems, so a stale value in the shell cannot turn a
  * checkout into "not a git repository". If git cannot list those variables
- * the command stops. mktemp gives each copy its own name
+ * the command stops. The list is split as a command substitution, never as
+ * a parameter, so sh, bash and zsh (which does not split `$v`) read it alike. mktemp gives each copy its own name
  * (0600), so a later rotation never overwrites an earlier one; the key is
  * removed only once its copy is written.
  */
 export function retiredKeyCopyCommand(key: string): string {
-  return `install -d -m 700 ${RETIRED_KEY_DIR} && v="$(git rev-parse --local-env-vars)" && [ -n "$v" ] && case "$(unset $v GIT_CEILING_DIRECTORIES; GIT_DISCOVERY_ACROSS_FILESYSTEM=1 LC_ALL=C git -C ${RETIRED_KEY_DIR} rev-parse --is-inside-work-tree 2>&1)" in *"not a git repository"*) true ;; *) false ;; esac && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
+  return `install -d -m 700 ${RETIRED_KEY_DIR} && case "$(v="$(git rev-parse --local-env-vars)" && [ -n "$v" ] && unset $(echo "$v") GIT_CEILING_DIRECTORIES && GIT_DISCOVERY_ACROSS_FILESYSTEM=1 LC_ALL=C git -C ${RETIRED_KEY_DIR} rev-parse --is-inside-work-tree 2>&1)" in *"not a git repository"*) true ;; *) false ;; esac && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
 }
 
 /**

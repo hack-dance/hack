@@ -26,6 +26,12 @@ import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
+let composeUpReturned = false;
+const lifecycleStops: {
+  afterUp: boolean;
+  hadRuntimeState: boolean;
+  composeProject: string;
+}[] = [];
 const psRows: string[] = [];
 const psSnapshots: string[][] = [];
 const errorMessages: string[] = [];
@@ -121,6 +127,7 @@ const runtimeBackendMock = await registerScopedModuleMock({
         if (upDurationMs) {
           await Bun.sleep(upDurationMs);
         }
+        composeUpReturned = true;
         return upExitCode;
       },
       down: async () => {
@@ -158,6 +165,27 @@ const runtimeBackendMock = await registerScopedModuleMock({
   },
 });
 
+const lifecycleControllerMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/project-lifecycle-controller.ts",
+  overrides: {
+    stopLifecycleProcessController: async (opts: {
+      readonly project: { readonly projectDir: string };
+      readonly composeProject: string;
+    }) => {
+      const entry = await readProjectRuntimeStateEntry({
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+      });
+      lifecycleStops.push({
+        afterUp: composeUpReturned,
+        hadRuntimeState: entry !== null,
+        composeProject: opts.composeProject,
+      });
+    },
+  },
+});
+
 const shellMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
   specifier: "../src/lib/shell.ts",
@@ -191,6 +219,7 @@ const { restartCommand, upCommand, runCommand } = await import(
 );
 
 beforeAll(() => {
+  lifecycleControllerMock.activate();
   branchesMock.activate();
   runtimeBackendMock.activate();
   runtimeProjectsMock.activate();
@@ -206,6 +235,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  composeUpReturned = false;
+  lifecycleStops.length = 0;
   psRows.length = 0;
   psSnapshots.length = 0;
   errorMessages.length = 0;
@@ -246,6 +277,7 @@ afterEach(async () => {
 });
 
 afterAll(() => {
+  lifecycleControllerMock.deactivate();
   branchesMock.deactivate();
   runtimeBackendMock.deactivate();
   runtimeProjectsMock.deactivate();
@@ -1367,4 +1399,27 @@ test("up reports a Docker inspection error without waiting out the start budget"
     code: "E_DOCKER_UNAVAILABLE",
   });
   expect(psEnvs).toHaveLength(1);
+});
+
+test("full restart cleans lifecycle state before propagating a Docker inspection failure", async () => {
+  const projectRoot = await createProject();
+  const projectDir = resolve(projectRoot, ".hack");
+  psExitCode = 1;
+  await expect(runRestart({ projectRoot })).rejects.toMatchObject({
+    code: "E_DOCKER_UNAVAILABLE",
+  });
+  expect(psEnvs).toHaveLength(1);
+  expect(lifecycleStops.filter((entry) => entry.afterUp)).toEqual([
+    {
+      afterUp: true,
+      hadRuntimeState: true,
+      composeProject: "startup-state-test",
+    },
+  ]);
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "startup-state-test",
+    })
+  ).toBeNull();
 });

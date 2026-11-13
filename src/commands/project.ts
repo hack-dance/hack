@@ -1002,18 +1002,24 @@ async function readComposeServiceStates(opts: {
     all: true,
     env: opts.env,
   });
-  const read = readComposePsResult({
-    result: res,
-    redactValues: Object.values(opts.env ?? {}),
-  });
-  if (!read.ok) {
-    if (opts.strict) {
+  let entries: Record<string, unknown>[];
+  if (opts.strict) {
+    const read = readComposePsResult({
+      result: res,
+      redactValues: Object.values(opts.env ?? {}),
+    });
+    if (!read.ok) {
       throw read.error;
     }
-    return [];
+    entries = read.entries;
+  } else {
+    if (res.exitCode !== 0) {
+      return [];
+    }
+    entries = parseJsonLines(res.stdout);
   }
   const serviceFilter = opts.services ? new Set(opts.services) : null;
-  return read.entries
+  return entries
     .map((entry) => ({
       containerId: getString(entry, "ID") ?? "",
       service: getString(entry, "Service") ?? "",
@@ -8666,19 +8672,7 @@ async function runRestartCommand({
       activeProfiles: effectiveProfiles,
     })
   );
-  const { states, startup } = await waitForComposeStartupState({
-    successfulCompletionServices,
-    deadlineMs: performance.now() + (upOutcome.observationBudgetMs ?? 0),
-    read: () =>
-      readComposeServiceStates({
-        project,
-        composeProjectName,
-        profiles,
-        env: preflightEnv.env,
-        strict: true,
-      }),
-  });
-  if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
+  const cleanupIncompleteStartup = async () => {
     // Some containers may still run: keep the helper holders for hack down.
     await stopLifecycleProcessesBestEffort({
       project,
@@ -8692,6 +8686,24 @@ async function runRestartCommand({
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
     });
+  };
+  const { states, startup } = await waitForComposeStartupState({
+    successfulCompletionServices,
+    deadlineMs: performance.now() + (upOutcome.observationBudgetMs ?? 0),
+    read: () =>
+      readComposeServiceStates({
+        project,
+        composeProjectName,
+        profiles,
+        env: preflightEnv.env,
+        strict: true,
+      }),
+  }).catch(async (error: unknown) => {
+    await cleanupIncompleteStartup();
+    throw error;
+  });
+  if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
+    await cleanupIncompleteStartup();
     const message = buildStartupIncompleteMessage({
       composeProject: composeProjectName ?? baseProjectName,
       failed: startup.failed,

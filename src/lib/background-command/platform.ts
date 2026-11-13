@@ -1,6 +1,7 @@
 import { dlopen, FFIType } from "bun:ffi";
 import { spawn } from "node:child_process";
 import { closeSync, constants, fstatSync, openSync } from "node:fs";
+import { childEnvironment } from "../child-environment.ts";
 import { parseObservedProcesses } from "../host-command-observation.ts";
 import { exec } from "../shell.ts";
 
@@ -90,7 +91,7 @@ export async function spawnInNewSession(opts: {
   }
   const child = spawn(executable, rest, {
     cwd: opts.cwd,
-    env: { ...opts.env },
+    env: childEnvironment({ ...opts.env }),
     detached: true,
     stdio: ["ignore", "ignore", "ignore", "pipe"],
   });

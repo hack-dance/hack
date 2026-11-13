@@ -1,5 +1,4 @@
 import { stat } from "node:fs/promises";
-
 import { resolve } from "node:path";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -24,6 +23,7 @@ import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import type { DaemonStatus } from "../daemon/status.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
+import { hackReexecEnvironment } from "../lib/child-environment.ts";
 import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
@@ -738,6 +738,7 @@ async function runGatewaySetup(opts: {
   }
 
   const proc = Bun.spawn([invocation.bin, ...invocation.args, ...argv], {
+    env: hackReexecEnvironment(),
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",

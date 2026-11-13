@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { childEnvironment } from "../lib/child-environment.ts";
 import type { ExecResult, RunOptions } from "../lib/shell.ts";
 import { findExecutableInPath } from "../lib/shell.ts";
 import {
@@ -188,9 +189,9 @@ export function createTmuxBackend(): MuxBackend {
       args.push("-c", opts.cwd);
     }
     if (opts.env) {
-      for (const [key, value] of Object.entries(opts.env).sort(
-        ([left], [right]) => left.localeCompare(right)
-      )) {
+      for (const [key, value] of Object.entries(
+        childEnvironment({}, opts.env)
+      ).sort(([left], [right]) => left.localeCompare(right))) {
         args.push("-e", `${key}=${value}`);
       }
     }

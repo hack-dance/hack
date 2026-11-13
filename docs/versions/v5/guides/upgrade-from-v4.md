@@ -1,11 +1,16 @@
 # Upgrade a v4 machine to v5
 
-This is a working upgrade checklist, not a completed migration report. It was
+This is a working upgrade checklist with a limited real-project trial record. It was
 audited against `next` at `26a142921c` and the v4.3.0 reference on `main` at
 `b36275575c`, with the merged Linux daemon service update at `5e017fddd3`.
-The site itself is pinned to **next.15**. Sections about newer
-source builds do not mean those features ship in next.15. Real-machine results
-are **to be confirmed in the dogfood run**.
+The site targets **next.16**. The first reported trials used three existing
+Compose projects on macOS, previously running v4.3.0. Start, restart, stop and
+lifecycle hooks worked without changes to their `.hack/` configuration, after
+one project's own cloud credentials were refreshed and with the reruns noted
+under [Known problems](#known-problems-and-the-dogfood-record). This does not qualify every
+project, the v4.2.1 path, env migration, data recovery or rollback. Those remaining
+steps are **to be confirmed in the dogfood run**. Native setup and log following
+remain **under verification**.
 
 ```mermaid
 ---
@@ -29,6 +34,16 @@ flowchart TD
 
 Keep v4 when stability is required; otherwise back up, try one project on
 Compose, check the application, and only then consider an eligible native trial.
+
+**next.16 migration warning (HACK-2172): do not run
+`hack doctor --migrate-env-config` without a private, readable copy of
+`.hack.secret.key`.** If a legacy encrypted store's `keyPath` names that file,
+explicit Doctor cleanup can remove the key that the migrated values still need.
+Implicit migration also writes files, so back up before it too; the key-removal
+defect described here is in the explicit Doctor cleanup. See
+[Config and env migration](#config-and-env-migration) before any env-consuming
+command. Keep this warning until a published fix replaces it with the verified
+cleanup contract.
 
 ## 1. Who should upgrade now
 
@@ -75,13 +90,30 @@ Then stop stable daemon activity before the filesystem copy and candidate use:
 
 ```sh
 hack daemon stop
+```
+
+On macOS with the stable launchd service installed, uninstall it **after** that
+stop, before running the candidate:
+
+```sh
+hack daemon uninstall
+```
+
+Then confirm that stable daemon activity has stopped:
+
+```sh
 pgrep -fl "hack daemon start"
 ```
 
-The process check must print nothing. On macOS a configured launchd service can
-start it again: record that service first, use stable `hack daemon uninstall`,
-then stop and check again. Do not stop an unrelated process. Do not invoke more
-stable commands against the shared home during the candidate run. The complete
+The process check must print nothing. The Mac trials required both stopping the
+stable daemon and uninstalling its launchd service; stopping alone allowed it to
+return. Record the service before removing it, and restore it with stable
+`hack daemon install` when returning to v4. Do not stop an unrelated process.
+Candidate installation leaves stable installed, but candidate Compose commands
+share the stable Hack home by default. Do not invoke more stable commands against
+that shared home during the candidate run. In next.16, candidate Doctor can
+suggest `hack daemon start`: that spelling runs stable Hack. Do not follow that
+hint during the candidate trial; its wording is being corrected. The complete
 [stable-daemon stop procedure](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/candidate-install.md#stop-stable-hackd-before-a-compose-run)
 also explains which stable commands can start it again.
 
@@ -151,16 +183,19 @@ to try the prerelease.
 
 | Starting point | Today | What the dogfood run must establish |
 | --- | --- | --- |
-| 4.3.0 on Apple Silicon macOS | Keep v4; install the separate candidate, stop stable writers, then use the Compose pilot below. | End-to-end upgrade and rollback: **to be confirmed in the dogfood run**. |
+| 4.3.0 on Apple Silicon macOS | Keep v4; install the separate candidate, stop stable writers, then use the Compose pilot below. Three existing Compose projects passed start, restart and stop on next.16 with their `.hack/` unchanged, with the reruns noted under Known problems. | Full application/data checks and rollback: **to be confirmed in the dogfood run**. |
 | Older 4.x, including 4.2.1 | Use the same backup and isolated-candidate sequence; inspect legacy env before any env-consuming command. Do not assume every project needs the same migration. | Direct 4.2.1 upgrade, or any need for an intermediate version: **to be confirmed in the dogfood run**. |
 | Homebrew install | Keep the installed v4 formula during the trial. `brew upgrade hack-dance/tap/hack` is the stable-release path, not the native-candidate installer. | Stable v5 formula availability and replacement/rollback: **to be confirmed in the dogfood run**. |
 | Script install | Use the separate reviewed candidate bootstrap on supported Macs. For stable software, the release downloader accepts `HACK_INSTALL_TAG` or `HACK_INSTALL_VERSION`. | Replacing an installed v4 with a stable v5 archive: **to be confirmed in the dogfood run**. |
-| Linux 4.x or a fresh Linux host | next.15 publishes no Linux candidate bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
+| Linux 4.x or a fresh Linux host | next.16 publishes no Linux candidate bundle. Keep stable Compose, or agree on a separately built current-source CLI before testing newer Linux setup. | Published v5 Linux install and full host migration: **to be confirmed in the dogfood run**. |
 | Intel macOS or a fresh host | Native is unavailable. A fresh stable installation uses the normal Homebrew/release installer and Compose; use the candidate only on its supported host. | First stable v5 install and project initialization: **to be confirmed in the dogfood run**. |
 
 After backups and stable-daemon quiescence, read the migration section below
-**before** the Compose pilot. Prefer the explicit Doctor migration there and
-review its diff first. On eligible legacy projects, interactive `up` otherwise
+**before** the Compose pilot. Make and verify the project-key backup before
+either explicit or implicit migration. Explicit next.16 Doctor cleanup has the
+key-removal gap described above; implicit cleanup removes migrated dotenv files,
+but still writes. Only then consider the explicit Doctor migration and review
+its diff. On eligible legacy projects, interactive `up` otherwise
 asks whether to migrate and **Enter means Yes**. Answer No if you have not
 reviewed and accepted that write. `env exec` and session env resolution can
 migrate without that prompt; do not use them as read-only probes.
@@ -181,7 +216,8 @@ after restart. Record what failed, not just a green health endpoint.
 For a **current-source** Linux CLI, DNS and CA trust setup are implemented. Follow
 the [Linux DNS setup source](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-setup.md)
 and [Linux trust guide](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/guides/linux-certificate-trust.md).
-They postdate next.15. DNS host integration is bounded to a rootful Linux Docker
+These sources are included in next.16; its published candidate bundle is still
+Apple Silicon only. DNS host integration is bounded to a rootful Linux Docker
 bridge/systemd-resolved setup; trust has separate host and browser handling.
 Review the printed privileged steps and confirm them yourself.
 
@@ -198,7 +234,7 @@ Real-machine service setup and upgrade are **to be confirmed in the dogfood run*
 
 Sources: [stable installation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/README.md#install),
 [release asset generation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/scripts/build-release.ts),
-[next.15 artifact contract](https://github.com/hack-dance/hack/blob/278aeb1cee5b136d7bae0ddfcd5f3741e9579524/docs/guides/candidate-install.md),
+[next.16 artifact contract](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/docs/guides/candidate-install.md),
 [Linux service and detached-start contract](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/docs/architecture.md#keeping-hackd-running),
 [service regression tests](https://github.com/hack-dance/hack/blob/5e017fddd30bae212883053c62c1105e56835ebc/tests/daemon-systemd-cli.test.ts).
 Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/project.ts),
@@ -210,7 +246,23 @@ Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a1
 ### Config and env migration
 
 The project still uses `.hack/`, but this does **not** mean legacy env files are
-left untouched. The preferred explicit migration is:
+left untouched.
+
+**Stop before migration on next.16 unless the project key is backed up.**
+HACK-2172 affects a legacy encrypted store configured with a `keyPath` pointing
+at `.hack.secret.key`: migration cleanup can delete that same file after using
+it for the new encrypted YAML values. The values then cannot be decrypted.
+Keep the key copy private and outside the working tree, verify it is readable,
+and preserve the pre-migration env files too. A successful migration exit does
+not prove the key survived. Implicit migration cleanup removes only migrated
+dotenv files, not the store's `keyPath`, but it still writes project state: keep
+the backup before env-consuming commands that can migrate automatically too.
+The section 2 template already saves the key privately as
+`$BACKUP/project-.hack.secret.key`, outside the working tree. A published fix
+for explicit Doctor cleanup is still required; a planned fix is not protection
+for next.16.
+
+After those prerequisites, the explicit migration command is:
 
 ```sh
 HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project --migrate-env-config
@@ -248,6 +300,43 @@ Sources: [migration and refusal audit](https://github.com/hack-dance/hack/blob/2
 [managed-dollar behavior](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/env.md#upgrading-managed-values-that-contain-),
 [Doctor mode validation](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/src/commands/doctor.ts).
 
+The key-removal warning follows the cleanup-candidate collection and deletion
+paths in [project-env-config.ts at the trial-guide audit revision](https://github.com/hack-dance/hack/blob/cce4b5954a4b1889b095bda796bea561142d6b52/src/lib/project-env-config.ts)
+(`collectLegacyEncryptedBackendCleanupCandidates`, `removeLegacyProjectEnvArtifacts`).
+
+### Secrets after upgrading
+
+Run Doctor with the selected v5 executable after upgrading:
+
+```sh
+HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project
+```
+
+An existing project key can retain group or other access from an older version.
+next.16 Doctor already reports `env-key-weak-permissions` and suggests
+`chmod 600` for the key. Review that finding and keep the backup private too.
+Open PR [#764](https://github.com/hack-dance/hack/pull/764), intended for the next
+prerelease, adds the broader secrets-hygiene report and fixes; those are not a
+next.16 guarantee. Once using a release
+that contains them, review Doctor's findings before applying its fixes. The
+hygiene repair is separate from `--migrate-env-config` and does not remove the
+key-backup requirement above.
+
+In the next.16 trials, most real env entries were stored as plain values.
+`env list --json` still prints those values: JSON is formatting, not redaction.
+Avoid bulk listing when only names or provenance are needed. Plain values
+migrated from v4 are not encrypted merely by upgrading.
+
+Open PR [#767](https://github.com/hack-dance/hack/pull/767), intended for the next
+prerelease, changes env listings to hide values by default and adds protection in place. This is
+a breaking output change: scripts should use `has_value` to test availability;
+an explicit `env get KEY` is a deliberate plaintext read. Follow that PR's
+migration notes when installing a release that contains it. Do not use the new
+output contract or assume the protection command exists in next.16.
+
+Sources for next.16 behavior: [env list and get](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/env.ts),
+[project key checks](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/lib/doctor-env-key.ts).
+
 ### Daemon, old lock and missing checkouts
 
 Installing another CLI does not replace an already running daemon. For an
@@ -257,8 +346,9 @@ service, a unit pointing at a different existing executable needs explicit
 `daemon install`: restarting that unit would run its old executable again.
 Keep this separate from a side-by-side candidate
 trial: the launcher disables daemon autostart, and stable `hackd` stays stopped
-while the candidate shares its home. Capture macOS service respawn and the exact
-old-daemon transition: **to be confirmed in the dogfood run**.
+while the candidate shares its home. The macOS trials confirmed that the stable
+launchd service must be stopped and uninstalled first. The full service restore
+and old-daemon replacement transcript remain **to be confirmed in the dogfood run**.
 
 The registry writer protocol changed. v4 writers do not honor the v5 lock, so
 never run both against the same home concurrently. A lock's age is not permission
@@ -335,17 +425,17 @@ The complete 4.2.1 automation/exit/JSON transcript is **to be confirmed in the d
 ## 6. Try native, then return to Compose
 
 Only after the Compose pilot passes, use a disposable project and read
-[the limits](../native/limits.md). A build containing the merged runtime-setup
-feature provides one explicit preparation command:
+[the limits](../native/limits.md). next.16 provides one explicit preparation
+command, [under verification](../native/setup.md):
 
 ```sh
 /absolute/bundle/hack-native --candidate-root /absolute/private/native-home runtime setup
 ```
 
 Setup previews the pinned downloads and asks for consent; ordinary `up` does not
-fetch provider artifacts. Do not assume a previously installed next.15 binary
-has this newer command. Use the [current setup instructions and older-build
-alternative](https://github.com/hack-dance/hack/blob/26a142921c9b9aeb8821b7e0a19c2cfb3be0189f/docs/native/try-it.md).
+fetch provider artifacts. Check `hack-next --manager status` for the selected
+version; older installed prereleases can lack this command. Use the
+[setup instructions and offline alternative](../native/setup.md).
 Setup success does not prove a project works. Native project admission, mounts,
 images and command support still have their own limits.
 
@@ -482,6 +572,26 @@ The complete restore, including retained data and daemon/service recovery, is
 
 ## Known problems and the dogfood record
 
+The first macOS trials reported the following next.16 behavior. The open fix PRs
+below are intended for the next prerelease; they do not change an installed
+next.16 bundle.
+
+| Symptom | What to check or do |
+| --- | --- |
+| `up` stops with `E_LIFECYCLE_FAILED` and a pre-up hook's message | In one trial, the hook needed its project's cloud credentials refreshed. Check that hook's own dependency and credentials privately, then retry. A failing `up.before` hook blocks startup; do not suppress it to continue. |
+| `up -d` or `restart` exits 1 with `E_STARTUP_INCOMPLETE` although services are up | next.16 can misclassify a one-shot service that finishes in under a second. Check the reported service states and actual exit codes first. In the observed case, rerunning `up -d` succeeded. Open PR [#758](https://github.com/hack-dance/hack/pull/758) addresses short one-shot observation and is intended for the next prerelease; do not assume every incomplete start is this bug. |
+| HTTP on port 80 works but routed HTTPS on 443 times out | On one Mac, another program listened on 443 on all addresses, including loopback; affected project hostnames resolved to `127.0.0.1`. Check listener ownership and hostname resolution. Hostnames resolving to the proxy container's address were not affected in that trial. A VPN's “serve” feature is one possible conflicting listener. Doctor does not yet detect this case. |
+| Candidate Doctor suggests `hack daemon start` | That command names the stable CLI. Keep the stable daemon and its launchd service stopped during the shared-home candidate run; the candidate hint is being corrected. |
+| `env list --json` reveals plain values | This is next.16 behavior. Review the breaking listing changes in [#767](https://github.com/hack-dance/hack/pull/767) before updating scripts for the next prerelease. |
+| Explicit Doctor migration cleanup can remove `.hack.secret.key` | Keep a private readable key backup before any migration, including `doctor --migrate-env-config`. HACK-2172 remains a next.16 warning until the fix ships. |
+| An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. Open PR [#764](https://github.com/hack-dance/hack/pull/764) adds the broader secrets-hygiene report and fixes intended for the next prerelease. |
+
+Sources for startup failures: [next.16 lifecycle and startup handling](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/project.ts).
+The three-project result, credential refresh, daemon-service behavior and HTTPS
+listener case above are reported real-project observations from November 13,
+not results inferred from unit tests. No native, Linux, full data-recovery or
+rollback acceptance is claimed by this record.
+
 Stop on a lock/ownership refusal, an env-delivery mismatch, unreadable state, or
 application data that fails its restart check. Keep the pre-upgrade backup and
 the refused state; do not reset receipts, delete locks or prune volumes to force
@@ -492,11 +602,11 @@ For help, report versions, OS/architecture, backend, command form, exit code and
 value-free error code in [a repository issue](https://github.com/hack-dance/hack/issues).
 Do not attach env values, keys, raw registry contents or private project paths.
 
-Tonight's record must fill these gaps, each **to be confirmed in the dogfood run**:
+The remaining record must fill these gaps, each **to be confirmed in the dogfood run**:
 
-- 4.2.1 and 4.3.0 installation path, exact version selections and daemon transitions.
+- The 4.2.1 installation/upgrade path, exact version selections and complete daemon/service restore.
 - Which migration prompts/files change, and whether every required overlay still reaches its target.
 - Missing-folder registry preview and the old-lock recovery outcome.
-- Application checks across start, retaining stop, restart and restored v4 data.
+- Full application/data checks beyond the three-project start/restart/stop trials, and restored v4 data.
 - Linux DNS, host/browser trust and daemon service availability at the tested revision.
 - Explicit agent-client loading, native setup eligibility, and the actual rollback transcript.

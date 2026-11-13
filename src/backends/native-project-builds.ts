@@ -1,6 +1,7 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -388,7 +389,7 @@ export async function invokeNativeBuild(opts: {
     ],
     {
       cwd: opts.cwd,
-      env: systemEnvironment(),
+      env: childEnvironment(systemEnvironment()),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

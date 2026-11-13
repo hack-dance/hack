@@ -1,6 +1,10 @@
 import { constants, openSync } from "node:fs";
 import { lstat, open, unlink } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import {
+  childEnvironment,
+  hackReexecEnvironment,
+} from "../child-environment.ts";
 import { isRecord } from "../guards.ts";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { auditEnd } from "./audit.ts";
@@ -311,12 +315,14 @@ function startChild(opts: {
       cwd: opts.launch.cwd,
       env:
         opts.meta.backend === "native"
-          ? {
+          ? hackReexecEnvironment({
               ...childEnv(),
               [NATIVE_EXIT_CONFIRMED_ENV]: opts.paths.exitConfirmed,
-            }
+            })
           : // The engine recorded at start: the client and cleanup share it.
-            dockerEnvFor({ env: childEnv(), target: opts.launch.docker }),
+            childEnvironment(
+              dockerEnvFor({ env: childEnv(), target: opts.launch.docker })
+            ),
       stdin: "ignore",
       stdout: descriptors.stdout,
       stderr: descriptors.stderr,

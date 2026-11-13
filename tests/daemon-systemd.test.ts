@@ -96,6 +96,8 @@ type Fake = {
   enableError: string | null;
   /** Fails the unit-specific `show` while set. */
   showFails: boolean;
+  /** Only the unit-state query (ActiveState, MainPID...) fails. */
+  stateShowFails: boolean;
   /** Overrides ActiveState, e.g. "activating" during a restart delay. */
   activeState: string | null;
   needsReload: boolean;
@@ -125,7 +127,7 @@ type Fake = {
    * What proving the unit's main process (MainPID) finds: this home's
    * hackd, another home's (its socket elsewhere), or nothing readable.
    */
-  mainProcess: "ours" | "foreign" | "unknown";
+  mainProcess: "ours" | "foreign" | "unbound" | "exited" | "unknown";
   /** False: the unit reports no main process (e.g. a pending restart). */
   mainPidReported: boolean;
   /** Namespace settings (`RootDirectory=...` lines) systemd reports. */
@@ -183,6 +185,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     failed: false,
     enableError: null,
     showFails: false,
+    stateShowFails: false,
     activeState: null,
     needsReload: false,
     unitEnvironment: `PATH=${sysBin} HACK_NO_INTERACTIVE=1`,
@@ -303,6 +306,17 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
         )
       );
     }
+    if (
+      verb === "show" &&
+      state.stateShowFails &&
+      args.some((arg) => arg.includes("MainPID"))
+    ) {
+      return Promise.resolve({
+        exitCode: 1,
+        stdout: "",
+        stderr: "Failed to get properties: Connection timed out",
+      });
+    }
     if (verb === "show") {
       return Promise.resolve(
         ok(
@@ -375,10 +389,22 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
 }
 
 /** The stop path's proof of the unit's main process, as the fake says. */
-function proveFor(fake: Fake): (pid: number) => Promise<DaemonProcessProof> {
-  return (pid) =>
-    Promise.resolve(
-      fake.mainProcess === "ours"
+/**
+ * The proof for the fake's main process, by daemon directory: `ours` holds
+ * this home's socket; `foreign` holds a socket of any other home (positive
+ * evidence of another home); `unbound` is a hackd holding neither (still
+ * starting, or sockets unreadable); `unknown` cannot be identified.
+ */
+function proveFor(
+  fake: Fake
+): (pid: number, daemonRoot: string) => Promise<DaemonProcessProof> {
+  return (pid, daemonRoot) => {
+    const thisHome = daemonRoot === join(root, ".hack", "daemon");
+    const owned =
+      (fake.mainProcess === "ours" && thisHome) ||
+      (fake.mainProcess === "foreign" && !thisHome);
+    return Promise.resolve(
+      owned
         ? ({
             kind: "owned",
             pid,
@@ -388,11 +414,14 @@ function proveFor(fake: Fake): (pid: number) => Promise<DaemonProcessProof> {
         : {
             kind: "refused",
             reason:
-              fake.mainProcess === "foreign"
-                ? "foreign-socket"
-                : "identity-unknown",
+              fake.mainProcess === "unknown"
+                ? "identity-unknown"
+                : fake.mainProcess === "exited"
+                  ? "not-running"
+                  : "foreign-socket",
           }
     );
+  };
 }
 
 function unitText(): string {
@@ -1727,8 +1756,57 @@ linuxTest(
       deps: fake.deps,
     });
     expect(result.handled).toBe(false);
-    expect(result.refused).toContain("could not be read");
+    expect(result.refused).toContain("cannot be checked");
     expect(result.refused).toContain("systemctl --user stop hackd.service");
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+  }
+);
+
+linuxTest(
+  "stop refuses when only the unit's state query fails, even with this home's configuration",
+  async () => {
+    // Second-family review blocker: a failed state query reported no main
+    // process, the environment query (which succeeded) named this home,
+    // and stop ran with no process proof; it could stop a daemon serving
+    // another home after a reload.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    fake.active = true;
+    fake.stateShowFails = true;
+    fake.calls.length = 0;
+    let proofs = 0;
+    const result = await stopViaSystemdIfInstalled({
+      proveDaemon: (pid, daemonRoot) => {
+        proofs += 1;
+        return proveFor(fake)(pid, daemonRoot);
+      },
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(result.handled).toBe(false);
+    expect(result.refused).toContain(
+      "could not report its state or main process"
+    );
+    expect(result.refused).toContain("systemctl --user stop hackd.service");
+    expect(proofs).toBe(0);
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    // The final re-read failing after a successful proof: refused too.
+    fake.stateShowFails = false;
+    const reread = await stopViaSystemdIfInstalled({
+      proveDaemon: (pid, daemonRoot) => {
+        fake.stateShowFails = true;
+        return proveFor(fake)(pid, daemonRoot);
+      },
+      pid: null,
+      hackHome: join(root, ".hack"),
+      deps: fake.deps,
+    });
+    expect(reread.refused).toContain("could not be read again");
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
   }
 );
@@ -4047,14 +4125,35 @@ linuxTest(
     fake.passwdHome = root;
     fake.mainProcess = "unknown";
     expect((await stop()).refused).toContain("not proven");
+    // Second-family review: holding no socket of this home is not evidence
+    // of another. A hackd that holds neither this home's socket nor one of
+    // the home the configuration names (still starting, or its sockets
+    // unreadable) is refused with the retry hint, not left alone.
+    fake.mainProcess = "unbound";
+    const unbound = await stop();
+    expect(unbound.refused).toContain(
+      "not proven to hold a socket of this Hack home"
+    );
+    expect(unbound.refused).toContain("/srv/other-home/daemon");
+    expect(unbound.refused).toContain("may still be starting");
+    expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    // A main process that exited while it was checked: nothing runs, so the
+    // configuration decides, as for a pending restart (left alone).
+    fake.mainProcess = "exited";
+    expect((await stop()).refused).toBeNull();
     // No unit file, the unit loaded from another home's directory and
-    // running: left alone too, and refused when unidentifiable.
+    // running: left alone too when proven another home's or exited, and
+    // refused when unproven or unidentifiable.
     await rm(unitPath);
     fake.active = true;
     fake.mainProcess = "foreign";
     fake.calls.length = 0;
     expect((await stop()).refused).toBeNull();
     expect(fake.calls).not.toContain("systemctl --user stop hackd.service");
+    fake.mainProcess = "exited";
+    expect((await stop()).refused).toBeNull();
+    fake.mainProcess = "unbound";
+    expect((await stop()).refused).toContain("cannot be checked");
     fake.mainProcess = "unknown";
     expect((await stop()).refused).toContain("cannot be checked");
   }
@@ -4073,11 +4172,11 @@ linuxTest(
       deps: fake.deps,
     });
     let proofs = 0;
-    const proveDaemon = (pid: number) => {
+    const proveDaemon = (pid: number, daemonRoot: string) => {
       proofs += 1;
       // The process is replaced once it has been proven.
       fake.mainPidReported = false;
-      return proveFor(fake)(pid);
+      return proveFor(fake)(pid, daemonRoot);
     };
     fake.calls.length = 0;
     const changed = await stopViaSystemdIfInstalled({

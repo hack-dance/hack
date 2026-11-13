@@ -366,7 +366,7 @@ cancels a restart systemd has scheduled after a crash. When systemd runs or is
 about to restart `hackd.service` but the managed unit file is gone (or the unit
 is loaded from another directory), `stop` refuses and prints the
 `systemctl --user` commands to review and stop it, instead of reporting hackd as
-stopped. `uninstall` does the same in that case instead of reporting
+stopped, unless the unit is shown to be another home's (below). `uninstall` does the same in that case instead of reporting
 that nothing was installed. If systemd cannot report the unit's state at all (the query
 fails, times out, loses the user bus, or `systemctl` cannot be run), both refuse
 in the same way. Only a unit systemd reports as inactive or not found, or a
@@ -378,19 +378,25 @@ this home's `daemon/` directory), and `stop` stops only this home's own hackd. W
 process, `stop` proves from that process which Hack home it serves (a hackd
 holding a socket in this home's `daemon/` directory), not from the loaded
 configuration: a reload without a restart changes the configuration, not the
-running daemon. A main process proven to be a hackd that holds another home's
-socket is that home's daemon when the configuration also names another home:
-the unit is left alone and this home's own hackd is still stopped, whether or
-not the managed unit file is present. When the configuration names this home
-instead (a reload without a restart), `stop` refuses: the daemon may still be
-starting (it has not bound its socket yet), so it says to run `stop` again,
-or it serves another home. A main process that cannot be identified (its
-process details cannot be read, or it is not a hackd) is refused, with the
-`systemctl --user status` and `stop` commands. With no live process (a pending
-restart), the configuration decides, and `stop` still cancels the restart.
-Just before `systemctl --user stop`, `stop` reads the unit's main process
-again and refuses if it changed (a crash and restart while it was checked);
-the window left is the few milliseconds between that read and the stop.
+running daemon. A hackd main process that does not hold this home's socket is
+left alone only with positive evidence that it is another home's daemon: the
+configuration names another home, and the process is proven (identity stable)
+to hold a socket in that home's `daemon/` directory, or it exited while being
+checked. Then the unit is left alone and this home's own hackd is still
+stopped, whether or not the managed unit file is present. Without that
+evidence `stop` refuses: the daemon may still be starting (it has not bound
+its socket yet), its sockets may be unreadable, or a reload changed the
+configuration to this home under a running daemon; the message says to run
+`stop` again or how to stop it by hand. A main process that cannot be
+identified (its process details cannot be read, or it is not a hackd) is
+refused, with the `systemctl --user status` and `stop` commands. With no live
+process (a pending restart), the configuration decides, and `stop` still
+cancels the restart. A failed query of the unit's state or main process is
+not "no process": it is refused with the manual commands, installed unit or
+not. Just before `systemctl --user stop`, `stop` reads the unit's state again
+and refuses if the main pid changed or the read fails. That narrows the gap
+without closing it: `systemctl stop` acts on whatever runs when it lands, so a
+change after that read, or a pid reused in between, is not detected.
 When the Hack home cannot be read with certainty (for example an
 `EnvironmentFile=`, an `ExecSearchPath=`, a `PassEnvironment=` naming
 `HACK_HOME`, `HOME` or `PATH`, a relative `HOME`, or an escaped quote or

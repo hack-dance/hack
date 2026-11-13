@@ -268,7 +268,13 @@ async function checkUnitServesHome(opts: {
   readonly action: "starting" | "stopping";
 }): Promise<
   | { readonly kind: "ours" }
-  | { readonly kind: "foreign" | "unknown"; readonly message: string }
+  | {
+      readonly kind: "foreign";
+      readonly message: string;
+      /** The Hack home the unit's configuration names. */
+      readonly path: string;
+    }
+  | { readonly kind: "unknown"; readonly message: string }
 > {
   const unitHome = await readSystemdUnitHackHome({ deps: opts.deps });
   const ours = resolve(opts.hackHome);
@@ -277,6 +283,7 @@ async function checkUnitServesHome(opts: {
       ? { kind: "ours" }
       : {
           kind: "foreign",
+          path: unitHome.path,
           message: `${SYSTEMD_UNIT_NAME} runs hackd for ${unitHome.path}, not ${ours}; not ${opts.action} it from here`,
         };
   }
@@ -457,7 +464,10 @@ export async function stopViaSystemdIfInstalled(opts: {
    * Proves the unit's main process is this home's hackd; defaults to
    * {@link proveOwnedDaemonProcess} on `<hackHome>/daemon`. Tests pin it.
    */
-  readonly proveDaemon?: (pid: number) => Promise<DaemonProcessProof>;
+  readonly proveDaemon?: (
+    pid: number,
+    daemonRoot: string
+  ) => Promise<DaemonProcessProof>;
   /** Test seam for the default proof's observations. */
   readonly probe?: DaemonProcessProbe;
   /** Test seam: a process's parent pid (defaults to /proc). */
@@ -505,9 +515,15 @@ export async function stopViaSystemdIfInstalled(opts: {
       checkMainProcess,
     });
   }
-  // An unknown state (the unit-specific `systemctl show` failed) does not
-  // prove the unit is stopped: stop it anyway, which is harmless when it is
-  // already inactive.
+  // A failed state read reports no main process, which is not evidence
+  // that none runs: one serving another home could be stopped on the
+  // configuration alone. Refused with the manual steps (HACK-2052).
+  if (status.stateError !== null) {
+    return {
+      ...none,
+      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: systemd could not report its state or main process (${status.stateError}), so whose daemon it runs cannot be checked. Check: systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
+    };
+  }
   if (
     status.activeState !== null &&
     !MANAGER_STOPPABLE_STATES.has(status.activeState)
@@ -554,14 +570,19 @@ export async function stopViaSystemdIfInstalled(opts: {
     };
   }
   // The checks above judged the main process systemd reported then; the
-  // stop acts on whatever runs when it lands. Read it again just before:
-  // a different process (a crash and restart meanwhile) is refused, so the
-  // window left is the few milliseconds between this read and the stop.
+  // stop acts on whatever runs when it lands. Read it again just before: a
+  // different main pid (a crash and restart meanwhile), or a read that
+  // fails, is refused. This narrows the gap without closing it: a change
+  // after this read, or the same pid reused in between, is not detected.
   const latest = await readSystemdServiceStatus({ unitPath, deps });
-  if (latest?.mainPid !== status.mainPid) {
+  if (
+    latest === null ||
+    latest.stateError !== null ||
+    latest.mainPid !== status.mainPid
+  ) {
     return {
       ...none,
-      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: its main process changed while it was being checked (pid ${status.mainPid ?? "none"}, now ${latest?.mainPid ?? "unknown"}). Run hack daemon stop again; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
+      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: its main process changed while it was being checked, or could not be read again (pid ${status.mainPid ?? "none"}, now ${latest === null || latest.stateError !== null ? "unknown" : (latest.mainPid ?? "none")}). Run hack daemon stop again; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
     };
   }
   const stopped = await systemdServiceAction({ action: "stop", deps });
@@ -576,10 +597,12 @@ export async function stopViaSystemdIfInstalled(opts: {
  * where that does not decide, its loaded configuration (HACK-2052):
  * - this home's proven hackd: stop;
  * - an unidentifiable process: refuse;
- * - a proven hackd holding another home's socket: another home's daemon
- *   (`leave`, so the caller still stops this home's own hackd) when the
- *   configuration also names another home; refused when it names this
- *   home (a reload without a restart, or still starting) or is unreadable;
+ * - a hackd without this home's socket: left alone (the caller still stops
+ *   this home's own hackd) only with positive evidence that it is another
+ *   home's: the configuration names that home and the process is proven
+ *   to hold a socket in that home's daemon directory (or it exited
+ *   meanwhile). Otherwise refused: it may still be starting, its sockets
+ *   may be unreadable, or a reload changed the configuration under it;
  * - no live process (a pending restart): the configuration decides.
  */
 async function decideUnitStop(opts: {
@@ -597,15 +620,39 @@ async function decideUnitStop(opts: {
     return { kind: "refuse", message: mainProcess.message };
   }
   const unitHome = await opts.unitHome();
-  if (unitHome.kind === "foreign") {
-    return { kind: "leave", message: unitHome.message };
-  }
   if (unitHome.kind === "unknown") {
     return { kind: "refuse", message: unitHome.message };
   }
-  return mainProcess.kind === "foreign"
-    ? { kind: "refuse", message: mainProcess.message }
-    : { kind: "stop" };
+  if (mainProcess.kind === "none") {
+    return unitHome.kind === "foreign"
+      ? { kind: "leave", message: unitHome.message }
+      : { kind: "stop" };
+  }
+  if (unitHome.kind === "ours") {
+    return { kind: "refuse", message: mainProcess.message };
+  }
+  return (await foreignHomeProven({ mainProcess, home: unitHome.path }))
+    ? { kind: "leave", message: unitHome.message }
+    : {
+        kind: "refuse",
+        message: mainProcess.unprovenMessage(unitHome.path),
+      };
+}
+
+/**
+ * Positive evidence that a hackd without this home's socket is `home`'s
+ * daemon: proven ({@link proveOwnedDaemonProcess}, identity stable) to hold
+ * a socket in that home's daemon directory, or gone meanwhile (then
+ * nothing runs, and the configuration decides, as for a pending restart).
+ */
+async function foreignHomeProven(opts: {
+  readonly mainProcess: Extract<MainProcessCheck, { kind: "foreign" }>;
+  readonly home: string;
+}): Promise<boolean> {
+  const proof = await opts.mainProcess.proveIn(
+    resolve(opts.home, GLOBAL_DAEMON_DIR_NAME)
+  );
+  return proof.kind === "owned" || proof.reason === "not-running";
 }
 
 /**
@@ -650,9 +697,10 @@ async function stopWithoutUnitFile(opts: {
   }
   // Another home's unit, loaded from its own directory (for example a
   // shell whose HOME points elsewhere): not this shell's to stop or refuse
-  // over, when nothing runs (a pending restart) or what runs is proven to
-  // be a hackd holding another home's socket. Anything else is refused
-  // below: without the unit file it cannot be checked (HACK-2052).
+  // over, when nothing runs (a pending restart, or its main process exited
+  // while checked) or what runs is proven to hold a socket in that home's
+  // daemon directory. Anything else is refused below: without the unit
+  // file it cannot be checked (HACK-2052).
   const loadedHome = await readSystemdUnitHackHome({ deps });
   if (
     loadedHome.kind === "home" &&
@@ -660,7 +708,12 @@ async function stopWithoutUnitFile(opts: {
   ) {
     const mainProcess =
       status.mainPid === null ? null : await opts.checkMainProcess();
-    if (mainProcess === null || mainProcess.kind === "foreign") {
+    if (
+      mainProcess === null ||
+      mainProcess.kind === "none" ||
+      (mainProcess.kind === "foreign" &&
+        (await foreignHomeProven({ mainProcess, home: loadedHome.path })))
+    ) {
       return none;
     }
   }
@@ -675,20 +728,34 @@ async function stopWithoutUnitFile(opts: {
  * tied to that process ({@link proveOwnedDaemonProcess}: a hackd image
  * holding a socket in `daemonRoot`), never from configuration (HACK-2052).
  * `none`: no live main process (none reported, or it exited meanwhile).
- * `foreign`: a live hackd proven to hold another home's socket, not this
- * one's; the caller decides with the loaded configuration, and `message`
- * is the refusal to give when they disagree.
+ * `foreign`: a live hackd that does not hold this home's socket. That is
+ * not yet evidence of another home (it may still be starting, or its
+ * sockets may be unreadable): the caller proves it against the home the
+ * configuration names with `proveIn`. `message` is the refusal when the
+ * configuration names this home; `unprovenMessage` when it names another
+ * home the process is not proven to serve.
  * `refused`: a live process that cannot be identified (unreadable, not a
  * hackd, or changed while checked), with the manual status and stop steps.
  */
 type MainProcessCheck =
-  | { readonly kind: "ours" | "none" }
-  | { readonly kind: "foreign" | "refused"; readonly message: string };
+  | { readonly kind: "ours" }
+  | { readonly kind: "none" }
+  | { readonly kind: "refused"; readonly message: string }
+  | {
+      readonly kind: "foreign";
+      readonly message: string;
+      readonly unprovenMessage: (home: string) => string;
+      readonly proveIn: (daemonRoot: string) => Promise<DaemonProcessProof>;
+    };
 
 async function checkMainProcessServesHome(opts: {
   readonly status: SystemdServiceStatus;
   readonly daemonRoot: string;
-  readonly prove?: (pid: number) => Promise<DaemonProcessProof>;
+  /** Proves `pid` is a hackd holding a socket in `daemonRoot`; tests pin it. */
+  readonly prove?: (
+    pid: number,
+    daemonRoot: string
+  ) => Promise<DaemonProcessProof>;
   readonly probe?: DaemonProcessProbe;
   /** This home's hackd per its pid file, if one is running. */
   readonly homePid: number | null;
@@ -707,15 +774,16 @@ async function checkMainProcessServesHome(opts: {
     ...(await defaultDaemonIdentityExpectation()),
     anyBunEntry: true,
   };
-  const prove =
-    opts.prove ??
-    ((candidate: number) =>
-      proveOwnedDaemonProcess({
-        pid: candidate,
-        daemonRoot: opts.daemonRoot,
-        expectation,
-        probe: opts.probe,
-      }));
+  const proveAt = (candidate: number, daemonRoot: string) =>
+    opts.prove
+      ? opts.prove(candidate, daemonRoot)
+      : proveOwnedDaemonProcess({
+          pid: candidate,
+          daemonRoot,
+          expectation,
+          probe: opts.probe,
+        });
+  const prove = (candidate: number) => proveAt(candidate, opts.daemonRoot);
   const proof = await prove(pid);
   if (proof.kind === "owned") {
     return { kind: "ours" };
@@ -746,9 +814,13 @@ async function checkMainProcessServesHome(opts: {
   if (proof.reason === "foreign-socket") {
     // A hackd without this home's socket: another home's, or one that has
     // not bound its socket yet (just started, even if systemd already
-    // reports it active), so say both.
+    // reports it active), or whose sockets cannot be read. The caller
+    // proves it against the home the configuration names.
     return {
       kind: "foreign",
+      proveIn: (daemonRoot) => proveAt(pid, daemonRoot),
+      unprovenMessage: (home) =>
+        `Not stopping ${SYSTEMD_UNIT_NAME}: its main process (pid ${pid}) is a hackd that is not proven to hold a socket of this Hack home (${opts.daemonRoot}) or of the one its configuration names (${resolve(home, GLOBAL_DAEMON_DIR_NAME)}). It may still be starting: run hack daemon stop again in a moment. Otherwise its sockets could not be read. ${manual}`,
       message: `Not stopping ${SYSTEMD_UNIT_NAME}: its main process (pid ${pid}) is a hackd that does not hold this Hack home's daemon socket (${opts.daemonRoot}), while the unit's configuration names this home. It may still be starting: run hack daemon stop again in a moment. Otherwise it serves another Hack home (a reload changes the unit's configuration, not the running process). ${manual}`,
     };
   }

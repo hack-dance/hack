@@ -30,7 +30,9 @@ import {
   requireHumanApproval,
   requireReviewerProtection,
   requireUnreleasedCandidateLine,
+  selectPrereleaseCiRun,
   stableReleaseVersion,
+  verifyPrereleaseCi,
   verifyPublishGate,
   verifyReleaseAssets,
 } from "../scripts/prerelease-plan.ts";
@@ -92,6 +94,9 @@ const approval = [
 ];
 const ciRun = {
   id: 77,
+  run_attempt: 1,
+  updated_at: "2026-11-12T20:00:00Z",
+  check_suite_id: 700,
   head_sha: sha,
   head_branch: "next",
   event: "push",
@@ -100,6 +105,10 @@ const ciRun = {
   path: ".github/workflows/ci.yml",
 };
 const jobNames = [
+  "Config compiler (ubuntu-latest)",
+  "Config compiler (macos-latest)",
+  "Config compiler (ubuntu-24.04-arm)",
+  "Config compiler (macos-15-intel)",
   "Runtime state models",
   "Candidate core (ubuntu-latest)",
   "Candidate core (macos-latest)",
@@ -121,12 +130,30 @@ const jobNames = [
   "test",
   "linux-process-lifetime",
 ];
-const jobs = jobNames.map((name) => ({
+const jobs = jobNames.map((name, id) => ({
+  check_run_url: `https://api.github.com/repos/fixture/repository/check-runs/${1000 + id}`,
+  steps:
+    name === "test"
+      ? ["selection_mode=full", "ci_evidence=release-full"].map((name) => ({
+          name,
+          status: "completed",
+          conclusion: "success",
+        }))
+      : [],
   name,
   head_sha: sha,
   status: "completed",
   conclusion: "success",
 }));
+const testCheck = {
+  id: 1000 + jobNames.indexOf("test"),
+  check_suite: { id: 700 },
+  name: "test",
+  head_sha: sha,
+  app: { id: 15_368 },
+  status: "completed",
+  conclusion: "success",
+};
 const branch = {
   protected: true,
   commit: { sha },
@@ -135,13 +162,25 @@ const branch = {
   },
 };
 
+const runListPath = `actions/workflows/ci.yml/runs?branch=next&head_sha=${sha}&per_page=100&page=1`;
+const checkPath = `commits/${sha}/check-runs?filter=all&per_page=100&page=1`;
+const attemptPath = "actions/runs/77/attempts/1/jobs?per_page=100&page=1";
+const scopedJobs = jobs.map((job) => ({
+  ...job,
+  steps: job.steps.map((step) => ({
+    ...step,
+    name: step.name.replace("release-full", "scoped"),
+  })),
+}));
+
 function gateApi(overrides: Record<string, unknown> = {}) {
   const data: Record<string, unknown> = {
     "branches/next": branch,
     "environments/v5-prerelease": environment,
-    [`actions/workflows/ci.yml/runs?branch=next&event=push&head_sha=${sha}&per_page=1`]:
+    [`actions/workflows/ci.yml/runs?branch=next&head_sha=${sha}&per_page=100&page=1`]:
       { workflow_runs: [ciRun] },
-    "actions/runs/77/jobs?per_page=100&page=1": { jobs },
+    "actions/runs/77": ciRun,
+    "actions/runs/77/attempts/1/jobs?per_page=100&page=1": { jobs },
     "rules/branches/next?per_page=100&page=1": [
       {
         type: "required_status_checks",
@@ -150,16 +189,8 @@ function gateApi(overrides: Record<string, unknown> = {}) {
         },
       },
     ],
-    [`commits/${sha}/check-runs?filter=latest&per_page=100&page=1`]: {
-      check_runs: [
-        {
-          name: "test",
-          head_sha: sha,
-          app: { id: 15_368 },
-          status: "completed",
-          conclusion: "success",
-        },
-      ],
+    [`commits/${sha}/check-runs?filter=all&per_page=100&page=1`]: {
+      check_runs: [testCheck],
     },
     [`commits/${sha}/statuses?per_page=100&page=1`]: [],
     [`git/ref/tags/${plan.tag}`]: null,
@@ -170,6 +201,8 @@ function gateApi(overrides: Record<string, unknown> = {}) {
     "actions/runs/99/approvals": approval,
     ...overrides,
   };
+  data[`commits/${sha}/check-runs?filter=latest&per_page=100&page=1`] ??=
+    data[checkPath];
   return (path: string): Promise<unknown> => {
     if (!(path in data)) {
       throw new Error(`Unexpected API request ${path}`);
@@ -179,6 +212,251 @@ function gateApi(overrides: Record<string, unknown> = {}) {
 }
 
 describe("prerelease decision boundary", () => {
+  test("newer non-successful scoped evidence blocks an older green full run", async () => {
+    for (const state of [
+      { status: "completed", conclusion: "failure" },
+      { status: "completed", conclusion: "cancelled" },
+      { status: "in_progress", conclusion: null },
+    ]) {
+      const newer = {
+        ...ciRun,
+        ...state,
+        id: 78,
+        updated_at: "2026-11-12T21:00:00Z",
+      };
+      const refusal = selectPrereleaseCiRun({
+        api: gateApi({
+          [runListPath]: { workflow_runs: [ciRun, newer] },
+          "actions/runs/78": newer,
+          "actions/runs/78/attempts/1/jobs?per_page=100&page=1": {
+            jobs: scopedJobs,
+          },
+        }),
+        sourceRevision: sha,
+      });
+      await expect(refusal).rejects.toThrow(
+        "gh workflow run ci.yml --ref next -f full=true"
+      );
+      await expect(refusal).rejects.toThrow(
+        "Wait for the scoped push run 78 at this commit to succeed"
+      );
+      await expect(refusal).rejects.toThrow("gh run rerun 78");
+    }
+    const newer = { ...ciRun, id: 78, updated_at: "2026-11-12T21:00:00Z" };
+    expect(
+      (
+        await selectPrereleaseCiRun({
+          api: gateApi({
+            [runListPath]: { workflow_runs: [ciRun, newer] },
+            "actions/runs/78": newer,
+            "actions/runs/78/attempts/1/jobs?per_page=100&page=1": {
+              jobs: scopedJobs,
+            },
+          }),
+          sourceRevision: sha,
+        })
+      ).run.id
+    ).toBe(77);
+  });
+
+  test("a newer successful full dispatch supersedes failed scoped evidence", async () => {
+    const full = {
+      ...ciRun,
+      event: "workflow_dispatch",
+      updated_at: "2026-11-12T22:00:00Z",
+    };
+    const scoped = {
+      ...ciRun,
+      id: 78,
+      conclusion: "failure",
+      updated_at: "2026-11-12T21:00:00Z",
+    };
+    expect(
+      (
+        await selectPrereleaseCiRun({
+          api: gateApi({
+            [runListPath]: { workflow_runs: [scoped, full] },
+            "actions/runs/77": full,
+            "actions/runs/78": scoped,
+            "actions/runs/78/attempts/1/jobs?per_page=100&page=1": {
+              jobs: scopedJobs,
+            },
+          }),
+          sourceRevision: sha,
+        })
+      ).run.id
+    ).toBe(77);
+  });
+
+  test("external required checks retain latest semantics across suites", async () => {
+    const external = {
+      ...testCheck,
+      name: "external",
+      id: 2000,
+      app: { id: 55 },
+      check_suite: { id: 900 },
+    };
+    await expect(
+      verifyPrereleaseCi({
+        sourceRevision: sha,
+        api: gateApi({
+          "branches/next": {
+            ...branch,
+            protection: {
+              required_status_checks: {
+                checks: [{ context: "external", app_id: 55 }],
+                contexts: [],
+              },
+            },
+          },
+          [checkPath]: { check_runs: [testCheck, external] },
+          [`commits/${sha}/check-runs?filter=latest&per_page=100&page=1`]: {
+            check_runs: [{ ...external, id: 2001, conclusion: "failure" }],
+          },
+        }),
+      })
+    ).rejects.toThrow("external");
+  });
+  test("a green subset or full unit selection without release qualification cannot release", async () => {
+    for (const evidence of [
+      scopedJobs,
+      scopedJobs.map((job) => ({
+        ...job,
+        steps: job.steps.map((step) => ({
+          ...step,
+          name: step.name.replace("mode=full", "mode=selected"),
+        })),
+      })),
+    ]) {
+      await expect(
+        verifyPrereleaseCi({
+          api: gateApi({ [attemptPath]: { jobs: evidence } }),
+          sourceRevision: sha,
+        })
+      ).rejects.toThrow("gh workflow run ci.yml --ref next -f full=true");
+      expect(() =>
+        requireExactHeadCi({ run: ciRun, jobs: evidence, sourceRevision: sha })
+      ).toThrow("ci_evidence=release-full");
+    }
+  });
+
+  test("all compiler hosts and executed markers are required", () => {
+    for (const name of jobNames.filter((name) =>
+      name.startsWith("Config compiler")
+    )) {
+      expect(() =>
+        requireExactHeadCi({
+          run: ciRun,
+          jobs: jobs.filter((job) => job.name !== name),
+          sourceRevision: sha,
+        })
+      ).toThrow(name);
+    }
+    for (const conclusion of ["skipped", "cancelled", "failure"]) {
+      const evidence = jobs.map((job) => ({
+        ...job,
+        steps: job.steps.map((step) => ({ ...step, conclusion })),
+      }));
+      expect(() =>
+        requireExactHeadCi({ run: ciRun, jobs: evidence, sourceRevision: sha })
+      ).toThrow("successful selection_mode");
+    }
+  });
+
+  test("a newer failed or cancelled full run cannot expose older green evidence", async () => {
+    for (const conclusion of ["cancelled", "failure"]) {
+      const newer = {
+        ...ciRun,
+        id: 78,
+        updated_at: "2026-11-12T21:00:00Z",
+        conclusion,
+      };
+      await expect(
+        selectPrereleaseCiRun({
+          api: gateApi({
+            [runListPath]: { workflow_runs: [ciRun, newer] },
+            "actions/runs/78": newer,
+            "actions/runs/78/attempts/1/jobs?per_page=100&page=1": { jobs },
+          }),
+          sourceRevision: sha,
+        })
+      ).rejects.toThrow("successful next");
+    }
+  });
+
+  test("a rerun uses its latest attempt and refuses an attempt race", async () => {
+    const rerun = { ...ciRun, run_attempt: 2 };
+    const overrides = {
+      "actions/runs/77": rerun,
+      "actions/runs/77/attempts/2/jobs?per_page=100&page=1": { jobs },
+    };
+    expect(
+      (
+        await selectPrereleaseCiRun({
+          api: gateApi(overrides),
+          sourceRevision: sha,
+        })
+      ).run.run_attempt
+    ).toBe(2);
+    await expect(
+      selectPrereleaseCiRun({
+        api: gateApi({
+          ...overrides,
+          "actions/runs/77/attempts/2/jobs?per_page=100&page=1": {
+            jobs: scopedJobs,
+          },
+        }),
+        sourceRevision: sha,
+      })
+    ).rejects.toThrow("release-full");
+    let reads = 0;
+    const api = gateApi(overrides);
+    await expect(
+      selectPrereleaseCiRun({
+        api: (path) =>
+          path === "actions/runs/77" && ++reads > 1
+            ? Promise.resolve({ ...rerun, run_attempt: 3 })
+            : api(path),
+        sourceRevision: sha,
+      })
+    ).rejects.toThrow("changed during verification");
+  });
+
+  test("required CI statuses bind to this suite and exact attempt job, without legacy fallback", async () => {
+    for (const check of [
+      { ...testCheck, check_suite: { id: 701 } },
+      { ...testCheck, id: testCheck.id + 100 },
+      { ...testCheck, conclusion: "cancelled" },
+    ]) {
+      await expect(
+        verifyPrereleaseCi({
+          api: gateApi({
+            [checkPath]: { check_runs: [check] },
+            [`commits/${sha}/statuses?per_page=100&page=1`]: [
+              { context: "test", state: "success" },
+            ],
+          }),
+          sourceRevision: sha,
+        })
+      ).rejects.toThrow("Required exact-head check");
+    }
+    await verifyPrereleaseCi({
+      api: gateApi({
+        [checkPath]: {
+          check_runs: [
+            {
+              ...testCheck,
+              id: 999,
+              check_suite: { id: 701 },
+              conclusion: "failure",
+            },
+            testCheck,
+          ],
+        },
+      }),
+      sourceRevision: sha,
+    });
+  });
   test("plans exact immutable assets without publishing by default", () => {
     expect(plan.publish).toBe(false);
     expect(plan.tag).toBe("v5.0.0-next.1");
@@ -451,9 +729,13 @@ describe("prerelease decision boundary", () => {
       {
         "environments/v5-prerelease": { ...environment, protection_rules: [] },
       },
-      { "actions/runs/77/jobs?per_page=100&page=1": { jobs: jobs.slice(1) } },
       {
-        [`commits/${sha}/check-runs?filter=latest&per_page=100&page=1`]: {
+        "actions/runs/77/attempts/1/jobs?per_page=100&page=1": {
+          jobs: jobs.slice(1),
+        },
+      },
+      {
+        [`commits/${sha}/check-runs?filter=all&per_page=100&page=1`]: {
           check_runs: [
             {
               name: "test",
@@ -552,7 +834,7 @@ describe("prerelease decision boundary", () => {
         },
       },
     };
-    const checkPath = `commits/${sha}/check-runs?filter=latest&per_page=100&page=1`;
+    const checkPath = `commits/${sha}/check-runs?filter=all&per_page=100&page=1`;
     const classicCheck = {
       name: "classic-check",
       head_sha: sha,
@@ -563,10 +845,7 @@ describe("prerelease decision boundary", () => {
     const overrides = {
       "branches/next": classicBranch,
       [checkPath]: {
-        check_runs: [
-          { ...classicCheck, name: "test", app: { id: 15_368 } },
-          classicCheck,
-        ],
+        check_runs: [testCheck, classicCheck],
       },
     };
     await verifyPublishGate({
@@ -586,10 +865,7 @@ describe("prerelease decision boundary", () => {
           api: gateApi({
             ...overrides,
             [checkPath]: {
-              check_runs: [
-                { ...classicCheck, name: "test", app: { id: 15_368 } },
-                check,
-              ],
+              check_runs: [testCheck, check],
             },
           }),
           runId: "99",
@@ -658,7 +934,7 @@ describe("prerelease decision boundary", () => {
       plan,
       api: gateApi({
         ...overrides,
-        [`commits/${sha}/check-runs?filter=latest&per_page=100&page=1`]: {
+        [`commits/${sha}/check-runs?filter=all&per_page=100&page=1`]: {
           check_runs: [
             {
               name: "later-check",
@@ -1616,6 +1892,30 @@ function prereleaseGuide() {
 }
 
 describe("published support list", () => {
+  test("next.17 release notes include the env breaking change, migration commands and preserved-key fix", () => {
+    const notes = prereleaseNotes(
+      createPrereleasePlan({
+        ...input,
+        version: "5.0.0-next.17",
+        publish: "true",
+      })
+    );
+    for (const detail of [
+      "Breaking env output",
+      "has_value",
+      "hack env get KEY",
+      "--value-stdin",
+      "only global values",
+      "hack env protect KEY...",
+      "HACK-2172",
+      "cannot recover",
+      "--show-values",
+      "GET /v1/env",
+      "409 yaml_env_mutation_unsupported",
+    ]) {
+      expect(notes).toContain(detail);
+    }
+  });
   test("release notes link to the support list pinned at the candidate tag", () => {
     const published = createPrereleasePlan({
       ...input,

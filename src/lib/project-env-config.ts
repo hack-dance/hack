@@ -235,6 +235,25 @@ export type ProjectEnvResolvedConfig = ProjectEnvResolvedMetadata & {
   >;
 };
 
+/** Select names and flags with the same scope refusal as value selection. */
+export function selectProjectEnvMetadata(opts: {
+  readonly resolved: ProjectEnvResolvedMetadata;
+  readonly scopeName?: string | null;
+}): EffectiveEnvMetadata[string] {
+  const scopeName = normalizeProjectEnvScopeName({ scopeName: opts.scopeName });
+  const scoped = Object.hasOwn(opts.resolved.effectiveMetadata, scopeName)
+    ? opts.resolved.effectiveMetadata[scopeName]
+    : undefined;
+  if (!scoped) {
+    throw new ClosedCliError(
+      unknownProjectEnvScopeMessage({
+        configuredScopes: Object.keys(opts.resolved.effectiveMetadata),
+      })
+    );
+  }
+  return { ...scoped };
+}
+
 export function selectProjectEnvValues(opts: {
   readonly resolved: ProjectEnvResolvedConfig;
   readonly scopeName?: string | null;
@@ -1568,15 +1587,24 @@ type ProjectEnvLayers = NonNullable<
  * not a portable public plan or an atomic snapshot of configuration inputs.
  */
 export async function resolveProjectEnvMetadata(
-  opts: ProjectEnvResolveOptions
+  opts: ProjectEnvResolveOptions & { readonly fileDiagnostics?: boolean }
 ): Promise<ProjectEnvResolvedMetadata | null> {
   try {
-    const layers = await readProjectEnvLayers({ ...opts, strictRead: true });
+    const layers = await readProjectEnvLayers({
+      ...opts,
+      strictRead: !opts.fileDiagnostics,
+    });
     return layers
       ? projectEnvProjection({ layers, serviceNames: opts.serviceNames })
           .metadata
       : null;
-  } catch {
+  } catch (error) {
+    if (
+      opts.fileDiagnostics &&
+      (error instanceof ClosedCliError || error instanceof HackCliError)
+    ) {
+      throw error;
+    }
     throw new Error(
       "Cannot resolve project env metadata: selected configuration is invalid or unreadable."
     );
@@ -2938,6 +2966,257 @@ async function readProjectEnvLayerForMutation(opts: {
     );
   }
   return { read, text };
+}
+
+/** Names-only inventory of a plaintext entry; never contains its value. */
+export type ProjectEnvPlaintextEntry = {
+  readonly key: string;
+  readonly scope: string;
+  readonly filePath: string;
+  readonly environment: string | null;
+  readonly local: boolean;
+};
+
+type ProtectionOptions = {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  /** Undefined selects every overlay in this checkout; null selects base layers. */
+  readonly envName?: string | null;
+};
+
+/** Inspect this checkout's layers only; inherited primary layers are not mutation targets. */
+async function protectionLayers(opts: ProtectionOptions) {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  const legacyLocal = await isLegacyTrackedLocalOverlay(opts);
+  const layers: {
+    filePath: string;
+    environment: string | null;
+    local: boolean;
+  }[] = [];
+  for (const entry of await readdir(opts.projectDir, { withFileTypes: true })) {
+    if (
+      !(
+        entry.name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        entry.name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+      )
+    ) {
+      continue;
+    }
+    const stem = entry.name.slice(
+      PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
+      -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length
+    );
+    const baseLocal = stem === "local" && !legacyLocal;
+    const local = stem.endsWith(".local") || baseLocal;
+    const overlay = stem.endsWith(".local") ? stem.slice(0, -6) : stem;
+    const environment = overlay === "default" || baseLocal ? null : overlay;
+    if (opts.envName !== undefined && opts.envName !== environment) {
+      continue;
+    }
+    layers.push({
+      filePath: resolve(opts.projectDir, entry.name),
+      environment,
+      local,
+    });
+  }
+  return layers.sort((left, right) =>
+    left.filePath.localeCompare(right.filePath)
+  );
+}
+
+function plaintextEntries(opts: {
+  readonly config: ProjectEnvConfig;
+  readonly layer: {
+    readonly filePath: string;
+    readonly environment: string | null;
+    readonly local: boolean;
+  };
+}): ProjectEnvPlaintextEntry[] {
+  const entries: ProjectEnvPlaintextEntry[] = [];
+  for (const [scope, values] of Object.entries(opts.config.values)) {
+    for (const [key, value] of Object.entries(values)) {
+      if (value !== null && !isProjectEnvSecretValue(value)) {
+        entries.push({ key, scope, ...opts.layer });
+      }
+    }
+  }
+  return entries.sort(
+    (left, right) =>
+      left.scope.localeCompare(right.scope) || left.key.localeCompare(right.key)
+  );
+}
+
+/** List plaintext keys, scopes and layers without acquiring a key or returning values. */
+export async function listProjectEnvPlaintextEntries(
+  opts: ProtectionOptions
+): Promise<ProjectEnvPlaintextEntry[]> {
+  const entries: ProjectEnvPlaintextEntry[] = [];
+  for (const layer of await protectionLayers(opts)) {
+    const { read } = await readProjectEnvLayerForMutation({
+      projectRoot: opts.projectRoot,
+      path: layer.filePath,
+      environment: layer.environment ?? "default",
+    });
+    entries.push(...plaintextEntries({ config: read.config, layer }));
+  }
+  return entries;
+}
+
+/** Validate the project's existing ciphertext before any conversion can split its key. */
+async function protectionKey(
+  opts: ProtectionOptions & {
+    readonly targets: readonly {
+      readonly key: string;
+      readonly scope?: string;
+    }[];
+  }
+): Promise<string | null> {
+  const matched = new Set<number>();
+  const ciphertexts: string[] = [];
+  let hasPlaintext = false;
+  for (const layer of await protectionLayers({ ...opts, envName: undefined })) {
+    const { read } = await readProjectEnvLayerForMutation({
+      projectRoot: opts.projectRoot,
+      path: layer.filePath,
+      environment: layer.environment ?? "default",
+    });
+    for (const [scope, entries] of Object.entries(read.config.values)) {
+      for (const [key, value] of Object.entries(entries)) {
+        if (isProjectEnvSecretValue(value)) {
+          ciphertexts.push(value.secure);
+        }
+        if (opts.envName !== undefined && opts.envName !== layer.environment) {
+          continue;
+        }
+        for (const [index, target] of opts.targets.entries()) {
+          if (
+            target.key === key &&
+            (target.scope === undefined || target.scope === scope)
+          ) {
+            matched.add(index);
+            hasPlaintext ||= value !== null && !isProjectEnvSecretValue(value);
+          }
+        }
+      }
+    }
+  }
+  if (matched.size !== opts.targets.length) {
+    throw new ClosedCliError(
+      "One or more requested env keys do not exist in the selected layers. Run hack env protect to inspect plaintext names, then retry (values omitted)."
+    );
+  }
+  if (!hasPlaintext) {
+    return null;
+  }
+  const existing = await resolveProjectEnvKey({
+    projectRoot: opts.projectRoot,
+    required: false,
+    forEncryption: true,
+  });
+  if (!existing && ciphertexts.length > 0) {
+    throw new ProjectEnvKeyMissingError(missingProjectEnvKeyHint());
+  }
+  const keyText = existing ?? (await ensureProjectEnvSecretKey(opts)).keyText;
+  for (const ciphertext of ciphertexts) {
+    decryptProjectEnvValue({ ciphertext, keyText });
+  }
+  return keyText;
+}
+
+/**
+ * Encrypt chosen plaintext entries in place, preserving every scope and overlay.
+ * Each file is re-read under its writer lock and published with a content CAS.
+ * Already encrypted entries and null removals are unchanged. Files commit
+ * independently; a retry safely finishes a partially completed multi-file run.
+ */
+export async function protectProjectEnvEntries(
+  opts: ProtectionOptions & {
+    readonly targets: readonly {
+      readonly key: string;
+      readonly scope?: string;
+    }[];
+  }
+): Promise<ProjectEnvPlaintextEntry[]> {
+  for (const target of opts.targets) {
+    if (!PROJECT_ENV_KEY_PATTERN.test(target.key)) {
+      throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
+    }
+    if (target.scope !== undefined) {
+      assertValidProjectEnvScopeName({ scopeName: target.scope });
+    }
+  }
+  // Refuse malformed layers before changing any file or acquiring key material.
+  const keyText = await protectionKey(opts);
+  if (keyText === null) {
+    return [];
+  }
+  const protectedEntries: ProjectEnvPlaintextEntry[] = [];
+  for (const layer of await protectionLayers(opts)) {
+    const changed = await withEnvLayerLock({
+      layerPath: layer.filePath,
+      run: async () => {
+        const { read, text } = await readProjectEnvLayerForMutation({
+          projectRoot: opts.projectRoot,
+          path: layer.filePath,
+          environment: layer.environment ?? "default",
+        });
+        const selected = plaintextEntries({
+          config: read.config,
+          layer,
+        }).filter((entry) =>
+          opts.targets.some(
+            (target) =>
+              target.key === entry.key &&
+              (target.scope === undefined || target.scope === entry.scope)
+          )
+        );
+        if (selected.length === 0) {
+          return [];
+        }
+        for (const entries of Object.values(read.config.values)) {
+          for (const value of Object.values(entries)) {
+            if (isProjectEnvSecretValue(value)) {
+              decryptProjectEnvValue({ ciphertext: value.secure, keyText });
+            }
+          }
+        }
+        const values: ProjectEnvValuesByScope = Object.fromEntries(
+          Object.entries(read.config.values).map(([scope, entries]) => [
+            scope,
+            { ...entries },
+          ])
+        );
+        for (const entry of selected) {
+          const scope = values[entry.scope];
+          const value = scope?.[entry.key];
+          if (
+            !scope ||
+            value === undefined ||
+            value === null ||
+            isProjectEnvSecretValue(value)
+          ) {
+            continue;
+          }
+          scope[entry.key] = stableProjectEnvSecretValue({
+            previous: value,
+            plaintext: String(value),
+            keyText,
+          });
+        }
+        await writeProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
+          path: layer.filePath,
+          config: { ...read.config, values },
+          expectedExisting: text,
+          machineLocal: layer.local,
+        });
+        return selected;
+      },
+    });
+    protectedEntries.push(...changed);
+  }
+  return protectedEntries;
 }
 
 export async function setProjectEnvValue(opts: {
@@ -4559,6 +4838,8 @@ function formatProjectEnvStateValue(opts: {
 async function resolveProjectEnvKey(opts: {
   readonly projectRoot: string;
   readonly required: boolean;
+  /** Existing files use the encryption owner's tracked-key/ignore/adoption checks. */
+  readonly forEncryption?: boolean;
   readonly nativeSelection?: { readonly signal?: AbortSignal };
 }): Promise<string | null> {
   if (opts.nativeSelection) {
@@ -4571,6 +4852,9 @@ async function resolveProjectEnvKey(opts: {
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
   const localKey = await readLegacyProjectEnvKeyFile({ path: keyPath });
   if (localKey) {
+    if (opts.forEncryption) {
+      return (await ensureProjectEnvSecretKey(opts)).keyText;
+    }
     return localKey;
   }
   const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
@@ -4581,12 +4865,18 @@ async function resolveProjectEnvKey(opts: {
       ? null
       : await readLegacyProjectEnvKeyFile({ path: sharedKeyPath });
   if (sharedKey) {
+    if (opts.forEncryption) {
+      return (await ensureProjectEnvSecretKey(opts)).keyText;
+    }
     return sharedKey;
   }
   const inheritedKey = await resolveInheritedProjectEnvKey({
     projectRoot: opts.projectRoot,
   });
   if (inheritedKey) {
+    if (opts.forEncryption) {
+      return (await ensureProjectEnvSecretKey(opts)).keyText;
+    }
     return inheritedKey.keyText;
   }
   const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";

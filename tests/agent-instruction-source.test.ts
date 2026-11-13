@@ -71,6 +71,22 @@ test("every documented hack command path and long flag exists in CLI_SPEC", () =
   }
 });
 
+test("every consumer surface names local plaintext and output disclosure", () => {
+  for (const rendered of Object.values(RENDERED_SURFACES)) {
+    expect(rendered).toContain("hack.env*.local.yaml");
+    expect(rendered).toContain("must not be committed");
+    expect(rendered).toContain("MCP run/exec results");
+    expect(rendered).toContain("background-command reads");
+    expect(rendered).toContain("`hack secrets get <name>` print plaintext");
+    expect(rendered).toContain("plaintext values");
+    expect(rendered).toContain("hides every value by default");
+    expect(rendered).not.toContain("masks only entries stored as secrets");
+    expect(rendered).toContain("JSON is formatting, not redaction");
+    expect(rendered).toContain("Background metadata stores caller argv");
+    expect(rendered).not.toContain("with secret values masked");
+  }
+});
+
 test("guidance command validator rejects unknown nested subcommands and flags", () => {
   for (const fixture of [
     "`hack env bogus`",

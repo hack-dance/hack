@@ -202,8 +202,9 @@ other way round.
   nextCursor, gap, timedOut, ended, reason, outcome?, exitCode?, limits }`.
   Output events carry `text` (UTF-8) or `withheld`. An unknown or expired cursor
   gives `gap: true` and one `gap` event naming the earliest cursor.
-- `inspect`: required `commandId`; `data` is the `hack commands show` result. It
-  never contains environment values.
+- `inspect`: required `commandId`; `data` is the `hack commands show` result.
+  Automatic env maps are omitted, but stored caller argv can contain sensitive
+  expanded values and is not redacted, including with metadata-only capture.
 - `cancel`: required `commandId`; `data` says what was confirmed. Stopping a
   `docker compose exec` or `run` client does not prove the process inside the
   container stopped (`containerProcess: "not_confirmed"`).
@@ -290,8 +291,9 @@ dropped whole.
 
 ### Value-free output
 
-`hack env list --json` prints plaintext values, and CLI errors can quote env
-files. Both env tools therefore withhold the child's output:
+`hack env list --json` defaults to metadata without values. Both env tools also
+enforce an independent value-free boundary and withhold the child's raw output,
+including on errors:
 
 - `stdout` is always `""`.
 - `stderr` is `""` on success. On failure it is a fixed message that tells you

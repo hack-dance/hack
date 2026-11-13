@@ -25,7 +25,7 @@ export const optEnv = defineOption({
   long: "--env",
   valueHint: "<name|base|default>",
   description:
-    "Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only",
+    "Select an env overlay by name, or use 'base' or 'default' for base layers only; omitted selection follows the command's documented behavior",
 } as const);
 
 export const optBranch = defineOption({

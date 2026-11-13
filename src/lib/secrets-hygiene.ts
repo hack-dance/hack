@@ -16,6 +16,7 @@ import {
   removeStaleMuxEnvironment,
   type StaleMuxEnvironment,
 } from "../mux/private-environment.ts";
+import { childEnvironment } from "./child-environment.ts";
 import {
   displayPath,
   MACHINE_LOCAL_LAYER_NAME,
@@ -32,6 +33,7 @@ import {
 import {
   isGitIgnoredProjectEnvPath,
   isGitTrackedOrUnknownProjectPath,
+  isInsideGitCheckoutMarker,
   projectEnvLiveInputPaths,
 } from "./project-env-config.ts";
 
@@ -75,6 +77,11 @@ type Candidate = {
      * differs from the candidate's (a resolved alias); defaults to it.
      */
     readonly gitPath?: string;
+    /**
+     * Another repository's work tree (not the project's): reported, never
+     * repaired, since the hygiene check does not edit other repositories.
+     */
+    readonly manual?: boolean;
   } | null;
 };
 
@@ -355,6 +362,18 @@ async function gitFindings(opts: {
     path: ignore.gitPath ?? candidate.path,
   };
   if (await isGitTrackedOrUnknownProjectPath(target)) {
+    if (candidate.holds === "an encrypted secret store") {
+      // Ciphertext only: a committed store is exposed while its key is too
+      // (the key's own check is an error); some projects commit the store.
+      return [
+        {
+          status: "warn",
+          path: candidate.path,
+          message: `git tracks ${name} (or cannot say whether it does), an encrypted secret store: anyone with the repository has its ciphertext, so keep its key out of git; to stop sharing it, ${untrackAdvice(ignore.gitPath ?? candidate.path, ignore.projectRoot)}.`,
+          fix: null,
+        },
+      ];
+    }
     return [
       {
         status: "error",
@@ -380,6 +399,16 @@ async function gitFindings(opts: {
           status: "warn",
           path: candidate.path,
           message: `git does not ignore ${name}, which holds ${candidate.holds}; its name has a line break, a control character or a trailing space, so add an ignore entry for it to ${displayPath(where)} by hand.`,
+          fix: null,
+        },
+      ];
+    }
+    if (ignore.manual === true) {
+      return [
+        {
+          status: "warn",
+          path: candidate.path,
+          message: `${name} holds ${candidate.holds} inside the git work tree at ${displayPath(ignore.projectRoot)}, which does not ignore it; add '${displayPath(ignore.entry)}' to ${displayPath(ignore.gitignorePath)} by hand, or move it out of that tree.`,
           fix: null,
         },
       ];
@@ -571,6 +600,114 @@ async function inProjectIgnore(opts: {
   };
 }
 
+/**
+ * The git work tree containing `path` (as git finds it from its nearest
+ * existing directory), null when there is none, or "unknown" when a checkout
+ * marker shows one but git cannot name it (HACK-2165). A path inside a git
+ * directory itself is in no work tree.
+ */
+async function containingWorkTree(
+  path: string
+): Promise<string | null | "unknown"> {
+  const dir = await nearestExistingDirectory(dirname(path));
+  if (dir === null) {
+    return "unknown";
+  }
+  if (!(await isInsideGitCheckoutMarker({ startDir: dir }))) {
+    return null;
+  }
+  const answer = await gitAnswer(dir, [
+    "rev-parse",
+    "--is-inside-work-tree",
+    "--is-inside-git-dir",
+  ]);
+  const [inWorkTree, inGitDir] = answer?.split("\n") ?? [];
+  if (inGitDir === "true" && inWorkTree === "false") {
+    return null;
+  }
+  if (inWorkTree !== "true") {
+    return "unknown";
+  }
+  const top = await gitAnswer(dir, ["rev-parse", "--show-toplevel"]);
+  return top
+    ? ((await realpath(top).catch(() => null)) ?? "unknown")
+    : "unknown";
+}
+
+/** The resolved nearest directory of `path` that exists (git runs there). */
+async function nearestExistingDirectory(path: string): Promise<string | null> {
+  let current = path;
+  while (true) {
+    const real = await realpath(current).catch(() => null);
+    if (real !== null) {
+      return real;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+async function gitAnswer(
+  dir: string,
+  args: readonly string[]
+): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["git", "-C", dir, ...args], {
+      env: childEnvironment(),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const [out, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    return code === 0 && out.trim() !== "" ? out.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Git metadata for a configured store or key outside the project tree that
+ * another work tree contains (a home directory kept in git, say): checked
+ * there, reported without a repair. An error finding when git cannot name it.
+ */
+async function otherWorkTreeIgnore(opts: {
+  readonly path: string;
+  readonly name: string;
+  readonly holds: Holds;
+}): Promise<Candidate["ignore"] | SecretsHygieneFinding> {
+  const root = await containingWorkTree(opts.path);
+  if (root === null) {
+    return null;
+  }
+  if (root === "unknown") {
+    return {
+      status: "error",
+      path: opts.path,
+      message: `${opts.name} holds ${opts.holds} inside a git checkout, but git could not name its work tree to check whether it tracks or ignores it; make git work there, or move it out of the checkout.`,
+      fix: null,
+    };
+  }
+  const dir = await resolveExisting(dirname(opts.path));
+  const resolved = join(dir ?? dirname(opts.path), basename(opts.path));
+  const rel = relative(root, resolved);
+  if (rel === "" || isOutside(rel)) {
+    return null;
+  }
+  return {
+    projectRoot: root,
+    gitPath: resolved,
+    gitignorePath: join(root, ".gitignore"),
+    entry: `/${rel.split(sep).map(gitignoreLiteral).join("/")}`,
+    manual: true,
+  };
+}
+
 async function storeFindings(opts: {
   readonly store: SecretsHygieneScope["stores"][number];
   readonly storeKeyFromEnvironment: boolean;
@@ -582,10 +719,23 @@ async function storeFindings(opts: {
     { path: storePath, holds: "an encrypted secret store" },
     { path: keyPath, holds: "an encrypted store key" },
   ] as const) {
-    const ignore = await inProjectIgnore({
+    let ignore = await inProjectIgnore({
       path: candidate.path,
       project: opts.project,
     });
+    if (ignore === null) {
+      const other = await otherWorkTreeIgnore({
+        path: candidate.path,
+        name: shown(candidate.path, opts.project),
+        holds: candidate.holds,
+      });
+      if (other !== null && "status" in other) {
+        // Unknown: reported, and its other checks still run.
+        findings.push(other);
+      } else {
+        ignore = other;
+      }
+    }
     findings.push(
       ...(await candidateFindings({
         candidate: { ...candidate, ignore },

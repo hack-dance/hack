@@ -451,8 +451,12 @@ global Hack home, in its "secrets hygiene" section. It names files, never values
   `.hack/.env` files, the project key (checkout-local and shared) and the encrypted
   store and its key, when other users can read them, when they are links, or when they
   belong to another user;
-- those files when git tracks them, or (inside the project) when git does not ignore
-  them;
+- those files when git tracks them (an error, except for the encrypted store: it holds
+  only ciphertext, so a tracked store is a warning while its key stays out of git), or
+  when git does not ignore them. Inside the project `--fix` adds the ignore entry; a
+  store or key in another git work tree (a home directory kept in git, say) is
+  checked there and reported for you to ignore by hand, and one in a checkout git
+  cannot name is an error;
 - staging copies an interrupted write left behind, and env values staged for a terminal
   session that never ran (older than 10 minutes);
 - an encrypted store whose key file is missing: "store present, key missing, cannot be

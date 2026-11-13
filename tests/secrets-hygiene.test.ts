@@ -340,9 +340,12 @@ test("an in-project store under a name starting with '..' is still checked again
     stores: [{ storePath, keyPath }],
   });
   expect(paths(findings)).toEqual([keyPath, storePath].sort());
-  for (const finding of findings) {
-    expect(finding).toMatchObject({ status: "error", fix: null });
-  }
+  // A tracked key is an error; a tracked store is ciphertext only, so a
+  // warning (some projects commit it), never repaired automatically.
+  const byPath = new Map(findings.map((finding) => [finding.path, finding]));
+  expect(byPath.get(keyPath)).toMatchObject({ status: "error", fix: null });
+  expect(byPath.get(storePath)).toMatchObject({ status: "warn", fix: null });
+  expect(byPath.get(storePath)?.message).toContain("keep its key out of git");
 });
 
 test("project-configured store paths outside the checkout and the Hack home are reported, never fixed", async () => {
@@ -931,4 +934,69 @@ test("git lookups that fail after the first ones never shrink the live set", asy
   } finally {
     spy.mockRestore();
   }
+});
+
+test("a store and key in another git work tree are checked there and reported, never repaired", async () => {
+  const f = await fixture();
+  // A home directory kept in git, say: outside the project, inside a tree.
+  const outer = join(f.root, "dotfiles");
+  await mkdir(outer);
+  await git(outer, ["init", "-q", "-b", "main"]);
+  const storePath = join(outer, "secrets", "store.enc.json");
+  const keyPath = join(outer, "secrets", "store.key");
+  const scope: SecretsHygieneScope = {
+    ...f.scope,
+    stores: [{ storePath, keyPath }],
+  };
+  const unignored = await inspectSecretsHygiene(scope);
+  expect(paths(unignored)).toEqual([keyPath, storePath].sort());
+  for (const finding of unignored) {
+    expect(finding).toMatchObject({ status: "warn", fix: null });
+    expect(finding.message).toContain("by hand");
+  }
+  // Ignored there by hand: clean.
+  await writeFile(join(outer, ".gitignore"), "/secrets/\n");
+  expect(await inspectSecretsHygiene(scope)).toEqual([]);
+  // Tracked there: an error.
+  await mkdir(join(outer, "secrets"));
+  await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+  await git(outer, ["add", "-f", "--", "secrets/store.key"]);
+  const tracked = await inspectSecretsHygiene(scope);
+  expect(
+    tracked.some(
+      (finding) => finding.path === keyPath && finding.status === "error"
+    )
+  ).toBe(true);
+  // A checkout git cannot name: an error, never clean.
+  await rm(join(outer, ".git"), { recursive: true, force: true });
+  await writeFile(
+    join(outer, ".git"),
+    `gitdir: ${join(f.root, "missing-git-dir")}\n`
+  );
+  const unknown = await inspectSecretsHygiene(scope);
+  expect(
+    unknown.some(
+      (finding) =>
+        finding.path === storePath &&
+        finding.status === "error" &&
+        finding.message.includes("could not name")
+    )
+  ).toBe(true);
+});
+
+test("a store inside a git directory itself is not in a work tree", async () => {
+  const f = await fixture();
+  const gitDir = join(f.root, "bare.git");
+  await mkdir(gitDir);
+  await git(gitDir, ["init", "-q", "--bare"]);
+  const scope: SecretsHygieneScope = {
+    ...f.scope,
+    stores: [
+      {
+        storePath: join(gitDir, "store.enc.json"),
+        keyPath: join(gitDir, "store.key"),
+      },
+    ],
+  };
+  expect(await inspectSecretsHygiene(scope)).toEqual([]);
 });

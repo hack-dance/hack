@@ -863,7 +863,7 @@ export async function isGitIgnoredProjectEnvPath(opts: {
  * but "absent"), counts as inside, since only confirmed absence may exempt a
  * write from git's privacy checks.
  */
-async function isInsideGitCheckoutMarker(opts: {
+export async function isInsideGitCheckoutMarker(opts: {
   readonly startDir: string;
 }): Promise<boolean> {
   if ((process.env.GIT_DIR ?? "").trim().length > 0) {

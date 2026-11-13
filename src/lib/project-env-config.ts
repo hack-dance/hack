@@ -3674,6 +3674,33 @@ export type ProjectEnvLayerKeyReport = {
 };
 
 /**
+ * Overlay names that have a machine-local layer
+ * (`hack.env.<name>.local.yaml`), whether or not the committed overlay
+ * exists. `default` is excluded: that file is the legacy-compatible local
+ * default layer, not an overlay. Unlistable directories yield none.
+ */
+async function listProjectEnvLocalOnlyOverlayNames(opts: {
+  readonly projectDir: string;
+}): Promise<readonly string[]> {
+  const suffix = `.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`;
+  const entries = await readdir(opts.projectDir, { withFileTypes: true }).catch(
+    () => []
+  );
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter(
+      (name) =>
+        name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        name.endsWith(suffix)
+    )
+    .map((name) =>
+      name.slice(PROJECT_ENV_CONFIG_FILENAME_PREFIX.length, -suffix.length)
+    )
+    .filter((name) => name.length > 0 && name !== "default");
+}
+
+/**
  * Read-only (HACK-2169): for every committed and machine-local env layer of
  * this project, how many secrets it holds and how many open under the key
  * readers would use (key file, else `HACK_ENV_SECRET_KEY`). Nothing is
@@ -3697,9 +3724,17 @@ export async function inspectProjectEnvLayerKeys(opts: {
   }
   const readerKey =
     fileKey ?? (process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() || null);
-  const overlays = await listProjectEnvOverlayNames({
+  const committedOverlays = await listProjectEnvOverlayNames({
     projectDir: opts.projectDir,
   }).catch(() => [] as readonly string[]);
+  // An overlay may exist only as its machine-local layer (`env set --env
+  // <name> --local` writes no committed file); inspect those too.
+  const overlays = [
+    ...new Set([
+      ...committedOverlays,
+      ...(await listProjectEnvLocalOnlyOverlayNames(opts)),
+    ]),
+  ];
   const layers = new Map<
     string,
     { readonly envName: string | null; readonly local: boolean }

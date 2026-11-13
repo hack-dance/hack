@@ -207,6 +207,41 @@ test("the local default layer --local writes is the one inspected, legacy-compat
   expect(findings[0]?.message).toContain("SECOND (--local), THIRD (--local)");
 });
 
+test("an overlay that exists only as its machine-local layer is inspected", async () => {
+  const repo = await createRepo();
+  await setSecret(repo, "FIRST", "synthetic-first-3e70");
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: "staging",
+    scope: "global",
+    key: "STAGE",
+    value: "synthetic-stage-91b2",
+    secret: true,
+    local: true,
+  });
+  const localPath = resolve(repo.projectDir, "hack.env.staging.local.yaml");
+  expect(await readFile(localPath, "utf8")).toContain("STAGE");
+  expect(await inspect(repo)).toEqual([]);
+
+  const other = await createRepo();
+  await setSecret(other, "SECOND", "synthetic-second-0c4a");
+  const parsed = YAML.parse(await readFile(localPath, "utf8")) as {
+    values: { global: Record<string, unknown> };
+  };
+  parsed.values.global.SECOND = globalValues(
+    await readFile(other.envFile, "utf8")
+  ).SECOND;
+  await writeFile(localPath, YAML.stringify(parsed));
+
+  const findings = await inspect(repo);
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.message).toContain(
+    ".hack/hack.env.staging.local.yaml holds secrets under more than one key"
+  );
+  expect(findings[0]?.message).toContain("SECOND (--env staging --local)");
+});
+
 test("a layer whose key is missing, or the wrong one, is reported", async () => {
   const repo = await createRepo();
   await setSecret(repo, "FIRST", "synthetic-first-0b4e");

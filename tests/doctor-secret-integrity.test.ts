@@ -495,6 +495,18 @@ test("a linked worktree's inherited primary local layer is inspected", async () 
   expect(findings[0]?.message).toContain('the "worktree keys" check');
   expect(findings[0]?.message).toContain("more than one key: 1 of 3");
   expect(findings[0]?.message).toContain("SECOND (--local), THIRD (--local)");
+
+  // The primary's local default as a link leading outside its project:
+  // runtime refuses it, so the inspection reports it, never "absent".
+  const outside = resolve(primary.projectRoot, "..", "outside.yaml");
+  await writeFile(outside, await readFile(localPath, "utf8"));
+  await rm(localPath);
+  await symlink(outside, localPath);
+  const refused = await inspectLinked();
+  expect(refused).toHaveLength(1);
+  expect(refused[0]?.status).toBe("error");
+  expect(refused[0]?.message).toContain("exists but could not be read");
+  expect(refused[0]?.message).toContain("in the primary checkout");
 });
 
 test("a layer that exists but cannot be read or parsed is an error, not success", async () => {

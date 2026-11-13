@@ -3941,11 +3941,23 @@ async function listInheritedProjectEnvLayers(opts: {
     await validatePrimaryLocalFile(path);
     return await readPrimaryLocalFile(path);
   };
+  // Resolving the primary's local default checks its path (runtime does
+  // the same and refuses); a failure is reported, never taken as absent.
   const defaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
     projectRoot: primaryRoot,
     projectDir: primaryDir,
     envName: null,
-  }).catch(() => null);
+  }).catch(() => {
+    failures.push({
+      path: resolveProjectEnvLocalConfigPath({
+        projectDir: primaryDir,
+        envName: null,
+      }),
+      inherited: true,
+      what: "layer",
+    });
+    return null;
+  });
   const layers: InspectedProjectEnvLayer[] =
     defaultPath === null
       ? []

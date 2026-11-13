@@ -158,6 +158,7 @@ async function writeDocuments(
 
 /** Reading order of the v5 "Native backend (beta)" section. */
 const nativeSectionOrder = [
+  "start",
   "overview",
   "try-it",
   "preflight",
@@ -458,8 +459,10 @@ async function stageVersion(
         "index",
         "install",
         "getting-started",
-        ...optional("release-notes"),
         "upgrade",
+        ...optional("native/start"),
+        ...optional("troubleshooting"),
+        ...optional("release-notes"),
         "core",
         "env",
         "lifecycle",

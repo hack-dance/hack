@@ -210,6 +210,8 @@ const recipeEntryPoints = new Set([
   "env",
   "reference/configuration-fields",
   "guides/upgrade-from-v4",
+  "native/start",
+  "troubleshooting",
   "native/setup",
   "native/log-follow",
 ]);

@@ -71,6 +71,7 @@ when testing Hack behavior. Keep host-native virtualization, routing/trust, and
 resource benchmarks on the host they qualify. Container checks do not replace them.
 
 For a behavior change, add or update the closest regression test and affected docs.
+A PR that changes user-visible behavior updates the affected short page in the v5 start-here path in the same PR.
 Run focused checks first, then required CI gates. Documentation-only changes need
 link, generation, and contract checks rather than artificial unit tests.
 After applicable checks pass, broaden or repeat them only for a new change, failure,

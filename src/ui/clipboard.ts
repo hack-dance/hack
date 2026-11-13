@@ -1,3 +1,5 @@
+import { childEnvironment } from "../lib/child-environment.ts";
+
 type ClipboardResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: string };
@@ -45,6 +47,7 @@ export async function copyToClipboard(opts: {
   }
 
   const proc = Bun.spawn([command.command, ...command.args], {
+    env: childEnvironment(),
     stdin: "pipe",
     stdout: "ignore",
     stderr: "pipe",

@@ -1,5 +1,6 @@
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Animation playback keeps frame composition inline with rendering state to stay predictable.
 import { resolve } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { pathExists } from "../lib/fs.ts";
 import { loadLipgloss } from "./lipgloss.ts";
 import type { PlanetAnimation } from "./planet-animations.ts";
@@ -364,6 +365,7 @@ async function runChafaOnce(opts: {
   }
 
   const proc = Bun.spawn(cmd, {
+    env: childEnvironment(),
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",

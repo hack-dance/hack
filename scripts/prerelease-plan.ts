@@ -274,6 +274,44 @@ export const CI_JOBS = [
   "linux-process-lifetime",
 ] as const;
 
+/** Candidate release qualification also requires every compiler architecture. */
+export const PRERELEASE_CI_JOBS = [
+  ...CI_JOBS,
+  "Config compiler (ubuntu-latest)",
+  "Config compiler (macos-latest)",
+  "Config compiler (ubuntu-24.04-arm)",
+  "Config compiler (macos-15-intel)",
+] as const;
+
+/** Markers are executed steps of the existing fan-in, not inferred from a run's color. */
+export function ciEvidence(jobs: unknown) {
+  const fanins = array(jobs)
+    .map(object)
+    .filter((job) => job.name === "test");
+  const steps =
+    fanins.length === 1 ? array(fanins[0]?.steps ?? []).map(object) : [];
+  const selections = steps.filter(
+    (step) =>
+      step.name === "selection_mode=full" ||
+      step.name === "selection_mode=selected"
+  );
+  const certificates = steps.filter(
+    (step) =>
+      step.name === "ci_evidence=release-full" ||
+      step.name === "ci_evidence=scoped"
+  );
+  const selection = selections.length === 1 ? selections[0] : undefined;
+  const certificate = certificates.length === 1 ? certificates[0] : undefined;
+  return {
+    full: selection?.name === "selection_mode=full",
+    scoped: certificate?.name === "ci_evidence=scoped",
+    releaseFull: certificate?.name === "ci_evidence=release-full",
+    complete: [selection, certificate].every(
+      (step) => step?.status === "completed" && step.conclusion === "success"
+    ),
+  };
+}
+
 export function requireExactHeadCi({
   run,
   jobs,
@@ -283,24 +321,42 @@ export function requireExactHeadCi({
   readonly run: unknown;
   readonly jobs: unknown;
   readonly sourceRevision: string;
-  /** Protected branch the push run must belong to; `next` for candidates, `main` for stable. */
+  /** Main retains its push-only gate; next also accepts explicit full dispatches. */
   readonly branch?: "next" | "main";
 }) {
   const ci = object(run);
   if (
     ci.head_sha !== sourceRevision ||
     ci.head_branch !== branch ||
-    ci.event !== "push" ||
+    !(
+      ci.event === "push" ||
+      (branch === "next" && ci.event === "workflow_dispatch")
+    ) ||
     ci.status !== "completed" ||
     ci.conclusion !== "success" ||
     ci.path !== ".github/workflows/ci.yml"
   ) {
     throw new Error(
-      `A successful ${branch} push CI run is required on the exact source SHA`
+      `A successful ${branch} ${branch === "main" ? "push " : ""}CI run is required on the exact source SHA`
     );
   }
+  if (branch === "next") {
+    const evidence = ciEvidence(jobs);
+    if (!(evidence.full && evidence.releaseFull && evidence.complete)) {
+      throw new Error(
+        "Exact-head CI requires successful selection_mode=full and ci_evidence=release-full steps"
+      );
+    }
+    if (
+      typeof ci.check_suite_id !== "number" ||
+      !Number.isSafeInteger(ci.check_suite_id) ||
+      ci.check_suite_id < 1
+    ) {
+      throw new Error("Exact-head release CI requires its check suite id");
+    }
+  }
   const completed = array(jobs).map(object);
-  for (const name of CI_JOBS) {
+  for (const name of branch === "main" ? CI_JOBS : PRERELEASE_CI_JOBS) {
     if (
       !completed.some(
         (job) =>
@@ -326,6 +382,150 @@ export function requireExactHeadCi({
 
 export type Api = (path: string, allowMissing?: boolean) => Promise<unknown>;
 
+function missingFullCi(
+  sourceRevision: string,
+  reason: string,
+  pushRunId?: number
+): Error {
+  const pushRecovery = pushRunId
+    ? ` Wait for the scoped push run ${pushRunId} at this commit to succeed, or rerun it with: gh run rerun ${pushRunId} . An older full run cannot supersede this running, failed or cancelled scoped run. A new full dispatch may supersede it once the dispatch succeeds.`
+    : "";
+  return new Error(
+    `${reason}.${pushRecovery} A release-full CI run is required at next@${sourceRevision}; a green subset is insufficient. Freeze next at this SHA, run: gh workflow run ci.yml --ref next -f full=true ; wait for success, then retry the prerelease plan.`
+  );
+}
+
+/** The newest release-full attempt wins; cancelled/failed attempts never expose an older green. */
+async function currentCiRuns(opts: {
+  readonly api: Api;
+  readonly sourceRevision: string;
+}) {
+  const candidates = (
+    await pages({
+      api: opts.api,
+      path: `actions/workflows/ci.yml/runs?branch=next&head_sha=${opts.sourceRevision}`,
+      field: "workflow_runs",
+    })
+  ).map(object);
+  const runs: Record<string, unknown>[] = [];
+  for (const candidate of candidates) {
+    if (candidate.event !== "push" && candidate.event !== "workflow_dispatch") {
+      continue;
+    }
+    if (
+      typeof candidate.id !== "number" ||
+      !Number.isSafeInteger(candidate.id) ||
+      candidate.id < 1
+    ) {
+      throw missingFullCi(
+        opts.sourceRevision,
+        "CI history has an invalid run id"
+      );
+    }
+    const run = object(await opts.api(`actions/runs/${candidate.id}`));
+    if (
+      run.id !== candidate.id ||
+      run.head_sha !== opts.sourceRevision ||
+      run.head_branch !== "next" ||
+      run.event !== candidate.event ||
+      run.path !== ".github/workflows/ci.yml" ||
+      typeof run.updated_at !== "string" ||
+      !Number.isFinite(Date.parse(run.updated_at))
+    ) {
+      throw missingFullCi(
+        opts.sourceRevision,
+        "CI history has invalid run identity or activity time"
+      );
+    }
+    runs.push(run);
+  }
+  // A rerun is fresh CI activity even when its original run was created earlier.
+  runs.sort(
+    (left, right) =>
+      Date.parse(String(right.updated_at)) - Date.parse(String(left.updated_at))
+  );
+  return runs;
+}
+
+export async function selectPrereleaseCiRun(opts: {
+  readonly api: Api;
+  readonly sourceRevision: string;
+}) {
+  const runs = await currentCiRuns(opts);
+  for (const run of runs) {
+    const attempt = run.run_attempt;
+    if (
+      typeof attempt !== "number" ||
+      !Number.isSafeInteger(attempt) ||
+      attempt < 1
+    ) {
+      throw missingFullCi(
+        opts.sourceRevision,
+        "CI history has no valid latest attempt"
+      );
+    }
+    const jobs = await pages({
+      api: opts.api,
+      path: `actions/runs/${String(run.id)}/attempts/${attempt}/jobs`,
+      field: "jobs",
+    });
+    const evidence = ciEvidence(jobs);
+    if (evidence.releaseFull) {
+      requireExactHeadCi({ run, jobs, sourceRevision: opts.sourceRevision });
+      const latest = object(await opts.api(`actions/runs/${String(run.id)}`));
+      if (
+        latest.run_attempt !== attempt ||
+        latest.status !== "completed" ||
+        latest.conclusion !== "success"
+      ) {
+        throw missingFullCi(
+          opts.sourceRevision,
+          "The selected full CI attempt changed during verification"
+        );
+      }
+      return { run, jobs };
+    }
+    if (
+      !evidence.scoped ||
+      run.status !== "completed" ||
+      run.conclusion !== "success"
+    ) {
+      throw missingFullCi(
+        opts.sourceRevision,
+        "The newest CI attempt has incomplete release evidence",
+        evidence.scoped && run.event === "push" ? Number(run.id) : undefined
+      );
+    }
+  }
+  throw missingFullCi(
+    opts.sourceRevision,
+    "No successful release-full attempt exists (only scoped or unmarked CI evidence)"
+  );
+}
+
+/** Read-only plan gate, also repeated immediately before publication. */
+export async function verifyPrereleaseCi(opts: {
+  readonly api: Api;
+  readonly sourceRevision: string;
+}) {
+  const branch = object(await opts.api("branches/next"));
+  if (
+    branch.protected !== true ||
+    object(branch.commit).sha !== opts.sourceRevision
+  ) {
+    throw new Error("Source SHA must still be the protected next head");
+  }
+  const { run, jobs } = await selectPrereleaseCiRun(opts);
+  await requireBranchChecks({
+    api: opts.api,
+    sourceRevision: opts.sourceRevision,
+    branch,
+    ciRun: run,
+    ciJobs: jobs,
+  });
+  return { run, jobs, branch };
+}
+
 /** Rechecked after environment approval, immediately before any release mutation. */
 export async function verifyPublishGate({
   plan,
@@ -338,36 +538,10 @@ export async function verifyPublishGate({
   readonly runId: string;
   readonly approved: boolean;
 }) {
-  const branch = object(await api("branches/next"));
-  if (
-    branch.protected !== true ||
-    object(branch.commit).sha !== plan.source_revision
-  ) {
-    throw new Error("Source SHA must still be the protected next head");
-  }
+  await verifyPrereleaseCi({ api, sourceRevision: plan.source_revision });
   const environmentId = requireReviewerProtection(
     await api(`environments/${PRERELEASE_ENVIRONMENT}`)
   );
-  const runs = object(
-    await api(
-      `actions/workflows/ci.yml/runs?branch=next&event=push&head_sha=${plan.source_revision}&per_page=1`
-    )
-  );
-  const run = object(array(runs.workflow_runs)[0]);
-  if (typeof run.id !== "number") {
-    throw new Error("No exact-head next CI run exists");
-  }
-  const jobs = await pages({
-    api,
-    path: `actions/runs/${run.id}/jobs`,
-    field: "jobs",
-  });
-  requireExactHeadCi({ run, jobs, sourceRevision: plan.source_revision });
-  await requireBranchChecks({
-    api,
-    sourceRevision: plan.source_revision,
-    branch,
-  });
   if (
     (await api(`git/ref/tags/${plan.tag}`, true)) !== null ||
     (await api(`releases/tags/${plan.tag}`, true)) !== null
@@ -441,10 +615,14 @@ async function requireBranchChecks({
   api,
   sourceRevision,
   branch,
+  ciRun,
+  ciJobs,
 }: {
   readonly api: Api;
   readonly sourceRevision: string;
   readonly branch: Record<string, unknown>;
+  readonly ciRun: Record<string, unknown>;
+  readonly ciJobs: readonly unknown[];
 }) {
   const rules = (await pages({ api, path: "rules/branches/next" })).map(object);
   // Get-branch includes classic check policy with Contents:read. The dedicated
@@ -468,13 +646,25 @@ async function requireBranchChecks({
   const checks = (
     await pages({
       api,
-      path: `commits/${sourceRevision}/check-runs?filter=latest`,
+      path: `commits/${sourceRevision}/check-runs?filter=all`,
       field: "check_runs",
     })
   ).map(object);
   const statuses = (
     await pages({ api, path: `commits/${sourceRevision}/statuses` })
   ).map(object);
+  const ciContexts = new Map(ciJobs.map(object).map((job) => [job.name, job]));
+  const externalChecks = requirements.some(
+    (requirement) => !ciContexts.has(requirement.context)
+  )
+    ? (
+        await pages({
+          api,
+          path: `commits/${sourceRevision}/check-runs?filter=latest`,
+          field: "check_runs",
+        })
+      ).map(object)
+    : [];
   for (const requirement of requirements) {
     if (
       typeof requirement.context !== "string" ||
@@ -482,9 +672,20 @@ async function requireBranchChecks({
     ) {
       throw new Error("Invalid required-check policy");
     }
-    const check = checks.find(
+    const ciJob = ciContexts.get(requirement.context);
+    const checkId =
+      typeof ciJob?.check_run_url === "string"
+        ? /^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/check-runs\/([1-9][0-9]*)$/.exec(
+            ciJob.check_run_url
+          )?.[1]
+        : undefined;
+    const check = (ciJob ? checks : externalChecks).find(
       (check) =>
         check.name === requirement.context &&
+        (!ciJob ||
+          (checkId !== undefined &&
+            check.id === Number(checkId) &&
+            object(check.check_suite).id === ciRun.check_suite_id)) &&
         (requirement.integration_id == null ||
           requirement.integration_id === -1 ||
           object(check.app).id === requirement.integration_id)
@@ -496,7 +697,9 @@ async function requireBranchChecks({
       ? check.head_sha === sourceRevision &&
         check.status === "completed" &&
         check.conclusion === "success"
-      : requirement.integration_id == null && status?.state === "success";
+      : !ciContexts.has(requirement.context) &&
+        requirement.integration_id == null &&
+        status?.state === "success";
     if (!success) {
       throw new Error(
         `Required exact-head check did not succeed: ${requirement.context}`
@@ -872,6 +1075,14 @@ async function main() {
       bundle: resolve(env("HACK_PRERELEASE_BUNDLE")),
       output: resolve(env("HACK_PRERELEASE_OUTPUT")),
     });
+  } else if (mode === "verify-ci") {
+    const { run } = await verifyPrereleaseCi({
+      api: githubApi(),
+      sourceRevision,
+    });
+    process.stdout.write(
+      `Qualified release-full CI run ${String(run.id)} at ${sourceRevision}\n`
+    );
   } else if (mode === "verify" || mode === "publish") {
     if (!plan.publish || env("GITHUB_RUN_ATTEMPT") !== "1") {
       throw new Error(
@@ -921,7 +1132,7 @@ async function main() {
     }
   } else if (mode !== "plan") {
     throw new Error(
-      "Expected plan, metadata, package, verify, publish, or stable"
+      "Expected plan, metadata, package, verify-ci, verify, publish, or stable"
     );
   }
   process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);

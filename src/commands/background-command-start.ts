@@ -17,6 +17,10 @@ import {
   withoutBunRuntimeEnv,
 } from "../lib/background-command/launch.ts";
 import { pruneStore } from "../lib/background-command/store.ts";
+import {
+  childEnvironment,
+  hackReexecEnvironment,
+} from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
@@ -121,13 +125,7 @@ export function collectRedactionValues(opts: {
 function spawnEnv(
   overrides: Readonly<Record<string, string>> | undefined
 ): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") {
-      env[key] = value;
-    }
-  }
-  return { ...env, ...overrides };
+  return childEnvironment(process.env, overrides);
 }
 
 function randomToken(): string {
@@ -329,8 +327,8 @@ export async function startNativeBackgroundCommand(opts: {
         }),
       ],
       cwd: opts.cwd,
-      // The native child is this hack binary: no Bun runtime settings.
-      env: withoutBunRuntimeEnv(spawnEnv({ HACK_NO_INTERACTIVE: "1" })),
+      // This Hack re-exec decrypts layers itself; its tool children strip keys.
+      env: nativeBackgroundEnvironment(),
     },
     redactValues: [],
     requestIdentity: callerIdentity({
@@ -343,6 +341,16 @@ export async function startNativeBackgroundCommand(opts: {
       options: opts.options,
     }),
   });
+}
+
+/** Native background work re-executes Hack to resolve and decrypt its own layers. */
+export function nativeBackgroundEnvironment(): Record<string, string> {
+  return withoutBunRuntimeEnv(
+    hackReexecEnvironment({
+      ...process.env,
+      HACK_NO_INTERACTIVE: "1",
+    })
+  );
 }
 
 /** Foreground `hack exec|run` argv; values are fused and `--` ends hack options. */

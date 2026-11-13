@@ -190,6 +190,79 @@ describe("handleEnvRoutes", () => {
     });
   });
 
+  for (const secret of [false, true]) {
+    test(`POST /v1/env/set refuses YAML layers before a legacy write (secret=${secret})`, async () => {
+      const hackDir = join(repoRoot, ".hack");
+      await writeFile(
+        join(hackDir, "hack.env.default.yaml"),
+        "version: 1\nvalues:\n  global: {}\n"
+      );
+      const req = mockRequest({
+        method: "POST",
+        path: "/v1/env/set",
+        body: {
+          project: "env-test",
+          env: "qa",
+          key: "FOO",
+          value: "synthetic-daemon-sentinel",
+          secret,
+        },
+      });
+      const result = await handleEnvRoutes({ req, url: new URL(req.url) });
+      expect(result?.status).toBe(409);
+      expect(await result?.json()).toMatchObject({
+        error: "yaml_env_mutation_unsupported",
+      });
+      expect(await Bun.file(join(hackDir, ".env.qa")).exists()).toBe(false);
+      expect(await Bun.file(join(hackDir, ".env")).exists()).toBe(false);
+    });
+  }
+
+  test("POST /v1/env/unset refuses YAML layers before touching legacy storage", async () => {
+    const hackDir = join(repoRoot, ".hack");
+    await writeFile(
+      join(hackDir, "hack.env.default.yaml"),
+      "version: 1\nvalues:\n  global:\n    FOO: yaml-value\n"
+    );
+    await writeFile(join(hackDir, ".env.qa"), "FOO=synthetic-legacy-value\n");
+    const req = mockRequest({
+      method: "POST",
+      path: "/v1/env/unset",
+      body: { project: "env-test", env: "qa", key: "FOO" },
+    });
+    const result = await handleEnvRoutes({ req, url: new URL(req.url) });
+    expect(result?.status).toBe(409);
+    expect(await result?.json()).toMatchObject({
+      error: "yaml_env_mutation_unsupported",
+    });
+    expect(await readFile(join(hackDir, ".env.qa"), "utf8")).toBe(
+      "FOO=synthetic-legacy-value\n"
+    );
+  });
+
+  test("daemon metadata and mutation errors redact an unquoted JSON value", async () => {
+    const sentinel = "synthetic_pasted_value_sentinel";
+    await writeFile(
+      join(repoRoot, ".hack", PROJECT_ENV_CONTRACT_FILENAME),
+      `{"version":1,"vars":${sentinel}}`
+    );
+    for (const method of ["GET", "POST"]) {
+      const req =
+        method === "GET"
+          ? mockRequest({ method, path: "/v1/env?project=env-test" })
+          : mockRequest({
+              method,
+              path: "/v1/env/set",
+              body: { project: "env-test", key: "FOO", value: "replacement" },
+            });
+      const result = await handleEnvRoutes({ req, url: new URL(req.url) });
+      expect(result?.status).toBe(method === "GET" ? 200 : 409);
+      const text = await result?.text();
+      expect(text).not.toContain(sentinel);
+      expect(text).toContain("Invalid JSON syntax at line");
+    }
+  });
+
   test("POST /v1/env/set writes to .hack/.env and shows as resolved when broker auth is unavailable", async () => {
     const previousAuthBrokerUrl = process.env.HACK_AUTH_BROKER_URL;
     process.env.HACK_AUTH_BROKER_URL = "http://127.0.0.1:9";
@@ -399,7 +472,7 @@ describe("handleEnvRoutes", () => {
   test("malformed hack.env.json fails closed before plaintext writes", async () => {
     await writeTextFileIfChanged(
       resolve(repoRoot, ".hack", PROJECT_ENV_CONTRACT_FILENAME),
-      '{"version":1,"vars":[{"key":"SECRET_TOKEN","source":"keychain"}\n'
+      '{"version":1,"vars":[{"key":"SECRET_TOKEN","source":"keychain","description":"synthetic-daemon-parse-sentinel"}\n'
     );
 
     const setReq = mockRequest({
@@ -419,6 +492,12 @@ describe("handleEnvRoutes", () => {
     expect(setRes?.status).toBe(409);
     const setBody = await parseResponse(setRes!);
     expect(setBody?.error).toBe("contract_parse_error");
+    expect(JSON.stringify(setBody)).not.toContain(
+      "synthetic-daemon-parse-sentinel"
+    );
+    expect(setBody?.parseError).toMatch(
+      /Invalid JSON syntax at line \d+, column \d+/
+    );
     expect(String(setBody?.message)).toContain("hack.env.json");
     expect(String(setBody?.message)).toContain(
       "Fix or remove the contract file"

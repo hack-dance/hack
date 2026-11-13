@@ -276,7 +276,7 @@ test("structured annotations find runner failures and do not rely on stack frame
 test("dedicated native job replay uses the same input and host gates", () => {
   for (const name of [
     "Candidate core (macos-latest)",
-    "Config compiler (macos-15-intel)",
+    "Config compiler (macos-latest)",
   ]) {
     expect(
       replayJobAdmitted({ name, changed: ["src/lib/cli-result.ts"] })
@@ -311,7 +311,13 @@ test("dedicated native job replay uses the same input and host gates", () => {
       name: "Config compiler (macos-15-intel)",
       changed: ["packages/config-compiler/src/lib.rs"],
     })
-  ).toBe(true);
+  ).toBe(false);
+  expect(
+    replayJobAdmitted({
+      name: "Config compiler (macos-15-intel)",
+      changed: [".github/workflows/ci.yml"],
+    })
+  ).toBe(false);
   expect(
     replayJobAdmitted({
       name: "linux-process-lifetime",

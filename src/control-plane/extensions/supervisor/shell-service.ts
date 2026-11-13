@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { childEnvironment } from "../../../lib/child-environment.ts";
 import type { Logger } from "../../../ui/logger.ts";
 import { logger as baseLogger } from "../../../ui/logger.ts";
 
@@ -286,7 +287,7 @@ function spawnShellProcess(opts: {
   try {
     const proc = Bun.spawn([opts.shell], {
       cwd: opts.cwd,
-      env: buildShellEnv({ env: opts.env }),
+      env: childEnvironment(buildShellEnv({ env: opts.env })),
       terminal: opts.terminal,
     });
     return { ok: true, proc };

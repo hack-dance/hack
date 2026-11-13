@@ -22,6 +22,7 @@ import {
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
 import { CALLER_ENV } from "../lib/background-command/launch.ts";
+import { hackReexecEnvironment } from "../lib/child-environment.ts";
 import {
   HACK_ERROR_CODES,
   HackCliError,
@@ -1586,7 +1587,7 @@ function registerBackgroundCommandTools(opts: {
     name: "hack.project.command.inspect",
     title: "Inspect a background command",
     description:
-      "Show a background command's state, limits, capture and redaction settings (redaction.values: how many values were set up to be redacted; partial: redaction is not a guarantee), output sizes, supervisor and child identity, cursors and final outcome (hack commands show --json). Never returns environment values. Read-only.",
+      "Show a background command's state, stored argv, limits, capture and redaction settings (redaction.values: how many values were set up to be redacted; partial: redaction is not a guarantee), output sizes, supervisor and child identity, cursors and final outcome (hack commands show --json). Automatic env maps are omitted, but caller-supplied argv can contain sensitive expanded values and is not redacted. Read-only.",
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     inputSchema: { ...scopeInput, commandId: COMMAND_ID_INPUT },
     handler: async (input, extra) => {
@@ -2484,7 +2485,10 @@ async function runHackCommand(opts: {
     const proc = Bun.spawn(cmd, {
       detached: true,
       cwd: opts.cwd ?? opts.context.cwd,
-      env: { ...buildChildEnv(opts.context.env), ...opts.extraEnv },
+      env: hackReexecEnvironment({
+        ...buildChildEnv(opts.context.env),
+        ...opts.extraEnv,
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -2574,7 +2578,7 @@ async function runHackLogCollect(opts: {
     const proc = Bun.spawn(cmd, {
       detached: true,
       cwd: opts.context.cwd,
-      env: buildChildEnv(opts.context.env),
+      env: hackReexecEnvironment(buildChildEnv(opts.context.env)),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

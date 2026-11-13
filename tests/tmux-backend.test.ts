@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
+import { HACK_KEY_MATERIAL_VARIABLES } from "../src/lib/child-environment.ts";
 
 import type { ExecOptions } from "../src/lib/shell.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -67,6 +68,35 @@ async function loadTmuxBackend() {
   );
   return createTmuxBackend();
 }
+
+test("tmux session overrides cannot restore Hack key material through -e", async () => {
+  const backend = await loadTmuxBackend();
+  const sentinel = "synthetic-tmux-key-sentinel";
+  expect(
+    (
+      await backend.createSession({
+        name: "filtered",
+        env: {
+          ...Object.fromEntries(
+            [...HACK_KEY_MATERIAL_VARIABLES].map((key) => [key, sentinel])
+          ),
+          KEEP: "retained",
+        },
+      })
+    ).ok
+  ).toBe(true);
+  const input = execCalls[0]?.options.stdin;
+  expect(input).toBeInstanceOf(Blob);
+  if (!(input instanceof Blob)) {
+    throw new Error("Missing tmux command input");
+  }
+  const text = await input.text();
+  expect(text).toContain("KEEP=retained");
+  expect(text).not.toContain(sentinel);
+  for (const key of HACK_KEY_MATERIAL_VARIABLES) {
+    expect(text).not.toContain(key);
+  }
+});
 
 test("tmux creates lifecycle ownership through stdin, never argv", async () => {
   const backend = await loadTmuxBackend();

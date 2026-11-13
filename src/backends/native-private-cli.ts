@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { childEnvironment } from "../lib/child-environment.ts";
 
 const MAX_OUTPUT = 64 * 1024;
 const TIMEOUT_MS = 30_000;
@@ -38,7 +39,7 @@ export function runNativePrivateCli(opts: {
       }
     }
     const child = spawn(opts.executable, [...opts.args], {
-      env,
+      env: childEnvironment(env),
       detached: true,
       stdio: ["ignore", "pipe", "ignore"],
     });

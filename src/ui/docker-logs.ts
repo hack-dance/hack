@@ -1,3 +1,4 @@
+import { childEnvironment } from "../lib/child-environment.ts";
 import { pathExists } from "../lib/fs.ts";
 import {
   type LifecycleLogRecord,
@@ -388,6 +389,7 @@ function spawnComposeLogs(opts: {
     return null;
   }
   return Bun.spawn(buildComposeLogsCommand(opts), {
+    env: childEnvironment(),
     cwd: opts.cwd,
     stdin: "ignore",
     stdout: "pipe",
@@ -456,6 +458,7 @@ async function startLifecycleTail(opts: {
       opts.lifecycle.logPath,
     ],
     {
+      env: childEnvironment(),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

@@ -17,6 +17,8 @@ import {
   JournalWriter,
   OUTPUT_EVENT_LIMIT,
   outputPath,
+  outputWasCut,
+  placeReservedMarker,
   readChild,
   readEvents,
   readOwner,
@@ -386,6 +388,14 @@ export async function cutUnscannedOutput(opts: {
       event.type === "command.output_truncated" &&
       event.payload.reason === "redaction_unavailable"
   );
+  if (dropped) {
+    // Durable before the event: if the event cannot be written on a full
+    // disk, a later takeover still reports the capture as truncated.
+    await placeReservedMarker({
+      pending: opts.paths.outputCutPending,
+      marker: opts.paths.outputCut,
+    });
+  }
   if (dropped && !marked) {
     await opts.writer
       .write("command.output_truncated", {
@@ -400,7 +410,12 @@ export async function cutUnscannedOutput(opts: {
         }
       });
   }
-  return dropped || marked || emittedOffsets(opts.events).truncated;
+  return (
+    dropped ||
+    marked ||
+    emittedOffsets(opts.events).truncated ||
+    (await outputWasCut(opts.paths))
+  );
 }
 
 /** Full capture with values to redact: unscanned output must not stay on disk. */

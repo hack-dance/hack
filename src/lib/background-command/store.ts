@@ -349,6 +349,10 @@ export async function acceptCommand(opts: {
       path: paths.endUnsyncedPending,
       text: "",
     });
+    await createPrivateFileExclusive({
+      path: paths.outputCutPending,
+      text: "",
+    });
     const accepted = buildEnvelope({
       meta,
       seq: 1,
@@ -780,6 +784,8 @@ async function removeJournalPayload(paths: JournalPaths): Promise<void> {
     paths.exitConfirmed,
     paths.endUnsynced,
     paths.endUnsyncedPending,
+    paths.outputCut,
+    paths.outputCutPending,
   ]) {
     await unlink(path).catch(() => undefined);
   }

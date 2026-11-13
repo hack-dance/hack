@@ -940,6 +940,51 @@ describe("review regressions", () => {
     }
   });
 
+  test("a cut stays recorded when its marker event cannot be written, so the end still says truncated", async () => {
+    const { meta, paths } = await acceptCommand({
+      input: input({ redaction: { values: 1 } }),
+      root,
+    });
+    const owner = {
+      pid: 230_001,
+      birth: "o",
+      processGroupId: 230_001,
+      sessionId: 230_001,
+      newSession: true,
+    };
+    const child = { pid: 230_002, birth: "c", processGroupId: 230_002 };
+    await writeFile(paths.owner, JSON.stringify(owner), { mode: 0o600 });
+    await writeFile(paths.child, JSON.stringify(child), { mode: 0o600 });
+    await writeFile(paths.stdout, "unscanned\n", { mode: 0o600 });
+    // The marker event finds no space; everything else appends normally.
+    const noSpaceForMarker = async (path: string, line: string) => {
+      if (line.includes('"command.output_truncated"')) {
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      }
+      await writeFile(path, line, { flag: "a" });
+    };
+    const running = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve([child]),
+      append: noSpaceForMarker,
+    });
+    expect((await stat(paths.stdout)).size).toBe(0);
+    expect(
+      running.some((event) => event.type === "command.output_truncated")
+    ).toBe(false);
+    // The child exits without writing more: nothing is left to cut, yet
+    // the end reports the capture as truncated.
+    const ended = await recoverLostOwner({
+      paths,
+      meta,
+      observe: fakeObserve(),
+      append: noSpaceForMarker,
+    });
+    expect(ended.at(-1)?.type).toBe("command.ended");
+    expect(ended.at(-1)?.payload.truncated).toBe(true);
+  });
+
   test("with no values to redact, a reader announces an orphan's output unsupervised and leaves it on disk", async () => {
     const { meta, paths } = await acceptCommand({ input: input(), root });
     const child = { pid: 210_002, birth: "c", processGroupId: 210_002 };

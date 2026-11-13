@@ -239,6 +239,9 @@ export type JournalPaths = {
   readonly endUnsynced: string;
   /** Empty file reserved at acceptance; renamed to `endUnsynced` to mark. */
   readonly endUnsyncedPending: string;
+  /** Present once a takeover cut unscanned output; reserved like `endUnsynced`. */
+  readonly outputCut: string;
+  readonly outputCutPending: string;
 };
 
 export function journalPaths(opts: {
@@ -271,6 +274,8 @@ export function journalPaths(opts: {
     fallbackLock: resolve(dir, "lock.owner"),
     endUnsynced: resolve(dir, "end-unsynced"),
     endUnsyncedPending: resolve(dir, "end-unsynced.pending"),
+    outputCut: resolve(dir, "output-cut"),
+    outputCutPending: resolve(dir, "output-cut.pending"),
   };
 }
 
@@ -610,18 +615,37 @@ export async function reconcileTail(
  * it means no failure was recorded, not that the fsync was confirmed.
  */
 async function markEndUnsynced(paths: JournalPaths): Promise<void> {
+  await placeReservedMarker({
+    pending: paths.endUnsyncedPending,
+    marker: paths.endUnsynced,
+  });
+}
+
+/**
+ * Put an empty marker file in place: rename the copy reserved at
+ * acceptance (normally no new space needed), else create it, best effort.
+ */
+export async function placeReservedMarker(opts: {
+  readonly pending: string;
+  readonly marker: string;
+}): Promise<void> {
   try {
-    await rename(paths.endUnsyncedPending, paths.endUnsynced);
+    await rename(opts.pending, opts.marker);
     return;
   } catch {
     // Not reserved: fall back to creating it.
   }
   const handle = await open(
-    paths.endUnsynced,
+    opts.marker,
     constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW,
     0o600
   ).catch(() => null);
   await handle?.close();
+}
+
+/** True when a takeover cut unscanned output (see `cutUnscannedOutput`). */
+export async function outputWasCut(paths: JournalPaths): Promise<boolean> {
+  return (await lstat(paths.outputCut).catch(() => null)) !== null;
 }
 
 /** True when the final record's fsync was not confirmed (see `reconcileTail`). */

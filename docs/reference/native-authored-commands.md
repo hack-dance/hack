@@ -310,6 +310,10 @@ any other refusal, or a successful inspection retains every file. This path does
 not compile input, acquire values, serve a run or touch guest resources. If it
 refuses because runtime state was reserved, the command independently attempts
 the settled recovery proof below; that refusal grants no authority.
+If inspection refuses because an interrupted removal no longer has an intact
+network, a read-only recovery selection must validate the exact start-bound
+settled journal before choosing recovery. Busy, canceled, unknown and malformed
+results still cannot choose cleanup from the inspection refusal alone.
 
 When Ready was never saved, recovery requires the exact start and private source
 envelope, repeatedly proves Ready absent, and records a distinct version 3

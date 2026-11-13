@@ -23,8 +23,13 @@ import {
   nativeAuthoredProjectNothingToRecover,
   withNativeAuthoredProjectAdmission,
 } from "../src/backends/native-authored-project-run.ts";
+import { NativeAuthoredReservedStartError } from "../src/backends/native-authored-stop-errors.ts";
+import { retireNativeAuthoredUnreservedStart } from "../src/backends/native-authored-unreserved-start.ts";
 import { createNativeProcessCensusDiagnostics } from "../src/backends/native-process-census-diagnostics.ts";
-import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
+import {
+  type invokeNativeRuntime,
+  NativeRuntimeRequestError,
+} from "../src/backends/native-runtime-client.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 import { installFixtureProcessCensus } from "./helpers/fixture-process-census.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -440,6 +445,51 @@ test("pre-Ready selection accepts runtime Ready and cleanup origins but refuses 
   }
 }, 30_000);
 
+test("an interrupted network removal routes from refused inspection only through an exact settled journal selection", async () => {
+  for (const eligible of [true, false]) {
+    const current = await fixture(true, false, "released");
+    current.selection.receipt = parseNativeAuthoredReceipt({
+      ...receipt(),
+      phase: eligible ? "removal-intent" : "preparing",
+      resources: Object.fromEntries(
+        Object.entries(receipt().resources).map(([name, resource]) => [
+          name,
+          {
+            ...resource,
+            phase: resource.kind === "network" ? "remove-intent" : "removed",
+          },
+        ])
+      ),
+    });
+    const calls: string[] = [];
+    const failure = await retireNativeAuthoredUnreservedStart({
+      ...current.options,
+      request: async (opts) => {
+        calls.push(opts.args[2] ?? "");
+        if (opts.args[2] === "inspect") {
+          throw new NativeRuntimeRequestError({
+            message: "synthetic missing network",
+            nativeCode: "native_graph_admission",
+          });
+        }
+        expect(opts.args[2]).toBe("recovery-selection");
+        return current.selection;
+      },
+    }).catch((error: unknown) => error);
+    expect(calls).toEqual(["inspect", "recovery-selection"]);
+    expect(await Bun.file(current.paths.start).exists()).toBe(true);
+    expect(current.cleanupCalls()).toBe(0);
+    if (eligible) {
+      expect(failure).toBeInstanceOf(NativeAuthoredReservedStartError);
+      await recoverNativeAuthoredProject(current.options);
+      expect(current.cleanupCalls()).toBe(1);
+    } else {
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(NativeAuthoredReservedStartError);
+    }
+  }
+});
+
 test("explicit frontend recovery refuses a live admission before any native request", async () => {
   const current = await fixture();
   await expect(recoverNativeAuthoredProject(current.options)).rejects.toThrow();
@@ -448,6 +498,61 @@ test("explicit frontend recovery refuses a live admission before any native requ
     (await loadNativeAuthoredProjectRun(current.scope))?.record.receipt
   ).toEqual(receipt());
   expect(await Bun.file(current.paths.intent).exists()).toBe(false);
+});
+
+test("unreserved probing preserves files on malformed, failed, cancelled or unrelated inspection refusals", async () => {
+  for (const scenario of [
+    "malformed",
+    "failed",
+    "cancelled",
+    "busy",
+  ] as const) {
+    const current = await fixture(true, false, "released");
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const failure = await retireNativeAuthoredUnreservedStart({
+      ...current.options,
+      signal: controller.signal,
+      request: async (opts) => {
+        calls.push(opts.args[2] ?? "");
+        if (opts.args[2] === "inspect") {
+          throw new NativeRuntimeRequestError({
+            message: "synthetic inspection refusal",
+            nativeCode:
+              scenario === "busy"
+                ? "native_runtime_busy"
+                : "native_graph_admission",
+          });
+        }
+        if (scenario === "cancelled") {
+          controller.abort(130);
+        }
+        if (scenario !== "malformed") {
+          throw new Error("synthetic probe failure");
+        }
+        return { invalid: true };
+      },
+    }).catch((error: unknown) => error);
+    expect(calls).toEqual(
+      scenario === "busy" ? ["inspect"] : ["inspect", "recovery-selection"]
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(NativeAuthoredReservedStartError);
+    expect(await Bun.file(current.paths.start).exists()).toBe(true);
+    expect(await Bun.file(current.paths.intent).exists()).toBe(false);
+    expect(current.cleanupCalls()).toBe(0);
+  }
+});
+
+test("successful inspection preserves the reserved-start routing signal through real admission storage", async () => {
+  const current = await fixture(true, false, "released");
+  const failure = await retireNativeAuthoredUnreservedStart({
+    ...current.options,
+    request: async () => current.selection.receipt,
+  }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(NativeAuthoredReservedStartError);
+  expect(await Bun.file(current.paths.start).exists()).toBe(true);
+  expect(current.cleanupCalls()).toBe(0);
 });
 
 test("fresh pre-Ready admission survives crashes around durable release and retains a failed release exactly", async () => {

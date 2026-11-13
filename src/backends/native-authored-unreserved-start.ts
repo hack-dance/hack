@@ -4,8 +4,11 @@ import {
   withNativeAuthoredProjectAdmission,
   withNativeAuthoredProjectStatus,
 } from "./native-authored-project-run.ts";
+import { parseNativeAuthoredRecoverySelection } from "./native-authored-recovery-protocol.ts";
+import { NativeAuthoredReservedStartError } from "./native-authored-stop-errors.ts";
 import {
   invokeNativeRuntime,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -13,16 +16,6 @@ function refused(): never {
   throw new Error(
     "Native startup intent is not a provably unreserved attempt; selected state is retained. Values omitted."
   );
-}
-
-/** A successful inspection proves a journal exists; cleanup still needs its own proof. */
-export class NativeAuthoredReservedStartError extends Error {
-  constructor() {
-    super(
-      "Native startup has reserved runtime state; stored-generation recovery is required. Values omitted."
-    );
-    this.name = "NativeAuthoredReservedStartError";
-  }
 }
 
 /**
@@ -117,6 +110,42 @@ export async function retireNativeAuthoredUnreservedStart(opts: {
     }
     remaining();
     await admission.assertHeld();
+    if (
+      refusal instanceof NativeRuntimeRequestError &&
+      refusal.nativeCode === "native_graph_admission" &&
+      refusal.stopSignal === undefined
+    ) {
+      // Inspection expects an intact network even during interrupted removal.
+      // A closed, start-bound journal selection can route that attempt to the
+      // independent cleanup owner. An inspection refusal alone never can.
+      const selected = await request({
+        runtime,
+        cwd: scope.projectRoot,
+        args: [
+          "graph",
+          "native",
+          "recovery-selection",
+          "--run-id",
+          run,
+          "--json",
+        ],
+        timeoutMs: remaining(),
+        signal,
+        boundNativeAuthoredRecoveryDrain: "selection",
+      })
+        .then((value) =>
+          parseNativeAuthoredRecoverySelection({
+            value,
+            start: start.record.review,
+          })
+        )
+        .catch(() => null);
+      remaining();
+      await admission.assertHeld();
+      if (selected) {
+        throw new NativeAuthoredReservedStartError();
+      }
+    }
     await admission.retireUnreserved({ expectedStart: start, refusal });
     return { run };
   });

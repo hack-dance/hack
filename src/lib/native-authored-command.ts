@@ -29,9 +29,11 @@ import {
   serveNativeAuthoredProject,
 } from "../backends/native-authored-project-start.ts";
 import { NativeAuthoredProjectNotStartedError } from "../backends/native-authored-runtime-binary.ts";
-import { NativeAuthoredStopUnavailableError } from "../backends/native-authored-stop-errors.ts";
 import {
   NativeAuthoredReservedStartError,
+  NativeAuthoredStopUnavailableError,
+} from "../backends/native-authored-stop-errors.ts";
+import {
   nativeAuthoredUnreservedStartSelected,
   retireNativeAuthoredUnreservedStart,
 } from "../backends/native-authored-unreserved-start.ts";

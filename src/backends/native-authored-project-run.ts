@@ -45,7 +45,10 @@ import {
   requestNativeAuthoredLiveStop,
 } from "./native-authored-live-stop.ts";
 import type { NativeAuthoredProcessIncarnation } from "./native-authored-process-incarnation.ts";
-import { NativeAuthoredStopUnavailableError } from "./native-authored-stop-errors.ts";
+import {
+  NativeAuthoredReservedStartError,
+  NativeAuthoredStopUnavailableError,
+} from "./native-authored-stop-errors.ts";
 import {
   NATIVE_GRAPH_UNRESERVED,
   NativeRuntimeRequestError,
@@ -426,7 +429,15 @@ async function storage<T>(
       },
       check
     );
-  } catch {
+  } catch (error) {
+    // Preserve only closed, value-free routing hints across the redaction boundary.
+    // Recovery must still acquire its leases and prove the selected state itself.
+    if (
+      error instanceof NativeAuthoredStopUnavailableError ||
+      error instanceof NativeAuthoredReservedStartError
+    ) {
+      throw error;
+    }
     return refused();
   } finally {
     await Promise.all(held.map(({ file }) => file.close()));

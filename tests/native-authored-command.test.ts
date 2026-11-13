@@ -9,8 +9,10 @@ import {
   type serveNativeAuthoredProject,
 } from "../src/backends/native-authored-project-start.ts";
 import { NativeAuthoredProjectNotStartedError } from "../src/backends/native-authored-runtime-binary.ts";
-import { NativeAuthoredStopUnavailableError } from "../src/backends/native-authored-stop-errors.ts";
-import { NativeAuthoredReservedStartError } from "../src/backends/native-authored-unreserved-start.ts";
+import {
+  NativeAuthoredReservedStartError,
+  NativeAuthoredStopUnavailableError,
+} from "../src/backends/native-authored-stop-errors.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {

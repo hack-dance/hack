@@ -254,6 +254,12 @@ export class SecretStoreRetireError extends Error {
 export async function retireEncryptedStoreFile(input: {
   readonly storePath: string;
   readonly now?: Date;
+  /**
+   * Runs under the store's lock just before the move: a refusal message
+   * when the store is no longer one to retire (its key was restored, or it
+   * was replaced meanwhile), null to go on.
+   */
+  readonly recheck?: () => Promise<string | null>;
 }): Promise<{ readonly from: string; readonly to: string }> {
   const storePath = input.storePath;
   return await withEncryptedStoreMutation({
@@ -269,6 +275,10 @@ export async function retireEncryptedStoreFile(input: {
         throw new SecretStoreRetireError(
           `The encrypted secret store at ${storePath} is a symlink or not a regular file; nothing was moved. Inspect it with ls -l, then move it aside by hand if you mean to.`
         );
+      }
+      const changed = (await input.recheck?.()) ?? null;
+      if (changed !== null) {
+        throw new SecretStoreRetireError(changed);
       }
       const stamp = (input.now ?? new Date())
         .toISOString()

@@ -121,32 +121,26 @@ export async function retireSecretStore(opts: {
   readonly now?: Date;
 }): Promise<SecretStoreRetireOutcome> {
   const listing = await storeLocation(opts);
-  if (listing.kind === "inactive") {
-    return {
-      kind: "refused",
-      message:
-        "No encrypted file secret store is configured here (the backend is the OS keychain); nothing was moved.",
-    };
-  }
-  if (listing.kind === "listed") {
-    return {
-      kind: "refused",
-      message:
-        listing.ownEntries.size + listing.foreignEntryCount === 0
-          ? `There is no encrypted secret store with entries at ${listing.storePath}; nothing was moved.`
-          : `The encrypted secret store at ${listing.storePath} opens with the key in use, so there is nothing to retire; nothing was moved.`,
-    };
-  }
-  if (!RETIRABLE_REASONS.has(listing.reason)) {
-    return {
-      kind: "refused",
-      message: `The encrypted secret store at ${listing.storePath} is not retired: it is not a missing or wrong key (${listing.reason.replaceAll("_", " ")}). Run hack doctor for what to fix; nothing was moved.`,
-    };
+  const refusal = retireRefusal(listing);
+  if (refusal !== null) {
+    return { kind: "refused", message: refusal };
   }
   try {
     const moved = await retireEncryptedStoreFile({
       storePath: listing.storePath,
       now: opts.now,
+      // Classified before the lock: classify again under it, so a store
+      // whose key came back, or that was replaced, is not retired.
+      recheck: async () => {
+        const current = await storeLocation(opts);
+        if (current.storePath !== listing.storePath) {
+          return "The secret store configuration changed while retiring; nothing was moved. Run hack doctor, then retry.";
+        }
+        const changed = retireRefusal(current);
+        return changed === null
+          ? null
+          : `${changed} (It changed while retiring.)`;
+      },
     });
     return { kind: "retired", ...moved, keyPath: listing.keyPath };
   } catch (error: unknown) {
@@ -155,4 +149,23 @@ export async function retireSecretStore(opts: {
     }
     throw error;
   }
+}
+
+/**
+ * Why a store is not one to retire, or null when it is (entries exist and
+ * the key that opens them is missing or wrong).
+ */
+function retireRefusal(listing: FileSecretStoreListing): string | null {
+  if (listing.kind === "inactive") {
+    return "No encrypted file secret store is configured here (the backend is the OS keychain); nothing was moved.";
+  }
+  if (listing.kind === "listed") {
+    return listing.ownEntries.size + listing.foreignEntryCount === 0
+      ? `There is no encrypted secret store with entries at ${listing.storePath}; nothing was moved.`
+      : `The encrypted secret store at ${listing.storePath} opens with the key in use, so there is nothing to retire; nothing was moved.`;
+  }
+  if (!RETIRABLE_REASONS.has(listing.reason)) {
+    return `The encrypted secret store at ${listing.storePath} is not retired: it is not a missing or wrong key (${listing.reason.replaceAll("_", " ")}). Run hack doctor for what to fix; nothing was moved.`;
+  }
+  return null;
 }

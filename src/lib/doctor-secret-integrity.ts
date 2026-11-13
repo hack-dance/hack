@@ -31,6 +31,19 @@ export type SecretIntegrityFinding = {
 /** The command that moves a store whose key is gone aside (HACK-2177). */
 export const RETIRE_STORE_COMMAND = "hack secrets retire-store";
 
+const SAFE_SHELL_ARG = /^[A-Za-z0-9_./:-]+$/u;
+
+/**
+ * The retire command for the store this project selects: with `--path`,
+ * since it otherwise acts on the current directory's project.
+ */
+function retireStoreCommand(projectRoot: string): string {
+  const quoted = SAFE_SHELL_ARG.test(projectRoot)
+    ? projectRoot
+    : `'${projectRoot.replaceAll("'", `'"'"'`)}'`;
+  return `${RETIRE_STORE_COMMAND} --path ${quoted}`;
+}
+
 /** A path for display: project-relative inside it, `~/...` under home. */
 function displayPath(opts: {
   readonly projectRoot: string;
@@ -124,7 +137,7 @@ async function keylessStoreFinding(opts: {
   ].join(" ");
   return {
     status: usedHere ? "error" : "warn",
-    message: `${state} Its entries cannot be counted or read without that key. ${usage} Choose one: restore the key (put the key file back at ${opts.key} with mode 600 from a backup or another machine, or set HACK_SECRETS_FILE_KEY to the same key); or, if the key is gone for good, run ${RETIRE_STORE_COMMAND}, which moves the store aside to a timestamped name beside it, deletes nothing, and prints how to put it back. Do not provision a new key: it cannot open these entries.`,
+    message: `${state} Its entries cannot be counted or read without that key. ${usage} Choose one: restore the key (put the key file back at ${opts.key} with mode 600 from a backup or another machine, or set HACK_SECRETS_FILE_KEY to the same key); or, if the key is gone for good, run ${retireStoreCommand(opts.projectRoot)}, which moves the store aside to a timestamped name beside it, deletes nothing, and prints how to put it back. Do not provision a new key: it cannot open these entries.`,
   };
 }
 

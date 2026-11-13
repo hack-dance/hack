@@ -23,11 +23,17 @@ export type DoctorRecoveryGuidance = {
 const FIX_CHECKS = new Set(["caddy local ca", "dns:hack", "dns:hack.gy"]);
 /** The secret integrity finding for a store whose key is missing names this command. */
 const RETIRE_STORE_COMMAND = "hack secrets retire-store";
+/** The command as the finding names it, with the diagnosed project's `--path`. */
+const RETIRE_STORE_COMMAND_PATTERN =
+  /hack secrets retire-store(?: --path (?:'(?:[^']|'"'"')*'|[A-Za-z0-9_./:-]+))?/u;
+
 /** The two ways forward for such a store, shown as one choice (HACK-2177). */
-const SECRET_STORE_CHOICES = [
-  "Restore the encrypted secret store's key: put the key file back where the secret integrity check says (mode 600), or set HACK_SECRETS_FILE_KEY to the same key.",
-  `Or, if the key is gone for good, retire the store: \`${RETIRE_STORE_COMMAND}\` moves it aside to a timestamped name beside it, deletes nothing, and prints how to put it back.`,
-] as const;
+function secretStoreChoices(command: string): readonly string[] {
+  return [
+    "Restore the encrypted secret store's key: put the key file back where the secret integrity check says (mode 600), or set HACK_SECRETS_FILE_KEY to the same key.",
+    `Or, if the key is gone for good, retire the store: \`${command}\` moves it aside to a timestamped name beside it, deletes nothing, and prints how to put it back.`,
+  ];
+}
 const SAFE_SHELL_ARG_PATTERN = /^[A-Za-z0-9_./:-]+$/u;
 const PROJECTS_PRUNE_COMMAND_PATTERN =
   /hack projects prune(?: --project [A-Za-z0-9_.-]+)?/u;
@@ -90,7 +96,10 @@ export function buildDoctorRecoveryGuidance(input: {
       result.name === "secret integrity" &&
       result.message.includes(RETIRE_STORE_COMMAND)
     ) {
-      for (const choice of SECRET_STORE_CHOICES) {
+      const command =
+        result.message.match(RETIRE_STORE_COMMAND_PATTERN)?.[0] ??
+        RETIRE_STORE_COMMAND;
+      for (const choice of secretStoreChoices(command)) {
         pushUnique(choices, choice);
       }
       // Any other finding in the same check still needs a look.
@@ -177,7 +186,17 @@ export function scopeDoctorRecoveryGuidance(input: {
     configurationRepair: input.guidance.configurationRepair.map((command) =>
       scopeRecoveryCommand({ command, projectRoot: input.projectRoot })
     ),
-    choices: [...(input.guidance.choices ?? [])],
+    // A retire command without --path acts on the current directory: scope
+    // it to the diagnosed project, as the other project commands are.
+    choices: (input.guidance.choices ?? []).map((choice) =>
+      input.projectRoot?.trim() &&
+      choice.includes(`\`${RETIRE_STORE_COMMAND}\``)
+        ? choice.replace(
+            `\`${RETIRE_STORE_COMMAND}\``,
+            `\`${RETIRE_STORE_COMMAND} --path ${quoteShellArg(input.projectRoot.trim())}\``
+          )
+        : choice
+    ),
     followUp: [...input.guidance.followUp],
     verify: input.guidance.verify.map((command) =>
       scopeRecoveryCommand({ command, projectRoot: input.projectRoot })

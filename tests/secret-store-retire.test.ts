@@ -26,6 +26,7 @@ import {
 import { inspectSecretIntegrity } from "../src/lib/doctor-secret-integrity.ts";
 import { findProjectContext } from "../src/lib/project.ts";
 import { upsertProjectRegistration } from "../src/lib/projects-registry.ts";
+import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { retireSecretStore } from "../src/lib/secret-store-retire.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -235,7 +236,9 @@ test("a store whose key is missing is an error only for a project that reads it"
   }).join("\n");
   expect(lines).toContain("Choose one:");
   expect(lines).toContain("Restore the encrypted secret store's key");
-  expect(lines).toContain("`hack secrets retire-store`");
+  expect(lines).toContain(
+    `\`hack secrets retire-store --path ${fixture.bystander.projectRoot}\``
+  );
 });
 
 test("retire-store refuses without --yes when it cannot prompt, then retires, and moving the file back restores it", async () => {
@@ -347,4 +350,79 @@ test("retire-store refuses a store that opens, an absent store, and a key that i
     "There is no encrypted secret store with entries"
   );
   expect(await readFile(join(root, "elsewhere.enc.json"))).toEqual(before);
+});
+
+test("retire re-checks the store under its lock: a key restored meanwhile is not retired", async () => {
+  // Codex review: eligibility was decided before the store's lock, so a
+  // store whose key came back in between was still moved aside.
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  let retire: ReturnType<typeof retireSecretStore> | undefined;
+  await withProjectsRegistryLock({
+    lockPath: `${fixture.storePath}.lock`,
+    label: "test store holder",
+    run: async () => {
+      retire = retireSecretStore({
+        projectName: "app-b",
+        projectDir: fixture.bystander.projectDir,
+      });
+      await Bun.sleep(300);
+      // Still waiting for the lock: the key comes back now.
+      await writeFile(fixture.keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
+      await chmod(fixture.keyPath, 0o600);
+    },
+  });
+  if (!retire) {
+    throw new Error("retire not started");
+  }
+  const outcome = await retire;
+  expect(outcome.kind).toBe("refused");
+  expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+    "opens with the key in use"
+  );
+  expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+    "It changed while retiring"
+  );
+  expect(await readFile(fixture.storePath)).toEqual(before);
+  const retired = (await readdir(fixture.hackHome)).filter((name) =>
+    name.includes(".retired-")
+  );
+  expect(retired).toEqual([]);
+});
+
+test("the retire command doctor and the recovery block name targets the diagnosed project", async () => {
+  // Codex review: an unscoped command acts on the current directory, not
+  // the project doctor (or crash capture) diagnosed with --path.
+  const fixture = await setUp();
+  const finding = (await inspect(fixture.bystander, "app-b"))[0];
+  const command = `hack secrets retire-store --path ${fixture.bystander.projectRoot}`;
+  expect(finding?.message).toContain(command);
+  const guidance = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "secret integrity",
+        status: "warn",
+        message: finding?.message ?? "",
+      },
+    ],
+  });
+  expect(
+    buildRecoveryWorkflowLines({ guidance, projectRoot: null }).join("\n")
+  ).toContain(`\`${command}\``);
+  // A finding without --path (an older wording) is scoped to the project.
+  const unscoped = buildDoctorRecoveryGuidance({
+    results: [
+      {
+        name: "secret integrity",
+        status: "warn",
+        message: "Run hack secrets retire-store to move it aside.",
+      },
+    ],
+  });
+  expect(
+    buildRecoveryWorkflowLines({
+      guidance: unscoped,
+      projectRoot: "/srv/some project",
+    }).join("\n")
+  ).toContain("`hack secrets retire-store --path '/srv/some project'`");
 });

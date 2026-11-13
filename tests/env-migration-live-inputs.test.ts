@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -46,7 +47,10 @@ afterEach(async () => {
 });
 
 async function fixture(directory = ".hack") {
-  const projectRoot = await mkdtemp(join(tmpdir(), "hack-live-env-inputs-"));
+  const unresolvedProjectRoot = await mkdtemp(
+    join(tmpdir(), "hack-live-env-inputs-")
+  );
+  const projectRoot = await realpath(unresolvedProjectRoot);
   roots.push(projectRoot);
   const projectDir = join(projectRoot, directory);
   await mkdir(projectDir);
@@ -56,6 +60,7 @@ async function fixture(directory = ".hack") {
   );
   return {
     projectRoot,
+    unresolvedProjectRoot,
     projectDir,
     projectName: "fixture",
     serviceNames: ["app"],
@@ -130,7 +135,18 @@ test("candidate selection and deletion both reject project/shared keys and curre
     "version: 1\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
   );
   expect(await resolveProjectEnvSharedKeyPath(options)).toBe(sharedKeyPath);
-  const protectedPaths = [keyPath, sharedKeyPath, configPath, layerPath];
+  // Temp roots can have another spelling on hosts with a symlinked temp directory.
+  const unresolvedKeyPath = join(
+    options.unresolvedProjectRoot,
+    ".hack.secret.key"
+  );
+  const protectedPaths = [
+    keyPath,
+    sharedKeyPath,
+    configPath,
+    layerPath,
+    unresolvedKeyPath,
+  ];
   await symlink(".", join(options.projectRoot, "link"));
   const alias = join(options.projectRoot, "link/.hack.secret.key");
   const hardlink = join(options.projectRoot, "key-hardlink");

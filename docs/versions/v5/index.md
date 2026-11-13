@@ -13,6 +13,8 @@ changed and what was retired.
 
 Start with [Install](install.md), then [Getting started](getting-started.md).
 [What's new in 5.0](../guides/v5-release-notes.md) summarizes the release.
+v5 prerelease bundles are Apple Silicon macOS only; see
+[Install](install.md#prerequisites) for platform support.
 
 ## Understand the project
 

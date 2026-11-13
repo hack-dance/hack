@@ -8,6 +8,7 @@ import { withPinnedRuntimeBinary } from "./native-authored-runtime-binary.ts";
 import {
   invokeNativeRuntime,
   isNativeRuntimeNotRunning,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -37,6 +38,7 @@ export type NativeAuthoredProjectStatus = {
   readonly status:
     | "not_started"
     | "pending"
+    | "runtime_busy"
     | "runtime_not_running"
     | "observed";
   readonly run: string | null;
@@ -104,7 +106,7 @@ export async function nativeAuthoredProjectPs(input: {
                 "--run-id",
                 receipt.review.provenance.run,
                 "--action",
-                "status",
+                "observe",
                 "--json",
               ],
               timeoutMs: 15_000,
@@ -112,7 +114,12 @@ export async function nativeAuthoredProjectPs(input: {
               boundNativeStatusDrain: true,
             });
           } catch (error: unknown) {
-            if (!isNativeRuntimeNotRunning(error)) {
+            const changed =
+              error instanceof NativeRuntimeRequestError &&
+              (error.nativeCode === "graph_status_changed" ||
+                (error.nativeCode === "native_graph_foreground" &&
+                  error.nativeCauseCode === "graph_status_changed"));
+            if (!(changed || isNativeRuntimeNotRunning(error))) {
               throw error;
             }
             // A stopped runtime is a status, not a refusal; the same saved
@@ -120,14 +127,14 @@ export async function nativeAuthoredProjectPs(input: {
             await check();
             return {
               backend: "native",
-              status: "runtime_not_running",
+              status: changed ? "runtime_busy" : "runtime_not_running",
               run: receipt.review.provenance.run,
               phase: null,
               items: [],
             };
           }
           await check();
-          const current = parseNativeAuthoredControl(value, receipt, "status");
+          const current = parseNativeAuthoredControl(value, receipt, "observe");
           const items: Item[] = Object.entries(current.receipt.readiness).map(
             ([service]) => {
               const observation = current.observations?.[service];

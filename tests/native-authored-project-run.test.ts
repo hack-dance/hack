@@ -26,7 +26,9 @@ import {
   prepareNativeAuthoredProjectRunStorage as prepare,
   removeNativeAuthoredProjectRun as remove,
   saveNativeAuthoredProjectRun as save,
+  stopNativeAuthoredProject,
 } from "../src/backends/native-authored-project-run.ts";
+import { NativeAuthoredStopUnavailableError } from "../src/backends/native-authored-stop-errors.ts";
 import {
   loadNativeProjectRun as loadCompose,
   saveNativeProjectRun as saveCompose,
@@ -136,6 +138,35 @@ async function file(opts: Awaited<ReturnType<typeof fixture>>) {
   }
   return join(root, name);
 }
+
+test("missing Ready reaches the stop caller as an unavailable owner through real storage", async () => {
+  const scope = await fixture();
+  await prepare(scope);
+  const failure = await stopNativeAuthoredProject({
+    scope,
+    timeoutMs: 5000,
+  }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(NativeAuthoredStopUnavailableError);
+});
+
+test("storage still redacts arbitrary errors and lookalike routing errors", async () => {
+  const scope = await fixture();
+  for (const name of [
+    "Error",
+    "NativeAuthoredStopUnavailableError",
+    "NativeAuthoredReservedStartError",
+  ]) {
+    const original = new Error("private fixture detail");
+    original.name = name;
+    const failure = await admit(scope, async () => {
+      throw original;
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBe(original);
+    expect(String(failure)).not.toContain("private fixture detail");
+    expect(failure).not.toBeInstanceOf(NativeAuthoredStopUnavailableError);
+  }
+});
 
 test("absent native artifact reads have no writes and storage remains private and excluded", async () => {
   const opts = await fixture();

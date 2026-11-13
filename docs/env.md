@@ -462,7 +462,7 @@ global Hack home, in its "secrets hygiene" section. It names files, never values
 - an encrypted store whose key file is missing: "store present, key missing, cannot be
   read".
 
-`hack doctor --fix` sets the files it reports to mode 0600, adds missing ignore
+`hack doctor --fix` removes group and other permission bits from eligible files it reports, adds missing ignore
 entries, and removes Hack's own leftovers, and prints each change. It never deletes a
 store, a key or a file you wrote, and never untracks a file.
 

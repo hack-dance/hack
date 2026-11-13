@@ -628,7 +628,7 @@ function validNativeStatusDrainSelection(args: readonly string[]): boolean {
     args[3] === "--run-id" &&
     NATIVE_RUN.test(args[4] ?? "") &&
     args[5] === "--action" &&
-    args[6] === "status" &&
+    (args[6] === "status" || args[6] === "observe") &&
     args[7] === "--json"
   );
 }
@@ -817,7 +817,8 @@ function nativeFailureCause(input: {
     input.code
   ) ||
     (input.code === "native_graph_foreground" &&
-      input.cause === NATIVE_RUNTIME_NOT_RUNNING)
+      (input.cause === NATIVE_RUNTIME_NOT_RUNNING ||
+        input.cause === "graph_status_changed"))
     ? input.cause
     : undefined;
 }

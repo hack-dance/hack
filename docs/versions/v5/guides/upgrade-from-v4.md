@@ -437,12 +437,16 @@ HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project
 An existing project key can retain group or other access from an older version.
 next.16 Doctor already reports `env-key-weak-permissions` and suggests
 `chmod 600` for the key. Review that finding and keep the backup private too.
-The broader secrets-hygiene report and fixes are tracked in
-[#764](https://github.com/hack-dance/hack/pull/764); those are not a next.16
-guarantee. Once using a release
-that contains them, review Doctor's findings before applying its fixes. The
-hygiene repair is separate from `--migrate-env-config` and does not remove the
-key-backup requirement above.
+Merged [#764](https://github.com/hack-dance/hack/pull/764), intended for next.17,
+adds Doctor's `secrets hygiene` report: loose modes, tracked or unignored files,
+staging leftovers and terminal payloads older than ten minutes. It names files,
+never values. After reviewing the report, `doctor --fix` tightens eligible files'
+permissions, adds missing project ignore entries and removes only Hack leftovers
+that are not live inputs. It rechecks configuration before removal; current
+stores, keys, config and env layers, and retired stores, stay in place. It never
+untracks files. The hygiene repair is separate from `--migrate-env-config` and
+does not remove the key-backup requirement above. next.16 does not have this
+broader report. Source: [hygiene inspection and repair](https://github.com/hack-dance/hack/blob/25bd63c19f4d6aa152ecb9bda88086364a1bd4fd/src/lib/secrets-hygiene.ts).
 
 In the next.16 trials, most real env entries were stored as plain values.
 `env list --json` still prints those values: JSON is formatting, not redaction.
@@ -459,8 +463,9 @@ output contract or assume the protection command exists in next.16.
 #### An old global secret store whose key is gone
 
 A machine upgraded from v4 may still have an encrypted store such as
-`~/.hack/secrets.enc.json` whose key file was lost. From next.17 (HACK-2169,
-HACK-2177), Doctor reports that store as a `secret integrity` finding:
+`~/.hack/secrets.enc.json` whose key file was lost. Merged
+[#779](https://github.com/hack-dance/hack/pull/779), intended for next.17,
+changes Doctor's `secret integrity` finding for that store:
 
 - an **error** in a project whose legacy env contract reads the store, and a
   **warning** in any other project;
@@ -474,8 +479,9 @@ entries.
    600), from a backup or another machine, or set `HACK_SECRETS_FILE_KEY` to the
    same key.
 2. **Retire the store** when the key is gone for good:
-   `hack secrets retire-store`, run in a project that selects the store or
-   outside any project for the global one. Without a terminal, add `--yes`.
+   `hack secrets retire-store --path <project>` selects that project's store;
+   outside any project, omitting `--path` selects the global one. Without a
+   terminal, add `--yes`.
    - It moves the store into a new directory `<store>.retired-<UTC time>/`
      beside it, keeping its name. It deletes nothing, reads and prints no
      entry, and leaves the key file alone. It only retires a file that is a
@@ -489,6 +495,21 @@ entries.
    - It prints the `mv` command that puts the store back.
    - Afterwards Doctor lists the retired file as information, and the project
      check no longer fails.
+
+For example, after those key and project checks, use the selected candidate
+with the same Compose home as the Doctor finding:
+
+```sh
+HACK_RUNTIME_BACKEND=compose "$V5" secrets retire-store --path /absolute/project --allow-unchecked
+```
+
+Review the store path in the confirmation prompt. Retirement keeps the encrypted
+entries for recovery; it does not make them readable with a replacement key.
+It is separate from migration cleanup and is not available in next.16.
+
+Sources: [Doctor's store finding](https://github.com/hack-dance/hack/blob/91c311e4d9540ea3ca32113a61458a26db90c704/src/lib/doctor-secret-integrity.ts),
+[retirement command and confirmation](https://github.com/hack-dance/hack/blob/91c311e4d9540ea3ca32113a61458a26db90c704/src/commands/secrets.ts),
+[retirement checks](https://github.com/hack-dance/hack/blob/91c311e4d9540ea3ca32113a61458a26db90c704/src/lib/secret-store-retire.ts).
 
 Sources for next.16 behavior: [env list and get](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/env.ts),
 [project key checks](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/lib/doctor-env-key.ts).
@@ -516,10 +537,9 @@ With [#783](https://github.com/hack-dance/hack/pull/783), a confirmed store
 removal drops its legacy config pointer even if a later cleanup step fails.
 If the store remains, the pointer stays. A config-write failure is reported too,
 so follow the remaining reconciliation guidance rather than assuming rollback.
-An old global store with a missing key should stay intact until its key is
-recovered or the separate retirement path in
-[#779](https://github.com/hack-dance/hack/pull/779) is available. Do not discard
-the store or replace its only key to silence Doctor.
+For an old global store with a missing key, use the separate
+[restore-or-retire choices](#an-old-global-secret-store-whose-key-is-gone) above.
+Do not discard the store or replace its only key to silence Doctor.
 
 Source: [current env migration and cleanup guidance](https://github.com/hack-dance/hack/blob/af91049f30d7ec272c461d009253faf6800507bc/docs/env.md#legacy-repos-and-migration).
 
@@ -815,7 +835,7 @@ next.16 bundle.
 | next.16 candidate Doctor suggests `hack daemon start` | That command names the stable CLI. Keep the stable daemon and its launchd service stopped during the shared-home candidate run. Merged [#776](https://github.com/hack-dance/hack/pull/776) treats the daemon as optional for newer candidate Compose trials. |
 | `env list --json` reveals plain values | This is next.16 behavior. Review the breaking listing changes in [#767](https://github.com/hack-dance/hack/pull/767) before updating scripts for the next prerelease. |
 | next.16 or earlier explicit Doctor migration cleanup can remove `.hack.secret.key` | Keep a private readable key backup before any migration, including `doctor --migrate-env-config`. The merged [#769](https://github.com/hack-dance/hack/pull/769) live-input protection is intended for next.17; an older bundle retains the bug, and upgrading does not recover an already removed key. |
-| An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. The broader secrets-hygiene report and fixes are tracked in [#764](https://github.com/hack-dance/hack/pull/764); check the chosen release's availability. |
+| An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. Merged [#764](https://github.com/hack-dance/hack/pull/764), intended for next.17, adds `secrets hygiene`; review its findings, then use `doctor --fix` to tighten eligible files and remove only stale Hack artifacts that are not live inputs. |
 
 Sources for startup failures: [next.16 lifecycle and startup handling](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/project.ts).
 The three-project result, credential refresh, daemon-service behavior and HTTPS

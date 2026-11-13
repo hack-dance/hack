@@ -196,7 +196,7 @@ test(
       HACK_NATIVE_ADAPTATION: explicit,
     });
     expect(errorLines(result.output)).toEqual([
-      `ERROR: E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION}`,
+      `ERROR: E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION} Foreign external networks: shared-dev.`,
     ]);
     expect(await f.calls()).toEqual([]);
   },
@@ -213,7 +213,7 @@ test(
     });
     const without = await cli(f, ["up"], { HACK_NATIVE_SHARED_SOURCE: "1" });
     expect(errorLines(without.output)).toEqual([
-      `ERROR: E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION}`,
+      `ERROR: E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION} Foreign external networks: shared-dev.`,
     ]);
     expect(await f.calls()).toEqual([]);
     const withEnv = await cli(f, ["up", "--env", "qa"], {

@@ -245,8 +245,11 @@ Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a1
 
 ### Env command changes: what to change
 
-These changes apply to builds containing HACK-2163/HACK-2166, after the next.16
-snapshot used above. Check the chosen binary's help before changing scripts.
+These changes are planned for next.17 in HACK-2163/HACK-2166, after the next.16
+snapshot used above. Check the chosen binary's release notes and help before changing scripts.
+HACK-2172's live-key preservation fix is also merged for next.17; it cannot
+recover keys removed by earlier cleanup. Keep the next.16 key-backup warning
+until using a published build containing that fix.
 
 - Replace `env list --json --show-secrets` in noninteractive scripts with
   explicit `hack env get KEY` reads for the keys needed, using the same `--env`

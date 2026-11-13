@@ -156,9 +156,18 @@ export function prereleaseNotes({
   tag,
   source_revision: sourceRevision,
 }: Pick<PrereleasePlan, "tag" | "source_revision">) {
+  const envChanges =
+    tag === "v5.0.0-next.17"
+      ? [
+          "Breaking env output change (HACK-2166, #767): env list now returns names, scopes, layers and set state by default, including JSON. Replace scripted env list --json --show-secrets with explicit hack env get KEY reads for only the keys needed; use has_value for availability checks and never log plaintext. Bulk reveal requires an explicit flag in an interactive terminal.",
+          "Pipe secret writes through hack env add KEY --secret --value-stdin (or env set); positional secret values are refused. Legacy lifecycle hooks/processes now receive only global values. Use hack env protect to list plaintext key names and hack env protect KEY... to encrypt chosen entries in place, preserving scope and overlay.",
+          "Fixed migration key deletion (HACK-2172, #769): cleanup preserves current project/shared keys and current env inputs, including filesystem aliases. Keep existing private key backups; the fix cannot recover a key already removed by an earlier release.",
+        ]
+      : [];
   return [
     `Native macOS ARM64 candidate from ${sourceRevision}. Requires explicit opt-in; stable installation is unchanged.`,
     `Supported platform, unsupported platforms and capability limits: https://github.com/hack-dance/hack/blob/${tag}/docs/guides/prereleases.md#${PRERELEASE_SUPPORT_ANCHOR}`,
+    ...envChanges,
   ].join("\n\n");
 }
 

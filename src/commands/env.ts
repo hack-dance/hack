@@ -1937,13 +1937,6 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
         valueArg !== undefined || keyArg?.includes("=") === true,
     });
   }
-  assertSecretArgvAllowed({
-    secret: args.options.secret === true,
-    hasPositionalValue:
-      valueArg !== undefined || keyArg?.includes("=") === true,
-    allow: args.options.allowSecretArgv === true,
-  });
-
   // Validate a key argument with fixed, value-free refusals before stdin is
   // read or any project file is migrated or written.
   const interactive = !(valueStdin || keyArg || valueArg);
@@ -1953,6 +1946,12 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
         keyOrPath: keyArg ?? "",
         scopeOverride: args.options.service,
       });
+  assertSecretArgvAllowed({
+    secret: args.options.secret === true,
+    hasPositionalValue:
+      valueArg !== undefined || keyArg?.includes("=") === true,
+    allow: args.options.allowSecretArgv === true,
+  });
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });

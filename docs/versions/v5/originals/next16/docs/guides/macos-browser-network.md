@@ -45,6 +45,52 @@ apply, so verify the exact origin in the browser as described below.
 
 ## Diagnose a browser failure
 
+The browser resolves a name to the proxy's address, verifies TLS with Caddy, and
+receives the service response through that proxy.
+
+```mermaid
+---
+title: Browser to local service
+---
+sequenceDiagram
+  autonumber
+  participant Browser
+  participant DNS as Host resolver
+  participant Proxy as Caddy proxy
+  participant App as Service container
+  Browser->>DNS: Resolve dev host
+  DNS-->>Browser: Proxy address
+  Browser->>Proxy: HTTPS with verification
+  Proxy->>App: HTTP to service
+  App-->>Proxy: Service response
+  Proxy-->>Browser: HTTPS response
+```
+
+The Compose path above assumes global routing is configured; browser privacy and
+trust are separate boundaries, and native routing has explicit prerequisites in
+the [native guide](native-candidate.md).
+
+A failed local URL can come from DNS, certificate trust, the proxy, route labels
+or the service; the browser's privacy permission is an additional check below.
+
+```mermaid
+---
+title: Local route failure causes
+---
+ishikawa-beta
+  Local route fails
+  DNS
+    Wrong resolver
+  Trust
+    CA untrusted
+  Proxy
+    Listener absent
+  Labels
+    Host mismatch
+  Service
+    Container stopped
+```
+
 Run `hack doctor` first. DNS, resolver, Caddy, project services and certificate trust
 have separate checks. The browser check remains unverified until you report an
 observation; Doctor does not read the browser's permissions or its private data.

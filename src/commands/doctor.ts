@@ -5002,13 +5002,6 @@ async function maybeUntrackGeneratedFiles(opts: {
 }
 
 /**
- * `hack doctor --fix` step: creates a missing committed `.hack/.gitignore`, or
- * restores its managed block, in a git checkout. This is the explicit,
- * user-invoked way to add the file to an existing project: runtime commands
- * never write it, and `hack init` refuses or rescaffolds an existing project.
- * Lines outside the managed markers are kept. An unreadable file is left alone.
- */
-/**
  * `hack doctor --fix` step: applies the "secrets hygiene" fixes and prints
  * each change. Safe by construction (modes, ignore entries, Hack's own
  * leftovers), so it needs no confirmation of its own.
@@ -5030,6 +5023,13 @@ async function maybeFixSecretsHygiene(opts: {
   note(lines.join("\n"), SECRETS_HYGIENE_CHECK);
 }
 
+/**
+ * `hack doctor --fix` step: creates a missing committed `.hack/.gitignore`, or
+ * restores its managed block, in a git checkout. This is the explicit,
+ * user-invoked way to add the file to an existing project: runtime commands
+ * never write it, and `hack init` refuses or rescaffolds an existing project.
+ * Lines outside the managed markers are kept. An unreadable file is left alone.
+ */
 async function maybeEnsureHackDirGitignore(opts: {
   readonly startDir: string;
 }): Promise<void> {

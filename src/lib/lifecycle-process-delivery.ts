@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, realpath, rmdir, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { basename, dirname, join } from "node:path";
+import { childEnvironment } from "./child-environment.ts";
 import { isRecord } from "./guards.ts";
 
 export const LIFECYCLE_PROCESS_CLIENT = "--internal-lifecycle-process-client";
@@ -281,7 +282,7 @@ export async function runLifecycleProcessClient(path: string): Promise<number> {
     }
     const child = Bun.spawn([...launch.command], {
       cwd: launch.cwd,
-      env: { ...launch.env },
+      env: childEnvironment({ ...launch.env }),
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",

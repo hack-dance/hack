@@ -369,15 +369,12 @@ fn inert_logging_and_metadata_labels_are_admitted_with_review_warnings() {
     assert!(codes.contains(&("error".into(), "external_logging_driver".into())));
     assert!(admitted.is_err());
 
-    // Router, runtime and ownership labels are never treated as inert.
+    // Foreign router labels stay refused; generated metadata is inert.
     for key in [
         "traefik.enable",
         "caddy.header",
         "caddy_ingress_network",
         "caddy_0",
-        "com.docker.compose.project",
-        "hack.custom",
-        "io.hack-local.owner",
     ] {
         let (codes, admitted) = prepare(&|web| {
             web["labels"] = json!({ key: "x" });

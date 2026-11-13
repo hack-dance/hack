@@ -14,6 +14,7 @@ description: >
 - Read before changing anything, in this order, and stop once the cause is clear:
 - Step 1, `hack ps --json`: which services exist and their state.
 - Step 2, `hack doctor --json`: findings and stable E_* codes.
+- Before Step 3, assess whether logs may contain injected values or credentials. Logs are not redacted; JSON is formatting, not redaction. Do not automatically ingest sensitive output into agent context. When only env names or presence are needed, prefer `hack env explain` or the value-free MCP env key inventory.
 - Step 3, `hack logs --json --no-follow --tail 200`: a finite snapshot; add a service name to narrow it.
 - Step 4, `hack env explain <key> --service <service>`: only when a value is suspect; it reports provenance without the value.
 - Step 5, `hack global status`: shared proxy, DNS and logging infrastructure.
@@ -29,6 +30,8 @@ description: >
 - When the exit status matters, do not pipe `hack` output through `| tail` or `| grep`: the pipeline reports the filter's status, and filtered text can hide failures. Check the `hack` exit status or `--json` envelope first, and use finite reads such as `hack logs --no-follow --tail 100`.
 - Scripted/agent runs: pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) so commands never block on prompts — they apply documented defaults or fail fast with E_INTERACTIVE_REQUIRED.
 - Use MCP only when shell access is unavailable.
+- Treat `hack logs`, MCP run/exec results and background-command reads as secret-bearing output: applications can print injected values. Do not paste or persist raw output in prompts, replies, logs or reports without reviewing it; redaction is partial and native background output is not redacted.
+- Assess output sensitivity before reading it into agent context. JSON is formatting, not redaction. Background metadata stores caller argv even with metadata-only capture; expanded values in arguments are not redacted. Keep sensitive values out of argv.
 - A task request authorizes its stated scope, not unrelated service, global config, or production changes. Preserve native credential/trust approvals and destructive-cleanup gates; do not ask again for the same authorized action.
 - Cleanup must prove resource ownership. Successful one-shot containers may exit with code 0; adopted external processes must remain running when Hack stops its own services.
 - If runtime state looks wrong, inspect with `hack doctor`; apply `hack doctor --fix` only for repairs covered by the request. Warnings do not authorize broader changes.

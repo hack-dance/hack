@@ -14,6 +14,7 @@ import type {
 } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
+import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import { ensureDir, readOptionalTextFile, readTextFile } from "./fs.ts";
 import { resolveUserHomeDir } from "./home-dir.ts";
 import { isKeychainDisabled, keychain } from "./keychain.ts";
@@ -993,7 +994,7 @@ function decryptEncryptedEntriesText(input: {
     parsed = JSON.parse(text);
   } catch {
     throw new Error(
-      `Invalid encrypted secret store JSON at ${input.filePath}.`
+      `Invalid encrypted secret store JSON at ${input.filePath}: ${envParseDiagnostic({ format: "JSON", text })}.`
     );
   }
 
@@ -1089,7 +1090,9 @@ function parsePlaintextStore(value: string): PlaintextStore {
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error("Decrypted secret store payload is not valid JSON.");
+    throw new Error(
+      `Decrypted secret store payload: ${envParseDiagnostic({ format: "JSON", text: value })}.`
+    );
   }
   if (!(parsed && typeof parsed === "object")) {
     throw new Error("Decrypted secret store payload is not an object.");

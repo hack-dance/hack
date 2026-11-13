@@ -1,3 +1,4 @@
+import { hackReexecEnvironment } from "../lib/child-environment.ts";
 /**
  * Spawns a hackd launcher that must outlive its caller.
  *
@@ -22,7 +23,7 @@ export function spawnDetachedDaemon(opts: {
   const env: Record<string, string | undefined> = { ...process.env };
   Reflect.deleteProperty(env, "HACK_DAEMON_SERVICE_READ_ONLY");
   const proc = Bun.spawn([...opts.argv], {
-    env,
+    env: hackReexecEnvironment(env),
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",

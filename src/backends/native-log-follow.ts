@@ -1,5 +1,6 @@
 import type { Writable } from "node:stream";
 import { CliUsageError } from "../cli/command.ts";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { parseTimeInput } from "../lib/time.ts";
@@ -743,7 +744,7 @@ async function readSelectedLogs({
         ],
         {
           cwd: input.cwd,
-          env: runtimeEnvironment(),
+          env: childEnvironment(runtimeEnvironment()),
           stdin: "pipe",
           stdout: "pipe",
           stderr: "pipe",

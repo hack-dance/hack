@@ -192,7 +192,8 @@ hack commands cancel <id> --json
 
 `show` prints the request (service, argv, workdir), state, limits, capture and
 redaction settings, output sizes, the supervisor and child process ids, the
-cursors and the final record. It never prints environment values.
+cursors and the final record. Automatic env maps are omitted, but argv is retained
+and shown as supplied. Caller-expanded values in arguments are not redacted.
 
 `cancel` first records the request, then signals the supervisor and the
 command's process group, each only after re-checking its pid, start time and
@@ -304,7 +305,12 @@ user that can select the project can read it, and backups can copy it.
   their 7 days are up: when a Hack home already holds 4096 tombstones, a new
   start is refused with `E_ADMISSION_LIMIT` until older ones age out, rather
   than forgetting a key early.
-- Metadata never contains environment values.
+- Automatic env maps are not serialized into command metadata. Raw caller argv
+  is stored in `meta.json` and `launch.json`, including with `--capture metadata`,
+  and returned by `show`. A shell-expanded value or token-bearing URL in argv
+  therefore stays on disk and can reach agent context. Output redaction does not
+  sanitize these records; metadata capture is not an argument-redaction mode.
+  Keep sensitive values out of arguments and use managed env injection instead.
 
 Settings, in the global `~/.hack/hack.config.json` or the project's
 `.hack/hack.config.json`, under `backgroundCommands`:
@@ -319,9 +325,10 @@ A per-call flag wins over the project default, which wins over the global one.
 
 **Redaction is partial.** Before output is announced, Hack replaces values it
 had already resolved to inject into that command's Compose environment with
-`*`, in place in the stored file. Values shorter than 6 bytes are not redacted
-(too many false matches). The values reach the supervisor over an inherited
-pipe; they are never written to disk or put in an environment variable. The command writes to the
+`*`, in place in the stored file. Values shorter than 6 UTF-8 bytes are never redacted
+(too many false matches). The redaction matcher list reaches the supervisor over
+an inherited pipe; Hack does not persist that list or put it in an environment
+variable. The command writes to the
 file directly, so a value is on disk unredacted until the supervisor's next
 scan (about 200 ms), and the start of a value stays unredacted until the rest
 arrives or the command ends. It matches across separate writes, so a value split between
@@ -331,11 +338,21 @@ values printed after the supervisor was lost (such output is withheld from reads
 with `withheld: "redaction_unavailable"`). Hack never loads or decrypts secrets
 only to redact. Treat stored output as sensitive.
 
+If the supervisor dies before scanning bytes, those bytes stay unredacted on
+disk, along with later output that it never scans. Withholding them from reads
+does not erase them. They can remain for the whole result retention period,
+and physical deletion waits for a later sweep; a command whose end cannot be
+confirmed can retain its files longer. The native backend performs no output
+redaction. Neither a short value nor native output gains protection by being
+read through MCP instead of the CLI.
+
 - Full capture supports at most 1,024 distinct values to redact (values of
   6 bytes or more from the command's environment). A command with more is
   refused before it starts; use `--capture metadata` or run it in the
-  foreground. Output is scanned in slices that shrink as the number of values
-  grows, so one scan never stalls cancel or timeout handling.
+  foreground. One pass over the output finds every value, so the work does not
+  grow with the number of values (building the matcher still grows with their
+  total length); output is scanned in 256 KiB slices, so one
+  scan never stalls cancel or timeout handling.
 
 ## Audit
 

@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import type { NativeProcessRefusal } from "../lib/native-process-wrappers.ts";
@@ -356,7 +357,7 @@ async function serveGraphProcess(
     ],
     {
       cwd: opts.projectRoot,
-      env: environment,
+      env: childEnvironment(environment),
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",

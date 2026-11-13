@@ -191,7 +191,6 @@ export function gitignoreLiteral(name: string): string {
     .replace(GITIGNORE_TRAILING_SPACE, "\\ ");
 }
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what this pattern rejects.
 const UNWRITABLE_IGNORE_ENTRY = /[\u0000-\u001f\u007f]/;
 const GITIGNORE_GLOB = /[\\*?[\]]/g;
 const GITIGNORE_LEADING = /^[#!]/;

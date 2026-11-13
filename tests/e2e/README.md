@@ -817,3 +817,44 @@ positive shared system link count, while every private artifact and alternate Gi
 selection remains single-link. It pins and rechecks that exact link count, owner
 IDs, physical path, mode, inode and bytes throughout the attempt. This prerequisite
 does not add engine authority or prove guest/lifecycle acceptance.
+
+## Manual six-shard timing trial
+
+`Docker E2E trial` is a separate, manual-dispatch-only experiment. It runs the
+unchanged default scenario set across six standard `ubuntu-24.04` runners with
+advisory job names and `continue-on-error`. It never starts on pushes or pull
+requests and cannot provide required CI or release evidence. Required Docker CI
+keeps its four shards, fan-in and inline setup; the trial-only action preserves
+those commands, proof checks and supplemental tests. Extras run once on the
+lightest trial shard, 6/6, away from the long network scenarios.
+
+To compare an integration revision, first obtain its ordinary four-shard run,
+then dispatch the trial at that same ref and verify both runs' `head_sha` match:
+
+```sh
+gh workflow run docker-e2e-trial.yml --ref next
+```
+
+Freeze that ref while collecting the pair, or use a branch pinned at the desired
+commit. The trial consumes runner capacity only when explicitly dispatched. The
+command's dispatch acceptance and the new manual-only revision still need live
+qualification; the historical pairs below used the earlier experiment revision.
+
+Two same-revision comparisons showed potential, without establishing median/p90
+performance or justifying a required-matrix change:
+
+| Four-shard run | Six-shard trial | Wall minutes (4 / 6) | Runner-minutes (4 / 6) |
+| --- | --- | ---: | ---: |
+| [42958529262](https://github.com/hack-dance/hack/actions/runs/42958529262) | [42958597354](https://github.com/hack-dance/hack/actions/runs/42958597354) | 31.25 / 22.23 | 120.80 / 115.95 |
+| [42967635017](https://github.com/hack-dance/hack/actions/runs/42967635017) | [42967635060](https://github.com/hack-dance/hack/actions/runs/42967635060) | 29.87 / 22.03 | 113.95 / 105.78 |
+
+Wall time spans first shard start to last shard end, excluding queue before the
+first start; runner-minutes sum shard durations. Compare same-head runs with the
+same default scenarios, hints and supplemental checks. Retain failures, skips,
+cancellations, retries and cleanup results when evaluating normal-load trials.
+Job summaries allowlist scenario names, numeric durations and pass/fail outcomes;
+missing results or failed setup/cleanup cannot report success. A green advisory
+workflow alone is insufficient: inspect every shard's steps and summary. Adoption
+would require a separate atomic update of CI and its release contract.
+
+![Manual timing trial](../../docs/reference/docker-e2e-trial.svg)

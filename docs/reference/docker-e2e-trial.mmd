@@ -1,29 +1,12 @@
 flowchart TD
-    event{CI event}
-    event -->|Push, PR or dispatch| scope{CI suite in scope?}
-    scope -->|Yes| four[Four hosted shards]
-    scope -->|No| skip[Docker scope skip]
-    four --> aggregate[Docker aggregate]
-    four --> evidence[Required Docker evidence]
-    aggregate --> evidence
-    evidence -->|Exact-head next push| prerelease[Prerelease gate]
-    evidence -->|Exact-head main push| release[Release prepare gate]
-    event -->|Push, PR or dispatch| opt{Push, dispatch or PR label?}
-    opt -->|Yes| trialscope{Trial suite in scope?}
-    trialscope -->|Yes| six[Six hosted trial shards]
-    six --> metrics[Advisory timings only]
-    subgraph ci[CI workflow]
-      scope
-      four
-      aggregate
-      skip
-    end
-    subgraph trial[Separate trial workflow]
-      opt
-      trialscope
-      six
-      metrics
-    end
-    class four,six live
-    class prerelease,release ok
-    class skip idle
+  ci[Ordinary CI workflow] --> four[Four Docker shards]
+  four --> aggregate[Existing CI fan-in]
+  aggregate --> exact[Exact-source release checks]
+  manual[Explicit manual dispatch] --> six[Six advisory shards]
+  six --> metrics[Allowlisted timing summaries]
+  four --> compare[Compare same-head evidence]
+  metrics --> compare
+  compare --> decision[Separate adoption decision]
+  class four,six live
+  class aggregate,exact ok
+  class compare,decision wait

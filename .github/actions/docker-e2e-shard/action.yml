@@ -74,6 +74,12 @@ runs:
       if: inputs.shard == inputs.extra-shard
       shell: bash
       run: HACK_TEST_DOCKER_CLI=1 bun test tests/docker-context.test.ts
+    - name: Verify recipe and config examples with docker compose config
+      if: inputs.shard == inputs.extra-shard
+      shell: bash
+      run: |
+        HACK_TEST_COMPOSE_CONFIG=1 bun test tests/recipe-examples.test.ts --test-name-pattern '^docker compose config accepts every example Compose file$' 2>&1 | tee "$RUNNER_TEMP/recipe-examples-compose.log"
+        grep -Eq '^ *1 pass$' "$RUNNER_TEMP/recipe-examples-compose.log"
     - name: Run local and Docker E2E shard
       id: e2e
       shell: bash

@@ -1060,8 +1060,13 @@ async function livePaths(
   const live = new Set<string>();
   for (const path of paths) {
     live.add(resolve(path));
-    const real = await realpath(path).catch(() => null);
-    if (real) {
+    // A missing input has no resolved spelling; one that cannot be resolved
+    // for another reason leaves the set unknown, never smaller.
+    const real = await realpathOrMissing(path);
+    if (real === "unknown") {
+      return "unknown";
+    }
+    if (real !== null) {
       live.add(real);
     }
   }

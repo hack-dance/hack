@@ -1322,3 +1322,46 @@ test("a removal whose target cannot be resolved is refused, even through an alia
   }
   expect(await readFile(archive, "utf8")).toContain(SENTINEL);
 });
+
+test("a configured input whose alias cannot be resolved makes the live set unknown, not smaller", async () => {
+  const f = await fixture();
+  // The configured key is a leftover-shaped file reached through an alias
+  // directory; resolving that alias spelling fails (an I/O error, say).
+  const real = join(f.projectRoot, `..hack.secret.key.${UUID}.tmp`);
+  await writeFile(real, `${SENTINEL}\n`, { mode: 0o600 });
+  await backdate(real);
+  const alias = join(f.root, "alias");
+  await symlink(f.projectRoot, alias);
+  const keyPath = join(alias, basename(real));
+  const scope = {
+    ...f.scope,
+    stores: [{ storePath: join(f.home, "secrets.enc.json"), keyPath }],
+  };
+  const original = fsPromises.realpath;
+  const spy = spyOn(fsPromises, "realpath").mockImplementation((async (
+    path: Parameters<typeof original>[0],
+    ...rest: unknown[]
+  ) => {
+    if (String(path) === keyPath) {
+      throw Object.assign(new Error("synthetic EIO"), { code: "EIO" });
+    }
+    return await Reflect.apply(original, fsPromises, [path, ...rest]);
+  }) as typeof original);
+  try {
+    const findings = await inspectSecretsHygiene(scope);
+    expect(
+      findings.some(
+        (finding) =>
+          finding.fix?.kind === "remove_leftover" && finding.path === real
+      )
+    ).toBe(false);
+    await applySecretsHygieneFixes({
+      findings,
+      report: () => undefined,
+      currentScope: async () => scope,
+    });
+  } finally {
+    spy.mockRestore();
+  }
+  expect(await readFile(real, "utf8")).toBe(`${SENTINEL}\n`);
+});

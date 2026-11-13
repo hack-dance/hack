@@ -293,6 +293,21 @@ export async function readLinuxProcessStartTicks(
 }
 
 /**
+ * The parent pid of `pid` on Linux (`/proc/<pid>/stat` field 4), or null
+ * when it cannot be read (gone, or another platform).
+ */
+export async function readLinuxParentPid(pid: number): Promise<number | null> {
+  const stat = await readTextFile(`/proc/${pid}/stat`);
+  if (stat === null) {
+    return null;
+  }
+  // Fields after the command name (in parentheses) are fixed: rest[0] is
+  // field 3 (state), rest[1] is field 4 (ppid).
+  const ppid = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1];
+  return ppid && DIGITS.test(ppid) ? Number.parseInt(ppid, 10) : null;
+}
+
+/**
  * True when `pid` is a zombie on Linux (`/proc/<pid>/stat` state `Z`): it
  * has exited and only waits for its parent to reap it. `kill(pid, 0)` still
  * succeeds for it, but it holds no sockets and runs nothing. False when the

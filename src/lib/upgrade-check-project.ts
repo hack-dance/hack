@@ -27,6 +27,11 @@ import {
   projectEnvConfigExistsForMutation,
 } from "./project-env-config.ts";
 import type { RegisteredProject } from "./projects-registry.ts";
+import {
+  inspectStoreKeyState,
+  resolveFileSecretStorePaths,
+} from "./secret-store.ts";
+import { projectUsesSecretStore } from "./secret-store-retire.ts";
 import type { NativePreflightProbe } from "./upgrade-check-probes.ts";
 
 /**
@@ -67,6 +72,7 @@ export type UpgradeFinding = {
 
 /** Checks the upgrade's safety depends on; a failure there is `incomplete`. */
 const REQUIRED_CHECKS = new Set([
+  "project-store",
   "env-format",
   "env-key",
   "tracked-files",
@@ -498,6 +504,84 @@ function nativeFinding(
 }
 
 /**
+ * The encrypted store this checkout selects for itself, when it is not the
+ * global one (the machine check covers that) and the checkout reads it:
+ * the key its configuration selects must open it. Read-only and
+ * value-free ({@link inspectStoreKeyState}); the keychain is never asked.
+ */
+async function projectStoreFinding(opts: {
+  readonly root: string;
+  readonly projectDir: string;
+}): Promise<UpgradeFinding | null> {
+  const [own, global] = await Promise.all([
+    resolveFileSecretStorePaths({ projectDir: opts.projectDir }),
+    resolveFileSecretStorePaths({}),
+  ]);
+  if (
+    !own.active ||
+    (global.active && (await sameFile(own.storePath, global.storePath))) ||
+    !(await projectUsesSecretStore({ projectDir: opts.projectDir }))
+  ) {
+    return null;
+  }
+  const state = await inspectStoreKeyState({
+    storePath: own.storePath,
+    keyPath: own.keyPath,
+    env: process.env,
+  });
+  const base = { id: "project-store" } as const;
+  if (state.kind === "no-store" || state.kind === "opens") {
+    return {
+      ...base,
+      status: "ok",
+      summary:
+        state.kind === "no-store"
+          ? "Its own secret store file does not exist (nothing stored)."
+          : "Its own secret store opens with the key it selects.",
+      args: null,
+      action: null,
+    };
+  }
+  if (state.kind === "store-unreadable" || state.kind === "key-uninspected") {
+    return {
+      ...base,
+      status: "incomplete",
+      summary:
+        state.kind === "store-unreadable"
+          ? "Its own secret store file cannot be read, so whether its secrets can be read is unknown."
+          : "Its own secret store's key file is missing; the OS keychain may hold the key, but it was not asked (asking can prompt).",
+      args: ["doctor", "--path", opts.root],
+      action: null,
+    };
+  }
+  return {
+    ...base,
+    status: "blocker",
+    summary:
+      state.kind === "key-refused"
+        ? "Its own secret store's key is refused at runtime (a link, readable by others, or tracked by Git), so its secrets cannot be read or migrated."
+        : "Its own secret store does not open with the key it selects, so its secrets cannot be read or migrated.",
+    args: ["doctor", "--path", opts.root],
+    action:
+      state.kind === "key-refused"
+        ? state.message
+        : "Restore the store's key file (or set HACK_SECRETS_FILE_KEY), or retire the store with hack secrets retire-store --path <project root> --allow-unchecked.",
+  };
+}
+
+/** Whether two paths name the same file (resolved; same path if neither exists). */
+async function sameFile(a: string, b: string): Promise<boolean> {
+  const [x, y] = await Promise.all([
+    stat(a).catch(() => null),
+    stat(b).catch(() => null),
+  ]);
+  if (x !== null && y !== null) {
+    return x.dev === y.dev && x.ino === y.ino;
+  }
+  return resolve(a) === resolve(b);
+}
+
+/**
  * Runs one check. A check that threw or ran out of time is reported, never
  * a pass: `incomplete` for a required check (readiness is then not
  * established), `warn` for an optional one. It gets at most `timeoutMs`,
@@ -588,6 +672,9 @@ export async function inspectUpgradeProject(opts: {
     ),
     guarded("agent-integrations", limits, () =>
       agentFinding({ root, homeDir: opts.homeDir })
+    ),
+    guarded("project-store", limits, () =>
+      projectStoreFinding({ root, projectDir })
     ),
     guarded("native-preflight", limits, async () =>
       nativeFinding(await opts.nativePreflight({ projectRoot: root }))

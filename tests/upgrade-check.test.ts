@@ -936,6 +936,67 @@ test("the snapshot keeps a project's own secret store and key", async () => {
   expect(JSON.stringify(collected)).not.toContain(SENTINEL);
 });
 
+test("a project's own secret store is checked with the key it selects", async () => {
+  // Codex review: only the global store was checked, so a project-selected
+  // store with a wrong key passed.
+  const project = await liveProject("app-own-store");
+  const storePath = join(project.projectDir, "secrets.enc.json");
+  const keyPath = join(project.repoRoot, ".store.key");
+  await writeFile(
+    join(project.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-own-store",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath, keyPath },
+        },
+      },
+    })}\n`
+  );
+  await writeFile(
+    join(project.projectDir, "hack.env.json"),
+    `${JSON.stringify({ version: 1, vars: [{ key: "TOKEN", source: "keychain" }] })}\n`
+  );
+  await writeFile(keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
+  await chmod(keyPath, 0o600);
+  await (
+    await resolveSecretStore({
+      projectName: "app-own-store",
+      projectDir: project.projectDir,
+    })
+  ).set({ key: "TOKEN", value: SENTINEL });
+  await writeRegistry([project]);
+  const good = await check(healthyProbes());
+  const finding = (r: UpgradeCheckReport) =>
+    r.projects[0]?.findings.find((f) => f.id === "project-store");
+  expect(finding(good)?.status).toBe("ok");
+
+  await writeFile(keyPath, "synthetic-wrong-project-key\n", { mode: 0o600 });
+  const bad = await check(healthyProbes());
+  expect(finding(bad)?.status).toBe("blocker");
+  expect(bad.ready).toBe(false);
+  expect(JSON.stringify(bad)).not.toContain(SENTINEL);
+  expect(JSON.stringify(bad)).not.toContain(STORE_KEY);
+});
+
+test("Docker answering but the container listing failing is incomplete", async () => {
+  await writeRegistry([await liveProject("app-a")]);
+  const report = await check(
+    healthyProbes({
+      globalInfra: async () => ({
+        installed: true,
+        running: null,
+        listFailed: true,
+      }),
+    })
+  );
+  expect(report.machine.find((f) => f.id === "global-infra")?.status).toBe(
+    "incomplete"
+  );
+  expect(report.ready).toBe(false);
+});
+
 test("a config path that is a FIFO is refused at once, never waited on", async () => {
   const project = entry("app-fifo");
   await mkdir(project.projectDir, { recursive: true });

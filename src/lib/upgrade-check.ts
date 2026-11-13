@@ -722,6 +722,18 @@ function globalInfraFinding(
       action: null,
     };
   }
+  if (infra.running === null && infra.listFailed === true) {
+    // Docker answered but the containers could not be listed: neither they
+    // nor the proxy ports were checked.
+    return {
+      ...base,
+      status: unperformed,
+      summary:
+        "Not checked: listing Hack's global containers failed or ran out of time, so neither they nor the proxy ports were checked.",
+      args: ["global", "status"],
+      action: null,
+    };
+  }
   return {
     ...base,
     status: infra.running === null ? "info" : "ok",
@@ -1076,6 +1088,7 @@ const MACHINE_ORDER = [
 /** Checkout fixes in the order they should run. */
 const PROJECT_ORDER = [
   "project-config",
+  "project-store",
   "env-format",
   "env-key",
   "tracked-files",

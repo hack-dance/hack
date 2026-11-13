@@ -75,8 +75,10 @@ export type DaemonProbe = {
 export type GlobalInfraProbe = {
   /** `hack global install` has written the proxy files. */
   readonly installed: boolean;
-  /** The proxy containers run; null when Docker could not be asked. */
+  /** The proxy containers run; null when it was not established. */
   readonly running: boolean | null;
+  /** True when Docker answered but listing the containers failed or timed out. */
+  readonly listFailed?: boolean;
 };
 
 export type NativePreflightProbe = {
@@ -234,7 +236,7 @@ async function probeGlobalInfra(opts: {
     { stdin: "ignore", timeoutMs: COMMAND_TIMEOUT_MS }
   ).catch(() => null);
   if (result === null || result.exitCode !== 0) {
-    return { installed, running: null };
+    return { installed, running: null, listFailed: true };
   }
   const states = result.stdout.split("\n").filter((line) => line.trim() !== "");
   return {

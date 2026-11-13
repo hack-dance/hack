@@ -276,3 +276,49 @@ test("a store and key configured inside the project are checked against git", as
   expect(await readFile(keyPath, "utf8")).toBe(`${SENTINEL}\n`);
   expect(await readFile(storePath, "utf8")).toContain(SENTINEL);
 });
+
+test("a .hack linked outside the project is reported and nothing behind it is inspected or fixed", async () => {
+  const f = await fixture();
+  const outside = join(f.root, "outside-hack");
+  await mkdir(outside);
+  const outsideEnv = join(outside, ".env");
+  const outsideLeftover = join(outside, `..env.${UUID}.tmp`);
+  await writeFile(outsideEnv, `${SENTINEL}\n`);
+  await chmod(outsideEnv, 0o644);
+  await writeFile(outsideLeftover, `${SENTINEL}\n`, { mode: 0o600 });
+  await backdate(outsideLeftover);
+  await rm(f.projectDir, { recursive: true });
+  await symlink(outside, f.projectDir);
+
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(findings).toEqual([
+    expect.objectContaining({ status: "error", path: f.projectDir, fix: null }),
+  ]);
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  expect((await stat(outsideEnv)).mode & 0o777).toBe(0o644);
+  expect(await readFile(outsideLeftover, "utf8")).toBe(`${SENTINEL}\n`);
+});
+
+test("a fix is skipped when its directory was replaced after inspection", async () => {
+  const f = await fixture();
+  // An unignored overlay: the fix appends to .hack/.gitignore.
+  const overlay = join(f.projectDir, ".env.qa");
+  await writeFile(overlay, `QA=${SENTINEL}\n`, { mode: 0o600 });
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(findings.map((finding) => finding.fix?.kind)).toEqual(["ignore"]);
+
+  // Before --fix, .hack is swapped for a link to a directory elsewhere with
+  // its own .gitignore. A file-identity check alone would not notice: the
+  // ignore file is found by path.
+  const elsewhere = join(f.root, "elsewhere-hack");
+  await mkdir(elsewhere);
+  const otherIgnore = join(elsewhere, ".gitignore");
+  await writeFile(otherIgnore, "kept\n");
+  await rm(f.projectDir, { recursive: true });
+  await symlink(elsewhere, f.projectDir);
+
+  expect(
+    await applySecretsHygieneFixes({ findings, report: () => undefined })
+  ).toEqual({ applied: 0, skipped: 1 });
+  expect(await readFile(otherIgnore, "utf8")).toBe("kept\n");
+});

@@ -824,7 +824,8 @@ never sees a partial file. If Hack is killed between those two steps, an empty
 `.hack.secret.key` or lock file is left behind. Hack refuses it rather than use or
 replace it; remove it and run the command again. ExFAT and FAT do not store Unix
 permissions, so on such a drive the key file is not limited to your user the way mode
-`0600` limits it elsewhere.
+`0600` limits it elsewhere. The private staging directory (`.hack-staging/`) is the same: Hack still refuses one
+that is a link or belongs to another user, but accepts the drive's mount-wide mode.
 
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the

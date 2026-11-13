@@ -1,5 +1,5 @@
 import { constants, type Stats } from "node:fs";
-import { lstat, open, readdir } from "node:fs/promises";
+import { lstat, open, readdir, stat } from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -86,12 +86,25 @@ export type SecretsHygieneFix =
   | { readonly kind: "remove_leftover"; readonly leftover: StagingLeftover }
   | { readonly kind: "remove_mux"; readonly stale: StaleMuxEnvironment };
 
+/** A directory's identity, captured at inspection and checked before a fix. */
+export type DirectoryGuard = {
+  readonly path: string;
+  readonly dev: number;
+  readonly ino: number;
+};
+
 export type SecretsHygieneFinding = {
   readonly status: "warn" | "error";
   readonly path: string;
   /** Value-free; names the file and what it holds. */
   readonly message: string;
   readonly fix: SecretsHygieneFix | null;
+  /**
+   * The directory `fix` changes, as inspected. A fix is skipped when that
+   * path no longer names the same directory, so a directory replaced by a
+   * link after inspection is never written through.
+   */
+  readonly guard?: DirectoryGuard;
 };
 
 /** One file or directory the inspection covers, labelled for messages. */
@@ -143,12 +156,16 @@ function holdsForProjectFile(name: string): Holds | null {
   return null;
 }
 
-async function projectCandidates(
-  project: NonNullable<SecretsHygieneScope["project"]>
-): Promise<Candidate[]> {
-  const { projectRoot, projectDir } = project;
+async function projectCandidates(opts: {
+  readonly project: NonNullable<SecretsHygieneScope["project"]>;
+  /** False when `.hack` is a link: its files are not listed. */
+  readonly inspectProjectDir: boolean;
+}): Promise<Candidate[]> {
+  const { projectRoot, projectDir } = opts.project;
   const hackGitignore = resolve(projectDir, ".gitignore");
-  const names = await readdir(projectDir).catch(() => [] as string[]);
+  const names = opts.inspectProjectDir
+    ? await readdir(projectDir).catch(() => [] as string[])
+    : [];
   const candidates: Candidate[] = names.flatMap((name): Candidate[] => {
     const holds = holdsForProjectFile(name);
     return holds
@@ -386,19 +403,39 @@ export async function inspectSecretsHygiene(
   const now = scope.now ?? Date.now();
   const findings: SecretsHygieneFinding[] = [];
   if (scope.project) {
-    for (const candidate of await projectCandidates(scope.project)) {
+    // Env writers refuse a linked `.hack`; so does this inspection, so no
+    // fix can reach files outside the project through it.
+    const projectDir = await lstat(scope.project.projectDir).catch(() => null);
+    const inspectProjectDir =
+      projectDir?.isDirectory() === true && !projectDir.isSymbolicLink();
+    if (projectDir && !inspectProjectDir) {
+      findings.push({
+        status: "error",
+        path: scope.project.projectDir,
+        message: `${shown(scope.project.projectDir, scope.project)} is a symbolic link or not a directory; Hack does not read, write or fix env files through it. Replace it with a regular directory.`,
+        fix: null,
+      });
+    }
+    for (const candidate of await projectCandidates({
+      project: scope.project,
+      inspectProjectDir,
+    })) {
       findings.push(
         ...(await candidateFindings({ candidate, project: scope.project }))
       );
     }
+    if (inspectProjectDir) {
+      findings.push(
+        ...(await leftoverFindings({
+          directory: scope.project.projectDir,
+          names: [".env", "hack.env.local.yaml"],
+          accept: HACK_DIR_STAGED,
+          now,
+          project: scope.project,
+        }))
+      );
+    }
     findings.push(
-      ...(await leftoverFindings({
-        directory: scope.project.projectDir,
-        names: [".env", "hack.env.local.yaml"],
-        accept: HACK_DIR_STAGED,
-        now,
-        project: scope.project,
-      })),
       ...(await leftoverFindings({
         directory: scope.project.projectRoot,
         names: [PROJECT_ENV_KEY_FILENAME],
@@ -459,7 +496,47 @@ export async function inspectSecretsHygiene(
       fix: { kind: "remove_mux", stale },
     });
   }
-  return findings;
+  return await Promise.all(findings.map(withGuard));
+}
+
+/** The directory a fix changes. */
+function fixDirectory(fix: SecretsHygieneFix): string {
+  switch (fix.kind) {
+    case "chmod":
+      return dirname(fix.path);
+    case "ignore":
+      return dirname(fix.gitignorePath);
+    case "remove_leftover":
+      return dirname(fix.leftover.path);
+    default:
+      return dirname(fix.stale.root);
+  }
+}
+
+async function withGuard(
+  finding: SecretsHygieneFinding
+): Promise<SecretsHygieneFinding> {
+  if (!finding.fix) {
+    return finding;
+  }
+  const path = fixDirectory(finding.fix);
+  const info = await stat(path).catch(() => null);
+  // A directory that can't be identified gets no fix.
+  return info?.isDirectory()
+    ? { ...finding, guard: { path, dev: info.dev, ino: info.ino } }
+    : { ...finding, fix: null };
+}
+
+async function guardHolds(guard: DirectoryGuard | undefined): Promise<boolean> {
+  if (!guard) {
+    return false;
+  }
+  const info = await stat(guard.path).catch(() => null);
+  return (
+    info?.isDirectory() === true &&
+    info.dev === guard.dev &&
+    info.ino === guard.ino
+  );
 }
 
 /** Tightens a file in place through a no-follow handle, if it is still the one found. */
@@ -526,7 +603,9 @@ export async function applySecretsHygieneFixes(opts: {
     done.add(key);
     let changed = false;
     try {
-      if (fix.kind === "chmod") {
+      if (!(await guardHolds(finding.guard))) {
+        changed = false;
+      } else if (fix.kind === "chmod") {
         changed = await tightenMode(fix);
       } else if (fix.kind === "ignore") {
         changed = await addIgnoreEntry(fix);

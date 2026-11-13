@@ -181,7 +181,7 @@ test("old leftovers are swept by the next staging write; recent ones are kept", 
   );
 });
 
-test("a linked or shared staging directory is refused before anything is staged", async () => {
+test("a linked staging directory is refused; a loose one of the user's own is made private", async () => {
   const root = await tempDir();
   const elsewhere = join(root, "elsewhere");
   await mkdir(elsewhere);
@@ -193,13 +193,14 @@ test("a linked or shared staging directory is refused before anything is staged"
   ).rejects.toThrow("synthetic staging refusal");
   expect(await readdir(elsewhere)).toEqual([]);
 
+  // A loose staging directory of the user's own is made private, then used.
   const shared = join(root, "shared");
   await mkdir(join(shared, PRIVATE_STAGING_DIRNAME), { recursive: true });
   await chmod(join(shared, PRIVATE_STAGING_DIRNAME), 0o777);
-  await expect(
-    preparePrivateStaging({ target: join(shared, ".env"), refusal })
-  ).rejects.toThrow("synthetic staging refusal");
-  expect(await readdir(join(shared, PRIVATE_STAGING_DIRNAME))).toEqual([]);
+  await preparePrivateStaging({ target: join(shared, ".env"), refusal });
+  expect(
+    (await lstat(join(shared, PRIVATE_STAGING_DIRNAME))).mode & 0o777
+  ).toBe(0o700);
 });
 
 test("a staging directory whose .gitignore does not ignore everything is refused (a committed one included)", async () => {
@@ -239,4 +240,22 @@ test("concurrent first writers in a fresh directory all get a complete self-igno
   const staging = join(root, PRIVATE_STAGING_DIRNAME);
   expect(await readdir(staging)).toEqual([".gitignore"]);
   expect(await readFile(join(staging, ".gitignore"), "utf8")).toBe("*\n");
+});
+
+test("on a filesystem without Unix permissions (ExFAT, FAT) a staging directory is still admitted", async () => {
+  const root = await tempDir();
+  const proc = Bun.spawn(
+    [
+      process.execPath,
+      join(import.meta.dir, "fixtures", "private-staging-noperm-worker.ts"),
+      join(root, ".env"),
+    ],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  const out = await new Response(proc.stdout).text();
+  expect(await proc.exited).toBe(0);
+  expect(out).toBe("admitted\n");
+  expect((await lstat(join(root, PRIVATE_STAGING_DIRNAME))).mode & 0o777).toBe(
+    0o777
+  );
 });

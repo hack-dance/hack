@@ -66,14 +66,41 @@ function isExisting(error: unknown): boolean {
   return isRecord(error) && error.code === "EEXIST";
 }
 
-/** A directory only the current user can use: real, owned, no group/other bits. */
-function isPrivateDirectory(stats: Stats): boolean {
+/** A real directory of this user's: not a link, owned by the current user. */
+function isOwnDirectory(stats: Stats): boolean {
   return (
     stats.isDirectory() &&
     !stats.isSymbolicLink() &&
-    stats.uid === process.getuid?.() &&
-    (stats.mode & 0o077) === 0
+    stats.uid === process.getuid?.()
   );
+}
+
+/**
+ * Admits the staging directory: a real directory of this user's, made
+ * private (0700). One with a looser mode is the user's own, so its mode is
+ * set; when that does not take, the filesystem does not store Unix
+ * permissions (ExFAT, FAT), and the directory is accepted as private as that
+ * filesystem allows, as the files written there are (HACK-2165). A link,
+ * another user's directory, or one replaced meanwhile is never admitted.
+ */
+async function admitStagingDirectory(directory: string): Promise<Stats | null> {
+  const stats = await lstat(directory).catch(() => null);
+  if (!(stats && isOwnDirectory(stats))) {
+    return null;
+  }
+  if ((stats.mode & 0o777) === 0o700) {
+    return stats;
+  }
+  await chmod(directory, 0o700).catch(() => undefined);
+  const after = await lstat(directory).catch(() => null);
+  if (
+    !(after && isOwnDirectory(after)) ||
+    after.dev !== stats.dev ||
+    after.ino !== stats.ino
+  ) {
+    return null;
+  }
+  return after;
 }
 
 /** A leftover Hack may remove: a regular file of ours, old enough. */
@@ -120,7 +147,7 @@ export async function findStagingLeftovers(opts: {
   );
   const staging = join(opts.directory, PRIVATE_STAGING_DIRNAME);
   const stagingStats = await lstat(staging).catch(() => null);
-  if (stagingStats && isPrivateDirectory(stagingStats)) {
+  if (stagingStats && isOwnDirectory(stagingStats)) {
     await collect(staging, isStagingFileName);
   }
   return found;
@@ -158,10 +185,11 @@ export type PreparedStaging = {
 
 /**
  * Prepares the staging directory next to `target` and returns a fresh
- * staging path in it. The directory is created private (0700) with its
+ * staging path in it. The directory is made private (0700), as far as the
+ * filesystem stores Unix permissions, with its
  * self-ignoring `.gitignore`; an existing entry there that is a link, not a
- * directory, not the user's own or open to group or others is refused with
- * `refusal()`, so a staging copy is never created through it. Old leftovers
+ * directory, or not the user's own is refused with `refusal()`, so a staging
+ * copy is never created through it (see {@link admitStagingDirectory}). Old leftovers
  * of this target are swept first.
  */
 export async function preparePrivateStaging(opts: {
@@ -170,22 +198,15 @@ export async function preparePrivateStaging(opts: {
   readonly now?: number;
 }): Promise<PreparedStaging> {
   const directory = join(dirname(opts.target), PRIVATE_STAGING_DIRNAME);
-  const created = await mkdir(directory, { mode: 0o700 }).then(
-    () => true,
-    (error: unknown) => {
-      if (!isExisting(error)) {
-        throw error;
-      }
-      return false;
+  await mkdir(directory, { mode: 0o700 }).catch((error: unknown) => {
+    if (!isExisting(error)) {
+      throw error;
     }
-  );
-  if (created) {
-    // The umask can only remove bits: a restrictive one would leave a
-    // directory the owner cannot create files in.
-    await chmod(directory, 0o700);
-  }
-  const identity = await lstat(directory).catch(() => null);
-  if (!(identity && isPrivateDirectory(identity))) {
+  });
+  // Sets 0700 on a new directory too: the umask can only remove bits, and
+  // a restrictive one would leave a directory the owner cannot use.
+  const identity = await admitStagingDirectory(directory);
+  if (!identity) {
     throw opts.refusal();
   }
   await ensureSelfIgnore({ directory, refusal: opts.refusal });
@@ -202,7 +223,7 @@ export async function preparePrivateStaging(opts: {
     recheck: async () => {
       const current = await lstat(directory).catch(() => null);
       if (
-        !(current && isPrivateDirectory(current)) ||
+        !(current && isOwnDirectory(current)) ||
         current.dev !== identity.dev ||
         current.ino !== identity.ino
       ) {

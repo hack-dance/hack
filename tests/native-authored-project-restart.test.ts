@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   NativeAuthoredProjectRestartError,
   type NativeAuthoredProjectRestartOptions,
@@ -9,6 +12,7 @@ import {
   NativeAuthoredProjectStartError,
   type serveNativeAuthoredProject,
 } from "../src/backends/native-authored-project-start.ts";
+import { hasLogRestart } from "../src/backends/native-log-restart.ts";
 
 type Stop = Parameters<typeof stopNativeAuthoredProject>[0];
 type Startup = Parameters<typeof serveNativeAuthoredProject>[0];
@@ -54,6 +58,85 @@ function recorder() {
     },
   };
 }
+
+macTest("restart admission refusal leaves the native home empty", async () => {
+  const home = await realpath(
+    await mkdtemp(join(tmpdir(), "restart-refusal-"))
+  );
+  try {
+    let starts = 0;
+    const input = selection();
+    await expect(
+      restartNativeAuthoredProject({
+        ...input,
+        runtime: { ...input.runtime, home },
+        scope: {
+          ...input.scope,
+          projectRoot: home,
+          projectDir: join(home, ".hack"),
+          nativeHome: home,
+        },
+        dependencies: {
+          serve: async () => {
+            starts++;
+            return 0;
+          },
+        },
+      })
+    ).rejects.toMatchObject({ phase: "stop" });
+    expect(starts).toBe(0);
+    expect(await readdir(home)).toEqual([]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+macTest.each(["ready", "stop-failed", "start-failed"] as const)(
+  "restart notice starts at stop admission and retires on %s",
+  async (outcome) => {
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "restart-notice-"))
+    );
+    try {
+      const input = selection();
+      const scope = { ...input.scope, nativeHome: home };
+      const result = await restartNativeAuthoredProject({
+        ...input,
+        runtime: { ...input.runtime, home },
+        scope,
+        dependencies: {
+          stop: async ({ onStopping }) => {
+            expect(await readdir(home)).toEqual([]);
+            await onStopping?.({ remainingMs: 1000 });
+            expect(await hasLogRestart(scope)).toBe(true);
+            if (outcome === "stop-failed") {
+              throw new Error("stop failed");
+            }
+          },
+          serve: async () => {
+            expect(await hasLogRestart(scope)).toBe(true);
+            if (outcome === "start-failed") {
+              throw new Error("start failed");
+            }
+            return 0;
+          },
+        },
+      }).catch((error: unknown) => error);
+      if (outcome === "ready") {
+        expect(result).toBe(0);
+      } else {
+        expect(result).toHaveProperty(
+          "phase",
+          outcome === "stop-failed" ? "stop" : "start"
+        );
+      }
+      expect(await hasLogRestart(scope)).toBe(false);
+      expect(await readdir(join(home, "log-restart-notices"))).toEqual([]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+);
 
 macTest(
   "proven stop precedes a fresh foreground start with the captured selection",

@@ -1251,6 +1251,8 @@ export async function stopNativeAuthoredProject(input: {
   readonly scope: NativeAuthoredProjectRunScope;
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
+  /** Advisory observation after admission, before the stop request; grants no authority. */
+  readonly onStopping?: (input: { remainingMs: number }) => Promise<void>;
 }): Promise<void> {
   const opts = { ...input, scope: { ...input.scope } };
   const deadline = performance.now() + opts.timeoutMs;
@@ -1266,6 +1268,21 @@ export async function stopNativeAuthoredProject(input: {
     return budget;
   };
   remaining();
+  let observed = false;
+  const onStopping = opts.onStopping
+    ? async () => {
+        const remainingMs = remaining();
+        if (observed) {
+          return;
+        }
+        observed = true;
+        try {
+          await opts.onStopping?.({ remainingMs });
+        } catch {
+          // Advisory observation must not change the stop owner's result.
+        }
+      }
+    : undefined;
   await withNativeAuthoredProjectRecoveryStorage(opts.scope, async (store) => {
     const ready = await store.readReady();
     const start = await store.readStart();
@@ -1308,6 +1325,7 @@ export async function stopNativeAuthoredProject(input: {
         run,
         remaining,
         signal: opts.signal,
+        onStopping,
       })
     ) {
       return;
@@ -1327,7 +1345,11 @@ export async function stopNativeAuthoredProject(input: {
           `${digest(JSON.stringify(opts.scope.branch))}.hooks.json`
         ) ||
       typeof value.port !== "number" ||
-      typeof value.token !== "string"
+      !Number.isInteger(value.port) ||
+      value.port < 1 ||
+      value.port > 65_535 ||
+      typeof value.token !== "string" ||
+      !HEX64.test(value.token)
     ) {
       return refused();
     }
@@ -1347,6 +1369,18 @@ export async function stopNativeAuthoredProject(input: {
       [value.owner.path, owner],
     ]);
     await store.check();
+    remaining();
+    if (onStopping) {
+      await onStopping();
+      await store.check();
+      await assertStopFiles([
+        [store.ready, readyFile],
+        [store.start, startFile],
+        [path, current],
+        [value.owner.path, owner],
+      ]);
+      await store.check();
+    }
     await requestNativeHookStop({
       run,
       port: value.port,

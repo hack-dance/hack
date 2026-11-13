@@ -12,9 +12,17 @@ import {
   type LogStreamContext,
 } from "../ui/log-stream.ts";
 import { withPinnedRuntimeBinary } from "./native-authored-runtime-binary.ts";
+import { watchLogConsumer } from "./native-log-consumer.ts";
 import { readLogFailure } from "./native-log-drain.ts";
 import {
+  abortableLogRead,
+  isNewLogContainer,
+  NativeLogRestartUnavailable,
+} from "./native-log-restart.ts";
+import {
   NATIVE_EXIT_DRAIN_BOUND_MS,
+  type NativeLogFailurePhase,
+  NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -23,6 +31,21 @@ const ID = /^[a-f0-9]{64}$/;
 const BASE64 =
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const LINE_LIMIT = 64 * 1024;
+const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+function wireVersion(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value).sort().join(",");
+  return (
+    (value.version === 1 &&
+      keys === "container,data,kind,service,stream,version") ||
+    (value.version === 2 &&
+      keys === "container,data,kind,service,stream,timestamp,version" &&
+      (value.timestamp === null ||
+        (typeof value.timestamp === "string" &&
+          TIMESTAMP.test(value.timestamp))))
+  );
+}
 /** Native's supported flags are explicit; no selector or formatting flag is ignored. */
 export function assertNativeLogFlags(options: {
   readonly profile?: string;
@@ -35,6 +58,7 @@ export function assertNativeLogFlags(options: {
   readonly pretty?: boolean;
   readonly follow?: boolean;
   readonly noFollow?: boolean;
+  readonly timestamps?: boolean;
 }): void {
   for (const name of [
     "profile",
@@ -52,6 +76,9 @@ export function assertNativeLogFlags(options: {
   if (options.follow && options.noFollow) {
     throw new CliUsageError("Cannot combine --follow and --no-follow.");
   }
+  if (options.noFollow && options.timestamps) {
+    throw new CliUsageError("Native --timestamps currently requires --follow.");
+  }
   if (options.noFollow && options.since !== undefined) {
     throw new CliUsageError("Native --since currently requires --follow.");
   }
@@ -64,14 +91,33 @@ export type NativeLogFollowSelection = {
   readonly native: boolean;
   readonly container?: string;
 };
-function refused(code = "native_log_stream_uncertain"): never {
-  throw new HackCliError({
-    code: "E_LIFECYCLE_FAILED",
-    message:
-      code === "native_log_stopped_idle"
-        ? "Native logs ended after the stopped service was idle for five seconds without stream EOF (native_log_stopped_idle); the final tail may be incomplete."
-        : `Native logs failed (${code}); no cleanup was inferred.`,
-  });
+class NativeLogError extends HackCliError {
+  readonly reason: string;
+  readonly phase: NativeLogFailurePhase | undefined;
+  readonly runtimeMessage: string | undefined;
+  constructor(
+    code: string,
+    detail?: { message?: string; logPhase?: NativeLogFailurePhase }
+  ) {
+    super({
+      code: "E_LIFECYCLE_FAILED",
+      message:
+        (code === "native_log_stopped_idle"
+          ? "Native logs ended after the stopped service was idle for five seconds without stream EOF (native_log_stopped_idle); the final tail may be incomplete."
+          : `Native logs failed (${code}); no cleanup was inferred.`) +
+        (detail?.logPhase ? ` Phase: ${detail.logPhase}.` : "") +
+        (detail?.message ? ` Runtime: ${detail.message}` : ""),
+    });
+    this.reason = code;
+    this.phase = detail?.logPhase;
+    this.runtimeMessage = detail?.message;
+  }
+}
+function refused(
+  code = "native_log_stream_uncertain",
+  detail?: { message?: string; logPhase?: NativeLogFailurePhase }
+): never {
+  throw new NativeLogError(code, detail);
 }
 /** Reject unsupported bounds explicitly before selecting or spawning the runtime. */
 export function nativeLogFollowOptions(input: {
@@ -179,15 +225,30 @@ export async function* nativeLogWireLines(
 export function nativeLogLineDecoder(input: {
   readonly service: string;
   readonly container?: string;
+  readonly onAttached?: (container: string) => Promise<void>;
   readonly onLine: (
     stream: "stdout" | "stderr",
     text: string,
-    completeness: { readonly truncated: boolean; readonly partial: boolean }
+    completeness: {
+      readonly truncated: boolean;
+      readonly partial: boolean;
+      readonly timestamp?: string;
+    }
   ) => Promise<void>;
 }) {
   const state = {
-    stdout: { decoder: new TextDecoder(), pending: "", truncated: false },
-    stderr: { decoder: new TextDecoder(), pending: "", truncated: false },
+    stdout: {
+      decoder: new TextDecoder(),
+      pending: "",
+      truncated: false,
+      timestamp: undefined as string | undefined,
+    },
+    stderr: {
+      decoder: new TextDecoder(),
+      pending: "",
+      truncated: false,
+      timestamp: undefined as string | undefined,
+    },
   };
   const emit = async (stream: "stdout" | "stderr", partial: boolean) => {
     const selected = state[stream];
@@ -200,10 +261,15 @@ export function nativeLogLineDecoder(input: {
     await input.onLine(
       stream,
       `${prefix}${selected.truncated ? " [truncated]" : ""}${partial ? " [partial]" : ""}`,
-      { truncated: selected.truncated, partial }
+      {
+        truncated: selected.truncated,
+        partial,
+        ...(selected.timestamp ? { timestamp: selected.timestamp } : {}),
+      }
     );
     selected.pending = "";
     selected.truncated = false;
+    selected.timestamp = undefined;
   };
   const append = async (stream: "stdout" | "stderr", text: string) => {
     const selected = state[stream];
@@ -231,10 +297,22 @@ export function nativeLogLineDecoder(input: {
         refused("native_log_wire_invalid");
       }
       if (
-        !isRecord(value) ||
-        Object.keys(value).sort().join(",") !==
-          "container,data,kind,service,stream,version" ||
-        value.version !== 1 ||
+        isRecord(value) &&
+        value.version === 2 &&
+        value.kind === "native-log-attached" &&
+        Object.keys(value).sort().join(",") ===
+          "container,kind,service,version" &&
+        value.service === input.service &&
+        typeof value.container === "string" &&
+        ID.test(value.container) &&
+        (container === undefined || container === value.container)
+      ) {
+        container = value.container;
+        await input.onAttached?.(container);
+        return;
+      }
+      if (
+        !(isRecord(value) && wireVersion(value)) ||
         value.kind !== "native-log-chunk" ||
         value.service !== input.service ||
         typeof value.container !== "string" ||
@@ -255,7 +333,14 @@ export function nativeLogLineDecoder(input: {
       if (bytes.byteLength > 4096) {
         refused("native_log_wire_limit");
       }
+      await input.onAttached?.(value.container);
       const selected = state[value.stream];
+      if (
+        !(selected.pending || selected.truncated) &&
+        typeof value.timestamp === "string"
+      ) {
+        selected.timestamp = value.timestamp;
+      }
       await append(
         value.stream,
         selected.decoder.decode(bytes, { stream: true })
@@ -300,11 +385,19 @@ function write(
 type FollowInput = {
   readonly runtime: NativeRuntimeSelection;
   readonly cwd: string;
-  readonly selection: NativeLogFollowSelection;
+  readonly selection:
+    | NativeLogFollowSelection
+    | (() => Promise<NativeLogFollowSelection>);
+  /** Fresh admission only; the previous selection never grants restart authority. */
+  readonly resume?: (
+    previous: NativeLogFollowSelection,
+    signal: AbortSignal
+  ) => Promise<NativeLogFollowSelection | null>;
   readonly service: string;
   readonly tail?: number;
   readonly since?: string;
   readonly json?: boolean;
+  readonly timestamps?: boolean;
   readonly stdout?: Writable;
   readonly stderr?: Writable;
   readonly project?: string;
@@ -366,40 +459,62 @@ function logOutput(
     async end(
       code: number,
       endSignal = signal,
-      reason = code === 0 ? "eof" : `exit:${code}`
+      reason = code === 0 ? "eof" : `exit:${code}`,
+      phase?: NativeLogFailurePhase,
+      message?: string
     ) {
       if (input.json) {
         await write(
           stdout,
-          `${JSON.stringify(buildLogStreamEndEvent({ context, reason }))}\n`,
+          `${JSON.stringify(buildLogStreamEndEvent({ context, reason, phase, message }))}\n`,
           endSignal
         );
       }
     },
-    decoder: nativeLogLineDecoder({
-      service: input.service,
-      container: input.selection.container,
-      onLine: async (stream, text, completeness) => {
-        const raw = `${input.service} | ${text}`;
-        const entry: LogJsonEntry = {
-          ...parseComposeLogLine({ line: raw, stream }),
-          source: "native",
-          service: input.service,
-          instance: undefined,
-          project: input.project,
-          ...(completeness.truncated ? { truncated: true } : {}),
-          ...(completeness.partial ? { partial: true } : {}),
-        };
-        const output = input.json || stream === "stdout" ? stdout : stderr;
-        await write(
-          output,
-          input.json
-            ? `${JSON.stringify(buildLogStreamLogEvent({ context, entry }))}\n`
-            : `${raw}\n`,
-          signal
-        );
-      },
-    }),
+    notice(message: string, noticeSignal = signal) {
+      return write(stderr, `${message}\n`, noticeSignal);
+    },
+    async restarted() {
+      const message = `Service ${input.service} restarted; following the new container.`;
+      await write(
+        input.json ? stdout : stderr,
+        input.json
+          ? `${JSON.stringify({ type: "notice", ts: new Date().toISOString(), backend: "native", reason: "native_log_restarted", message })}\n`
+          : `${message}\n`,
+        signal
+      );
+    },
+    decoder: (
+      selection: NativeLogFollowSelection,
+      onAttached: (container: string) => Promise<void>
+    ) =>
+      nativeLogLineDecoder({
+        service: input.service,
+        container: selection.container,
+        onAttached,
+        onLine: async (stream, text, completeness) => {
+          const raw = `${input.service} | ${text}`;
+          const entry: LogJsonEntry = {
+            ...parseComposeLogLine({ line: raw, stream }),
+            source: "native",
+            service: input.service,
+            instance: undefined,
+            project: input.project,
+            ...(completeness.timestamp
+              ? { timestamp: completeness.timestamp }
+              : {}),
+            ...(completeness.truncated ? { truncated: true } : {}),
+            ...(completeness.partial ? { partial: true } : {}),
+          };
+          await write(
+            stdout,
+            input.json
+              ? `${JSON.stringify(buildLogStreamLogEvent({ context, entry }))}\n`
+              : `${input.timestamps && completeness.timestamp ? `${completeness.timestamp} ` : ""}${text}\n`,
+            signal
+          );
+        },
+      }),
     dispose() {
       stdout.off("error", failed);
       if (stderr !== stdout) {
@@ -461,134 +576,239 @@ function ownLogReader(
   };
 }
 
-/** Own exactly one read child. Cancellation reaps it, never the project owner. */
+/** One session owns admission, sequential readers, and its final NDJSON event. */
 export async function followNativeLogs(input: FollowInput): Promise<number> {
   const opts = nativeLogFollowOptions(input);
   const controller = new AbortController();
   let consumerClosed = false;
+  let outputError: Error | undefined;
   let canceled = 0;
+  const close = () => {
+    if (outputError) {
+      return;
+    }
+    consumerClosed = true;
+    controller.abort();
+  };
   const cancel = (code: number) => {
     canceled ||= code;
     controller.abort();
   };
   const interrupt = () => cancel(130);
   const terminate = () => cancel(143);
+  const output = logOutput(input, controller.signal, (error) => {
+    if (closedOutput(error)) {
+      close();
+    } else {
+      outputError = error;
+      controller.abort();
+    }
+  });
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", terminate);
+  let disposeConsumer: () => void = () => undefined;
   try {
-    return await withPinnedRuntimeBinary(
-      { binary: input.runtime.binary, signal: controller.signal, refused },
-      async (pin) => {
-        await pin.check();
-        const selection = input.selection;
-        const env = runtimeEnvironment();
-        pin.checkSync();
-        const child = Bun.spawn(
-          [
-            input.runtime.binary,
-            "--candidate-root",
-            input.runtime.home,
-            "graph",
-            "logs-follow",
-            "--run-id",
-            selection.run,
-            "--service",
-            opts.service,
-            "--expect-owner",
-            selection.owner,
-            "--expect-plan",
-            selection.plan,
-            "--expect-namespace",
-            selection.namespace,
-            "--tail",
-            String(opts.tail),
-            ...(selection.native ? ["--native"] : []),
-            ...(opts.since === undefined
-              ? []
-              : ["--since", String(opts.since)]),
-          ],
-          {
-            cwd: input.cwd,
-            env: childEnvironment(env),
-            stdin: "pipe",
-            stdout: "pipe",
-            stderr: "pipe",
-            detached: true,
-          }
-        );
-        const reader = ownLogReader(child, controller.signal);
-        const { exited } = reader;
-        const failure = readLogFailure(child.stderr, exited, controller.signal);
-        // Writable emits error independently of the write callback. Keep a listener
-        // for the entire session, including cancellation of a blocked write.
-        const outputFailed = (error: Error) => {
-          consumerClosed ||= closedOutput(error);
-          controller.abort();
-        };
-        const output = logOutput(input, controller.signal, outputFailed);
-        const { decoder } = output;
-        let endReason: string | undefined;
-        try {
-          await output.start();
-          for await (const line of nativeLogWireLines(
-            child.stdout,
-            controller.signal,
-            exited
-          )) {
-            await decoder.accept(line);
-          }
-          const code = await exited;
-          const detail = await failure;
-          if (canceled) {
-            await endInterruptedLog(output, canceled, consumerClosed);
-            return canceled;
-          }
-          if (consumerClosed) {
-            return 0;
-          }
-          if (detail?.code === "native_log_stopped_idle") {
-            endReason = detail.code;
-            await decoder.finish();
-            refused(detail.code);
-          }
-          if (
-            code !== 0 ||
-            controller.signal.aborted ||
-            detail?.code === "native_log_exit_drain_timeout"
-          ) {
-            refused(detail?.code);
-          }
-          await decoder.finish();
-          await output.end(code);
-          return 0;
-        } catch (error) {
-          await endInterruptedLog(
-            output,
-            canceled || 1,
-            consumerClosed,
-            endReason
-          );
-          throw error;
-        } finally {
-          controller.abort();
-          await reader.dispose();
-          await failure;
-          output.dispose();
-        }
-      }
+    disposeConsumer = await watchLogConsumer(
+      input.stdout ?? process.stdout,
+      close
     );
+    await output.start();
+    return await runLogSession(input, opts, controller.signal, output);
   } catch (error) {
-    if (canceled) {
-      return canceled;
-    }
     if (consumerClosed || closedOutput(error)) {
       return 0;
     }
-    throw error;
+    if (canceled) {
+      await endInterruptedLog(output, canceled, false);
+      return canceled;
+    }
+    const reason = logErrorReason(error);
+    const diagnostic =
+      error instanceof NativeLogError ? error : new NativeLogError(reason);
+    await output
+      .end(
+        1,
+        controller.signal,
+        reason,
+        diagnostic.phase,
+        diagnostic.runtimeMessage
+      )
+      .catch(() => undefined);
+    if (!consumerClosed) {
+      // Fixed diagnostics: admission errors can contain paths or input values.
+      await output
+        .notice(diagnostic.message, AbortSignal.timeout(1000))
+        .catch(() => undefined);
+    }
+    return consumerClosed ? 0 : canceled || 1;
   } finally {
+    controller.abort();
+    disposeConsumer();
+    output.dispose();
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", terminate);
   }
+}
+
+async function runLogSession(
+  input: FollowInput,
+  opts: ReturnType<typeof nativeLogFollowOptions>,
+  signal: AbortSignal,
+  output: ReturnType<typeof logOutput>
+): Promise<number> {
+  let selection =
+    typeof input.selection === "function"
+      ? await abortableLogRead(
+          input.selection,
+          AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+        )
+      : input.selection;
+  let resumed = false;
+  for (;;) {
+    signal.throwIfAborted();
+    const container = await readSelectedLogs({
+      input,
+      selection,
+      opts: resumed ? { service: opts.service, tail: 1000 } : opts,
+      signal,
+      output,
+      resumed,
+    });
+    selection = { ...selection, container };
+    signal.throwIfAborted();
+    const resume = input.resume;
+    const next = resume
+      ? await abortableLogRead(() => resume(selection, signal), signal)
+      : null;
+    if (!next) {
+      await output.notice(`Service ${input.service} stopped.`);
+      await output.end(0, signal, "native_log_service_stopped");
+      return 0;
+    }
+    if (!isNewLogContainer(selection, next)) {
+      refused("native_log_restart_unavailable");
+    }
+    selection = next;
+    resumed = true;
+  }
+}
+
+async function readSelectedLogs({
+  input,
+  selection,
+  opts,
+  signal,
+  output,
+  resumed,
+}: {
+  input: FollowInput;
+  selection: NativeLogFollowSelection;
+  opts: ReturnType<typeof nativeLogFollowOptions>;
+  signal: AbortSignal;
+  output: ReturnType<typeof logOutput>;
+  resumed: boolean;
+}): Promise<string> {
+  const containerArgs = selection.container
+    ? ["--expect-container", selection.container]
+    : [];
+  return await withPinnedRuntimeBinary(
+    { binary: input.runtime.binary, signal, refused },
+    async (pin) => {
+      await pin.check();
+      signal.throwIfAborted();
+      pin.checkSync();
+      const child = Bun.spawn(
+        [
+          input.runtime.binary,
+          "--candidate-root",
+          input.runtime.home,
+          "graph",
+          "logs-follow",
+          "--run-id",
+          selection.run,
+          "--service",
+          opts.service,
+          "--expect-owner",
+          selection.owner,
+          "--expect-plan",
+          selection.plan,
+          "--expect-namespace",
+          selection.namespace,
+          ...containerArgs,
+          "--tail",
+          String(opts.tail),
+          ...(selection.native ? ["--native"] : []),
+          ...(input.timestamps ? ["--timestamps"] : []),
+          ...(resumed ? ["--from-start"] : []),
+          ...(opts.since === undefined ? [] : ["--since", String(opts.since)]),
+        ],
+        {
+          cwd: input.cwd,
+          env: childEnvironment(runtimeEnvironment()),
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+          detached: true,
+        }
+      );
+      const reader = ownLogReader(child, signal);
+      const failure = readLogFailure(child.stderr, reader.exited, signal);
+      let marked = !resumed;
+      let attachedContainer: string | undefined;
+      const decoder = output.decoder(selection, async (container) => {
+        attachedContainer = container;
+        if (!marked) {
+          await output.restarted();
+          marked = true;
+        }
+      });
+      try {
+        for await (const line of nativeLogWireLines(
+          child.stdout,
+          signal,
+          reader.exited
+        )) {
+          await decoder.accept(line);
+        }
+        const code = await reader.exited;
+        const detail = await failure;
+        signal.throwIfAborted();
+        await decoder.finish();
+        if (code !== 0 || detail?.code) {
+          refused(detail?.code, detail);
+        }
+        return attachedContainer ?? refused("native_log_selection_changed");
+      } catch (error) {
+        if (!signal.aborted) {
+          await decoder.finish();
+        }
+        throw error;
+      } finally {
+        await reader.dispose();
+        await failure;
+      }
+    }
+  );
+}
+
+function logErrorReason(error: unknown): string {
+  if (
+    error instanceof NativeLogError ||
+    error instanceof NativeLogRestartUnavailable
+  ) {
+    return error.reason;
+  }
+  if (
+    error instanceof NativeRuntimeRequestError &&
+    error.nativeCode &&
+    ERROR_CODE.test(error.nativeCode)
+  ) {
+    return error.nativeCode;
+  }
+  if (error instanceof HackCliError) {
+    return error.code;
+  }
+  return "native_log_failed";
 }
 
 function closedOutput(error: unknown): boolean {

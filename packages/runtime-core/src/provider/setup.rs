@@ -95,11 +95,12 @@ enum Outcome {
     Downloaded,
     Resumed,
     Reused,
+    Offline,
 }
 
-/// Accounting for pinned artifacts this invocation. Reused bytes cover offline
-/// inputs, verified cache entries/prefixes, or an equivalent verified installed
-/// tree. Complete-home reuse reads no archive inputs.
+/// Accounting for archive inputs read this invocation. Reused bytes cover offline
+/// inputs, verified cache entries and prefixes. Complete-home reuse reads no
+/// archives and returns an empty file list instead.
 #[derive(Debug, Serialize)]
 struct FileResult {
     name: String,
@@ -126,14 +127,11 @@ struct Installation {
     files: Vec<FileResult>,
 }
 impl Installation {
-    fn reused(files: &[FilePin]) -> Result<Self, CandidateError> {
-        Ok(Self {
+    fn reused() -> Self {
+        Self {
             status: "reused",
-            files: files
-                .iter()
-                .map(|pin| FileResult::new(pin, Outcome::Reused, 0))
-                .collect::<Result<_, _>>()?,
-        })
+            files: Vec::new(),
+        }
     }
 
     fn with_probe(self, probe: impl Serialize) -> serde_json::Value {
@@ -203,7 +201,7 @@ pub fn reuse_existing(candidate: &Candidate) -> Result<Option<serde_json::Value>
     if !observe_existing(candidate, &verified_install)? {
         return Ok(None);
     }
-    Ok(Some(Installation::reused(&pins()?)?.with_probe(
+    Ok(Some(Installation::reused().with_probe(
         super::probe_with_profile(candidate, super::Profile::Development)?,
     )))
 }
@@ -264,7 +262,7 @@ fn install(
     {
         let _provider_lock = state::Lock::acquire(&candidate.state_root.join("run/smolvm"))?;
         if reuse(candidate, &target, &verify)? {
-            return Installation::reused(files);
+            return Ok(Installation::reused());
         }
     }
     let downloads = download_directory(candidate);
@@ -276,7 +274,7 @@ fn install(
             download::verify_input(&inputs.network_tools.join(pin.name()?), pin)?;
         }
         for pin in files {
-            results.push(FileResult::new(pin, Outcome::Reused, 0)?);
+            results.push(FileResult::new(pin, Outcome::Offline, 0)?);
         }
         (
             inputs.archive.to_path_buf(),

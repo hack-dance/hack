@@ -1,6 +1,7 @@
 import { mkdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { childEnvironment } from "./child-environment.ts";
 import { isRecord } from "./guards.ts";
 import {
   readReplaceablePrivateFile,
@@ -1051,7 +1052,7 @@ async function spawnOwned(
       ["/bin/sh", "-c", GATE_SCRIPT, "hack-shared-host-gate", ...spec.command],
       {
         cwd: spec.cwd,
-        env: { ...spec.env },
+        env: childEnvironment({ ...spec.env }),
         stdin: "pipe",
         stdout: "ignore",
         stderr: "ignore",

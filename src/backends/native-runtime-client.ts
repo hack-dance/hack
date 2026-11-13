@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -385,7 +386,7 @@ export async function invokeNativeRuntime(opts: {
     [opts.runtime.binary, "--candidate-root", opts.runtime.home, ...opts.args],
     {
       cwd: opts.cwd,
-      env,
+      env: childEnvironment(env),
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",

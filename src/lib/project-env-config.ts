@@ -42,9 +42,11 @@ import {
   HACK_DIR_GITIGNORE_END_MARKER,
   HACK_DIR_GITIGNORE_ENTRIES,
 } from "../templates.ts";
+import { childEnvironment } from "./child-environment.ts";
 import { ClosedCliError, HackCliError } from "./cli-result.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
 import { withEnvLayerLock } from "./env-layer-lock.ts";
+import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import {
   AtomicWriteConflictError,
   closedFileWriteError,
@@ -736,6 +738,7 @@ async function isGitTrackedProjectEnvPath(opts: {
   let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
   try {
     proc = Bun.spawn({
+      env: childEnvironment(),
       cmd: [
         "git",
         "-C",
@@ -776,6 +779,7 @@ export async function isGitIgnoredProjectEnvPath(opts: {
   let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
   try {
     proc = Bun.spawn({
+      env: childEnvironment(),
       cmd: [
         "git",
         "-C",
@@ -1164,12 +1168,12 @@ function parseProjectEnvConfigText(opts: {
   let parsed: unknown;
   try {
     parsed = YAML.parse(text);
-  } catch (error: unknown) {
+  } catch {
     return {
       path: opts.path,
       exists: true,
       config: defaultProjectEnvConfig({ environment: opts.environment }),
-      parseError: error instanceof Error ? error.message : "Invalid YAML",
+      parseError: envParseDiagnostic({ format: "YAML", text }),
     };
   }
 
@@ -1896,9 +1900,13 @@ function parseNativeEnvLayer(opts: {
   readonly bytes: Uint8Array;
   readonly environment: string;
 }): ProjectEnvConfig {
-  const parsed: unknown = YAML.parse(
-    new TextDecoder("utf-8", { fatal: true }).decode(opts.bytes)
-  );
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(opts.bytes);
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    throw new SyntaxError(envParseDiagnostic({ format: "YAML", text }));
+  }
   const result = parseProjectEnvConfig({
     parsed,
     environment: opts.environment,
@@ -3959,10 +3967,10 @@ async function readProjectEnvStateFile(opts: {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
-  } catch (error: unknown) {
+  } catch {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Invalid JSON",
+      error: envParseDiagnostic({ format: "JSON", text }),
     };
   }
 
@@ -6006,7 +6014,7 @@ function legacyOverlayFileList(names: readonly string[]): string {
     .join(", ");
 }
 
-function isExcludedLegacyDotenvName(name: string): boolean {
+export function isExcludedLegacyDotenvName(name: string): boolean {
   return (
     name === LEGACY_DOTENV_STATE_OVERLAY ||
     LEGACY_DOTENV_NON_OVERLAY_NAMES.has(name)

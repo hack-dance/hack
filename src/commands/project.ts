@@ -5895,6 +5895,7 @@ async function runRemoteLifecycleCommand(opts: {
   });
   return await runShell([invocation.bin, ...dispatchArgs], {
     cwd: opts.project.projectRoot,
+    hackReexec: true,
   });
 }
 

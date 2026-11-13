@@ -188,6 +188,7 @@ async function track(
 
 type LaunchConfig = {
   readonly argv: readonly string[];
+  readonly native?: boolean;
   readonly requestKey?: string;
   readonly timeoutMs?: number;
   readonly stallAfterMs?: number;
@@ -1285,3 +1286,69 @@ describe("background command processes", () => {
     TEST_TIMEOUT_MS
   );
 });
+
+test(
+  "background command strips caller and explicit Hack decryption keys",
+  async () => {
+    const sentinel = "synthetic-background-key-sentinel";
+    const keys = {
+      HACK_ENV_SECRET_KEY: sentinel,
+      HACK_SECRETS_FILE_KEY: sentinel,
+    };
+    const launched = await launch({
+      argv: [
+        "sh",
+        "-c",
+        'printf "%s|%s\\n" "${HACK_ENV_SECRET_KEY-unset}" "${HACK_SECRETS_FILE_KEY-unset}"',
+      ],
+      extraEnv: keys,
+      childEnv: keys,
+    });
+    expect(launched.envelope.ok).toBe(true);
+    if (!launched.journal) {
+      throw new Error("Missing journal");
+    }
+    const read = await readUntilEnded({ journal: launched.journal });
+    expect(read.exitCode).toBe(0);
+    expect(stdoutText(read.events)).toBe("unset|unset\n");
+  },
+  TEST_TIMEOUT_MS
+);
+
+test(
+  "native background Hack re-exec retains environment-only keys and strips its host child's keys",
+  async () => {
+    const sentinel = "synthetic-native-background-key";
+    const probe = join(fixture.root, "native-reexec.ts");
+    const root = resolve(import.meta.dir, "..");
+    await writeFile(
+      probe,
+      [
+        `import { exec } from ${JSON.stringify(join(root, "src/lib/shell.ts"))};`,
+        `import { noteNativeExitConfirmed } from ${JSON.stringify(join(root, "src/lib/background-command/native-exit.ts"))};`,
+        `if (process.env.HACK_ENV_SECRET_KEY !== ${JSON.stringify(sentinel)} || process.env.HACK_SECRETS_FILE_KEY !== ${JSON.stringify(sentinel)}) process.exit(42);`,
+        `const result = await exec([process.execPath,"-e", "console.log([process.env.HACK_ENV_SECRET_KEY, process.env.HACK_SECRETS_FILE_KEY].filter(Boolean).length)"], {stdin:"ignore"});`,
+        "process.stdout.write(result.stdout); await noteNativeExitConfirmed(); process.exitCode = result.exitCode;",
+      ].join("\n")
+    );
+    const launched = await launch({
+      argv: [process.execPath, probe],
+      native: true,
+      extraEnv: {
+        HACK_ENV_SECRET_KEY: sentinel,
+        HACK_SECRETS_FILE_KEY: sentinel,
+      },
+    });
+    expect(launched.envelope.ok).toBe(true);
+    if (!launched.journal) {
+      throw new Error("Missing journal");
+    }
+    const read = await readUntilEnded({ journal: launched.journal });
+    expect(read.exitCode).toBe(0);
+    expect(stdoutText(read.events)).toBe("0\n");
+    expect(await readFile(launched.journal.paths.launch, "utf8")).not.toContain(
+      sentinel
+    );
+  },
+  TEST_TIMEOUT_MS
+);

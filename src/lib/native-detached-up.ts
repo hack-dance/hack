@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { NATIVE_PROVIDER_PIN_MESSAGE } from "../backends/native-runtime-client.ts";
+import { hackReexecEnvironment } from "./child-environment.ts";
 import {
   emitCliResult,
   errorResult,
@@ -276,7 +277,7 @@ export async function startNativeDetachedUp(opts: {
     // with the launcher's JSON. Service logs remain available through hack logs.
     stdio: ["ignore", "ignore", "ignore", "ipc"],
     serialization: "json",
-    env: process.env,
+    env: hackReexecEnvironment(process.env),
   });
   let ready: Ready | undefined;
   let committed = false;

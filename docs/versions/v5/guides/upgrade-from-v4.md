@@ -387,8 +387,9 @@ output contract or assume the protection command exists in next.16.
 #### An old global secret store whose key is gone
 
 A machine upgraded from v4 may still have an encrypted store such as
-`~/.hack/secrets.enc.json` whose key file was lost. From next.17 (HACK-2169,
-HACK-2177), Doctor reports that store as a `secret integrity` finding:
+`~/.hack/secrets.enc.json` whose key file was lost. Merged
+[#779](https://github.com/hack-dance/hack/pull/779), intended for next.17,
+changes Doctor's `secret integrity` finding for that store:
 
 - an **error** in a project whose legacy env contract reads the store, and a
   **warning** in any other project;
@@ -402,8 +403,9 @@ entries.
    600), from a backup or another machine, or set `HACK_SECRETS_FILE_KEY` to the
    same key.
 2. **Retire the store** when the key is gone for good:
-   `hack secrets retire-store`, run in a project that selects the store or
-   outside any project for the global one. Without a terminal, add `--yes`.
+   `hack secrets retire-store --path <project>` selects that project's store;
+   outside any project, omitting `--path` selects the global one. Without a
+   terminal, add `--yes`.
    - It moves the store into a new directory `<store>.retired-<UTC time>/`
      beside it, keeping its name. It deletes nothing, reads and prints no
      entry, and leaves the key file alone. It only retires a file that is a
@@ -417,6 +419,20 @@ entries.
    - It prints the `mv` command that puts the store back.
    - Afterwards Doctor lists the retired file as information, and the project
      check no longer fails.
+
+For example, after those key and project checks, use the selected candidate:
+
+```sh
+"$V5" secrets retire-store --path /absolute/project --allow-unchecked
+```
+
+Review the store path in the confirmation prompt. Retirement keeps the encrypted
+entries for recovery; it does not make them readable with a replacement key.
+It is separate from migration cleanup and is not available in next.16.
+
+Sources: [Doctor's store finding](https://github.com/hack-dance/hack/blob/91c311e4d9/src/lib/doctor-secret-integrity.ts),
+[retirement command and confirmation](https://github.com/hack-dance/hack/blob/91c311e4d9/src/commands/secrets.ts),
+[retirement checks](https://github.com/hack-dance/hack/blob/91c311e4d9/src/lib/secret-store-retire.ts).
 
 Sources for next.16 behavior: [env list and get](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/env.ts),
 [project key checks](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/lib/doctor-env-key.ts).
@@ -444,10 +460,9 @@ With [#783](https://github.com/hack-dance/hack/pull/783), a confirmed store
 removal drops its legacy config pointer even if a later cleanup step fails.
 If the store remains, the pointer stays. A config-write failure is reported too,
 so follow the remaining reconciliation guidance rather than assuming rollback.
-An old global store with a missing key should stay intact until its key is
-recovered or the separate retirement path in
-[#779](https://github.com/hack-dance/hack/pull/779) is available. Do not discard
-the store or replace its only key to silence Doctor.
+For an old global store with a missing key, use the separate
+[restore-or-retire choices](#an-old-global-secret-store-whose-key-is-gone) above.
+Do not discard the store or replace its only key to silence Doctor.
 
 Source: [current env migration and cleanup guidance](https://github.com/hack-dance/hack/blob/af91049f30d7ec272c461d009253faf6800507bc/docs/env.md#legacy-repos-and-migration).
 

@@ -114,6 +114,27 @@ See [Env and secrets](../env.md#legacy-repos-and-migration) and the
 [threat model](../security/env-secrets-threat-model.md). These are manual checks,
 not evidence that the real-machine upgrade or rollback has passed.
 
+### An old global secret store whose key is gone
+
+Merged #779, intended for next.17, makes an old store with a missing or wrong
+key a Doctor error only where the project's runtime reads it. Other projects
+receive a warning. Choose one: restore the original key from a private backup,
+or retire the store if the key is gone for good. A new key cannot open the old
+entries.
+
+`hack secrets retire-store --path <project>` selects the store for that project
+and moves it into a timestamped directory beside it. It deletes nothing, leaves
+the key file alone and prints how to put the encrypted file back. Retirement
+does not decrypt or print entries. Doctor then lists the retired file as
+information.
+
+Retiring requires `--allow-unchecked` because another shell may hold the key in
+`HACK_SECRETS_FILE_KEY`, which Hack cannot check. Pass it only after confirming
+that no shell for a project selecting the store has that key; it also acknowledges
+registered projects Hack could not check. Without a terminal, add `--yes` to
+confirm the move. A store that an available key opens is refused. See
+[the recovery and retirement details](../env.md#compatibility-notes).
+
 ## The daemon after an upgrade
 
 Installing 5.0.0 over a running 4.x does not replace the daemon. On Linux the old

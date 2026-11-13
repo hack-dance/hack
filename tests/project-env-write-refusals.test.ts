@@ -149,8 +149,17 @@ async function refusalOf(
   throw new Error("Expected the write to be refused");
 }
 
+/** Staging leftovers beside the files in `directory` and in its staging directory. */
 async function tmpSiblings(directory: string): Promise<string[]> {
-  return (await readdir(directory)).filter((name) => name.endsWith(".tmp"));
+  const staged = await readdir(join(directory, ".hack-staging")).catch(
+    () => [] as string[]
+  );
+  return [
+    ...(await readdir(directory)).filter((name) => name.endsWith(".tmp")),
+    ...staged
+      .filter((name) => name.endsWith(".tmp"))
+      .map((name) => `.hack-staging/${name}`),
+  ];
 }
 
 // Root bypasses permission bits, so an unreadable layer only exists for others.
@@ -1267,9 +1276,14 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Pattern for the staging siblings of `path` (`.<name>.<uuid>.tmp`). */
+/**
+ * Pattern for the staging files of `path`: an atomic layer write's sibling
+ * (`.<name>.<uuid>.tmp`) or a private write's file in the self-ignoring
+ * staging directory (`.hack-staging/<name>.<uuid>.tmp`, HACK-2165).
+ */
 function stagingOf(path: string): string {
-  return `/\\.${escapeRegExp(path.split("/").at(-1) ?? "")}\\.[^/]+\\.tmp$`;
+  const name = escapeRegExp(path.split("/").at(-1) ?? "");
+  return `/(?:\\.${name}|\\.hack-staging/${name})\\.[^/]+\\.tmp$`;
 }
 
 /** Pattern for a path ending in `suffix`, whatever prefix resolves to it. */
@@ -1515,10 +1529,15 @@ for (const [step, code] of [
       `E_NO_SPACE: Could not write ${keyPath}: ${NO_SPACE_REASON}`
     );
     expectNoErrnoOrStaging(run);
-    // The ignore entry is written before the key (HACK-1375) and stays.
+    // The ignore entry is written before the key (HACK-1375) and stays. The
+    // failed staging copy is gone; its self-ignoring directory stays (HACK-2165).
     expect((await readdir(repo.projectRoot)).sort()).toEqual([
       ".gitignore",
       ".hack",
+      ".hack-staging",
+    ]);
+    expect(await readdir(resolve(repo.projectRoot, ".hack-staging"))).toEqual([
+      ".gitignore",
     ]);
     expect(
       await readFile(resolve(repo.projectRoot, ".gitignore"), "utf8")

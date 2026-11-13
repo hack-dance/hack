@@ -730,6 +730,8 @@ async function expireJournal(opts: {
   await replacePrivateFileAtomic({
     path: opts.paths.expired,
     directories: [opts.paths.dir],
+    // Store directories hold only their own files; stage beside them.
+    staging: "sibling",
     refusal: storeRefusal,
     text: JSON.stringify({
       expiredAt: new Date(opts.now).toISOString(),
@@ -766,6 +768,8 @@ async function removeJournalPayload(paths: JournalPaths): Promise<void> {
     await replacePrivateFileAtomic({
       path: paths.meta,
       directories: [paths.dir],
+      // Store directories hold only their own files; stage beside them.
+      staging: "sibling",
       refusal: storeRefusal,
       text: JSON.stringify({ ...meta, argv: [], workdir: null }),
     }).catch(() => undefined);

@@ -75,6 +75,8 @@ function fileOptions(path: string): ReplaceablePrivateFileOptions {
     path,
     directories: overrideDirectories(path),
     refusal: () => new Error(REFUSAL),
+    // Already inside the ignored .internal directory, beside its own asides.
+    staging: "sibling",
   };
 }
 

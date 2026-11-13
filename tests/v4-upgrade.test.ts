@@ -190,7 +190,32 @@ for (const globalKeyPresent of [true, false]) {
           false
         );
       }
+      // Private writes keep an empty, self-ignoring stage directory (HACK-2165).
+      // Pin these exact effects as well as the migration's payload changes.
+      const stagingMarkers = [
+        "linked/.hack/.hack-staging/.gitignore",
+        "tracked/.hack/.hack-staging/.gitignore",
+        "untracked/.hack/.hack-staging/.gitignore",
+        globalKeyPresent
+          ? "untracked/.hack-staging/.gitignore"
+          : "home/.hack/.hack-staging/.gitignore",
+      ];
+      for (const marker of stagingMarkers) {
+        expect(await readFile(join(f.root, marker), "utf8")).toBe("*\n");
+        expect(await readdir(join(f.root, marker, ".."))).toEqual([
+          ".gitignore",
+        ]);
+        const [project, ...path] = marker.split("/");
+        if (project && project !== "home") {
+          await f.git(join(f.root, project), [
+            "check-ignore",
+            "--quiet",
+            path.join("/"),
+          ]);
+        }
+      }
       const expected = [
+        ...stagingMarkers,
         "linked/.hack/docker-compose.yml",
         "linked/.hack/.gitignore",
         "tracked/.hack/.env",

@@ -33,11 +33,15 @@ export const MUX_ENVIRONMENT_TTL_MS = 10 * 60 * 1000;
  * it is a regular single-link file of this user. Failures are skipped: this
  * is cleanup, never a reason to refuse a new session.
  */
+/** Test seam: told the parent directory of every sweep this process runs. */
+export const sweepObserver: { onSweep?: (parent: string) => void } = {};
+
 export async function sweepStaleMuxEnvironments(opts: {
   readonly parent?: string;
   readonly now?: number;
 }): Promise<void> {
   const parent = opts.parent ?? tmpdir();
+  sweepObserver.onSweep?.(parent);
   const now = opts.now ?? Date.now();
   const uid = process.getuid?.();
   const names = await readdir(parent).catch(() => [] as string[]);

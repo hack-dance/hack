@@ -510,6 +510,8 @@ export async function stopViaSystemdIfInstalled(opts: {
     daemonRoot: resolve(opts.hackHome, GLOBAL_DAEMON_DIR_NAME),
     prove: opts.proveDaemon,
     probe: opts.probe,
+    homePid: opts.pid,
+    isPidInUnit: opts.isPidInUnit,
   });
   if (mainProcess.kind === "refused") {
     return { ...none, refused: mainProcess.message };
@@ -627,6 +629,9 @@ async function checkMainProcessServesHome(opts: {
   readonly daemonRoot: string;
   readonly prove?: (pid: number) => Promise<DaemonProcessProof>;
   readonly probe?: DaemonProcessProbe;
+  /** This home's hackd per its pid file, if one is running. */
+  readonly homePid: number | null;
+  readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
 }): Promise<
   | { readonly kind: "ours" | "none" }
   | { readonly kind: "refused"; readonly message: string }
@@ -642,7 +647,7 @@ async function checkMainProcessServesHome(opts: {
     ...(await defaultDaemonIdentityExpectation()),
     anyBunEntry: true,
   };
-  const proof = await (
+  const prove =
     opts.prove ??
     ((candidate: number) =>
       proveOwnedDaemonProcess({
@@ -650,13 +655,29 @@ async function checkMainProcessServesHome(opts: {
         daemonRoot: opts.daemonRoot,
         expectation,
         probe: opts.probe,
-      }))
-  )(pid);
+      }));
+  const proof = await prove(pid);
   if (proof.kind === "owned") {
     return { kind: "ours" };
   }
   if (proof.reason === "not-running") {
     return { kind: "none" };
+  }
+  // A `#!` launcher that runs hackd as a child (no `exec`) is the main
+  // process itself: then the hackd named by this home's pid file must be
+  // proven this home's and be in the unit (its cgroup), still from process
+  // evidence, not configuration.
+  if (
+    proof.reason === "not-hackd" &&
+    opts.homePid !== null &&
+    opts.homePid !== pid &&
+    (await prove(opts.homePid)).kind === "owned" &&
+    (await (
+      opts.isPidInUnit ??
+      ((child: number) => isPidInSystemdUnit({ pid: child }))
+    )(opts.homePid)) === true
+  ) {
+    return { kind: "ours" };
   }
   // Still starting: its socket may not be bound yet, which is not evidence
   // of another home.

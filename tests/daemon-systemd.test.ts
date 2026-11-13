@@ -4054,3 +4054,56 @@ linuxTest(
     }
   }
 );
+
+linuxTest(
+  "stop proves the hackd child when the unit's main process is a launcher",
+  async () => {
+    // Codex review: a `#!` launcher that runs hackd as a child keeps the
+    // interpreter as MainPID; requiring MainPID itself to be hackd refused
+    // this home's own daemon. The pid file's hackd, proven this home's and
+    // in the unit, counts instead.
+    const fake = fakeSystemd({ active: true });
+    await installSystemdUnit({
+      unitPath,
+      unitText: unitText(),
+      deps: fake.deps,
+    });
+    const child = 5555;
+    let childProof: "owned" | "foreign-socket" = "owned";
+    let inUnit: boolean | null = true;
+    const proveDaemon = (pid: number): Promise<DaemonProcessProof> =>
+      Promise.resolve(
+        pid === child && childProof === "owned"
+          ? ({
+              kind: "owned",
+              pid,
+              birth: "ticks:1",
+              image: { executable: program, argv: [program] },
+            } as unknown as DaemonProcessProof)
+          : {
+              kind: "refused",
+              reason: pid === child ? childProof : "not-hackd",
+            }
+      );
+    const stop = (pid: number | null) =>
+      stopViaSystemdIfInstalled({
+        proveDaemon,
+        isPidInUnit: () => Promise.resolve(inUnit),
+        pid,
+        hackHome: join(root, ".hack"),
+        deps: fake.deps,
+      });
+    fake.active = true;
+    expect((await stop(child)).handled).toBe(true);
+    // The child is not in the unit: not this unit's daemon.
+    fake.active = true;
+    inUnit = false;
+    expect((await stop(child)).refused).toContain("not proven");
+    // The child is another home's: refused.
+    inUnit = true;
+    childProof = "foreign-socket";
+    expect((await stop(child)).refused).toContain("not proven");
+    // No pid file hackd to prove: refused.
+    expect((await stop(null)).refused).toContain("not proven");
+  }
+);

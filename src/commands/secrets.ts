@@ -1,12 +1,17 @@
+import { resolve } from "node:path";
+
 import { isCancel, password, text } from "@clack/prompts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
+import { optPath } from "../cli/options.ts";
 import {
   canPrompt,
   confirmSafe,
   requireInteractive,
 } from "../lib/interactivity.ts";
 import { keychain } from "../lib/keychain.ts";
+import { findProjectContext, readProjectConfig } from "../lib/project.ts";
+import { retireSecretStore } from "../lib/secret-store-retire.ts";
 import { logger } from "../ui/logger.ts";
 
 const DEFAULT_SECRETS_SERVICE = "hack-cli" as const;
@@ -28,8 +33,18 @@ const optYes = defineOption({
     "Confirm the deletion without prompting (required without a TTY or with HACK_NO_INTERACTIVE)",
 } as const);
 
+const optRetireYes = defineOption({
+  name: "yes",
+  type: "boolean",
+  long: "--yes",
+  description:
+    "Confirm moving the store aside without prompting (required without a TTY or with HACK_NO_INTERACTIVE)",
+} as const);
+
 const secretsOptions = [optService] as const;
 const deleteOptions = [optService, optYes] as const;
+const retireStoreOptions = [optPath, optRetireYes] as const;
+type RetireStoreArgs = CommandArgs<typeof retireStoreOptions, readonly []>;
 const secretsPositionals = [{ name: "name", required: false }] as const;
 
 type SecretsArgs = CommandArgs<
@@ -72,6 +87,24 @@ const deleteSpec = defineCommand({
   subcommands: [],
 } as const);
 
+const retireStoreSpec = defineCommand({
+  name: "retire-store",
+  summary:
+    "Move an encrypted secret store whose key is gone aside (reversible)",
+  group: "Secrets",
+  description: [
+    "For an encrypted_file (or cloud shim) store that hack doctor reports with a missing or wrong key.",
+    "Renames the store to <store>.retired-<UTC time> in the same directory: nothing is deleted, read or printed,",
+    "and the key file is left alone. It prints how to put the store back. The store is the one this project",
+    "selects (--path or the current directory), or the global one outside a project. Refused for a store that",
+    "opens with the key in use, or that is unreadable for another reason. Without a TTY (or with",
+    "HACK_NO_INTERACTIVE / --no-interactive) it is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.",
+  ].join("\n"),
+  options: retireStoreOptions,
+  positionals: [],
+  subcommands: [],
+} as const);
+
 export const secretsCommand = defineCommand({
   name: "secrets",
   summary: "Manage secrets in OS keychain (Bun.secrets)",
@@ -83,6 +116,7 @@ export const secretsCommand = defineCommand({
     withHandler(setSpec, handleSecretsSet),
     withHandler(getSpec, handleSecretsGet),
     withHandler(deleteSpec, handleSecretsDelete),
+    withHandler(retireStoreSpec, handleSecretsRetireStore),
   ],
 } as const);
 
@@ -214,5 +248,60 @@ async function handleSecretsDelete({
   }
 
   logger.success({ message: `Deleted secret "${name}" (${service})` });
+  return 0;
+}
+
+/**
+ * `hack secrets retire-store` (HACK-2177): the reversible way forward for an
+ * encrypted secret store whose key is gone. Confirmation works as for
+ * `delete`: `--yes`, a prompt (default no), or a closed refusal when the run
+ * cannot prompt, before anything is moved.
+ */
+async function handleSecretsRetireStore({
+  args,
+}: {
+  readonly ctx: CliContext;
+  readonly args: RetireStoreArgs;
+}): Promise<number> {
+  const startDir = args.options.path
+    ? resolve(process.cwd(), args.options.path)
+    : process.cwd();
+  const project = await findProjectContext(startDir);
+  let projectName = "project";
+  if (project) {
+    const cfg = await readProjectConfig(project);
+    projectName = (
+      cfg.name ??
+      project.projectRoot.split("/").at(-1) ??
+      "project"
+    ).trim();
+  }
+  const ok =
+    args.options.yes === true ||
+    (await confirmSafe({
+      message:
+        "Move the encrypted secret store aside? Its entries stay in the moved file, which can be put back.",
+      initialValue: false,
+      nonInteractive: "fail",
+      hint: "Pass --yes to confirm (`hack secrets retire-store --yes`), or run it in a terminal.",
+    }));
+  if (!ok) {
+    return 0;
+  }
+  const outcome = await retireSecretStore({
+    projectName,
+    projectDir: project?.projectDir,
+  });
+  if (outcome.kind === "refused") {
+    logger.error({ message: outcome.message });
+    return 1;
+  }
+  logger.success({
+    message: [
+      `Moved the encrypted secret store ${outcome.from} to ${outcome.to}.`,
+      "Nothing was deleted, and no entry was read or printed. The key file was left alone.",
+      `To put it back (while no store is at ${outcome.from}): mv '${outcome.to}' '${outcome.from}'`,
+    ].join("\n"),
+  });
   return 0;
 }

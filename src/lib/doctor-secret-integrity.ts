@@ -1,14 +1,21 @@
-import { homedir } from "node:os";
 import { isAbsolute, relative, sep } from "node:path";
 
 import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
+import { resolveUserHomeDir } from "./home-dir.ts";
 import {
   inspectProjectEnvLayerKeys,
   PROJECT_ENV_SECRET_KEY_ENV,
   type ProjectEnvLayerInspectionFailure,
   type ProjectEnvLayerKeyReport,
 } from "./project-env-config.ts";
-import { listFileSecretStoreEntries } from "./secret-store.ts";
+import {
+  listFileSecretStoreEntries,
+  listRetiredEncryptedStores,
+} from "./secret-store.ts";
+import {
+  listProjectsUsingSecretStore,
+  projectUsesSecretStore,
+} from "./secret-store-retire.ts";
 
 /**
  * `hack doctor`'s secret integrity findings (HACK-2169): stores and env
@@ -16,9 +23,13 @@ import { listFileSecretStoreEntries } from "./secret-store.ts";
  * value-free: paths, counts and fixed text only, never a value or key.
  */
 export type SecretIntegrityFinding = {
-  readonly status: "warn" | "error";
+  /** `info` is not a problem: it is shown with an `ok` result. */
+  readonly status: "info" | "warn" | "error";
   readonly message: string;
 };
+
+/** The command that moves a store whose key is gone aside (HACK-2177). */
+export const RETIRE_STORE_COMMAND = "hack secrets retire-store";
 
 /** A path for display: project-relative inside it, `~/...` under home. */
 function displayPath(opts: {
@@ -34,7 +45,7 @@ function displayPath(opts: {
   ) {
     return inside;
   }
-  const home = homedir();
+  const home = resolveUserHomeDir();
   const underHome = relative(home, opts.path);
   if (underHome && !underHome.startsWith("..") && !isAbsolute(underHome)) {
     return `~/${underHome}`;
@@ -52,12 +63,101 @@ async function inspectSecretStore(opts: {
     projectName: opts.projectName,
     projectDir: opts.projectDir,
   });
+  const retired =
+    listing.kind === "inactive"
+      ? []
+      : await retiredStoreFindings({ ...opts, storePath: listing.storePath });
   if (listing.kind !== "unreadable") {
-    return [];
+    return retired;
   }
   const store = displayPath({ ...opts, path: listing.storePath });
   const key = displayPath({ ...opts, path: listing.keyPath });
-  switch (listing.reason) {
+  if (
+    listing.reason === "key_missing" ||
+    listing.reason === "wrong_key_or_corrupt"
+  ) {
+    return [
+      await keylessStoreFinding({
+        ...opts,
+        storePath: listing.storePath,
+        store,
+        key,
+        missing: listing.reason === "key_missing",
+      }),
+      ...retired,
+    ];
+  }
+  return [...storeFindings({ reason: listing.reason, store, key }), ...retired];
+}
+
+/**
+ * A store with entries that no available key opens (HACK-2177). An error
+ * only for a project whose runtime reads the store; for any other project
+ * the same machine-wide store is a warning. It says what is known without
+ * the key (entries cannot be counted), which registered projects read it,
+ * and the two ways forward: restore the key, or retire the store.
+ */
+async function keylessStoreFinding(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly storePath: string;
+  readonly store: string;
+  readonly key: string;
+  readonly missing: boolean;
+}): Promise<SecretIntegrityFinding> {
+  const usedHere = await projectUsesSecretStore({
+    projectDir: opts.projectDir,
+  });
+  const users = await listProjectsUsingSecretStore({
+    storePath: opts.storePath,
+  });
+  const state = opts.missing
+    ? `The encrypted secret store ${opts.store} has entries, but its key ${opts.key} is missing.`
+    : `The available key does not open the encrypted secret store ${opts.store}, or the store is damaged.`;
+  const usage = [
+    usedHere
+      ? "This project's env contract reads it."
+      : "This project does not read it.",
+    users.length > 0
+      ? `Registered projects that read it: ${users.join(", ")}.`
+      : "No registered project reads it.",
+  ].join(" ");
+  return {
+    status: usedHere ? "error" : "warn",
+    message: `${state} Its entries cannot be counted or read without that key. ${usage} Choose one: restore the key (put the key file back at ${opts.key} with mode 600 from a backup or another machine, or set HACK_SECRETS_FILE_KEY to the same key); or, if the key is gone for good, run ${RETIRE_STORE_COMMAND}, which moves the store aside to a timestamped name beside it, deletes nothing, and prints how to put it back. Do not provision a new key: it cannot open these entries.`,
+  };
+}
+
+/** Retired copies kept beside the store: information, not a problem. */
+async function retiredStoreFindings(opts: {
+  readonly projectRoot: string;
+  readonly storePath: string;
+}): Promise<SecretIntegrityFinding[]> {
+  const store = displayPath({ ...opts, path: opts.storePath });
+  return (await listRetiredEncryptedStores(opts.storePath)).map((path) => {
+    const shown = displayPath({ ...opts, path });
+    // The command quotes absolute paths: a quoted `~` is not expanded.
+    return {
+      status: "info",
+      message: `Retired secret store kept at ${shown}; Hack no longer reads it. To put it back while no store is at ${store}: mv '${path}' '${opts.storePath}'.`,
+    };
+  });
+}
+
+/** Findings for the remaining store states (unchanged from HACK-2169). */
+function storeFindings(opts: {
+  readonly reason: Exclude<
+    Extract<
+      Awaited<ReturnType<typeof listFileSecretStoreEntries>>,
+      { kind: "unreadable" }
+    >["reason"],
+    "key_missing" | "wrong_key_or_corrupt"
+  >;
+  readonly store: string;
+  readonly key: string;
+}): SecretIntegrityFinding[] {
+  const { store, key } = opts;
+  switch (opts.reason) {
     case "store_unreadable":
       return [
         {
@@ -72,25 +172,11 @@ async function inspectSecretStore(opts: {
           message: `The encrypted secret store ${store} is a symlink, not a regular file, or too large, so Hack refuses to read or change it. Replace it with a regular file this user owns (for a symlink: copy the target's contents to ${store} with mode 600), then re-run hack doctor.`,
         },
       ];
-    case "key_missing":
-      return [
-        {
-          status: "error",
-          message: `The encrypted secret store ${store} has entries, but its key ${key} is missing. Restore that key file from a backup or another machine (mode 600), or set HACK_SECRETS_FILE_KEY to the same key. Do not provision a new key: it cannot open these entries.`,
-        },
-      ];
     case "key_refused":
       return [
         {
           status: "error",
           message: `The key ${key} for ${store} is refused: it is a symlink, other users can read or write it, or git tracks it. Replace it with a regular, untracked file this user owns (chmod 600 ${key}; git rm --cached if tracked, then rotate it).`,
-        },
-      ];
-    case "wrong_key_or_corrupt":
-      return [
-        {
-          status: "error",
-          message: `The available key does not open the encrypted secret store ${store}, or the store is damaged. Restore the key that encrypted it (or the store from a backup); do not provision a replacement key over it.`,
         },
       ];
     case "incomplete_config":
@@ -215,6 +301,6 @@ export async function inspectSecretIntegrity(opts: {
     ...(await inspectEnvLayers(opts)),
   ];
   const rank = (finding: SecretIntegrityFinding) =>
-    finding.status === "error" ? 0 : 1;
+    ({ error: 0, warn: 1, info: 2 })[finding.status];
   return findings.sort((a, b) => rank(a) - rank(b));
 }

@@ -4,7 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { lstat, realpath, stat } from "node:fs/promises";
+import { link, lstat, readdir, realpath, stat, unlink } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import type {
@@ -198,6 +198,114 @@ export type FileSecretStoreListing = {
     }
 );
 
+/**
+ * Where the encrypted file store (also the cloud shim's) for this context
+ * lives, from configuration only: nothing is read, opened or provisioned.
+ * `active` is false when the backend is the OS keychain.
+ */
+export async function resolveFileSecretStorePaths(input: {
+  /** Omitted: only the global configuration applies (no project). */
+  readonly projectDir?: string;
+}): Promise<{
+  readonly active: boolean;
+  readonly storePath: string;
+  readonly keyPath: string;
+}> {
+  const secretsConfig = (
+    await readControlPlaneConfig({ projectDir: input.projectDir })
+  ).config.secrets;
+  return {
+    active:
+      secretsConfig.backend === "encrypted_file" ||
+      secretsConfig.backend === "cloud",
+    storePath: resolveConfiguredPath({
+      path: secretsConfig.encryptedFile.path,
+      projectDir: input.projectDir,
+    }),
+    keyPath: resolveConfiguredPath({
+      path:
+        secretsConfig.encryptedFile.keyPath ?? DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+      projectDir: input.projectDir,
+    }),
+  };
+}
+
+/** Retired stores are kept beside the store as `<store><infix><UTC stamp>`. */
+export const RETIRED_STORE_INFIX = ".retired-";
+const STAMP_SEPARATORS = /[-:]/g;
+const STAMP_MILLISECONDS = /\.\d{3}Z$/;
+
+/** Thrown when a store cannot be moved aside; the message says why and what to do. */
+export class SecretStoreRetireError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecretStoreRetireError";
+  }
+}
+
+/**
+ * Moves an encrypted store file aside (HACK-2177), never deleting it: under
+ * the store's mutation lock, the regular file at `storePath` gets a second
+ * name `<store>.retired-<UTC stamp>` in the same directory (a hard link,
+ * which never replaces an existing file), and only then is its original
+ * name removed. A link, a non-regular file or an absent store is refused.
+ * Nothing is read or decrypted; the key file is not touched.
+ */
+export async function retireEncryptedStoreFile(input: {
+  readonly storePath: string;
+  readonly now?: Date;
+}): Promise<{ readonly from: string; readonly to: string }> {
+  const storePath = input.storePath;
+  return await withEncryptedStoreMutation({
+    filePath: storePath,
+    run: async () => {
+      const info = await lstat(storePath).catch(() => null);
+      if (info === null) {
+        throw new SecretStoreRetireError(
+          `There is no encrypted secret store at ${storePath}; nothing was moved.`
+        );
+      }
+      if (!info.isFile()) {
+        throw new SecretStoreRetireError(
+          `The encrypted secret store at ${storePath} is a symlink or not a regular file; nothing was moved. Inspect it with ls -l, then move it aside by hand if you mean to.`
+        );
+      }
+      const stamp = (input.now ?? new Date())
+        .toISOString()
+        .replace(STAMP_SEPARATORS, "")
+        .replace(STAMP_MILLISECONDS, "Z");
+      const to = `${storePath}${RETIRED_STORE_INFIX}${stamp}`;
+      try {
+        await link(storePath, to);
+      } catch (error: unknown) {
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? String((error as { readonly code?: unknown }).code)
+            : "unknown";
+        throw new SecretStoreRetireError(
+          code === "EEXIST"
+            ? `${to} already exists; nothing was moved. Retry in a second.`
+            : `Could not give ${storePath} the name ${to} (${code}); nothing was moved. To retire it by hand: mv '${storePath}' '${to}'`
+        );
+      }
+      await unlink(storePath);
+      return { from: storePath, to };
+    },
+  });
+}
+
+/** Retired copies of `storePath` in its directory, oldest first. */
+export async function listRetiredEncryptedStores(
+  storePath: string
+): Promise<readonly string[]> {
+  const prefix = `${basename(storePath)}${RETIRED_STORE_INFIX}`;
+  const entries = await readdir(dirname(storePath)).catch(() => [] as string[]);
+  return entries
+    .filter((name) => name.startsWith(prefix))
+    .sort()
+    .map((name) => resolve(dirname(storePath), name));
+}
+
 /** The listing's reason for each way a store file read can fail. */
 const STORE_READ_FAILURE_REASON = {
   refused: "store_refused",
@@ -212,7 +320,8 @@ const STORE_READ_FAILURE_REASON = {
  */
 export async function listFileSecretStoreEntries(input: {
   readonly projectName: string;
-  readonly projectDir: string;
+  /** Omitted: only the global configuration applies (no project). */
+  readonly projectDir?: string;
 }): Promise<FileSecretStoreListing> {
   const controlPlane = await readControlPlaneConfig({
     projectDir: input.projectDir,

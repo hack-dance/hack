@@ -9,12 +9,25 @@ export type RecoveryCheckResult = {
 export type DoctorRecoveryGuidance = {
   readonly temporaryBreakage: readonly string[];
   readonly configurationRepair: readonly string[];
+  /**
+   * Alternatives the operator chooses between (one is enough), as plain
+   * text; for example the two ways forward for a secret store whose key is
+   * missing (HACK-2177).
+   */
+  readonly choices?: readonly string[];
   readonly followUp: readonly string[];
   readonly verify: readonly string[];
   readonly capture: readonly string[];
 };
 
 const FIX_CHECKS = new Set(["caddy local ca", "dns:hack", "dns:hack.gy"]);
+/** The secret integrity finding for a store whose key is missing names this command. */
+const RETIRE_STORE_COMMAND = "hack secrets retire-store";
+/** The two ways forward for such a store, shown as one choice (HACK-2177). */
+const SECRET_STORE_CHOICES = [
+  "Restore the encrypted secret store's key: put the key file back where the secret integrity check says (mode 600), or set HACK_SECRETS_FILE_KEY to the same key.",
+  `Or, if the key is gone for good, retire the store: \`${RETIRE_STORE_COMMAND}\` moves it aside to a timestamped name beside it, deletes nothing, and prints how to put it back.`,
+] as const;
 const SAFE_SHELL_ARG_PATTERN = /^[A-Za-z0-9_./:-]+$/u;
 const PROJECTS_PRUNE_COMMAND_PATTERN =
   /hack projects prune(?: --project [A-Za-z0-9_.-]+)?/u;
@@ -61,6 +74,7 @@ export function buildDoctorRecoveryGuidance(input: {
 }): DoctorRecoveryGuidance {
   const temporaryBreakage: string[] = [];
   const configurationRepair: string[] = [];
+  const choices: string[] = [];
   const followUp: string[] = [];
 
   for (const result of input.results) {
@@ -69,6 +83,18 @@ export function buildDoctorRecoveryGuidance(input: {
       continue;
     }
     if (!isActionableRecoveryResult(result)) {
+      continue;
+    }
+
+    if (
+      result.name === "secret integrity" &&
+      result.message.includes(RETIRE_STORE_COMMAND)
+    ) {
+      for (const choice of SECRET_STORE_CHOICES) {
+        pushUnique(choices, choice);
+      }
+      // Any other finding in the same check still needs a look.
+      followUp.push(`${result.name}: ${result.message}`);
       continue;
     }
 
@@ -133,6 +159,7 @@ export function buildDoctorRecoveryGuidance(input: {
   return {
     temporaryBreakage,
     configurationRepair,
+    choices,
     followUp,
     verify: ["hack doctor"],
     capture: ["hack crash-capture --path <repo>"],
@@ -150,6 +177,7 @@ export function scopeDoctorRecoveryGuidance(input: {
     configurationRepair: input.guidance.configurationRepair.map((command) =>
       scopeRecoveryCommand({ command, projectRoot: input.projectRoot })
     ),
+    choices: [...(input.guidance.choices ?? [])],
     followUp: [...input.guidance.followUp],
     verify: input.guidance.verify.map((command) =>
       scopeRecoveryCommand({ command, projectRoot: input.projectRoot })
@@ -186,6 +214,11 @@ export function buildRecoveryNextSteps(input: {
 
   for (const command of scoped.configurationRepair) {
     nextSteps.push(`Configuration repair: \`${command}\`.`);
+  }
+
+  const choices = scoped.choices ?? [];
+  if (choices.length > 0) {
+    nextSteps.push(`Choose one: ${choices.join(" ")}`);
   }
 
   for (const item of scoped.followUp) {
@@ -240,6 +273,15 @@ export function buildRecoveryWorkflowLines(input: {
     lines.push(`${stepNumber}. Repair configuration:`);
     for (const command of scoped.configurationRepair) {
       lines.push(`   - \`${command}\``);
+    }
+    stepNumber += 1;
+  }
+
+  const choices = scoped.choices ?? [];
+  if (choices.length > 0) {
+    lines.push(`${stepNumber}. Choose one:`);
+    for (const choice of choices) {
+      lines.push(`   - ${choice}`);
     }
     stepNumber += 1;
   }

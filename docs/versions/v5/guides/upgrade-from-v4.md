@@ -374,6 +374,33 @@ an explicit `env get KEY` is a deliberate plaintext read. Follow that PR's
 migration notes when installing a release that contains it. Do not use the new
 output contract or assume the protection command exists in next.16.
 
+#### An old global secret store whose key is gone
+
+A machine upgraded from v4 may still have an encrypted store such as
+`~/.hack/secrets.enc.json` whose key file was lost. From next.17 (HACK-2169,
+HACK-2177), Doctor reports that store as a `secret integrity` finding:
+
+- an **error** in a project whose legacy env contract reads the store, and a
+  **warning** in any other project;
+- the finding names the registered projects that read the store. Without the
+  key, its entries cannot be counted or read.
+
+There are two ways forward. Do not provision a new key: it cannot open these
+entries.
+
+1. **Restore the key.** Put the key file back where the finding says (mode
+   600), from a backup or another machine, or set `HACK_SECRETS_FILE_KEY` to the
+   same key.
+2. **Retire the store** when the key is gone for good:
+   `hack secrets retire-store`, run in a project that selects the store or
+   outside any project for the global one. Without a terminal, add `--yes`.
+   - It renames the store to `<store>.retired-<UTC time>` in the same
+     directory. It deletes nothing, reads and prints no entry, and leaves the
+     key file alone.
+   - It prints the `mv` command that puts the store back.
+   - Afterwards Doctor lists the retired file as information, and the project
+     check no longer fails.
+
 Sources for next.16 behavior: [env list and get](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/env.ts),
 [project key checks](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/lib/doctor-env-key.ts).
 

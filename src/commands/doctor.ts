@@ -4597,12 +4597,19 @@ export async function removeDoctorEnvCleanup(opts: {
     });
   } catch (error) {
     if (error instanceof LegacyEnvCleanupError) {
-      await dropRemovedLegacySecretStorePointer({
-        projectRoot: opts.projectRoot,
-        projectDir: opts.projectDir,
-        projectName: opts.projectName,
-        removed: error.removedPaths,
-      });
+      try {
+        await dropRemovedLegacySecretStorePointer({
+          projectRoot: opts.projectRoot,
+          projectDir: opts.projectDir,
+          projectName: opts.projectName,
+          removed: error.removedPaths,
+        });
+      } catch {
+        note(
+          "Could not reconcile the legacy secret store pointer. Check hack.config.json for a pointer to the removed store before retrying cleanup (values omitted).",
+          "env cleanup"
+        );
+      }
     }
     throw error;
   }

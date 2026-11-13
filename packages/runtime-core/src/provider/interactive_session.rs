@@ -584,24 +584,41 @@ pub fn reconcile_observed(candidate: &Candidate) -> Result<usize, CandidateError
 
 /// Bookkeeping never prevents the container cleanup that resolves uncertainty.
 #[cfg(target_os = "macos")]
-pub(crate) fn after_cleanup(candidate: &Candidate) {
+pub(crate) fn after_cleanup(candidate: &Candidate, run: &str) {
     let _ = reconcile_observed(candidate);
     match retained(candidate) {
-        Ok(records) if records.is_empty() => (),
         Ok(records) => {
-            cleanup_notice(format_args!(
-                "session_cleanup_uncertain: {} interactive session receipts remain in the native home; run hack exec-sessions --reconcile, or hack down for their projects.",
-                records.len()
-            ));
-            for record in records {
-                cleanup_notice(format_args!(
-                    "session {} run {} service {}",
-                    record.session, record.binding.run, record.binding.service
-                ));
+            for line in cleanup_report(&records, run) {
+                cleanup_notice(format_args!("{line}"));
             }
         }
         Err(_) => cleanup_warning(),
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn cleanup_report(records: &[Receipt], run: &str) -> Vec<String> {
+    let selected: Vec<_> = records.iter().filter(|r| r.binding.run == run).collect();
+    let mut lines = Vec::new();
+    if !selected.is_empty() {
+        lines.push(format!(
+            "session_cleanup_uncertain: {} interactive session receipts remain for this run; run hack exec-sessions --reconcile, or retry hack down for this project and instance.",
+            selected.len()
+        ));
+        for record in &selected {
+            lines.push(format!(
+                "session {} run {} service {}",
+                record.session, record.binding.run, record.binding.service
+            ));
+        }
+    }
+    let other = records.len() - selected.len();
+    if other > 0 {
+        lines.push(format!(
+            "{other} interactive session receipts belong to other runs; use hack exec-sessions to inspect them."
+        ));
+    }
+    lines
 }
 
 /// Caller supplies exact absence or established stopped-boot proof for each
@@ -722,6 +739,114 @@ mod tests {
         assert!(retained(&candidate).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn terminal_restores_before_busy_retirement_and_preserves_known_exit() {
+        use super::super::graph::interactive_exec::finish;
+        let (root, candidate, binding) = fixture();
+        let receipt = admit(&candidate, binding)
+            .unwrap()
+            .record_exec(&candidate, &"e".repeat(64))
+            .unwrap();
+        let locked = Store::open(&candidate, false).unwrap().unwrap();
+        for exit in [0, 7] {
+            let restored = std::cell::Cell::new(false);
+            let completion = finish(
+                &receipt.session,
+                Ok(exit),
+                || {
+                    restored.set(true);
+                    Ok(())
+                },
+                || {
+                    assert!(restored.get(), "store wait began with a raw terminal");
+                    let error = retire_completed(&candidate, &receipt).unwrap_err();
+                    assert_eq!(error.code, "session_receipt_busy");
+                    Err(error)
+                },
+            )
+            .unwrap();
+            assert_eq!(completion.exit_code, exit);
+            assert!(completion.retained);
+            assert_eq!(retained(&candidate).unwrap(), vec![receipt.clone()]);
+        }
+        drop(locked);
+        retire_completed(&candidate, &receipt).unwrap();
+        assert!(retained(&candidate).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_restore_and_unknown_exit_stay_scoped_and_never_retire() {
+        use super::super::graph::interactive_exec::finish;
+        let session = "00000000-0000-4000-8000-000000000001";
+        let error = finish(
+            session,
+            Ok(0),
+            || {
+                Err(CandidateError::new(
+                    "interactive_terminal_restore_failed",
+                    "restore",
+                ))
+            },
+            || panic!("failed restoration must preserve the receipt"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "interactive_terminal_restore_failed");
+        assert_eq!(error.session(), Some(session));
+        let restored = std::cell::Cell::new(false);
+        let error = finish(
+            session,
+            Err(CandidateError::new("session_cleanup_uncertain", "unknown")),
+            || {
+                restored.set(true);
+                Ok(())
+            },
+            || panic!("unknown exit is not retirement proof"),
+        )
+        .err()
+        .unwrap();
+        assert!(restored.get());
+        assert_eq!(error.code, "session_cleanup_uncertain");
+        assert_eq!(error.session(), Some(session));
+    }
+
+    #[test]
+    fn cleanup_names_only_the_selected_run_and_counts_unrelated_receipts() {
+        let (root, candidate, binding) = fixture();
+        let selected = admit(&candidate, binding.clone()).unwrap();
+        let mut unrelated = binding.clone();
+        unrelated.run = "f".repeat(32);
+        unrelated.namespace = "e".repeat(64);
+        unrelated.service = "unrelated-private-service".into();
+        let other = admit(&candidate, unrelated).unwrap();
+        let records = retained(&candidate).unwrap();
+        let report = cleanup_report(&records, &binding.run).join("\n");
+        assert!(report.contains(&selected.receipt.session));
+        assert!(report.contains(&binding.run));
+        assert!(report.contains("service web"));
+        assert!(report.contains("1 interactive session receipts belong to other runs"));
+        for value in [
+            &other.receipt.session,
+            &other.receipt.binding.run,
+            &other.receipt.binding.namespace,
+            &other.receipt.binding.service,
+        ] {
+            assert!(!report.contains(value));
+        }
+        retire_completed(
+            &candidate,
+            &selected.record_exec(&candidate, &"e".repeat(64)).unwrap(),
+        )
+        .unwrap();
+        let report = cleanup_report(&retained(&candidate).unwrap(), &binding.run).join("\n");
+        assert!(!report.contains("session_cleanup_uncertain"));
+        assert!(!report.contains(&other.receipt.session));
+        assert!(report.contains("hack exec-sessions"));
+        assert_eq!(retained(&candidate).unwrap(), vec![other.receipt]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn completed_receipt_retirement_is_exact_and_does_not_accumulate() {
         let (root, candidate, binding) = fixture();

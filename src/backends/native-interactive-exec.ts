@@ -388,7 +388,9 @@ async function finishInteractiveReport({
     await reportRetainedSessions(opts, check, remedy, session);
     return exit === 0 ? 1 : exit;
   }
-  if (report.retained) {
+  // A completed report proves the exit. Bookkeeping may retain its receipt for
+  // later reconciliation without turning that known result into a warning.
+  if (report.retained && report.failure) {
     await reportRetainedSessions(opts, check, remedy, session);
   }
   if (report.failure) {

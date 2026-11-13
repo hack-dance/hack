@@ -91,7 +91,7 @@ root = sys.argv[1]
 protected_keys = json.loads(sys.argv[2])
 command = sys.argv[3:]
 assert all(os.environ.get(key) == "synthetic-parent-key-canary" for key in protected_keys)
-for mode in ("normal", "child-kill", "frontend-kill", "cancel", "refused", "old-launcher", "retained", "cleared"):
+for mode in ("normal", "child-kill", "frontend-kill", "cancel", "refused", "old-launcher", "retained", "retained-zero", "cleared"):
     for name in ("reader.pid", "reader.closed", "session.queried", "session.cleared"):
         try:
             os.unlink(os.path.join(root, name))
@@ -131,8 +131,10 @@ for mode in ("normal", "child-kill", "frontend-kill", "cancel", "refused", "old-
         elif mode == "cancel":
             os.kill(frontend, signal.SIGTERM)
         code = record(control, master, output, b"E", 10, mode)
-        if mode in ("normal", "retained", "cleared"):
+        if mode in ("normal", "retained"):
             assert code == 7, code
+        elif mode == "retained-zero":
+            assert code == 0, code
         else:
             assert code != 0, code
         if mode == "frontend-kill":
@@ -163,15 +165,17 @@ for mode in ("normal", "child-kill", "frontend-kill", "cancel", "refused", "old-
             output.extend(os.read(master, 8192))
         assert b"synthetic-private-envelope-canary" not in output
         assert b"synthetic-parent-key-canary" not in output
-        if mode in ("normal", "refused", "old-launcher"):
+        if mode in ("normal", "refused", "old-launcher", "retained", "retained-zero"):
             assert not os.path.exists(os.path.join(root, "session.queried"))
             if mode == "old-launcher":
                 assert b"HACK_NO_INTERACTIVE=1" in output and b"restart the service" in output
             assert b"session_cleanup_uncertain" not in output, repr(output)
+            if mode in ("normal", "retained", "retained-zero"):
+                assert output == b"child-ready\n", repr(output)
         elif mode == "cleared":
             assert b"No receipt is currently retained for session" in output
             assert b"without a result" not in output
-            assert b"session_cleanup_uncertain" not in output
+            assert b"session_cleanup_uncertain: session " not in output
         elif mode != "frontend-kill":
             with open(os.path.join(root, "session.id")) as file:
                 session_id = file.read().encode()
@@ -238,4 +242,4 @@ for selection, expected in (("foreground", True), ("disabled", False),
         control.close()
         os.close(master)
         os.close(slave)
-print("Frontend PTY: eight lifetime and five selection cases passed")
+print("Frontend PTY: nine lifetime and five selection cases passed")

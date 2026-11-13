@@ -1501,7 +1501,7 @@ fn cleanup_inner(
         check_startup(guard)?;
     }
     #[cfg(target_os = "macos")]
-    crate::provider::interactive_session::after_cleanup(candidate);
+    crate::provider::interactive_session::after_cleanup(candidate, receipt.review.scope().run);
     Ok(receipt)
 }
 #[cfg(test)]

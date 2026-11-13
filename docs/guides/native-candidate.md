@@ -4112,7 +4112,9 @@ service: a peer service with no managed values still uses ordinary interactive e
 Finite exec retains its existing behavior.
 
 Normal stream closure plus a validated Engine exit returns the exit code and
-silently retires the session receipt. Surviving background processes are the
+restores the terminal before attempting to retire the session receipt. A busy or
+failed receipt store preserves that known exit code silently and leaves the receipt
+for later reconciliation. Surviving background processes are the
 user's responsibility, as with Docker. Lost connections or processes before a
 known outcome, uncertain create/start dispatch and failed inspection retain a
 value-free receipt and `session_cleanup_uncertain` with the attempted session ID.
@@ -4137,7 +4139,9 @@ proven stopped-boot evidence; intents without an exec ID require one of the
 latter two proofs. It reports the exact remaining count and IDs after its bounded
 pass. Use `hack down` for an affected project if uncertainty remains. A new boot
 alone is not proof. Ordinary successful exec does not consume the 1024 retained
-session limit.
+session limit when retirement succeeds. `hack down` names remaining receipts only
+for the selected run; receipts for other runs are reported as a count without
+their service names or run/session IDs.
 
 ### Interactive exec acceptance
 

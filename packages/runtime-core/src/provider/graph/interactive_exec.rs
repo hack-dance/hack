@@ -65,6 +65,24 @@ pub struct Completion {
     pub session: String,
     pub retained: bool,
 }
+
+/// Restore before any potentially blocking receipt mutation. A validated exit
+/// remains a completion even if bookkeeping must be retried by reconciliation.
+#[cfg(any(target_os = "macos", test))]
+pub(in crate::provider) fn finish(
+    session: &str,
+    result: Result<i32, CandidateError>,
+    restore: impl FnOnce() -> Result<(), CandidateError>,
+    retire: impl FnOnce() -> Result<(), CandidateError>,
+) -> Result<Completion, CandidateError> {
+    restore().map_err(|error| error.with_session(session))?;
+    let exit_code = result.map_err(|error| error.with_session(session))?;
+    Ok(Completion {
+        exit_code,
+        session: session.into(),
+        retained: retire().is_err(),
+    })
+}
 pub fn execute(
     candidate: &Candidate,
     options: &Options<'_>,
@@ -167,7 +185,7 @@ fn native(
     };
     let mut attached = admission?;
     let receipt = &attached.receipt;
-    let result: Result<(i32, bool), CandidateError> = (|| {
+    let result: Result<i32, CandidateError> = (|| {
         leash.check()?;
         if let Some(managed) = &managed {
             interactive_exec::deliver(
@@ -189,21 +207,14 @@ fn native(
                 })
             },
         )?;
-        let exit = observer.interactive_exit(receipt)?;
-        // A known command status survives bookkeeping failures. Retained
-        // evidence is reported separately and can be reconciled with this proof.
-        let retained = interactive_session::retire_completed(candidate, receipt).is_err();
-        Ok((exit, retained))
+        observer.interactive_exit(receipt)
     })();
-    terminal
-        .restore()
-        .map_err(|error| error.with_session(&receipt.session))?;
+    let completion = finish(
+        &receipt.session,
+        result,
+        || terminal.restore(),
+        || interactive_session::retire_completed(candidate, receipt),
+    );
     drop(attached.stream);
-    result
-        .map(|(exit_code, retained)| Completion {
-            exit_code,
-            session: receipt.session.clone(),
-            retained,
-        })
-        .map_err(|error| error.with_session(&receipt.session))
+    completion
 }

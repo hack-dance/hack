@@ -2245,7 +2245,7 @@ fn cleanup_owned_fenced(
     state::write(&root.join("state.json"), &receipt)?;
     fence()?;
     #[cfg(target_os = "macos")]
-    crate::provider::interactive_session::after_cleanup(candidate);
+    crate::provider::interactive_session::after_cleanup(candidate, &receipt.run);
     Ok(receipt)
 }
 

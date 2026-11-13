@@ -47,11 +47,14 @@ if mode in ("refused", "old-launcher"):
 if mode == "cleared":
     with open("session.cleared", "w") as file:
         file.write("cleared")
-if mode in ("normal", "retained", "cleared"):
+    control.sendall(json.dumps({"version": 1, "outcome": "refused", "code": "session_cleanup_uncertain", "session": session}).encode() + b"\n")
+    sys.exit(1)
+if mode in ("normal", "retained", "retained-zero"):
+    exit_code = 0 if mode == "retained-zero" else 7
     control.sendall(json.dumps({"version": 1, "outcome": "completed", "completion": {
-        "session": session, "exit_code": 7, "retained": mode != "normal"}}).encode() + b"\n")
+        "session": session, "exit_code": exit_code, "retained": mode != "normal"}}).encode() + b"\n")
     # Deliberately leave raw mode: the frontend's independent snapshot owns it.
-    sys.exit(7)
+    sys.exit(exit_code)
 assert select.select([control], [], [], 10)[0], "leash deadline"
 assert control.recv(1) == b"", "unexpected post-envelope data"
 previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)

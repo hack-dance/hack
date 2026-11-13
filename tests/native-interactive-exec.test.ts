@@ -123,7 +123,7 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
         expect(code, err + out).toBe(0);
         if (cmd[0] === python) {
           expect(out).toBe(
-            "Frontend PTY: eight lifetime and five selection cases passed\n"
+            "Frontend PTY: nine lifetime and five selection cases passed\n"
           );
         }
       }

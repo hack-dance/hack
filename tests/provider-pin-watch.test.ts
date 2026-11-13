@@ -794,12 +794,27 @@ describe("pinned download availability", () => {
   });
 });
 
+function firstByte(total: number): Response {
+  return new Response("x", {
+    status: 206,
+    headers: {
+      "content-range": `bytes 0-0/${total}`,
+      "content-length": "1",
+    },
+  });
+}
+
 test("HEAD length and failure kinds distinguish broken pins from transient failures", async () => {
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch(request) {
       const path = new URL(request.url).pathname;
+      if (request.method === "GET") {
+        expect(path).toBe("/wrong");
+        expect(request.headers.get("range")).toBe("bytes=0-0");
+        return firstByte(6);
+      }
       if (path === "/gone") {
         return new Response(null, { status: 410 });
       }
@@ -899,24 +914,23 @@ test("a HEAD length disagreement must repeat before it can reopen an issue", asy
     hostname: "127.0.0.1",
     port: 0,
     fetch(request) {
-      expect(request.method).toBe("HEAD");
       expect(request.headers.has("authorization")).toBe(false);
       const path = new URL(request.url).pathname;
       const count = (counts.get(path) ?? 0) + 1;
       counts.set(path, count);
+      expect(request.method).toBe(count === 1 ? "HEAD" : "GET");
       if (count === 2) {
         expect(request.headers.get("cache-control")).toBe("no-cache");
+        expect(request.headers.get("range")).toBe("bytes=0-0");
+        expect(request.headers.get("accept-encoding")).toBe("identity");
         if (path === "/fails") {
           return new Response(null, { status: 503 });
         }
       }
-      const length =
-        count === 1 || path === "/repeats"
-          ? "6"
-          : path === "/changes"
-            ? "7"
-            : "5";
-      return new Response(null, { headers: { "content-length": length } });
+      if (count === 1) {
+        return new Response(null, { headers: { "content-length": "6" } });
+      }
+      return firstByte(path === "/repeats" ? 6 : path === "/changes" ? 7 : 5);
     },
   });
   const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
@@ -958,7 +972,7 @@ test("a HEAD length disagreement must repeat before it can reopen an issue", asy
         ).action
       ).toBe(index === 3 ? "update" : "none");
     }
-    expect(checks[3]?.problem).toContain("confirmed by a second HEAD");
+    expect(checks[3]?.problem).toContain("confirmed by one-byte GET");
   } finally {
     server.stop(true);
   }
@@ -971,15 +985,16 @@ test("unsuccessful length confirmations cannot create or reopen an issue", async
     hostname: "127.0.0.1",
     port: 0,
     fetch(request) {
-      expect(request.method).toBe("HEAD");
       expect(request.headers.has("authorization")).toBe(false);
       const path = new URL(request.url).pathname;
       const count = (observed.get(path) ?? 0) + 1;
       observed.set(path, count);
+      expect(request.method).toBe(count === 1 ? "HEAD" : "GET");
       if (count === 1) {
         return new Response(null, { headers: { "content-length": "6" } });
       }
       expect(request.headers.get("cache-control")).toBe("no-cache");
+      expect(request.headers.get("range")).toBe("bytes=0-0");
       if (path === "/gone" || path === "/retired") {
         return new Response(null, { status: path === "/gone" ? 404 : 410 });
       }
@@ -1041,6 +1056,157 @@ test("unsuccessful length confirmations cannot create or reopen an issue", async
         ).action
       ).toBe("update");
     }
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("one-byte confirmation refuses ignored ranges, bad framing and incomplete bodies", async () => {
+  const paths = [
+    "ignored",
+    "bad-range",
+    "missing-range",
+    "missing-length",
+    "encoding",
+    "empty",
+    "extra",
+  ];
+  const seen: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      seen.push(`${request.method} ${path}`);
+      if (request.method === "HEAD") {
+        return new Response(null, { headers: { "content-length": "6" } });
+      }
+      expect(request.headers.get("range")).toBe("bytes=0-0");
+      if (path === "/ignored") {
+        return new Response("ignore", { status: 200 });
+      }
+      const response = firstByte(6);
+      if (path === "/bad-range") {
+        response.headers.set("content-range", "bytes 1-1/6");
+      }
+      if (path === "/missing-range") {
+        response.headers.delete("content-range");
+      }
+      if (path === "/missing-length") {
+        response.headers.delete("content-length");
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("x"));
+              controller.close();
+            },
+          }),
+          { status: 206, headers: response.headers }
+        );
+      }
+      return response;
+    },
+  });
+  const fetcher = (async (
+    input: string | URL | Request,
+    init?: RequestInit
+  ) => {
+    const path = new URL(String(input)).pathname;
+    const response = await fetch(new URL(path, server.url), init);
+    if (
+      init?.method === "GET" &&
+      ["/missing-length", "/encoding"].includes(path)
+    ) {
+      const headers = new Headers(response.headers);
+      if (path === "/encoding") {
+        headers.set("content-encoding", "gzip");
+      } else {
+        headers.delete("content-length");
+      }
+      return new Response(response.body, { status: 206, headers });
+    }
+    if (init?.method === "GET" && ["/empty", "/extra"].includes(path)) {
+      // The HTTP server frames Content-Length correctly. This transport seam
+      // also exercises a response whose delivered bytes contradict its header.
+      await response.body?.cancel();
+      return new Response(path === "/empty" ? "" : "xx", {
+        status: 206,
+        headers: response.headers,
+      });
+    }
+    return response;
+  }) as typeof fetch;
+  try {
+    const checks = await checkPinnedUrls(
+      paths.map((name) => ({
+        url: new URL(name, "https://source.test/").href,
+        sizeBytes: 5,
+        redirectHosts: [],
+      })),
+      fetcher
+    );
+    expect(checks).toHaveLength(paths.length);
+    for (const check of checks) {
+      expect({ name: check.name, kind: check.kind }).toEqual({
+        name: check.name,
+        kind: "transient",
+      });
+      expect(
+        plan(
+          [delta(smolvm, "1.34.1", [])],
+          {
+            number: 7,
+            state: "closed",
+            stateReason: "completed",
+          },
+          "2026-11-13",
+          [check]
+        ).action
+      ).toBe("none");
+    }
+    expect(seen).toHaveLength(paths.length * 2);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("only a decimal HEAD length can corroborate a changed GET total", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      expect(request.method).toBe("GET");
+      return firstByte(6);
+    },
+  });
+  const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    if (init?.method === "HEAD") {
+      // Malformed header values cannot corroborate a size even if Number()
+      // would coerce them; keep the transport boundary defensive.
+      const response = new Response(null, {
+        headers: { "content-length": path.slice(1) },
+      });
+      expect(response.headers.get("content-length")).toBe(path.slice(1));
+      return response;
+    }
+    return fetch(new URL(path, server.url), init);
+  }) as typeof fetch;
+  try {
+    const checks = await checkPinnedUrls(
+      ["0x6", "6e0", "6.0", "6"].map((value) => ({
+        url: new URL(value, "https://source.test/").href,
+        sizeBytes: 5,
+        redirectHosts: [],
+      })),
+      fetcher
+    );
+    expect(checks.map((entry) => entry.kind)).toEqual([
+      "transient",
+      "transient",
+      "transient",
+      "invalid",
+    ]);
   } finally {
     server.stop(true);
   }

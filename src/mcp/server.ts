@@ -106,6 +106,8 @@ type ProjectSelection = {
 
 type HackCommandResult = {
   readonly outputTruncated?: boolean;
+  /** The server stopped the command when its timeoutMs ran out. */
+  readonly timedOut?: boolean;
   readonly command: string;
   readonly exitCode: number;
   readonly stdout: string;
@@ -803,7 +805,8 @@ function registerTools(opts: {
         .optional(),
       timeoutMs: boundedLimitInput({
         ceiling: MCP_INPUT_CEILINGS.timeoutMs,
-        description: "Command timeout in ms",
+        description:
+          "Command timeout in ms (default 120000). When it runs out Hack stops the command and the result has timedOut: true; for anything longer than a few minutes use hack.project.command.start",
       }).optional(),
     },
     handler: async (input, extra) => {
@@ -1076,7 +1079,8 @@ function registerTools(opts: {
         .optional(),
       timeoutMs: boundedLimitInput({
         ceiling: MCP_INPUT_CEILINGS.timeoutMs,
-        description: "Command timeout in ms",
+        description:
+          "Command timeout in ms (default 120000). When it runs out Hack stops the command and the result has timedOut: true; for anything longer than a few minutes use hack.project.command.start",
       }).optional(),
     },
     handler: async (input, extra) => {
@@ -1885,6 +1889,7 @@ function buildToolResult(opts: {
     stdout: opts.result.stdout,
     stderr: opts.result.stderr,
     ...(opts.result.outputTruncated ? { outputTruncated: true } : {}),
+    ...(opts.result.timedOut ? { timedOut: true } : {}),
     ...(!opts.result.outputTruncated && opts.data !== undefined
       ? { data: opts.data }
       : {}),
@@ -2495,10 +2500,14 @@ async function runHackCommand(opts: {
     });
 
     const timeoutMs = opts.timeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
+    let stopReason: string | null = null;
     const lifetime = superviseMcpCommand({
       proc,
       signal: opts.signal,
       timeoutMs,
+      onStop: (reason) => {
+        stopReason = reason;
+      },
     });
     const output = createMcpOutputBudget({
       onLimit: () => lifetime.stop("output_limit"),
@@ -2521,6 +2530,11 @@ async function runHackCommand(opts: {
       stderr +=
         "\nMCP output exceeded the 8 MiB capture limit; use the CLI for full output.\n";
     }
+    const timedOut = (stopReason as string | null) === "timeout";
+    if (timedOut) {
+      // Exit 143 alone does not say who stopped it: name the server's limit.
+      stderr += `\nStopped by the MCP server after timeoutMs (${timeoutMs} ms). Pass a larger timeoutMs (at most ${MCP_INPUT_CEILINGS.timeoutMs}) or start it in the background with hack.project.command.start.\n`;
+    }
     const command = formatCommand(cmd);
     if (opts.audit !== false) {
       await appendAuditLog({
@@ -2537,6 +2551,7 @@ async function runHackCommand(opts: {
       stdout,
       stderr,
       ...(output.exceeded() ? { outputTruncated: true } : {}),
+      ...(timedOut ? { timedOut: true } : {}),
     };
   };
   return opts.context.admission

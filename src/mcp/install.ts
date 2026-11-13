@@ -10,6 +10,7 @@ import {
   prepareMcpBundleLaunch,
 } from "./bundle-launch.ts";
 import {
+  CODEX_TOOL_TIMEOUT_SEC,
   hasCodexLaunch,
   removeCodexLaunch,
   renderCodexLaunch,
@@ -474,6 +475,7 @@ function renderCodexTomlBlock(): string {
     `[mcp_servers.${SERVER_NAME}]`,
     `command = "${SERVER_COMMAND}"`,
     `args = ["${SERVER_ARGS[0]}", "${SERVER_ARGS[1]}"]`,
+    `tool_timeout_sec = ${CODEX_TOOL_TIMEOUT_SEC}`,
   ].join("\n");
 }
 

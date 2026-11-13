@@ -111,7 +111,9 @@ test("installer removal roundtrip restores working stdio config and preserves re
   expect((await installMcpConfig(opts))[0]?.status).toBe("updated");
   expect(Bun.TOML.parse(await Bun.file(path).text())).toEqual({
     model: "keep",
-    mcp_servers: { hack: { command: "hack", args: ["mcp", "serve"] } },
+    mcp_servers: {
+      hack: { command: "hack", args: ["mcp", "serve"], tool_timeout_sec: 660 },
+    },
   });
   const broken = '[mcp_servers]\nhack = {command = "preserve"}\n';
   await Bun.write(path, broken);

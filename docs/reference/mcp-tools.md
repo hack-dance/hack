@@ -161,6 +161,11 @@ starts a container, and the CLI fails when the service is not running.
   `--branch` reach the container command and are never parsed by hack.
 - `data.limits` echoes `{ timeoutMs, outputBytes }`. `outputBytes` is the shared
   8 MiB capture limit.
+- When `timeoutMs` runs out, the server stops the command's process group and
+  the result has `timedOut: true`, a nonzero `exitCode` (usually 143) and a
+  stderr line naming the limit. Exit 143 alone does not tell a timeout from a
+  signal sent by something else. For anything that may run longer than a few
+  minutes, use `hack.project.command.start` instead.
 
 ## Background commands
 
@@ -249,6 +254,17 @@ Client notes, from qualifying the tools with Claude Code and the Codex CLI:
 - Observed in Claude Code 2.1.322: it loads the tools on demand through its
   tool search, and their names appear with dots replaced
   (`mcp__hack__hack_project_command_start`).
+- Tool-call limits. Codex CLI 0.168.0 and Claude Code 2.1.322 applied no
+  per-call limit by default: a foreground exec of 90 s completed in both, and
+  one of 200 s (`timeoutMs: 600000`) in Codex. Codex stops waiting at
+  `mcp_servers.<name>.tool_timeout_sec` when it is set (`timed out awaiting
+  tools/call after 30s` at 30 s); it then cancels the call, and Hack stops the
+  command's process group (exit 143 in `mcp-audit.log`). For a Compose command
+  that stops the `docker compose` client; what runs in the container is not
+  proven stopped. `hack setup mcp --codex` and `hack mcp install --codex`
+  write `tool_timeout_sec = 660`, above the largest `timeoutMs` (600 s), so
+  Hack's own limit ends a long call first and reports `timedOut: true`; a
+  value already set is kept.
 
 ## `hack.project.doctor`
 

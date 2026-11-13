@@ -53,8 +53,20 @@ function valueToToml(value: unknown): string {
   throw new Error("Unsupported value in Codex MCP configuration");
 }
 
+/**
+ * Codex's per-call limit for Hack's tools, in seconds: above the largest
+ * timeoutMs a tool accepts (600 s), so Hack's own limit always ends a long
+ * call first and says so (`timedOut: true`), instead of the client giving
+ * up with no result. A value the user already set is kept.
+ */
+export const CODEX_TOOL_TIMEOUT_SEC = 660;
+
 export function renderCodexLaunch(launch: McpLaunch): string {
-  return renderEntry({ ...launch, args: [...launch.args] });
+  return renderEntry({
+    ...launch,
+    args: [...launch.args],
+    tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC,
+  });
 }
 
 function renderEntry(entry: Record<string, unknown>): string {
@@ -102,6 +114,7 @@ export function replaceCodexLaunch(opts: {
       ...(isRecord(existing.env) ? existing.env : {}),
       ...opts.launch.env,
     },
+    tool_timeout_sec: existing.tool_timeout_sec ?? CODEX_TOOL_TIMEOUT_SEC,
   };
   const expected = { ...parsed, mcp_servers: { ...servers, hack: nextEntry } };
   if (isDeepStrictEqual(parsed, expected)) {

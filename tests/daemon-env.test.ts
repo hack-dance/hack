@@ -263,6 +263,40 @@ describe("handleEnvRoutes", () => {
     }
   });
 
+  test("GET /v1/env reports modern metadata without decrypting or presenting legacy state", async () => {
+    const sentinel = "synthetic-ciphertext-metadata-sentinel";
+    await writeFile(
+      join(repoRoot, ".hack/hack.env.default.yaml"),
+      `version: 1\nsecretsprovider: project_key\nvalues:\n  global:\n    MODERN_TOKEN:\n      secure: ${sentinel}\n`
+    );
+    await writeFile(
+      join(repoRoot, ".hack/.env"),
+      "FOO=synthetic-legacy-metadata-sentinel\n"
+    );
+    const req = mockRequest({
+      method: "GET",
+      path: "/v1/env?project=env-test",
+    });
+    const result = await handleEnvRoutes({ req, url: new URL(req.url) });
+    expect(result?.status).toBe(200);
+    const text = await result!.text();
+    const body = JSON.parse(text);
+    expect(body.format).toBe("project_env_config_v1");
+    expect(body.values).toContainEqual({
+      key: "MODERN_TOKEN",
+      scope: "global",
+      effectiveScope: "global",
+      secret: true,
+      hasValue: true,
+    });
+    expect(body).not.toHaveProperty("contract");
+    expect(text).not.toContain(sentinel);
+    expect(text).not.toContain("synthetic-legacy-metadata-sentinel");
+    expect(await Bun.file(join(repoRoot, ".hack.secret.key")).exists()).toBe(
+      false
+    );
+  });
+
   test("POST /v1/env/set writes to .hack/.env and shows as resolved when broker auth is unavailable", async () => {
     const previousAuthBrokerUrl = process.env.HACK_AUTH_BROKER_URL;
     process.env.HACK_AUTH_BROKER_URL = "http://127.0.0.1:9";

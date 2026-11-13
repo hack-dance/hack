@@ -53,6 +53,23 @@ async function env(dir: string, name: string, values: unknown) {
     })
   );
 }
+
+test("empty service environments still normalize managed keys without exposing their values", async () => {
+  const opts = await fixture({
+    services: { app: { image: "example", environment: null } },
+  });
+  await env(opts.projectDir, "default", {
+    app: { TOKEN: "synthetic-managed-value" },
+  });
+  const input = await prepareNativeProjectInput(opts);
+  expect(JSON.parse(input.normalizedComposeJson)).toMatchObject({
+    services: { app: { environment: { TOKEN: null } } },
+  });
+  expect(input.managedEnvironment).toEqual({
+    app: { TOKEN: "synthetic-managed-value" },
+  });
+  expect(input.normalizedComposeJson).not.toContain("synthetic-managed-value");
+});
 test("modern values stay private while original contracts and exact input hash survive", async () => {
   const original = {
     name: "demo",

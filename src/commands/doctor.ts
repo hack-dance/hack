@@ -134,6 +134,7 @@ import {
   NATIVE_SOURCE_CHECK,
   type NativeSourceReport,
 } from "../lib/doctor-native-source.ts";
+import { inspectSecretIntegrity } from "../lib/doctor-secret-integrity.ts";
 import {
   findCrossCheckoutInstances,
   inspectWorktreeSecretKeys,
@@ -209,6 +210,7 @@ import {
   nativeProcessCheckFromCompose,
 } from "../lib/native-process-wrappers.ts";
 import { isLinux, isMac } from "../lib/os.ts";
+import { readPrivateEnvFile } from "../lib/private-env-file.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -233,6 +235,7 @@ import {
   type LegacyComposeEnvFileReference,
   LegacyDotenvMigrationRefusalError,
   type LegacyProjectEnvMigration,
+  listProjectEnvPlaintextEntries,
   migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
   planTrackedEnvMigrationChanges,
@@ -1309,6 +1312,14 @@ async function handleNativeDoctor(opts: {
         progress,
         ENV_KEY_CHECK,
         () => checkProjectEnvKey({ startDir: opts.startDir }),
+        { timeoutMs: 5000 }
+      )
+    );
+    results.push(
+      await runCheck(
+        progress,
+        SECRET_INTEGRITY_CHECK,
+        () => checkSecretIntegrity({ startDir: opts.startDir }),
         { timeoutMs: 5000 }
       )
     );
@@ -3137,6 +3148,64 @@ async function checkWorktreeSecretKeys({
 }
 
 const ENV_KEY_CHECK = "env key";
+const SECRET_INTEGRITY_CHECK = "secret integrity";
+
+/**
+ * Stores and env layers whose secrets cannot all be read with the key in
+ * use (HACK-2169): an unreadable store, a missing or refused store key, and
+ * an env layer holding secrets under more than one key. Value-free; each
+ * finding says how to recover.
+ */
+async function checkSecretIntegrity({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const project = await findProjectContext(startDir);
+  if (!project) {
+    return {
+      name: SECRET_INTEGRITY_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const cfg = await readProjectConfig(project);
+  const projectName = (
+    cfg.name ??
+    project.projectRoot.split("/").at(-1) ??
+    "project"
+  ).trim();
+  let findings: Awaited<ReturnType<typeof inspectSecretIntegrity>>;
+  try {
+    findings = await inspectSecretIntegrity({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      projectName,
+    });
+  } catch {
+    // Not inspected is not fine (HACK-2169); fixed text, no values.
+    return {
+      name: SECRET_INTEGRITY_CHECK,
+      status: "error",
+      message:
+        "The secret store and env layers could not be checked (the secrets configuration or a layer could not be read). Make the project and global Hack config and the env layer files readable and valid, then re-run hack doctor.",
+    };
+  }
+  if (findings.length === 0) {
+    return {
+      name: SECRET_INTEGRITY_CHECK,
+      status: "ok",
+      message: "Every stored secret opens with the key in use",
+    };
+  }
+  return {
+    name: SECRET_INTEGRITY_CHECK,
+    status: findings.some((finding) => finding.status === "error")
+      ? "error"
+      : "warn",
+    message: findings.map((finding) => finding.message).join("\n"),
+  };
+}
 
 /** Doctor check result for an env key inspection; message and data stay value-free. */
 export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
@@ -3643,6 +3712,14 @@ async function runProjectChecks(opts: {
   results.push(
     await runCheck(
       s,
+      SECRET_INTEGRITY_CHECK,
+      () => checkSecretIntegrity({ startDir }),
+      { timeoutMs: 5000 }
+    )
+  );
+  results.push(
+    await runCheck(
+      s,
       "generated files",
       () => checkTrackedGeneratedFiles({ startDir }),
       {
@@ -3932,7 +4009,9 @@ async function checkComposeNetworkHygiene({
 }
 
 async function readLegacyEnvDevHost(envFile: string): Promise<string | null> {
-  const envText = await readTextFile(envFile);
+  // No-follow (HACK-2165): a linked .hack/.env is not read, so its values
+  // are never printed.
+  const envText = await readPrivateEnvFile({ envFile }).catch(() => null);
   if (!envText) {
     return null;
   }
@@ -4262,6 +4341,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
       projectDir: project.projectDir,
       acceptTrackedChanges: opts.acceptTrackedChanges,
     });
+    await printMigrationProtectionHint(project);
     return;
   }
 
@@ -4315,6 +4395,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
   });
   if (migrated.wroteFiles.length === 0) {
     note("Legacy env migration found nothing to write.", "doctor");
+    await printMigrationProtectionHint(project);
     return;
   }
   note(
@@ -4398,6 +4479,38 @@ async function maybeMigrateProjectEnvConfig(opts: {
     paths: cleanupCandidates,
     acceptTrackedChanges: opts.acceptTrackedChanges,
   });
+  await printMigrationProtectionHint(project);
+}
+
+/** End migration with names-only guidance for encrypting plaintext values in place. */
+async function printMigrationProtectionHint(project: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<void> {
+  let entries: Awaited<ReturnType<typeof listProjectEnvPlaintextEntries>>;
+  try {
+    entries = await listProjectEnvPlaintextEntries(project);
+  } catch {
+    note(
+      "Could not inspect plaintext env names. Check env layers, then run hack env protect to inspect names and choose keys (values omitted).",
+      "env protection"
+    );
+    return;
+  }
+  const keys = [...new Set(entries.map((entry) => entry.key))].sort();
+  if (keys.length === 0) {
+    note("No plaintext env entries remain.", "env protection");
+    return;
+  }
+  note(
+    [
+      "Plaintext env keys remain (values omitted):",
+      ...keys.map((key) => `- ${key}`),
+      "Encrypt chosen keys in their current scopes and overlays:",
+      "hack env protect <KEY> [KEY...]",
+    ].join("\n"),
+    "env protection"
+  );
 }
 
 /**

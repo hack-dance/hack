@@ -4,7 +4,11 @@ import { dirname } from "node:path";
 import { HACK_KEY_MATERIAL_VARIABLES } from "../src/lib/child-environment.ts";
 
 import type { ExecOptions } from "../src/lib/shell.ts";
+import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+
+// Staging sweeps the temp directory: never the developer's real one.
+isolateMuxTempDir();
 
 const execCalls: Array<{
   readonly command: readonly string[];

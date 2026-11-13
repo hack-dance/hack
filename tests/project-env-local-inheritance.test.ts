@@ -352,11 +352,21 @@ test("actual CLI masks inherited global secret overriding tracked service plaint
       new Response(child.stderr).text(),
       child.exited,
     ]);
-    expect(code).toBe(0);
     expect(stderr).not.toContain(synthetic);
-    expect(stdout.includes(synthetic)).toBe(format.includes("--show-secrets"));
-    if (!format.includes("--show-secrets")) {
-      expect(stdout).toContain("***");
+    expect(stdout).not.toContain(synthetic);
+    if (format.includes("--show-secrets")) {
+      expect(code).not.toBe(0);
+      expect(stdout + stderr).toContain("interactive terminal");
+    } else {
+      expect(code).toBe(0);
+      expect(stdout).toContain("TOKEN");
+      if (format.includes("--json")) {
+        expect(
+          JSON.parse(stdout).vars.find(
+            (entry: { key: string }) => entry.key === "TOKEN"
+          ).has_value
+        ).toBe(true);
+      }
     }
   }
 });

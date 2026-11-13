@@ -232,6 +232,19 @@ is reported as `unavailable` with an update hint and cannot produce `ready: true
 Image acquisition, private delivery, verified source/cache bindings, retained
 ownership and actual service readiness are checked during `up`.
 
+Preflight and start use one file-local admission collector. Preflight lists its
+refusals; start returns its first refusal before acquiring runtime inputs. This
+can change which reason start reports first when a file has several problems.
+Review assumes routing is enrolled and cache initializers are admitted. The
+readiness defaults are checked against the CLI over shared fixtures. Managed env
+metadata and eligible shell references contribute service names only, so restart
+policies incompatible with private delivery are blockers even when no decryption
+key is available. Shell values and credentials are never read for this check.
+Credential adapters, image defaults, occupied ports and other inputs only known
+at start remain runtime boundaries.
+AWS/gcloud credentials are added after static review; a restart policy on a
+service receiving only those adapter credentials can still be refused at serve.
+
 With `--json` the report is the `data` of the standard result envelope:
 
 ```json
@@ -1541,6 +1554,10 @@ references separately. There is no consent prompt in this feature.
 | --- | --- | --- |
 | `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose. |
 | `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The service gets an empty value. Compose would leave it unset instead. |
+
+An entire `environment: null` declaration, including an `environment:` key with
+only comments beneath it, is empty. Preflight and start both accept it; managed
+keys are still added as private references when configured for the service.
 
 A value read from the shell is never written to the reviewed Compose document, a
 plan, a receipt, an env fingerprint or a log. The entry stays a reference and the

@@ -4,6 +4,7 @@ import { HACK_KEY_MATERIAL_VARIABLES } from "../lib/child-environment.ts";
 import { isRecord } from "../lib/guards.ts";
 import { nativeAwsCredentialMount } from "./native-aws-environment.ts";
 import {
+  composeEnvironmentReferences,
   interpolateComposeEnvironment,
   parseComposeEnvironmentFile,
 } from "./native-compose-env-syntax.ts";
@@ -216,6 +217,14 @@ async function readAutomaticDotenv(opts: {
     dotenv = parseComposeEnvironmentFile({
       text: source.text,
       lookup: opts.lookup,
+      onUnresolved: (name) => {
+        if (!shellVariableReadable(name)) {
+          throw refused(
+            ".env",
+            `variable ${name} cannot be read from the caller's shell; use an explicit file value`
+          );
+        }
+      },
     });
   } catch (error: unknown) {
     if (error instanceof NativeEnvFileRefusal) {
@@ -335,6 +344,7 @@ type Resolution = {
   readonly delivered: Record<string, string>;
   readonly unset: string[];
   readonly unbound: Set<string>;
+  readonly references: Map<string, ReadonlySet<string>>;
   readonly changed: boolean;
 };
 type ServiceContext = {
@@ -424,8 +434,18 @@ function expandServiceValue(opts: {
     );
   }
 }
-function scalar(value: unknown): value is number | boolean {
-  return typeof value === "number" || typeof value === "boolean";
+function serviceScalar(opts: {
+  readonly value: unknown;
+  readonly service: string;
+}): number | boolean {
+  if (typeof opts.value === "number" || typeof opts.value === "boolean") {
+    return opts.value;
+  }
+  throw refused(
+    "environment",
+    "environment values must be scalar",
+    opts.service
+  );
 }
 
 function resolveBareService(opts: {
@@ -460,6 +480,7 @@ function resolveService(opts: {
   const resolved = new Map<string, string>();
   const unset: string[] = [];
   const unbound = new Set<string>();
+  const references = new Map<string, ReadonlySet<string>>();
   const { context } = opts;
   let changed = false;
   for (const [key, value] of Object.entries(opts.environment)) {
@@ -496,15 +517,9 @@ function resolveService(opts: {
       continue;
     }
     if (typeof value !== "string") {
-      if (!scalar(value)) {
-        throw refused(
-          "environment",
-          "environment values must be scalar",
-          context.name
-        );
-      }
-      environment[key] = value;
-      resolved.set(key, String(value));
+      const literal = serviceScalar({ value, service: context.name });
+      environment[key] = literal;
+      resolved.set(key, String(literal));
       continue;
     }
     const expanded = expandServiceValue({ text: value, key, context });
@@ -513,13 +528,24 @@ function resolveService(opts: {
       unbound.add(key);
     } else {
       resolved.set(key, expanded.value);
+      if (!expanded.private) {
+        references.set(key, composeEnvironmentReferences(value));
+      }
     }
     if (expanded.private) {
       delivered[key] = expanded.value;
       changed = true;
     }
   }
-  return { environment, resolved, delivered, unset, unbound, changed };
+  return {
+    environment,
+    resolved,
+    delivered,
+    unset,
+    unbound,
+    references,
+    changed,
+  };
 }
 
 async function serviceFiles(opts: {
@@ -561,21 +587,16 @@ async function serviceFiles(opts: {
               opts.context.name
             );
           }
-          if (
-            !(
-              opts.resolution.resolved.has(key) ||
-              shellVariableReadable(key) ||
-              Object.hasOwn(opts.context.global, key) ||
-              opts.sources.dotenv.has(key)
-            )
-          ) {
+          return opts.resolution.resolved.get(key);
+        },
+        onUnresolved: (key) => {
+          if (!shellVariableReadable(key)) {
             throw refused(
               spec.path,
               `variable ${key} cannot be read from the caller's shell; use an explicit file value or credential adapter`,
               opts.context.name
             );
           }
-          return opts.resolution.resolved.get(key);
         },
       });
     } catch (error: unknown) {
@@ -632,6 +653,7 @@ async function normalizeService(opts: {
     Object.create(null),
     resolution.environment
   );
+  const fileBindings = new Set<string>();
   for (const [key, value] of files) {
     if (protectedName(key)) {
       throw refused(
@@ -645,7 +667,9 @@ async function normalizeService(opts: {
     }
     environment[key] = null;
     resolution.delivered[key] = value;
+    fileBindings.add(key);
   }
+  resolveFileBindingDefaults({ environment, resolution, fileBindings });
   if (specs.length > 0 || resolution.changed) {
     document.environment = environment;
   }
@@ -655,6 +679,27 @@ async function normalizeService(opts: {
   }
   Reflect.deleteProperty(document, "env_file");
   return resolution.delivered;
+}
+
+/**
+ * YAML environment interpolation uses the project context, never env-file values.
+ * Freeze a public default before a newly private file name becomes runtime-owned.
+ * Re-escape dollars because the runtime still evaluates the public declarations.
+ */
+function resolveFileBindingDefaults(opts: {
+  readonly environment: Record<string, unknown>;
+  readonly resolution: Resolution;
+  readonly fileBindings: ReadonlySet<string>;
+}): void {
+  for (const [key, references] of opts.resolution.references) {
+    const value = opts.resolution.resolved.get(key);
+    if (
+      value !== undefined &&
+      [...references].some((name) => opts.fileBindings.has(name))
+    ) {
+      opts.environment[key] = value.replaceAll("$", () => "$$");
+    }
+  }
 }
 
 /**

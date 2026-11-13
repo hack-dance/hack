@@ -23,6 +23,28 @@ const ESCAPES: Readonly<Record<string, string>> = {
 
 export type ComposeEnvLookup = (name: string) => string | undefined;
 
+/** All syntactic source names, including unselected words, without reading values. */
+export function composeEnvironmentReferences(
+  text: string
+): ReadonlySet<string> {
+  const result = new Set<string>();
+  for (let cursor = 0; cursor < text.length; cursor += 1) {
+    if (text[cursor] !== "$") {
+      continue;
+    }
+    if (text[cursor + 1] === "$") {
+      cursor += 1;
+      continue;
+    }
+    const begin = cursor + (text[cursor + 1] === "{" ? 2 : 1);
+    const name = NAME.exec(text.slice(begin))?.[0];
+    if (name !== undefined) {
+      result.add(name);
+    }
+  }
+  return result;
+}
+
 /** Closed failures never include the input, an authored error word or values. */
 export class NativeEnvSyntaxError extends Error {
   constructor() {
@@ -293,6 +315,20 @@ function dotenvValue(opts: {
   };
 }
 
+function inheritBareFileName(opts: {
+  readonly key: string;
+  readonly lookup: ComposeEnvLookup;
+  readonly values: Map<string, string>;
+  readonly onUnresolved?: (name: string) => void;
+}): void {
+  const inherited = opts.lookup(opts.key);
+  if (inherited !== undefined) {
+    opts.values.set(opts.key, inherited);
+  } else if (!opts.values.has(opts.key)) {
+    opts.onUnresolved?.(opts.key);
+  }
+}
+
 /**
  * Sequential Compose assignments, seeded by earlier files. A bare name inherits
  * only from project/service lookup; when unresolved it leaves prior entries
@@ -304,6 +340,8 @@ export function parseComposeEnvironmentFile(opts: {
   readonly lookup: ComposeEnvLookup;
   readonly initial?: ReadonlyMap<string, string>;
   readonly onMissing?: (name: string) => void;
+  /** Source admission after both project lookup and parsed-file assignments miss. */
+  readonly onUnresolved?: (name: string) => void;
 }): ReadonlyMap<string, string> {
   if (Buffer.byteLength(opts.text) > MAX_BYTES || opts.text.includes("\0")) {
     return invalid();
@@ -313,7 +351,13 @@ export function parseComposeEnvironmentFile(opts: {
   if (lines.length > MAX_LINES) {
     return invalid();
   }
-  const lookup = (name: string) => opts.lookup(name) ?? result.get(name);
+  const lookup = (name: string) => {
+    const found = opts.lookup(name) ?? result.get(name);
+    if (found === undefined) {
+      opts.onUnresolved?.(name);
+    }
+    return found;
+  };
   for (let index = 0; index < lines.length; index += 1) {
     const line = (lines[index] ?? "").trimStart();
     if (line.trim() === "" || line.startsWith("#")) {
@@ -328,10 +372,12 @@ export function parseComposeEnvironmentFile(opts: {
       return invalid();
     }
     if (entry?.[2] === undefined) {
-      const inherited = opts.lookup(key);
-      if (inherited !== undefined) {
-        result.set(key, inherited);
-      }
+      inheritBareFileName({
+        key,
+        lookup: opts.lookup,
+        values: result,
+        onUnresolved: opts.onUnresolved,
+      });
       continue;
     }
     const decoded = dotenvValue({

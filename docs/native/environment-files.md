@@ -59,6 +59,11 @@ destination but are not ambient interpolation sources. For env-file expansion,
 that project context wins over resolved service `environment`, then current and
 earlier file assignments. A current file assignment replaces the previous file's
 assignment before the next line is read. `.env` alone injects no container variables.
+Service-environment defaults resolve only against the project context: an env-file
+`HOST` does not replace `${HOST:-localhost}` with its file value. Defaults that
+reference newly file-backed names are frozen before runtime private ownership.
+File-local cloud names can be used by later assignments without reading those
+names from the shell.
 
 Support includes export prefixes, `=` and `:` separators in default format,
 comments, single-quoted literals, double-quoted escapes, multiline quoted values,

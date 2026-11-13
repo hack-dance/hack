@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  composeEnvironmentReferences,
   interpolateComposeEnvironment,
   parseComposeEnvironmentFile,
 } from "../src/backends/native-compose-env-syntax.ts";
@@ -12,6 +13,14 @@ const variables: Readonly<Record<string, string>> = {
 };
 const lookup = (name: string) =>
   Object.hasOwn(variables, name) ? variables[name] : undefined;
+
+test("source names include unselected branches while escaped dollars stay literal", () => {
+  expect([
+    ...composeEnvironmentReferences(
+      "${OTHER:+${HOST}} $$ESCAPED $${BRACED} $$$REAL ${MISSING:-$$LITERAL}"
+    ),
+  ]).toEqual(["OTHER", "HOST", "REAL", "MISSING"]);
+});
 
 test.each([
   ["$SET/${SET}", `${SENTINEL}/${SENTINEL}`],

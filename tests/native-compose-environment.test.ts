@@ -170,6 +170,110 @@ test("explicit cloud values may seed env-file expansion without reading cloud sh
   expect(input.normalizedComposeJson).not.toContain(SHELL);
 });
 
+test("file-backed names do not capture service defaults from the project interpolation context", async () => {
+  const f = await fixture({
+    env_file: "service.env",
+    environment: {
+      URL: "${HOST:-localhost}",
+      ALT: "${HOST:+present}",
+      DOLLAR: "${HOST:-$$LITERAL}",
+      UNSELECTED: "${OTHER:+${HOST}}",
+      UNAFFECTED: "${OTHER:-public}",
+    },
+  });
+  await f.source("service.env", `HOST=${FILE}\n`);
+  const first = await prepareNativeProjectInput(f);
+  expect(first.shellEnvironment).toEqual({ app: { HOST: FILE } });
+  expect(publicService(first).environment).toEqual({
+    HOST: null,
+    URL: "localhost",
+    ALT: "",
+    DOLLAR: "$$LITERAL",
+    UNSELECTED: "",
+    UNAFFECTED: "${OTHER:-public}",
+  });
+  expect(first.normalizedComposeJson).not.toContain(FILE);
+  await f.source("service.env", `HOST=${DOTENV}\n`);
+  const second = await prepareNativeProjectInput(f);
+  expect(second.normalizedComposeJson).toBe(first.normalizedComposeJson);
+  expect(second.shellEnvironment).toEqual({ app: { HOST: DOTENV } });
+});
+
+test("a default combined with a private source stays private after file bindings are introduced", async () => {
+  const f = await fixture({
+    env_file: "service.env",
+    environment: { URL: "${HOST:-localhost}/${SOURCE}" },
+  });
+  await f.source("service.env", `HOST=${FILE}\n`);
+  await f.source(".env", `SOURCE=${DOTENV}\n`);
+  const input = await prepareNativeProjectInput(f);
+  expect(publicService(input).environment).toEqual({ HOST: null, URL: null });
+  expect(input.shellEnvironment).toEqual({
+    app: { HOST: FILE, URL: `localhost/${DOTENV}` },
+  });
+  expect(input.normalizedComposeJson).not.toContain(FILE);
+  expect(input.normalizedComposeJson).not.toContain(DOTENV);
+});
+
+test("env-file-local cloud values resolve without reading cloud shell values", async () => {
+  const f = await fixture({ env_file: ["one.env", "two.env"] });
+  await f.source(
+    "one.env",
+    `AWS_REGION=${FILE}\nSAME=\${AWS_REGION}\nGOOGLE_PROJECT=${DOTENV}\nCLOUDSDK_CORE_PROJECT=${FILE}\n`
+  );
+  await f.source(
+    "two.env",
+    "REGION=${AWS_REGION}\nPROJECT=${GOOGLE_PROJECT}\nCLOUD=${CLOUDSDK_CORE_PROJECT}\nAWS_REGION\n"
+  );
+  const env: Record<string, string> = {};
+  for (const key of ["AWS_REGION", "GOOGLE_PROJECT", "CLOUDSDK_CORE_PROJECT"]) {
+    Object.defineProperty(env, key, {
+      enumerable: true,
+      get() {
+        throw new Error("cloud shell value must never be read");
+      },
+    });
+  }
+  const input = await prepareNativeProjectInput({ ...f, env });
+  expect(input.shellEnvironment).toEqual({
+    app: {
+      AWS_REGION: FILE,
+      SAME: FILE,
+      GOOGLE_PROJECT: DOTENV,
+      CLOUDSDK_CORE_PROJECT: FILE,
+      REGION: FILE,
+      PROJECT: DOTENV,
+      CLOUD: FILE,
+    },
+  });
+  expect(input.forwardedShellVariables?.app).toEqual([]);
+  expect(input.normalizedComposeJson).not.toContain(FILE);
+  expect(input.normalizedComposeJson).not.toContain(DOTENV);
+  await f.source("one.env", "REGION=${AWS_REGION}\n");
+  await expect(prepareNativeProjectInput({ ...f, env })).rejects.toThrow(
+    "cannot be read from the caller's shell"
+  );
+});
+
+test("dotenv cloud references use earlier local values and refuse an unavailable source", async () => {
+  const f = await fixture({ environment: { REGION: "${REGION}" } });
+  await f.source(".env", `AWS_REGION=${DOTENV}\nREGION=\${AWS_REGION}\n`);
+  const input = await prepareNativeProjectInput({
+    ...f,
+    env: { AWS_REGION: SHELL },
+  });
+  expect(input.shellEnvironment).toEqual({ app: { REGION: DOTENV } });
+  expect(input.normalizedComposeJson).not.toContain(DOTENV);
+  expect(input.normalizedComposeJson).not.toContain(SHELL);
+  await f.source(".env", "REGION=${AWS_REGION}\n");
+  const error: unknown = await prepareNativeProjectInput({
+    ...f,
+    env: { AWS_REGION: SHELL },
+  }).catch((caught: unknown) => caught);
+  expect(String(error)).toContain("AWS_REGION cannot be read");
+  expect(String(error)).not.toContain(SHELL);
+});
+
 test("NUL private inputs refuse with closed diagnostics", async () => {
   const f = await fixture({ env_file: "service.env" });
   await f.source("service.env", `TOKEN=${FILE}\0\n`);

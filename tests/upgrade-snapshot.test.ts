@@ -586,6 +586,49 @@ test("a snapshot root reached through a symlink into a Git working tree is refus
   expect(await readdir(join(repo, "hack-home"))).toEqual([]);
 });
 
+test("Git selected through the environment refuses snapshot and restore", async () => {
+  // Codex security review: GIT_DIR/GIT_WORK_TREE can make $HOME a working
+  // tree with no .git marker above the snapshot root.
+  const paths = await fixture();
+  const ready = await snapshotOf(paths);
+  await writeFile(paths.config, '{"step":true}\n');
+  await recordUpgradeSnapshotAfter({ manifestPath: ready.manifestPath });
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE"]) {
+    const saved = process.env[key];
+    process.env[key] = join(root, "elsewhere");
+    try {
+      const created = await createUpgradeSnapshot({
+        purpose: "t",
+        root: join(root, "other-snapshots"),
+        targets: [{ path: paths.env, label: "env" }],
+      });
+      expect(
+        created.status === "refused" && created.reason === "root"
+          ? created.rootReason
+          : null
+      ).toBe("inside-working-tree");
+      const restored = await restoreUpgradeSnapshot({
+        manifestPath: ready.manifestPath,
+      });
+      expect(
+        restored.status === "invalid-manifest"
+          ? null
+          : restored.results.find((r) => r.path === paths.config)?.status
+      ).toBe("error");
+      expect(await readFile(paths.config, "utf8")).toBe('{"step":true}\n');
+    } finally {
+      if (saved === undefined) {
+        Reflect.deleteProperty(process.env, key);
+      } else {
+        process.env[key] = saved;
+      }
+    }
+  }
+  expect(
+    await lstat(join(root, "other-snapshots")).catch(() => null)
+  ).toBeNull();
+});
+
 test("a manifest that is not private, or a damaged copy, restores nothing", async () => {
   const paths = await fixture();
   const envBefore = await readFile(paths.env);

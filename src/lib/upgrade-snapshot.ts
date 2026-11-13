@@ -353,6 +353,8 @@ const MESSAGES = {
   damaged:
     "The snapshot's copy of this file is missing or does not match its recorded digest; nothing was restored here.",
   error: "The file could not be restored at this path; left as it was.",
+  gitEnvironment:
+    "GIT_DIR or GIT_WORK_TREE is set, so the snapshot directory may be part of a Git working tree; nothing was changed here. Unset them and rerun the restore.",
   noWorkDir:
     "The snapshot's private working directories could not be prepared; nothing was changed here.",
   crossFilesystem:
@@ -784,6 +786,13 @@ async function restoreWorkDirs(input: {
     }
   | { readonly kind: "refused"; readonly outcome: RestoreOutcome }
 > {
+  if (gitSelectedByEnvironment()) {
+    // Staged copies would be written where Git may track them.
+    return {
+      kind: "refused",
+      outcome: { status: "error", message: MESSAGES.gitEnvironment },
+    };
+  }
   const staging = join(input.snapshot.dir, STAGING_DIR);
   const displaced = join(input.snapshot.dir, DISPLACED_DIR);
   for (const dir of [staging, displaced]) {
@@ -1251,8 +1260,25 @@ async function canonicalPath(path: string): Promise<string | null> {
   }
 }
 
-/** Whether `path` or any directory above it holds a `.git` entry. */
+/**
+ * Git selected through the environment (`GIT_DIR` or `GIT_WORK_TREE`) can
+ * make any directory part of a working tree without a `.git` marker above
+ * it, so its presence counts as inside one: fail closed.
+ */
+function gitSelectedByEnvironment(): boolean {
+  return ["GIT_DIR", "GIT_WORK_TREE"].some(
+    (key) => (process.env[key] ?? "").trim().length > 0
+  );
+}
+
+/**
+ * Whether `path` may be inside a Git working tree: a `.git` entry at or
+ * above it, or Git selected through the environment.
+ */
 async function insideWorkingTree(path: string): Promise<boolean> {
+  if (gitSelectedByEnvironment()) {
+    return true;
+  }
   let current = resolve(path);
   for (;;) {
     const marker = await lstatOrNull(join(current, ".git"));

@@ -279,6 +279,29 @@ test("a snapshot root inside a Git working tree is refused", async () => {
   ).toBe("inside-working-tree");
 });
 
+test("a snapshot root reached through a symlink into a Git working tree is refused", async () => {
+  // Codex review: only the lexical ancestors were checked, so a symlinked
+  // hack home inside a dotfiles checkout received the snapshot.
+  const paths = await fixture();
+  const repo = join(root, "dotfiles");
+  await mkdir(join(repo, ".git"), { recursive: true });
+  await mkdir(join(repo, "hack-home"), { recursive: true });
+  const linkedHome = join(root, "linked-hack-home");
+  await symlink(join(repo, "hack-home"), linkedHome);
+  const result = await createUpgradeSnapshot({
+    purpose: "t",
+    root: join(linkedHome, "upgrade", "snapshots"),
+    targets: [{ path: paths.env, label: "env" }],
+  });
+  expect(
+    result.status === "refused" && result.reason === "root"
+      ? result.rootReason
+      : null
+  ).toBe("inside-working-tree");
+  // Nothing was created inside the checkout.
+  expect(await readdir(join(repo, "hack-home"))).toEqual([]);
+});
+
 test("a manifest that is not private, or a damaged copy, restores nothing", async () => {
   const paths = await fixture();
   const envBefore = await readFile(paths.env);

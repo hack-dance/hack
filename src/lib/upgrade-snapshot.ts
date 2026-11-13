@@ -6,6 +6,7 @@ import {
   mkdir,
   open,
   readdir,
+  realpath,
   rename,
   unlink,
 } from "node:fs/promises";
@@ -882,7 +883,14 @@ async function privateDirectoryProblem(
 async function ensurePrivateRoot(
   root: string
 ): Promise<UpgradeSnapshotRootRefusal | null> {
-  if (await insideWorkingTree(root)) {
+  // Check the path as written and as resolved: a symlinked ancestor (a
+  // `~/.hack` that points into a dotfiles checkout) must not carry the
+  // snapshot into a working tree.
+  const canonical = await canonicalPath(root);
+  if (canonical === null) {
+    return "unwritable";
+  }
+  if ((await insideWorkingTree(root)) || (await insideWorkingTree(canonical))) {
     return "inside-working-tree";
   }
   try {
@@ -892,7 +900,40 @@ async function ensurePrivateRoot(
       ? "not-a-directory"
       : "unwritable";
   }
+  // Again on the created directory, before anything is written into it.
+  const created = await realpath(root).catch(() => null);
+  if (created === null) {
+    return "unwritable";
+  }
+  if (await insideWorkingTree(created)) {
+    return "inside-working-tree";
+  }
   return await privateDirectoryProblem(root);
+}
+
+/**
+ * The resolved form of `path`: the real path of its deepest existing
+ * ancestor, with the components that do not exist yet appended. Null when
+ * an ancestor cannot be resolved for another reason.
+ */
+async function canonicalPath(path: string): Promise<string | null> {
+  const missing: string[] = [];
+  let current = resolve(path);
+  for (;;) {
+    try {
+      return join(await realpath(current), ...missing);
+    } catch (error: unknown) {
+      if (errorCode(error) !== "ENOENT") {
+        return null;
+      }
+      const parent = dirname(current);
+      if (parent === current) {
+        return null;
+      }
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
 }
 
 /** Whether `path` or any directory above it holds a `.git` entry. */

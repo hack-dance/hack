@@ -3709,11 +3709,18 @@ export async function inspectProjectEnvLayerKeys(opts: {
       resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName }),
       { envName, local: false }
     );
+    // The file `hack env set/unset --local` acts on, including a
+    // legacy-compatible local default layer.
     layers.set(
-      resolveProjectEnvLocalConfigPath({
-        projectDir: opts.projectDir,
+      await resolveProjectEnvEffectiveLocalConfigPath({
+        ...opts,
         envName,
-      }),
+      }).catch(() =>
+        resolveProjectEnvLocalConfigPath({
+          projectDir: opts.projectDir,
+          envName,
+        })
+      ),
       { envName, local: true }
     );
   }

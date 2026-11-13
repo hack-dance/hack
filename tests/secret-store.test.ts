@@ -997,6 +997,33 @@ test("explicit key provisioning never replaces a different key a store could sti
   }
 });
 
+test("explicit key provisioning never writes a key file that shadows the key a store opens with (HACK-2169)", async () => {
+  // An older setup: the store's entries are under a key held elsewhere (the
+  // keychain), and no key file exists. A key file would shadow that key.
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  const storePath = join(tempDir, "shadow.enc.json");
+  const keyPath = join(tempDir, "shadow.key");
+  await privateKey(keyPath, "store-key");
+  await encryptedFileConfig({ storePath, keyPath });
+  await (await resolveSecretStore({ projectName: "app" })).set({
+    key: "TOKEN",
+    value: "under-store-key",
+  });
+  await rm(keyPath);
+  process.env.HACK_SECRETS_FILE_KEY = "different-key";
+  await expect(
+    provisionEncryptedFileKey({ keyPath, storePath })
+  ).rejects.toThrow("does not open the store");
+  await expect(access(keyPath)).rejects.toThrow();
+  // The key that opens it is provisioned.
+  process.env.HACK_SECRETS_FILE_KEY = "store-key";
+  await provisionEncryptedFileKey({ keyPath, storePath });
+  expect(await readFile(keyPath, "utf8")).toBe("store-key\n");
+});
+
 test("explicit key provisioning repairs a key file the store's entries do not open (HACK-2169)", async () => {
   // The environment key opens the store and the key file's does not: the
   // key file is wrong, and provisioning the right one is a repair.

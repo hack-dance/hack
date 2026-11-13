@@ -812,6 +812,16 @@ async function provisionEnvKey(input: {
   await ensureDir(dirname(input.keyPath));
   const options = encryptedFileKeyOptions(input);
   const text = `${input.key}\n`;
+  if (
+    (await readKeyForProvisioning(input.keyPath)) === null &&
+    !(await storeOpensOrIsEmpty({ storePath: input.storePath, key: input.key }))
+  ) {
+    // The store's entries are under another key (for example the keychain
+    // key of an older setup): a key file would shadow that key for readers.
+    throw new SecretStoreKeyUnavailableError(
+      `Refused to write the encrypted secret key at ${input.keyPath}: ${ENCRYPTED_FILE_KEY_ENV} does not open the store at ${input.storePath}, which has entries, and readers would use the key file instead of the key that does (values omitted). Unset ${ENCRYPTED_FILE_KEY_ENV}, or set it to the key that opens the store, and retry.`
+    );
+  }
   if (await publishPrivateFileExclusive({ ...options, text })) {
     return;
   }
@@ -837,18 +847,8 @@ async function provisionEnvKey(input: {
           `the store at ${storePath} has no entries to show which key is right`
         );
       }
-      const opens = (encryptionKey: string) => {
-        try {
-          decryptEncryptedEntriesText({
-            filePath: storePath,
-            text: store.text,
-            encryptionKey,
-          });
-          return true;
-        } catch {
-          return false;
-        }
-      };
+      const opens = (key: string) =>
+        encryptedStoreOpensUnder({ storePath, text: store.text, key });
       if (opens(existing) || !opens(input.key)) {
         throw refuse(
           `the store at ${storePath} has entries the environment key does not open in its place`
@@ -860,6 +860,48 @@ async function provisionEnvKey(input: {
       await replacePrivateFileAtomic({ ...options, text });
     },
   });
+}
+
+/** True when `key` decrypts the store text. */
+function encryptedStoreOpensUnder(input: {
+  readonly storePath: string;
+  readonly text: string;
+  readonly key: string;
+}): boolean {
+  try {
+    decryptEncryptedEntriesText({
+      filePath: input.storePath,
+      text: input.text,
+      encryptionKey: input.key,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * False only when the store has entries that `key` does not open; a
+ * store that is absent, empty, unconfigured or unreadable is judged by the
+ * paths that use it.
+ */
+async function storeOpensOrIsEmpty(input: {
+  readonly storePath: string | undefined;
+  readonly key: string;
+}): Promise<boolean> {
+  if (input.storePath === undefined) {
+    return true;
+  }
+  const store = await readEncryptedStoreText(input.storePath);
+  return (
+    store.kind !== "text" ||
+    store.text.length === 0 ||
+    encryptedStoreOpensUnder({
+      storePath: input.storePath,
+      text: store.text,
+      key: input.key,
+    })
+  );
 }
 
 /**

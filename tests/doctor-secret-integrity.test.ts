@@ -169,6 +169,44 @@ test("a layer holding secrets under two keys is reported, value-free", async () 
   expect(resolved?.globalEnv.THIRD).toBe("synthetic-again-90fa");
 });
 
+test("the local default layer --local writes is the one inspected, legacy-compatible included", async () => {
+  // A legacy hack.env.local.yaml (environment: local) is an overlay; the
+  // machine-local default layer is then hack.env.default.local.yaml.
+  const repo = await createRepo();
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.yaml"),
+    "version: 1\nenvironment: local\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "FIRST",
+    value: "synthetic-first-6c0d",
+    secret: true,
+    local: true,
+  });
+  const localPath = resolve(repo.projectDir, "hack.env.default.local.yaml");
+  const other = await createRepo();
+  await setSecret(other, "SECOND", "synthetic-second-d81f");
+  await setSecret(other, "THIRD", "synthetic-third-27aa");
+  const parsed = YAML.parse(await readFile(localPath, "utf8")) as {
+    values: { global: Record<string, unknown> };
+  };
+  const otherValues = globalValues(await readFile(other.envFile, "utf8"));
+  parsed.values.global.SECOND = otherValues.SECOND;
+  parsed.values.global.THIRD = otherValues.THIRD;
+  await writeFile(localPath, YAML.stringify(parsed));
+
+  const findings = await inspect(repo);
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.message).toContain(
+    ".hack/hack.env.default.local.yaml holds secrets under more than one key"
+  );
+  expect(findings[0]?.message).toContain("SECOND (--local), THIRD (--local)");
+});
+
 test("a layer whose key is missing, or the wrong one, is reported", async () => {
   const repo = await createRepo();
   await setSecret(repo, "FIRST", "synthetic-first-0b4e");

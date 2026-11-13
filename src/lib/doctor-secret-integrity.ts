@@ -16,6 +16,7 @@ import {
 import {
   listProjectsUsingSecretStore,
   projectUsesSecretStore,
+  type SecretStoreUsers,
 } from "./secret-store-retire.ts";
 
 /**
@@ -127,14 +128,33 @@ async function keylessStoreFinding(opts: {
     usedHere
       ? "This project's env contract reads it."
       : "This project does not read it.",
-    users.length > 0
-      ? `Registered projects that read it: ${users.join(", ")}.`
-      : "No registered project reads it.",
+    describeStoreUsers(users),
   ].join(" ");
   return {
     status: usedHere ? "error" : "warn",
     message: `${state} Its entries cannot be counted or read without that key. ${usage} Choose one: restore the key (put the key file back at ${opts.key} with mode 600 from a backup or another machine, or set HACK_SECRETS_FILE_KEY to the same key); or, if the key is gone for good, run \`${retireStoreCommand(opts.projectRoot)}\`, which moves the store aside to a timestamped name beside it, deletes nothing, and prints how to put it back. Do not provision a new key: it cannot open these entries.`,
   };
+}
+
+/**
+ * Which registered projects read the store, saying plainly when the scan
+ * could not check every one (never "no project reads it" on a guess).
+ */
+function describeStoreUsers(users: SecretStoreUsers): string {
+  const named =
+    users.names.length > 0
+      ? `Registered projects that read it: ${users.names.join(", ")}.`
+      : null;
+  if (!users.registryRead) {
+    return "The projects registry could not be read, so which registered projects read it is unknown.";
+  }
+  if (users.unchecked > 0) {
+    const gap = `${users.unchecked} registered project(s) could not be checked (their Hack config cannot be read), so the list may be incomplete.`;
+    return named === null
+      ? `No checked registered project reads it, but ${gap}`
+      : `${named} ${gap}`;
+  }
+  return named ?? "No registered project reads it.";
 }
 
 /** Retired copies kept beside the store: information, not a problem. */

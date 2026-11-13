@@ -1,5 +1,10 @@
+import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { PROJECT_CONFIG_FILENAME } from "../constants.ts";
+import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { resolveGlobalConfigPath } from "./config-paths.ts";
+import { readOptionalTextFile } from "./fs.ts";
 import { readHackEnvContract, readHackEnvRuntimeConfig } from "./hack-env.ts";
 import { readProjectsRegistry } from "./projects-registry.ts";
 import {
@@ -48,14 +53,53 @@ export async function projectUsesSecretStore(opts: {
 }
 
 /**
- * Names (only) of registered projects whose configuration selects the store
- * at `storePath` and whose runtime reads it, from configuration only: no
- * store is opened. Projects whose configuration cannot be read are skipped;
- * a registry that cannot be read yields none.
+ * Why the configuration that selects the store (the global config and, for
+ * a project, its `hack.config.json`) cannot be trusted, or null when it can.
+ * A file that exists but cannot be read is not absent, and one that does
+ * not parse contributes nothing, so either could silently select another
+ * store (for example the global one). Value-free: paths only.
+ */
+export async function secretStoreSelectionProblem(opts: {
+  readonly projectDir?: string;
+}): Promise<string | null> {
+  const paths = [
+    resolveGlobalConfigPath(),
+    ...(opts.projectDir === undefined
+      ? []
+      : [resolve(opts.projectDir, PROJECT_CONFIG_FILENAME)]),
+  ];
+  for (const path of paths) {
+    if ((await readOptionalTextFile(path)).kind === "unreadable") {
+      return `The Hack config ${path} exists but cannot be read, so which secret store is selected is unknown.`;
+    }
+  }
+  const config = await readControlPlaneConfig({ projectDir: opts.projectDir });
+  return config.parseError === undefined
+    ? null
+    : "The Hack config that selects the secret store does not parse, so which secret store is selected is unknown.";
+}
+
+/** Registered projects that read a store, and whether every one was checked. */
+export type SecretStoreUsers = {
+  /** Names only, sorted. */
+  readonly names: readonly string[];
+  /** False when the registry could not be read. */
+  readonly registryRead: boolean;
+  /** Registered projects whose store selection could not be checked. */
+  readonly unchecked: number;
+};
+
+/**
+ * Registered projects whose configuration selects the store at `storePath`
+ * and whose runtime reads it, from configuration only: no store is opened.
+ * A project selects the same store when its configured path is the same,
+ * or names the same file (device and inode, so aliases through symlinked
+ * directories match). What could not be checked is counted, never taken as
+ * "does not read it".
  */
 export async function listProjectsUsingSecretStore(opts: {
   readonly storePath: string;
-}): Promise<readonly string[]> {
+}): Promise<SecretStoreUsers> {
   let projects: readonly {
     readonly name: string;
     readonly projectDir: string;
@@ -63,27 +107,58 @@ export async function listProjectsUsingSecretStore(opts: {
   try {
     projects = (await readProjectsRegistry()).projects;
   } catch {
-    return [];
+    return { names: [], registryRead: false, unchecked: 0 };
   }
+  const target = await stat(opts.storePath).catch(() => null);
   const names = new Set<string>();
+  let unchecked = 0;
   for (const project of projects) {
     let location: Awaited<ReturnType<typeof resolveFileSecretStorePaths>>;
     try {
+      if (
+        (await secretStoreSelectionProblem({
+          projectDir: project.projectDir,
+        })) !== null
+      ) {
+        unchecked += 1;
+        continue;
+      }
       location = await resolveFileSecretStorePaths({
         projectDir: project.projectDir,
       });
     } catch {
+      unchecked += 1;
       continue;
     }
     if (
       location.active &&
-      resolve(location.storePath) === resolve(opts.storePath) &&
+      (await sameStoreFile({ path: location.storePath, opts, target })) &&
       (await projectUsesSecretStore({ projectDir: project.projectDir }))
     ) {
       names.add(project.name);
     }
   }
-  return [...names].sort();
+  return { names: [...names].sort(), registryRead: true, unchecked };
+}
+
+/** The same configured path, or the same existing file (device and inode). */
+async function sameStoreFile(input: {
+  readonly path: string;
+  readonly opts: { readonly storePath: string };
+  readonly target: { readonly dev: number; readonly ino: number } | null;
+}): Promise<boolean> {
+  if (resolve(input.path) === resolve(input.opts.storePath)) {
+    return true;
+  }
+  if (input.target === null) {
+    return false;
+  }
+  const candidate = await stat(input.path).catch(() => null);
+  return (
+    candidate !== null &&
+    candidate.dev === input.target.dev &&
+    candidate.ino === input.target.ino
+  );
 }
 
 /**
@@ -120,6 +195,13 @@ export async function retireSecretStore(opts: {
   readonly projectDir?: string;
   readonly now?: Date;
 }): Promise<SecretStoreRetireOutcome> {
+  const selection = await secretStoreSelectionProblem(opts);
+  if (selection !== null) {
+    return {
+      kind: "refused",
+      message: `${selection} Nothing was moved. Fix that config, then run hack doctor and retry.`,
+    };
+  }
   const listing = await storeLocation(opts);
   const refusal = retireRefusal(listing);
   if (refusal !== null) {
@@ -128,10 +210,15 @@ export async function retireSecretStore(opts: {
   try {
     const moved = await retireEncryptedStoreFile({
       storePath: listing.storePath,
+      keyPath: listing.keyPath,
       now: opts.now,
       // Classified before the lock: classify again under it, so a store
       // whose key came back, or that was replaced, is not retired.
       recheck: async () => {
+        const unsure = await secretStoreSelectionProblem(opts);
+        if (unsure !== null) {
+          return `${unsure} Nothing was moved. (It changed while retiring.)`;
+        }
         const current = await storeLocation(opts);
         if (current.storePath !== listing.storePath) {
           return "The secret store configuration changed while retiring; nothing was moved. Run hack doctor, then retry.";

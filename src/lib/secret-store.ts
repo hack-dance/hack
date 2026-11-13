@@ -5,11 +5,12 @@ import {
   randomBytes,
 } from "node:crypto";
 import {
-  link,
   lstat,
+  open,
   readdir,
   readFile,
   realpath,
+  rename,
   stat,
   unlink,
 } from "node:fs/promises";
@@ -254,15 +255,27 @@ export class SecretStoreRetireError extends Error {
 }
 
 /**
- * Moves an encrypted store file aside (HACK-2177), never deleting it: under
- * the store's mutation lock, the regular file at `storePath` gets a second
- * name `<store>.retired-<UTC stamp>` in the same directory (a hard link,
- * which never replaces an existing file), and only then is its original
- * name removed. A link, a non-regular file or an absent store is refused.
- * Nothing is read or decrypted; the key file is not touched.
+ * Moves an encrypted store file aside (HACK-2177), never deleting it. Under
+ * the store's mutation lock:
+ *
+ * 1. the store must be a regular file, and not the key file itself (same
+ *    device and inode, so an alias or hard link of the key is refused);
+ * 2. `recheck` runs (eligibility, classified again under the lock);
+ * 3. the archive name `<store>.retired-<UTC stamp>` is created exclusively
+ *    as an empty placeholder (refused if that name exists);
+ * 4. `rename` moves whatever file is at the store path at that instant over
+ *    the placeholder, after checking the placeholder is still the same
+ *    empty file.
+ *
+ * Nothing is unlinked: if a writer outside the lock replaced the store in
+ * between, the replacement is what gets archived, and the only file ever
+ * replaced is the empty placeholder this call created. Nothing is read or
+ * decrypted; the key file is not touched.
  */
 export async function retireEncryptedStoreFile(input: {
   readonly storePath: string;
+  /** The store's key file: a store that is the key file is not retired. */
+  readonly keyPath?: string;
   readonly now?: Date;
   /**
    * Runs under the store's lock just before the move: a refusal message
@@ -270,22 +283,17 @@ export async function retireEncryptedStoreFile(input: {
    * was replaced meanwhile), null to go on.
    */
   readonly recheck?: () => Promise<string | null>;
+  /**
+   * Test seam: runs just before the rename, after the placeholder check,
+   * so a test can replace the store as a writer outside the lock would.
+   */
+  readonly beforeMove?: () => Promise<void>;
 }): Promise<{ readonly from: string; readonly to: string }> {
   const storePath = input.storePath;
   return await withEncryptedStoreMutation({
     filePath: storePath,
     run: async () => {
-      const info = await lstat(storePath).catch(() => null);
-      if (info === null) {
-        throw new SecretStoreRetireError(
-          `There is no encrypted secret store at ${storePath}; nothing was moved.`
-        );
-      }
-      if (!info.isFile()) {
-        throw new SecretStoreRetireError(
-          `The encrypted secret store at ${storePath} is a symlink or not a regular file; nothing was moved. Inspect it with ls -l, then move it aside by hand if you mean to.`
-        );
-      }
+      await assertRetirableStoreFile(input);
       const changed = (await input.recheck?.()) ?? null;
       if (changed !== null) {
         throw new SecretStoreRetireError(changed);
@@ -295,23 +303,129 @@ export async function retireEncryptedStoreFile(input: {
         .replace(STAMP_SEPARATORS, "")
         .replace(STAMP_MILLISECONDS, "Z");
       const to = `${storePath}${RETIRED_STORE_INFIX}${stamp}`;
-      try {
-        await link(storePath, to);
-      } catch (error: unknown) {
-        const code =
-          typeof error === "object" && error !== null && "code" in error
-            ? String((error as { readonly code?: unknown }).code)
-            : "unknown";
-        throw new SecretStoreRetireError(
-          code === "EEXIST"
-            ? `${to} already exists; nothing was moved. Retry in a second.`
-            : `Could not give ${storePath} the name ${to} (${code}); nothing was moved. To retire it by hand: mv ${quoteShellWord(storePath)} ${quoteShellWord(to)}`
-        );
-      }
-      await unlink(storePath);
+      const placeholder = await createRetirePlaceholder({ storePath, to });
+      await moveStoreOverPlaceholder({
+        storePath,
+        to,
+        placeholder,
+        beforeMove: input.beforeMove,
+      });
       return { from: storePath, to };
     },
   });
+}
+
+/** The store is a regular file, and not its own key file (same device and inode). */
+async function assertRetirableStoreFile(input: {
+  readonly storePath: string;
+  readonly keyPath?: string;
+}): Promise<void> {
+  const info = await stat(input.storePath).catch(() => null);
+  const linkInfo = await lstat(input.storePath).catch(() => null);
+  if (info === null || linkInfo === null) {
+    throw new SecretStoreRetireError(
+      `There is no encrypted secret store at ${input.storePath}; nothing was moved.`
+    );
+  }
+  if (!linkInfo.isFile()) {
+    throw new SecretStoreRetireError(
+      `The encrypted secret store at ${input.storePath} is a symlink or not a regular file; nothing was moved. Inspect it with ls -l, then move it aside by hand if you mean to.`
+    );
+  }
+  const keyInfo = input.keyPath
+    ? await stat(input.keyPath).catch(() => null)
+    : null;
+  if (
+    keyInfo !== null &&
+    keyInfo.dev === info.dev &&
+    keyInfo.ino === info.ino
+  ) {
+    throw new SecretStoreRetireError(
+      `The encrypted secret store at ${input.storePath} is its own key file (${input.keyPath}); retiring it would remove the key. Nothing was moved. Fix controlPlane.secrets.encryptedFile so the store and its key are different files.`
+    );
+  }
+}
+
+/**
+ * Renames the store over the placeholder, after checking the placeholder is
+ * still the same empty file; on any failure the placeholder (only if still
+ * ours) is removed and nothing has moved.
+ */
+async function moveStoreOverPlaceholder(input: {
+  readonly storePath: string;
+  readonly to: string;
+  readonly placeholder: { readonly dev: number; readonly ino: number };
+  readonly beforeMove?: () => Promise<void>;
+}): Promise<void> {
+  try {
+    const current = await lstat(input.to).catch(() => null);
+    if (
+      current === null ||
+      !current.isFile() ||
+      current.dev !== input.placeholder.dev ||
+      current.ino !== input.placeholder.ino ||
+      current.size !== 0
+    ) {
+      throw new SecretStoreRetireError(
+        `${input.to} changed while retiring; nothing was moved and it was left as it is.`
+      );
+    }
+    await input.beforeMove?.();
+    await rename(input.storePath, input.to);
+  } catch (error: unknown) {
+    await removeOwnPlaceholder(input);
+    if (error instanceof SecretStoreRetireError) {
+      throw error;
+    }
+    throw new SecretStoreRetireError(
+      `Could not move ${input.storePath} to ${input.to} (${errorCode(error)}); nothing was moved. To retire it by hand: mv ${quoteShellWord(input.storePath)} ${quoteShellWord(input.to)}`
+    );
+  }
+}
+
+/** Creates the archive name exclusively (an empty 0600 file); refuses if it exists. */
+async function createRetirePlaceholder(input: {
+  readonly storePath: string;
+  readonly to: string;
+}): Promise<{ readonly dev: number; readonly ino: number }> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(input.to, "wx", 0o600);
+  } catch (error: unknown) {
+    throw new SecretStoreRetireError(
+      errorCode(error) === "EEXIST"
+        ? `${input.to} already exists; nothing was moved. Retry in a second.`
+        : `Could not create ${input.to} (${errorCode(error)}); nothing was moved. To retire it by hand: mv ${quoteShellWord(input.storePath)} ${quoteShellWord(input.to)}`
+    );
+  }
+  try {
+    const created = await handle.stat();
+    return { dev: created.dev, ino: created.ino };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Removes the placeholder only while it is still the empty file this call made. */
+async function removeOwnPlaceholder(input: {
+  readonly to: string;
+  readonly placeholder: { readonly dev: number; readonly ino: number };
+}): Promise<void> {
+  const current = await lstat(input.to).catch(() => null);
+  if (
+    current?.isFile() === true &&
+    current.dev === input.placeholder.dev &&
+    current.ino === input.placeholder.ino &&
+    current.size === 0
+  ) {
+    await unlink(input.to).catch(() => undefined);
+  }
+}
+
+function errorCode(error: unknown): string {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { readonly code?: unknown }).code)
+    : "unknown";
 }
 
 /** Retired copies of `storePath` in its directory, oldest first. */

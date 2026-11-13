@@ -9,6 +9,7 @@ import {
   realpath,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -27,7 +28,10 @@ import { inspectSecretIntegrity } from "../src/lib/doctor-secret-integrity.ts";
 import { findProjectContext } from "../src/lib/project.ts";
 import { upsertProjectRegistration } from "../src/lib/projects-registry.ts";
 import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
-import { resolveSecretStore } from "../src/lib/secret-store.ts";
+import {
+  resolveSecretStore,
+  retireEncryptedStoreFile,
+} from "../src/lib/secret-store.ts";
 import { retireSecretStore } from "../src/lib/secret-store-retire.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -515,4 +519,125 @@ test("a key file that exists but cannot be read is not missing: the store is not
   }
   // Readable again: the store opens; nothing was lost.
   expect(await inspect(fixture.bystander, "app-b")).toEqual([]);
+});
+
+test("a store replaced at the moment of the move is archived, never deleted, and an existing archive is never replaced", async () => {
+  // Second-family review blocker: link then unlink removed a replacement a
+  // writer outside the lock put at the store path between the two steps.
+  const fixture = await setUp();
+  const replacement = Buffer.from("synthetic-replacement-store-bytes\n");
+  const outcome = await retireEncryptedStoreFile({
+    storePath: fixture.storePath,
+    keyPath: fixture.keyPath,
+    now: new Date("2026-11-13T12:00:00Z"),
+    beforeMove: async () => {
+      // A writer that ignores the lock swaps in a new file (new inode).
+      const staged = `${fixture.storePath}.staged`;
+      await writeFile(staged, replacement);
+      await rename(staged, fixture.storePath);
+    },
+  });
+  expect(outcome.to).toBe(`${fixture.storePath}.retired-20261113T120000Z`);
+  // The replacement is what was archived; nothing at either name was lost.
+  expect(await readFile(outcome.to)).toEqual(replacement);
+  expect(await lstat(fixture.storePath).catch(() => null)).toBeNull();
+
+  // An archive name that already exists is never replaced.
+  const second = join(fixture.hackHome, "secrets.enc.json");
+  await writeFile(second, "synthetic-second-store\n");
+  await expect(
+    retireEncryptedStoreFile({
+      storePath: second,
+      now: new Date("2026-11-13T12:00:00Z"),
+    })
+  ).rejects.toThrow("already exists; nothing was moved");
+  expect(await readFile(outcome.to)).toEqual(replacement);
+  expect(await readFile(second, "utf8")).toBe("synthetic-second-store\n");
+});
+
+test("a store that is its own key file is not retired, through any spelling", async () => {
+  // Second-family review: path and keyPath naming the same file (directly
+  // or through a symlinked directory) made the key file retirable.
+  const fixture = await setUp();
+  await writeFile(fixture.keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
+  await chmod(fixture.keyPath, 0o600);
+  const alias = join(fixture.home, "key-alias");
+  await symlink(fixture.hackHome, alias);
+  for (const path of [fixture.keyPath, join(alias, "secrets-file.key")]) {
+    await expect(
+      retireEncryptedStoreFile({ storePath: path, keyPath: fixture.keyPath })
+    ).rejects.toThrow("is its own key file");
+    expect(await readFile(fixture.keyPath, "utf8")).toBe(`${STORE_KEY}\n`);
+  }
+});
+
+test("retire refuses when the config that selects the store cannot be read or does not parse", async () => {
+  // Second-family review: an unreadable or malformed project config was
+  // taken as absent, so the global store could be retired instead.
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  const projectConfig = join(fixture.bystander.projectDir, "hack.config.json");
+  if (process.getuid?.() !== 0) {
+    await chmod(projectConfig, 0o000);
+    try {
+      const outcome = await retireSecretStore({
+        projectName: "app-b",
+        projectDir: fixture.bystander.projectDir,
+      });
+      expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+        "exists but cannot be read"
+      );
+    } finally {
+      await chmod(projectConfig, 0o644);
+    }
+  }
+  const projectText = await readFile(projectConfig, "utf8");
+  await writeFile(projectConfig, "{ not json");
+  const malformed = await retireSecretStore({
+    projectName: "app-b",
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(malformed.kind === "refused" ? malformed.message : "").toContain(
+    "does not parse"
+  );
+  await writeFile(projectConfig, projectText);
+  expect(await readFile(fixture.storePath)).toEqual(before);
+});
+
+test("doctor says when the reader scan is incomplete, and finds readers through an alias", async () => {
+  // Second-family review: scan failures became "no registered project
+  // reads it", and a reader reaching the store through a symlinked
+  // directory was missed.
+  const fixture = await setUp();
+  // app-a reaches the store through a symlinked directory instead.
+  const alias = join(fixture.home, "hack-alias");
+  await symlink(fixture.hackHome, alias);
+  await writeFile(
+    join(fixture.reader.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-a",
+      dev_host: "app-a.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: {
+            path: join(alias, "secrets.enc.json"),
+            keyPath: fixture.keyPath,
+          },
+        },
+      },
+    })}\n`
+  );
+  const aliased = await inspect(fixture.bystander, "app-b");
+  expect(aliased[0]?.message).toContain(
+    "Registered projects that read it: app-a."
+  );
+
+  // A registered project whose config cannot be parsed is not "does not read it".
+  await writeFile(join(fixture.reader.projectDir, "hack.config.json"), "{ bad");
+  const partial = await inspect(fixture.bystander, "app-b");
+  expect(partial[0]?.message).toContain(
+    "No checked registered project reads it, but 1 registered project(s) could not be checked"
+  );
+  expect(partial[0]?.message).not.toContain("No registered project reads it.");
 });

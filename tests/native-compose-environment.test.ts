@@ -215,6 +215,110 @@ test("a default combined with a private source stays private after file bindings
   expect(input.normalizedComposeJson).not.toContain(DOTENV);
 });
 
+test.each([
+  {
+    field: "command",
+    authored: [
+      "echo",
+      "${HOST:-localhost}",
+      "${HOST:+present}",
+      "${OTHER:+${HOST}}",
+      "${HOST:-$$LITERAL}",
+      "${COMPOSE_PROJECT_NAME}",
+      "${OTHER:-untouched}",
+      "$$HOST",
+    ],
+    expected: [
+      "echo",
+      "localhost",
+      "",
+      "",
+      "$$LITERAL",
+      "${COMPOSE_PROJECT_NAME}",
+      "${OTHER:-untouched}",
+      "$$HOST",
+    ],
+  },
+  {
+    field: "command",
+    authored: "echo ${HOST:-localhost}",
+    expected: "echo localhost",
+  },
+  { field: "entrypoint", authored: ["${HOST:-echo}"], expected: ["echo"] },
+  { field: "entrypoint", authored: "${HOST:-echo}", expected: "echo" },
+  { field: "user", authored: "${HOST:-1000}", expected: "1000" },
+  {
+    field: "healthcheck",
+    authored: { test: ["CMD", "echo", "${HOST:-healthy}"] },
+    expected: { test: ["CMD", "echo", "healthy"] },
+  },
+  {
+    field: "healthcheck",
+    authored: { test: "echo ${HOST:-healthy}" },
+    expected: { test: "echo healthy" },
+  },
+  {
+    field: "extra_hosts",
+    authored: ["relay.hack:${HOST:-host-gateway}"],
+    expected: ["relay.hack:host-gateway"],
+  },
+  {
+    field: "extra_hosts",
+    authored: { "relay.hack": "${HOST:-host-gateway}" },
+    expected: { "relay.hack": "host-gateway" },
+  },
+])("public executable defaults use project context before file bindings (%s)", async ({
+  field,
+  authored,
+  expected,
+}) => {
+  const f = await fixture({ env_file: "service.env", [field]: authored });
+  await f.source("service.env", `HOST=${FILE}\n`);
+  const first = await prepareNativeProjectInput(f);
+  expect(publicService(first)[field]).toEqual(expected);
+  expect(first.shellEnvironment).toEqual({ app: { HOST: FILE } });
+  expect(first.normalizedComposeJson).not.toContain(FILE);
+  await f.source("service.env", `HOST=${DOTENV}\n`);
+  const second = await prepareNativeProjectInput(f);
+  expect(second.normalizedComposeJson).toBe(first.normalizedComposeJson);
+  expect(second.shellEnvironment).toEqual({ app: { HOST: DOTENV } });
+});
+
+test.each([
+  "COMPOSE_PROJECT_NAME",
+  "AWS_REGION",
+  "MANAGED",
+])("public defaults cannot freeze runtime-bound %s into a different value", async (name) => {
+  const f = await fixture({
+    env_file: "service.env",
+    command: ["echo", `\${HOST:-localhost}/\${${name}:-fallback}`],
+  });
+  await f.source("service.env", `HOST=${FILE}\n`);
+  await managed(f.projectDir, { app: { MANAGED } });
+  const error: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(String(error)).toContain(name);
+  expect(String(error)).toContain("runtime-bound");
+  expect(String(error)).not.toContain(FILE);
+  expect(String(error)).not.toContain(MANAGED);
+});
+
+test("public executable defaults still refuse a defined project source beside a file binding", async () => {
+  const f = await fixture({
+    env_file: "service.env",
+    command: ["echo", "${HOST:-localhost}/${SOURCE}"],
+  });
+  await f.source("service.env", `HOST=${FILE}\n`);
+  await f.source(".env", `SOURCE=${DOTENV}\n`);
+  const error: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(String(error)).toContain("SOURCE");
+  expect(String(error)).not.toContain(FILE);
+  expect(String(error)).not.toContain(DOTENV);
+});
+
 test("env-file-local cloud values resolve without reading cloud shell values", async () => {
   const f = await fixture({ env_file: ["one.env", "two.env"] });
   await f.source(

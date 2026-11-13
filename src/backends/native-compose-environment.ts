@@ -129,16 +129,18 @@ function fileSpecs(value: unknown, service: string): FileSpec[] {
   });
 }
 
-/** Reject a public expression if resolving it would consult a private source. */
+/** Reject private interpolation; optionally freeze defaults before file names gain ownership. */
 function checkPublicFields(opts: {
   readonly value: unknown;
   readonly lookup: Sources["lookup"];
   readonly service?: string;
   readonly field?: string;
-}): void {
+  readonly fileBindings?: ReadonlySet<string>;
+  readonly managedNames?: ReadonlySet<string>;
+}): unknown {
   if (typeof opts.value === "string") {
     try {
-      interpolateComposeEnvironment({
+      const expanded = interpolateComposeEnvironment({
         text: opts.value,
         lookup: (name) => {
           if (opts.lookup(name) !== undefined) {
@@ -152,6 +154,21 @@ function checkPublicFields(opts: {
           return undefined;
         },
       });
+      const references = composeEnvironmentReferences(opts.value);
+      if ([...references].some((name) => opts.fileBindings?.has(name))) {
+        const runtimeName = [...references].find(
+          (name) => !shellVariableReadable(name) || opts.managedNames?.has(name)
+        );
+        if (runtimeName !== undefined) {
+          throw new NativeEnvFileRefusal({
+            source: "Compose public field",
+            service: opts.service,
+            field: opts.field,
+            reason: `variable ${runtimeName} cannot combine runtime-bound interpolation with a file-backed default`,
+          });
+        }
+        return expanded.replaceAll("$", () => "$$");
+      }
     } catch (error: unknown) {
       if (error instanceof NativeEnvFileRefusal) {
         throw error;
@@ -164,20 +181,24 @@ function checkPublicFields(opts: {
       });
     }
   } else if (Array.isArray(opts.value)) {
-    for (const value of opts.value) {
+    return opts.value.map((value) => {
       if (
         opts.field === "volumes" &&
         (nativeAwsCredentialMount(value) || nativeGcloudCredentialMount(value))
       ) {
-        continue;
+        return value;
       }
-      checkPublicFields({ ...opts, value });
-    }
+      return checkPublicFields({ ...opts, value });
+    });
   } else if (isRecord(opts.value)) {
-    for (const value of Object.values(opts.value)) {
-      checkPublicFields({ ...opts, value });
-    }
+    return Object.fromEntries(
+      Object.entries(opts.value).map(([key, value]) => [
+        key,
+        checkPublicFields({ ...opts, value }),
+      ])
+    );
   }
+  return opts.value;
 }
 
 function ignoredExtension(field: string): boolean {
@@ -670,6 +691,11 @@ async function normalizeService(opts: {
     fileBindings.add(key);
   }
   resolveFileBindingDefaults({ environment, resolution, fileBindings });
+  resolvePublicFileBindingDefaults({
+    document,
+    context: opts.context,
+    fileBindings,
+  });
   if (specs.length > 0 || resolution.changed) {
     document.environment = environment;
   }
@@ -679,6 +705,41 @@ async function normalizeService(opts: {
   }
   Reflect.deleteProperty(document, "env_file");
   return resolution.delivered;
+}
+
+/** Only executable fields consumed by the runtime get a frozen public default. */
+function resolvePublicFileBindingDefaults(opts: {
+  readonly document: Record<string, unknown>;
+  readonly context: ServiceContext;
+  readonly fileBindings: ReadonlySet<string>;
+}): void {
+  if (opts.fileBindings.size === 0) {
+    return;
+  }
+  const managedNames = new Set(Object.keys(opts.context.managed));
+  const prepare = (value: unknown, field: string) =>
+    checkPublicFields({
+      value,
+      field,
+      service: opts.context.name,
+      lookup: opts.context.lookup,
+      fileBindings: opts.fileBindings,
+      managedNames,
+    });
+  for (const field of ["command", "entrypoint", "user", "extra_hosts"]) {
+    if (Object.hasOwn(opts.document, field)) {
+      opts.document[field] = prepare(opts.document[field], field);
+    }
+  }
+  if (
+    isRecord(opts.document.healthcheck) &&
+    Object.hasOwn(opts.document.healthcheck, "test")
+  ) {
+    opts.document.healthcheck.test = prepare(
+      opts.document.healthcheck.test,
+      "healthcheck.test"
+    );
+  }
 }
 
 /**

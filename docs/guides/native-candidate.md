@@ -4011,7 +4011,9 @@ This does not isolate values from other processes running as the same container
 user, which already share access to the command's environment.
 
 Interactive managed-env exec refuses if fresh delivery is unavailable; it does
-not reuse mounted startup values. Finite exec retains its existing behavior.
+not reuse mounted startup values. This requirement applies only to the selected
+service: a peer service with no managed values still uses ordinary interactive exec.
+Finite exec retains its existing behavior.
 
 An interactive command's exit code does not prove its descendants are gone. Hack
 retains a value-free session receipt and prints `session_cleanup_uncertain` with
@@ -4037,6 +4039,8 @@ On the built current-branch runtime and CLI, exercise authored and adopted servi
 - Fresh adopted env with a synthetic canary and detach-control bytes; no private
   bytes echo, the intended command receives the values, and an old launcher refuses
   before delivery.
+- In a mixed adopted project, interactive exec also works on a service without
+  managed values while another service has a managed environment.
 
 Linux PTY and fake-Engine tests do not qualify these real Engine/VM effects.
 

@@ -82,12 +82,6 @@ pub(super) fn interactive(
     let deadline = Instant::now() + options.timeout;
     let engine = Engine::connect_command_until(candidate, deadline)?;
     let (receipt, root) = load(candidate, &engine, options.run)?;
-    if receipt.environment_attached && managed.is_none() {
-        return Err(error(
-            "interactive_exec_environment_required",
-            "Interactive exec requires fresh selected-service environment delivery; no startup-environment fallback was attempted.",
-        ));
-    }
     super::startup::require_dependency_rebind_complete(&root, &receipt)?;
     let pending = root
         .join("state.pending")
@@ -100,6 +94,7 @@ pub(super) fn interactive(
         .filter(|s| crate::provider::engine::log_follow::valid_timestamp(s))
         .ok_or_else(refused)?
         .to_owned();
+    let mounted_slot = interactive_environment_slot(&container, managed.is_some())?;
     let slot = if receipt.environment_attached {
         crate::provider::environment_recovery::active_exec_slot(
             candidate,
@@ -107,17 +102,11 @@ pub(super) fn interactive(
             &receipt.run,
             options.service,
             &resource.name,
-            mounted_environment_slot(&container)?.as_deref(),
+            mounted_slot.as_deref(),
         )?
     } else {
         None
     };
-    if managed.is_none() && slot.is_some() && !options.argv[0].starts_with('/') {
-        #[cfg(feature = "environment-launcher")]
-        require_current_launcher(&container, &super::launcher::current_source())?;
-        #[cfg(not(feature = "environment-launcher"))]
-        return Err(refused());
-    }
     let argv = if let Some(managed) = managed {
         #[cfg(feature = "environment-launcher")]
         {
@@ -353,6 +342,24 @@ fn require_current_launcher(container: &Value, source: &str) -> Result<(), Candi
     Ok(())
 }
 
+/// A peer service's allocation cannot require fresh delivery for this container.
+/// Attached values still require a fresh envelope; partial mounts never count as absence.
+#[cfg(any(target_os = "macos", test))]
+fn interactive_environment_slot(
+    container: &Value,
+    fresh: bool,
+) -> Result<Option<String>, CandidateError> {
+    let slot = mounted_environment_slot(container)?;
+    managed_exec_argv(container, slot.as_deref(), &["/bin/true".into()])?;
+    if slot.is_some() && !fresh {
+        return Err(error(
+            "interactive_exec_environment_required",
+            "Interactive exec requires fresh selected-service environment delivery; no startup-environment fallback was attempted.",
+        ));
+    }
+    Ok(slot)
+}
+
 /// Infer only from the exact inspected container, never historical run inventory.
 fn mounted_environment_slot(container: &Value) -> Result<Option<String>, CandidateError> {
     let mounts = container["HostConfig"]["Mounts"]
@@ -511,6 +518,42 @@ mod tests {
         let plain = json!({"HostConfig":{"Mounts":[]}});
         assert_eq!(managed_exec_argv(&plain, None, &args).unwrap(), args);
         assert!(managed_exec_argv(&plain, Some(slot), &args).is_err());
+    }
+    #[test]
+    fn interactive_fresh_delivery_depends_on_selected_container_mounts() {
+        let slot = format!(
+            "hack-env-lease-dddddddd-dddd-4ddd-8ddd-dddddddddddd-{}",
+            "a".repeat(32)
+        );
+        let managed = json!({"HostConfig":{"Mounts":[
+            {"Type":"bind","Source":format!("/storage/hack-environment-launcher/{}", "a".repeat(64)),"Target":"/run/hack-environment-launcher","ReadOnly":true},
+            {"Type":"bind","Source":format!("/run/{slot}/values.json"),"Target":"/run/hack-environment.json","ReadOnly":true},
+            {"Type":"bind","Source":format!("/run/{slot}/expires"),"Target":"/run/hack-environment.expires","ReadOnly":true}
+        ]}});
+        let plain = json!({"HostConfig":{"Mounts":[]}});
+        // Both services may share a graph whose environment_attached bit is true.
+        assert_eq!(interactive_environment_slot(&plain, false).unwrap(), None);
+        assert_eq!(
+            interactive_environment_slot(&managed, false)
+                .unwrap_err()
+                .code,
+            "interactive_exec_environment_required"
+        );
+        assert_eq!(
+            interactive_environment_slot(&managed, true).unwrap(),
+            Some(slot)
+        );
+        for fresh in [false, true] {
+            let mut partial = managed.clone();
+            partial["HostConfig"]["Mounts"]
+                .as_array_mut()
+                .unwrap()
+                .remove(1);
+            assert!(interactive_environment_slot(&partial, fresh).is_err());
+            let mut writable = managed.clone();
+            writable["HostConfig"]["Mounts"][1]["ReadOnly"] = json!(false);
+            assert!(interactive_environment_slot(&writable, fresh).is_err());
+        }
     }
     #[test]
     fn mounted_allocation_selection_rejects_ambiguous_partial_or_escaping_mounts() {

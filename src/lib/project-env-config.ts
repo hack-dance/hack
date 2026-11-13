@@ -3323,14 +3323,32 @@ async function setLockedProjectEnvValue(opts: {
   let createdKey = false;
   let storedValue: ProjectEnvStoredValue = opts.value;
   if (opts.secret) {
-    const ensuredKey = await ensureProjectEnvSecretKey({
+    // The same key rules as hydration (HACK-2169): every secret already in
+    // this layer must open with the key readers use, and a key is never
+    // created while only HACK_ENV_SECRET_KEY is set (the new file would
+    // shadow it, so existing secrets would stop decrypting). Checked before
+    // any key or layer is written.
+    // The entry being replaced is left out: overwriting it (re-encrypting a
+    // value whose old ciphertext no longer opens) leaves no mixed keys.
+    const otherScopeValues = { ...(read.config.values[scope] ?? {}) };
+    delete otherScopeValues[opts.key];
+    const resolvedKey = await resolveProjectEnvHydrationKey({
       projectRoot: opts.projectRoot,
+      config: {
+        ...read.config,
+        values: { ...read.config.values, [scope]: otherScopeValues },
+      },
+      secret: true,
+      refuse: projectEnvSetKeyRefusal,
     });
-    createdKey = ensuredKey.created;
+    if (resolvedKey.keyText === null) {
+      throw projectEnvSetKeyRefusal("wrong_key");
+    }
+    createdKey = resolvedKey.createdKey;
     storedValue = stableProjectEnvSecretValue({
       previous: read.config.values[scope]?.[opts.key],
       plaintext: opts.value,
-      keyText: ensuredKey.keyText,
+      keyText: resolvedKey.keyText,
     });
   }
   if (opts.local === true) {
@@ -3654,7 +3672,7 @@ export async function hydrateProjectEnvLocalLayer(opts: {
 
 type ProjectEnvHydrationRefuse = (
   reason: ProjectEnvHydrationRefusalReason
-) => ProjectEnvHydrationRefusalError;
+) => Error;
 
 async function hydrateLockedProjectEnvLayer(opts: {
   readonly projectRoot: string;
@@ -3829,6 +3847,45 @@ async function resolveProjectEnvHydrationKey(opts: {
   return { keyText: ensured.keyText, createdKey: ensured.created };
 }
 
+/**
+ * HACK-2169 (F8): legacy migration of keychain secrets never creates a key
+ * file while only `HACK_ENV_SECRET_KEY` holds the key, since the new file
+ * would shadow it and committed secrets encrypted under it would stop
+ * decrypting. Refused before any migration file is written.
+ */
+async function refuseMigrationKeyShadowingEnvironmentKey(opts: {
+  readonly projectRoot: string;
+}): Promise<void> {
+  if (!process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim()) {
+    return;
+  }
+  const fileKey = await readExistingProjectEnvKeyFileText({
+    projectRoot: opts.projectRoot,
+  });
+  if (fileKey === null) {
+    throw new ClosedCliError(
+      `Refusing legacy env migration: ${PROJECT_ENV_SECRET_KEY_ENV} is set but no ${PROJECT_ENV_KEY_FILENAME} exists, and creating one would replace that key for every layer. Store the same key in ${PROJECT_ENV_KEY_FILENAME} (owner-only, untracked) and retry. No env migration files were written.`
+    );
+  }
+}
+
+/**
+ * Closed, value-free refusals for writing a secret with `hack env add
+ * --secret` or `hack env set` (HACK-2169); the key rules are hydration's.
+ */
+function projectEnvSetKeyRefusal(
+  reason: ProjectEnvHydrationRefusalReason
+): ProjectEnvKeyRefusalError {
+  if (reason === "key_env_only") {
+    return new ProjectEnvKeyRefusalError(
+      `Refusing to store a secret: ${PROJECT_ENV_SECRET_KEY_ENV} is set but no ${PROJECT_ENV_KEY_FILENAME} exists. A new key file would be used instead of that key, so existing secrets would stop decrypting. Store the same key in ${PROJECT_ENV_KEY_FILENAME} (owner-only, untracked) and retry; nothing was written.`
+    );
+  }
+  return new ProjectEnvKeyRefusalError(
+    `Refusing to store a secret: a secret already in this env layer does not decrypt under the project env key, or no key is available, and a value encrypted under another key would leave the layer with mixed keys. Restore the matching ${PROJECT_ENV_KEY_FILENAME} (or set ${PROJECT_ENV_SECRET_KEY_ENV} to it) and retry; nothing was written. \`hack doctor\` reports the layer.`
+  );
+}
+
 /** Pure merge of imported entries into one scope; keys are reported sorted. */
 function planProjectEnvHydration(opts: {
   readonly previousScope: Readonly<Record<string, ProjectEnvStoredValue>>;
@@ -3912,6 +3969,398 @@ function canDecryptProjectEnvValue(opts: {
   } catch {
     return false;
   }
+}
+
+/** One env layer's secrets, counted against the key readers use. */
+export type ProjectEnvLayerKeyReport = {
+  readonly path: string;
+  readonly secretCount: number;
+  /** Secrets that open under the readers' key; null when no key is available. */
+  readonly openCount: number | null;
+  /** The layer, as `hack env` options select it. */
+  readonly envName: string | null;
+  readonly local: boolean;
+  /**
+   * True for a primary checkout's local layer that this linked worktree
+   * inherits: `hack env` must be run in the primary checkout to change it.
+   */
+  readonly inherited: boolean;
+  /**
+   * Names (never values) of the secrets the readers' key does not open,
+   * by scope ("global" or a service), so they can be re-entered; empty
+   * when no key is available.
+   */
+  readonly unopened: readonly {
+    readonly scope: string;
+    readonly name: string;
+  }[];
+};
+
+/**
+ * Every overlay name an env layer file in the project dir implies, for the
+ * integrity inspection: `hack.env.<name>.yaml` and
+ * `hack.env.<name>.local.yaml`, of any entry type (in-project links are
+ * supported layers; the read checks where they lead and reports anything
+ * runtime refuses, such as a directory). This adds
+ * what {@link listProjectEnvOverlayNames} leaves out: overlays that exist
+ * only as their machine-local layer, and symlinked layers. `default` and
+ * the bare local file are default layers, not overlays. Unlistable
+ * directories yield none.
+ */
+async function listProjectEnvInspectedOverlayNames(opts: {
+  readonly projectDir: string;
+}): Promise<readonly string[]> {
+  const localSuffix = `.${PROJECT_ENV_LOCAL_SEGMENT}`;
+  // Only a missing directory has no layers; any other listing failure
+  // throws, so the caller reports it instead of finding nothing.
+  const entries = await readdir(opts.projectDir, { withFileTypes: true }).catch(
+    (error: unknown) => {
+      if (isRecord(error) && error.code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+  );
+  return (
+    entries
+      // Any entry type: a directory or other non-regular entry named like a
+      // layer is an existing layer runtime refuses, so its read reports it.
+      .map((entry) => entry.name)
+      .filter(
+        (name) =>
+          name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+          name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+      )
+      .map((name) =>
+        name.slice(
+          PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
+          -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length
+        )
+      )
+      .map((name) =>
+        name.endsWith(localSuffix) ? name.slice(0, -localSuffix.length) : name
+      )
+      .filter(
+        (name) =>
+          name.length > 0 &&
+          name !== "default" &&
+          name !== PROJECT_ENV_LOCAL_SEGMENT
+      )
+  );
+}
+
+/**
+ * Read-only (HACK-2169): for every committed and machine-local env layer of
+ * this project, how many secrets it holds and how many open under the key
+ * readers would use (key file, else `HACK_ENV_SECRET_KEY`). Nothing is
+ * created, copied or decrypted into the result: it carries counts and the
+ * names of secrets that do not open, never a value. Absent layers and
+ * layers without secrets are left out. A layer that exists but cannot be
+ * read or parsed, a directory that cannot be listed, and inheritance that
+ * cannot be resolved are returned as `failures`, never as "no secrets",
+ * so a caller cannot report success for what it did not inspect.
+ */
+export async function inspectProjectEnvLayerKeys(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<{
+  readonly reports: readonly ProjectEnvLayerKeyReport[];
+  readonly failures: readonly ProjectEnvLayerInspectionFailure[];
+}> {
+  let fileKey: string | null = null;
+  try {
+    fileKey = await readExistingProjectEnvKeyFileText({
+      projectRoot: opts.projectRoot,
+    });
+  } catch {
+    // A refused key file is reported by the env key check; no key here.
+    fileKey = null;
+  }
+  const readerKey =
+    fileKey ?? (process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() || null);
+  const reports: ProjectEnvLayerKeyReport[] = [];
+  const listed = await listInspectedProjectEnvLayers(opts);
+  const failures: ProjectEnvLayerInspectionFailure[] = [...listed.failures];
+  for (const layer of listed.layers) {
+    // Each layer is read the way runtime reads it. Absent is nothing to
+    // check; one that exists but runtime refuses or cannot read is a
+    // failure, as is one that does not parse.
+    let text: string | null;
+    try {
+      text = await layer.read();
+    } catch {
+      failures.push({
+        path: layer.path,
+        inherited: layer.inherited,
+        what: "layer",
+      });
+      continue;
+    }
+    if (text === null) {
+      continue;
+    }
+    const report = projectEnvLayerKeyReport({ ...layer, text, readerKey });
+    if (report === "unparsed") {
+      failures.push({
+        path: layer.path,
+        inherited: layer.inherited,
+        what: "layer",
+      });
+    } else if (report !== null) {
+      reports.push(report);
+    }
+  }
+  return { reports, failures };
+}
+
+/**
+ * What the layer inspection could not check (HACK-2169), value-free: a
+ * layer that exists but cannot be read or parsed, a directory whose layers
+ * cannot be listed, or a linked worktree whose inherited layers cannot be
+ * resolved.
+ */
+export type ProjectEnvLayerInspectionFailure = {
+  readonly path: string;
+  readonly inherited: boolean;
+  readonly what: "layer" | "directory" | "inheritance";
+};
+
+type InspectedProjectEnvLayer = {
+  readonly path: string;
+  readonly envName: string | null;
+  readonly local: boolean;
+  readonly inherited: boolean;
+  readonly read: () => Promise<string | null>;
+};
+
+/**
+ * The layers runtime may read for this checkout, each with runtime's read:
+ * the committed and machine-local layers of every overlay found here, and,
+ * in a linked worktree that inherits local inputs, the primary checkout's
+ * local default and overlay layers (read with the same inheritance guards).
+ */
+async function listInspectedProjectEnvLayers(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<{
+  readonly layers: readonly InspectedProjectEnvLayer[];
+  readonly failures: readonly ProjectEnvLayerInspectionFailure[];
+}> {
+  const failures: ProjectEnvLayerInspectionFailure[] = [];
+  const listingFailed = () => {
+    if (!failures.some((failure) => failure.path === opts.projectDir)) {
+      failures.push({
+        path: opts.projectDir,
+        inherited: false,
+        what: "directory",
+      });
+    }
+    return [] as readonly string[];
+  };
+  const committedOverlays = await listProjectEnvOverlayNames({
+    projectDir: opts.projectDir,
+  }).catch(listingFailed);
+  // An overlay may exist only as its machine-local layer (`env set --env
+  // <name> --local` writes no committed file), or as a symlinked layer;
+  // inspect those too.
+  const overlays = [
+    ...new Set([
+      ...committedOverlays,
+      ...(await listProjectEnvInspectedOverlayNames(opts).catch(listingFailed)),
+    ]),
+  ];
+  const layers = new Map<string, InspectedProjectEnvLayer>();
+  // The first label for a path wins, and the default layers come first.
+  // Defensive: overlay discovery already leaves out `local` in a non-legacy
+  // project, so no overlay path can collide with a default layer today;
+  // this keeps a default layer's `--local` advice correct if that changes.
+  const addLayer = (layer: Omit<InspectedProjectEnvLayer, "read">) => {
+    if (!layers.has(layer.path)) {
+      layers.set(layer.path, {
+        ...layer,
+        read: () =>
+          readProjectEnvLayerText({
+            projectRoot: opts.projectRoot,
+            path: layer.path,
+            strictRead: true,
+          }),
+      });
+    }
+  };
+  for (const envName of [null, ...overlays]) {
+    addLayer({
+      path: resolveProjectEnvConfigPath({
+        projectDir: opts.projectDir,
+        envName,
+      }),
+      envName,
+      local: false,
+      inherited: false,
+    });
+    // The file `hack env set/unset --local` acts on, including a
+    // legacy-compatible local default layer.
+    addLayer({
+      path: await resolveProjectEnvEffectiveLocalConfigPath({
+        ...opts,
+        envName,
+      }).catch(() =>
+        resolveProjectEnvLocalConfigPath({
+          projectDir: opts.projectDir,
+          envName,
+        })
+      ),
+      envName,
+      local: true,
+      inherited: false,
+    });
+  }
+  const inherited = await listInheritedProjectEnvLayers({ ...opts, overlays });
+  return {
+    layers: [...layers.values(), ...inherited.layers],
+    failures: [...failures, ...inherited.failures],
+  };
+}
+
+/**
+ * The primary checkout's local layers a linked worktree inherits, as
+ * `readProjectEnvLayers` selects them: its effective local default layer
+ * and the local layer of each overlay name (this checkout's and the
+ * primary's own). None outside a linked worktree that inherits.
+ */
+async function listInheritedProjectEnvLayers(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly overlays: readonly string[];
+}): Promise<{
+  readonly layers: readonly InspectedProjectEnvLayer[];
+  readonly failures: readonly ProjectEnvLayerInspectionFailure[];
+}> {
+  let primaryDir: string | null;
+  try {
+    primaryDir = await resolvePrimaryLocalProjectDir(opts);
+  } catch {
+    // Runtime refuses the same way; what it would inherit is unknown.
+    return {
+      layers: [],
+      failures: [
+        { path: opts.projectDir, inherited: true, what: "inheritance" },
+      ],
+    };
+  }
+  if (primaryDir === null) {
+    return { layers: [], failures: [] };
+  }
+  const primaryRoot = dirname(primaryDir);
+  const failures: ProjectEnvLayerInspectionFailure[] = [];
+  const primaryOverlays = await listProjectEnvInspectedOverlayNames({
+    projectDir: primaryDir,
+  }).catch(() => {
+    failures.push({ path: primaryDir, inherited: true, what: "directory" });
+    return [] as readonly string[];
+  });
+  const read = (path: string) => async () => {
+    await assertProjectEnvLayerPath({ projectRoot: primaryRoot, path });
+    await validatePrimaryLocalFile(path);
+    return await readPrimaryLocalFile(path);
+  };
+  // Resolving the primary's local default checks its path (runtime does
+  // the same and refuses); a failure is reported, never taken as absent.
+  const defaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
+    projectRoot: primaryRoot,
+    projectDir: primaryDir,
+    envName: null,
+  }).catch(() => {
+    failures.push({
+      path: resolveProjectEnvLocalConfigPath({
+        projectDir: primaryDir,
+        envName: null,
+      }),
+      inherited: true,
+      what: "layer",
+    });
+    return null;
+  });
+  const layers: InspectedProjectEnvLayer[] =
+    defaultPath === null
+      ? []
+      : [
+          {
+            path: defaultPath,
+            envName: null,
+            local: true,
+            inherited: true,
+            read: read(defaultPath),
+          },
+        ];
+  for (const envName of new Set([...opts.overlays, ...primaryOverlays])) {
+    const path = resolveProjectEnvLocalConfigPath({
+      projectDir: primaryDir,
+      envName,
+    });
+    layers.push({
+      path,
+      envName,
+      local: true,
+      inherited: true,
+      read: read(path),
+    });
+  }
+  return { layers, failures };
+}
+
+/**
+ * One layer's secret counts against the readers' key; null without
+ * secrets, `unparsed` when the text is not a valid env layer.
+ */
+function projectEnvLayerKeyReport(opts: {
+  readonly path: string;
+  readonly envName: string | null;
+  readonly local: boolean;
+  readonly inherited: boolean;
+  readonly text: string;
+  readonly readerKey: string | null;
+}): ProjectEnvLayerKeyReport | "unparsed" | null {
+  const read = parseProjectEnvConfigText({
+    path: opts.path,
+    environment: "default",
+    text: opts.text,
+  });
+  if (read.parseError !== undefined) {
+    return "unparsed";
+  }
+  const secrets = Object.entries(read.config.values).flatMap(
+    ([scope, scopeValues]) =>
+      Object.entries(scopeValues).flatMap(([name, value]) =>
+        value !== null && isProjectEnvSecretValue(value)
+          ? [{ scope, name, value }]
+          : []
+      )
+  );
+  if (secrets.length === 0) {
+    return null;
+  }
+  const readerKey = opts.readerKey;
+  const unopened =
+    readerKey === null
+      ? []
+      : secrets
+          .filter(
+            (secret) =>
+              !canDecryptProjectEnvValue({
+                ciphertext: secret.value.secure,
+                keyText: readerKey,
+              })
+          )
+          .map(({ scope, name }) => ({ scope, name }));
+  return {
+    path: opts.path,
+    envName: opts.envName,
+    local: opts.local,
+    inherited: opts.inherited,
+    secretCount: secrets.length,
+    openCount: readerKey === null ? null : secrets.length - unopened.length,
+    unopened,
+  };
 }
 
 /**
@@ -5900,9 +6349,15 @@ export async function migrateLegacyProjectEnv(opts: {
     projectDir: opts.projectDir,
     overlayNames,
   });
-  const keyInfo = baseResolved.values.some(
+  const migratesSecrets = baseResolved.values.some(
     (value) => value.source === "keychain"
-  )
+  );
+  if (migratesSecrets) {
+    await refuseMigrationKeyShadowingEnvironmentKey({
+      projectRoot: opts.projectRoot,
+    });
+  }
+  const keyInfo = migratesSecrets
     ? await ensureProjectEnvSecretKey({ projectRoot: opts.projectRoot })
     : null;
   if (

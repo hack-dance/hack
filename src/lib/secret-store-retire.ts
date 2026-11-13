@@ -123,6 +123,12 @@ export async function listProjectsUsingSecretStore(opts: {
   // of their own, and each can have its own env contract and store config:
   // every checkout is a context of its own.
   for (const project of projects.flatMap(registeredCheckouts)) {
+    // A checkout that is not there (an unmounted volume, a moved repo) has
+    // no config or contract to read, which is not "does not read it".
+    if (!(await stat(project.projectDir).catch(() => null))?.isDirectory()) {
+      unchecked += 1;
+      continue;
+    }
     let location: Awaited<ReturnType<typeof resolveFileSecretStorePaths>>;
     try {
       if (

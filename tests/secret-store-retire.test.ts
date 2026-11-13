@@ -1184,3 +1184,32 @@ test("a registered worktree that reads the store is named, even when its primary
     "1 registered project(s) could not be checked"
   );
 });
+
+test("a registered checkout that is not available counts as unchecked", async () => {
+  // Codex review: a missing project directory (an unmounted volume) read
+  // as a checkout with no config and no contract, so a non-reader.
+  const fixture = await setUp();
+  const registry = join(fixture.hackHome, "projects.json");
+  const parsed = JSON.parse(await readFile(registry, "utf8")) as {
+    projects: { name: string; worktrees?: unknown[] }[];
+  };
+  for (const project of parsed.projects) {
+    if (project.name === "app-a") {
+      project.worktrees = [
+        {
+          path: join(root, "unmounted", "app-a-feature"),
+          branch: "feature",
+          lastSeenAt: "2026-11-13T12:00:00.000Z",
+        },
+      ];
+    }
+  }
+  await writeFile(registry, JSON.stringify(parsed));
+  const finding = (await inspect(fixture.bystander, "app-b"))[0];
+  expect(finding?.message).toContain(
+    "Registered projects that read it: app-a."
+  );
+  expect(finding?.message).toContain(
+    "1 registered project(s) could not be checked"
+  );
+});

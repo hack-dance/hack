@@ -1,4 +1,5 @@
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
+import { childEnvironment } from "./child-environment.ts";
 import { isRecord } from "./guards.ts";
 import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
 import { waitNativeComposeReady } from "./native-compose-wait-ready.ts";
@@ -1484,7 +1485,7 @@ export function createNativeComposeProbe(
         stdout: "pipe",
         stderr: "pipe",
         detached: ownsProcessGroup,
-        env: environment,
+        env: childEnvironment(environment),
       });
     } catch {
       probeRefused("E_NATIVE_COMPOSE_PROBE", "operation");

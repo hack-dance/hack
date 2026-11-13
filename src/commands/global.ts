@@ -1718,6 +1718,7 @@ export async function maybeOfferMacHackdLaunchdInstall(): Promise<void> {
   const exit = await run(
     [invocation.bin, ...invocation.args, "daemon", "install"],
     {
+      hackReexec: true,
       stdin: "inherit",
     }
   );
@@ -1776,6 +1777,7 @@ async function ensureHackdForGlobalUp(): Promise<void> {
   const daemonExit = await run(
     [invocation.bin, ...invocation.args, "daemon", "start"],
     {
+      hackReexec: true,
       stdin: "ignore",
     }
   );

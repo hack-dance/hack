@@ -14,6 +14,7 @@
  */
 import { realpath, stat } from "node:fs/promises";
 import { dirname } from "node:path";
+import { childEnvironment } from "./child-environment.ts";
 import { run } from "./shell.ts";
 import {
   VETTED_HELPER_PATH,
@@ -116,7 +117,7 @@ const spawnWithInput: InputRunner = async (argv, opts) => {
     stdin: new Blob([opts.input.slice()]),
     stdout: "inherit",
     stderr: "inherit",
-    env: { ...opts.env },
+    env: childEnvironment({ ...opts.env }),
   });
   return await proc.exited;
 };

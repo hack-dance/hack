@@ -1,7 +1,7 @@
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Unsupported experimental supervisor commands remain an explicit gateway-facing control surface.
 import { isAbsolute, resolve } from "node:path";
-
 import { requestDaemonJson } from "../../../daemon/client.ts";
+import { hackReexecEnvironment } from "../../../lib/child-environment.ts";
 import { resolveGlobalConfigPath } from "../../../lib/config-paths.ts";
 import { isRecord } from "../../../lib/guards.ts";
 import { resolveHackInvocation } from "../../../lib/hack-cli.ts";
@@ -1487,6 +1487,7 @@ async function runHackCommand(opts: {
   const proc = Bun.spawn(
     [opts.invocation.bin, ...opts.invocation.args, ...opts.argv],
     {
+      env: hackReexecEnvironment(),
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",

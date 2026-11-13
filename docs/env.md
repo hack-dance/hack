@@ -70,6 +70,8 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.internal/`
 - `.branch/`
 - `.env`
+- `.env.*` (legacy plaintext overlays such as `.env.qa`; `.env.example`,
+  `.env.sample`, `.env.template` and `.env.dist` remain visible as shared templates)
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
@@ -78,8 +80,14 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 
 How it is maintained:
 
+Tracked legacy overlays are shared project inputs. `hack doctor --fix` leaves
+their index entries and tracked templates/backups alone. Run
+`hack doctor --migrate-env-config` to preserve overlay values before considering
+removal; committing an automatic index removal would delete teammates' copies.
+
 - created by `hack init` for a new project, and refreshed when you write
   machine-local env overrides (`hack env set --local`, `hack env hydrate`)
+
 - in an existing project without it (for example one an earlier Hack version
   initialized), `hack doctor` reports the "hack gitignore" check as a warning,
   and `hack doctor --fix` creates the file, or restores its managed block,
@@ -146,6 +154,14 @@ How it is maintained:
   refused
 - older repos that added `.hack/.internal/` to the root `.gitignore` keep
   working; the entries are equivalent and nothing is removed
+
+Existing projects gain the `.env.*` entry on the next operation that maintains
+these rules, including the local `info/exclude` maintenance on runtime commands
+and legacy env writes. `.env.state.json` remains ignored and is still reported
+when tracked. `hack doctor` also reports tracked or unignored legacy overlays;
+ignore rules do not remove files that Git already tracks. The legacy daemon
+`POST /v1/env/set` and `POST /v1/env/unset` routes refuse projects with YAML env layers with
+`yaml_env_mutation_unsupported`; use `hack env set` or `hack env add` for them.
 
 Leak detection and repair:
 
@@ -1479,7 +1495,10 @@ when the env layers now deliver every entry it holds for this project and it hol
 another; otherwise it keeps the store and names the entries that would be lost, never their
 values. A store it can't list (its key isn't available, it can't be read, or the backend is
 the keychain) is kept too. A store key file inside the project is offered only when no store
-that needs it stays behind. While a store exists, the migration keeps its pointer in
+that needs it stays behind. Project env keys (including the shared Git key), current
+YAML layers and project config files are never legacy cleanup targets, even when
+an old backend configuration names the same file. Cleanup refuses a request that
+includes one, because migrated values may still depend on it. While a store exists, the migration keeps its pointer in
 `hack.config.json` (`controlPlane.secrets.encryptedFile` and `backend: encrypted_file`) on
 every route, including implicit ones such as `hack env add`, so entries it still holds stay
 readable through the secret store without hand edits; Hack reports the kept pointer with the

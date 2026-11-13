@@ -47,9 +47,13 @@ export async function collectUpgradeSnapshotTargets(): Promise<{
     readonly reason: "symlink" | "not-a-file" | "unreadable";
   }[];
   /**
-   * Checkouts whose migration write set could not be fully known, so a
-   * rollback may leave a file the migration creates: the overlays only the
-   * secret store holds cannot be listed without asking the OS keychain.
+   * What the snapshot does not cover, so it is not a complete recovery
+   * point: a registry that could not be read (no project is covered),
+   * registry records that are not valid entries, live checkouts that
+   * cannot be read, files that were skipped (a link or other entry), and
+   * checkouts whose migration write set could not be fully known (overlays
+   * only the secret store holds, when listing them would ask the keychain).
+   * Dead registry entries are left out on purpose and are not gaps.
    */
   readonly gaps: readonly { readonly name: string; readonly reason: string }[];
 }> {
@@ -66,11 +70,31 @@ export async function collectUpgradeSnapshotTargets(): Promise<{
     );
   }
   const registry = await readProjectsRegistryStrict().catch(() => null);
+  if (registry === null || registry.kind === "invalid") {
+    gaps.push({
+      name: "projects registry",
+      reason:
+        "it could not be read or is not valid, so no project's files are in this snapshot",
+    });
+  }
   if (registry?.kind === "valid") {
+    if (registry.rejected > 0) {
+      gaps.push({
+        name: "projects registry",
+        reason: `${registry.rejected} record(s) are not valid project entries, so those projects are not in this snapshot`,
+      });
+    }
     for (const project of registry.registry.projects.flatMap(
       registeredCheckouts
     )) {
-      if ((await classifyRegistryEntry(project)).state !== "live") {
+      const state = await classifyRegistryEntry(project);
+      if (state.state === "unreadable") {
+        gaps.push({
+          name: project.name,
+          reason: `the checkout cannot be read (${state.reason}), so its files are not in this snapshot`,
+        });
+      }
+      if (state.state !== "live") {
         continue;
       }
       const found = await projectCandidates({
@@ -85,6 +109,12 @@ export async function collectUpgradeSnapshotTargets(): Promise<{
     }
   }
   const { targets, skipped } = await classifyCandidates(candidates);
+  for (const entry of skipped) {
+    gaps.push({
+      name: entry.label,
+      reason: `${entry.path} was not kept (${entry.reason})`,
+    });
+  }
   return { targets, skipped, gaps };
 }
 

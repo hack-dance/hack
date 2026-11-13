@@ -114,16 +114,20 @@ hack upgrade rollback --rollback-manifest <manifest>
 ```
 
 Rollback restores each file's exact bytes and mode. A file that changed since
-the snapshot is left as it is unless you add `--overwrite`; whatever rollback
-replaces or removes is kept in the snapshot directory, never deleted.
+the snapshot is left as it is unless you add `--overwrite`. Whatever rollback
+replaces or removes is kept as itself (not as a copy) in the snapshot directory
+and named in the output; nothing is deleted. A file that appears at a path while
+rollback runs is left alone and reported as a conflict.
 `hack upgrade rollback` without a manifest lists the snapshots and changes
 nothing.
 
 The snapshot also records, as absent, the env layers the migration would
 create, so a rollback moves them aside. This includes layers for overlays held
-only in the secret store. When those overlays could not be listed without
-asking the OS keychain, the snapshot says so: a rollback may then leave such a
-layer in place. The snapshot does not cover the Git index, the daemon's login
+only in the secret store. When the snapshot cannot cover everything, it says
+so and lists what it misses (`complete: false` in `--json`). Examples are a
+projects registry it could not read, a live project it could not read, a file
+it skipped because it is a link, and overlays it could not list without asking
+the OS keychain. A rollback cannot put back what a snapshot does not hold. The snapshot does not cover the Git index, the daemon's login
 service or Docker state; the steps below still apply.
 
 ### Record the current state

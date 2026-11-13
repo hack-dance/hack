@@ -336,7 +336,7 @@ async function inspectRegistry(opts: { readonly deadline: number }): Promise<{
     rejected: 0,
   } as const;
   const read = await withDeadline(
-    readProjectsRegistryStrict().catch(() => "error" as const),
+    () => readProjectsRegistryStrict().catch(() => "error" as const),
     opts.deadline
   );
   if (read === "timeout" || read === "error" || read.kind !== "valid") {
@@ -354,12 +354,13 @@ async function inspectRegistry(opts: { readonly deadline: number }): Promise<{
     CLASSIFY_CONCURRENCY,
     async (checkout) => {
       const state = await withDeadline(
-        classifyRegistryEntry(checkout).catch(
-          (): RegistryEntryState => ({
-            state: "unreadable",
-            reason: "it could not be read",
-          })
-        ),
+        () =>
+          classifyRegistryEntry(checkout).catch(
+            (): RegistryEntryState => ({
+              state: "unreadable",
+              reason: "it could not be read",
+            })
+          ),
         opts.deadline
       );
       return { checkout, state };
@@ -547,8 +548,12 @@ async function inspectMachine(opts: {
   findings.push(
     pathHackFinding({ probe: pathHack, cliVersion: opts.cliVersion })
   );
-  findings.push(daemonFinding(daemon));
-  findings.push(...infraFindings({ docker, infra, proxy }));
+  // A probe that failed (not one disabled on purpose, which is reported
+  // once above) leaves its check unperformed: incomplete.
+  const unperformed: UpgradeFindingStatus =
+    probes.disabled === true ? "warn" : "incomplete";
+  findings.push(daemonFinding(daemon, unperformed));
+  findings.push(...infraFindings({ docker, infra, proxy, unperformed }));
   if (linuxDns !== null) {
     // Before `hack global install` runs, it sets the route up too.
     findings.push(
@@ -561,7 +566,7 @@ async function inspectMachine(opts: {
             args: null,
             action: null,
           }
-        : linuxDnsFinding(linuxDns)
+        : linuxDnsFinding(linuxDns, unperformed)
     );
   }
   findings.push(
@@ -594,12 +599,13 @@ function pathHackFinding(opts: {
 }
 
 function daemonFinding(
-  daemon: Awaited<ReturnType<UpgradeCheckProbes["daemon"]>> | null
+  daemon: Awaited<ReturnType<UpgradeCheckProbes["daemon"]>> | null,
+  unperformed: UpgradeFindingStatus
 ): UpgradeFinding {
   if (daemon === null) {
     return {
       id: "daemon",
-      status: "warn",
+      status: unperformed,
       summary: "Not checked: the daemon service could not be read.",
       args: ["daemon", "status"],
       action: null,
@@ -624,57 +630,17 @@ function daemonFinding(
 }
 
 function infraFindings(opts: {
+  readonly unperformed: UpgradeFindingStatus;
   readonly docker: "reachable" | "unreachable" | "missing";
   readonly infra: Awaited<ReturnType<UpgradeCheckProbes["globalInfra"]>> | null;
   readonly proxy: Awaited<ReturnType<UpgradeCheckProbes["proxyPorts"]>> | null;
 }): UpgradeFinding[] {
   const findings: UpgradeFinding[] = [];
-  if (opts.docker !== "reachable") {
-    findings.push({
-      id: "docker",
-      status: "warn",
-      summary:
-        opts.docker === "missing"
-          ? "Docker is not installed; the Compose backend needs it."
-          : "Docker does not answer; global services and proxy ports were not checked.",
-      args: null,
-      action:
-        opts.docker === "missing"
-          ? "Install Docker Engine (or Docker Desktop on macOS)."
-          : "Start Docker, then rerun the upgrade check.",
-    });
+  const docker = dockerFinding(opts.docker);
+  if (docker !== null) {
+    findings.push(docker);
   }
-  if (opts.infra === null || !opts.infra.installed) {
-    findings.push({
-      id: "global-infra",
-      status: "warn",
-      summary:
-        opts.infra === null
-          ? "Not checked: Hack's global services could not be read."
-          : "Hack's global proxy and DNS are not installed on this machine.",
-      args: ["global", "install"],
-      action: null,
-    });
-  } else if (opts.infra.running === false) {
-    findings.push({
-      id: "global-infra",
-      status: "warn",
-      summary: "Hack's global proxy and DNS are installed but not running.",
-      args: ["global", "up"],
-      action: null,
-    });
-  } else {
-    findings.push({
-      id: "global-infra",
-      status: opts.infra.running === null ? "info" : "ok",
-      summary:
-        opts.infra.running === null
-          ? "Hack's global proxy is installed; whether it runs was not checked."
-          : "Hack's global proxy and DNS are installed and running.",
-      args: null,
-      action: null,
-    });
-  }
+  findings.push(globalInfraFinding(opts.infra, opts.unperformed));
   if (opts.proxy !== null) {
     findings.push({
       id: "proxy-ports",
@@ -687,13 +653,82 @@ function infraFindings(opts: {
   return findings;
 }
 
+function dockerFinding(
+  docker: "reachable" | "unreachable" | "missing"
+): UpgradeFinding | null {
+  if (docker === "reachable") {
+    return null;
+  }
+  return docker === "missing"
+    ? {
+        id: "docker",
+        status: "warn",
+        summary: "Docker is not installed; the Compose backend needs it.",
+        args: null,
+        action: "Install Docker Engine (or Docker Desktop on macOS).",
+      }
+    : {
+        id: "docker",
+        status: "warn",
+        summary:
+          "Docker does not answer; global services and proxy ports were not checked.",
+        args: null,
+        action: "Start Docker, then rerun the upgrade check.",
+      };
+}
+
+function globalInfraFinding(
+  infra: Awaited<ReturnType<UpgradeCheckProbes["globalInfra"]>> | null,
+  unperformed: UpgradeFindingStatus
+): UpgradeFinding {
+  const base = { id: "global-infra" } as const;
+  if (infra === null) {
+    return {
+      ...base,
+      status: unperformed,
+      summary: "Not checked: Hack's global services could not be read.",
+      args: ["global", "install"],
+      action: null,
+    };
+  }
+  if (!infra.installed) {
+    return {
+      ...base,
+      status: "warn",
+      summary: "Hack's global proxy and DNS are not installed on this machine.",
+      args: ["global", "install"],
+      action: null,
+    };
+  }
+  if (infra.running === false) {
+    return {
+      ...base,
+      status: "warn",
+      summary: "Hack's global proxy and DNS are installed but not running.",
+      args: ["global", "up"],
+      action: null,
+    };
+  }
+  return {
+    ...base,
+    status: infra.running === null ? "info" : "ok",
+    summary:
+      infra.running === null
+        ? "Hack's global proxy is installed; whether it runs was not checked."
+        : "Hack's global proxy and DNS are installed and running.",
+    args: null,
+    action: null,
+  };
+}
+
 function linuxDnsFinding(
-  inspection: Awaited<ReturnType<UpgradeCheckProbes["linuxDns"]>> | undefined
+  inspection: Awaited<ReturnType<UpgradeCheckProbes["linuxDns"]>> | undefined,
+  unperformed: UpgradeFindingStatus
 ): UpgradeFinding {
   if (inspection === undefined || inspection === null) {
     return {
       id: "linux-dns",
-      status: "warn",
+      status: unperformed,
       summary: "Not checked: the Linux DNS route could not be read.",
       args: ["doctor"],
       action: null,
@@ -767,28 +802,16 @@ async function inspectGlobalSecretStore(opts: {
   }
   if (state.kind === "opens") {
     // A reader may name its own key file: it must open the store too.
-    const readers = await readerKeyStates({
-      storePath: location.storePath,
-      globalKeyPath: location.keyPath,
-      globalState: state,
-      env: opts.env,
+    return storeOpensFinding({
+      source: state.source,
+      readers: await readerKeyStates({
+        storePath: location.storePath,
+        globalKeyPath: location.keyPath,
+        globalState: state,
+        env: opts.env,
+      }),
+      retiredNote,
     });
-    if (readers.failing.length > 0) {
-      return {
-        ...base,
-        status: "blocker",
-        summary: `The global secret store opens with ${state.source === "env" ? "HACK_SECRETS_FILE_KEY" : "its key file"}, but not with the key ${readers.failing.join(", ")} ${readers.failing.length === 1 ? "selects" : "select"} (their own encryptedFile.keyPath).`,
-        args: ["doctor"],
-        action: `Give ${readers.failing.join(", ")} the key that opens the store, or remove their own keyPath to use the global key.`,
-      };
-    }
-    return {
-      ...base,
-      status: "ok",
-      summary: `The global secret store opens with ${state.source === "env" ? "HACK_SECRETS_FILE_KEY from this shell" : "its key file"}${readers.opening.length > 0 ? `, and with the key of every project that reads it (${readers.opening.join(", ")})` : ""}.${retiredNote}`,
-      args: null,
-      action: null,
-    };
   }
   if (state.kind === "store-unreadable") {
     return {
@@ -822,17 +845,76 @@ async function inspectGlobalSecretStore(opts: {
   return storeFailureFinding({ state, readers, retiredNote });
 }
 
+/** The finding for a global store that opens with its own key, given each reader's key. */
+function storeOpensFinding(opts: {
+  readonly source: "env" | "file";
+  readonly readers: ReaderKeyStates;
+  readonly retiredNote: string;
+}): UpgradeFinding {
+  const { readers } = opts;
+  if (readers.failing.length > 0) {
+    return {
+      id: "secret-store",
+      status: "blocker",
+      summary: `The global secret store opens with ${opts.source === "env" ? "HACK_SECRETS_FILE_KEY" : "its key file"}, but not with the key ${readers.failing.join(", ")} ${readers.failing.length === 1 ? "selects" : "select"} (their own encryptedFile.keyPath).`,
+      args: ["doctor"],
+      action: `Give ${readers.failing.join(", ")} the key that opens the store, or remove their own keyPath to use the global key.`,
+    };
+  }
+  if (readers.uncertain.length > 0 || !readers.scanComplete) {
+    return uncertainReadersFinding(readers);
+  }
+  const every =
+    readers.opening.length > 0
+      ? `, and with the key of every project that reads it (${readers.opening.join(", ")})`
+      : "";
+  return {
+    id: "secret-store",
+    status: "ok",
+    summary: `The global secret store opens with ${opts.source === "env" ? "HACK_SECRETS_FILE_KEY from this shell" : "its key file"}${every}.${opts.retiredNote}`,
+    args: null,
+    action: null,
+  };
+}
+
+/**
+ * Some readers' keys fail while another configured key opens the store, or
+ * other readers' keys are unknown: fix their keys; retiring is refused (or
+ * not justified) then.
+ */
+function misconfiguredReadersFinding(readers: ReaderKeyStates): UpgradeFinding {
+  const others =
+    readers.opening.length > 0
+      ? `, though ${readers.opening.join(", ")} open${readers.opening.length === 1 ? "s" : ""} it with another key`
+      : ", and other readers' keys could not be established";
+  return {
+    id: "secret-store",
+    status: "blocker",
+    summary: `The global secret store does not open with the key${readers.failing.length === 1 ? "" : "s"} of ${readers.failing.join(", ")}${others}.`,
+    args: ["doctor"],
+    action:
+      readers.opening.length > 0
+        ? `Give ${readers.failing.join(", ")} the key that opens the store (the keyPath ${readers.opening.join(", ")} use${readers.opening.length === 1 ? "s" : ""}), or HACK_SECRETS_FILE_KEY.`
+        : "Run hack doctor to establish every reader's key before retiring or replacing the store.",
+  };
+}
+
 /** The finding for a global store whose own key does not open it, given each reader's key. */
 function storeFailureFinding(opts: {
   readonly state: Exclude<
     Awaited<ReturnType<typeof inspectStoreKeyState>>,
     { kind: "no-store" | "opens" | "store-unreadable" | "key-uninspected" }
   >;
-  readonly readers: { readonly failing: string[]; readonly opening: string[] };
+  readonly readers: ReaderKeyStates;
   readonly retiredNote: string;
 }): UpgradeFinding {
   const { state, readers, retiredNote } = opts;
   const base = { id: "secret-store" } as const;
+  const uncertain = readers.uncertain.length > 0 || !readers.scanComplete;
+  if (readers.failing.length === 0 && uncertain) {
+    // Not proven lost for anyone: never suggest retiring on uncertainty.
+    return uncertainReadersFinding(readers);
+  }
   if (readers.failing.length === 0 && readers.opening.length > 0) {
     return {
       ...base,
@@ -848,15 +930,11 @@ function storeFailureFinding(opts: {
       : " No registered project reads it.";
   const blocking: UpgradeFindingStatus =
     readers.failing.length > 0 ? "blocker" : "warn";
-  if (readers.opening.length > 0) {
-    // Retiring is refused while another configured key opens the store.
-    return {
-      ...base,
-      status: blocking,
-      summary: `The global secret store does not open with the key${readers.failing.length === 1 ? "" : "s"} of ${readers.failing.join(", ")}, though ${readers.opening.join(", ")} open${readers.opening.length === 1 ? "s" : ""} it with another key.`,
-      args: ["doctor"],
-      action: `Give ${readers.failing.join(", ")} the key that opens the store (the keyPath ${readers.opening.join(", ")} use${readers.opening.length === 1 ? "s" : ""}), or HACK_SECRETS_FILE_KEY.`,
-    };
+  if (readers.opening.length > 0 || uncertain) {
+    // Retiring is refused while another configured key opens the store,
+    // and not suggested while any reader's key is unknown. Here at least
+    // one reader's key is known to fail.
+    return misconfiguredReadersFinding(readers);
   }
   if (state.kind === "key-refused") {
     return {
@@ -897,22 +975,70 @@ async function readerKeyStates(opts: {
   readonly globalKeyPath: string;
   readonly globalState: Awaited<ReturnType<typeof inspectStoreKeyState>>;
   readonly env: Readonly<Record<string, string | undefined>>;
-}): Promise<{ readonly failing: string[]; readonly opening: string[] }> {
+}): Promise<ReaderKeyStates> {
   const found = await listSecretStoreReaders({ storePath: opts.storePath });
+  const states = new Map<
+    string,
+    Promise<Awaited<ReturnType<typeof inspectStoreKeyState>>>
+  >([[resolve(opts.globalKeyPath), Promise.resolve(opts.globalState)]]);
   const failing = new Set<string>();
   const opening = new Set<string>();
+  const uncertain = new Set<string>();
   for (const reader of found.readers) {
-    const state =
-      resolve(reader.keyPath) === resolve(opts.globalKeyPath)
-        ? opts.globalState
-        : await inspectStoreKeyState({
-            storePath: opts.storePath,
-            keyPath: reader.keyPath,
-            env: opts.env,
-          });
-    (state.kind === "opens" ? opening : failing).add(reader.name);
+    const keyPath = resolve(reader.keyPath);
+    let pending = states.get(keyPath);
+    if (pending === undefined) {
+      // One inspection per distinct key file.
+      pending = inspectStoreKeyState({
+        storePath: opts.storePath,
+        keyPath,
+        env: opts.env,
+      });
+      states.set(keyPath, pending);
+    }
+    const state = await pending;
+    if (state.kind === "opens") {
+      opening.add(reader.name);
+    } else if (
+      state.kind === "key-uninspected" ||
+      state.kind === "store-unreadable"
+    ) {
+      uncertain.add(reader.name);
+    } else {
+      failing.add(reader.name);
+    }
   }
-  return { failing: [...failing].sort(), opening: [...opening].sort() };
+  return {
+    failing: [...failing].sort(),
+    opening: [...opening].sort(),
+    uncertain: [...uncertain].sort(),
+    scanComplete: found.registryRead && found.unchecked === 0,
+  };
+}
+
+/** Readers of a store by whether the key each one selects opens it. */
+type ReaderKeyStates = {
+  readonly failing: string[];
+  readonly opening: string[];
+  /** Readers whose key could not be established (keychain not asked, unreadable). */
+  readonly uncertain: string[];
+  /** False when some registered checkouts could not be checked at all. */
+  readonly scanComplete: boolean;
+};
+
+/** The incomplete finding for readers whose key could not be established. */
+function uncertainReadersFinding(readers: ReaderKeyStates): UpgradeFinding {
+  const who =
+    readers.uncertain.length > 0
+      ? `the key of ${readers.uncertain.join(", ")} could not be established (the OS keychain was not asked, or the key file cannot be read)`
+      : "some registered checkouts could not be checked";
+  return {
+    id: "secret-store",
+    status: "incomplete",
+    summary: `Whether every project that reads the global secret store can open it is unknown: ${who}.`,
+    args: ["doctor"],
+    action: null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,15 +1151,19 @@ function buildPlan(opts: {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** `work`, or `timeout` once `deadline` (epoch ms) passes. */
+/**
+ * `start()`'s result, or `timeout` once `deadline` (epoch ms) passes. Work
+ * is not started at all when the deadline has already passed.
+ */
 async function withDeadline<T>(
-  work: Promise<T>,
+  start: () => Promise<T>,
   deadline: number
 ): Promise<T | "timeout"> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {
     return "timeout";
   }
+  const work = start();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<"timeout">((done) => {
     timer = setTimeout(() => done("timeout"), remaining);
@@ -1054,7 +1184,10 @@ async function probe<T, F>(
   const limit = Math.min(deadline, Date.now() + PROBE_TIMEOUT_MS);
   try {
     // Every child process the probe starts ends by the probe's own limit.
-    const result = await withDeadline(withProcessDeadline(limit, run), limit);
+    const result = await withDeadline(
+      () => withProcessDeadline(limit, run),
+      limit
+    );
     return result === "timeout" ? fallback : result;
   } catch {
     return fallback;

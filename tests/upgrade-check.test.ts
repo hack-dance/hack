@@ -404,9 +404,12 @@ test("probes that are disabled or fail report not checked, never a pass", async 
       },
     })
   );
-  expect(failing.machine.find((f) => f.id === "daemon")?.summary).toContain(
-    "Not checked"
-  );
+  const daemon = failing.machine.find((f) => f.id === "daemon");
+  expect(daemon?.summary).toContain("Not checked");
+  // A probe that failed (not one disabled on purpose) leaves the check
+  // unperformed: not ready.
+  expect(daemon?.status).toBe("incomplete");
+  expect(failing.ready).toBe(false);
 });
 
 test("tracked machine-local files and a missing .hack/.gitignore are steps, a tracked secret key blocks", async () => {
@@ -468,6 +471,140 @@ test("a checkout Git fails on is incomplete, not a directory without Git", async
   } finally {
     await chmod(index, 0o644);
   }
+});
+
+test("a checkout whose Git is broken leaves tracked files and ignore rules incomplete", async () => {
+  const project = await liveProject("app-broken-dotgit");
+  // A .git that git cannot use: inspections fail fast (exit 128).
+  await mkdir(join(project.repoRoot, ".git"));
+  await writeRegistry([project]);
+  const report = await check(healthyProbes());
+  const byId = new Map(
+    report.projects[0]?.findings.map((f) => [f.id, f.status]) ?? []
+  );
+  expect(byId.get("tracked-files")).toBe("incomplete");
+  expect(byId.get("ignore-rules")).toBe("incomplete");
+  expect(report.ready).toBe(false);
+});
+
+test("an expired budget starts no probe and no registry read", async () => {
+  await writeRegistry([await liveProject("app-a")]);
+  let calls = 0;
+  const healthy = healthyProbes();
+  const counted =
+    <A extends unknown[], T>(run: (...args: A) => Promise<T>) =>
+    (...args: A): Promise<T> => {
+      calls += 1;
+      return run(...args);
+    };
+  const report = await runUpgradeCheck({
+    cliVersion: "5.0.0-next.17",
+    homeDir: home,
+    budgetMs: 0,
+    probes: {
+      ...healthy,
+      pathHack: counted(healthy.pathHack),
+      daemon: counted(healthy.daemon),
+      docker: counted(healthy.docker),
+      globalInfra: counted(healthy.globalInfra),
+      linuxDns: counted(healthy.linuxDns),
+    },
+  });
+  expect(calls).toBe(0);
+  expect(report.registry.state).toBe("unreadable");
+  expect(report.ready).toBe(false);
+});
+
+test("a probe that would spawn after the deadline starts no child", async () => {
+  const pids = join(root, "late-pids");
+  const bin = join(root, "late-bin");
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(bin, "late-probe"),
+    `#!/bin/sh\necho "$$" >> '${pids}'\nexec sleep 60\n`,
+    { mode: 0o755 }
+  );
+  await chmod(join(bin, "late-probe"), 0o755);
+  const { exec } = await import("../src/lib/shell.ts");
+  await runUpgradeCheck({
+    cliVersion: "5.0.0-next.17",
+    homeDir: home,
+    budgetMs: 500,
+    probes: healthyProbes({
+      daemon: async () => {
+        await Bun.sleep(1000);
+        await exec([join(bin, "late-probe")], { stdin: "ignore" });
+        throw new Error("the late probe has no result");
+      },
+    }),
+  });
+  // Give the late probe time to try.
+  await Bun.sleep(1200);
+  expect(await readFile(pids, "utf8").catch(() => "")).toBe("");
+}, 20_000);
+
+test("a reader key that cannot be established is incomplete, never retire advice", async () => {
+  const reader = await liveProject("app-unknown-key");
+  await writeRegistry([reader]);
+  const { storePath, keyPath } = await globalStore({ reader });
+  // The global key file is wrong; the reader names its own key file.
+  await writeFile(keyPath, "synthetic-wrong-global-key\n", { mode: 0o600 });
+  const ownKey = join(root, "unknown-own.key");
+  await writeFile(
+    join(reader.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-unknown-key",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath, keyPath: ownKey },
+        },
+      },
+    })}\n`
+  );
+  // Its key file is missing and the keychain fallback is on: not asked.
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK");
+  const uninspected = await check(healthyProbes());
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  const first = uninspected.machine.find((f) => f.id === "secret-store");
+  expect(first?.status).toBe("incomplete");
+  expect(first?.args).toEqual(["doctor"]);
+  expect(uninspected.ready).toBe(false);
+
+  // Its key file exists but cannot be read.
+  if (process.getuid?.() !== 0) {
+    await writeFile(ownKey, `${STORE_KEY}\n`, { mode: 0o600 });
+    await chmod(ownKey, 0o000);
+    try {
+      const unreadable = await check(healthyProbes());
+      const second = unreadable.machine.find((f) => f.id === "secret-store");
+      expect(second?.status).toBe("incomplete");
+      expect(second?.args).toEqual(["doctor"]);
+    } finally {
+      await chmod(ownKey, 0o600);
+    }
+  }
+});
+
+test("a snapshot that cannot cover everything says so", async () => {
+  // A malformed registry: no project is covered.
+  await writeFile(join(hackHome, "projects.json"), "{ not json");
+  const malformed = await collectUpgradeSnapshotTargets();
+  expect(malformed.gaps.map((g) => g.name)).toContain("projects registry");
+
+  // An unreadable live checkout, and a skipped (linked) file.
+  const live = await liveProject("app-live");
+  await symlink(
+    join(root, "elsewhere.env"),
+    join(live.projectDir, "hack.env.json")
+  );
+  const broken = await liveProject("app-broken");
+  await writeFile(join(broken.projectDir, "hack.config.json"), "{ not json");
+  await writeRegistry([live, broken]);
+  const partial = await collectUpgradeSnapshotTargets();
+  const names = partial.gaps.map((g) => g.name);
+  expect(names).toContain("app-broken");
+  expect(names).toContain("project app-live: .hack/hack.env.json");
 });
 
 test("a registered linked worktree is checked on its own and can block", async () => {

@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
   realpath,
@@ -240,8 +241,10 @@ test("a file published at the target after it was displaced is never overwritten
   expect(await readFile(byPath.get(paths.config)?.keptAs ?? "", "utf8")).toBe(
     '{"step":true}\n'
   );
-  // An absent-before target: the late file is not removed.
-  expect(byPath.get(paths.created)?.status).toBe("moved-aside");
+  // An absent-before target: the late file is not removed, and the target
+  // is not reported as restored (the snapshot holds absence).
+  expect(byPath.get(paths.created)?.status).toBe("conflict");
+  expect(result.status).toBe("incomplete");
   expect(await readFile(paths.created, "utf8")).toBe(
     `late edit of ${paths.created}\n`
   );
@@ -270,42 +273,57 @@ test("a late edit just before displacement goes back in place and is kept, for a
   });
   const entry =
     result.status === "invalid-manifest" ? undefined : result.results[0];
+  // The late edit is linked back into place: the same file, untouched.
   expect(entry?.status).toBe("conflict");
   expect(await readFile(paths.created, "utf8")).toBe("env: edited later\n");
-  expect(await readFile(entry?.keptAs ?? "", "utf8")).toBe(
-    "env: edited later\n"
-  );
 });
 
-test("when the current file cannot be kept, it is put back and nothing is restored", async () => {
-  if (process.getuid?.() === 0) {
-    return; // root ignores the read-only blobs directory
-  }
+test("when the snapshot cannot give the displaced file a name, the file stays beside its path and is named", async () => {
   const paths = await fixture();
   const snapshot = await snapshotOf(paths);
   await writeFile(paths.config, '{"step":true}\n');
   await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
-  const blobs = join(snapshot.dir, "blobs");
-  await chmod(blobs, 0o500);
-  try {
-    const result = await restoreUpgradeSnapshot({
-      manifestPath: snapshot.manifestPath,
-      paths: [paths.config],
-    });
-    const entry =
-      result.status === "invalid-manifest" ? undefined : result.results[0];
-    expect(entry?.status).toBe("error");
-    expect(entry?.message).toContain("put back");
-  } finally {
-    await chmod(blobs, 0o700);
-  }
-  // The step's output is still at its path; no displaced sibling is left.
-  expect(await readFile(paths.config, "utf8")).toBe('{"step":true}\n');
-  expect(
-    (await readdir(join(work, "project"))).filter((name) =>
-      name.includes(".hack-")
-    )
-  ).toEqual([]);
+  // A file where the snapshot's displaced/ directory would go.
+  await writeFile(join(snapshot.dir, "displaced"), "", { mode: 0o600 });
+  const result = await restoreUpgradeSnapshot({
+    manifestPath: snapshot.manifestPath,
+    paths: [paths.config],
+  });
+  const entry =
+    result.status === "invalid-manifest" ? undefined : result.results[0];
+  expect(entry?.status).toBe("restored");
+  expect(entry?.keptAs?.startsWith(join(work, "project", "."))).toBe(true);
+  expect(await readFile(entry?.keptAs ?? "", "utf8")).toBe('{"step":true}\n');
+});
+
+test("a writer holding the displaced file open keeps its edit in a named file", async () => {
+  // Second-family review: copying the displaced bytes and unlinking the
+  // file lost an edit made through an already-open descriptor.
+  const paths = await fixture();
+  const snapshot = await snapshotOf(paths);
+  await writeFile(paths.config, '{"step":true}\n');
+  await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  const result = await restoreUpgradeSnapshot({
+    manifestPath: snapshot.manifestPath,
+    paths: [paths.config],
+    beforeReplace: async (path) => {
+      handle = await open(path, "r+");
+    },
+    afterDisplace: async () => {
+      // The open descriptor still reaches the displaced file.
+      await handle?.write('{"written":"late"}\n', 0);
+      await handle?.truncate(19);
+      await handle?.close();
+    },
+  });
+  const entry =
+    result.status === "invalid-manifest" ? undefined : result.results[0];
+  expect(entry?.status).toBe("restored");
+  expect(await readFile(paths.config, "utf8")).toBe('{"name":"app-a"}\n');
+  expect(await readFile(entry?.keptAs ?? "", "utf8")).toBe(
+    '{"written":"late"}\n'
+  );
 });
 
 test("a restore of a path the snapshot does not hold is refused, not reported as restored", async () => {

@@ -200,7 +200,16 @@ async function readConfigText(
     if (!info.isFile() || info.size > MAX_CONFIG_BYTES) {
       return { kind: "unreadable" };
     }
-    return { kind: "text", text: await handle.readFile("utf8") };
+    // Bounded even if the file grows after the stat.
+    const buffer = Buffer.alloc(MAX_CONFIG_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MAX_CONFIG_BYTES) {
+      return { kind: "unreadable" };
+    }
+    return {
+      kind: "text",
+      text: buffer.subarray(0, bytesRead).toString("utf8"),
+    };
   } catch (error: unknown) {
     const code = errorCode(error);
     return code === "ENOENT" || code === "ENOTDIR"
@@ -401,14 +410,30 @@ async function ignoreRulesFinding(opts: {
   const state = await inspectHackDirGitignoreForDoctor({
     projectDir: opts.projectDir,
   });
-  if (state === null || state === "current") {
+  if (state === null) {
+    // Git failing on a checkout is not a directory without Git.
+    return (await insideGitWorkTree(opts.root))
+      ? {
+          id: "ignore-rules",
+          status: "incomplete",
+          summary:
+            "Git could not inspect this checkout, so whether its .hack/.gitignore keeps machine-local files out is unknown.",
+          args: ["doctor", "--path", opts.root],
+          action: null,
+        }
+      : {
+          id: "ignore-rules",
+          status: "ok",
+          summary: "Not a Git checkout; no ignore rules needed.",
+          args: null,
+          action: null,
+        };
+  }
+  if (state === "current") {
     return {
       id: "ignore-rules",
       status: "ok",
-      summary:
-        state === null
-          ? "Not a Git checkout; no ignore rules needed."
-          : "The committed .hack/.gitignore is current.",
+      summary: "The committed .hack/.gitignore is current.",
       args: null,
       action: null,
     };

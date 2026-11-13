@@ -240,10 +240,13 @@ async function handleUpgradeSnapshot({
   readonly args: CommandArgs<typeof snapshotOptions, readonly []>;
 }): Promise<number> {
   const collected = await collectUpgradeSnapshotTargets();
-  const gapLines = collected.gaps.map(
-    (gap) =>
-      `Not complete for ${gap.name}: ${gap.reason}. A rollback may leave env layers the migration creates for those overlays.`
-  );
+  const gapLines =
+    collected.gaps.length === 0
+      ? []
+      : [
+          "This snapshot is not a complete recovery point; it does not cover:",
+          ...collected.gaps.map((gap) => `  ${gap.name}: ${gap.reason}`),
+        ];
   const created = await createUpgradeSnapshot({
     purpose: "hack upgrade snapshot",
     targets: collected.targets,
@@ -294,9 +297,6 @@ async function handleUpgradeSnapshot({
   }
   const lines = [
     `Kept ${snapshot.manifest.entries.length} file(s) in ${snapshot.dir}.`,
-    ...collected.skipped.map(
-      (entry) => `Skipped ${entry.label} (${entry.reason}): ${entry.path}`
-    ),
     ...gapLines,
     "To put them back:",
     `  ${rollback}`,

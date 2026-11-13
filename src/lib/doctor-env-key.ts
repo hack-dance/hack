@@ -233,22 +233,19 @@ const READD_SECRET =
 
 /**
  * Copies the key to a new private file under {@link RETIRED_KEY_DIR}, then
- * removes it. The command copies only when git itself answers that the
- * directory is not in a repository; inside a work tree (a home directory
- * kept in git, say), or when git is missing or cannot tell, it stops before
- * copying anything. Git is asked with every repository-selecting variable
- * removed: the set git itself clears when it enters another repository
- * (`git rev-parse --local-env-vars`: `GIT_DIR`, `GIT_OBJECT_DIRECTORY`,
- * `GIT_WORK_TREE` and the rest) plus the discovery ceiling, and with
- * discovery across file systems, so a stale value in the shell cannot turn a
- * checkout into "not a git repository". If git cannot list those variables
- * the command stops. The list is split as a command substitution, never as
- * a parameter, so sh, bash and zsh (which does not split `$v`) read it alike. mktemp gives each copy its own name
+ * removes it, but only once no directory from the resolved retired-key
+ * directory up to `/` holds a `.git` entry (a directory, a file or a link,
+ * readable or not). Inside a checkout (a home directory kept in git, say) it
+ * stops before copying anything. The check looks for the marker itself
+ * rather than asking git: git cannot tell a checkout whose metadata it cannot
+ * read, or one hidden by a stale `GIT_DIR`, from no checkout at all. Every
+ * resolved ancestor was just traversed by `cd`, so testing an entry in it
+ * is reliable. mktemp gives each copy its own name
  * (0600), so a later rotation never overwrites an earlier one; the key is
  * removed only once its copy is written.
  */
 export function retiredKeyCopyCommand(key: string): string {
-  return `install -d -m 700 ${RETIRED_KEY_DIR} && case "$(v="$(git rev-parse --local-env-vars)" && [ -n "$v" ] && unset $(echo "$v") GIT_CEILING_DIRECTORIES && GIT_DISCOVERY_ACROSS_FILESYSTEM=1 LC_ALL=C git -C ${RETIRED_KEY_DIR} rev-parse --is-inside-work-tree 2>&1)" in *"not a git repository"*) true ;; *) false ;; esac && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
+  return `install -d -m 700 ${RETIRED_KEY_DIR} && d="$(cd ${RETIRED_KEY_DIR} && pwd -P)" && while [ ! -e "$d/.git" ] && [ ! -L "$d/.git" ] && [ "$d" != / ]; do d="$(dirname "$d")"; done && [ ! -e "$d/.git" ] && [ ! -L "$d/.git" ] && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
 }
 
 /**
@@ -263,7 +260,7 @@ export function symlinkKeyRepairCommand(key: string): string {
 }
 
 function rotateRemedy(path: (suffix?: string) => string): string {
-  return `keep a recoverable copy of the old key outside every git checkout, then remove it: '${retiredKeyCopyCommand(path())}' (it stops without copying unless git confirms ${RETIRED_KEY_DIR} is outside every repository; then copy the key to a private directory outside any checkout yourself). Then ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
+  return `keep a recoverable copy of the old key outside every git checkout, then remove it: '${retiredKeyCopyCommand(path())}' (it stops without copying if ${RETIRED_KEY_DIR} or any directory above it holds a .git entry; then copy the key to a private directory outside any checkout yourself). Then ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
 }
 
 async function inspectCandidate(opts: {

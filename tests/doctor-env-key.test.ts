@@ -884,29 +884,31 @@ describe("printed key recovery commands leave nothing git can collect (HACK-2165
     expect(await untracked(box.home)).toEqual([]);
   });
 
-  test("rotation stops without copying when git cannot tell (not a confirmed non-repository)", async () => {
+  test("rotation stops for a .git file (a linked worktree or submodule) above the directory", async () => {
     const box = await sandbox();
+    await writeFile(join(box.home, ".git"), "gitdir: /elsewhere/.git\n");
     await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
-    // A git that fails for another reason: unavailable metadata, say.
-    const bin = join(box.root, "bin");
-    await mkdir(bin);
-    await writeFile(
-      join(bin, "git"),
-      "#!/bin/sh\necho 'fatal: unable to inspect' >&2\nexit 128\n",
-      { mode: 0o755 }
-    );
-    const proc = Bun.spawn(["sh", "-c", retiredKeyCopyCommand(KEY_FILE)], {
-      cwd: box.project,
-      env: {
-        ...fixtureGitEnv({ env: { HOME: box.home } }),
-        PATH: `${bin}:/usr/bin:/bin`,
-      },
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    expect(await proc.exited).not.toBe(0);
+    expect(
+      await run(box.project, box.home, retiredKeyCopyCommand(KEY_FILE))
+    ).not.toBe(0);
     expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
     expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual([]);
+  });
+
+  test("rotation checks the resolved directory: a ~/.hack linked into a checkout stops it", async () => {
+    const box = await sandbox();
+    const checkout = join(box.root, "dotfiles");
+    await mkdir(checkout);
+    await git(checkout, ["init", "-q", "-b", "main"]);
+    await mkdir(join(checkout, "hack"));
+    await symlink(join(checkout, "hack"), join(box.home, ".hack"));
+    await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+    expect(
+      await run(box.project, box.home, retiredKeyCopyCommand(KEY_FILE))
+    ).not.toBe(0);
+    expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+    expect(await readdir(join(checkout, "hack", "retired-keys"))).toEqual([]);
+    expect(await untracked(checkout)).toEqual([]);
   });
 
   for (const [label, override] of [
@@ -984,6 +986,24 @@ describe("printed key recovery commands leave nothing git can collect (HACK-2165
         expect(
           await readdir(join(box.home, ".hack", "retired-keys"))
         ).toHaveLength(1);
+      }
+    );
+    test.skipIf(Bun.which(shell[0]) === null || process.getuid?.() === 0)(
+      `rotation under ${name} stops for a home checkout whose .git cannot be read`,
+      async () => {
+        const box = await sandbox();
+        await git(box.home, ["init", "-q", "-b", "main"]);
+        await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+        await chmod(join(box.home, ".git"), 0o000);
+        try {
+          expect(await runIn(box, {})).not.toBe(0);
+        } finally {
+          await chmod(join(box.home, ".git"), 0o755);
+        }
+        expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+        expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual(
+          []
+        );
       }
     );
     test.skipIf(Bun.which(shell[0]) === null)(

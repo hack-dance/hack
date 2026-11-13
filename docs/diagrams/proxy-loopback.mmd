@@ -1,0 +1,20 @@
+flowchart TD
+  D[Doctor: published loopback bindings] --> C[Read proxy CA/publications]
+  O[Compose open: loopback candidates] --> C
+  C -->|Unavailable| U[Doctor warns; open proceeds]
+  C -->|Verified runtime root| B{Published on loopback?}
+  B -->|No| K[Skip intentional binds]
+  B -->|Yes| P[Probe with short timeout]
+  P -->|HTTPS| T[Verify CA and SNI]
+  P -->|HTTP| H[Check TCP reachability]
+  T -->|Valid| S[Endpoint passes]
+  H -->|Connected| S
+  T -->|Timeout or verification failure| F[Doctor warns per endpoint]
+  H -->|Timeout or refusal| F
+  F --> Q{Healthy alternate path?}
+  Q -->|Yes| S
+  Q -->|No| R[Open refuses URL output]
+  class S ok
+  class P wait
+  class F,R fail
+  class U,K idle

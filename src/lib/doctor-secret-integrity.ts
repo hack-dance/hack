@@ -173,10 +173,43 @@ async function keylessStoreFinding(opts: {
  * Which registered projects read the store, saying plainly when the scan
  * could not check every one (never "no project reads it" on a guess).
  */
+const WORKTREE_READER = /^(.+) \(worktree (.+)\)$/;
+const LISTED_WORKTREES = 3;
+
+/**
+ * Reader names for one sentence: a project with many worktrees is one entry
+ * with a count and a few examples, not one entry per worktree. Up to
+ * {@link LISTED_WORKTREES} worktrees are still listed by name.
+ */
+export function summarizeStoreReaders(names: readonly string[]): string[] {
+  const worktrees = new Map<string, string[]>();
+  const summary: string[] = [];
+  for (const name of names) {
+    const match = WORKTREE_READER.exec(name);
+    if (!(match?.[1] && match[2])) {
+      summary.push(name);
+      continue;
+    }
+    const listed = worktrees.get(match[1]) ?? [];
+    listed.push(match[2]);
+    worktrees.set(match[1], listed);
+  }
+  for (const [project, listed] of worktrees) {
+    if (listed.length <= LISTED_WORKTREES) {
+      summary.push(...listed.map((tree) => `${project} (worktree ${tree})`));
+    } else {
+      summary.push(
+        `${project} (${listed.length} worktrees, including ${listed.slice(0, LISTED_WORKTREES).join(", ")})`
+      );
+    }
+  }
+  return summary.sort();
+}
+
 function describeStoreUsers(users: SecretStoreUsers): string {
   const named =
     users.names.length > 0
-      ? `Registered projects that read it: ${users.names.join(", ")}.`
+      ? `Registered projects that read it: ${summarizeStoreReaders(users.names).join(", ")}.`
       : null;
   if (!users.registryRead) {
     return "The projects registry could not be read or is not valid, so which registered projects read it is unknown.";

@@ -18,7 +18,10 @@ import {
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
 } from "../src/constants.ts";
-import { inspectSecretIntegrity } from "../src/lib/doctor-secret-integrity.ts";
+import {
+  inspectSecretIntegrity,
+  summarizeStoreReaders,
+} from "../src/lib/doctor-secret-integrity.ts";
 import {
   PROJECT_ENV_SECRET_KEY_ENV,
   resolveProjectEnvConfig,
@@ -560,4 +563,27 @@ test("a layer that exists but cannot be read or parsed is an error, not success"
   } finally {
     await chmod(repo.projectDir, 0o755);
   }
+});
+
+test("store readers: a project with many worktrees is one entry with a count", () => {
+  // Found while dogfooding: one project with thirty worktrees printed thirty
+  // names. Up to three worktrees are still listed by name.
+  expect(
+    summarizeStoreReaders([
+      "app-a",
+      "app-b (worktree feature)",
+      "app-c",
+      "app-c (worktree w1)",
+      "app-c (worktree w2)",
+      "app-c (worktree w3)",
+      "app-c (worktree w4)",
+      "app-c (worktree w5)",
+    ])
+  ).toEqual([
+    "app-a",
+    "app-b (worktree feature)",
+    "app-c",
+    "app-c (5 worktrees, including w1, w2, w3)",
+  ]);
+  expect(summarizeStoreReaders([])).toEqual([]);
 });

@@ -286,6 +286,11 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
     message: "A mount source is outside the project.",
     fix: "Mount only paths inside the project root.",
   },
+  source_case_collision: {
+    message:
+      "Project source paths collide under Unicode normalization and case folding.",
+    fix: "Rename the conflicting files or directories so their normalized, case-folded paths are distinct, then correct any env_file references.",
+  },
   unresolved_source_path: {
     message: "A mount source cannot be resolved inside the project.",
     fix: "Use a plain path relative to the project.",
@@ -514,6 +519,7 @@ export const REVIEW_STOP_CODES: ReadonlySet<string> = new Set([
   "registry_template_unsafe",
   "service_budget",
   "source_budget",
+  "source_case_collision",
   "source_escape",
   "source_generated",
   "source_limit_config",

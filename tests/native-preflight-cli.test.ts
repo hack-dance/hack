@@ -551,6 +551,34 @@ test(
 );
 
 test(
+  "ambiguous env-file aliases are a preflight blocker in JSON and text",
+  async () => {
+    const f = await fixture({ services: { web: { image: IMAGE } } });
+    await f.reviewStops("source_case_collision");
+    const env = { ...f.native, ...GRANT };
+    const result = await preflight(f, env);
+    expect(result.code).toBe(1);
+    expect(result.report.ready).toBe(false);
+    expect(result.report.runtime_review).toEqual({
+      status: "stopped",
+      code: "source_case_collision",
+    });
+    expect(result.report.blockers).toHaveLength(1);
+    expect(result.report.blockers[0]).toMatchObject({
+      gate: "runtime",
+      code: "source_case_collision",
+    });
+    expect(result.report.blockers[0]?.fix).toContain("Rename");
+    const text = await cli(f, ["doctor", "--native-preflight"], env);
+    expect(text.code).toBe(1);
+    expect(text.output).toContain("Unicode normalization and case folding");
+    expect(text.output).toContain("Rename");
+    expect(text.output).not.toContain(PRIVATE);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
   "a review that stops early is reported as a blocker, and one that fails is reported as unavailable",
   async () => {
     const stopped = await fixture({ services: { web: { image: IMAGE } } });

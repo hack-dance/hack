@@ -250,3 +250,86 @@ test("a mistyped protection key refuses before changing a matching key", async (
   ).rejects.toThrow("do not exist");
   expect(await readFile(file, "utf8")).toBe(before);
 });
+
+for (const envName of [null, "local"] as const) {
+  test(`protection preserves the legacy local overlay when selecting ${envName ?? "base"}`, async () => {
+    const options = await fixture();
+    const overlay = join(options.projectDir, "hack.env.local.yaml");
+    const overlayLocal = join(options.projectDir, "hack.env.local.local.yaml");
+    const baseLocal = join(options.projectDir, "hack.env.default.local.yaml");
+    await writeFile(
+      overlay,
+      `version: 1\nsecretsprovider: project_key\nenvironment: local\nvalues:\n  global:\n    TOKEN: ${SENTINEL}-legacy-overlay\n`
+    );
+    await writeFile(
+      overlayLocal,
+      `version: 1\nsecretsprovider: project_key\nenvironment: local\nvalues:\n  global:\n    TOKEN: ${SENTINEL}-legacy-overlay-local\n`
+    );
+    await writeFile(
+      baseLocal,
+      `version: 1\nsecretsprovider: project_key\nvalues:\n  global:\n    TOKEN: ${SENTINEL}-base-local\n`
+    );
+    for (const args of [
+      ["init", "--quiet"],
+      ["add", "-f", ".hack/hack.env.local.yaml"],
+    ]) {
+      const result = Bun.spawnSync(["git", ...args], {
+        cwd: options.projectRoot,
+        env: fixtureGitEnv(),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+    }
+    const base = join(options.projectDir, "hack.env.default.yaml");
+    const selected =
+      envName === null ? [base, baseLocal] : [overlay, overlayLocal];
+    const untouched =
+      envName === null ? [overlay, overlayLocal] : [base, baseLocal];
+    const before = await Promise.all(
+      untouched.map((path) => readFile(path, "utf8"))
+    );
+    const saved = process.env.HACK_ENV_SECRET_KEY;
+    process.env.HACK_ENV_SECRET_KEY = "synthetic-local-overlay-key";
+    try {
+      const runtime = await Promise.all([
+        resolved(options, null),
+        resolved(options, "local"),
+      ]);
+      const inventory = await listProjectEnvPlaintextEntries({
+        ...options,
+        envName,
+      });
+      expect(
+        [...new Set(inventory.map((entry) => entry.filePath))].sort()
+      ).toEqual([...selected].sort());
+      expect(inventory.every((entry) => entry.environment === envName)).toBe(
+        true
+      );
+      expect(
+        inventory.find((entry) => entry.filePath === selected[1])?.local
+      ).toBe(true);
+      const changed = await protectProjectEnvEntries({
+        ...options,
+        envName,
+        targets: [{ key: "TOKEN" }],
+      });
+      expect(
+        [...new Set(changed.map((entry) => entry.filePath))].sort()
+      ).toEqual([...selected].sort());
+      for (const path of selected) {
+        expect(await readFile(path, "utf8")).toContain("secure:");
+        expect(await readFile(path, "utf8")).not.toContain(SENTINEL);
+      }
+      expect(
+        await Promise.all(untouched.map((path) => readFile(path, "utf8")))
+      ).toEqual(before);
+      expect(
+        await Promise.all([resolved(options, null), resolved(options, "local")])
+      ).toEqual(runtime);
+    } finally {
+      restoreEnv("HACK_ENV_SECRET_KEY", saved);
+    }
+  });
+}

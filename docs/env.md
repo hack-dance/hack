@@ -883,6 +883,9 @@ hack env protect API_TOKEN --service api
 
 An unqualified key covers every matching scope and overlay in this checkout.
 `--env default` selects base layers; omitting `--env` covers all overlays.
+For a retained tracked `hack.env.local.yaml` overlay, `--env local` covers both
+that file and its `hack.env.local.local.yaml` override. Base selection leaves
+both overlay files untouched.
 The value, scope and overlay remain the same; only its YAML representation changes
 to an encrypted entry. Already encrypted entries and null removals are unchanged.
 The command re-reads each layer under its write lock and refuses conflicting edits.

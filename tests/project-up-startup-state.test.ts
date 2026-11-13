@@ -20,6 +20,7 @@ import {
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
 import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
+import { isRecord } from "../src/lib/guards.ts";
 import { readProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
@@ -278,6 +279,15 @@ for (const sequence of [
     const projectRoot = await createProject();
     const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
     const document = YAML.parse(await readFile(composeFile, "utf8"));
+    if (
+      !(
+        isRecord(document) &&
+        isRecord(document.services) &&
+        isRecord(document.services.api)
+      )
+    ) {
+      throw new Error("Missing fixture API service");
+    }
     document.services.api.restart = "no";
     await writeFile(composeFile, YAML.stringify(document));
     for (const state of sequence) {

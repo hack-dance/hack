@@ -37,6 +37,9 @@ import { readReplaceablePrivateFile } from "../private-file.ts";
  * - `end-unsynced`: empty marker; the final record's fsync failed, so its
  *   durability was not confirmed. `end-unsynced.pending` is the same file
  *   reserved at acceptance, so marking is a rename.
+ * - `output-cut`: empty marker; a takeover cut output nobody scanned (placed
+ *   before the cut, so the end still reports `truncated`). Reserved as
+ *   `output-cut.pending`. Markers are best effort and not fsynced.
  * - `lock`: empty file, flocked as the journal lock. `lock.owner` is the
  *   owner receipt of the file-based fallback used when flock is unavailable.
  *

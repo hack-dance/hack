@@ -51,6 +51,7 @@ import {
   readCommandEvents,
 } from "../src/lib/background-command/reader.ts";
 import {
+  dropUnscannedOutput,
   OWNER_START_GRACE_MS,
   recoverLostOwner,
   withJournalLock,
@@ -938,6 +939,23 @@ describe("review regressions", () => {
       );
       expect(ended?.payload.descendants).toBe("not_confirmed");
     }
+  });
+
+  test("the record of a cut is placed before any byte is cut", async () => {
+    const { paths } = await acceptCommand({ input: input(), root });
+    await writeFile(paths.stdout, "unscanned\n", { mode: 0o600 });
+    const sizesAtRecord: number[] = [];
+    const dropped = await dropUnscannedOutput({
+      paths,
+      events: [],
+      beforeCut: async () => {
+        sizesAtRecord.push((await stat(paths.stdout)).size);
+      },
+    });
+    expect(dropped).toBe(true);
+    // Called once, while the bytes were still there.
+    expect(sizesAtRecord).toEqual(["unscanned\n".length]);
+    expect((await stat(paths.stdout)).size).toBe(0);
   });
 
   test("a cut stays recorded when its marker event cannot be written, so the end still says truncated", async () => {

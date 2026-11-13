@@ -379,23 +379,23 @@ export async function cutUnscannedOutput(opts: {
   readonly events: readonly EventEnvelope[];
   readonly writer: JournalWriter;
 }): Promise<boolean> {
+  // The durable record comes first: if the event below cannot be written
+  // (full disk) or the process dies after the cut, a later takeover still
+  // reports the capture as truncated.
   const dropped = await dropUnscannedOutput({
     paths: opts.paths,
     events: opts.events,
+    beforeCut: async () =>
+      await placeReservedMarker({
+        pending: opts.paths.outputCutPending,
+        marker: opts.paths.outputCut,
+      }),
   });
   const marked = opts.events.some(
     (event) =>
       event.type === "command.output_truncated" &&
       event.payload.reason === "redaction_unavailable"
   );
-  if (dropped) {
-    // Durable before the event: if the event cannot be written on a full
-    // disk, a later takeover still reports the capture as truncated.
-    await placeReservedMarker({
-      pending: opts.paths.outputCutPending,
-      marker: opts.paths.outputCut,
-    });
-  }
   if (dropped && !marked) {
     await opts.writer
       .write("command.output_truncated", {
@@ -431,6 +431,12 @@ export function needsAtRestScrub(meta: CommandMeta): boolean {
 export async function dropUnscannedOutput(opts: {
   readonly paths: JournalPaths;
   readonly events: readonly EventEnvelope[];
+  /**
+   * Runs once, before the first byte is cut: a record of the cut placed
+   * here survives a crash in the middle (overstating `truncated` if the cut
+   * then fails is the safe direction).
+   */
+  readonly beforeCut?: () => Promise<void>;
 }): Promise<boolean> {
   const offsets = emittedOffsets(opts.events);
   let dropped = false;
@@ -444,6 +450,9 @@ export async function dropUnscannedOutput(opts: {
     }
     try {
       if ((await handle.stat()).size > offsets[stream]) {
+        if (!dropped) {
+          await opts.beforeCut?.();
+        }
         await handle.truncate(offsets[stream]);
         dropped = true;
       }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { publishFileExclusive } from "./exclusive-publish.ts";
 import { isRecord } from "./guards.ts";
 
 /**
@@ -224,24 +225,31 @@ async function ensureSelfIgnore(opts: {
   readonly refusal: () => Error;
 }): Promise<void> {
   const path = join(opts.directory, ".gitignore");
-  let file: Awaited<ReturnType<typeof open>> | null = null;
-  try {
-    file = await open(
-      path,
-      constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_NOFOLLOW |
-        constants.O_WRONLY,
-      0o600
-    );
-    await file.writeFile(SELF_IGNORE, "utf8");
-    return;
-  } catch (error: unknown) {
-    if (!isExisting(error)) {
-      throw error;
+  // Published complete (staged, then linked into place), so a concurrent
+  // first writer never sees an empty or partial file, and a crash leaves
+  // either no `.gitignore` or the complete one. The staged copy holds only
+  // `*` and, if a crash leaves it, matches the staging sweep.
+  if (!(await lstat(path).catch(() => null))) {
+    const staged = join(opts.directory, `.gitignore.${randomUUID()}.tmp`);
+    let file: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      file = await open(
+        staged,
+        constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_NOFOLLOW |
+          constants.O_WRONLY,
+        0o600
+      );
+      await file.writeFile(SELF_IGNORE, "utf8");
+      await file.sync();
+      await file.close();
+      file = null;
+      await publishFileExclusive({ source: staged, target: path });
+    } finally {
+      await file?.close();
+      await unlink(staged).catch(() => undefined);
     }
-  } finally {
-    await file?.close();
   }
   if (!(await isOwnSelfIgnore(path))) {
     throw opts.refusal();

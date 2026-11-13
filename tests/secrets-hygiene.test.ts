@@ -248,3 +248,31 @@ test("a stale terminal-session payload is reported and removed", async () => {
   await applySecretsHygieneFixes({ findings, report: () => undefined });
   expect(await lstat(root).catch(() => null)).toBeNull();
 });
+
+test("a store and key configured inside the project are checked against git", async () => {
+  const f = await fixture();
+  const secrets = join(f.projectRoot, "secrets");
+  await mkdir(secrets);
+  const storePath = join(secrets, "store.enc.json");
+  const keyPath = join(secrets, "store.key");
+  await writeFile(storePath, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+  await git(f.projectRoot, ["add", "-f", "--", keyPath]);
+  const scope: SecretsHygieneScope = {
+    ...f.scope,
+    stores: [{ storePath, keyPath }],
+  };
+  const findings = await inspectSecretsHygiene(scope);
+  const byPath = new Map(findings.map((finding) => [finding.path, finding]));
+  expect(byPath.get(keyPath)).toMatchObject({ status: "error", fix: null });
+  expect(byPath.get(storePath)?.fix).toEqual({
+    kind: "ignore",
+    gitignorePath: join(f.projectRoot, ".gitignore"),
+    entry: "/secrets/store.enc.json",
+  });
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  expect(paths(await inspectSecretsHygiene(scope))).toEqual([keyPath]);
+  // Neither file is changed or removed.
+  expect(await readFile(keyPath, "utf8")).toBe(`${SENTINEL}\n`);
+  expect(await readFile(storePath, "utf8")).toContain(SENTINEL);
+});

@@ -1,6 +1,14 @@
 import { constants, type Stats } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
 import {
   findStaleMuxEnvironments,
@@ -303,17 +311,50 @@ async function leftoverFindings(opts: {
   }));
 }
 
+/**
+ * Git metadata for a configured store or key file: one inside the project
+ * checkout must be untracked and ignored like the project's own secrets (an
+ * anchored entry in the root `.gitignore`); one outside it is exempt.
+ */
+function inProjectIgnore(opts: {
+  readonly path: string;
+  readonly project: SecretsHygieneScope["project"];
+}): Candidate["ignore"] {
+  if (!opts.project) {
+    return null;
+  }
+  const rel = relative(opts.project.projectRoot, opts.path);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    return null;
+  }
+  return {
+    projectRoot: opts.project.projectRoot,
+    gitignorePath: join(opts.project.projectRoot, ".gitignore"),
+    entry: `/${rel.split(sep).join("/")}`,
+  };
+}
+
 async function storeFindings(opts: {
   readonly store: SecretsHygieneScope["stores"][number];
   readonly storeKeyFromEnvironment: boolean;
+  readonly project: SecretsHygieneScope["project"];
 }): Promise<SecretsHygieneFinding[]> {
   const { storePath, keyPath } = opts.store;
   const findings: SecretsHygieneFinding[] = [];
   for (const candidate of [
-    { path: storePath, holds: "an encrypted secret store", ignore: null },
-    { path: keyPath, holds: "an encrypted store key", ignore: null },
+    { path: storePath, holds: "an encrypted secret store" },
+    { path: keyPath, holds: "an encrypted store key" },
   ] as const) {
-    findings.push(...(await candidateFindings({ candidate, project: null })));
+    const ignore = inProjectIgnore({
+      path: candidate.path,
+      project: opts.project,
+    });
+    findings.push(
+      ...(await candidateFindings({
+        candidate: { ...candidate, ignore },
+        project: opts.project,
+      }))
+    );
   }
   const store = await lstat(storePath).catch(() => null);
   const key = await lstat(keyPath).catch(() => null);
@@ -388,6 +429,7 @@ export async function inspectSecretsHygiene(
       ...(await storeFindings({
         store,
         storeKeyFromEnvironment: scope.storeKeyFromEnvironment,
+        project: scope.project,
       }))
     );
     for (const path of [store.storePath, store.keyPath]) {

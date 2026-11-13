@@ -223,3 +223,20 @@ test("a staging directory whose .gitignore does not ignore everything is refused
     preparePrivateStaging({ target: join(linkedRoot, ".env"), refusal })
   ).rejects.toThrow("synthetic staging refusal");
 });
+
+// Smoke test only: in one process the open/write interleaving that left a
+// concurrent first writer reading an empty .gitignore rarely occurs (it was
+// seen across worker processes). The guarantee is structural: the file is
+// staged complete and linked into place, so it never exists partially.
+test("concurrent first writers in a fresh directory all get a complete self-ignore", async () => {
+  const root = await tempDir();
+  const results = await Promise.allSettled(
+    Array.from({ length: 32 }, () =>
+      preparePrivateStaging({ target: join(root, ".env"), refusal })
+    )
+  );
+  expect(results.filter((result) => result.status === "rejected")).toEqual([]);
+  const staging = join(root, PRIVATE_STAGING_DIRNAME);
+  expect(await readdir(staging)).toEqual([".gitignore"]);
+  expect(await readFile(join(staging, ".gitignore"), "utf8")).toBe("*\n");
+});

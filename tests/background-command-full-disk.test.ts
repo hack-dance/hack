@@ -87,10 +87,6 @@ function noSpaceCode(error: unknown): string | null {
   return code === "ENOSPC" || code === "EDQUOT" ? code : null;
 }
 
-/**
- * Fill the filesystem: large chunks, then single bytes, until a write is
- * refused for lack of space. Returns the refusal code.
- */
 /** Largest filesystem the suite will fill: never a host disk. */
 const MAX_FILL_BYTES = 256 * 1024 * 1024;
 
@@ -111,6 +107,10 @@ async function assertSmallMount(dir: string): Promise<void> {
   }
 }
 
+/**
+ * Fill the filesystem: large chunks, then single bytes, until a write is
+ * refused for lack of space. Returns the refusal code.
+ */
 async function fill(dir: string): Promise<string> {
   await assertSmallMount(dir);
   const filler = join(dir, "filler");

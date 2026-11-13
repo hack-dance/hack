@@ -365,12 +365,16 @@ HACK_RUNTIME_BACKEND=compose "$V5" doctor --path /absolute/project
 An existing project key can retain group or other access from an older version.
 next.16 Doctor already reports `env-key-weak-permissions` and suggests
 `chmod 600` for the key. Review that finding and keep the backup private too.
-The broader secrets-hygiene report and fixes are tracked in
-[#764](https://github.com/hack-dance/hack/pull/764); those are not a next.16
-guarantee. Once using a release
-that contains them, review Doctor's findings before applying its fixes. The
-hygiene repair is separate from `--migrate-env-config` and does not remove the
-key-backup requirement above.
+Merged [#764](https://github.com/hack-dance/hack/pull/764), intended for next.17,
+adds Doctor's `secrets hygiene` report: loose modes, tracked or unignored files,
+staging leftovers and terminal payloads older than ten minutes. It names files,
+never values. After reviewing the report, `doctor --fix` tightens eligible files'
+permissions, adds missing project ignore entries and removes only Hack leftovers
+that are not live inputs. It rechecks configuration before removal; current
+stores, keys, config and env layers, and retired stores, stay in place. It never
+untracks files. The hygiene repair is separate from `--migrate-env-config` and
+does not remove the key-backup requirement above. next.16 does not have this
+broader report. Source: [hygiene inspection and repair](https://github.com/hack-dance/hack/blob/25bd63c19f4d6aa152ecb9bda88086364a1bd4fd/src/lib/secrets-hygiene.ts).
 
 In the next.16 trials, most real env entries were stored as plain values.
 `env list --json` still prints those values: JSON is formatting, not redaction.
@@ -759,7 +763,7 @@ next.16 bundle.
 | next.16 candidate Doctor suggests `hack daemon start` | That command names the stable CLI. Keep the stable daemon and its launchd service stopped during the shared-home candidate run. Merged [#776](https://github.com/hack-dance/hack/pull/776) treats the daemon as optional for newer candidate Compose trials. |
 | `env list --json` reveals plain values | This is next.16 behavior. Review the breaking listing changes in [#767](https://github.com/hack-dance/hack/pull/767) before updating scripts for the next prerelease. |
 | next.16 or earlier explicit Doctor migration cleanup can remove `.hack.secret.key` | Keep a private readable key backup before any migration, including `doctor --migrate-env-config`. The merged [#769](https://github.com/hack-dance/hack/pull/769) live-input protection is intended for next.17; an older bundle retains the bug, and upgrading does not recover an already removed key. |
-| An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. The broader secrets-hygiene report and fixes are tracked in [#764](https://github.com/hack-dance/hack/pull/764); check the chosen release's availability. |
+| An old project key has group or other access | next.16 Doctor reports `env-key-weak-permissions` with a `chmod 600` remedy. Merged [#764](https://github.com/hack-dance/hack/pull/764), intended for next.17, adds `secrets hygiene`; review its findings, then use `doctor --fix` to tighten eligible files and remove only stale Hack artifacts that are not live inputs. |
 
 Sources for startup failures: [next.16 lifecycle and startup handling](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/project.ts).
 The three-project result, credential refresh, daemon-service behavior and HTTPS

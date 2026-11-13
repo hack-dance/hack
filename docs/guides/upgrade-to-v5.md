@@ -84,8 +84,9 @@ Keep these manual checks too:
 
 - Check ownership and permissions of `.hack/hack.env.local.yaml` and
   `.hack/hack.env.<name>.local.yaml`. New local layers are created mode 0600,
-  but existing layers keep their modes. Keep local layers owner-only and do
-  not assume an upgrade tightened old files.
+  but next.16 keeps existing modes. The merged #764 change, intended for
+  next.17, tightens a local layer on a write and lets Doctor fix loose files
+  without waiting for that write. Keep local layers owner-only.
 - Check Git's tracked-file list for `.hack/.env.<name>` and
   `hack.env*.local.yaml`. next.16's managed ignore block omitted legacy overlay
   dotenv names; newer ignore rules still cannot untrack an existing file.
@@ -106,13 +107,44 @@ keys, config and YAML inputs are not cleanup targets, including filesystem
 aliases, and cleanup refuses a request that names one. It cannot recover a key already removed by an older
 build. Back up original keys and env state before migration on any version.
 
-The broader Doctor secrets-hygiene report and repairs (HACK-2165, #764) are a
-separate change; check the chosen release's availability. next.16 already
-reports `env-key-weak-permissions` and suggests `chmod 600` for an old loose key.
+Merged #764 (HACK-2165), intended for next.17, adds the
+[Doctor secrets-hygiene report and fixes](#after-upgrading-check-secrets-at-rest)
+below. next.16 already reports `env-key-weak-permissions` with a `chmod 600`
+remedy, but does not include the broader hygiene report.
 
 See [Env and secrets](../env.md#legacy-repos-and-migration) and the
 [threat model](../security/env-secrets-threat-model.md). These are manual checks,
 not evidence that the real-machine upgrade or rollback has passed.
+
+## After upgrading, check secrets at rest
+
+Earlier versions could leave env values and keys more exposed than v5 does:
+machine-local env files created by hand or by an older release with mode 0644,
+staging copies of `.hack/.env` or the project key under names git does not
+ignore, env values staged for a terminal session that never ran, or an
+encrypted secret store whose key file is gone. In a build containing #764, run this once
+in each project, and once outside any project for the global Hack home:
+
+```bash
+hack doctor          # read the "secrets hygiene" section
+hack doctor --fix    # apply the fixes after reviewing the report
+```
+
+The "secrets hygiene" section reports loose modes, links, tracked or unignored
+secret-bearing files, staging leftovers and stale terminal-session payloads.
+It names files and what they hold, never values. `hack doctor --fix` removes
+group and other permission bits from eligible files owned by this user, adds
+missing ignore entries inside the project, and removes Hack's staging leftovers
+and terminal payloads older than ten minutes. It prints each change.
+
+Removal never includes a live input: the configured store or key, project/shared
+keys, config and env layers are protected by their paths and resolved paths.
+Doctor rechecks the configuration before each removal and leaves the file when
+it cannot prove removal is allowed. Retired stores are kept too. It never deletes
+a store, a key or a file you wrote, and never untracks a file git already tracks.
+Review any suggested `git rm --cached` and treat earlier shared copies as exposed.
+For a store whose key is lost, use the restore-or-retire choices below, not hygiene
+cleanup. Keep these repairs separate from `--migrate-env-config` and its backup step.
 
 ### An old global secret store whose key is gone
 

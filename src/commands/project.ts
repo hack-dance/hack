@@ -1,3 +1,4 @@
+import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -1453,6 +1454,8 @@ export async function resolveModernComposeEnvOverrides(opts: {
     envName: opts.envName,
     serviceNames: opts.allServiceNames,
   });
+  // After a successful read, so a refusal stays one line.
+  await reportLooseEnvLayerModes({ projectDir: opts.project.projectDir });
   if (!modern) {
     return null;
   }
@@ -1545,6 +1548,8 @@ export async function resolveLifecycleEnvForProject(opts: {
     envName: opts.envName,
     serviceNames,
   });
+  // After a successful read, so a refusal stays one line.
+  await reportLooseEnvLayerModes({ projectDir: opts.project.projectDir });
   if (modern) {
     return selectProjectEnvValuesForExecutionTarget({
       resolved: modern,

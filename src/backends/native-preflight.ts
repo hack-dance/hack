@@ -30,6 +30,7 @@ import {
 } from "./native-project-ports.ts";
 import {
   nativeBridgeCapacity,
+  nativeRouteProbeRefusalDetails,
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
 import {
@@ -432,7 +433,12 @@ const RUNTIME_FINDINGS: Readonly<Record<string, Explanation>> = {
   route_binding_required: {
     message:
       "The service declares a route, which needs native HTTPS to be set up.",
-    fix: "Set up native HTTPS (see the guide) and give the service a healthcheck with x-hack-http.",
+    fix: "Set up native HTTPS (see the guide). A route without an authored healthcheck gets a default route-port probe.",
+  },
+  inferred_route_probe: {
+    message:
+      "Native checks TCP and HTTP on the route port because no healthcheck was authored. HTTP 2xx-4xx counts as ready; 5xx does not.",
+    fix: "Nothing to do. Declare an explicit x-hack-http healthcheck if this route needs a different path or timing.",
   },
   inert_route_declaration: {
     message:
@@ -1398,7 +1404,7 @@ function routeFindings(opts: {
         specs,
         capacity: 1,
       });
-    } catch {
+    } catch (error) {
       found.push(
         finding(
           {
@@ -1408,11 +1414,7 @@ function routeFindings(opts: {
             service: name,
             field: "healthcheck.x-hack-http",
           },
-          {
-            message:
-              "The service has caddy routing labels but no enabled native HTTP probe on its route port, or it also declares a dependency cache.",
-            fix: "Give the service a healthcheck with x-hack-http on the port its route proxies to, or add one under httpProbes in the native adaptation.",
-          }
+          nativeRouteProbeRefusalDetails(error)
         )
       );
     }

@@ -121,12 +121,12 @@ fn stage_refused(code: &'static str) -> CandidateError {
 /// An owned service failed while dependency relays were attached. The stage code
 /// stays `graph_startup_application_failed`; the message and service name the
 /// failed service (exit code, death or health) instead of a validation failure.
-fn application_failed(name: &str, observation: Observation) -> CandidateError {
-    crate::project::execution::failed_service_error(
-        "graph_startup_application_failed",
-        name,
-        observation,
-    )
+fn application_failed(
+    name: &str,
+    observation: Observation,
+    probe: Option<&crate::provider::http_probe::HttpProbe>,
+) -> CandidateError {
+    probes::service_failure("graph_startup_application_failed", name, observation, probe)
 }
 // Fresh and restored graphs both provision a new container generation. Retained
 // stopped/ready receipts cannot authorize listener attachment.
@@ -199,7 +199,11 @@ fn classify_exited_listener(
 ) -> Result<(), CandidateError> {
     if observation.failed() {
         record(receipt, name, observation, None)?;
-        return Err(application_failed(name, observation));
+        return Err(application_failed(
+            name,
+            observation,
+            receipt.probes.get(name).map(|probe| &probe.config),
+        ));
     }
     if let Err(error) = verify_exited_listener(receipt.readiness.get(name), observed) {
         if error.code == "graph_startup_listener_unexpected_exit"
@@ -1792,17 +1796,17 @@ mod application_failure_tests {
     use super::*;
     #[test]
     fn an_application_failure_names_the_service_not_dependency_validation() {
-        let error = application_failed("deps", Observation::Exited { code: 3 });
+        let error = application_failed("deps", Observation::Exited { code: 3 }, None);
         assert_eq!(error.code, "graph_startup_application_failed");
         assert_eq!(error.service.as_deref(), Some("deps"));
         let message = error.message.to_string();
         assert!(message.contains("deps exited with code 3"), "{message}");
         assert!(!message.contains("validation"), "{message}");
-        let dead = application_failed("deps", Observation::Dead);
+        let dead = application_failed("deps", Observation::Dead, None);
         assert!(dead.message.to_string().contains("dead or OOM-killed"));
         // An invalid service identifier is never echoed as the service.
         assert_eq!(
-            application_failed("bad name", Observation::Dead).service,
+            application_failed("bad name", Observation::Dead, None).service,
             None
         );
     }

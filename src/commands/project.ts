@@ -247,7 +247,11 @@ import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
-import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
+import {
+  resolveHackEnv,
+  selectHackEnvValues,
+  upsertDotEnvValue,
+} from "../lib/hack-env.ts";
 import { initProjectExistsError } from "../lib/init-existing-project.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
 import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
@@ -1558,7 +1562,7 @@ export async function resolveLifecycleEnvForProject(opts: {
       message: `Failed to parse ${envResolved.contractPath}: ${envResolved.contractParseError}`,
     });
   }
-  return envResolved.envForCompose;
+  return selectHackEnvValues({ resolved: envResolved });
 }
 
 async function resolveComposeEnvOverrides(opts: {
@@ -1666,7 +1670,7 @@ async function resolveComposeEnvOverrides(opts: {
     return {
       composeFiles: [],
       env: resolved.envForCompose,
-      lifecycleEnv: resolved.envForCompose,
+      lifecycleEnv: selectHackEnvValues({ resolved }),
       preflightEnvByService,
       effectiveEnvName: resolved.envSelection.effectiveEnv,
     };
@@ -1684,7 +1688,7 @@ async function resolveComposeEnvOverrides(opts: {
   return {
     composeFiles: [overridePath],
     env: resolved.envForCompose,
-    lifecycleEnv: resolved.envForCompose,
+    lifecycleEnv: selectHackEnvValues({ resolved }),
     preflightEnvByService,
     effectiveEnvName: resolved.envSelection.effectiveEnv,
   };

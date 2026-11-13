@@ -309,16 +309,45 @@ export async function readReplaceablePrivateFile(
   const directories = await captureRealDirectories(opts);
   for (let attempt = 1; ; attempt += 1) {
     const read = await readReplaceableTargetOnce(opts);
-    if (read === "replaced") {
-      if (attempt < REPLACEABLE_READ_ATTEMPTS) {
-        continue;
+    if (read !== "replaced") {
+      // Bind the read to the pinned directories (HACK-2165): first the
+      // directories are checked again, then the path must still name the
+      // file that was opened. A directory swapped to read another file and
+      // restored before the first check leaves the path naming a different
+      // file; one restored after it fails the directory check.
+      await recheckRealDirectories({ directories, refusal: opts.refusal });
+      if (
+        read === null ||
+        (await stillNamesOpened({ path: opts.path, read }))
+      ) {
+        return read === null ? null : { text: read.text, mode: read.mode };
       }
-      throw opts.refusal();
     }
-    await recheckRealDirectories({ directories, refusal: opts.refusal });
-    return read;
+    if (attempt < REPLACEABLE_READ_ATTEMPTS) {
+      continue;
+    }
+    throw opts.refusal();
   }
 }
+
+/** Whether `path` still names (no-follow) the regular file that was read. */
+async function stillNamesOpened(opts: {
+  readonly path: string;
+  readonly read: OpenedPrivateFile;
+}): Promise<boolean> {
+  const current = await lstat(opts.path).catch(() => null);
+  return (
+    current?.isFile() === true &&
+    current.dev === opts.read.dev &&
+    current.ino === opts.read.ino
+  );
+}
+
+/** A read's contents with the identity of the file actually opened. */
+type OpenedPrivateFile = ReplaceablePrivateFile & {
+  readonly dev: number;
+  readonly ino: number;
+};
 
 /**
  * One no-follow observe-open-read of `opts.path`: null when absent,
@@ -326,7 +355,7 @@ export async function readReplaceablePrivateFile(
  */
 async function readReplaceableTargetOnce(
   opts: ReplaceablePrivateFileOptions & { readonly maxBytes?: number }
-): Promise<ReplaceablePrivateFile | null | "replaced"> {
+): Promise<OpenedPrivateFile | null | "replaced"> {
   const observed = await observeReplaceableTarget(opts);
   if (!observed) {
     return null;
@@ -362,7 +391,12 @@ async function readReplaceableTargetOnce(
       // The file grew in place after the size check.
       throw opts.refusal();
     }
-    return { text, mode: opened.mode & 0o7777 };
+    return {
+      text,
+      mode: opened.mode & 0o7777,
+      dev: opened.dev,
+      ino: opened.ino,
+    };
   } finally {
     await file.close();
   }

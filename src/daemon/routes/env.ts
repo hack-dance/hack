@@ -14,7 +14,11 @@ import {
   serializeEnvStorageForJson,
 } from "../../lib/hack-env-status.ts";
 import { parseEnvConfigSelection } from "../../lib/project.ts";
-import { projectEnvConfigExistsForMutation } from "../../lib/project-env-config.ts";
+import {
+  discoverComposeServiceNames,
+  projectEnvConfigExistsForMutation,
+  resolveProjectEnvMetadata,
+} from "../../lib/project-env-config.ts";
 import type { RegisteredProject } from "../../lib/projects-registry.ts";
 import {
   readProjectsRegistry,
@@ -46,6 +50,7 @@ export type EnvValueState = {
 };
 
 export type EnvGetResponse = {
+  readonly format: "legacy_env_contract";
   readonly project: {
     readonly id: string;
     readonly name: string;
@@ -151,6 +156,67 @@ async function handleGetEnv(opts: { readonly url: URL }): Promise<Response> {
   }
 
   const { project, registration } = resolvedProject.value;
+  try {
+    if (
+      await projectEnvConfigExistsForMutation({
+        projectDir: project.projectDir,
+      })
+    ) {
+      const modern = await resolveProjectEnvMetadata({
+        projectRoot: project.projectRoot,
+        projectDir: project.projectDir,
+        envName,
+        serviceNames: await discoverComposeServiceNames({
+          composeFile: project.composeFile,
+        }),
+      });
+      if (!modern) {
+        return jsonResponse(
+          {
+            error: "env_metadata_unavailable",
+            message: "YAML env metadata could not be resolved.",
+          },
+          409
+        );
+      }
+      return jsonResponse({
+        format: "project_env_config_v1",
+        project: {
+          id: registration.id,
+          name: registration.name,
+          repoRoot: registration.repoRoot,
+          projectDir: registration.projectDir,
+        },
+        envSelection: {
+          requested: modern.selection.requestedEnv,
+          default: modern.selection.defaultEnv,
+          effective: modern.selection.effectiveEnv,
+          overlayPath: modern.selection.overlayPath,
+          overlayExists: modern.selection.overlayExists,
+        },
+        files: modern.files,
+        values: Object.entries(modern.effectiveMetadata).flatMap(
+          ([scope, entries]) =>
+            Object.entries(entries).map(([key, entry]) => ({
+              key,
+              scope,
+              effectiveScope: entry.scope,
+              secret: entry.secret,
+              hasValue: true,
+            }))
+        ),
+        unknownScopes: modern.unknownScopes,
+      });
+    }
+  } catch {
+    return jsonResponse(
+      {
+        error: "env_metadata_invalid",
+        message: "YAML env metadata is invalid or unreadable; values omitted.",
+      },
+      409
+    );
+  }
   let resolved: Awaited<ReturnType<typeof resolveHackEnv>>;
   try {
     resolved = await resolveHackEnv({
@@ -193,6 +259,7 @@ async function handleGetEnv(opts: { readonly url: URL }): Promise<Response> {
   }
 
   const body: EnvGetResponse = {
+    format: "legacy_env_contract",
     project: {
       id: registration.id,
       name: registration.name,

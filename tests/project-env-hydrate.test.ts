@@ -7,6 +7,7 @@ import {
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,6 +27,7 @@ import {
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hydrateProjectEnvLocalLayer,
+  MACHINE_LOCAL_LAYER_REFUSALS,
   ProjectEnvHydrationRefusalError,
   type ProjectEnvHydrationRefusalReason,
   resolveProjectEnvConfig,
@@ -259,9 +261,26 @@ async function createTrackedRepo(): Promise<Repo> {
   return repo;
 }
 
-test("hydration keeps a read-only outdated .hack/.gitignore and warns instead of failing (HACK-1363)", async () => {
+test("hydration refuses a local layer linked to the tracked default layer (HACK-2165)", async () => {
+  const repo = await createTrackedRepo();
+  const tracked = await readFile(repo.trackedFile, "utf8");
+  // The link's own name is ignored and untracked; the file it names is not.
+  await symlink("hack.env.default.yaml", repo.localFile);
+  await expect(
+    hydrate(repo, { API_TOKEN: "synthetic-linked-token" }, false)
+  ).rejects.toThrow(MACHINE_LOCAL_LAYER_REFUSALS.linked(repo.localFile));
+  expect(await readFile(repo.trackedFile, "utf8")).toBe(tracked);
+  expect(await git(repo, ["status", "--porcelain"])).toBe("");
+});
+
+test("hydration keeps a read-only outdated .hack/.gitignore and warns while another rule ignores the layer (HACK-1363)", async () => {
   const repo = await createRepo();
   await git(repo, ["init", "-q", "-b", "main"]);
+  // HACK-2165: the write needs the layer to be ignored by some rule.
+  await writeFile(
+    resolve(repo.projectRoot, ".gitignore"),
+    ".hack/hack.env*.local.yaml\n"
+  );
   const gitignore = resolve(repo.projectDir, ".gitignore");
   await writeFile(gitignore, "my-own-entry\n");
   await chmod(gitignore, 0o444);
@@ -887,6 +906,11 @@ test("`hack env hydrate` imports from stdin or a file and never prints values", 
 test("`hack env hydrate --json` keeps stdout pure JSON when a read-only .hack/.gitignore is outdated (HACK-1363)", async () => {
   const repo = await createRepo();
   await git(repo, ["init", "-q", "-b", "main"]);
+  // HACK-2165: the write needs the layer to be ignored by some rule.
+  await writeFile(
+    resolve(repo.projectRoot, ".gitignore"),
+    ".hack/hack.env*.local.yaml\n"
+  );
   const gitignore = resolve(repo.projectDir, ".gitignore");
   await writeFile(gitignore, "my-own-entry\n");
   await chmod(gitignore, 0o444);

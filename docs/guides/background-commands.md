@@ -335,7 +335,8 @@ only to redact. Treat stored output as sensitive.
   6 bytes or more from the command's environment). A command with more is
   refused before it starts; use `--capture metadata` or run it in the
   foreground. One pass over the output finds every value, so the work does not
-  grow with the number of values; output is scanned in 256 KiB slices, so one
+  grow with the number of values (building the matcher still grows with their
+  total length); output is scanned in 256 KiB slices, so one
   scan never stalls cancel or timeout handling.
 
 ## Audit

@@ -256,11 +256,12 @@ export function searchStart(opts: {
 export const REDACTION_VALUES_LIMIT = 1024;
 
 /**
- * Slice length for one scan. Matching is one pass whatever the number of
- * values, so one slice's work is bounded by its length alone (8 MiB, so
- * 32 slices, measured under 0.4 s of CPU with 1,024 values, random or
- * adversarial; see scripts/bench-output-scanner.ts). The count is accepted
- * for compatibility.
+ * Slice length for one scan. Matching takes one pass whatever the number of
+ * values, so a slice's work follows its length (and the matcher's shape),
+ * not the value count. On the development host, 8 MiB (32 slices) took
+ * under 0.4 s of CPU with 1,024 values of 32 bytes, random or adversarial
+ * (scripts/bench-output-scanner.ts): a measured workload, not a bound for
+ * every value set or machine. The count is accepted for compatibility.
  */
 export function scanSliceBytes(_secretCount: number): number {
   return 256 * 1024;
@@ -286,8 +287,9 @@ export function encodeSecrets(opts: {
  * byte, first child, next sibling, failure link, depth and the length of the
  * longest value that ends at it or at a node on its failure chain. The root's
  * children are also kept in a dense table, since most bytes return there.
- * Memory is about 22 bytes per byte of value text, plus a 1 KiB table for
- * each node with more than 16 children (at most about 80 bytes per byte).
+ * Memory is roughly 25 bytes per byte of value text (six per-node arrays),
+ * plus a 1 KiB table for each node with more than 16 children (up to about
+ * 80 bytes per byte), plus a temporary queue while building.
  */
 type Matcher = {
   readonly label: Uint8Array;
@@ -308,7 +310,11 @@ const DENSE_CHILDREN = 16;
 
 const matchers = new WeakMap<readonly Uint8Array[], Matcher>();
 
-/** The matcher for a set of values, built once per array (the supervisor keeps one). */
+/**
+ * The matcher for a set of values, built once per array (the supervisor keeps
+ * one). Contract: the array and its byte arrays must not change after the
+ * first scan; the cache keys on the array's identity and never rereads it.
+ */
 function matcherFor(secrets: readonly Uint8Array[]): Matcher {
   const cached = matchers.get(secrets);
   if (cached) {

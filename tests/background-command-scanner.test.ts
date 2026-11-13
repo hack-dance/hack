@@ -576,12 +576,14 @@ describe("pumpStream", () => {
     const dir = await mkdtemp(join(tmpdir(), "hack-bg-pump-"));
     try {
       const path = join(dir, "stdout");
-      const text = `${"a".repeat(100_000)}c`;
+      // The whole output is the start of a value longer than two 256 KiB
+      // slices: an ordinary poll holds all of it back, so only the final
+      // drain can read past those held-back slices.
+      const text = "a".repeat(600_000);
       await writeFile(path, text, { mode: 0o600 });
-      // 512 values: slices of 32 KiB, shorter than the long value below.
       const secrets = encodeSecrets({
         values: [
-          `${"a".repeat(100_000)}b`,
+          `${"a".repeat(600_000)}b`,
           ...Array.from({ length: 511 }, (_, index) => `other-${index}-value`),
         ],
         minLength: 6,
@@ -605,6 +607,8 @@ describe("pumpStream", () => {
           },
         });
       const first = await pump({ final: false, from: 0 });
+      // Nothing emitted yet: the work is left to the final drain.
+      expect(first.emittedTo).toBe(0);
       const last = await pump({
         final: true,
         from: first.emittedTo,

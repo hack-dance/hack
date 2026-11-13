@@ -12,7 +12,7 @@ import {
 import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
 import {
   findStaleMuxEnvironments,
-  MUX_ENV_TTL_MS,
+  MUX_ENVIRONMENT_TTL_MS,
   removeStaleMuxEnvironment,
   type StaleMuxEnvironment,
 } from "../mux/private-environment.ts";
@@ -794,7 +794,7 @@ export async function inspectSecretsHygiene(
     findings.push({
       status: "warn",
       path: stale.root,
-      message: `${displayPath(stale.root)} holds env values staged for a terminal session that never ran (older than ${MUX_ENV_TTL_MS / 60_000} minutes); --fix removes it.`,
+      message: `${displayPath(stale.root)} holds env values staged for a terminal session that never ran (older than ${MUX_ENVIRONMENT_TTL_MS / 60_000} minutes); --fix removes it.`,
       fix: { kind: "remove_mux", stale },
     });
   }

@@ -13,9 +13,10 @@ import {
 } from "../mux/mux-resolver.ts";
 import { buildLifecycleSessionName } from "../mux/session-names.ts";
 import { logger } from "../ui/logger.ts";
-import { ensureDir, readTextFile } from "./fs.ts";
+import { readTextFile } from "./fs.ts";
 import {
   appendLifecycleLogRecord,
+  ensurePrivateLifecycleLog,
   type LifecycleStateEntry,
   readLifecycleState,
   removeLifecycleStateEntry,
@@ -948,9 +949,12 @@ async function startLifecycleProcess(opts: {
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
   });
+  // The session's shell appends to this log on every backend: it must
+  // already exist as a private file (the pid file lives in the same private
+  // directory).
+  await ensurePrivateLifecycleLog({ root: dirname(logPath), logPath });
   if (opts.backend === "tmux") {
     const commandPidPath = `${logPath}.${windowName}.pid`;
-    await ensureDir(dirname(commandPidPath));
     await rm(commandPidPath, { force: true });
     const wrappedCommand = wrapLifecyclePersistentCommand({
       command: opts.process.command,
@@ -1347,8 +1351,19 @@ export function wrapLifecyclePersistentCommand(opts: {
     ...(commandPidPath
       ? [`HACK_LIFECYCLE_COMMAND_PID_FILE=${commandPidPath}`]
       : []),
-    `fifo="$(mktemp -u "\${TMPDIR:-/tmp}/hack-lifecycle.XXXXXX")"`,
-    'mkfifo "$fifo"',
+    // Output passes through a FIFO in a directory created atomically and
+    // privately (mktemp -d makes it 0700), never a reserved name in the
+    // shared temp dir; any failure stops before the command runs. The
+    // command's own umask is left as it was.
+    // A refusal is recorded in the (already private) log, since the pane
+    // closes before anyone reads its stderr.
+    "lifecycle_refused() {",
+    `  printf '%s\\t%s\\tmeta\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HACK_LIFECYCLE_SERVICE" "[refused] $1; the process was not started" >> "$HACK_LIFECYCLE_LOG"`,
+    "  exit 1",
+    "}",
+    `fifo_dir="$(mktemp -d "\${TMPDIR:-/tmp}/hack-lifecycle.XXXXXX")" || lifecycle_refused "could not create a private temporary directory"`,
+    'fifo="$fifo_dir/output"',
+    'mkfifo -m 600 "$fifo" || { rmdir "$fifo_dir"; lifecycle_refused "could not create the output FIFO"; }',
     "cleanup_lifecycle() {",
     "  trap - EXIT INT TERM HUP",
     `  if [ -n "\${cmd_pid:-}" ]; then`,
@@ -1366,6 +1381,7 @@ export function wrapLifecyclePersistentCommand(opts: {
     "  fi",
     ...(commandPidPath ? ['  rm -f "$HACK_LIFECYCLE_COMMAND_PID_FILE"'] : []),
     '  rm -f "$fifo"',
+    '  rmdir "$fifo_dir" 2>/dev/null || true',
     "}",
     'trap "cleanup_lifecycle; exit 130" INT TERM HUP',
     'trap "cleanup_lifecycle" EXIT',
@@ -1396,6 +1412,7 @@ export function wrapLifecyclePersistentCommand(opts: {
     'wait "$reader_pid" 2>/dev/null || true',
     'reader_pid=""',
     'rm -f "$fifo"',
+    'rmdir "$fifo_dir" 2>/dev/null || true',
     'exit "$cmd_status"',
   ].join("\n");
 }

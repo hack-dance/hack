@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import {
   chmod,
@@ -16,11 +16,26 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   findStaleMuxEnvironments,
-  MUX_ENV_TTL_MS,
+  MUX_ENVIRONMENT_TTL_MS,
   removeStaleMuxEnvironment,
   runMuxEnvironment,
   stageMuxEnvironment,
 } from "../src/mux/private-environment.ts";
+import { restoreEnv } from "./helpers/env.ts";
+
+// Staging sweeps the temp directory for stale payloads: give this file its
+// own, so a run never touches the developer's real temp directory.
+let savedTmp: string | undefined;
+let testTmp = "";
+beforeAll(async () => {
+  savedTmp = process.env.TMPDIR;
+  testTmp = await mkdtemp(join(tmpdir(), "mux-env-tmp-"));
+  process.env.TMPDIR = testTmp;
+});
+afterAll(async () => {
+  restoreEnv("TMPDIR", savedTmp);
+  await rm(testTmp, { recursive: true, force: true });
+});
 
 /**
  * Payloads are staged in a private directory of this file, never the host's
@@ -156,7 +171,7 @@ test("the launcher waits through a group SIGINT that the command handles", async
 }, 30_000);
 
 async function expire(path: string): Promise<void> {
-  const old = (Date.now() - MUX_ENV_TTL_MS - 60_000) / 1000;
+  const old = (Date.now() - MUX_ENVIRONMENT_TTL_MS - 60_000) / 1000;
   await utimes(path, old, old);
 }
 

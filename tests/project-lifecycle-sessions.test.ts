@@ -11,6 +11,10 @@ import {
   resolveLifecycleEnvironmentFingerprint,
 } from "../src/lib/project-lifecycle-sessions.ts";
 import type { MuxBackend, MuxSession } from "../src/mux/mux-backend.ts";
+import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
+
+// Staging sweeps the temp directory: never the developer's real one.
+isolateMuxTempDir();
 
 const ownershipToken = ["test", "lifecycle", "owner"].join("-");
 const definitionHash = resolveLifecycleDefinitionHash({

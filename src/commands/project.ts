@@ -259,7 +259,9 @@ import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import { runLifecycleCommandChild } from "../lib/lifecycle-command-child.ts";
 import {
-  appendLifecycleLogRecord,
+  createLifecycleLogSink,
+  drainLifecycleOutput,
+  type LifecycleLogSink,
   readLifecycleState,
   resolveLifecycleComposeProjectName,
   resolveLifecycleLogPath,
@@ -394,7 +396,6 @@ import {
   renderProjectEnvConfigYaml,
 } from "../templates.ts";
 import { display } from "../ui/display.ts";
-import { readLinesFromStream } from "../ui/lines.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
 import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
@@ -1869,24 +1870,33 @@ function runLifecycleChild(opts: {
   readonly composeProject: string;
   readonly service: string;
   readonly signal?: AbortSignal;
+  /** The hook's log sink, shared with its end record. */
+  readonly sink: LifecycleLogSink;
 }): Promise<number> {
+  const { sink } = opts;
   return runLifecycleCommandChild({
     command: opts.command,
     cwd: opts.cwd,
     env: opts.env,
     signal: opts.signal,
     drain: (stream, source) =>
-      streamLifecycleCommandOutput({
+      drainLifecycleOutput({
         stream,
         output: source === "stdout" ? opts.output : "stderr",
-        projectDir: opts.projectDir,
-        composeProject: opts.composeProject,
         service: opts.service,
+        sink,
       }),
   });
 }
 
-async function runLifecycleCommands(opts: {
+/**
+ * Run a lifecycle phase's commands in order. Exported for tests. A log that
+ * cannot be written (a refused path, an I/O error) changes only
+ * persistence: nothing is written through it, the problem is reported once
+ * per hook, and the hook's output and result, and the commands after it,
+ * are unaffected.
+ */
+export async function runLifecycleCommands(opts: {
   readonly title: string;
   readonly commands: readonly ProjectLifecycleCommand[] | undefined;
   readonly projectRoot: string;
@@ -1943,18 +1953,19 @@ async function runLifecycleCommands(opts: {
       cwd: cmd.cwd,
     });
 
-    await appendLifecycleLogRecord({
+    const sink = createLifecycleLogSink({
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
-      record: {
-        timestamp: new Date().toISOString(),
-        service: serviceName,
-        stream: "meta",
-        message: `[start] ${opts.title}: ${label}`,
-      },
+      warn: (message) => logger.warn({ message }),
     });
-
+    await sink.append({
+      timestamp: new Date().toISOString(),
+      service: serviceName,
+      stream: "meta",
+      message: `[start] ${opts.title}: ${label}`,
+    });
     const exitCode = await runLifecycleChild({
+      sink,
       command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
@@ -1965,15 +1976,11 @@ async function runLifecycleCommands(opts: {
       signal: opts.signal,
     });
 
-    await appendLifecycleLogRecord({
-      projectDir: opts.projectDir,
-      composeProject: opts.composeProject,
-      record: {
-        timestamp: new Date().toISOString(),
-        service: serviceName,
-        stream: "meta",
-        message: `[end] ${opts.title}: exit ${exitCode}`,
-      },
+    await sink.append({
+      timestamp: new Date().toISOString(),
+      service: serviceName,
+      stream: "meta",
+      message: `[end] ${opts.title}: exit ${exitCode}`,
     });
 
     if (exitCode !== 0) {
@@ -2738,35 +2745,6 @@ export async function startLifecycleProcesses(opts: {
       throw error;
     }
     throw new Error("Failed to start lifecycle processes");
-  }
-}
-
-async function streamLifecycleCommandOutput(opts: {
-  readonly stream: ReadableStream<Uint8Array> | number | null;
-  readonly output: "stdout" | "stderr";
-  readonly projectDir: string;
-  readonly composeProject: string;
-  readonly service: string;
-}): Promise<void> {
-  if (!opts.stream || typeof opts.stream === "number") {
-    return;
-  }
-  for await (const line of readLinesFromStream(opts.stream)) {
-    if (opts.output === "stderr") {
-      process.stderr.write(`${line}\n`);
-    } else {
-      process.stdout.write(`${line}\n`);
-    }
-    await appendLifecycleLogRecord({
-      projectDir: opts.projectDir,
-      composeProject: opts.composeProject,
-      record: {
-        timestamp: new Date().toISOString(),
-        service: opts.service,
-        stream: opts.output,
-        message: line,
-      },
-    });
   }
 }
 

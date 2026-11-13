@@ -5,27 +5,15 @@ import { join } from "node:path";
 
 import type { ExecOptions } from "../src/lib/shell.ts";
 import { findExecutableInPath } from "../src/lib/shell.ts";
-import { restoreEnv } from "./helpers/env.ts";
+import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+
+// Staging sweeps the temp directory: never the developer's real one.
+isolateMuxTempDir();
 
 const tmux = findExecutableInPath("tmux");
 const root = await mkdtemp(join(tmpdir(), "tmux-private-test-"));
 const socket = join(root, "socket");
-
-/**
- * Runs a staging call with the OS temporary directory pointed at this test's
- * own root, so the stale-payload sweep never looks at the host's real
- * temporary directory (HACK-2165).
- */
-async function inPrivateTmpdir<R>(run: () => R): Promise<Awaited<R>> {
-  const saved = process.env.TMPDIR;
-  process.env.TMPDIR = root;
-  try {
-    return await run();
-  } finally {
-    restoreEnv("TMPDIR", saved);
-  }
-}
 const calls: (readonly string[])[] = [];
 async function privateExec(
   command: readonly string[],
@@ -176,13 +164,11 @@ test.skipIf(!tmux)(
       "leaked: values.some(value => parentArgv.includes(value) || process.argv.some(arg => arg.includes(value))),",
       "tty: process.stdin.isTTY === true }));",
     ].join(" ");
-    const sent = await inPrivateTmpdir(() =>
-      backend.execInSession({
-        name: "readonly",
-        command: `'${process.execPath}' --eval '${report}' | /bin/cat > '${outputPath}'`,
-        env: readonlyValues,
-      })
-    );
+    const sent = await backend.execInSession({
+      name: "readonly",
+      command: `'${process.execPath}' --eval '${report}' | /bin/cat > '${outputPath}'`,
+      env: readonlyValues,
+    });
     expect(sent.exitCode).toBe(0);
     const expected = `${JSON.stringify({
       values: [readonlyValues.UID, readonlyValues.EUID, value],
@@ -217,13 +203,11 @@ test.skipIf(!tmux)(
       ],
     ] as const) {
       await rm(outputPath, { force: true });
-      const result = await inPrivateTmpdir(() =>
-        backend.execInSession({
-          name: "readonly",
-          command,
-          env: { UID: "fake-uid", NODE_ENV: "selected-value" },
-        })
-      );
+      const result = await backend.execInSession({
+        name: "readonly",
+        command,
+        env: { UID: "fake-uid", NODE_ENV: "selected-value" },
+      });
       expect(result.exitCode, label).toBe(0);
       const until = Date.now() + 5000;
       let actual = "";

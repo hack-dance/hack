@@ -145,8 +145,8 @@ test("encrypted_file store refuses to write through a symlinked store path", asy
   }
   const { storeDir, storePath } = await configureEncryptedFileStore();
   const outsideFile = resolve(root, "outside-store.json");
-  // An empty target reads as an empty store, so only the write guard can stop
-  // the set below.
+  // A symlinked store is refused before it is read (HACK-2036), so the set
+  // below never reaches the write.
   await writeFile(outsideFile, "");
   await symlink(outsideFile, storePath);
 
@@ -158,7 +158,7 @@ test("encrypted_file store refuses to write through a symlinked store path", asy
 
   expect(error).toBeInstanceOf(Error);
   expect(error instanceof Error ? error.message : "").toBe(
-    "Refused encrypted secret store write: the store path is a symlink or not a regular file. Replace it with a regular file and retry; values omitted."
+    "Refused to read the encrypted secret store: the store path is a symlink, not a regular file, or larger than a store can be. Replace it with a regular file and retry; values omitted."
   );
   for (const privateText of [STORE_SENTINEL, STORE_KEY, "TOKEN", outsideFile]) {
     expect(String(error)).not.toContain(privateText);

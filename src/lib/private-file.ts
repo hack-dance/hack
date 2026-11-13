@@ -1,18 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import {
+  chmod,
   type FileHandle,
   lstat,
+  mkdir,
   open,
   realpath,
   rename,
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { ClosedCliError } from "./cli-result.ts";
 import { publishFileExclusive } from "./exclusive-publish.ts";
 import { closedFileWriteError } from "./fs.ts";
 import { isRecord } from "./guards.ts";
 import { preparePrivateStaging } from "./private-staging.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
 /**
  * Bounded, no-follow reads and exclusive creates for private key material.
@@ -604,4 +608,170 @@ export function decodeCanonicalBase64(opts: {
     return null;
   }
   return decoded;
+}
+
+/**
+ * A private path was refused: a symlink, a non-regular file or directory,
+ * another owner, or more than one hard link. The message names the path
+ * only; contents are never read.
+ */
+export class PrivatePathRefusedError extends ClosedCliError {
+  readonly path: string;
+
+  constructor(path: string, reason: string) {
+    super(`Refusing ${reason} at ${path}; remove it and retry.`);
+    this.name = "PrivatePathRefusedError";
+    this.path = path;
+  }
+}
+
+/**
+ * Create (parents included) or adopt a private directory: mode 0700, owned
+ * by this user, not a symlink. An existing directory with group or other
+ * access is tightened to 0700 in place.
+ */
+export async function ensurePrivateDirectory(path: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await mkdir(path, { mode: 0o700 }).catch((error: unknown) => {
+    if (!(isRecord(error) && error.code === "EEXIST")) {
+      throw error;
+    }
+  });
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new PrivatePathRefusedError(path, "a non-directory entry");
+  }
+  if (info.uid !== process.getuid?.()) {
+    throw new PrivatePathRefusedError(
+      path,
+      "a directory owned by another user"
+    );
+  }
+  if ((info.mode & 0o077) !== 0) {
+    await chmod(path, 0o700);
+  }
+}
+
+/**
+ * Open a private file for appending without following a symlink at the
+ * final path: created mode 0600, refused unless it is a regular file owned
+ * by this user with one link. An older file with group or other access is
+ * replaced by a private copy (a new inode) before anything is written, so a
+ * reader that already had it open sees no new output. `O_NONBLOCK` makes a
+ * planted FIFO fail instead of blocking.
+ */
+export async function openPrivateAppend(path: string): Promise<FileHandle> {
+  for (let attempt = 0; attempt < MIGRATION_ATTEMPTS; attempt += 1) {
+    const handle = await openVerifiedAppend(path);
+    const info = await handle.stat();
+    if ((info.mode & 0o077) === 0) {
+      return handle;
+    }
+    await handle.close();
+    // Group or other could read it, and chmod does not revoke a descriptor a
+    // reader already holds: move it aside and start a new private file, so
+    // that reader sees nothing written from now on. One migration at a time;
+    // the returned descriptor is always rechecked above.
+    await withProjectsRegistryLock({
+      lockPath: `${path}.migrate.lock`,
+      label: "private log migration",
+      run: async () => {
+        await moveAsidePublicFile({ path });
+      },
+    });
+  }
+  throw new PrivatePathRefusedError(
+    path,
+    "a file that stays readable by others"
+  );
+}
+
+/** Broad-mode files replaced faster than this are refused, not chased. */
+const MIGRATION_ATTEMPTS = 3;
+
+/**
+ * Move a broad-mode file out of the way (call it under the migration lock):
+ * if `path` names this user's single-link regular file that group or other
+ * can read, rename it to `<path>.before-private-<time>` and make that file
+ * 0600. Its history is kept there, never copied: nothing can interleave with
+ * a half-done copy, and a writer that still holds the old file (a shell
+ * started before the upgrade) appends to the kept file. The next open
+ * creates a new private file at `path`. Returns the kept file's path, or
+ * null when there is nothing to move (already private, or gone).
+ */
+export async function moveAsidePublicFile(opts: {
+  readonly path: string;
+}): Promise<string | null> {
+  const current = await lstat(opts.path).catch(() => null);
+  if (
+    !current?.isFile() ||
+    current.uid !== process.getuid?.() ||
+    current.nlink !== 1 ||
+    (current.mode & 0o077) === 0
+  ) {
+    return null;
+  }
+  const kept = `${opts.path}.before-private-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`;
+  await rename(opts.path, kept);
+  // Same inode under its kept name: make it private too (no-follow).
+  const handle = await open(
+    kept,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+  );
+  try {
+    const info = await handle.stat();
+    if (info.dev === current.dev && info.ino === current.ino) {
+      await handle.chmod(0o600);
+    }
+  } finally {
+    await handle.close();
+  }
+  return kept;
+}
+
+/** Open for appending, refusing anything but this user's single-link regular file. */
+async function openVerifiedAppend(path: string): Promise<FileHandle> {
+  const handle = await open(
+    path,
+    constants.O_WRONLY |
+      constants.O_APPEND |
+      constants.O_CREAT |
+      constants.O_NOFOLLOW |
+      constants.O_NONBLOCK,
+    0o600
+  ).catch((error: unknown) => {
+    if (isRecord(error) && (error.code === "ELOOP" || error.code === "ENXIO")) {
+      throw new PrivatePathRefusedError(path, "a symlink or special file");
+    }
+    throw error;
+  });
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      throw new PrivatePathRefusedError(path, "a non-regular file");
+    }
+    if (info.uid !== process.getuid?.()) {
+      throw new PrivatePathRefusedError(path, "a file owned by another user");
+    }
+    if (info.nlink !== 1) {
+      throw new PrivatePathRefusedError(path, "a file with other hard links");
+    }
+    return handle;
+  } catch (error: unknown) {
+    await handle.close();
+    throw error;
+  }
+}
+
+/** Append to a private file (see {@link openPrivateAppend}). */
+export async function appendPrivateFile(opts: {
+  readonly path: string;
+  readonly data: string | Uint8Array;
+}): Promise<void> {
+  const handle = await openPrivateAppend(opts.path);
+  try {
+    await handle.appendFile(opts.data);
+  } finally {
+    await handle.close();
+  }
 }

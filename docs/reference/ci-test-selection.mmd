@@ -1,18 +1,21 @@
 flowchart TD
   event{CI event}
-  event -->|Push to next or main| full[Every job and every test]
-  event -->|Pull request| draft{Draft?}
-  draft -->|Yes| light[Selected Linux tests and static checks]
-  light --> blocked[Fan-ins fail: skipped draft]
-  draft -->|No| select{Full label or uncertain input?}
-  select -->|Yes| all[All unit tests]
-  select -->|No| imports[Imports plus always-run tests]
-  all --> pools[Selected platform pools]
-  imports --> pools
-  pools --> gate[Required test fan-in]
-  select --> native[Native jobs follow input scope]
-  select --> docker[Docker follows existing scope]
-  full --> release[Exact-head full push gate]
-  class light,pools,full live
-  class blocked fail
-  class gate,release ok
+  event -->|Main or full dispatch| full[Every test and release host]
+  full --> release[Exact-head release-full gate]
+  event -->|PR| labels{Tier labels}
+  labels -->|Default| light[Selected Linux tests and static checks]
+  light --> deferred[Name deferred macOS files]
+  deferred --> prgate[Required test and docs checks]
+  labels -->|ci:mac or ci:e2e| tier[Selected opted-in tier]
+  labels -->|ci:full| allpr[Full ordinary PR tiers]
+  tier --> prgate
+  allpr --> prgate
+  event -->|Next push| before{Before push passed?}
+  before -->|No or unknown| all[Full integration selection]
+  before -->|Yes| select[Trusted selection from diff]
+  all --> integration[Selected platform and Docker jobs]
+  select --> integration
+  integration --> gate[Integration fan-ins]
+  class light,tier,allpr,integration,full live
+  class deferred wait
+  class prgate,gate,release ok

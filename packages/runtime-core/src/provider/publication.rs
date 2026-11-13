@@ -337,13 +337,13 @@ fn entry_gone(entry: &Entry) -> Result<bool, CandidateError> {
     if entry.reaped.as_ref() == Some(&entry.process) {
         return Ok(true);
     }
-    identity::incarnation_gone(&entry.process)
+    publisher::incarnation_gone(&entry.process)
 }
 
 /// Observe only this retained direct child, without reaping or taking a provider
 /// lease. A live publisher must never compete with its launcher's guest lease.
 #[cfg(any(test, target_os = "macos"))]
-fn child_exit_pending(child: &std::process::Child) -> Result<bool, CandidateError> {
+pub(crate) fn child_exit_pending(child: &std::process::Child) -> Result<bool, CandidateError> {
     let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
     // SAFETY: valid writable output and our retained direct Child. WNOWAIT
     // keeps its PID unreusable until identity is bound under the provider lease.
@@ -379,13 +379,43 @@ pub(crate) fn reap_child(
     child: &mut std::process::Child,
     exit: &mut Option<ChildExit>,
 ) -> Result<Option<std::process::ExitStatus>, CandidateError> {
+    reap_child_with_lease(c, owner, run, reservation, child, exit, true)
+}
+
+/// Event-loop counterpart: provider lease contention never delays signal/control
+/// handling. WNOWAIT retains the zombie until its identity is bound to the journal.
+#[cfg(target_os = "macos")]
+pub(crate) fn try_reap_child(
+    c: &Candidate,
+    owner: &str,
+    run: &str,
+    reservation: &str,
+    child: &mut std::process::Child,
+    exit: &mut Option<ChildExit>,
+) -> Result<Option<std::process::ExitStatus>, CandidateError> {
+    reap_child_with_lease(c, owner, run, reservation, child, exit, false)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn reap_child_with_lease(
+    c: &Candidate,
+    owner: &str,
+    run: &str,
+    reservation: &str,
+    child: &mut std::process::Child,
+    exit: &mut Option<ChildExit>,
+    wait: bool,
+) -> Result<Option<std::process::ExitStatus>, CandidateError> {
     if exit.is_none() && !child_exit_pending(child)? {
         return Ok(None);
     }
-    let _lease = state::Lock::acquire_existing_waiting(
-        &c.state_root.join("run/smolvm"),
-        std::time::Duration::from_secs(120),
-    )?;
+    let lease_root = c.state_root.join("run/smolvm");
+    let _lease = if wait {
+        state::Lock::acquire_existing_waiting(&lease_root, std::time::Duration::from_secs(120))?
+    } else {
+        state::Lock::acquire_existing(&lease_root)?
+    };
     if exit.is_none() {
         // Read both generations without replaying either. A publisher can exit
         // while its own launch write is pending; reaping must precede recovery.

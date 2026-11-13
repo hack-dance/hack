@@ -10,9 +10,13 @@ const ISO_TIMESTAMP_PREFIX_REGEX =
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type LogJsonEntry = {
-  readonly source: "compose" | "loki";
+  readonly source: "compose" | "loki" | "native";
   readonly message: string;
   readonly raw: string;
+  /** Native followed logs retain a bounded prefix of an oversized line. */
+  readonly truncated?: boolean;
+  /** The stream ended without a newline terminating this entry. */
+  readonly partial?: boolean;
   readonly stream?: "stdout" | "stderr";
   readonly project?: string;
   readonly service?: string;

@@ -13,6 +13,12 @@ import { join } from "node:path";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  captureNativeFrontendBirth,
+  isNativeFrontendBirth,
+  type NativeFrontendIdentity,
+  nativeFrontendGone,
+} from "./native-frontend-identity.ts";
+import {
   isNativeHttpsLeaseIdentity,
   type NativeHttpsLeaseIdentity,
 } from "./native-https-owner.ts";
@@ -38,14 +44,16 @@ export type NativeProjectFinalizationToken = FinalizationIdentity &
       }
     | {
         readonly version: 2;
-        /** A live or inaccessible PID refuses recovery; only ESRCH proves it exited. */
+        /** Without a birth, only ESRCH proves exit. Birth comparisons are macOS-only. */
         readonly pid: number;
+        readonly birth?: string;
         readonly httpsPort: number | null;
       }
     | {
         readonly version: 3;
         /** This frontend and its exact shared HTTPS lease must both be retired. */
         readonly pid: number;
+        readonly birth?: string;
         readonly httpsPort: number;
         readonly httpsLease: NativeHttpsLeaseIdentity;
       }
@@ -88,7 +96,16 @@ function sameLease(
   );
 }
 function validVersionFields(value: Record<string, unknown>): boolean {
-  const keys = Object.keys(value).sort().join();
+  if (
+    Object.hasOwn(value, "birth") &&
+    (value.version === 1 || !isNativeFrontendBirth(value.birth))
+  ) {
+    return false;
+  }
+  const keys = Object.keys(value)
+    .filter((key) => key !== "birth")
+    .sort()
+    .join();
   if (value.version === 1) {
     return keys === "attempt,namespace,owner,planId,run,scope,version";
   }
@@ -146,10 +163,12 @@ function same(
       (a.version === 2 &&
         b.version === 2 &&
         a.pid === b.pid &&
+        a.birth === b.birth &&
         a.httpsPort === b.httpsPort) ||
       (a.version === 3 &&
         b.version === 3 &&
         a.pid === b.pid &&
+        a.birth === b.birth &&
         a.httpsPort === b.httpsPort &&
         sameLease(a.httpsLease, b.httpsLease))) &&
     a.attempt === b.attempt &&
@@ -351,6 +370,7 @@ export async function beginNativeProjectFinalization(opts: {
     sharedPort = opts.httpsPort;
   }
   const { root, hash } = await selected(opts.scope, opts.run, true);
+  const birth = await captureNativeFrontendBirth();
   const identity = {
     scope: hash,
     run: opts.run.run,
@@ -358,6 +378,7 @@ export async function beginNativeProjectFinalization(opts: {
     namespace: opts.run.namespace,
     planId: opts.run.planId,
     pid: process.pid,
+    ...(birth === undefined ? {} : { birth }),
   };
   const token: NativeProjectFinalizationToken =
     opts.httpsLease !== undefined && sharedPort !== null
@@ -423,7 +444,7 @@ export async function recoverNativeProjectFinalization(opts: {
   readonly expectAttempt: string;
   readonly legacyPid?: number;
   readonly verifyEffects: () => Promise<void>;
-  readonly isDead?: (pid: number) => boolean;
+  readonly isDead?: (pid: number) => boolean | Promise<boolean>;
 }): Promise<void> {
   if (
     !isNativeProjectFinalizationToken(opts.token) ||
@@ -454,22 +475,17 @@ export async function recoverNativeProjectFinalization(opts: {
     ) {
       return;
     }
-    const dead =
-      opts.isDead ??
-      ((candidate: number) => {
-        try {
-          process.kill(candidate, 0);
-          return false;
-        } catch (error) {
-          return isRecord(error) && error.code === "ESRCH";
-        }
-      });
-    if (!dead(pid)) {
+    const dead = () =>
+      opts.isDead
+        ? opts.isDead(pid)
+        : nativeFrontendGone(opts.token.version === 1 ? { pid } : opts.token);
+    if (!(await dead())) {
       throw refused();
     }
     await opts.verifyEffects();
     // Recheck after asynchronous effects inspection, before durable publication.
-    if (!dead(pid)) {
+    const current = await read(join(root, "active.json"));
+    if (!(current && same(current, opts.token) && (await dead()))) {
       throw refused();
     }
     await write(root, "recovered.json", opts.token);
@@ -497,6 +513,7 @@ export async function waitNativeProjectFinalization(opts: {
   readonly timeoutMs?: number;
   /** Abandons this read-only wait; it changes no finalization state. */
   readonly signal?: AbortSignal;
+  readonly isGone?: typeof nativeFrontendGone;
 }): Promise<void> {
   const timeout = opts.timeoutMs ?? 150_000;
   if (
@@ -512,7 +529,7 @@ export async function waitNativeProjectFinalization(opts: {
     throw refused();
   }
   const end = performance.now() + timeout;
-  while (true) {
+  const acknowledged = async () => {
     const active = await read(join(root, "active.json"));
     if (!(active && same(active, opts.token))) {
       throw refused();
@@ -523,9 +540,31 @@ export async function waitNativeProjectFinalization(opts: {
       (completed && same(completed, opts.token)) ||
       (recovered && same(recovered, opts.token))
     ) {
+      return true;
+    }
+    return false;
+  };
+  let nextBirthRead = 0;
+  while (true) {
+    if (await acknowledged()) {
       return;
     }
     if (performance.now() >= end || opts.signal?.aborted) {
+      throw refused();
+    }
+    const inspectBirth = performance.now() >= nextBirthRead;
+    if (inspectBirth) {
+      nextBirthRead = performance.now() + 1000;
+    }
+    if (
+      opts.token.version !== 1 &&
+      (await (opts.isGone ?? nativeFrontendGone)(opts.token, { inspectBirth }))
+    ) {
+      // A clean frontend can publish completion and exit after the earlier
+      // reads. Its exit is not evidence that its finalizer failed.
+      if (await acknowledged()) {
+        return;
+      }
       throw refused();
     }
     await Bun.sleep(Math.min(100, Math.max(1, end - performance.now())));
@@ -537,8 +576,8 @@ export async function waitNativeProjectFinalization(opts: {
  * read without changing anything:
  * - `completed`: that lifetime acknowledged confirmed graph cleanup, HTTPS
  *   retirement and down hooks (a clean stop). Nothing else proves it.
- * - `live`: its frontend PID still exists (or cannot be signalled), so it may own
- *   resources. PID reuse can only make an exited owner look live.
+ * - `live`: its frontend may still own resources. A recorded macOS birth can
+ *   distinguish PID reuse; unreadable identity and legacy PID reuse remain live.
  * - `interrupted`: its frontend exited without acknowledging cleanup.
  * - `unproven`: no readable lifetime, a legacy token without a PID, or an
  *   explicitly recovered dead owner whose cleanup this record does not attest.
@@ -556,6 +595,11 @@ function processExists(pid: number): boolean {
   } catch (error) {
     return !(isRecord(error) && error.code === "ESRCH");
   }
+}
+async function frontendAlive(
+  identity: NativeFrontendIdentity
+): Promise<boolean> {
+  return !(await nativeFrontendGone(identity));
 }
 
 /**
@@ -654,7 +698,7 @@ async function lifetimeIn(
   root: string,
   hash: string,
   run: NativeProjectRun,
-  alive: (pid: number) => boolean
+  alive: (identity: NativeFrontendIdentity) => boolean | Promise<boolean>
 ): Promise<NativeProjectFinalizationLifetime> {
   const admission = await readAdmission(root);
   if (admission) {
@@ -663,7 +707,7 @@ async function lifetimeIn(
     if (!matches(admission, hash, run)) {
       return { state: "unproven" };
     }
-    return alive(admission.pid)
+    return (await alive(admission))
       ? { state: "live", pid: admission.pid }
       : { state: "interrupted", pid: admission.pid };
   }
@@ -678,7 +722,7 @@ async function lifetimeIn(
   if (active.version === 1) {
     return { state: "unproven" };
   }
-  if (alive(active.pid)) {
+  if (await alive(active)) {
     return { state: "live", pid: active.pid };
   }
   const recovered = await read(join(root, "recovered.json"));
@@ -697,13 +741,14 @@ export async function inspectNativeProjectFinalizationLifetime(opts: {
   readonly run: NativeProjectRun;
   readonly isAlive?: (pid: number) => boolean;
 }): Promise<NativeProjectFinalizationLifetime> {
+  const isAlive = opts.isAlive;
   try {
     const { root, hash } = await selected(opts.scope, opts.run, false);
     return await lifetimeIn(
       root,
       hash,
       opts.run,
-      opts.isAlive ?? processExists
+      isAlive ? (identity) => isAlive(identity.pid) : frontendAlive
     );
   } catch {
     return { state: "unproven" };
@@ -726,7 +771,7 @@ export async function withCompletedNativeProjectFinalization<T>(opts: {
   }
   const { root, hash } = await selected(opts.scope, opts.run, false);
   return await locked(root, async () => {
-    const lifetime = await lifetimeIn(root, hash, opts.run, processExists);
+    const lifetime = await lifetimeIn(root, hash, opts.run, frontendAlive);
     if (lifetime.state !== "completed" || lifetime.attempt !== opts.attempt) {
       throw refused();
     }

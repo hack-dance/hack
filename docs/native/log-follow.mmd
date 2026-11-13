@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    participant CLI as Frontend
+    participant Reader as Read-only child
+    participant Engine as Owned Engine relay
+    participant Down as Lifecycle owner
+    CLI->>Reader: Exact saved selection + lifetime pipe
+    Reader->>Engine: Inspect identity and start generation
+    Reader->>Engine: GET logs (follow, tail, since)
+    loop Bounded output, consumer backpressure
+        Engine-->>Reader: Multiplexed log bytes
+        Reader-->>CLI: At most 4 KiB per envelope
+    end
+    Note over Reader,Down: Reader holds no mutation lease
+    Down->>Engine: Stop or remove owned container
+    Engine-->>Reader: EOF or idle after service stop
+    Reader->>Engine: Check exact selected generation
+    alt Real EOF and confirmed stopped or absent
+        Reader-->>CLI: Exit 0
+    else Five idle seconds without EOF after stop
+        Reader-->>CLI: native_log_stopped_idle, exit 1
+    else Changed identity or unexplained EOF
+        Reader-->>CLI: Named refusal
+    end
+    Note over CLI,Reader: Ctrl-C stops and reaps reader
+    Note over CLI,Reader: Frontend death closes lifetime pipe

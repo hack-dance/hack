@@ -72,6 +72,8 @@ async function invoke(opts: {
         HOME: root,
         CI: "1",
         HACK_EXECUTION_MODE: "ci",
+        HACK_DAEMON_AUTOSTART_DISABLE: "1",
+        HACK_NO_INTERACTIVE: "1",
         HACK_HOME: join(root, "home"),
         HACK_CONFIG_COMPILER_BINARY: compiler,
         HACK_NATIVE_BINARY: native,
@@ -107,6 +109,22 @@ async function invoke(opts: {
   }
 }
 
+test("authored logs refuses --since with --no-follow by name before input or runtime work", async () => {
+  const selected = await fixture();
+  const result = await invoke({
+    selected,
+    args: ["logs", "web", "--no-follow", "--since", "1m"],
+    backend: "native",
+    logger: "console",
+  });
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("See `hack logs --help` for usage.");
+  expect(result.stderr).toContain("--since currently requires --follow");
+  expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
+    false
+  );
+});
+
 test.each([
   { args: ["restart", "--json"] },
   { args: ["restart", "web"] },
@@ -122,7 +140,7 @@ test.each([
   expect(value.code).toBe(1);
   expect(value.stdout + value.stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
   expect(value.stdout + value.stderr).toContain(
-    "whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS"
+    "whole-project foreground up or restart, owner-mediated down, ps, single-service logs, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS"
   );
   expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
     false

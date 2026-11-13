@@ -1,6 +1,6 @@
 import { pathExists } from "../lib/fs.ts";
 import type { DaemonPaths } from "./paths.ts";
-import { isProcessRunning, readDaemonPid } from "./process.ts";
+import { isProcessAlive, readDaemonPid } from "./process.ts";
 
 export interface DaemonStatus {
   readonly running: boolean;
@@ -50,7 +50,8 @@ export async function readDaemonStatus({
   const pid = await readDaemonPid({ pidPath: paths.pidPath });
   const socketExists = await pathExists(paths.socketPath);
   const logExists = await pathExists(paths.logPath);
-  const running = pid !== null && isProcessRunning({ pid });
+  // A zombie (exited, not yet reaped by a non-reaping init) is not running.
+  const running = pid !== null && (await isProcessAlive({ pid }));
 
   return {
     running,
@@ -67,6 +68,12 @@ export function buildDaemonStatusReport(opts: {
   readonly logExists: boolean;
   readonly apiReachable: boolean;
   readonly apiCompatible: boolean;
+  /**
+   * A service manager (launchd) has the daemon loaded but not running. The
+   * next step is then `hack daemon restart`, so `status --json` and the text
+   * repair message name the same command.
+   */
+  readonly serviceLoaded?: boolean;
 }): DaemonStatusReport {
   if (opts.apiReachable && opts.apiCompatible) {
     return {
@@ -171,7 +178,7 @@ export function buildDaemonStatusReport(opts: {
     stale: false,
     staleReason: null,
     issue: null,
-    nextStep: "hack daemon start",
+    nextStep: opts.serviceLoaded ? "hack daemon restart" : "hack daemon start",
   };
 }
 
@@ -191,17 +198,19 @@ export function buildDaemonRepairMessage(opts: {
     }): API not responding yet | If this persists, check: hack daemon logs --tail 200`;
   }
 
+  // `report.nextStep` is the command `hack daemon status --json` reports as
+  // `next_step`; the status command builds the report with `serviceLoaded`
+  // from the same launchd status, so both name the same command.
   if (opts.report.stale) {
-    return "hackd stopped with stale local state | Run: hack daemon clear | Then run: hack daemon start";
+    return `hackd stopped with stale local state | Run: ${opts.report.nextStep ?? "hack daemon start"} (it clears the stale pid/socket files)`;
   }
 
   const crashExitStatus = opts.launchdStatus?.loaded
     ? opts.launchdStatus.exitStatus
     : null;
-  const startCommand =
-    opts.launchdStatus?.loaded || crashExitStatus !== null
-      ? "hack daemon restart"
-      : "hack daemon start";
+  const startCommand = opts.launchdStatus?.loaded
+    ? "hack daemon restart"
+    : (opts.report.nextStep ?? "hack daemon start");
   const segments = ["hackd is not running"];
 
   if (crashExitStatus !== null && crashExitStatus !== 0) {

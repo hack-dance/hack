@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { nativeFrontendGone } from "../src/backends/native-frontend-identity.ts";
 import {
   beginNativeProjectFinalization,
   captureNativeProjectFinalization,
@@ -365,20 +366,138 @@ test("dead frontend recovery is explicit, exact, and distinct from completion", 
   await expectClosedRefusal(lifetime.complete(), "unconfirmed");
 });
 
-test("legacy recovery requires the observed PID and preserves stale completion", async () => {
+test("macOS birth-bound recovery rejects changed tokens and rechecks exit proof after effects", async () => {
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization(opts);
+  const birth = "Wed Nov 11 17:23:26 2026";
+  const token = {
+    ...lifetime.token,
+    version: 2 as const,
+    pid: process.pid,
+    birth,
+    httpsPort: null,
+  };
+  const base = join(opts.scope.nativeHome, ".hack-local/frontend-finalization");
+  const [hash] = await readdir(base);
+  const active = join(base, hash!, opts.run.run, "active.json");
+  await writeFile(active, JSON.stringify(token), { mode: 0o600 });
+  expect(await captureNativeProjectFinalization(opts)).toEqual(token);
+  for (const changed of ["", "bad", 123]) {
+    expect(isNativeProjectFinalizationToken({ ...token, birth: changed })).toBe(
+      false
+    );
+  }
+  let observedBirth = "Thu Nov 12 17:23:26 2026";
+  const isDead = () =>
+    nativeFrontendGone(token, {
+      platform: "darwin",
+      absent: () => false,
+      observe: async () => ({
+        uid: process.getuid?.() ?? 0,
+        birth: observedBirth,
+        zombie: false,
+      }),
+    });
+  const recovery = { ...opts, token, expectAttempt: token.attempt, isDead };
+  await expectClosedRefusal(
+    recoverNativeProjectFinalization({
+      ...recovery,
+      verifyEffects: async () => {
+        observedBirth = birth;
+      },
+    }),
+    "unconfirmed"
+  );
+  observedBirth = "Thu Nov 12 17:23:26 2026";
+  await expectClosedRefusal(
+    recoverNativeProjectFinalization({
+      ...recovery,
+      verifyEffects: async () => {
+        await writeFile(
+          active,
+          JSON.stringify({ ...token, birth: observedBirth })
+        );
+      },
+    }),
+    "unconfirmed"
+  );
+  await writeFile(active, JSON.stringify(token));
+  await recoverNativeProjectFinalization({
+    ...recovery,
+    verifyEffects: async () => {},
+  });
+  await waitNativeProjectFinalization({ ...opts, token, timeoutMs: 1 });
+  await expectClosedRefusal(lifetime.complete(), "unconfirmed");
+});
+
+test("a frontend completing between the completion read and exit observation is a clean stop", async () => {
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization(opts);
+  let reads = 0;
+  await waitNativeProjectFinalization({
+    ...opts,
+    token: lifetime.token,
+    timeoutMs: 1000,
+    isGone: async () => {
+      reads++;
+      await lifetime.complete();
+      return true;
+    },
+  });
+  expect(reads).toBe(1);
+});
+
+test("frontend wait polls ESRCH frequently but throttles birth inspection", async () => {
+  const opts = await fixture();
+  const lifetime = await beginNativeProjectFinalization(opts);
+  let polls = 0;
+  let births = 0;
+  await waitNativeProjectFinalization({
+    ...opts,
+    token: lifetime.token,
+    timeoutMs: 2000,
+    isGone: async (_, io) => {
+      polls++;
+      births += Number(io?.inspectBirth);
+      if (polls === 3) {
+        await lifetime.complete();
+      }
+      return false;
+    },
+  });
+  expect(polls).toBe(3);
+  expect(births).toBe(1);
+});
+
+test.each([
+  undefined,
+  "Wed Nov 11 17:23:26 2026",
+])("legacy recovery requires the observed PID and preserves stale completion (birth=%s)", async (birth) => {
   const opts = await fixture();
   const prior = await beginNativeProjectFinalization(opts);
   await prior.complete();
   const lifetime = await beginNativeProjectFinalization(opts);
-  const {
-    version: _version,
-    pid: _pid,
-    httpsPort: _port,
-    ...identity
-  } = lifetime.token.version === 2
-    ? lifetime.token
-    : { ...lifetime.token, pid: 0, httpsPort: null };
-  const legacy = { version: 1 as const, ...identity };
+  const modern = {
+    version: 2 as const,
+    attempt: lifetime.token.attempt,
+    scope: lifetime.token.scope,
+    run: lifetime.token.run,
+    owner: lifetime.token.owner,
+    namespace: lifetime.token.namespace,
+    planId: lifetime.token.planId,
+    pid: process.pid,
+    httpsPort: null,
+    ...(birth === undefined ? {} : { birth }),
+  };
+  const legacy = {
+    version: 1 as const,
+    attempt: modern.attempt,
+    scope: modern.scope,
+    run: modern.run,
+    owner: modern.owner,
+    namespace: modern.namespace,
+    planId: modern.planId,
+  };
   const active = join(
     opts.scope.nativeHome,
     ".hack-local/frontend-finalization",
@@ -386,6 +505,14 @@ test("legacy recovery requires the observed PID and preserves stale completion",
     legacy.run,
     "active.json"
   );
+  await writeFile(active, JSON.stringify(modern));
+  expect(await captureNativeProjectFinalization(opts)).toEqual(modern);
+  expect(
+    isNativeProjectFinalizationToken({
+      ...legacy,
+      birth: "Wed Nov 11 17:23:26 2026",
+    })
+  ).toBe(false);
   await writeFile(active, JSON.stringify(legacy));
   expect(await captureNativeProjectFinalization(opts)).toEqual(legacy);
   const recovery = {

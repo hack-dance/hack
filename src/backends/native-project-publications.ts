@@ -1,6 +1,8 @@
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 
+const SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
+
 export type NativePublishedPort = {
   readonly service: string;
   readonly port: number;
@@ -14,6 +16,38 @@ function port(value: unknown): value is number {
     value > 0 &&
     value <= 65_535
   );
+}
+
+/** Host-only fallback from the authenticated owner while guest inspection is busy.
+ * A pending exit proves a down port; live host handles alone grant no readiness.
+ */
+export function nativePendingPublisherPorts(
+  value: unknown
+): NativePublishedPort[] | null {
+  if (!Array.isArray(value) || value.length > 16) {
+    return null;
+  }
+  const ports: NativePublishedPort[] = [];
+  for (const item of value) {
+    if (
+      !isRecord(item) ||
+      typeof item.service !== "string" ||
+      !SERVICE.test(item.service) ||
+      !port(item.port) ||
+      !port(item.target) ||
+      ports.some((p) => p.port === item.port) ||
+      !(item.state === "observed" || item.state === "down")
+    ) {
+      return null;
+    }
+    ports.push({
+      service: item.service,
+      port: item.port,
+      target: item.target,
+      state: item.state === "down" ? "down" : "unconfirmed",
+    });
+  }
+  return ports.some((p) => p.state === "down") ? ports : null;
 }
 
 /** Only a bounded identity-matching runtime event can become a public notice. */

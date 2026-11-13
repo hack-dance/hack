@@ -45,7 +45,7 @@ static bool wait_socket(int fd, short events, uint64_t deadline) {
     }
     return false;
 }
-static bool request(int port, const char *path, uint64_t timeout) {
+static bool request(int port, const char *path, uint64_t timeout, bool route) {
     uint64_t deadline = millis(CLOCK_MONOTONIC) + timeout;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
@@ -71,22 +71,35 @@ static bool request(int port, const char *path, uint64_t timeout) {
         sent += (size_t)n;
     }
     char headers[8193];
-    size_t used = 0;
-    while (used < sizeof(headers) - 1) {
+    size_t used = 0, total = 0;
+    unsigned interim = 0;
+    while (used < sizeof(headers) - 1 && total < sizeof(headers) - 1) {
         if (!wait_socket(fd, POLLIN, deadline)) goto done;
-        ssize_t n = recv(fd, headers + used, sizeof(headers) - 1 - used, 0);
+        ssize_t n = recv(fd, headers + used, sizeof(headers) - 1 - total, 0);
         if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
         if (n <= 0) goto done;
-        size_t end = used + (size_t)n;
-        bool complete = false;
-        while (used < end) {
-            if (!headers[used++]) goto done;
-            if (used >= 4 && !memcmp(headers + used - 4, "\r\n\r\n", 4)) { complete = true; break; }
-        }
-        if (complete) {
-            ok = used >= 16 && (!memcmp(headers, "HTTP/1.1 ", 9) || !memcmp(headers, "HTTP/1.0 ", 9)) &&
-                headers[9] == '2' && headers[10] >= '0' && headers[10] <= '9' &&
-                headers[11] >= '0' && headers[11] <= '9' && headers[12] == ' ';
+        used += (size_t)n;
+        total += (size_t)n;
+        for (;;) {
+            size_t end = 0;
+            for (size_t i = 4; i <= used; i++) {
+                if (!memcmp(headers + i - 4, "\r\n\r\n", 4)) { end = i; break; }
+            }
+            if (!end) break;
+            if (end < 16 || memchr(headers, 0, end) ||
+                (memcmp(headers, "HTTP/1.1 ", 9) && memcmp(headers, "HTTP/1.0 ", 9)) ||
+                headers[9] < '1' || headers[9] > '5' || headers[10] < '0' || headers[10] > '9' ||
+                headers[11] < '0' || headers[11] > '9' || headers[12] != ' ') goto done;
+            int status = (headers[9] - '0') * 100 + (headers[10] - '0') * 10 + headers[11] - '0';
+            if (route && status >= 100 && status < 200 && status != 101) {
+                // Early hints and continue responses consume the same byte/time
+                // budget; they never satisfy readiness without a final status.
+                if (++interim > 4) goto done;
+                used -= end;
+                memmove(headers, headers + end, used);
+                continue;
+            }
+            ok = status >= 200 && status < (route ? 500 : 300);
             goto done;
         }
     }
@@ -112,7 +125,9 @@ static bool publish(int directory, const char *name, const char *generation, uin
     return ok && !renameat(directory, "status.pending", directory, name);
 }
 int main(int argc, char **argv) {
-    if (argc != 9) return 125;
+    if (argc != 9 && argc != 10) return 125;
+    bool route = argc == 10;
+    if (route && strcmp(argv[9], "route")) return 125;
     int port = (int)number(argv[1], 1, 65535);
     size_t path_length = strlen(argv[2]);
     if (!path_length || path_length > 512 || argv[2][0] != '/') return 125;
@@ -146,7 +161,7 @@ int main(int argc, char **argv) {
     if (!publish(directory, "status", argv[8], sequence, health, failures, 0)) return 125;
     while (!stopping) {
         uint64_t begun = millis(CLOCK_MONOTONIC);
-        bool success = request(port, argv[2], timeout);
+        bool success = request(port, argv[2], timeout, route);
         if (stopping) break;
         uint64_t finished = millis(CLOCK_MONOTONIC);
         if (success) { failures = 0; health = 1; ever_healthy = true; }

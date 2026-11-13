@@ -38,7 +38,7 @@ import {
 } from "./native-runtime-client.ts";
 
 const PROBE_PATH_BYTES = /^[\x21-\x7e]+$/;
-const HTTP_STATUS = /^HTTP\/1\.[01] ([2-5][0-9]{2})(?: [^\r\n]*)?$/;
+const HTTP_STATUS = /^HTTP\/1\.[01] ([1-5][0-9]{2})(?: [^\r\n]*)?$/;
 const SHA = /^[a-f0-9]{64}$/;
 const SINGLE_CERTIFICATE =
   /^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----$/;
@@ -348,6 +348,8 @@ https://:${opts.httpsPort} {
   on_demand
  }
  route {
+  vars native_probe {http.request.header.X-Hack-Probe-Request}
+  request_header -X-Hack-Probe-Request
   request_header -X-Hack-Endpoint
   forward_auth ${quoted(`unix/${opts.authority}`)} {
    uri /route?
@@ -356,6 +358,7 @@ https://:${opts.httpsPort} {
   reverse_proxy unix/{http.request.header.X-Hack-Endpoint} {
    header_up Host {hostport}
    header_up -X-Hack-Endpoint
+   header_down X-Hack-Upstream-Proof {http.vars.native_probe}
   }
  }
 }
@@ -1115,6 +1118,8 @@ export function isNativeHttpsProbePath(path: unknown): path is string {
 export interface NativeHttpsResponse {
   readonly statusCode: number;
   readonly location?: string;
+  /** A fresh request challenge was added by the upstream proxy response handler. */
+  readonly upstreamVerified?: true;
 }
 async function confirmTlsPeer(opts: {
   readonly verifyPeer?: (peerPort: number) => Promise<void>;
@@ -1130,7 +1135,27 @@ async function confirmTlsPeer(opts: {
 }
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const HEADER_VALUE = /^[\x20-\x7e\t]*$/;
-export function parseNativeHttpsHeaders(header: string): NativeHttpsResponse {
+function parseHttpsHeaderField(line: string): { name: string; value: string } {
+  const colon = line.indexOf(":");
+  const name = line.slice(0, colon).toLowerCase();
+  const raw = line.slice(colon + 1);
+  if (colon < 1 || !HEADER_NAME.test(name) || !HEADER_VALUE.test(raw)) {
+    throw refused();
+  }
+  return { name, value: raw.trim() };
+}
+function confirmedUpstream(
+  expectedProof: string | undefined,
+  observedProof: string | undefined
+): Pick<NativeHttpsResponse, "upstreamVerified"> {
+  return expectedProof !== undefined && observedProof === expectedProof
+    ? { upstreamVerified: true }
+    : {};
+}
+export function parseNativeHttpsHeaders(
+  header: string,
+  expectedProof?: string
+): NativeHttpsResponse {
   if (header.length > 8192 || !header.endsWith("\r\n\r\n")) {
     throw refused();
   }
@@ -1141,27 +1166,60 @@ export function parseNativeHttpsHeaders(header: string): NativeHttpsResponse {
     throw refused();
   }
   let location: string | undefined;
+  let upstreamProof: string | undefined;
   for (const line of lines) {
-    const colon = line.indexOf(":");
-    const name = line.slice(0, colon).toLowerCase();
-    const value = line.slice(colon + 1).trim();
-    if (
-      colon < 1 ||
-      !HEADER_NAME.test(name) ||
-      !HEADER_VALUE.test(line.slice(colon + 1))
-    ) {
-      throw refused();
-    }
+    const { name, value } = parseHttpsHeaderField(line);
     if (name === "location") {
       if (location !== undefined || !value || value.length > 2048) {
         throw refused();
       }
       location = value;
     }
+    if (name === "x-hack-upstream-proof") {
+      if (upstreamProof !== undefined) {
+        throw refused();
+      }
+      upstreamProof = value;
+    }
   }
   return {
     statusCode: Number(match[1]),
     ...(location === undefined ? {} : { location }),
+    ...confirmedUpstream(expectedProof, upstreamProof),
+  };
+}
+/** One byte budget spans interim and final headers; bodies are never retained. */
+function httpsResponseReader(
+  upstreamProof: string
+): (data: Buffer) => NativeHttpsResponse | undefined {
+  let prefix = "";
+  let headerBytes = 0;
+  let interim = 0;
+  return (data) => {
+    const part = data.subarray(0, 8192 - headerBytes);
+    headerBytes += part.length;
+    prefix += part.toString("latin1");
+    while (true) {
+      const end = prefix.indexOf("\r\n\r\n");
+      if (end < 0) {
+        if (headerBytes >= 8192) {
+          throw refused();
+        }
+        return undefined;
+      }
+      const response = parseNativeHttpsHeaders(
+        prefix.slice(0, end + 4),
+        upstreamProof
+      );
+      if (response.statusCode >= 200) {
+        return response;
+      }
+      interim++;
+      if (response.statusCode === 101 || interim > 4) {
+        throw refused();
+      }
+      prefix = prefix.slice(end + 4);
+    }
   };
 }
 export async function verifyNativeHttpsHostname(
@@ -1182,9 +1240,10 @@ export async function verifyNativeHttpsHostname(
     throw refused();
   }
   const ca = await validCa(caPath);
+  const upstreamProof = randomBytes(16).toString("hex");
   return await new Promise((resolve, reject) => {
     let settled = false;
-    let prefix = "";
+    const readResponse = httpsResponseReader(upstreamProof);
     let phase: "handshake" | "response" = "handshake";
     let peerVerified = verifyPeer === undefined;
     const finish = (error?: Error, response?: NativeHttpsResponse) => {
@@ -1223,7 +1282,7 @@ export async function verifyNativeHttpsHostname(
           phase = "response";
           const authority = port === 443 ? hostname : `${hostname}:${port}`;
           socket.write(
-            `GET ${path} HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`
+            `GET ${path} HTTP/1.1\r\nHost: ${authority}\r\nX-Hack-Probe-Request: ${upstreamProof}\r\nConnection: close\r\n\r\n`
           );
         } catch {
           finish(nativeHttpsVerificationError(undefined));
@@ -1236,13 +1295,11 @@ export async function verifyNativeHttpsHostname(
         return;
       }
       // Parse only bounded headers; discard any body bytes delivered in the same chunk.
-      prefix += data.subarray(0, 8192 - prefix.length).toString("latin1");
-      const end = prefix.indexOf("\r\n\r\n");
-      if (end < 0 && prefix.length < 8192) {
-        return;
-      }
       try {
-        finish(undefined, parseNativeHttpsHeaders(prefix.slice(0, end + 4)));
+        const response = readResponse(data);
+        if (response !== undefined) {
+          finish(undefined, response);
+        }
       } catch {
         finish(nativeHttpsVerificationError(undefined));
       }

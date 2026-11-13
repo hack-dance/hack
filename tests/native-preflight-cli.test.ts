@@ -716,7 +716,7 @@ test(
 test(
   "route admission, project-wide hosts and per-environment dependency files are checked as native up checks them",
   async () => {
-    // A routed service without a native HTTP probe: the review only warns, native up refuses.
+    // A route missing its reviewed probe still refuses; authored labels alone are insufficient.
     const routed = await fixture({
       services: {
         web: {
@@ -743,6 +743,30 @@ test(
     expect(route.code).toBe(1);
     expect(route.report.ready).toBe(false);
     expect(codes(route.report, "cli")).toEqual(["route_probe_required:web"]);
+    await routed.review([], {
+      services: {
+        web: {
+          active: true,
+          routing: { port: 3000 },
+          healthcheck: {
+            disabled: false,
+            native_http: {
+              policy: "route",
+              port: 3000,
+              path: "/",
+              interval_ms: 1000,
+              timeout_ms: 1000,
+              retries: 3,
+              start_period_ms: 300_000,
+            },
+          },
+        },
+      },
+    });
+    const inferred = await preflight(routed, { ...routed.native, ...GRANT });
+    expect(codes(inferred.report, "cli")).toEqual([]);
+    expect(inferred.code).toBe(0);
+    expect(inferred.report.ready).toBe(true);
 
     // Routes plus published ports over the pool's bridge limit: native up
     // refuses before any runtime work, so no review is needed to see it.

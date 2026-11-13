@@ -245,6 +245,13 @@ test("owns authority and Caddy lifetimes, writes strict routing config and prese
   expect(f.config()).toContain("uri /route?");
   expect(f.config()).toContain("request_header -X-Hack-Endpoint");
   expect(f.config()).toContain("header_up -X-Hack-Endpoint");
+  expect(f.config()).toContain(
+    "vars native_probe {http.request.header.X-Hack-Probe-Request}"
+  );
+  expect(f.config()).toContain("request_header -X-Hack-Probe-Request");
+  expect(f.config()).toContain(
+    "header_down X-Hack-Upstream-Proof {http.vars.native_probe}"
+  );
   expect(f.config()).toContain("https://:443");
   expect(f.config()).toContain("bind 127.0.0.1");
   expect(f.config()).toContain("permission http http://127.0.0.1:18443/ask");
@@ -719,7 +726,11 @@ while True:
    if data:
     seen.update(request=data.decode(),remote=remote[0],remote_port=remote[1])
     (root/'seen').write_text(json.dumps(seen))
-    conn.sendall((root/'response').read_bytes())
+    response=(root/'response').read_bytes()
+    if (root/'echo-proof').exists():
+     proof=next((line.split(b': ',1)[1] for line in data.split(b'\r\n') if line.startswith(b'X-Hack-Probe-Request: ')),b'')
+     response=response.replace(b'\r\n\r\n',b'\r\nX-Hack-Upstream-Proof: '+proof+b'\r\n\r\n')
+    conn.sendall(response)
  except (OSError,ssl.SSLError): client.close()
 `
   );
@@ -747,7 +758,11 @@ while True:
   ).toEqual({ statusCode: 204 });
   expect(JSON.parse(await readFile(seenPath, "utf8"))).toMatchObject({
     sni: "fixture.invalid",
-    request: `GET /health HTTP/1.1\r\nHost: fixture.invalid:${address.port}\r\nConnection: close\r\n\r\n`,
+    request: expect.stringMatching(
+      new RegExp(
+        `^GET /health HTTP/1\\.1\\r\\nHost: fixture\\.invalid:${address.port}\\r\\nX-Hack-Probe-Request: [a-f0-9]{32}\\r\\nConnection: close\\r\\n\\r\\n$`
+      )
+    ),
     remote: "127.0.0.1",
   });
   await rm(seenPath);
@@ -809,6 +824,19 @@ while True:
       "/health"
     )
   ).toEqual({ statusCode: 307, location: "https://canonical.invalid/health" });
+  await writeFile(join(root, "echo-proof"), "");
+  await writeFile(responsePath, "HTTP/1.1 404 Not Found\r\n\r\n");
+  expect(
+    await verifyNativeHttpsHostname("fixture.invalid", address.port, cert, "/")
+  ).toEqual({ statusCode: 404, upstreamVerified: true });
+  await writeFile(
+    responsePath,
+    "HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 404 Not Found\r\n\r\n"
+  );
+  expect(
+    await verifyNativeHttpsHostname("fixture.invalid", address.port, cert, "/")
+  ).toEqual({ statusCode: 404, upstreamVerified: true });
+  await rm(join(root, "echo-proof"));
   for (const invalid of [
     "HTTP/1.1 100 Continue\r\n\r\n",
     "malformed\r\n",
@@ -859,6 +887,32 @@ test("HTTPS header parsing refuses duplicate, folded and oversized fields", () =
   ]) {
     expect(() => parseNativeHttpsHeaders(value)).toThrow();
   }
+});
+
+test("upstream proof requires this request's exact challenge, never merely a 4xx status", () => {
+  const proof = "a".repeat(32);
+  for (const response of [
+    "HTTP/1.1 403 Denied\r\n\r\n",
+    "HTTP/1.1 404 Missing\r\nX-Hack-Upstream-Proof: stale\r\n\r\n",
+    "HTTP/1.1 421 Misdirected\r\n\r\n",
+    "HTTP/1.1 502 Missing Socket\r\n\r\n",
+  ]) {
+    expect(
+      parseNativeHttpsHeaders(response, proof).upstreamVerified
+    ).toBeUndefined();
+  }
+  expect(
+    parseNativeHttpsHeaders(
+      `HTTP/1.1 404 Not Found\r\nX-Hack-Upstream-Proof: ${proof}\r\n\r\n`,
+      proof
+    )
+  ).toEqual({ statusCode: 404, upstreamVerified: true });
+  expect(() =>
+    parseNativeHttpsHeaders(
+      `HTTP/1.1 404 Not Found\r\nX-Hack-Upstream-Proof: ${proof}\r\nx-hack-upstream-proof: ${proof}\r\n\r\n`,
+      proof
+    )
+  ).toThrow();
 });
 
 test("HTTPS headers permit unrelated duplicates but keep Location unambiguous", () => {

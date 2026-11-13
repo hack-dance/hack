@@ -67,6 +67,97 @@ impl Drop for Fixture {
 const BASIC: &str = "services:\n  web:\n    image: alpine:3.21\n    command: [echo, hello]\n";
 
 #[test]
+fn standard_route_without_healthcheck_infers_a_reviewed_probe_without_editing_source() {
+    use hack_runtime_core::provider::http_probe::HttpProbe;
+    let document = format!(
+        "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n"
+    );
+    let fixture = Fixture::new(&document);
+    let report = fixture.plan();
+    assert!(report.plan.enrollment_compatible);
+    let health = report.plan.services["web"].healthcheck.as_ref().unwrap();
+    assert!(!health.disabled);
+    assert!(health.test.is_none());
+    assert_eq!(health.native_http, Some(HttpProbe::inferred_route(3000)));
+    assert!(
+        report
+            .plan
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "inferred_route_probe" && d.severity == "warning")
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("compose.yaml")).unwrap(),
+        document
+    );
+    assert!(!fixture.candidate.state_root.exists());
+}
+
+#[test]
+fn route_inference_never_replaces_authored_healthchecks_or_accepts_an_authored_policy() {
+    let route = format!(
+        "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n"
+    );
+    for authored in [
+        "{}",
+        "{disable: true}",
+        "{test: [CMD, 'true']}",
+        "{test: [NONE]}",
+    ] {
+        let fixture = Fixture::new(&format!("{route}    healthcheck: {authored}\n"));
+        let report = fixture.plan();
+        assert!(
+            report.plan.services["web"]
+                .healthcheck
+                .as_ref()
+                .unwrap()
+                .native_http
+                .is_none(),
+            "{authored}"
+        );
+        assert!(
+            !report
+                .plan
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "inferred_route_probe")
+        );
+    }
+    let probe = "{port: 3000, path: /health, interval_ms: 100, timeout_ms: 500, retries: 3, start_period_ms: 0}";
+    let fixture = Fixture::new(&format!(
+        "{route}    healthcheck: {{x-hack-http: {probe}}}\n"
+    ));
+    let report = fixture.plan();
+    let health = report.plan.services["web"]
+        .healthcheck
+        .as_ref()
+        .unwrap()
+        .native_http
+        .as_ref()
+        .unwrap();
+    assert_eq!(health.path, "/health");
+    assert!(health.policy.is_none());
+    assert!(
+        serde_json::to_value(health)
+            .unwrap()
+            .get("policy")
+            .is_none()
+    );
+    let forged = probe.replace("path: /health", "path: /, policy: route");
+    fs::write(
+        fixture.project.join("compose.yaml"),
+        format!("{route}    healthcheck: {{x-hack-http: {forged}}}\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        project::plan(&fixture.candidate, fixture.options())
+            .unwrap_err()
+            .code,
+        "invalid_healthcheck"
+    );
+}
+
+#[test]
 fn local_https_labels_have_typed_review_intent_without_publication() {
     let labels = "    labels:\n      caddy: 'search.example-app.hack, search.example-app.hack.gy'\n      caddy.reverse_proxy: '{{upstreams 6980}}'\n      caddy.tls: internal\n";
     let fixture = Fixture::new(&format!("{BASIC}{labels}"));

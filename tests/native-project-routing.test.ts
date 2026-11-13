@@ -162,3 +162,64 @@ test("active reviewed routes request pool allocation with matching existing prob
     }).flags
   ).toEqual([]);
 });
+
+test("a route without an authored healthcheck accepts only its exact reviewed inferred probe", () => {
+  const inferred = {
+    policy: "route",
+    port: 3000,
+    path: "/",
+    interval_ms: 1000,
+    timeout_ms: 1000,
+    retries: 3,
+    start_period_ms: 300_000,
+  };
+  const opts = {
+    plan: {
+      services: {
+        web: {
+          ...service,
+          healthcheck: { disabled: false, native_http: inferred },
+        },
+      },
+    },
+    specs: { web: { labels } },
+    capacity: 1,
+  };
+  expect(reviewedNativeRoutes(opts).flags).toEqual([
+    "--route-slot",
+    "web=auto",
+  ]);
+  for (const authoredHealthcheck of [
+    null,
+    {},
+    { disable: true },
+    { test: ["CMD", "true"] },
+    healthcheck,
+  ]) {
+    expect(() =>
+      reviewedNativeRoutes({
+        ...opts,
+        specs: { web: { labels, healthcheck: authoredHealthcheck } },
+      })
+    ).toThrow();
+  }
+  for (const changed of [
+    { ...inferred, port: 3001 },
+    { ...inferred, path: "/health" },
+    { ...inferred, policy: "anything" },
+    { ...inferred, timeout_ms: 60_000 },
+    { ...inferred, extra: true },
+    { port: 3000 },
+  ]) {
+    expect(() =>
+      reviewedNativeRoutes({
+        ...opts,
+        plan: {
+          services: {
+            web: { ...service, healthcheck: { native_http: changed } },
+          },
+        },
+      })
+    ).toThrow();
+  }
+});

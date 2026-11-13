@@ -280,6 +280,7 @@ mod observation_clock_tests {
                 timeout_ms: 40,
                 retries: 3,
                 start_period_ms: 0,
+                policy: None,
             },
             allocation: "a".repeat(32),
             generation: "b".repeat(32),

@@ -2,6 +2,7 @@ import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "../lib/hack-ownership-labels.ts";
 import { isIgnoredHackComposeLabel } from "../lib/native-hack-compose-conventions.ts";
+import { isInferredNativeRouteProbe } from "./native-http-probe-admission.ts";
 import { hasOnlyNativeCacheLabels } from "./native-project-cache.ts";
 
 const ROUTE_LABELS = new Set(["caddy", "caddy.reverse_proxy", "caddy.tls"]);
@@ -10,7 +11,7 @@ function refused(): Error {
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native routes require reviewed Caddy labels and existing matching native HTTP health probes; no probe or route was invented.",
+      "Native routes require reviewed Caddy labels and matching native route readiness; explicit healthchecks are never replaced.",
   });
 }
 /**
@@ -148,16 +149,25 @@ function requireRouteProbe(
   const reviewedProbe = isRecord(service.healthcheck)
     ? service.healthcheck.native_http
     : undefined;
+  const inferred =
+    spec !== undefined &&
+    !Object.hasOwn(spec, "healthcheck") &&
+    isRecord(service.routing) &&
+    isInferredNativeRouteProbe(reviewedProbe, service.routing.port);
   if (
     !(
       isRecord(service.routing) &&
-      isRecord(probe) &&
       isRecord(reviewedProbe) &&
       Number.isInteger(service.routing.port)
     ) ||
     Number(service.routing.port) < 1 ||
     Number(service.routing.port) > 65_535 ||
-    probe.port !== service.routing.port ||
+    !(
+      inferred ||
+      (isRecord(probe) &&
+        probe.port === service.routing.port &&
+        reviewedProbe.policy === undefined)
+    ) ||
     reviewedProbe.port !== service.routing.port ||
     (isRecord(service.healthcheck) && service.healthcheck.disabled === true) ||
     (service.dependency_cache !== undefined &&

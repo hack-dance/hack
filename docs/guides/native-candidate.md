@@ -2316,10 +2316,11 @@ Host dependencies use the equivalent `--minimum-dependency-sockets N` selection;
 an exact capacity or a minimum. The combined physical transport limit still applies
 to the pool's actual capacities, including any spare slots. A minimum does not resize
 an existing pool or guarantee that enough slots are currently free.
-Each routed service
-must already declare a matching `healthcheck.x-hack-http` (see
-[Native HTTP readiness probe](#native-http-readiness-probe)); command healthchecks
-and missing probes are not replaced or inferred. Native review still validates
+Each routed service needs a matching native route probe (see
+[Native HTTP readiness probe](#native-http-readiness-probe)). If no `healthcheck`
+key was authored, native infers one on the reviewed Caddy route port without
+changing the Compose file. Explicit healthchecks are never replaced; command-only
+or disabled checks on routed services still refuse in this increment. Native review still validates
 hostnames, ports, networks and labels. Foreground graph ownership supervises and
 retires Unix route publishers. Without explicit HTTPS selection, this enrollment does not start a hostname authority
 or Caddy HTTPS server. It never installs trust, configures DNS, or widens an existing pool.
@@ -2838,7 +2839,35 @@ shared-source mode; active project bind mounts still use the explicit project sh
 
 #### Native HTTP readiness probe
 
-`healthcheck.x-hack-http` declares the readiness probe native startup uses for a
+For a complete Caddy route with no authored `healthcheck`, native reviews a default
+probe: `GET /` on the route port, a 1000 ms interval and timeout, three consecutive
+failures, and a 300000 ms startup grace matching the foreground startup deadline.
+A successful TCP connection and complete HTTP/1.0 or HTTP/1.1 response headers are
+required. HTTP 200–499, including `/` returning 404, is ready; 5xx, EOF, non-HTTP
+bytes, a timeout or partial headers are not. Redirects are not followed. At most
+four interim 1xx responses may precede the final response, within the same 8 KiB
+header and timeout budgets. The request uses `Host: 127.0.0.1:<port>`.
+
+This proves endpoint readiness, not application correctness. After the first
+success, three consecutive failures make the service unhealthy using the existing
+probe lifecycle; source-reload downtime is not silently called healthy. Final
+HTTPS publication verification accepts 2xx–4xx only with a fresh challenge added
+by the upstream proxy response handler. Authority denials and routing errors do
+not qualify as the application's 404. No readiness decision follows an external
+redirect. Explicit probes retain the stricter policy below. The generated
+`policy` field is internal and refuses in authored `x-hack-http` declarations.
+The native bundle embeds the matching guest probe; its content hash binds the
+published helper. An older helper refuses the new policy argument. These inferred
+defaults are retained-run compatibility values and cannot change without migration.
+
+Native reserves `X-Hack-Probe-Request` and `X-Hack-Upstream-Proof` for the HTTPS
+verification exchange. The challenge is stripped before either the authority or
+application sees it. Normal traffic has no challenge, so no non-empty proof
+header is emitted. The shared HTTPS reader permits up to four interim 1xx
+responses before the final status for both inferred and explicit routes; explicit
+final-status and reviewed-redirect rules remain unchanged.
+
+`healthcheck.x-hack-http` declares an explicit readiness probe native startup uses for a
 service. It must be the only key in that service's `healthcheck`: it cannot be
 combined with `test`, `disable`, `interval`, `timeout`, `start_period`,
 `start_interval` or `retries`. Docker Compose ignores the extension field. All six

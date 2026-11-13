@@ -13,10 +13,80 @@ beta. `hack dev`, added in 4.3.0, is part of the core.
 This page is the readable summary. The generated
 [CHANGELOG](../../CHANGELOG.md) lists every change by commit.
 
+## next.17: what changed and what to do
+
+These are source changes intended for `5.0.0-next.17`, not a claim that the
+release is published. Check the installed candidate's version and release notes
+before using a new flag or changing a script. An installed next.16 bundle keeps
+its original behavior.
+
+| Change | What to do |
+| --- | --- |
+| **Native plain `logs SERVICE --follow` output changes.** It now prints application-text lines, matching a finite snapshot, instead of adding a `SERVICE \| ` prefix. Both service streams go to stdout; Hack notices go to stderr. | Stop parsing the old plain prefix. Use `--json` and the log event's `entry.service`, `entry.stream` and `entry.message` when a script needs those fields. Use `--timestamps` to request Engine timestamps. |
+| **Env listings hide values by default, including migrated plaintext.** Ordinary `env` / `env list` text and JSON output are metadata. JSON omits `value` and reports `has_value`. | Use `has_value` for availability checks. For a value a script actually needs, call `hack env get KEY` with the same `--env` and `--service`; that command prints plaintext. Bulk `--show-values` requires interactive stdin and stdout; `--show-secrets` remains an alias. |
+| **Migration cleanup preserves live keys (HACK-2172).** A legacy store's `keyPath` can no longer make the current project/shared key a cleanup target. Current config and YAML inputs are protected too, including filesystem aliases. | Keep key and env backups before migration. On next.16 or an earlier prerelease, do not run `doctor --migrate-env-config` without a private readable copy of `.hack.secret.key`. The fix does not recover a key already removed. |
+| **Doctor fails when an env layer cannot be used by the runtime.** Unreadable, invalid or undecryptable layers no longer get an apparent all-clear. | Run `hack doctor` after upgrading. Fix the reported layer or recover the original key before starting; keep the encrypted file rather than generating a replacement key over it. |
+| **Doctor checks the Compose proxy's loopback ports.** A reachable container address no longer hides a broken published loopback path. | Read the `proxy ports` warning, check competing listeners and DNS/bind settings, then retry. HTTP success on port 80 is not HTTPS success on 443; the check applies no automatic repair. |
+| **Native route readiness can be inferred.** A complete standard Caddy route with no authored healthcheck gets a reviewed HTTP probe and 240 seconds of initial grace. A complete HTTP 200–499 response establishes endpoint readiness, not application correctness. | Review the route port and startup logs. Explicit healthchecks are not replaced, and inferred readiness does not satisfy `depends_on: condition: service_healthy`. The grace does not extend the whole graph's deadline. |
+| **Native start waits for bridge sockets after a stopped pool resumes.** An immediate start no longer fails merely because provider readiness preceded the bridge listener. | Use normal native `up`; startup still requires a successful bridge connection within its deadline. Do not replace readiness checks with a fixed sleep. |
+
+### Env scripts and migrated plaintext
+
+Replace noninteractive bulk reveal with explicit single-key reads; do not log or
+paste their output. `--json` is a format choice, not permission to reveal values.
+The terminal reveal gate reduces accidental transcript exposure; it is not
+access control against a local process with the same file and key access.
+
+Use `hack env protect` for a names-only inventory of plaintext YAML entries,
+then choose keys to encrypt in their original scopes and layers, for example
+`hack env protect API_TOKEN --service api`. Omitted `--env` covers all overlays.
+Keep the existing key and recover missing key material before trying to protect
+values. Encrypting a YAML entry does not erase legacy dotenv or store copies.
+
+Secret writes now use `--secret --value-stdin` or the hidden terminal prompt;
+positional values with `--secret` are refused. Continue using `--secret` when
+updating an encrypted entry. Review legacy lifecycle hooks and processes that
+depended on a service's values: they now receive only global contract values.
+Put only the values they need into global scope. For text parsers, prefer JSON metadata
+or explicit single-key reads over the old tab column positions. YAML projects'
+daemon `GET /v1/env` returns names-only metadata. Their legacy set/unset routes refuse with HTTP 409
+`yaml_env_mutation_unsupported`; use the canonical CLI env commands.
+
+See [the env command and script migration guidance](../env.md#common-commands)
+and [legacy migration and cleanup](../env.md#legacy-repos-and-migration).
+The merged env contract and its migration wording are also in
+[`scripts/prerelease-plan.ts`](../../scripts/prerelease-plan.ts), alongside
+[#767](https://github.com/hack-dance/hack/pull/767) and the live-key fix in
+[#769](https://github.com/hack-dance/hack/pull/769).
+
+### Cleanup can finish partially
+
+Cleanup now keeps content and file-identity receipts and rechecks them under
+the existing writer locks before removal. If a source or its delivery changed,
+keep the remaining files and keys. Migration writes already completed are not
+rolled back. Reconcile chosen values through `env set KEY --value-stdin`, keeping
+the overlay and service scope, adding `--local` for machine-local values and
+`--secret` for secrets. Check delivery before removing any remaining copy.
+
+Explicit Doctor cleanup reports the failure and every confirmed removal.
+Implicit cleanup warns and allows the original command to continue. If a legacy
+store was removed before a later cleanup failure, Doctor reconciles its config
+pointer for that confirmed removal. If the store remains, its pointer remains.
+If the config cannot be updated, Doctor warns about that too; a failure is not
+proof that nothing changed. See [cleanup and reconciliation](../env.md#legacy-repos-and-migration),
+[#768](https://github.com/hack-dance/hack/pull/768) and
+[#783](https://github.com/hack-dance/hack/pull/783).
+
+An old global secret store whose key is lost still needs its original key for
+recovery. Keep the encrypted store and key backups; do not delete it or provision
+a new key just to clear Doctor. A separate retire path is being added in
+[#779](https://github.com/hack-dance/hack/pull/779); no retire command is promised
+by these notes until it merges.
+
 ## Highlights
 
-- **Same projects, same commands.** A v4 project runs on v5 without a config
-  rewrite.
+- **Same project folder and default backend.** Compose remains the default;
+  inspect legacy env migration before accepting project-file changes.
 - **Safer env.** Secrets can be entered without appearing in command arguments, and
   the env migration never rewrites a tracked file without your consent.
 - **`hack dev`.** One command runs a repository's own side-by-side development
@@ -37,8 +107,8 @@ This page is the readable summary. The generated
 4. Start the project with `hack up` and check the application itself: sign-in,
    data-backed pages, and anything that must survive a restart.
 
-Projects need no changes to keep running on Compose. Three behavior changes can
-affect an existing project:
+Existing Compose projects keep the same project model. Review env migration and
+command behavior before upgrading; these changes can affect an existing project:
 
 - **Managed env values that contain `$`.** v4 let Compose interpolate `$VAR` inside
   a managed value. v5 delivers the value exactly as stored. A value that relied on
@@ -66,7 +136,13 @@ move to the layered YAML format with:
 hack doctor --migrate-env-config
 ```
 
-The migration is built to be safe to run on a real project:
+Back up the project, env files and original project key before migration. On
+next.16 or earlier prereleases, explicit Doctor cleanup can remove the project
+key when a legacy store's `keyPath` names it (HACK-2172). Use a build containing
+the fix or preserve a readable key copy outside the working tree first. A new
+key cannot decrypt values encrypted with a missing original key.
+
+The migration has the following consent and delivery checks:
 
 - Tracked layers receive encrypted values, never legacy plaintext. Plain values go
   to gitignored local layers.

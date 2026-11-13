@@ -2359,6 +2359,7 @@ hack secrets <subcommand> [options]
 | `hack secrets set [name]` | Store a secret |
 | `hack secrets get [name]` | Print a secret (exit 1 if missing) |
 | `hack secrets delete [name]` | Delete a stored secret |
+| `hack secrets retire-store` | Move an encrypted secret store whose key is gone aside (reversible) |
 
 ### Options
 
@@ -2444,6 +2445,37 @@ the deletion is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.
 | --- | --- |
 | `--service <service>` | Override Bun.secrets service name (default: hack-cli) |
 | `--yes` | Confirm the deletion without prompting (required without a TTY or with HACK_NO_INTERACTIVE) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack secrets retire-store`
+
+Move an encrypted secret store whose key is gone aside (reversible)
+
+### Usage
+
+```bash
+hack secrets retire-store [options]
+```
+
+For an encrypted_file (or cloud shim) store that hack doctor reports with a missing or wrong key.
+Moves the store into a new directory <store>.retired-<UTC time>/ beside it: nothing is deleted, read or printed,
+and the key file is left alone. It prints how to put the store back. The store is the one this project
+selects (--path or the current directory), or the global one outside a project. Refused for a store that
+opens with the key in use, that another registered project's key still opens, or that is unreadable for
+another reason. HACK_SECRETS_FILE_KEY set in another shell cannot be inspected, so retiring needs --allow-unchecked:
+pass it once you have confirmed no shell for a project that selects the store sets it (it also covers registered
+projects that could not be checked). Without a TTY (or with
+HACK_NO_INTERACTIVE / --no-interactive) it is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--yes` | Confirm moving the store aside without prompting (required without a TTY or with HACK_NO_INTERACTIVE) |
+| `--allow-unchecked` | Accept what cannot be checked: a HACK_SECRETS_FILE_KEY set in another shell for a project that selects the store, and registered projects that could not be checked. Retiring needs it; a key known to open the store still refuses |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

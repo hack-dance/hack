@@ -3,9 +3,21 @@ import {
   createDecipheriv,
   createHash,
   randomBytes,
+  randomUUID,
 } from "node:crypto";
-import { lstat, realpath, stat } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import {
+  link,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rmdir,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import type {
   CloudSecretProvider,
@@ -18,6 +30,7 @@ import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import { ensureDir } from "./fs.ts";
 import { resolveUserHomeDir } from "./home-dir.ts";
 import { isKeychainDisabled, keychain } from "./keychain.ts";
+import { quoteShellWord } from "./logs.ts";
 import { NativeKeychainTimeoutError } from "./native-keychain.ts";
 import {
   decodeCanonicalBase64,
@@ -110,6 +123,18 @@ export class SecretStoreKeyUnavailableError extends Error {
 }
 
 /**
+ * The OS keychain could not be asked for the encrypted_file key (access
+ * denied, locked, timed out, or the failure cooldown): whether the key
+ * exists is unknown, which is not the same as missing (HACK-2177).
+ */
+export class SecretStoreKeyAccessError extends SecretStoreKeyUnavailableError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecretStoreKeyAccessError";
+  }
+}
+
+/**
  * The key file exists but is refused (HACK-2036): a link or non-regular
  * file, readable or writable by other users, or tracked by git.
  */
@@ -193,10 +218,451 @@ export type FileSecretStoreListing = {
         | "store_refused"
         | "key_missing"
         | "key_refused"
+        | "key_unreadable"
+        | "key_access_failed"
         | "wrong_key_or_corrupt"
         | "incomplete_config";
     }
 );
+
+/**
+ * Where the encrypted file store (also the cloud shim's) for this context
+ * lives, from configuration only: nothing is read, opened or provisioned.
+ * `active` is false when the backend is the OS keychain.
+ */
+export async function resolveFileSecretStorePaths(input: {
+  /** Omitted: only the global configuration applies (no project). */
+  readonly projectDir?: string;
+}): Promise<{
+  readonly active: boolean;
+  readonly storePath: string;
+  readonly keyPath: string;
+}> {
+  const secretsConfig = (
+    await readControlPlaneConfig({ projectDir: input.projectDir })
+  ).config.secrets;
+  return {
+    active:
+      secretsConfig.backend === "encrypted_file" ||
+      secretsConfig.backend === "cloud",
+    storePath: resolveConfiguredPath({
+      path: secretsConfig.encryptedFile.path,
+      projectDir: input.projectDir,
+    }),
+    keyPath: resolveConfiguredPath({
+      path:
+        secretsConfig.encryptedFile.keyPath ?? DEFAULT_ENCRYPTED_FILE_KEY_PATH,
+      projectDir: input.projectDir,
+    }),
+  };
+}
+
+/** Retired stores are kept beside the store as `<store><infix><UTC stamp>`. */
+export const RETIRED_STORE_INFIX = ".retired-";
+const STAMP_SEPARATORS = /[-:]/g;
+const STAMP_MILLISECONDS = /\.\d{3}Z$/;
+
+/** Thrown when a store cannot be moved aside; the message says why and what to do. */
+export class SecretStoreRetireError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecretStoreRetireError";
+  }
+}
+
+/**
+ * Moves an encrypted store file aside (HACK-2177), never deleting it or
+ * replacing a file this call did not create. Under the store's lock:
+ *
+ * 1. the store must be a regular file, and not the key file itself (same
+ *    device and inode, so an alias or hard link of the key is refused);
+ * 2. `recheck` runs (eligibility, classified again under the lock);
+ * 3. a new directory `<store>.retired-<UTC stamp>/` is created exclusively
+ *    (mode 0700; refused if the name exists);
+ * 4. the store gets a second name `<dir>/<store name>` with a hard link,
+ *    which never replaces an existing file: that is the archive;
+ * 5. whatever is at the store path at that instant is renamed into the
+ *    new directory under an unpredictable, checked-free `.source-<uuid>`
+ *    name. When it is the archived file (same
+ *    device and inode) that extra name is removed; when a writer outside
+ *    the lock had replaced the store, the replacement stays there too.
+ *
+ * Every rename target, and the only name ever removed, is inside the
+ * directory this call created; nothing outside it is replaced or removed.
+ * This assumes no other process writes into that fresh private (0700)
+ * directory: one that does could plant a file at the unpredictable source
+ * name between its check and the rename, or swap that name between the
+ * same-file check and its removal. It is not a guarantee against such a
+ * process.
+ * On a failure before step 5 the directory is removed with rmdir, which
+ * refuses unless it is empty. Nothing is read or decrypted; the key file
+ * is not touched.
+ */
+export async function retireEncryptedStoreFile(input: {
+  readonly storePath: string;
+  /** The store's key file: a store that is the key file is not retired. */
+  readonly keyPath?: string;
+  readonly now?: Date;
+  /**
+   * Runs under the store's lock just before the move: a refusal message
+   * when the store is no longer one to retire (its key was restored, or it
+   * was replaced meanwhile), null to go on.
+   */
+  readonly recheck?: () => Promise<string | null>;
+  /**
+   * Test seam: runs after the archive link, just before the store path is
+   * renamed, so a test can replace the store as a writer outside the lock
+   * would.
+   */
+  readonly beforeMove?: () => Promise<void>;
+  /** Test seam: runs right after the archive directory is created. */
+  readonly afterDirectory?: (dir: string) => Promise<void>;
+}): Promise<{
+  readonly from: string;
+  readonly to: string;
+  /** Set when a replacement was found at the store path and kept too. */
+  readonly replacement: string | null;
+}> {
+  const storePath = input.storePath;
+  return await withEncryptedStoreMutation({
+    filePath: storePath,
+    run: async () => {
+      await assertRetirableStoreFile(input);
+      const changed = (await input.recheck?.()) ?? null;
+      if (changed !== null) {
+        throw new SecretStoreRetireError(changed);
+      }
+      const stamp = (input.now ?? new Date())
+        .toISOString()
+        .replace(STAMP_SEPARATORS, "")
+        .replace(STAMP_MILLISECONDS, "Z");
+      const dir = `${storePath}${RETIRED_STORE_INFIX}${stamp}`;
+      const to = join(dir, basename(storePath));
+      await createRetireDirectory({ storePath, dir });
+      await input.afterDirectory?.(dir);
+      const archived = await linkIntoRetireDirectory({ storePath, dir, to });
+      await input.beforeMove?.();
+      const replacement = await moveSourceIntoRetireDirectory({
+        storePath,
+        dir,
+        archived,
+      });
+      return { from: storePath, to, replacement };
+    },
+  });
+}
+
+/** The store is a regular file, and not its own key file (same device and inode). */
+async function assertRetirableStoreFile(input: {
+  readonly storePath: string;
+  readonly keyPath?: string;
+}): Promise<void> {
+  const info = await stat(input.storePath).catch(() => null);
+  const linkInfo = await lstat(input.storePath).catch(() => null);
+  if (info === null || linkInfo === null) {
+    throw new SecretStoreRetireError(
+      `There is no encrypted secret store at ${input.storePath}; nothing was moved.`
+    );
+  }
+  if (!linkInfo.isFile()) {
+    throw new SecretStoreRetireError(
+      `The encrypted secret store at ${input.storePath} is a symlink or not a regular file; nothing was moved. Inspect it with ls -l, then move it aside by hand if you mean to.`
+    );
+  }
+  const keyInfo = input.keyPath
+    ? await stat(input.keyPath).catch(() => null)
+    : null;
+  if (
+    keyInfo !== null &&
+    keyInfo.dev === info.dev &&
+    keyInfo.ino === info.ino
+  ) {
+    throw new SecretStoreRetireError(
+      `The encrypted secret store at ${input.storePath} is its own key file (${input.keyPath}); retiring it would remove the key. Nothing was moved. Fix controlPlane.secrets.encryptedFile so the store and its key are different files.`
+    );
+  }
+}
+
+/** Creates the archive directory exclusively (0700); refuses if the name exists. */
+async function createRetireDirectory(input: {
+  readonly storePath: string;
+  readonly dir: string;
+}): Promise<void> {
+  try {
+    await mkdir(input.dir, { mode: 0o700 });
+  } catch (error: unknown) {
+    throw new SecretStoreRetireError(
+      errorCode(error) === "EEXIST"
+        ? `${input.dir} already exists; nothing was moved. Retry in a second.`
+        : `Could not create ${input.dir} (${errorCode(error)}); nothing was moved. To retire the store by hand: mkdir ${quoteShellWord(input.dir)} && mv ${quoteShellWord(input.storePath)} ${quoteShellWord(input.dir)}/`
+    );
+  }
+}
+
+/**
+ * Links the store into the archive directory (a hard link never replaces an
+ * existing file) and returns the archived file's identity. On failure the
+ * directory is removed only if it is still empty (rmdir refuses otherwise).
+ */
+async function linkIntoRetireDirectory(input: {
+  readonly storePath: string;
+  readonly dir: string;
+  readonly to: string;
+}): Promise<{ readonly dev: number; readonly ino: number }> {
+  try {
+    await link(input.storePath, input.to);
+    const archived = await lstat(input.to);
+    return { dev: archived.dev, ino: archived.ino };
+  } catch (error: unknown) {
+    const code = errorCode(error);
+    if (code === "EEXIST") {
+      // Something appeared at the archive name: leave it and the directory
+      // as they are, and suggest no move that could overwrite it.
+      throw new SecretStoreRetireError(
+        `A file appeared at ${input.to} while retiring; it and ${input.storePath} were left as they are, and nothing was moved. Inspect ${quoteShellWord(input.dir)}, then retry (a new directory name is used).`
+      );
+    }
+    // The directory is still empty unless something else wrote into it;
+    // rmdir refuses otherwise.
+    const removed = await rmdir(input.dir).then(
+      () => true,
+      () => false
+    );
+    throw new SecretStoreRetireError(
+      removed
+        ? `Could not link ${input.storePath} into ${input.dir} (${code}; this filesystem may not support hard links); nothing was moved. To retire it by hand without overwriting anything: mkdir ${quoteShellWord(input.dir)} && mv -n ${quoteShellWord(input.storePath)} ${quoteShellWord(input.dir)}/`
+        : `Could not link ${input.storePath} into ${input.dir} (${code}), and ${input.dir} is no longer empty, so it was left as it is; nothing was moved. Inspect it before retrying.`
+    );
+  }
+}
+
+/**
+ * Renames whatever is at the store path into the archive directory, and
+ * removes that extra name only when it is the archived file itself. A
+ * replacement written meanwhile by a writer outside the lock is kept, and
+ * its path returned. Both names are inside the directory this call made.
+ */
+async function moveSourceIntoRetireDirectory(input: {
+  readonly storePath: string;
+  readonly dir: string;
+  readonly archived: { readonly dev: number; readonly ino: number };
+}): Promise<string | null> {
+  // An unpredictable name in the directory this call created, checked to
+  // be free first: the rename never replaces a file planted there.
+  const source = join(input.dir, `.source-${randomUUID()}`);
+  if ((await lstat(source).catch(() => null)) !== null) {
+    throw new SecretStoreRetireError(
+      `The store was archived at ${join(input.dir, basename(input.storePath))}, but ${source} appeared meanwhile, so ${input.storePath} was left in place. Nothing was deleted; remove ${quoteShellWord(input.storePath)} by hand once you have checked it.`
+    );
+  }
+  try {
+    await rename(input.storePath, source);
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") {
+      // Already gone: the archive holds the store; nothing else to keep.
+      return null;
+    }
+    throw new SecretStoreRetireError(
+      `The store was archived at ${join(input.dir, basename(input.storePath))}, but ${input.storePath} could not be moved (${errorCode(error)}), so both names hold it. Nothing was deleted. Remove ${quoteShellWord(input.storePath)} by hand once you have checked it, or keep the archive.`
+    );
+  }
+  const moved = await lstat(source).catch(() => null);
+  if (
+    moved?.isFile() === true &&
+    moved.dev === input.archived.dev &&
+    moved.ino === input.archived.ino
+  ) {
+    await unlink(source);
+    return null;
+  }
+  return source;
+}
+
+function errorCode(error: unknown): string {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { readonly code?: unknown }).code)
+    : "unknown";
+}
+
+/**
+ * Classifies the store file at an explicit `storePath` with an explicit
+ * `keyPath`, read-only (no key is provisioned): `empty` (absent or empty),
+ * `opens` (the available key decrypts it), or `unreadable` with the same
+ * reasons as {@link listFileSecretStoreEntries}. For a caller that has
+ * pinned a real path and must not follow a configured alias again
+ * (HACK-2177).
+ */
+export async function classifyEncryptedStoreAt(input: {
+  readonly storePath: string;
+  readonly keyPath: string;
+}): Promise<
+  | { readonly kind: "empty" }
+  | { readonly kind: "opens" }
+  | {
+      readonly kind: "unreadable";
+      readonly reason: Extract<
+        FileSecretStoreListing,
+        { kind: "unreadable" }
+      >["reason"];
+    }
+> {
+  const read = await readEncryptedStoreText(input.storePath);
+  if (read.kind === "refused" || read.kind === "unreadable") {
+    return { kind: "unreadable", reason: STORE_READ_FAILURE_REASON[read.kind] };
+  }
+  if (read.kind === "absent" || read.text.length === 0) {
+    return { kind: "empty" };
+  }
+  const opened = await openListedStore({ ...input, text: read.text });
+  return "reason" in opened
+    ? { kind: "unreadable", reason: opened.reason }
+    : { kind: "opens" };
+}
+
+/**
+ * Whether the key in the file at `keyPath` alone opens the store at
+ * `storePath` (HACK-2177): the key file is read directly, without the
+ * `HACK_SECRETS_FILE_KEY` override or the keychain, so a wrong override in
+ * the calling shell cannot hide a key file that works. `unknown` when the
+ * key file or the store exists but cannot be read; an absent or empty key
+ * file opens nothing.
+ */
+export async function keyFileOpensStore(input: {
+  readonly storePath: string;
+  readonly keyPath: string;
+}): Promise<"opens" | "does_not_open" | "absent" | "unknown"> {
+  const store = await readEncryptedStoreText(input.storePath);
+  if (store.kind !== "text" || store.text.length === 0) {
+    return store.kind === "absent" ? "does_not_open" : "unknown";
+  }
+  let key: string;
+  try {
+    key =
+      (
+        await readReplaceablePrivateFile({
+          path: input.keyPath,
+          directories: [],
+          refusal: () => new Error("not a regular key file"),
+        })
+      )?.text.trim() ?? "";
+  } catch {
+    return "unknown";
+  }
+  if (key.length === 0) {
+    return "absent";
+  }
+  return storeTextOpensUnder({
+    storePath: input.storePath,
+    text: store.text,
+    key,
+  });
+}
+
+/**
+ * Whether the encrypted_file key in the OS keychain (the runtime's fallback
+ * when a project has no key file) opens the store (HACK-2177). Asked
+ * directly, without the key resolution cooldown or cache. `unknown` when
+ * the keychain cannot be asked; `does_not_open` when the fallback is turned
+ * off or holds no key.
+ */
+export async function keychainKeyOpensStore(input: {
+  readonly storePath: string;
+}): Promise<"opens" | "does_not_open" | "unknown"> {
+  if (isKeychainDisabled()) {
+    return "does_not_open";
+  }
+  const store = await readEncryptedStoreText(input.storePath);
+  if (store.kind !== "text" || store.text.length === 0) {
+    return store.kind === "absent" ? "does_not_open" : "unknown";
+  }
+  let key: string;
+  try {
+    key =
+      (
+        await keychain.get({
+          service: ENCRYPTED_FILE_KEY_SERVICE,
+          name: ENCRYPTED_FILE_KEY_NAME,
+        })
+      )?.trim() ?? "";
+  } catch {
+    return "unknown";
+  }
+  if (key.length === 0) {
+    return "does_not_open";
+  }
+  return storeTextOpensUnder({
+    storePath: input.storePath,
+    text: store.text,
+    key,
+  });
+}
+
+function storeTextOpensUnder(input: {
+  readonly storePath: string;
+  readonly text: string;
+  readonly key: string;
+}): "opens" | "does_not_open" {
+  try {
+    decryptEncryptedEntriesText({
+      filePath: input.storePath,
+      text: input.text,
+      encryptionKey: input.key,
+    });
+    return "opens";
+  } catch {
+    return "does_not_open";
+  }
+}
+
+/**
+ * Whether the file at `storePath` is a Hack encrypted secret store: a
+ * regular file (read without following a link) holding the store's JSON
+ * envelope. Nothing is decrypted. A configured store path is project
+ * input, so anything else (any other file) is never treated as a store to
+ * retire (HACK-2177).
+ */
+export async function isEncryptedStoreFile(
+  storePath: string
+): Promise<boolean> {
+  const read = await readEncryptedStoreText(storePath);
+  if (read.kind !== "text") {
+    return false;
+  }
+  try {
+    return parseEncryptedEnvelope(JSON.parse(read.text)) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Retired copies of `storePath`, oldest first: `<dir>/<store name>` for
+ * each `<store>.retired-<stamp>/` directory (and a bare file of that name,
+ * as an earlier build of this command left).
+ */
+export async function listRetiredEncryptedStores(
+  storePath: string
+): Promise<readonly string[]> {
+  const prefix = `${basename(storePath)}${RETIRED_STORE_INFIX}`;
+  const entries = await readdir(dirname(storePath), {
+    withFileTypes: true,
+  }).catch(() => []);
+  const candidates = entries
+    .filter((entry) => entry.name.startsWith(prefix))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((entry) => {
+      const path = resolve(dirname(storePath), entry.name);
+      return entry.isDirectory() ? join(path, basename(storePath)) : path;
+    });
+  // Only archives still there: a directory emptied by a restore is not one.
+  const present: string[] = [];
+  for (const path of candidates) {
+    if ((await lstat(path).catch(() => null))?.isFile() === true) {
+      present.push(path);
+    }
+  }
+  return present;
+}
 
 /** The listing's reason for each way a store file read can fail. */
 const STORE_READ_FAILURE_REASON = {
@@ -212,7 +678,8 @@ const STORE_READ_FAILURE_REASON = {
  */
 export async function listFileSecretStoreEntries(input: {
   readonly projectName: string;
-  readonly projectDir: string;
+  /** Omitted: only the global configuration applies (no project). */
+  readonly projectDir?: string;
 }): Promise<FileSecretStoreListing> {
   const controlPlane = await readControlPlaneConfig({
     projectDir: input.projectDir,
@@ -302,7 +769,12 @@ async function openListedStore(input: {
 }): Promise<
   | { readonly entries: Record<string, string> }
   | {
-      readonly reason: "key_missing" | "key_refused" | "wrong_key_or_corrupt";
+      readonly reason:
+        | "key_missing"
+        | "key_refused"
+        | "key_unreadable"
+        | "key_access_failed"
+        | "wrong_key_or_corrupt";
     }
 > {
   let key: string;
@@ -315,12 +787,25 @@ async function openListedStore(input: {
       })
     ).key;
   } catch (error: unknown) {
-    return {
-      reason:
-        error instanceof SecretStoreKeyRefusedError
-          ? "key_refused"
-          : "key_missing",
-    };
+    if (error instanceof SecretStoreKeyRefusedError) {
+      return { reason: "key_refused" };
+    }
+    // A key file that exists but cannot be read is not missing: fixing its
+    // permissions may recover the store, which must not be retired.
+    if (await keyFileUnreadable(input.keyPath)) {
+      return { reason: "key_unreadable" };
+    }
+    // Missing only when every place the key could be has answered "none":
+    // no (or an empty) key file, and the keychain says no item or is turned
+    // off. A keychain that could not be asked, or any other failure, leaves
+    // it unknown (HACK-2177).
+    if (
+      !(error instanceof SecretStoreKeyUnavailableError) ||
+      error instanceof SecretStoreKeyAccessError
+    ) {
+      return { reason: "key_access_failed" };
+    }
+    return { reason: "key_missing" };
   }
   try {
     return {
@@ -332,6 +817,20 @@ async function openListedStore(input: {
     };
   } catch {
     return { reason: "wrong_key_or_corrupt" };
+  }
+}
+
+/** True when the key file exists but this user cannot read it. */
+async function keyFileUnreadable(keyPath: string): Promise<boolean> {
+  try {
+    await readFile(keyPath);
+    return false;
+  } catch (error: unknown) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+    return code !== "ENOENT" && code !== "ENOTDIR";
   }
 }
 
@@ -1066,7 +1565,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     cachedKeychainEncryptedFileKey === null &&
     nowMs < encryptedFileKeyFailureCooldownUntilMs
   ) {
-    throw new SecretStoreKeyUnavailableError(
+    throw new SecretStoreKeyAccessError(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
         storePath: input?.storePath,
@@ -1162,7 +1661,7 @@ function keychainKeyAccessError(input: {
   if (input.error instanceof NativeKeychainTimeoutError) {
     return input.error;
   }
-  return new SecretStoreKeyUnavailableError(
+  return new SecretStoreKeyAccessError(
     buildEncryptedBackendKeyRecoveryMessage({
       keyPath: input.keyPath,
       storePath: input.storePath,

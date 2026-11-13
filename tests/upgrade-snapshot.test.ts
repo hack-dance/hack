@@ -326,6 +326,35 @@ test("a writer holding the displaced file open keeps its edit in a named file", 
   );
 });
 
+test("when the snapshot's copy cannot be published, the displaced file's location is reported", async () => {
+  if (process.getuid?.() === 0) {
+    return; // root writes into a read-only directory anyway
+  }
+  const paths = await fixture();
+  const snapshot = await snapshotOf(paths);
+  await writeFile(paths.config, '{"step":true}\n');
+  await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
+  const dir = join(work, "project");
+  let result: Awaited<ReturnType<typeof restoreUpgradeSnapshot>>;
+  try {
+    result = await restoreUpgradeSnapshot({
+      manifestPath: snapshot.manifestPath,
+      paths: [paths.config],
+      afterDisplace: async () => {
+        await chmod(dir, 0o500);
+      },
+    });
+  } finally {
+    await chmod(dir, 0o755);
+  }
+  const entry =
+    result.status === "invalid-manifest" ? undefined : result.results[0];
+  expect(entry?.status).toBe("error");
+  // Neither published nor put back (the directory refused both): the step's
+  // file is kept and named.
+  expect(await readFile(entry?.keptAs ?? "", "utf8")).toBe('{"step":true}\n');
+});
+
 test("a restore of a path the snapshot does not hold is refused, not reported as restored", async () => {
   const paths = await fixture();
   const snapshot = await snapshotOf(paths);

@@ -351,6 +351,8 @@ const MESSAGES = {
   error: "The file could not be restored at this path; left as it was.",
   noHardLinks:
     "This directory's filesystem does not support hard links, so the snapshot's copy cannot be put back without risking a file that appears meanwhile; nothing was changed here.",
+  putBackUnrestored:
+    "The snapshot's copy could not be put back at this path, so the file that was there was put back; nothing was restored here.",
   notPublished:
     "The snapshot's copy could not be put back at this path; the file that was there is kept at keptAs.",
   reoccupied:
@@ -731,35 +733,70 @@ async function restoreEntry(input: {
     if (displaced.kind === "stopped") {
       return displaced.outcome;
     }
-    const kept =
-      displaced.keptAs === undefined ? {} : { keptAs: displaced.keptAs };
     await input.afterDisplace?.(entry.path);
     if (staged === null) {
-      // The snapshot holds absence: a file that appeared meanwhile is
-      // someone else's, left as it is, and the target is not restored.
-      if ((await lstatOrNull(entry.path)) !== null) {
-        return { status: "conflict", message: MESSAGES.reoccupied, ...kept };
-      }
-      return displaced.keptAs === undefined
-        ? { status: "already-restored" }
-        : { status: "moved-aside", ...kept };
+      return await absentRestored({
+        path: entry.path,
+        keptAs: displaced.keptAs,
+      });
     }
-    let published: boolean;
-    try {
-      published = await publishStaged({ staged, path: entry.path });
-    } catch {
-      return { status: "error", message: MESSAGES.notPublished, ...kept };
-    } finally {
-      staged = null;
-    }
-    return published
-      ? { status: "restored", ...kept }
-      : { status: "conflict", message: MESSAGES.conflict, ...kept };
+    const toPublish = staged;
+    staged = null;
+    return await publishOrPutBack({
+      staged: toPublish,
+      path: entry.path,
+      keptAs: displaced.keptAs,
+    });
   } finally {
     if (staged !== null) {
       await unlink(staged).catch(() => undefined);
     }
   }
+}
+
+/**
+ * The snapshot holds absence: a file that appeared meanwhile is someone
+ * else's, left as it is, and the target is not restored.
+ */
+async function absentRestored(input: {
+  readonly path: string;
+  readonly keptAs: string | undefined;
+}): Promise<RestoreOutcome> {
+  const kept = input.keptAs === undefined ? {} : { keptAs: input.keptAs };
+  if ((await lstatOrNull(input.path)) !== null) {
+    return { status: "conflict", message: MESSAGES.reoccupied, ...kept };
+  }
+  return input.keptAs === undefined
+    ? { status: "already-restored" }
+    : { status: "moved-aside", ...kept };
+}
+
+/**
+ * Publishes the staged copy; when that fails, puts the displaced file back
+ * (refused if the name was taken) or, failing that, names where it is
+ * kept.
+ */
+async function publishOrPutBack(input: {
+  readonly staged: string;
+  readonly path: string;
+  readonly keptAs: string | undefined;
+}): Promise<RestoreOutcome> {
+  const kept = input.keptAs === undefined ? {} : { keptAs: input.keptAs };
+  let published: boolean;
+  try {
+    published = await publishStaged({ staged: input.staged, path: input.path });
+  } catch {
+    if (
+      input.keptAs !== undefined &&
+      (await linkBack({ from: input.keptAs, path: input.path }))
+    ) {
+      return { status: "error", message: MESSAGES.putBackUnrestored };
+    }
+    return { status: "error", message: MESSAGES.notPublished, ...kept };
+  }
+  return published
+    ? { status: "restored", ...kept }
+    : { status: "conflict", message: MESSAGES.conflict, ...kept };
 }
 
 /** Whether hard links can be made beside `staged` (probed, then removed). */

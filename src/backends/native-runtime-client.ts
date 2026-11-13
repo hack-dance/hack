@@ -790,7 +790,8 @@ function nativeFailureCause(input: {
     input.code
   ) ||
     (input.code === "native_graph_foreground" &&
-      input.cause === NATIVE_RUNTIME_NOT_RUNNING)
+      (input.cause === NATIVE_RUNTIME_NOT_RUNNING ||
+        input.cause === "graph_status_changed"))
     ? input.cause
     : undefined;
 }

@@ -406,6 +406,8 @@ const STATUS_NOTES: Readonly<
     "Native project startup is pending: a start reserved its intent but has not reached Ready (it is still starting, or it failed and its startup evidence is retained). No current service status is confirmed. If no startup is running, `hack down --recover` retires an attempt that never reserved runtime state.",
   runtime_not_running:
     "Native runtime is not running; no services are running.",
+  runtime_busy:
+    "Native project changed during status observation; retry `hack ps` for a current snapshot.",
 };
 
 async function showStatus(options: {

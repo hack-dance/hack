@@ -192,13 +192,19 @@ retained attempt is inspected.
 
 ## Saved-run `ps`
 
-`ps` and `ps --json` issue one authenticated current status request for the exact
+`ps` and `ps --json` issue one authenticated `observe` request for the exact
 saved project and explicit branch selection. Text output lists service, container,
 current state and current health. JSON uses the ordinary result envelope with
 `data.backend: "native"`, `data.status`, `data.run`, historical `data.phase`, and
 `data.items`; each item includes service, container, state, health and exitCode.
 Only fresh runtime observations supply state and health. Stored readiness and phase
 do not prove that a service is still live.
+
+Observation takes no provider lease, executes no source checks or storage-witness
+helpers, and writes no runtime journal. If the journal changes during the read,
+`ps` reports `runtime_busy` with no phase or service rows; retry for a fresh view.
+The owner's separate `status` action retains full locked verification for `up`
+readiness. An `observed` presentation reply cannot satisfy a `status` request.
 
 A project with no saved attempt reports `not_started`; a retained startup intent
 without a Ready mapping reports `pending` with no confirmed service rows. `pending`

@@ -538,22 +538,20 @@ fn serve_input<'a>(
                         json!({"ok":false,"run":receipt.run,"code":code,"foreground_alive":true,"recovery_required":true}),
                     );
                 }
-                // inspect releases its Engine lease before the fresh runtime check.
-                let publishers_live = publishers.observe_live(candidate)?;
-                if publishers.has_pending_reap() {
-                    // Host child observations do not need a guest lease. Keep
-                    // pending ports visible even when guest inspection is busy;
-                    // this response makes no readiness or guest-health claim.
+                let publisher_error = publishers.observe_readonly(candidate)?;
+                let publishers_live = publisher_error.is_none();
+                if let Some(code) = publisher_error {
                     return Ok(
-                        json!({"ok":true,"run":receipt.run,"phase":receipt.phase,"plan":receipt.plan_id,"generation":redelivery::generation(&receipt)?,"foreground_alive":true,"runtime_verified":false,"runtime_error":"publisher_exit_pending","publisher_ports":publishers.port_status()}),
+                        json!({"ok":true,"run":receipt.run,"phase":receipt.phase,"plan":receipt.plan_id,"generation":redelivery::generation(&receipt)?,"foreground_alive":true,"runtime_verified":false,"runtime_error":code,"publisher_ports":publishers.port_status()}),
                     );
                 }
-                let mut snapshot = super::inspect(candidate, &receipt.run)?;
-                let engine = Engine::connect(candidate)?;
-                let (current, root) = super::load(candidate, &engine, &receipt.run)?;
-                snapshot.receipt = current;
-                let checked =
-                    startup::Driver::verify(&mut runtime, &engine, &mut snapshot.receipt, &root);
+                let observer = crate::provider::engine::Observer::connect(candidate)?;
+                let root = super::directory(candidate, &receipt.run)?;
+                let (snapshot, checked) = super::status::stable(&root, || {
+                    let snapshot = super::inspect_using(candidate, &observer, &receipt.run)?;
+                    let checked = runtime.check_readonly(&observer, &snapshot.receipt, &root);
+                    Ok((snapshot, checked))
+                })?;
                 Ok::<_, CandidateError>(
                     json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":publishers_live && checked.is_ok(),"runtime_error":if !publishers_live {Some("publisher_exited")} else {checked.err().map(|error|error.code)},"publisher_ports":publishers.port_status()}),
                 )

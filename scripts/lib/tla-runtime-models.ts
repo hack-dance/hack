@@ -956,6 +956,19 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-status-start",
+    module: "StatusStart",
+    states: 110,
+    invariant: "ReaderNeverFailsStart",
+    action: "ReaderRefusal",
+    fields: [
+      "failedByReader = TRUE",
+      "services = TRUE",
+      "reader = TRUE",
+      'lease = "reader"',
+    ],
+  },
+  {
     name: "native-publisher-stop",
     module: "PublisherStop",
     states: 168,

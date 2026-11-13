@@ -191,6 +191,8 @@ export function gitignoreLiteral(name: string): string {
     .replace(GITIGNORE_TRAILING_SPACE, "\\ ");
 }
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what this pattern rejects.
+const UNWRITABLE_IGNORE_ENTRY = /[\u0000-\u001f\u007f]/;
 const GITIGNORE_GLOB = /[\\*?[\]]/g;
 const GITIGNORE_LEADING = /^[#!]/;
 const GITIGNORE_TRAILING_SPACE = / $/;
@@ -327,14 +329,19 @@ async function gitFindings(opts: {
   if ((await isGitIgnoredProjectEnvPath(target)) === false) {
     const rel = relative(ignore.projectRoot, ignore.gitignorePath);
     const where = isOutside(rel) ? ignore.gitignorePath : rel;
-    // A name ending in a space can't be written as an entry that survives
-    // the ignore-file writer's trimming; leave that one to the user.
-    if (ignore.entry.endsWith("\\ ")) {
+    // An entry must be exactly one literal pattern line. A name holding a
+    // line break or other control character (a committed configuration can
+    // choose one, to add a second, negating line) or ending in a space
+    // (trimmed by the ignore-file writer) is left to the user.
+    if (
+      UNWRITABLE_IGNORE_ENTRY.test(ignore.entry) ||
+      ignore.entry.endsWith("\\ ")
+    ) {
       return [
         {
           status: "warn",
           path: candidate.path,
-          message: `git does not ignore ${name}, which holds ${candidate.holds}; its name ends with a space, so add an ignore entry for it to ${where} by hand.`,
+          message: `git does not ignore ${name}, which holds ${candidate.holds}; its name has a line break, a control character or a trailing space, so add an ignore entry for it to ${where} by hand.`,
           fix: null,
         },
       ];

@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { STAGING_LEFTOVER_MIN_AGE_MS } from "../src/lib/private-staging.ts";
 import {
   applySecretsHygieneFixes,
@@ -455,6 +455,33 @@ test("a store whose name ends with a space is reported with no automatic ignore 
   ]);
   expect(findings[0]?.message).toContain("by hand");
   const before = await readFile(join(f.projectRoot, ".gitignore"), "utf8");
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  expect(await readFile(join(f.projectRoot, ".gitignore"), "utf8")).toBe(
+    before
+  );
+});
+
+test("a configured path with a line break never becomes an ignore entry", async () => {
+  const f = await fixture();
+  const dir = join(f.projectRoot, "secret");
+  await mkdir(dir);
+  await writeFile(join(dir, "store.key"), `${SENTINEL}\n`, { mode: 0o600 });
+  await writeFile(
+    join(f.projectRoot, ".gitignore"),
+    ".hack.secret.key\n/secret/store.key\n"
+  );
+  // An in-project name that would add a negating line for the real key.
+  const crafted = join(f.projectRoot, "x\n!", "secret", "store.key");
+  await mkdir(dirname(crafted), { recursive: true });
+  await writeFile(crafted, `${SENTINEL}\n`, { mode: 0o600 });
+  const before = await readFile(join(f.projectRoot, ".gitignore"), "utf8");
+  const findings = await inspectSecretsHygiene({
+    ...f.scope,
+    stores: [{ storePath: join(dir, "absent.enc.json"), keyPath: crafted }],
+  });
+  expect(findings).toEqual([
+    expect.objectContaining({ path: crafted, fix: null }),
+  ]);
   await applySecretsHygieneFixes({ findings, report: () => undefined });
   expect(await readFile(join(f.projectRoot, ".gitignore"), "utf8")).toBe(
     before

@@ -28,6 +28,7 @@ import {
   type MuxSessionCreateResult,
 } from "../src/mux/mux-backend.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
+import { restoreEnv } from "./helpers/env.ts";
 import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
 
 // Staging sweeps the temp directory: never the developer's real one.
@@ -262,7 +263,11 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
       (entry) => entry.composeProject === COMPOSE_PROJECT
     );
   // hack down's stop path, against the same backend.
-  const stop = () =>
+  const stop = (options?: {
+    readonly retireSession: Parameters<
+      typeof stopLifecycleProcessController
+    >[0]["retireSession"];
+  }) =>
     stopLifecycleProcessController({
       project: { projectRoot: root, projectDir },
       definitionHash: "sha256:test",
@@ -270,6 +275,7 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
       branch: "branch-a",
       composeProject: COMPOSE_PROJECT,
       mux: resolvedMux,
+      retireSession: options?.retireSession,
     });
   const newOwnership = () =>
     createSharedHelperSessionOwnership({
@@ -292,6 +298,49 @@ async function fixture(backendName: "zellij" | "tmux" = "zellij") {
 }
 
 const PROCESS = { name: "helper-client", command: "sleep 600" };
+
+test("explicit down awaits ordered group retirement before session and state removal", async () => {
+  const { controller, stop, entries, mux, bin } = await fixture("tmux");
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  let release = () => {};
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered = false;
+  let settled = false;
+  let stopping: Promise<void> | undefined;
+  try {
+    const starter = controller({ sessionOwnership: undefined });
+    await starter.startMany({ processes: [PROCESS] });
+    await starter.finalize();
+    stopping = stop({
+      retireSession: async ({ stopSession }) => {
+        expect(await stopSession()).toBe(true);
+        entered = true;
+        await blocked;
+        return true;
+      },
+    }).then(() => {
+      settled = true;
+    });
+    const deadline = performance.now() + 5000;
+    while (!(entered || settled) && performance.now() < deadline) {
+      await Bun.sleep(5);
+    }
+    expect(entered).toBe(true);
+    expect(settled).toBe(false);
+    expect(mux.sessions.has(SESSION)).toBe(true);
+    expect(await entries()).toHaveLength(1);
+  } finally {
+    release();
+    await stopping;
+    restoreEnv("PATH", previousPath);
+  }
+  expect(settled).toBe(true);
+  expect(mux.sessions.has(SESSION)).toBe(false);
+  expect(await entries()).toEqual([]);
+}, 15_000);
 
 test("foreground operation cleanup awaits group retirement before removing ownership or resolving", async () => {
   const { controller, entries, mux } = await fixture();

@@ -22,11 +22,16 @@ This ordering is inherited from v4.3.0. The native backend has its own documente
 hook contract.
 
 On foreground cleanup, Hack captures the owned lifecycle process groups before
-stopping their mux session. It waits for the detached commands to disappear before
+stopping their mux session. The recorded pane PID and UTC start time must match
+before any descendants are captured, and captured member identities are checked
+again before escalation. It waits for the detached commands to disappear before
 retiring the FIFO wrapper and its reader. Each phase allows 500 ms for graceful
 exit, escalates surviving groups once with SIGKILL, then waits up to 2 seconds for
-absence (at most 5 seconds across both phases, excluding the bounded mux command
-and the foreground snapshot's two 1-second attempts).
+absence (at most 5 seconds of group waiting across both phases, plus bounded mux
+and process-identity queries). The capture allows two 1-second group snapshots
+alongside a 2-second identity read; each escalation checks identities again with
+bounded queries. Explicit `hack down` uses the same command-before-wrapper order
+after interrupting its owned lifecycle panes.
 Signal delivery and FIFO EOF alone do not confirm group exit. If confirmation
 fails, Hack reports it and retains the ownership record and dependent helpers;
 it does not silently report completed cleanup.

@@ -1,4 +1,8 @@
 import type { LifecycleStateEntry } from "./lifecycle-runtime.ts";
+import {
+  type ProcessIdentityRow,
+  readProcessIdentities,
+} from "./process-tree.ts";
 import { exec } from "./shell.ts";
 
 export type ProcessSnapshotRow = {
@@ -202,6 +206,9 @@ export async function terminateLifecycleProcessGroups(opts: {
   readonly assertFresh?: () => Promise<void>;
   /** The mux already delivered HUP; give its wrapper time to reap children. */
   readonly alreadySignalled?: boolean;
+  readonly beforeSignal?: (
+    groups: readonly number[]
+  ) => Promise<readonly number[]>;
   /** OS/time boundary, injectable for deterministic settlement tests. */
   readonly runtime?: {
     readonly signal: (group: number, signal: NodeJS.Signals | 0) => void;
@@ -252,13 +259,20 @@ export async function terminateLifecycleProcessGroups(opts: {
     return remaining;
   };
   if (!opts.alreadySignalled) {
-    for (const group of groups) {
+    const targets = opts.beforeSignal
+      ? await opts.beforeSignal(groups)
+      : groups;
+    for (const group of targets) {
       await opts.assertFresh?.();
       signal(group, "SIGTERM");
     }
   }
   const remaining = await wait(groups, 500);
-  for (const group of remaining) {
+  const targets =
+    remaining.length > 0 && opts.beforeSignal
+      ? await opts.beforeSignal(remaining)
+      : remaining;
+  for (const group of targets) {
     await opts.assertFresh?.();
     signal(group, "SIGKILL");
   }
@@ -270,9 +284,23 @@ export async function terminateLifecycleProcessGroups(opts: {
   }
 }
 
+type LifecyclePaneIdentity = {
+  readonly panePid?: number;
+  readonly paneBirth?: string;
+};
 type LifecycleSessionRetirementOptions = {
-  readonly processes: readonly { readonly panePid?: number }[];
+  readonly processes: readonly LifecyclePaneIdentity[];
   readonly stopSession: () => Promise<boolean>;
+  readonly assertFresh?: () => Promise<void>;
+};
+type RetirementBoundary = {
+  readonly readSnapshot: () => Promise<ProcessSnapshotRow[]>;
+  readonly readIdentities: () => Promise<ProcessIdentityRow[]>;
+};
+type CapturedLifecycleGroups = {
+  readonly groups: number[];
+  readonly paneGroups: Set<number>;
+  readonly members: Map<number, ProcessIdentityRow[]>;
 };
 
 /**
@@ -283,37 +311,21 @@ type LifecycleSessionRetirementOptions = {
  */
 export function createLifecycleSessionRetirement(boundary?: {
   readonly readSnapshot: () => Promise<ProcessSnapshotRow[]>;
+  readonly readIdentities?: () => Promise<ProcessIdentityRow[]>;
 }): (opts: LifecycleSessionRetirementOptions) => Promise<boolean> {
-  let captured:
-    | { groups: number[]; paneGroups: Set<number> }
-    | "unknown"
-    | undefined;
+  let captured: CapturedLifecycleGroups | "unknown" | undefined;
+  const os: RetirementBoundary = {
+    readSnapshot:
+      boundary?.readSnapshot ??
+      (() => readProcessSnapshot({ timeoutMs: 1000 })),
+    readIdentities: boundary?.readIdentities ?? readProcessIdentities,
+  };
   return async (opts) => {
     if (!captured) {
-      const roots = opts.processes.flatMap((process) =>
-        process.panePid ? [process.panePid] : []
-      );
-      const snapshot =
-        roots.length > 0
-          ? await readRetirementSnapshot({
-              read:
-                boundary?.readSnapshot ??
-                (() => readProcessSnapshot({ timeoutMs: 1000 })),
-            })
-          : [];
-      const groups = collectDescendantProcessGroupIds({
-        snapshot,
-        rootPids: roots,
+      captured = await captureRetirementGroups({
+        processes: opts.processes,
+        os,
       });
-      const paneGroups = new Set(
-        snapshot
-          .filter((row) => roots.includes(row.pid))
-          .map((row) => row.processGroupId)
-      );
-      captured =
-        roots.length > 0 && snapshot.length === 0
-          ? "unknown"
-          : { groups, paneGroups };
     }
     if (!(await opts.stopSession())) {
       captured = undefined;
@@ -324,17 +336,114 @@ export function createLifecycleSessionRetirement(boundary?: {
         "Lifecycle mux stopped, but descendant retirement could not be confirmed because process inspection failed"
       );
     }
-    const { groups, paneGroups } = captured;
+    const { groups, paneGroups, members } = captured;
+    const beforeSignal = (pending: readonly number[]) =>
+      verifyRetirementGroups({ pending, members, os });
     await terminateLifecycleProcessGroups({
       processGroupIds: groups.filter((group) => !paneGroups.has(group)),
       alreadySignalled: true,
+      beforeSignal,
+      assertFresh: opts.assertFresh,
     });
     await terminateLifecycleProcessGroups({
       processGroupIds: groups.filter((group) => paneGroups.has(group)),
       alreadySignalled: true,
+      beforeSignal,
+      assertFresh: opts.assertFresh,
     });
     return true;
   };
+}
+
+async function captureRetirementGroups(opts: {
+  readonly processes: readonly LifecyclePaneIdentity[];
+  readonly os: RetirementBoundary;
+}): Promise<CapturedLifecycleGroups | "unknown"> {
+  if (!opts.processes.some((process) => process.panePid)) {
+    return { groups: [], paneGroups: new Set(), members: new Map() };
+  }
+  const [snapshot, identities] = await Promise.all([
+    readRetirementSnapshot({ read: opts.os.readSnapshot }),
+    opts.os.readIdentities().catch(() => []),
+  ]);
+  if (
+    snapshot.length === 0 ||
+    identities.length === 0 ||
+    opts.processes.some(
+      (process) =>
+        process.panePid &&
+        !process.paneBirth &&
+        identities.some((row) => row.pid === process.panePid)
+    )
+  ) {
+    return "unknown";
+  }
+  const roots = opts.processes.flatMap((process) =>
+    process.panePid &&
+    process.paneBirth &&
+    identities.some(
+      (row) => row.pid === process.panePid && row.birth === process.paneBirth
+    )
+      ? [process.panePid]
+      : []
+  );
+  const groups = collectDescendantProcessGroupIds({
+    snapshot,
+    rootPids: roots,
+  });
+  const paneGroups = new Set(
+    snapshot
+      .filter((row) => roots.includes(row.pid))
+      .map((row) => row.processGroupId)
+  );
+  const members = new Map(
+    groups.map((group) => [
+      group,
+      identities.filter((identity) =>
+        snapshot.some(
+          (row) => row.pid === identity.pid && row.processGroupId === group
+        )
+      ),
+    ])
+  );
+  return { groups, paneGroups, members };
+}
+
+/** A captured PID/group number is not authority after its member's birth changes. */
+async function verifyRetirementGroups(opts: {
+  readonly pending: readonly number[];
+  readonly members: ReadonlyMap<number, readonly ProcessIdentityRow[]>;
+  readonly os: RetirementBoundary;
+}): Promise<readonly number[]> {
+  const [current, births] = await Promise.all([
+    opts.os.readSnapshot(),
+    opts.os.readIdentities(),
+  ]);
+  if (current.length === 0 || births.length === 0) {
+    throw new Error(
+      "Could not revalidate lifecycle process identities before signalling"
+    );
+  }
+  return opts.pending.filter((group) => {
+    const live = current.filter((row) => row.processGroupId === group);
+    if (live.length === 0) {
+      return false;
+    }
+    if (
+      !(opts.members.get(group) ?? []).some(
+        (member) =>
+          live.some((row) => row.pid === member.pid) &&
+          births.some(
+            (row) => row.pid === member.pid && row.birth === member.birth
+          )
+      )
+    ) {
+      throw new Error(
+        `Lifecycle process group ${group} no longer has a verified owned member; no signal sent`
+      );
+    }
+    return true;
+  });
 }
 
 /** Retry one transient foreground observation; neither failure proves absence. */

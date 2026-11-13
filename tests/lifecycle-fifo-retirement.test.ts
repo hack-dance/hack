@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensurePrivateLifecycleLog } from "../src/lib/lifecycle-runtime.ts";
 import { quoteShellWord } from "../src/lib/logs.ts";
+import { readProcessIdentities } from "../src/lib/process-tree.ts";
 import { wrapLifecyclePersistentCommand } from "../src/lib/project-lifecycle-controller.ts";
 import { createLifecycleSessionRetirement } from "../src/lib/project-lifecycle-processes.ts";
 
@@ -50,9 +51,13 @@ for (const ignoresTerm of [false, true]) {
       group = Number.parseInt(await Bun.file(commandPidPath).text(), 10);
       expect(group).toBeGreaterThan(1);
       const retire = createLifecycleSessionRetirement();
+      const paneBirth = (await readProcessIdentities()).find(
+        (row) => row.pid === child.pid
+      )?.birth;
+      expect(paneBirth).toBeDefined();
       expect(
         await retire({
-          processes: [{ panePid: child.pid }],
+          processes: [{ panePid: child.pid, paneBirth }],
           stopSession: () => {
             process.kill(-child.pid, "SIGHUP");
             return Promise.resolve(true);

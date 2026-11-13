@@ -7,6 +7,7 @@ stateDiagram-v2
   attached --> captured : Compose exits
   captured --> signalled : owned mux stop
   signalled --> commandsAbsent : command groups absent
+  signalled --> retained : observation unknown
   signalled --> escalated : grace expires
   escalated --> commandsAbsent : absence confirmed
   escalated --> retained : deadline or probe error
@@ -24,6 +25,10 @@ stateDiagram-v2
   note right of signalled
     Mux acknowledgement is not group exit
     FIFO EOF is not group absence
+    Revalidate member identity before KILL
+  end note
+  note right of captured
+    Capture roots only with matching PID and birth
   end note
   classDef live stroke-width:1.6px
   class attached live

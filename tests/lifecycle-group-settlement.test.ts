@@ -123,6 +123,15 @@ test("one failed foreground snapshot is retried before the owned mux stop", asyn
   let reads = 0;
   let stopped = false;
   const retire = createLifecycleSessionRetirement({
+    readIdentities: () =>
+      Promise.resolve([
+        {
+          pid: 7,
+          parentPid: 0,
+          birth: "synthetic-other-process",
+          zombie: false,
+        },
+      ]),
     readSnapshot: () => {
       reads++;
       if (reads === 1) {
@@ -148,6 +157,15 @@ test("failed process inspection still stops the owned mux and retains uncertaint
   let reads = 0;
   let stops = 0;
   const retire = createLifecycleSessionRetirement({
+    readIdentities: () =>
+      Promise.resolve([
+        {
+          pid: 7,
+          parentPid: 0,
+          birth: "synthetic-other-process",
+          zombie: false,
+        },
+      ]),
     readSnapshot: () => {
       reads++;
       return Promise.resolve([]);

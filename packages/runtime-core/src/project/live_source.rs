@@ -461,12 +461,14 @@ mod tests {
     }
 
     #[test]
-    fn optional_env_file_created_after_review_stays_out_of_live_source() {
+    fn optional_env_file_aliases_created_after_review_stay_out_of_source_and_live_updates() {
         let (_fixture, candidate, source) = fixture();
         let path = source.join("compose.yaml");
         let mut original = super::super::yaml::parse(&fs::read(&path).unwrap()).unwrap();
         original["services"]["deps"]["env_file"] = serde_json::json!([
-            {"path":"secrets/private.txt", "required":false, "format":"raw"}
+            {"path":"config/Private.txt", "required":false, "format":"raw"},
+            {"path":"config/café.vars", "required":false},
+            {"path":"Config/Straße.vars", "required":false}
         ]);
         let original_bytes = serde_json::to_vec(&original).unwrap();
         fs::write(&path, &original_bytes).unwrap();
@@ -497,21 +499,34 @@ mod tests {
                     .receipt()
                     .entries
                     .iter()
-                    .all(|entry| entry.path != "secrets/private.txt" && entry.path != ".env")
+                    .all(|entry| !entry.path.starts_with("config/") && entry.path != ".env")
+            );
+            assert!(
+                !snapshot
+                    .archive()
+                    .unwrap()
+                    .windows(b"PRIVATE_".len())
+                    .any(|bytes| bytes == b"PRIVATE_")
             );
             (plan, snapshot)
         };
         let (initial, snapshot) = capture();
         let contract = Contract::from_plan(&initial.plan, snapshot.receipt()).unwrap();
-        fs::create_dir(source.join("secrets")).unwrap();
-        fs::write(source.join("secrets/private.txt"), "PRIVATE_FUTURE_CANARY").unwrap();
+        fs::create_dir(source.join("config")).unwrap();
+        for path in [
+            "config/private.txt",
+            "config/cafe\u{301}.vars",
+            "config/STRASSE.vars",
+        ] {
+            fs::write(source.join(path), "PRIVATE_FUTURE_CANARY").unwrap();
+        }
         fs::write(source.join(".env"), "PRIVATE_DOTENV_CANARY").unwrap();
         let (with_file, snapshot) = capture();
         contract
             .verify(&with_file.plan, snapshot.receipt())
             .unwrap();
         fs::write(
-            source.join("secrets/private.txt"),
+            source.join("config/private.txt"),
             "PRIVATE_CHANGED_CANARY_LONGER",
         )
         .unwrap();

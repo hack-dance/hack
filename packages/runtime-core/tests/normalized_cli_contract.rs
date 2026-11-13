@@ -326,6 +326,28 @@ fn optional_raw_and_repeated_env_files_keep_future_secret_paths_excluded() {
 }
 
 #[test]
+fn environment_file_ignore_rule_aliases_refuse_without_reading_values() {
+    let mut fixture = Fixture::new();
+    fs::write(
+        fixture.project.join(".ignore"),
+        "IGNORE_RULE_PRIVATE_CANARY",
+    )
+    .unwrap();
+    for path in [".IGNORE", ".GitIgnore"] {
+        let original = ORIGINAL.replace(
+            "    image:",
+            &format!("    env_file: [{{path: {path}, required: false}}]\n    image:"),
+        );
+        fs::write(fixture.project.join("compose.yml"), &original).unwrap();
+        fixture.hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+        let output = fixture.invoke(&["project", "plan"], &["--json"]);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE_CANARY"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("PRIVATE_CANARY"));
+        assert_eq!(error(output), "conflicting_environment_owner");
+    }
+}
+
+#[test]
 fn removed_inactive_required_env_file_retains_ownership_while_absent() {
     let mut fixture = Fixture::new();
     fs::create_dir(fixture.project.join("future")).unwrap();

@@ -102,7 +102,10 @@ expiring guest allocation/launcher. They never enter CLI argv, public JSON, plan
 plan identities, receipts, logs or generated files. Original env-file declarations
 remain source exclusions in Rust even when normalization removes them, including
 absent optional targets, inactive-service files, raw inputs
-and duplicate paths. `.env*` remain excluded by the existing source policy. Tests
+and duplicate paths. Exclusions compare paths with Unicode canonical normalization
+and case folding, so host path aliases cannot enter snapshot archives or live source updates.
+Ambiguous matching directory entries refuse, and environment inputs cannot own
+source ignore-rule files through an alias. `.env*` remain excluded by the existing source policy. Tests
 must cover snapshot and live-share exclusion when an optional file appears later.
 
 Private delivery retains its existing limitations: it cannot use automatic

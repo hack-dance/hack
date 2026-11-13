@@ -489,7 +489,10 @@ pub(super) fn environment_files(
         };
         if resolved
             .file_name()
-            .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                matches!(source::folded_name(name).as_str(), ".gitignore" | ".ignore")
+            })
         {
             return Err(problem(
                 "conflicting_environment_owner",

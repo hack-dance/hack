@@ -98,7 +98,12 @@ export type SecretsHygieneFix =
       /** Resolved again just before removal: a live input is never removed. */
       readonly scope?: SecretsHygieneScope;
     }
-  | { readonly kind: "remove_mux"; readonly stale: StaleMuxEnvironment };
+  | {
+      readonly kind: "remove_mux";
+      readonly stale: StaleMuxEnvironment;
+      /** As for `remove_leftover`. */
+      readonly scope?: SecretsHygieneScope;
+    };
 
 /** A directory's identity, captured at inspection and checked before a fix. */
 export type DirectoryGuard = {
@@ -780,18 +785,6 @@ export async function inspectSecretsHygiene(
       : []),
     ...(await allStoreFindings({ scope, now })),
   ];
-  // A file the configuration uses is live, whatever its name looks like: it
-  // is never offered for removal as a leftover (HACK-2165).
-  const live = await livePaths(scope);
-  const kept: SecretsHygieneFinding[] = [];
-  for (const finding of findings) {
-    if (finding.fix?.kind !== "remove_leftover") {
-      kept.push(finding);
-    } else if (!(await isLive({ path: finding.path, live }))) {
-      kept.push({ ...finding, fix: { ...finding.fix, scope } });
-    }
-  }
-  findings.splice(0, findings.length, ...kept);
   for (const stale of await findStaleMuxEnvironments({
     ...(scope.tmpDir ? { tmpDir: scope.tmpDir } : {}),
     now,
@@ -803,6 +796,19 @@ export async function inspectSecretsHygiene(
       fix: { kind: "remove_mux", stale },
     });
   }
+  // A file current resolution reads is live, whatever its name or place
+  // looks like: it is never offered for removal (HACK-2165).
+  const live = await livePaths(scope);
+  const kept: SecretsHygieneFinding[] = [];
+  for (const finding of findings) {
+    const fix = finding.fix;
+    if (fix?.kind !== "remove_leftover" && fix?.kind !== "remove_mux") {
+      kept.push(finding);
+    } else if (!(await isLive({ path: removalTarget(fix), live }))) {
+      kept.push({ ...finding, fix: { ...fix, scope } });
+    }
+  }
+  findings.splice(0, findings.length, ...kept);
   return await Promise.all(findings.map(withGuard));
 }
 
@@ -993,6 +999,13 @@ async function addIgnoreEntry(
 export async function applySecretsHygieneFixes(opts: {
   readonly findings: readonly SecretsHygieneFinding[];
   readonly report: (line: string) => void;
+  /**
+   * The scope as configured now. Before each removal it is resolved again
+   * and the target must be live in neither it nor the inspection's scope; a
+   * removal is refused when it cannot be resolved. Without it, only the
+   * inspection's scope is asked again (its files, not its configuration).
+   */
+  readonly currentScope?: () => Promise<SecretsHygieneScope>;
 }): Promise<{ readonly applied: number; readonly skipped: number }> {
   let applied = 0;
   let skipped = 0;
@@ -1012,7 +1025,9 @@ export async function applySecretsHygieneFixes(opts: {
     done.add(key);
     let changed = false;
     try {
-      changed = (await guardHolds(finding.guard)) && (await applyFix(fix));
+      changed =
+        (await guardHolds(finding.guard)) &&
+        (await applyFix({ fix, currentScope: opts.currentScope }));
     } catch {
       changed = false;
     }
@@ -1029,28 +1044,69 @@ export async function applySecretsHygieneFixes(opts: {
   return { applied, skipped };
 }
 
+/** The file a removal unlinks. */
+function removalTarget(
+  fix: Extract<SecretsHygieneFix, { kind: "remove_leftover" | "remove_mux" }>
+): string {
+  return fix.kind === "remove_leftover"
+    ? fix.leftover.path
+    : join(fix.stale.root, "env.json");
+}
+
+/**
+ * Whether a removal may still go ahead: its target is live in neither the
+ * inspection's scope nor the current one (resolved again here, so a
+ * configuration edit since inspection counts). Any failure to resolve
+ * refuses the removal.
+ */
+async function removalStillSafe(opts: {
+  readonly fix: Extract<
+    SecretsHygieneFix,
+    { kind: "remove_leftover" | "remove_mux" }
+  >;
+  readonly currentScope?: () => Promise<SecretsHygieneScope>;
+}): Promise<boolean> {
+  const scopes: SecretsHygieneScope[] = [];
+  if (opts.fix.scope) {
+    scopes.push(opts.fix.scope);
+  }
+  if (opts.currentScope) {
+    const current = await opts.currentScope().catch(() => null);
+    if (current === null) {
+      return false;
+    }
+    scopes.push(current);
+  }
+  const path = removalTarget(opts.fix);
+  for (const scope of scopes) {
+    if (await isLive({ path, live: await livePaths(scope) })) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Applies one fix; false when it no longer applies. */
-async function applyFix(fix: SecretsHygieneFix): Promise<boolean> {
+async function applyFix(opts: {
+  readonly fix: SecretsHygieneFix;
+  readonly currentScope?: () => Promise<SecretsHygieneScope>;
+}): Promise<boolean> {
+  const { fix } = opts;
   switch (fix.kind) {
     case "chmod":
       return await tightenMode(fix);
     case "ignore":
       return await addIgnoreEntry(fix);
     case "remove_leftover":
-      // The configuration may have changed since inspection: ask again, and
-      // never remove a path current resolution reads.
-      if (
-        fix.scope !== undefined &&
-        (await isLive({
-          path: fix.leftover.path,
-          live: await livePaths(fix.scope),
-        }))
-      ) {
-        return false;
-      }
-      return await removeStagingLeftover(fix.leftover);
+      return (
+        (await removalStillSafe({ fix, currentScope: opts.currentScope })) &&
+        (await removeStagingLeftover(fix.leftover))
+      );
     default:
-      return await removeStaleMuxEnvironment(fix.stale);
+      return (
+        (await removalStillSafe({ fix, currentScope: opts.currentScope })) &&
+        (await removeStaleMuxEnvironment(fix.stale))
+      );
   }
 }
 

@@ -5132,6 +5132,8 @@ async function maybeFixSecretsHygiene(opts: {
   await applySecretsHygieneFixes({
     findings,
     report: (line) => lines.push(line),
+    // Removals check the configuration as it is then, not as inspected.
+    currentScope: () => resolveSecretsHygieneScope(opts),
   });
   note(lines.join("\n"), SECRETS_HYGIENE_CHECK);
 }

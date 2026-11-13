@@ -768,3 +768,75 @@ test("when the project's env inputs cannot be inspected, no leftover is removed"
   const later = await inspectSecretsHygiene(f.scope);
   expect(paths(later)).toContain(leftover);
 });
+
+test("a configured key inside a stale terminal payload directory is never removed", async () => {
+  const f = await fixture();
+  const tmpDir = f.scope.tmpDir ?? "";
+  const payload = await stageMuxEnvironment(
+    { FAKE_KEY: "synthetic-mux" },
+    { tmpDir }
+  );
+  // Recovery pointed the backend at that file as its key.
+  const store = join(f.home, "secrets.enc.json");
+  await writeFile(store, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  await backdate(dirname(payload.path));
+  const configured = {
+    ...f.scope,
+    stores: [{ storePath: store, keyPath: payload.path }],
+  };
+  // Inspected with that configuration: no removal is offered.
+  const findings = await inspectSecretsHygiene(configured);
+  expect(findings.some((finding) => finding.fix?.kind === "remove_mux")).toBe(
+    false
+  );
+  // Inspected before the configuration chose it: --fix asks the current
+  // configuration again and keeps the file.
+  const earlier = await inspectSecretsHygiene(f.scope);
+  expect(earlier.some((finding) => finding.fix?.kind === "remove_mux")).toBe(
+    true
+  );
+  await applySecretsHygieneFixes({
+    findings: earlier,
+    report: () => undefined,
+    currentScope: async () => configured,
+  });
+  expect(JSON.parse(await readFile(payload.path, "utf8"))).toEqual({
+    FAKE_KEY: "synthetic-mux",
+  });
+  await payload.cleanup();
+});
+
+test("a leftover the configuration selects after inspection is kept by --fix", async () => {
+  const f = await fixture();
+  const leftover = join(f.projectRoot, `..hack.secret.key.${UUID}.tmp`);
+  await writeFile(leftover, `${SENTINEL}\n`, { mode: 0o600 });
+  await backdate(leftover);
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(paths(findings)).toContain(leftover);
+  // A configuration edit between inspection and --fix makes it the key.
+  const store = join(f.home, "secrets.enc.json");
+  const current = {
+    ...f.scope,
+    stores: [{ storePath: store, keyPath: leftover }],
+  };
+  await applySecretsHygieneFixes({
+    findings,
+    report: () => undefined,
+    currentScope: async () => current,
+  });
+  expect(await readFile(leftover, "utf8")).toBe(`${SENTINEL}\n`);
+  // A configuration that cannot be resolved now refuses the removal too.
+  await applySecretsHygieneFixes({
+    findings,
+    report: () => undefined,
+    currentScope: () => Promise.reject(new Error("synthetic config error")),
+  });
+  expect(await readFile(leftover, "utf8")).toBe(`${SENTINEL}\n`);
+  // With the configuration unchanged, the leftover is removed.
+  await applySecretsHygieneFixes({
+    findings,
+    report: () => undefined,
+    currentScope: async () => f.scope,
+  });
+  expect(await lstat(leftover).catch(() => null)).toBeNull();
+});

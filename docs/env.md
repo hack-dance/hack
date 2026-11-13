@@ -465,10 +465,11 @@ store, a key or a file you wrote, and never untracks a file.
 Hack writes a file that holds a secret by staging the complete contents first. Those
 staging copies live in a private directory next to the file, `.hack-staging/`, which
 holds a `.gitignore` of `*`, so git never lists anything in it. `hack doctor --fix`
-removes copies older than 10 minutes, but never a file env resolution reads (a configured
-store or key, the project or shared key, `hack.config.json` or a YAML layer, by its own
-path or where it resolves), checked again just before each removal; writes themselves
-remove nothing there. A machine-local layer that a write changes, or
+removes copies older than 10 minutes, and stale terminal-session payloads, but never a
+file env resolution reads (a configured store or key, the project or shared key,
+`hack.config.json` or a YAML layer, by its own path or where it resolves). Before each
+removal it reads the configuration again, so an edit made since the check counts, and
+it removes nothing it cannot confirm; writes themselves remove nothing there. A machine-local layer that a write changes, or
 leaves unchanged, is set to 0600 if other users could read it. Commands that read env
 layers warn on stderr about a machine-local file other users can read.
 

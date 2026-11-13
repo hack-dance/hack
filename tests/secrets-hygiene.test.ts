@@ -417,6 +417,10 @@ test("an in-checkout store configured through an alias spelling is still checked
   expect(findings).toEqual([
     expect.objectContaining({ status: "error", path: aliasedKey, fix: null }),
   ]);
+  // The untrack command names the path git tracks, relative to the root.
+  expect(findings[0]?.message).toContain(
+    "git rm --cached -- 'secrets/store.key'"
+  );
 });
 
 test("an ignore entry for a path with glob characters is literal and verified (git ignores the file after --fix)", async () => {

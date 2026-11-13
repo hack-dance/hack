@@ -346,7 +346,7 @@ async function gitFindings(opts: {
       {
         status: "error",
         path: candidate.path,
-        message: `git tracks ${name} (or cannot say whether it does), and it holds ${candidate.holds}: ${untrackAdvice(candidate.path, ignore.projectRoot)}, then treat what it held as exposed.`,
+        message: `git tracks ${name} (or cannot say whether it does), and it holds ${candidate.holds}: ${untrackAdvice(ignore.gitPath ?? candidate.path, ignore.projectRoot)}, then treat what it held as exposed.`,
         fix: null,
       },
     ];

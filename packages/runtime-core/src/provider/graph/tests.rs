@@ -3406,6 +3406,123 @@ fn loopback_ports_are_admitted_only_for_the_foreground_owner() {
 }
 
 #[test]
+fn file_local_admission_returns_the_same_port_reasons_to_review_and_start() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    let mut document = compose(&image, "marker", false);
+    document["services"]["web"]["ports"] = json!(["8787:3000"]);
+    state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
+    for case in 0..6 {
+        let review = project::plan(&candidate, fixture.options()).unwrap();
+        let mut inputs = project::inputs::compile(
+            &candidate,
+            fixture.options(),
+            &review.plan_id,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        // Exercise lower-level guards on already-compiled inputs, including
+        // invalid bindings that the input compiler can reject even earlier.
+        let service = inputs.review.plan.services.get_mut("web").unwrap();
+        match case {
+            0 => service.ports[0].protocol = "udp".into(),
+            1 => service.ports[0].proposed_host_ip = "::1".into(),
+            2 => service.ports[0].published = None,
+            3 => service.networks.clear(),
+            4 => service.ports.push(service.ports[0].clone()),
+            _ => {
+                let port = service.ports[0].clone();
+                service.ports = (9000..9017)
+                    .map(|published| {
+                        let mut port = port.clone();
+                        port.published = Some(published);
+                        port
+                    })
+                    .collect();
+            }
+        }
+        let refusals =
+            config::compose_start_refusals(&inputs.review.plan, &goals(), &BTreeSet::new());
+        let start = config::prepare_delivery(
+            inputs,
+            &goals(),
+            &"a".repeat(32),
+            &"b".repeat(32),
+            None,
+            config::DeliveryOptions {
+                loopback_ports: true,
+                ..Default::default()
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(start.code, "graph_port_publication", "case {case}");
+        assert!(refusals.iter().any(|error| error.code == start.code
+            && error.message == start.message
+            && error.service == start.service));
+    }
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
+fn private_delivery_review_refuses_restart_without_changing_plan_identity() {
+    let fixture = Fixture::new();
+    let candidate_root = Fixture::new();
+    let candidate = Candidate::discover(&candidate_root.0).unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    state::write(&fixture.0.join("compose.yaml"), &json!({"services": {"app": {"image": image, "restart": "always", "environment": {"TOKEN": null}}}})).unwrap();
+    let mut review = project::plan(&candidate, fixture.options()).unwrap();
+    assert!(review.start_refusals.is_empty());
+    let identity = serde_json::to_value(&review.plan).unwrap();
+    project::review_start_delivery(&mut review, &["app".into()]).unwrap();
+    let scoped = project::inputs::compile_scoped(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+        &BTreeMap::from([(
+            "app".into(),
+            BTreeMap::from([("TOKEN".into(), "synthetic-private-sentinel".into())]),
+        )]),
+    )
+    .unwrap();
+    let start = config::prepare_delivery(
+        scoped.executable,
+        &review.start_readiness,
+        &"a".repeat(32),
+        &"b".repeat(32),
+        None,
+        config::DeliveryOptions {
+            environment: true,
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(start.code, "graph_restart_policy");
+    assert!(
+        review
+            .start_refusals
+            .iter()
+            .any(|error| error.code == start.code
+                && error.message == start.message
+                && error.service == start.service)
+    );
+    assert_eq!(serde_json::to_value(&review.plan).unwrap(), identity);
+    assert_eq!(review.plan_id, project::identity(&review.plan).unwrap());
+    assert!(
+        !serde_json::to_string(&review)
+            .unwrap()
+            .contains("synthetic-private-sentinel")
+    );
+    assert!(project::review_start_delivery(&mut review, &["unknown".into()]).is_err());
+    assert!(project::review_start_delivery(&mut review, &vec!["app".into(); 129]).is_err());
+    assert!(!candidate.state_root.exists());
+}
+
+#[test]
 fn restart_policy_is_not_applied_to_published_or_routed_services() {
     let fixture = Fixture::new();
     let candidate_root = Fixture::new();

@@ -1,3 +1,4 @@
+import { ChildProcess } from "node:child_process";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -27,7 +28,54 @@ const [role, root, mode] = Bun.argv.slice(2);
 if (!(root && mode)) {
   process.exit(2);
 }
+
+/** Exercise the valid exit-before-buffered-IPC order in this isolated launcher. */
+function deliverExitBeforeMessages(): () => void {
+  const emit = ChildProcess.prototype.emit;
+  const drained = new WeakSet<ChildProcess>();
+  const pending = new WeakMap<
+    ChildProcess,
+    { messages: unknown[][]; closed: [string | symbol, unknown[]][] }
+  >();
+  ChildProcess.prototype.emit = function (
+    this: ChildProcess,
+    event: string | symbol,
+    ...args: unknown[]
+  ): boolean {
+    let buffered = pending.get(this);
+    if (!buffered) {
+      buffered = { messages: [], closed: [] };
+      pending.set(this, buffered);
+    }
+    if (event === "message" && !drained.has(this)) {
+      buffered.messages.push(args);
+      return true;
+    }
+    if ((event === "disconnect" || event === "close") && !drained.has(this)) {
+      buffered.closed.push([event, args]);
+      return true;
+    }
+    if (event !== "exit") {
+      return emit.call(this, event, ...args);
+    }
+    const result = emit.call(this, event, ...args);
+    for (const message of buffered.messages) {
+      emit.call(this, "message", ...message);
+    }
+    drained.add(this);
+    for (const [closed, values] of buffered.closed) {
+      emit.call(this, closed, ...values);
+    }
+    return result;
+  };
+  return () => {
+    ChildProcess.prototype.emit = emit;
+  };
+}
+
 if (role === "launcher") {
+  const restore =
+    mode === "exit-first-failure" ? deliverExitBeforeMessages() : undefined;
   try {
     process.exitCode = await startNativeDetachedUp({
       cwd: root,
@@ -48,9 +96,13 @@ if (role === "launcher") {
       "wrapped-static-failure",
       "provider-pin",
       "wrapped-provider-pin",
+      "immediate-failure",
+      "exit-first-failure",
     ].includes(mode)
       ? await handleRunCliError({ error, jsonRequested: true })
       : 1;
+  } finally {
+    restore?.();
   }
 } else if (role === "owner") {
   process.exitCode = await runNativeDetachedOwner({
@@ -114,7 +166,14 @@ if (role === "launcher") {
         process.off("SIGTERM", terminate);
         return 1;
       }
-      if (["wrapped-failure", "wrapped-static-failure"].includes(mode)) {
+      if (
+        [
+          "wrapped-failure",
+          "wrapped-static-failure",
+          "immediate-failure",
+          "exit-first-failure",
+        ].includes(mode)
+      ) {
         const failure = new NativeRuntimeRequestError({
           message: "synthetic-private-value",
           nativeCode: "graph_port_publication",
@@ -133,6 +192,9 @@ if (role === "launcher") {
         );
         server.stop(true);
         process.off("SIGTERM", terminate);
+        if (["immediate-failure", "exit-first-failure"].includes(mode)) {
+          process.exit(1);
+        }
         return 1;
       }
       if (mode === "unsafe-failure") {

@@ -435,6 +435,33 @@ pub struct PlanReport {
     pub enrollment_diff: EnrollmentDiff,
     /// Read-only execution admission, outside plan identity and enrollment policy.
     pub start_refusals: Vec<CandidateError>,
+    /// Default file-review goals, outside identity; parity-tested against CLI start.
+    #[serde(skip_serializing)]
+    pub start_readiness: BTreeMap<String, execution::Condition>,
+}
+
+/// Add names-only private-delivery context to read-only start admission. Values
+/// must never enter this context; it neither changes the plan nor authorizes effects.
+pub fn review_start_delivery(
+    report: &mut PlanReport,
+    services: &[String],
+) -> Result<(), CandidateError> {
+    if services.len() > 128
+        || services
+            .iter()
+            .any(|name| !report.plan.services.contains_key(name))
+    {
+        return Err(problem(
+            "invalid_start_review_context",
+            "Start review context requires known service names; values omitted.",
+        ));
+    }
+    report.start_refusals = crate::provider::graph::compose_start_refusals(
+        &report.plan,
+        &report.start_readiness,
+        &services.iter().cloned().collect(),
+    );
+    Ok(())
 }
 
 pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
@@ -591,11 +618,17 @@ fn plan_input(
                 != previous.plan.source_selection.metadata_sha256,
         },
     };
-    let start_refusals = crate::provider::graph::compose_start_refusals(&data);
+    let start_readiness = crate::provider::graph::compose_start_readiness(&data);
+    let start_refusals = crate::provider::graph::compose_start_refusals(
+        &data,
+        &start_readiness,
+        &Default::default(),
+    );
     Ok(PlanReport {
         plan_id,
         plan: data,
         enrollment_diff,
         start_refusals,
+        start_readiness,
     })
 }

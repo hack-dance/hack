@@ -1,0 +1,125 @@
+[
+  {
+    "name": "health defaults include disabled and empty checks",
+    "compose": {
+      "services": {
+        "plain": {},
+        "empty": { "healthcheck": {} },
+        "disabled": { "healthcheck": { "disable": true } },
+        "none": { "healthcheck": { "test": ["NONE"] } },
+        "exec": { "healthcheck": { "test": ["CMD", "true"] } }
+      }
+    },
+    "goals": {
+      "plain": "started",
+      "empty": "healthy",
+      "disabled": "healthy",
+      "none": "healthy",
+      "exec": "healthy"
+    }
+  },
+  {
+    "name": "dependency conditions and one-shot override",
+    "compose": {
+      "services": {
+        "app": {
+          "depends_on": {
+            "job": { "condition": "service_completed_successfully" },
+            "db": { "condition": "service_healthy" }
+          }
+        },
+        "db": { "healthcheck": { "test": ["CMD", "true"] } },
+        "job": { "healthcheck": { "test": ["CMD", "true"] } },
+        "one": {
+          "labels": { "hack.service.one-shot": "true" },
+          "healthcheck": { "test": ["CMD", "true"] }
+        }
+      }
+    },
+    "goals": {
+      "app": "started",
+      "db": "healthy",
+      "job": "completed",
+      "one": "completed"
+    }
+  },
+  {
+    "name": "cache completion overrides command health",
+    "compose": {
+      "services": {
+        "deps": {
+          "volumes": ["modules:/app/node_modules"],
+          "labels": { "hack.dependencies.cache-volume": "modules" },
+          "healthcheck": { "test": ["CMD", "true"] }
+        },
+        "app": { "depends_on": ["deps"] }
+      },
+      "volumes": { "modules": {} }
+    },
+    "goals": { "deps": "completed", "app": "started" }
+  },
+  {
+    "name": "routed HTTP service is healthy and inert labels are not routed",
+    "compose": {
+      "services": {
+        "web": {
+          "labels": {
+            "caddy": "web.example.test",
+            "caddy.tls": "internal",
+            "caddy.reverse_proxy": "{{upstreams 3000}}"
+          },
+          "healthcheck": {
+            "x-hack-http": {
+              "port": 3000,
+              "path": "/health",
+              "interval_ms": 100,
+              "timeout_ms": 500,
+              "retries": 3,
+              "start_period_ms": 0
+            }
+          }
+        },
+        "inert": {
+          "labels": { "caddy": "inert.example.test", "caddy.tls": "internal" }
+        }
+      }
+    },
+    "goals": { "web": "healthy", "inert": "started" }
+  },
+  {
+    "name": "inactive profile edges and optional targets do not raise goals",
+    "compose": {
+      "services": {
+        "app": {
+          "depends_on": {
+            "db": { "condition": "service_healthy", "required": false }
+          }
+        },
+        "db": {
+          "profiles": ["database"],
+          "healthcheck": { "test": ["CMD", "true"] }
+        },
+        "job": {
+          "profiles": ["database"],
+          "labels": { "hack.service.one-shot": "true" },
+          "depends_on": { "app": { "condition": "service_healthy" } }
+        }
+      }
+    },
+    "goals": { "app": "started" }
+  },
+  {
+    "name": "selected profiles participate in readiness",
+    "profiles": ["database"],
+    "compose": {
+      "services": {
+        "app": { "depends_on": { "db": { "condition": "service_healthy" } } },
+        "db": {
+          "profiles": ["database"],
+          "healthcheck": { "test": ["CMD", "true"] }
+        }
+      }
+    },
+    "goals": { "app": "started", "db": "healthy" }
+  }
+]

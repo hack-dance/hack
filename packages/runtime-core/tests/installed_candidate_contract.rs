@@ -272,3 +272,154 @@ fn project_plan_reports_shared_start_refusals_without_runtime_effects() {
         assert_eq!(std::fs::read_dir(&candidate).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn preflight_readiness_matches_the_actual_cli_start_helpers() {
+    use hack_runtime_core::{
+        Candidate,
+        project::{self, PlanOptions},
+    };
+    use std::io::Write;
+    use std::process::Stdio;
+    let fixture = Fixture::new();
+    let project = fixture.directory("project");
+    let candidate_root = fixture.directory("candidate");
+    let home = fixture.directory("home");
+    let candidate = Candidate::discover(&candidate_root).unwrap();
+    let cases: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/native-start-readiness.json"
+    ))
+    .unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    for case in cases {
+        let mut compose = case["compose"].clone();
+        for service in compose["services"].as_object_mut().unwrap().values_mut() {
+            service["image"] = image.clone().into();
+        }
+        std::fs::write(
+            project.join("compose.json"),
+            serde_json::to_vec(&compose).unwrap(),
+        )
+        .unwrap();
+        let profiles: Vec<String> = serde_json::from_value(
+            case["profiles"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into(),
+        )
+        .unwrap();
+        let report = project::plan(
+            &candidate,
+            PlanOptions {
+                branch: None,
+                project: &project,
+                compose_file: Path::new("compose.json"),
+                profiles: &profiles,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&report.start_readiness).unwrap(),
+            case["goals"],
+            "{}",
+            case["name"]
+        );
+        let mut child = Command::new("bun")
+            .arg("--no-env-file")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/fixtures/native-start-readiness.ts"
+            ))
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &home)
+            .env("TMPDIR", &fixture.0)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("XDG_STATE_HOME", &home)
+            .env("XDG_DATA_HOME", &home)
+            .env("XDG_CACHE_HOME", &home)
+            .env("HACK_DAEMON_AUTOSTART_DISABLE", "1")
+            .env("HACK_NO_INTERACTIVE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                &serde_json::to_vec(
+                    &serde_json::json!({"specs": compose["services"], "plan": report.plan}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            case["name"],
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(cli, case["goals"], "{}", case["name"]);
+        assert_eq!(std::fs::read_dir(&candidate_root).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn plan_delivery_context_is_names_only_action_scoped_and_outside_identity() {
+    let fixture = Fixture::new();
+    let project = fixture.directory("project");
+    let candidate = fixture.directory("candidate");
+    let binary = Path::new(env!("CARGO_BIN_EXE_hack-native"));
+    fs::write(project.join("compose.json"), serde_json::to_vec(&serde_json::json!({"services": {
+        "app": {"image": format!("sha256:{}", "a".repeat(64)), "restart": "always", "environment": {"TOKEN": null}},
+        "worker": {"image": format!("sha256:{}", "a".repeat(64)), "profiles": ["worker"], "restart": "always"}
+    }})).unwrap()).unwrap();
+    let base = [
+        "project",
+        "plan",
+        "--project",
+        project.to_str().unwrap(),
+        "--file",
+        "compose.json",
+        "--json",
+    ];
+    let plain = invoke(binary, &candidate, &project, &base);
+    assert!(plain.status.success());
+    let plain: Value = serde_json::from_slice(&plain.stdout).unwrap();
+    assert_eq!(plain["start_refusals"], serde_json::json!([]));
+    let mut flags = base.to_vec();
+    flags.extend([
+        "--start-managed-service",
+        "app",
+        "--start-managed-service",
+        "worker",
+    ]);
+    let reviewed = invoke(binary, &candidate, &project, &flags);
+    assert!(
+        reviewed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reviewed.stderr)
+    );
+    let reviewed: Value = serde_json::from_slice(&reviewed.stdout).unwrap();
+    assert_eq!(reviewed["plan_id"], plain["plan_id"]);
+    assert_eq!(reviewed["plan"], plain["plan"]);
+    let refusals = reviewed["start_refusals"].as_array().unwrap();
+    assert_eq!(refusals.len(), 1);
+    assert_eq!(refusals[0]["code"], "graph_restart_policy");
+    assert_eq!(refusals[0]["service"], "app");
+    flags.extend(["--start-managed-service", "not-a-service"]);
+    let unknown = invoke(binary, &candidate, &project, &flags);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("invalid_start_review_context"));
+    flags[1] = "capture";
+    let capture = invoke(binary, &candidate, &project, &flags);
+    assert!(!capture.status.success());
+    assert!(String::from_utf8_lossy(&capture.stderr).contains("invalid_arguments"));
+    assert_eq!(fs::read_dir(&candidate).unwrap().count(), 0);
+}

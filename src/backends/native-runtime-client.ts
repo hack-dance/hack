@@ -140,6 +140,7 @@ export class NativeRuntimeRequestError extends ClosedCliError {
     readonly message: string;
     readonly nativeCode?: string;
     readonly nativeCauseCode?: string;
+    /** Only fixed text admitted by nativeFailureDetail; this can cross IPC. */
     readonly nativeMessage?: string;
     readonly nativeService?: string;
     readonly nativeStopFailures?: readonly NativeStopFailure[];

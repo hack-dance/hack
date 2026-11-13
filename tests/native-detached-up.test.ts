@@ -218,3 +218,45 @@ for (const phase of ["static-preflight", "after-start"] as const) {
     }
   });
 }
+
+test("detached immediate exit drains its fixed failure before reporting an unconfirmed start", async () => {
+  const modes = [
+    "exit-first-failure",
+    ...new Array<string>(8).fill("immediate-failure"),
+  ];
+  for (const mode of modes) {
+    const root = await mkdtemp(join(tmpdir(), "native-detached-exit-"));
+    const launcher = Bun.spawn(
+      [process.execPath, fixture, "launcher", root, mode],
+      {
+        env: fixtureEnv(root),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    try {
+      const [code, stdout, stderr] = await Promise.all([
+        launcher.exited,
+        new Response(launcher.stdout).text(),
+        new Response(launcher.stderr).text(),
+      ]);
+      expect(code).toBe(1);
+      expect(JSON.parse(stdout)).toMatchObject({
+        ok: false,
+        error: { code: "E_STARTUP_INCOMPLETE" },
+      });
+      expect(stdout).toContain("graph_port_publication");
+      expect(stdout).toContain("Native publishes only TCP ports");
+      expect(stdout).not.toContain("startup was not confirmed");
+      expect(stdout + stderr).not.toContain("synthetic-private-value");
+      expect(stderr).toBe("");
+    } finally {
+      if (launcher.exitCode === null) {
+        launcher.kill("SIGTERM");
+        await launcher.exited;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+}, 30_000);

@@ -232,6 +232,17 @@ is reported as `unavailable` with an update hint and cannot produce `ready: true
 Image acquisition, private delivery, verified source/cache bindings, retained
 ownership and actual service readiness are checked during `up`.
 
+Preflight and start use one file-local admission collector. Preflight lists its
+refusals; start returns its first refusal before acquiring runtime inputs. This
+can change which reason start reports first when a file has several problems.
+Review assumes routing is enrolled and cache initializers are admitted. The
+readiness defaults are checked against the CLI over shared fixtures. Managed env
+metadata and eligible shell references contribute service names only, so restart
+policies incompatible with private delivery are blockers even when no decryption
+key is available. Shell values and credentials are never read for this check.
+Credential adapters, image defaults, occupied ports and other inputs only known
+at start remain runtime boundaries.
+
 With `--json` the report is the `data` of the standard result envelope:
 
 ```json

@@ -314,7 +314,8 @@ export async function startNativeDetachedUp(opts: {
   const interrupt = () => cancel(130);
   const terminate = () => cancel(143);
   child.on("error", fail);
-  child.on("exit", fail);
+  // Exit may precede buffered IPC. A closed channel has drained its messages.
+  child.on("close", fail);
   child.on("disconnect", () => {
     if (!committed) {
       fail();

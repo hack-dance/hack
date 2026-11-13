@@ -1021,6 +1021,79 @@ test("preflight cannot report ready when a runtime omits or corrupts start-admis
   }
 });
 
+test("preflight supplies names-only private-delivery context without decrypting managed env or reading shell values", async () => {
+  const f = await fixture({
+    services: {
+      managed: { image: IMAGE, restart: "always" },
+      shell: {
+        image: IMAGE,
+        restart: "always",
+        environment: ["TOKEN=${SOURCE_TOKEN}"],
+      },
+      literal: { image: IMAGE, environment: { TOKEN: PRIVATE } },
+      excluded: {
+        image: IMAGE,
+        environment: ["AWS_SECRET_ACCESS_KEY", "COMPOSE_PROJECT_NAME"],
+      },
+    },
+  });
+  await writeFile(
+    join(f.projectDir, "hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { managed: { TOKEN: { secure: "invalid-ciphertext-sentinel" } } },
+    })
+  );
+  await f.review(
+    [],
+    {
+      services: {
+        managed: { active: true },
+        shell: { active: true },
+        literal: { active: true },
+        excluded: { active: true },
+      },
+    },
+    "both",
+    [
+      {
+        code: "graph_restart_policy",
+        message_fixed: true,
+        message:
+          "Automatic restart cannot be combined with managed environment delivery.",
+        service: "managed",
+      },
+    ]
+  );
+  const result = await preflight(f, { ...f.native, SOURCE_TOKEN: PRIVATE });
+  expect(result.code).toBe(1);
+  expect(
+    result.report.blockers.some(
+      (entry) => entry.code === "graph_restart_policy"
+    )
+  ).toBe(true);
+  expect(result.output).not.toContain(PRIVATE);
+  expect(result.output).not.toContain("invalid-ciphertext-sentinel");
+  const args = (await f.argv()).filter((line) =>
+    line.includes("--normalized-file")
+  );
+  expect(args).toHaveLength(1);
+  expect(args[0]).toContain("--start-managed-service managed");
+  expect(args[0]).toContain("--start-managed-service shell");
+  expect(args[0]).not.toContain("--start-managed-service literal");
+  expect(args[0]).not.toContain("--start-managed-service excluded");
+  expect(args.join("\n")).not.toContain(PRIVATE);
+  const normalized = await readFile(
+    join(f.root, "stub", "normalized.json"),
+    "utf8"
+  );
+  const document = JSON.parse(normalized);
+  expect(document.services.managed.environment).toEqual({ TOKEN: null });
+  expect(document.services.shell.environment).toEqual({ TOKEN: null });
+});
+
 test(
   "foreground, detached and JSON native up retain the fixed UDP refusal and omit unrelated runtime text",
   async () => {

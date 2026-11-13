@@ -1051,6 +1051,25 @@ test("Docker answering but the container listing failing is incomplete", async (
   expect(report.ready).toBe(false);
 });
 
+test("the snapshot covers the configured default overlay with a keychain backend", async () => {
+  // Codex review: with no file store active, only .env.<name> files were
+  // considered, though the migration also converts the configured default
+  // overlay.
+  const project = await liveProject("app-keychain");
+  await writeFile(
+    join(project.projectDir, "hack.config.json"),
+    `${JSON.stringify({ name: "app-keychain", env: { defaultOverlay: "staging" } })}\n`
+  );
+  await writeFile(join(project.projectDir, "hack.env.json"), "{}\n");
+  await writeRegistry([project]);
+  const collected = await collectUpgradeSnapshotTargets();
+  const labels = collected.targets.map((t) => t.label);
+  expect(labels).toContain("project app-keychain: .hack/hack.env.staging.yaml");
+  expect(labels).toContain(
+    "project app-keychain: .hack/hack.env.staging.local.yaml"
+  );
+});
+
 test("a config path that is a FIFO is refused at once, never waited on", async () => {
   const project = entry("app-fifo");
   await mkdir(project.projectDir, { recursive: true });

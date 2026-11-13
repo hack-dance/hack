@@ -10438,6 +10438,21 @@ function collectLegacyEncryptedBackendCleanupCandidates(opts: {
  * contract is absent or the migration would refuse, the file-discovered
  * overlays (what an undeclared-dotenv migration converts).
  */
+/**
+ * Read-only (HACK-2189): the overlays a migration of this project finds
+ * without its secret store: `.env.<name>` files and the configured default
+ * overlay, exactly as the migration discovers them. Empty when the
+ * directory cannot be read.
+ */
+export async function discoverLegacyMigrationOverlays(opts: {
+  readonly projectDir: string;
+}): Promise<readonly string[]> {
+  return await discoverLegacyOverlayNames({
+    projectDir: opts.projectDir,
+    includeSymlinks: false,
+  }).catch(() => [] as string[]);
+}
+
 export async function previewLegacyMigrationOverlayNames(opts: {
   readonly projectDir: string;
   readonly projectName: string;

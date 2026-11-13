@@ -11,7 +11,10 @@ import {
 } from "../constants.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { resolveEnvKeyCandidates } from "./doctor-env-key.ts";
-import { previewLegacyMigrationOverlayNames } from "./project-env-config.ts";
+import {
+  discoverLegacyMigrationOverlays,
+  previewLegacyMigrationOverlayNames,
+} from "./project-env-config.ts";
 import {
   readProjectsRegistryStrict,
   resolveProjectsRegistryPath,
@@ -269,10 +272,19 @@ async function migrationOverlays(opts: {
   readonly overlays: readonly string[];
   readonly gap: string | null;
 }> {
-  const fromFiles = opts.names.flatMap((name) => {
-    const match = LEGACY_OVERLAY.exec(name);
-    return match?.[1] && match[1] !== "state" ? [match[1]] : [];
-  });
+  // The migration's own discovery: `.env.<name>` files and the configured
+  // default overlay, whatever the secret backend.
+  const fromFiles = [
+    ...new Set([
+      ...opts.names.flatMap((name) => {
+        const match = LEGACY_OVERLAY.exec(name);
+        return match?.[1] && match[1] !== "state" ? [match[1]] : [];
+      }),
+      ...(await discoverLegacyMigrationOverlays({
+        projectDir: opts.projectDir,
+      })),
+    ]),
+  ];
   const location = await resolveFileSecretStorePaths({
     projectDir: opts.projectDir,
   }).catch(() => null);

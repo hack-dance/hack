@@ -152,7 +152,7 @@ these rules, including the local `info/exclude` maintenance on runtime commands
 and legacy env writes. `.env.state.json` remains ignored and is still reported
 when tracked. `hack doctor` also reports tracked or unignored legacy overlays;
 ignore rules do not remove files that Git already tracks. The legacy daemon
-`POST /v1/env/set` route refuses projects with YAML env layers with
+`POST /v1/env/set` and `POST /v1/env/unset` routes refuse projects with YAML env layers with
 `yaml_env_mutation_unsupported`; use `hack env set` or `hack env add` for them.
 
 Leak detection and repair:

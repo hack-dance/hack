@@ -12,8 +12,10 @@ import {
 import { keychain } from "../lib/keychain.ts";
 import { quoteShellWord } from "../lib/logs.ts";
 import { findProjectContext, readProjectConfig } from "../lib/project.ts";
-import { resolveFileSecretStorePaths } from "../lib/secret-store.ts";
-import { retireSecretStore } from "../lib/secret-store-retire.ts";
+import {
+  describeRetireTarget,
+  retireSecretStore,
+} from "../lib/secret-store-retire.ts";
 import { logger } from "../ui/logger.ts";
 
 const DEFAULT_SECRETS_SERVICE = "hack-cli" as const;
@@ -278,14 +280,15 @@ async function handleSecretsRetireStore({
       "project"
     ).trim();
   }
-  // Name the resolved file in the prompt: the configured path is project input.
-  const target = await resolveFileSecretStorePaths({
+  // Name the real file in the prompt: the configured path is project input
+  // and may reach another store through a symlinked directory.
+  const target = await describeRetireTarget({
     projectDir: project?.projectDir,
-  }).catch(() => null);
+  });
   const ok =
     args.options.yes === true ||
     (await confirmSafe({
-      message: `Move the encrypted secret store ${target?.storePath ?? "(unknown path)"} aside? Its entries stay in the moved file, which can be put back.`,
+      message: `Move the encrypted secret store ${target ?? "(unknown path)"} aside? Its entries stay in the moved file, which can be put back.`,
       initialValue: false,
       nonInteractive: "fail",
       hint: "Pass --yes to confirm (`hack secrets retire-store --yes`), or run it in a terminal.",
@@ -303,7 +306,9 @@ async function handleSecretsRetireStore({
   }
   logger.success({
     message: [
-      `Moved the encrypted secret store ${outcome.from} to ${outcome.to}.`,
+      outcome.configured === outcome.from
+        ? `Moved the encrypted secret store ${outcome.from} to ${outcome.to}.`
+        : `Moved the encrypted secret store ${outcome.from} (configured as ${outcome.configured}) to ${outcome.to}.`,
       "Nothing was deleted, and no entry was read or printed. The key file was left alone.",
       `To put it back (while no store is at ${outcome.from}): mv ${quoteShellWord(outcome.to)} ${quoteShellWord(outcome.from)}`,
       ...(outcome.replacement === null

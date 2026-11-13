@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { PROJECT_CONFIG_FILENAME } from "../constants.ts";
@@ -224,6 +224,8 @@ export type SecretStoreRetireOutcome =
       readonly to: string;
       /** A replacement found at the store path while moving, kept too. */
       readonly replacement: string | null;
+      /** The configured store path; `from` is its real path. */
+      readonly configured: string;
       readonly keyPath: string;
     }
   | { readonly kind: "refused"; readonly message: string };
@@ -254,14 +256,29 @@ export async function retireSecretStore(opts: {
   if (refusal !== null) {
     return { kind: "refused", message: refusal };
   }
+  // The configured path is project input and may reach the store through a
+  // symlinked directory: pin the real path, act only on it, and check under
+  // the lock that the configured path still leads there.
+  const canonical = await realpath(listing.storePath).catch(() => null);
+  if (canonical === null) {
+    return {
+      kind: "refused",
+      message: `The real path of ${listing.storePath} could not be resolved; nothing was moved.`,
+    };
+  }
   try {
     const moved = await retireEncryptedStoreFile({
-      storePath: listing.storePath,
+      storePath: canonical,
       keyPath: listing.keyPath,
       now: opts.now,
       // Classified before the lock: classify again under it, so a store
       // whose key came back, or that was replaced, is not retired.
       recheck: async () => {
+        if (
+          (await realpath(listing.storePath).catch(() => null)) !== canonical
+        ) {
+          return `${listing.storePath} no longer leads to ${canonical}; nothing was moved. (It changed while retiring.)`;
+        }
         const unsure = await secretStoreSelectionProblem(opts);
         if (unsure !== null) {
           return `${unsure} Nothing was moved. (It changed while retiring.)`;
@@ -277,13 +294,39 @@ export async function retireSecretStore(opts: {
           : `${changed} (It changed while retiring.)`;
       },
     });
-    return { kind: "retired", ...moved, keyPath: listing.keyPath };
+    return {
+      kind: "retired",
+      ...moved,
+      configured: listing.storePath,
+      keyPath: listing.keyPath,
+    };
   } catch (error: unknown) {
     if (error instanceof SecretStoreRetireError) {
       return { kind: "refused", message: error.message };
     }
     throw error;
   }
+}
+
+/**
+ * What `hack secrets retire-store` would move, for its confirmation: the
+ * store's real path, and the configured path when that differs (a symlinked
+ * directory on the way). Null when no file store is configured here.
+ */
+export async function describeRetireTarget(opts: {
+  readonly projectDir?: string;
+}): Promise<string | null> {
+  const location = await resolveFileSecretStorePaths(opts).catch(() => null);
+  if (location === null || !location.active) {
+    return null;
+  }
+  const canonical = await realpath(location.storePath).catch(() => null);
+  if (canonical === null) {
+    return location.storePath;
+  }
+  return canonical === resolve(location.storePath)
+    ? canonical
+    : `${canonical} (configured as ${location.storePath})`;
 }
 
 /**

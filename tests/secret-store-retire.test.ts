@@ -33,7 +33,10 @@ import {
   resolveSecretStore,
   retireEncryptedStoreFile,
 } from "../src/lib/secret-store.ts";
-import { retireSecretStore } from "../src/lib/secret-store-retire.ts";
+import {
+  describeRetireTarget,
+  retireSecretStore,
+} from "../src/lib/secret-store-retire.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -911,4 +914,48 @@ test("registry entries that are not valid projects make the reader scan incomple
   expect(only?.message).toContain("could not be checked");
   expect(only?.message).not.toContain("No registered project reads it.");
   await writeFile(registry, text);
+});
+
+test("a store reached through a symlinked directory is named and retired by its real path", async () => {
+  // Codex security review: lstat checked only the last component, so a
+  // repo-controlled symlinked directory could lead to another store while
+  // the prompt showed the alias.
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  const alias = join(fixture.bystander.projectRoot, "linked");
+  await symlink(fixture.hackHome, alias);
+  const configured = join(alias, "secrets.enc.json");
+  await writeFile(
+    join(fixture.bystander.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-b",
+      dev_host: "app-b.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: configured, keyPath: fixture.keyPath },
+        },
+      },
+    })}\n`
+  );
+  // The confirmation names the real file, and the configured alias.
+  expect(
+    await describeRetireTarget({ projectDir: fixture.bystander.projectDir })
+  ).toBe(`${fixture.storePath} (configured as ${configured})`);
+  const outcome = await retireSecretStore({
+    projectName: "app-b",
+    projectDir: fixture.bystander.projectDir,
+    now: new Date("2026-11-13T12:00:00Z"),
+  });
+  expect(outcome.kind).toBe("retired");
+  if (outcome.kind !== "retired") {
+    return;
+  }
+  // It acted on the real path: the archive sits beside the real store.
+  expect(outcome.from).toBe(fixture.storePath);
+  expect(outcome.configured).toBe(configured);
+  expect(outcome.to).toBe(
+    join(`${fixture.storePath}.retired-20261113T120000Z`, "secrets.enc.json")
+  );
+  expect(await readFile(outcome.to)).toEqual(before);
 });

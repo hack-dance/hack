@@ -1,4 +1,4 @@
-import { lstat, readdir } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 
 import {
@@ -11,11 +11,15 @@ import {
 } from "../constants.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { resolveEnvKeyCandidates } from "./doctor-env-key.ts";
+import { previewLegacyMigrationOverlayNames } from "./project-env-config.ts";
 import {
   readProjectsRegistryStrict,
   resolveProjectsRegistryPath,
 } from "./projects-registry.ts";
-import { resolveFileSecretStorePaths } from "./secret-store.ts";
+import {
+  inspectStoreKeyState,
+  resolveFileSecretStorePaths,
+} from "./secret-store.ts";
 import {
   classifyRegistryEntry,
   registeredCheckouts,
@@ -42,7 +46,14 @@ export async function collectUpgradeSnapshotTargets(): Promise<{
     readonly label: string;
     readonly reason: "symlink" | "not-a-file" | "unreadable";
   }[];
+  /**
+   * Checkouts whose migration write set could not be fully known, so a
+   * rollback may leave a file the migration creates: the overlays only the
+   * secret store holds cannot be listed without asking the OS keychain.
+   */
+  readonly gaps: readonly { readonly name: string; readonly reason: string }[];
 }> {
+  const gaps: { name: string; reason: string }[] = [];
   const candidates: UpgradeSnapshotTarget[] = [
     { path: resolveGlobalConfigPath(), label: "global: hack.config.json" },
     { path: resolveProjectsRegistryPath(), label: "global: projects.json" },
@@ -62,22 +73,41 @@ export async function collectUpgradeSnapshotTargets(): Promise<{
       if ((await classifyRegistryEntry(project)).state !== "live") {
         continue;
       }
-      candidates.push(
-        ...(await projectCandidates({
-          name: project.name,
-          root: project.repoRoot,
-          projectDir: project.projectDir,
-        }))
-      );
+      const found = await projectCandidates({
+        name: project.name,
+        root: project.repoRoot,
+        projectDir: project.projectDir,
+      });
+      candidates.push(...found.targets);
+      if (found.gap !== null) {
+        gaps.push({ name: project.name, reason: found.gap });
+      }
     }
   }
+  const { targets, skipped } = await classifyCandidates(candidates);
+  return { targets, skipped, gaps };
+}
+
+type Skipped = {
+  readonly path: string;
+  readonly label: string;
+  readonly reason: "symlink" | "not-a-file" | "unreadable";
+};
+
+/**
+ * Regular files and absent paths become targets (absent ones recorded as
+ * absent, so a rollback moves aside what a step creates there); links and
+ * other entries are skipped, never followed.
+ */
+async function classifyCandidates(
+  candidates: readonly UpgradeSnapshotTarget[]
+): Promise<{
+  readonly targets: UpgradeSnapshotTarget[];
+  readonly skipped: Skipped[];
+}> {
   const seen = new Set<string>();
   const targets: UpgradeSnapshotTarget[] = [];
-  const skipped: {
-    path: string;
-    label: string;
-    reason: "symlink" | "not-a-file" | "unreadable";
-  }[] = [];
+  const skipped: Skipped[] = [];
   for (const candidate of candidates) {
     const path = resolve(candidate.path);
     if (seen.has(path)) {
@@ -114,7 +144,10 @@ async function projectCandidates(opts: {
   readonly name: string;
   readonly root: string;
   readonly projectDir: string;
-}): Promise<UpgradeSnapshotTarget[]> {
+}): Promise<{
+  readonly targets: UpgradeSnapshotTarget[];
+  readonly gap: string | null;
+}> {
   const dirName = basename(opts.projectDir);
   const label = (file: string) => `project ${opts.name}: ${dirName}/${file}`;
   const names = await readdir(opts.projectDir).catch(() => [] as string[]);
@@ -129,10 +162,12 @@ async function projectCandidates(opts: {
   // machine-local, and one pair per legacy overlay), the config, the
   // Compose file it repairs, and .hack/.gitignore; absent ones are recorded
   // as absent.
-  const overlays = names.flatMap((name) => {
-    const match = LEGACY_OVERLAY.exec(name);
-    return match?.[1] && match[1] !== "state" ? [match[1]] : [];
+  const migration = await migrationOverlays({
+    root: opts.root,
+    projectDir: opts.projectDir,
+    names,
   });
+  const overlays = migration.overlays;
   const layers = [
     "hack.env.default.yaml",
     "hack.env.local.yaml",
@@ -153,18 +188,93 @@ async function projectCandidates(opts: {
   const keys = await resolveEnvKeyCandidates({ projectRoot: opts.root }).catch(
     () => []
   );
-  return [
-    ...files.map((file) => ({
-      path: resolve(opts.projectDir, file),
-      label: label(file),
-    })),
-    ...keys
-      .filter((key) => isInside({ path: key.path, dir: opts.root }))
-      .map((key) => ({
-        path: key.path,
-        label: `project ${opts.name}: ${relative(opts.root, key.path)} (env key)`,
+  return {
+    targets: [
+      ...files.map((file) => ({
+        path: resolve(opts.projectDir, file),
+        label: label(file),
       })),
-  ];
+      ...keys
+        .filter((key) => isInside({ path: key.path, dir: opts.root }))
+        .map((key) => ({
+          path: key.path,
+          label: `project ${opts.name}: ${relative(opts.root, key.path)} (env key)`,
+        })),
+    ],
+    gap: migration.gap,
+  };
+}
+
+/**
+ * The overlays the env migration would turn into layers: from the files,
+ * plus, when the project's secret store opens with this shell's key or its
+ * key file (never the keychain), the overlays only the store holds, from
+ * the migration's own selection. When the store can only be opened through
+ * the keychain, those cannot be listed without a prompt: a gap.
+ */
+async function migrationOverlays(opts: {
+  readonly root: string;
+  readonly projectDir: string;
+  readonly names: readonly string[];
+}): Promise<{
+  readonly overlays: readonly string[];
+  readonly gap: string | null;
+}> {
+  const fromFiles = opts.names.flatMap((name) => {
+    const match = LEGACY_OVERLAY.exec(name);
+    return match?.[1] && match[1] !== "state" ? [match[1]] : [];
+  });
+  const location = await resolveFileSecretStorePaths({
+    projectDir: opts.projectDir,
+  }).catch(() => null);
+  if (!location?.active) {
+    return { overlays: fromFiles, gap: null };
+  }
+  const state = await inspectStoreKeyState({
+    storePath: location.storePath,
+    keyPath: location.keyPath,
+    env: process.env,
+  });
+  if (state.kind === "key-uninspected") {
+    return {
+      overlays: fromFiles,
+      gap: "its secret store's key is not in a key file or HACK_SECRETS_FILE_KEY, so overlays held only in the store could not be listed without asking the OS keychain",
+    };
+  }
+  if (state.kind !== "opens") {
+    // The migration cannot list the store either, so it adds no overlay
+    // from it.
+    return { overlays: fromFiles, gap: null };
+  }
+  const preview = await previewLegacyMigrationOverlayNames({
+    projectDir: opts.projectDir,
+    projectName: await projectName(opts),
+  });
+  return { overlays: [...new Set([...fromFiles, ...preview])], gap: null };
+}
+
+/** The name the migration scopes store entries by: the config name, else the checkout directory. */
+async function projectName(opts: {
+  readonly root: string;
+  readonly projectDir: string;
+}): Promise<string> {
+  try {
+    const parsed: unknown = JSON.parse(
+      await readFile(resolve(opts.projectDir, PROJECT_CONFIG_FILENAME), "utf8")
+    );
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "name" in parsed &&
+      typeof parsed.name === "string" &&
+      parsed.name.trim() !== ""
+    ) {
+      return parsed.name.trim();
+    }
+  } catch {
+    // Fall back to the directory name, as the migration does.
+  }
+  return basename(opts.root);
 }
 
 function isInside(opts: { readonly path: string; readonly dir: string }) {

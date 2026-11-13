@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import {
   runUpgradeCheck,
   type UpgradeCheckReport,
@@ -24,6 +25,7 @@ import {
   type UpgradeCheckProbes,
 } from "../src/lib/upgrade-check-probes.ts";
 import { inspectUpgradeProject } from "../src/lib/upgrade-check-project.ts";
+import { collectUpgradeSnapshotTargets } from "../src/lib/upgrade-snapshot-targets.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -31,8 +33,11 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 const SENTINEL = ["sentinel", "upgrade", "check", "c41d07"].join("-");
 const ENTRYPOINT = resolve(import.meta.dir, "..", "index.ts");
 
+const STORE_KEY = ["synthetic", "upgrade", "store", "key", "51e0"].join("-");
 const ISOLATED_ENV = [
   "HOME",
+  "PATH",
+  "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK",
   "HACK_HOME",
   "HACK_GLOBAL_CONFIG_PATH",
   "HACK_SECRETS_FILE_KEY",
@@ -199,8 +204,15 @@ test("dead registry entries are counted apart from unreadable ones, and only liv
   ]);
   const dead77 = report.machine.find((f) => f.id === "registry-dead");
   expect(dead77?.status).toBe("warn");
-  expect(dead77?.fix).toBe("hack projects prune --dry-run");
+  expect(dead77?.command).toBe("hack projects prune --dry-run");
   expect(dead77?.summary).toContain("not live projects that failed to read");
+  // A live checkout that cannot be read blocks: its safety is unknown.
+  expect(report.ready).toBe(false);
+  expect(report.blockers).toContainEqual({
+    scope: "app-invalid",
+    id: "project-config",
+    summary: expect.stringContaining("not valid JSON"),
+  });
   // A registry of mostly dead entries stays fast.
   expect(report.duration_ms).toBeLessThan(30_000);
 });
@@ -234,14 +246,17 @@ test("once the time budget is spent, project checks report not checked without r
     },
   });
   expect(ran).toBe(false);
-  expect(findings.length).toBeGreaterThan(0);
-  for (const finding of findings) {
-    expect(finding.status).toBe("warn");
-    expect(finding.summary).toContain("ran out of time");
+  const byId = new Map(findings.map((f) => [f.id, f]));
+  // Required checks are incomplete (readiness not established); optional
+  // ones are warnings.
+  for (const id of ["env-format", "env-key", "tracked-files", "ignore-rules"]) {
+    expect(byId.get(id)?.status).toBe("incomplete");
+    expect(byId.get(id)?.summary).toContain("ran out of time");
   }
+  expect(byId.get("agent-integrations")?.status).toBe("warn");
 });
 
-test("the plan puts blockers first, then the snapshot, then machine and project steps", async () => {
+test("the plan starts with the snapshot, then blockers, then machine and project steps", async () => {
   // A conflicting env layer (a dangling link) blocks; legacy env is a step.
   const blocked = await liveProject("app-blocked");
   await symlink(
@@ -269,13 +284,13 @@ test("the plan puts blockers first, then the snapshot, then machine and project 
   expect(
     report.plan.map((step) => [step.id, step.scope, step.blocker])
   ).toEqual([
-    ["env-format", "app-blocked", true],
     ["snapshot", "machine", false],
+    ["env-format", "app-blocked", true],
     ["registry-dead", "machine", false],
     ["global-infra", "machine", false],
     ["env-format", "app-legacy", false],
   ]);
-  expect(report.next_command).toBe(report.plan[0]?.command ?? "");
+  expect(report.next_command).toBe("hack upgrade snapshot");
   const legacyStep = report.plan.find((step) => step.scope === "app-legacy");
   expect(legacyStep?.command).toBe(
     `hack doctor --migrate-env-config --path ${legacy.repoRoot}`
@@ -342,7 +357,13 @@ test("a global store whose key is gone blocks only when a registered project rea
   expect(blocking?.status).toBe("blocker");
   expect(blocking?.summary).toContain("app-reader");
   expect(blocked.ready).toBe(false);
-  expect(blocked.plan[0]?.id).toBe("secret-store");
+  expect(blocked.plan.map((step) => step.id).slice(0, 2)).toEqual([
+    "snapshot",
+    "secret-store",
+  ]);
+  const step = blocked.plan[1];
+  expect(step?.command).toBe("hack secrets retire-store --allow-unchecked");
+  expect(step?.action).toContain("restore the store's key file");
   expect(JSON.stringify(blocked)).not.toContain(SENTINEL);
 });
 
@@ -370,6 +391,10 @@ test("probes that are disabled or fail report not checked, never a pass", async 
   expect(byId.get("daemon")?.summary).toContain("Not checked");
   expect(byId.get("global-infra")?.summary).toContain("Not checked");
   expect(byId.get("docker")?.status).toBe("warn");
+  // Disabled probes leave the check incomplete, never ready.
+  expect(report.host_probes).toBe("disabled");
+  expect(byId.get("host-probes")?.status).toBe("incomplete");
+  expect(report.ready).toBe(false);
   // A probe that throws or hangs does not stop the check.
   const failing = await check(
     healthyProbes({
@@ -407,7 +432,7 @@ test("tracked machine-local files and a missing .hack/.gitignore are steps, a tr
     report.projects[0]?.findings.map((f) => [f.id, f]) ?? []
   );
   expect(findings.get("tracked-files")?.status).toBe("warn");
-  expect(findings.get("tracked-files")?.fix).toBe(
+  expect(findings.get("tracked-files")?.command).toBe(
     `hack doctor --fix --path ${project.repoRoot}`
   );
   expect(findings.get("ignore-rules")?.status).toBe("warn");
@@ -475,8 +500,277 @@ test("printed commands run the candidate launcher when the check ran through it"
   expect(report.cli.command).toBe(launcher);
   expect(report.next_command).toBe(`${launcher} upgrade snapshot`);
   for (const step of report.plan) {
-    expect(step.command.startsWith(`${launcher} `)).toBe(true);
+    expect((step.command ?? `${launcher} `).startsWith(`${launcher} `)).toBe(
+      true
+    );
   }
+});
+
+/** A global encrypted_file store with one entry, and its key file. */
+async function globalStore(opts: {
+  readonly reader: Entry;
+  readonly entries?: Readonly<Record<string, string>>;
+}) {
+  const storePath = join(hackHome, "secrets.enc.json");
+  const keyPath = join(hackHome, "secrets-file.key");
+  await writeFile(
+    process.env.HACK_GLOBAL_CONFIG_PATH ?? "",
+    `${JSON.stringify({
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath, keyPath },
+        },
+      },
+    })}\n`
+  );
+  await writeFile(
+    join(opts.reader.projectDir, "hack.env.json"),
+    `${JSON.stringify({ version: 1, vars: [{ key: "TOKEN", source: "keychain" }] })}\n`
+  );
+  await writeFile(keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
+  await chmod(keyPath, 0o600);
+  const store = await resolveSecretStore({
+    projectName: opts.reader.name,
+    projectDir: opts.reader.projectDir,
+  });
+  for (const [key, value] of Object.entries(
+    opts.entries ?? { TOKEN: SENTINEL }
+  )) {
+    await store.set({ key, value });
+  }
+  return { storePath, keyPath };
+}
+
+test("the global key is audited with the runtime's rules, not only by decrypting", async () => {
+  const reader = await liveProject("app-reader");
+  await writeRegistry([reader]);
+  const { keyPath } = await globalStore({ reader });
+  const storeFinding = async () =>
+    (await check(healthyProbes())).machine.find((f) => f.id === "secret-store");
+
+  expect((await storeFinding())?.status).toBe("ok");
+
+  // A key others can read decrypts the store, but the runtime refuses it.
+  await chmod(keyPath, 0o644);
+  const permissive = await storeFinding();
+  expect(permissive?.status).toBe("blocker");
+  expect(permissive?.summary).toContain("refused at runtime");
+  expect(permissive?.action).toContain("chmod 600");
+  await chmod(keyPath, 0o600);
+
+  // The same key tracked by Git is refused too.
+  const repo = join(root, "keys-repo");
+  await mkdir(repo, { recursive: true });
+  const trackedKey = join(repo, "secrets-file.key");
+  await writeFile(trackedKey, `${STORE_KEY}\n`, { mode: 0o600 });
+  await chmod(trackedKey, 0o600);
+  const git = (args: string[]) =>
+    Bun.spawnSync(["git", "-C", repo, ...args], {
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: home,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.invalid",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.invalid",
+      },
+    });
+  git(["init", "-q"]);
+  git(["add", "-f", "secrets-file.key"]);
+  git(["commit", "-q", "-m", "key"]);
+  const config = JSON.parse(
+    await readFile(process.env.HACK_GLOBAL_CONFIG_PATH ?? "", "utf8")
+  ) as { controlPlane: { secrets: { encryptedFile: { keyPath: string } } } };
+  config.controlPlane.secrets.encryptedFile.keyPath = trackedKey;
+  await writeFile(
+    process.env.HACK_GLOBAL_CONFIG_PATH ?? "",
+    `${JSON.stringify(config)}\n`
+  );
+  const tracked = await storeFinding();
+  expect(tracked?.status).toBe("blocker");
+  expect(tracked?.action).toContain("git tracks it");
+});
+
+test("the global store's states: no store, an env key, a keychain not asked", async () => {
+  const reader = await liveProject("app-reader");
+  await writeRegistry([reader]);
+  const { storePath, keyPath } = await globalStore({ reader });
+  const finding = async (env?: Record<string, string>) => {
+    const report = await runUpgradeCheck({
+      cliVersion: "5.0.0-next.17",
+      homeDir: home,
+      probes: healthyProbes(),
+      env: { ...process.env, ...env },
+    });
+    return {
+      report,
+      store: report.machine.find((f) => f.id === "secret-store"),
+    };
+  };
+  // HACK_SECRETS_FILE_KEY from this shell opens it; the value never shows.
+  await rm(keyPath);
+  const viaEnv = await finding({ HACK_SECRETS_FILE_KEY: STORE_KEY });
+  expect(viaEnv.store?.status).toBe("ok");
+  expect(viaEnv.store?.summary).toContain("HACK_SECRETS_FILE_KEY");
+  expect(JSON.stringify(viaEnv.report)).not.toContain(STORE_KEY);
+  expect(JSON.stringify(viaEnv.report)).not.toContain(SENTINEL);
+
+  // No key file and the keychain fallback on: not asked, so not established.
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK");
+  const uninspected = await finding();
+  expect(uninspected.store?.status).toBe("incomplete");
+  expect(uninspected.report.ready).toBe(false);
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+
+  // No store file at all is not a store that lost its key.
+  await rm(storePath);
+  const none = await finding();
+  expect(none.store?.status).toBe("ok");
+  expect(none.store?.summary).toContain("No global secret store file");
+});
+
+test("the snapshot covers overlays only the store holds, and reports when it cannot list them", async () => {
+  const reader = await liveProject("app-reader");
+  await writeRegistry([reader]);
+  const { keyPath } = await globalStore({
+    reader,
+    entries: { TOKEN: SENTINEL, "env.staging.TOKEN": SENTINEL },
+  });
+  const covered = await collectUpgradeSnapshotTargets();
+  const labels = covered.targets.map((t) => t.label);
+  expect(labels).toContain("project app-reader: .hack/hack.env.staging.yaml");
+  expect(labels).toContain(
+    "project app-reader: .hack/hack.env.staging.local.yaml"
+  );
+  expect(covered.gaps).toEqual([]);
+  expect(JSON.stringify(covered)).not.toContain(SENTINEL);
+
+  // Only the keychain could open the store: listing it would prompt.
+  await rm(keyPath);
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK");
+  const gapped = await collectUpgradeSnapshotTargets();
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  expect(gapped.gaps).toEqual([
+    { name: "app-reader", reason: expect.stringContaining("OS keychain") },
+  ]);
+});
+
+test("a config path that is a FIFO is refused at once, never waited on", async () => {
+  const project = entry("app-fifo");
+  await mkdir(project.projectDir, { recursive: true });
+  Bun.spawnSync(["mkfifo", join(project.projectDir, "hack.config.json")]);
+  await writeRegistry([project]);
+  const started = Date.now();
+  const report = await check(healthyProbes());
+  expect(Date.now() - started).toBeLessThan(10_000);
+  expect(report.registry.unreadable.map((e) => e.name)).toEqual(["app-fifo"]);
+  expect(report.ready).toBe(false);
+});
+
+test("a hanging git leaves the required check incomplete, and its children are ended", async () => {
+  const project = await liveProject("app-hang");
+  const bin = join(root, "fake-bin");
+  await mkdir(bin, { recursive: true });
+  const pids = join(root, "git-pids");
+  await writeFile(
+    join(bin, "git"),
+    `#!/bin/sh\necho "$$ $*" >> '${pids}'\nexec sleep 60\n`,
+    { mode: 0o755 }
+  );
+  await chmod(join(bin, "git"), 0o755);
+  await writeRegistry([project]);
+  process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+  const started = Date.now();
+  const report = await runUpgradeCheck({
+    cliVersion: "5.0.0-next.17",
+    homeDir: home,
+    probes: healthyProbes(),
+    budgetMs: 4000,
+    checkTimeoutMs: 1500,
+  });
+  expect(Date.now() - started).toBeLessThan(10_000);
+  const findings = new Map(
+    report.projects[0]?.findings.map((f) => [f.id, f]) ?? []
+  );
+  expect(findings.get("tracked-files")?.status).toBe("incomplete");
+  expect(report.ready).toBe(false);
+  expect(report.incomplete.some((i) => i.id === "tracked-files")).toBe(true);
+  // Every git the check started is ended by the check's own deadline.
+  const alive = async () =>
+    (await readFile(pids, "utf8").catch(() => ""))
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .filter((line) => {
+        try {
+          process.kill(Number(line.split(" ")[0]), 0);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+  // Each check's children end with the check: allow only kill latency.
+  const until = Date.now() + 3000;
+  while ((await alive()).length > 0 && Date.now() < until) {
+    await Bun.sleep(250);
+  }
+  expect(await alive()).toEqual([]);
+}, 40_000);
+
+test("candidate commands keep a path with spaces, quotes and ' hack ' intact", async () => {
+  const name = "my hack repo's";
+  const project = await liveProject(name);
+  await writeFile(join(project.projectDir, "hack.env.json"), "{}\n");
+  await writeRegistry([project]);
+  const weirdHome = join(root, "home with space's");
+  const report = await runUpgradeCheck({
+    cliVersion: "5.0.0-next.17",
+    homeDir: weirdHome,
+    probes: healthyProbes(),
+    env: {
+      ...process.env,
+      HACK_CANDIDATE_ENTRYPOINT: "hack-next",
+      HACK_RUNTIME_BACKEND: "compose",
+    },
+  });
+  const step = report.plan.find((s) => s.id === "env-format");
+  expect(step?.args).toEqual([
+    "doctor",
+    "--migrate-env-config",
+    "--path",
+    project.repoRoot,
+  ]);
+  // Split the command the way a shell does: every argument survives.
+  const split = Bun.spawnSync([
+    "sh",
+    "-c",
+    `eval "set -- $1"; printf '%s\\0' "$@"`,
+    "sh",
+    step?.command ?? "",
+  ]);
+  const words = split.stdout.toString().split("\0").slice(0, -1);
+  expect(words).toEqual([
+    "HACK_RUNTIME_BACKEND=compose",
+    join(weirdHome, ".hack-next", "bin", "hack-next"),
+    "doctor",
+    "--migrate-env-config",
+    "--path",
+    project.repoRoot,
+  ]);
+});
+
+test("a step with no command is manual: its action is never shown as a command", async () => {
+  await writeFile(join(hackHome, "projects.json"), "{ not json");
+  const report = await check(healthyProbes());
+  const registry = report.plan.find((step) => step.id === "registry");
+  expect(registry?.command).toBeNull();
+  expect(registry?.args).toBeNull();
+  expect(registry?.action).toContain("Repair");
+  expect(report.ready).toBe(false);
+  // The first step is the snapshot, a real command.
+  expect(report.next_command).toBe("hack upgrade snapshot");
+  expect(report.next_action).toBeNull();
 });
 
 // ---------------------------------------------------------------------------
@@ -530,7 +824,8 @@ test("hack upgrade check exits 1 naming the blockers, and prints the next comman
   const text = await cli(["upgrade", "check"]);
   expect(text.code).toBe(1);
   expect(text.stdout).toContain("Blocked by: app-blocked env-format");
-  expect(text.stdout).toContain("Next: hack doctor --path");
+  expect(text.stdout).toContain("Next: hack upgrade snapshot");
+  expect(text.stdout).toContain("[blocker] hack doctor --path");
 }, 60_000);
 
 test("hack upgrade snapshot, then rollback restores exact bytes; a changed file needs --overwrite", async () => {

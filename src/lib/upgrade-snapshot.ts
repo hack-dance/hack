@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import {
   type FileHandle,
+  link,
   lstat,
   mkdir,
   open,
@@ -59,9 +60,19 @@ import { isRecord } from "./guards.ts";
  * - Results and errors carry paths, labels, statuses and closed messages,
  *   never file content. Labels are caller input and must not hold values.
  *
- * Not atomic across targets, and not atomic against a concurrent editor:
- * each target is checked immediately before it is replaced, which leaves a
- * read-then-rename window.
+ * Restore protocol, per target: stage the snapshot's copy beside the target;
+ * move whatever is at the target to an invocation-owned sibling name (one
+ * atomic rename) and keep exactly those bytes before removing the sibling;
+ * publish the staged copy with a hard link, which fails if anything
+ * appeared at the target meanwhile. A late edit found in the displaced file
+ * is linked back unless `overwrite` is set, and is kept either way, so no
+ * edit is lost at any point. Not atomic across targets.
+ *
+ * One writer per snapshot: `recordUpgradeSnapshotAfter` rewrites the
+ * manifest (read, modify, atomic rename, directory fsync), so two
+ * concurrent recorders on the same snapshot can lose each other's after
+ * states. Callers (one upgrade step at a time) own the snapshot while they
+ * run.
  */
 
 export const UPGRADE_SNAPSHOT_VERSION = 1;
@@ -341,8 +352,10 @@ export async function restoreUpgradeSnapshot(input: {
   readonly manifestPath: string;
   readonly overwrite?: boolean;
   readonly paths?: readonly string[];
-  /** Test seam: runs after a target's checks, before it is replaced. */
+  /** Test seam: runs after a target's checks, before it is displaced. */
   readonly beforeReplace?: (path: string) => Promise<void>;
+  /** Test seam: runs after the target is displaced, before publication. */
+  readonly afterDisplace?: (path: string) => Promise<void>;
 }): Promise<RestoreUpgradeSnapshotResult> {
   const loaded = await readUpgradeSnapshot({
     manifestPath: input.manifestPath,
@@ -355,6 +368,14 @@ export async function restoreUpgradeSnapshot(input: {
     input.paths === undefined
       ? null
       : new Set(input.paths.map((path) => normalize(resolve(path))));
+  if (wanted !== null) {
+    const known = new Set(snapshot.manifest.entries.map((entry) => entry.path));
+    for (const path of wanted) {
+      if (!known.has(path)) {
+        throw new Error("The path is not a target of this upgrade snapshot.");
+      }
+    }
+  }
   const results: UpgradeRestoreEntry[] = [];
   for (const entry of snapshot.manifest.entries) {
     if (wanted !== null && !wanted.has(entry.path)) {
@@ -367,6 +388,7 @@ export async function restoreUpgradeSnapshot(input: {
         entry,
         overwrite: input.overwrite === true,
         beforeReplace: input.beforeReplace,
+        afterDisplace: input.afterDisplace,
       });
     } catch {
       outcome = { status: "error", message: MESSAGES.error };
@@ -651,6 +673,7 @@ async function restoreEntry(input: {
   readonly entry: UpgradeSnapshotEntry;
   readonly overwrite: boolean;
   readonly beforeReplace?: (path: string) => Promise<void>;
+  readonly afterDisplace?: (path: string) => Promise<void>;
 }): Promise<RestoreOutcome> {
   const { snapshot, entry } = input;
   const start = await restoreStart(input);
@@ -658,55 +681,149 @@ async function restoreEntry(input: {
     return start.outcome;
   }
   const { current } = start;
-  const restoredBytes =
-    entry.before.kind === "file"
-      ? await readBlob({ dir: snapshot.dir, sha256: entry.before.sha256 })
-      : null;
-  if (entry.before.kind === "file" && restoredBytes === null) {
-    return { status: "backup-damaged", message: MESSAGES.damaged };
+  let staged: string | null = null;
+  if (entry.before.kind === "file") {
+    const bytes = await readBlob({
+      dir: snapshot.dir,
+      sha256: entry.before.sha256,
+    });
+    if (bytes === null) {
+      return { status: "backup-damaged", message: MESSAGES.damaged };
+    }
+    staged = await stageFile({
+      path: entry.path,
+      bytes,
+      mode: entry.before.mode,
+    });
   }
-  // Keep what is there before replacing or removing it: never delete data.
-  const keptAs =
-    current.bytes !== null && current.state.kind === "file"
-      ? await writeBlob({
-          dir: snapshot.dir,
-          sha256: current.state.sha256,
-          bytes: current.bytes,
-        })
-      : undefined;
-  const kept = keptAs === undefined ? {} : { keptAs };
-  await input.beforeReplace?.(entry.path);
-  // Re-check right before the change: the target must still hold what was
-  // inspected (and kept) above.
-  const again = await readTargetBytes(entry.path);
-  if (again.kind === "refused" || !sameState(again.state, current.state)) {
-    return { status: "conflict", message: MESSAGES.conflict, ...kept };
+  try {
+    await input.beforeReplace?.(entry.path);
+    const displaced = await displaceTarget({
+      snapshot,
+      path: entry.path,
+      expected: current.state,
+      overwrite: input.overwrite,
+    });
+    if (displaced.kind === "stopped") {
+      return displaced.outcome;
+    }
+    const kept =
+      displaced.keptAs === undefined ? {} : { keptAs: displaced.keptAs };
+    await input.afterDisplace?.(entry.path);
+    if (staged === null) {
+      return displaced.keptAs === undefined
+        ? { status: "already-restored" }
+        : { status: "moved-aside", ...kept };
+    }
+    const published = await publishStaged({ staged, path: entry.path });
+    staged = null;
+    return published
+      ? { status: "restored", ...kept }
+      : { status: "conflict", message: MESSAGES.conflict, ...kept };
+  } finally {
+    if (staged !== null) {
+      await unlink(staged).catch(() => undefined);
+    }
   }
-  if (entry.before.kind === "absent") {
-    await unlink(entry.path);
-    return { status: "moved-aside", ...kept };
+}
+
+/**
+ * Moves whatever is at `path` right now to an invocation-owned sibling
+ * name (one atomic rename), keeps exactly those bytes as a blob, then
+ * removes the sibling. What was displaced is what is kept, so an edit that
+ * landed after the checks is never lost. When the displaced file is not
+ * what was inspected (a late edit) and `overwrite` is off, it is linked
+ * back and the target is reported as a conflict. A displaced link,
+ * directory or other entry is put back and reported as `not-a-file`.
+ */
+async function displaceTarget(input: {
+  readonly snapshot: UpgradeSnapshot;
+  readonly path: string;
+  readonly expected: UpgradeSnapshotState;
+  readonly overwrite: boolean;
+}): Promise<
+  | { readonly kind: "displaced"; readonly keptAs?: string }
+  | { readonly kind: "stopped"; readonly outcome: RestoreOutcome }
+> {
+  const sibling = join(
+    dirname(input.path),
+    `.${basename(input.path)}.hack-displaced-${randomBytes(6).toString("hex")}`
+  );
+  try {
+    await rename(input.path, sibling);
+  } catch (error: unknown) {
+    if (errorCode(error) !== "ENOENT") {
+      throw error;
+    }
+    // Nothing is there now.
+    return input.expected.kind === "absent" || input.overwrite
+      ? { kind: "displaced" }
+      : {
+          kind: "stopped",
+          outcome: { status: "conflict", message: MESSAGES.conflict },
+        };
   }
-  if (restoredBytes === null) {
-    return { status: "backup-damaged", message: MESSAGES.damaged };
+  const moved = await readTargetBytes(sibling);
+  if (moved.kind === "refused" || moved.state.kind !== "file") {
+    // Not a regular file: put it back where it was, untouched.
+    await putBack({ sibling, path: input.path, file: false });
+    return {
+      kind: "stopped",
+      outcome: { status: "not-a-file", message: MESSAGES.notAFile },
+    };
   }
-  await replaceFile({
-    path: entry.path,
-    bytes: restoredBytes,
-    mode: entry.before.mode,
+  const keptAs = await writeBlob({
+    dir: input.snapshot.dir,
+    sha256: moved.state.sha256,
+    bytes: moved.bytes ?? Buffer.alloc(0),
   });
-  return { status: "restored", ...kept };
+  if (!(sameState(moved.state, input.expected) || input.overwrite)) {
+    // A late edit: it goes back where it was (and is kept as a blob too).
+    await putBack({ sibling, path: input.path, file: true });
+    return {
+      kind: "stopped",
+      outcome: { status: "conflict", message: MESSAGES.conflict, keptAs },
+    };
+  }
+  await unlink(sibling);
+  return { kind: "displaced", keptAs };
+}
+
+/**
+ * Returns a displaced entry to `path` without replacing anything that
+ * appeared there meanwhile: a file is linked back (refused when the name
+ * is taken); another entry is renamed back only while the name is free.
+ * When the name was taken, the entry stays under its sibling name.
+ */
+async function putBack(input: {
+  readonly sibling: string;
+  readonly path: string;
+  readonly file: boolean;
+}): Promise<void> {
+  if (input.file) {
+    try {
+      await link(input.sibling, input.path);
+      await unlink(input.sibling);
+    } catch {
+      // The name was taken: the displaced file stays at its sibling name
+      // (and in the snapshot).
+    }
+    return;
+  }
+  if ((await lstatOrNull(input.path)) === null) {
+    await rename(input.sibling, input.path).catch(() => undefined);
+  }
 }
 
 /**
  * Writes `bytes` with exactly `mode` to a new no-follow temporary file in
- * the target's directory, then renames it over the target. A missing parent
- * directory is created (0700).
+ * the target's directory (created 0700 when missing) and syncs it.
  */
-async function replaceFile(input: {
+async function stageFile(input: {
   readonly path: string;
   readonly bytes: Buffer;
   readonly mode: number;
-}): Promise<void> {
+}): Promise<string> {
   const parent = dirname(input.path);
   await mkdir(parent, { recursive: true, mode: 0o700 });
   const temporary = join(
@@ -731,12 +848,40 @@ async function replaceFile(input: {
     throw error;
   }
   await handle.close();
+  return temporary;
+}
+
+/**
+ * Publishes a staged file at `path` only while the name is free: a hard
+ * link, which fails when anything appeared there since the displacement.
+ * False (and the staged file removed) when the name is taken. On a
+ * filesystem without hard links, a rename after checking the name is free.
+ */
+async function publishStaged(input: {
+  readonly staged: string;
+  readonly path: string;
+}): Promise<boolean> {
   try {
-    await rename(temporary, input.path);
+    await link(input.staged, input.path);
   } catch (error: unknown) {
-    await unlink(temporary).catch(() => undefined);
-    throw error;
+    const code = errorCode(error);
+    if (code === "EEXIST") {
+      await unlink(input.staged).catch(() => undefined);
+      return false;
+    }
+    if (code !== "EPERM" && code !== "ENOTSUP" && code !== "EXDEV") {
+      await unlink(input.staged).catch(() => undefined);
+      throw error;
+    }
+    if ((await lstatOrNull(input.path)) !== null) {
+      await unlink(input.staged).catch(() => undefined);
+      return false;
+    }
+    await rename(input.staged, input.path);
+    return true;
   }
+  await unlink(input.staged);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -814,6 +959,20 @@ async function writeManifest(input: {
     await handle.close();
   }
   await rename(temporary, input.path);
+  await syncDirectory(dirname(input.path));
+}
+
+/** Makes a rename in `dir` durable; best effort where directories cannot be synced. */
+async function syncDirectory(dir: string): Promise<void> {
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(dir, constants.O_RDONLY);
+    await handle.sync();
+  } catch {
+    // Some platforms and filesystems do not sync directories.
+  } finally {
+    await handle?.close();
+  }
 }
 
 /**

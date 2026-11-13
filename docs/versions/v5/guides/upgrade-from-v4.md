@@ -83,9 +83,18 @@ Silicon, the native preflight. It changes nothing and prints no secret value.
 - **Dead registry entries** (the checkout or its config is gone) are counted
   apart from live projects that cannot be read. Dead entries only need
   `hack projects prune`; unreadable ones need repair.
-- It ends with an ordered plan and the single next command. It exits 1 and
-  names the blockers when something would make the upgrade fail or lose data,
-  such as a global secret store whose key is gone while a project reads it.
+- It ends with an ordered plan and the next command. A step either has a
+  command or is marked manual, with the action to take; manual text is never
+  printed as a command. Commands run the CLI you ran the check with (the
+  `hack-next` launcher during the prerelease).
+- It exits 1 when something blocks the upgrade, naming the blockers. Examples
+  are a global secret store whose key is gone or refused while a project
+  reads it, a tracked secret key, an env layer conflict, or a live project
+  whose config cannot be read. It also exits 1 when a check the upgrade
+  depends on could not run, listed under "Not fully checked". Examples are a
+  check that timed out, or a key file that is missing while the OS keychain
+  may hold the key; the check never asks the keychain, because that can
+  prompt.
 
 Before you follow the plan, keep a private copy of the files it changes:
 
@@ -108,8 +117,14 @@ Rollback restores each file's exact bytes and mode. A file that changed since
 the snapshot is left as it is unless you add `--overwrite`; whatever rollback
 replaces or removes is kept in the snapshot directory, never deleted.
 `hack upgrade rollback` without a manifest lists the snapshots and changes
-nothing. The snapshot does not cover the daemon's login service or Docker
-state; the steps below still apply.
+nothing.
+
+The snapshot also records, as absent, the env layers the migration would
+create, so a rollback moves them aside. This includes layers for overlays held
+only in the secret store. When those overlays could not be listed without
+asking the OS keychain, the snapshot says so: a rollback may then leave such a
+layer in place. The snapshot does not cover the Git index, the daemon's login
+service or Docker state; the steps below still apply.
 
 ### Record the current state
 

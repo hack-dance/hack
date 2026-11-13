@@ -28,6 +28,8 @@ import { exec } from "./shell.ts";
  * Tests replace them; the project checks run against real files.
  */
 export type UpgradeCheckProbes = {
+  /** True for the refusing stand-ins; the report is then incomplete. */
+  readonly disabled?: boolean;
   /** The first `hack` on PATH: where it is, how it was installed, its version. */
   readonly pathHack: () => Promise<PathHackProbe>;
   /** Who runs hackd and whether a login service is registered. */
@@ -104,13 +106,15 @@ export function defaultUpgradeCheckProbes(
   const env = opts.env ?? process.env;
   if ((env[HOST_PROBES_DISABLE_ENV] ?? "").trim() === "1") {
     return {
+      disabled: true,
       pathHack: disabled,
       daemon: disabled,
       docker: () => Promise.resolve("unreachable" as const),
       globalInfra: disabled,
       linuxDns: disabled,
       proxyPorts: disabled,
-      nativePreflight: disabled,
+      // Reported once, as the report-level host-probes finding.
+      nativePreflight: () => Promise.resolve(null),
     };
   }
   return {

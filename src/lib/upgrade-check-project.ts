@@ -1,4 +1,5 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { type FileHandle, open, readdir, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 import { inspectDoctorAgentIntegrations } from "../commands/doctor.ts";
@@ -20,7 +21,7 @@ import {
   inspectHackDirGitignoreForDoctor,
   inspectTrackedGeneratedFiles,
 } from "./doctor-generated-files.ts";
-import { quoteShellWord } from "./logs.ts";
+import { withProcessDeadline } from "./process-deadline.ts";
 import {
   ProjectEnvLayerPathConflictError,
   projectEnvConfigExistsForMutation,
@@ -29,23 +30,48 @@ import type { RegisteredProject } from "./projects-registry.ts";
 import type { NativePreflightProbe } from "./upgrade-check-probes.ts";
 
 /**
- * Per-project checks for `hack upgrade check` (HACK-2189): the project's
- * state in the registry, then, for a live project, its env format, env key,
- * tracked machine-local files, ignore rules, agent integrations and (Apple
- * Silicon) native preflight. Read-only; reports names, paths, counts and
- * codes, never a value.
+ * Per-checkout checks for `hack upgrade check` (HACK-2189): the checkout's
+ * state in the registry, then, for a live checkout, its env format, env
+ * key, tracked machine-local files, ignore rules, agent integrations and
+ * (Apple Silicon) native preflight. Read-only; reports names, paths, counts
+ * and codes, never a value.
  */
 
-export type UpgradeFindingStatus = "ok" | "info" | "warn" | "blocker";
+/**
+ * - `blocker`: continuing would fail or lose data.
+ * - `incomplete`: a check the upgrade's safety depends on could not be
+ *   performed (it failed or ran out of time); readiness is not established.
+ * - `warn`: a step to take; `info` and `ok` need nothing.
+ */
+export type UpgradeFindingStatus =
+  | "ok"
+  | "info"
+  | "warn"
+  | "incomplete"
+  | "blocker";
 
 export type UpgradeFinding = {
   /** Stable id, for example `env-format` or `secret-store`. */
   readonly id: string;
   readonly status: UpgradeFindingStatus;
   readonly summary: string;
-  /** The command (or action) that fixes it, run from anywhere. */
-  readonly fix: string | null;
+  /**
+   * The Hack CLI arguments of the command that fixes it (or diagnoses it),
+   * run through the CLI that produced the report. Null when only a manual
+   * action applies.
+   */
+  readonly args: readonly string[] | null;
+  /** A manual action, when no command fixes it or as its alternative. Never run. */
+  readonly action: string | null;
 };
+
+/** Checks the upgrade's safety depends on; a failure there is `incomplete`. */
+const REQUIRED_CHECKS = new Set([
+  "env-format",
+  "env-key",
+  "tracked-files",
+  "ignore-rules",
+]);
 
 export type RegistryEntryState =
   | { readonly state: "live" }
@@ -86,7 +112,15 @@ export function registeredCheckouts(
   ];
 }
 
-/** Classifies a registered checkout from its files only. */
+/** Largest config file the classifier reads. */
+const MAX_CONFIG_BYTES = 1024 * 1024;
+
+/**
+ * Classifies a registered checkout from its files only. Config files are
+ * read only when they are regular files, through a non-blocking no-follow
+ * open with a size bound, so a FIFO or link at a config path cannot stall
+ * or redirect the check.
+ */
 export async function classifyRegistryEntry(
   project: RegisteredCheckout
 ): Promise<RegistryEntryState> {
@@ -113,7 +147,7 @@ export async function classifyRegistryEntry(
   if (config.kind === "unreadable") {
     return {
       state: "unreadable",
-      reason: `${PROJECT_CONFIG_FILENAME} cannot be read`,
+      reason: `${PROJECT_CONFIG_FILENAME} cannot be read (or is not a regular file)`,
     };
   }
   if (config.kind === "text") {
@@ -135,7 +169,10 @@ export async function classifyRegistryEntry(
   ]) {
     const other = await readConfigText(resolve(project.projectDir, name));
     if (other.kind === "unreadable") {
-      return { state: "unreadable", reason: `${name} cannot be read` };
+      return {
+        state: "unreadable",
+        reason: `${name} cannot be read (or is not a regular file)`,
+      };
     }
     if (other.kind === "text") {
       return { state: "live" };
@@ -153,13 +190,24 @@ async function readConfigText(
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "absent" | "unreadable" }
 > {
+  let handle: FileHandle | null = null;
   try {
-    return { kind: "text", text: await readFile(path, "utf8") };
+    handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    );
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > MAX_CONFIG_BYTES) {
+      return { kind: "unreadable" };
+    }
+    return { kind: "text", text: await handle.readFile("utf8") };
   } catch (error: unknown) {
     const code = errorCode(error);
     return code === "ENOENT" || code === "ENOTDIR"
       ? { kind: "absent" }
       : { kind: "unreadable" };
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -189,7 +237,7 @@ export async function detectEnvFormats(opts: {
     }
     throw error;
   }
-  const names = await readdir(opts.projectDir).catch(() => [] as string[]);
+  const names = await readdir(opts.projectDir);
   if (names.includes(PROJECT_ENV_CONTRACT_FILENAME)) {
     formats.push("legacy-json");
   }
@@ -212,14 +260,14 @@ function envFormatFinding(opts: {
   readonly detected: Awaited<ReturnType<typeof detectEnvFormats>>;
   readonly root: string;
 }): UpgradeFinding {
-  const path = quoteShellWord(opts.root);
   if (opts.detected.kind === "conflict") {
     return {
       id: "env-format",
       status: "blocker",
       summary:
         "An env layer path (.hack/hack.env.*.yaml) is a link or not a regular file, so the env format cannot be decided.",
-      fix: `hack doctor --path ${path}`,
+      args: ["doctor", "--path", opts.root],
+      action: null,
     };
   }
   const { formats } = opts.detected;
@@ -232,14 +280,16 @@ function envFormatFinding(opts: {
         formats.length === 0
           ? "No env configuration."
           : "Env uses YAML layers (current format).",
-      fix: null,
+      args: null,
+      action: null,
     };
   }
   return {
     id: "env-format",
     status: "warn",
     summary: `Env uses the legacy format (${legacy.join(", ")}${formats.includes("layers") ? ", beside YAML layers" : ""}); migrate it to YAML layers.`,
-    fix: `hack doctor --migrate-env-config --path ${path}`,
+    args: ["doctor", "--migrate-env-config", "--path", opts.root],
+    action: null,
   };
 }
 
@@ -268,32 +318,37 @@ async function envKeyFinding(opts: {
       summary: present
         ? "Env key present, private and untracked."
         : "No env key (none needed yet).",
-      fix: null,
+      args: null,
+      action: null,
     };
   }
   return {
     id: "env-key",
     status: inspection.status === "error" ? "blocker" : "warn",
-    summary: `Env key: ${codes.join(", ")}.${worst.remedy ? ` In the project root: ${worst.remedy}` : ""}`,
-    fix: `hack doctor --path ${quoteShellWord(opts.root)}`,
+    summary: `Env key: ${codes.join(", ")}.`,
+    args: ["doctor", "--path", opts.root],
+    action: worst.remedy ? `In the project root: ${worst.remedy}` : null,
   };
 }
 
 async function trackedFilesFinding(opts: {
   readonly root: string;
   readonly projectDirName: string;
+  readonly timeoutMs: number;
 }): Promise<UpgradeFinding> {
   const tracked = await inspectTrackedGeneratedFiles({
     projectRoot: opts.root,
     projectDirName: opts.projectDirName,
+    timeoutMs: opts.timeoutMs,
   });
-  const fix = `hack doctor --fix --path ${quoteShellWord(opts.root)}`;
+  const args = ["doctor", "--fix", "--path", opts.root];
   if (tracked === null) {
     return {
       id: "tracked-files",
       status: "info",
       summary: "Not a Git checkout, or Git could not list tracked files.",
-      fix: null,
+      args: null,
+      action: null,
     };
   }
   if (tracked.secretKeyTracked) {
@@ -302,7 +357,8 @@ async function trackedFilesFinding(opts: {
       status: "blocker",
       summary:
         "The project's env secret key is tracked in Git (a committed secret).",
-      fix,
+      args,
+      action: null,
     };
   }
   const count =
@@ -314,14 +370,16 @@ async function trackedFilesFinding(opts: {
       id: "tracked-files",
       status: "ok",
       summary: "No machine-local or sensitive files are tracked.",
-      fix: null,
+      args: null,
+      action: null,
     };
   }
   return {
     id: "tracked-files",
     status: "warn",
     summary: `${count} machine-local or sensitive file(s) are tracked or not ignored.`,
-    fix,
+    args,
+    action: null,
   };
 }
 
@@ -340,14 +398,16 @@ async function ignoreRulesFinding(opts: {
         state === null
           ? "Not a Git checkout; no ignore rules needed."
           : "The committed .hack/.gitignore is current.",
-      fix: null,
+      args: null,
+      action: null,
     };
   }
   return {
     id: "ignore-rules",
     status: "warn",
     summary: `The committed .hack/.gitignore is ${state}.`,
-    fix: `hack doctor --fix --path ${quoteShellWord(opts.root)}`,
+    args: ["doctor", "--fix", "--path", opts.root],
+    action: null,
   };
 }
 
@@ -364,14 +424,16 @@ async function agentFinding(opts: {
         id: "agent-integrations",
         status: "ok",
         summary: "Agent integrations are current (or not installed).",
-        fix: null,
+        args: null,
+        action: null,
       }
     : {
         id: "agent-integrations",
         status: "warn",
         summary:
           "Standalone Hack agent files are stale; the hack plugin replaces them.",
-        fix: `hack setup migrate --path ${quoteShellWord(opts.root)}`,
+        args: ["setup", "migrate", "--path", opts.root],
+        action: null,
       };
 }
 
@@ -386,58 +448,64 @@ function nativeFinding(
         id: "native-preflight",
         status: "ok",
         summary: `Ready for the native backend (${probe.warnings} warning(s)).`,
-        fix: null,
+        args: null,
+        action: null,
       }
     : {
         // Native is optional: a Compose project upgrades without it.
         id: "native-preflight",
         status: "info",
         summary: `Not ready for the native backend (${probe.blockers} blocker(s)); Compose is unaffected.`,
-        fix: null,
+        args: null,
+        action: null,
       };
 }
 
 /**
- * A check that threw or ran out of time is reported, never a pass. It gets
- * at most `timeoutMs`, and never runs past `deadline` (epoch ms): once the
- * whole check's budget is spent, it reports "not checked" without running.
+ * Runs one check. A check that threw or ran out of time is reported, never
+ * a pass: `incomplete` for a required check (readiness is then not
+ * established), `warn` for an optional one. It gets at most `timeoutMs`,
+ * and never runs past `deadline` (epoch ms).
  */
 async function guarded(
   id: string,
-  limits: { readonly timeoutMs: number; readonly deadline: number },
-  run: () => Promise<UpgradeFinding | null>
+  limits: {
+    readonly timeoutMs: number;
+    readonly deadline: number;
+    readonly root: string;
+  },
+  run: (timeoutMs: number) => Promise<UpgradeFinding | null>
 ): Promise<UpgradeFinding | null> {
+  const notChecked = (summary: string): UpgradeFinding => ({
+    id,
+    status: REQUIRED_CHECKS.has(id) ? "incomplete" : "warn",
+    summary,
+    args: ["doctor", "--path", limits.root],
+    action: null,
+  });
   const timeoutMs = Math.min(limits.timeoutMs, limits.deadline - Date.now());
   if (timeoutMs <= 0) {
-    return {
-      id,
-      status: "warn",
-      summary:
-        "Not checked: the upgrade check ran out of time before this project.",
-      fix: null,
-    };
+    return notChecked(
+      "Not checked: the upgrade check ran out of time before this check."
+    );
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<"timeout">((done) => {
     timer = setTimeout(() => done("timeout"), timeoutMs);
   });
   try {
-    const result = await Promise.race([run(), timeout]);
+    // Every child process the check starts ends by the check's own limit.
+    const result = await Promise.race([
+      withProcessDeadline(Date.now() + timeoutMs, () => run(timeoutMs)),
+      timeout,
+    ]);
     return result === "timeout"
-      ? {
-          id,
-          status: "warn",
-          summary: `Not checked: it took longer than ${Math.round(timeoutMs / 1000)} s.`,
-          fix: null,
-        }
+      ? notChecked(
+          `Not checked: it took longer than ${Math.max(1, Math.round(timeoutMs / 1000))} s.`
+        )
       : result;
   } catch {
-    return {
-      id,
-      status: "warn",
-      summary: "Not checked: the check failed.",
-      fix: null,
-    };
+    return notChecked("Not checked: the check failed.");
   } finally {
     clearTimeout(timer);
   }
@@ -445,21 +513,24 @@ async function guarded(
 
 const PROJECT_CHECK_TIMEOUT_MS = 8000;
 
-/** The findings for one live project, in a fixed order. */
+/** The findings for one live checkout, in a fixed order. */
 export async function inspectUpgradeProject(opts: {
   readonly project: RegisteredCheckout;
   readonly homeDir: string;
   readonly nativePreflight: (opts: {
     readonly projectRoot: string;
   }) => Promise<NativePreflightProbe | null>;
-  /** Epoch ms after which no further project check starts. */
+  /** Epoch ms after which no further check starts. */
   readonly deadline: number;
+  /** Per-check limit; defaults to 8 s. */
+  readonly checkTimeoutMs?: number;
 }): Promise<readonly UpgradeFinding[]> {
   const root = opts.project.repoRoot;
   const projectDir = opts.project.projectDir;
   const limits = {
-    timeoutMs: PROJECT_CHECK_TIMEOUT_MS,
+    timeoutMs: opts.checkTimeoutMs ?? PROJECT_CHECK_TIMEOUT_MS,
     deadline: opts.deadline,
+    root,
   };
   const results = await Promise.all([
     guarded("env-format", limits, async () =>
@@ -469,10 +540,11 @@ export async function inspectUpgradeProject(opts: {
       })
     ),
     guarded("env-key", limits, () => envKeyFinding({ root })),
-    guarded("tracked-files", limits, () =>
+    guarded("tracked-files", limits, (timeoutMs) =>
       trackedFilesFinding({
         root,
         projectDirName: basename(projectDir),
+        timeoutMs,
       })
     ),
     guarded("ignore-rules", limits, () =>

@@ -10,9 +10,9 @@ import {
 import { optJson } from "../cli/options.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { resolveUserHomeDir } from "../lib/home-dir.ts";
-import { quoteShellWord } from "../lib/logs.ts";
 import { escapeTerminalControls } from "../lib/terminal-text.ts";
 import {
+  renderUpgradeCommand,
   runUpgradeCheck,
   type UpgradeCheckReport,
   type UpgradeFinding,
@@ -115,12 +115,12 @@ export const upgradeCommand = defineCommand({
   ],
 } as const);
 
-/** How printed commands run this CLI (the candidate launcher during the prerelease). */
-function commandPrefix(): string {
-  return upgradeCommandPrefix({
-    env: process.env,
-    homeDir: resolveUserHomeDir(),
-  });
+/** A command line that runs this CLI (the candidate launcher during the prerelease). */
+function command(args: readonly string[]): string {
+  return renderUpgradeCommand(
+    upgradeCommandPrefix({ env: process.env, homeDir: resolveUserHomeDir() }),
+    args
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +151,7 @@ const MARK: Readonly<Record<UpgradeFinding["status"], string>> = {
   ok: "ok   ",
   info: "info ",
   warn: "warn ",
+  incomplete: "UNCHK",
   blocker: "BLOCK",
 };
 
@@ -174,9 +175,6 @@ export function renderUpgradeCheck(report: UpgradeCheckReport): string {
   for (const project of report.projects) {
     line("");
     line(`Project ${project.name} (${project.root})`);
-    if (project.state === "unreadable") {
-      line(`  warn  Not checked: ${project.reason ?? "it cannot be read"}.`);
-    }
     for (const finding of project.findings) {
       line(`  ${MARK[finding.status]} ${finding.summary}`);
     }
@@ -190,24 +188,45 @@ export function renderUpgradeCheck(report: UpgradeCheckReport): string {
 
 function renderPlan(report: UpgradeCheckReport): string[] {
   if (report.plan.length === 0) {
-    return ["Nothing to do: this machine and its projects are ready."];
+    return report.ready
+      ? ["Nothing to do: this machine and its projects are ready."]
+      : ["No step to suggest, but the check is not complete; see above."];
   }
-  const lines = [
-    "Plan",
-    ...report.plan.map(
-      (step) =>
-        `  ${step.order}. ${step.blocker ? "[blocker] " : ""}${step.command}${step.scope === "machine" ? "" : `   (${step.scope})`}`
-    ),
-    "",
-    `Next: ${report.next_command ?? "nothing"}`,
-  ];
+  const lines = ["Plan", ...report.plan.flatMap(renderStep), ""];
+  if (report.next_command !== null) {
+    lines.push(`Next: ${report.next_command}`);
+  } else if (report.next_action !== null) {
+    lines.push(`Next (manual): ${report.next_action}`);
+  }
   if (report.blockers.length > 0) {
     lines.push(
       "",
       `Blocked by: ${report.blockers.map((blocker) => `${blocker.scope} ${blocker.id}`).join(", ")}`
     );
   }
+  if (report.incomplete.length > 0) {
+    lines.push(
+      "",
+      `Not fully checked: ${report.incomplete.map((item) => `${item.scope} ${item.id}`).join(", ")}`
+    );
+  }
   return lines;
+}
+
+function renderStep(step: UpgradeCheckReport["plan"][number]): string[] {
+  const tag =
+    {
+      blocker: "[blocker] ",
+      incomplete: "[not checked] ",
+    }[step.status as string] ?? "";
+  const scope = step.scope === "machine" ? "" : `   (${step.scope})`;
+  const head =
+    step.command === null
+      ? `  ${step.order}. ${tag}manual: ${step.action ?? step.why}${scope}`
+      : `  ${step.order}. ${tag}${step.command}${scope}`;
+  return step.command !== null && step.action !== null
+    ? [head, `       ${step.action}`]
+    : [head];
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +240,10 @@ async function handleUpgradeSnapshot({
   readonly args: CommandArgs<typeof snapshotOptions, readonly []>;
 }): Promise<number> {
   const collected = await collectUpgradeSnapshotTargets();
+  const gapLines = collected.gaps.map(
+    (gap) =>
+      `Not complete for ${gap.name}: ${gap.reason}. A rollback may leave env layers the migration creates for those overlays.`
+  );
   const created = await createUpgradeSnapshot({
     purpose: "hack upgrade snapshot",
     targets: collected.targets,
@@ -243,7 +266,12 @@ async function handleUpgradeSnapshot({
     return 1;
   }
   const { snapshot } = created;
-  const rollback = `${commandPrefix()} upgrade rollback --rollback-manifest ${quoteShellWord(snapshot.manifestPath)}`;
+  const rollback = command([
+    "upgrade",
+    "rollback",
+    "--rollback-manifest",
+    snapshot.manifestPath,
+  ]);
   if (json) {
     emitCliResult({
       result: okResult({
@@ -256,6 +284,8 @@ async function handleUpgradeSnapshot({
             label: entry.label,
           })),
           skipped: collected.skipped,
+          complete: collected.gaps.length === 0,
+          gaps: collected.gaps,
           rollback_command: rollback,
         },
       }),
@@ -267,6 +297,7 @@ async function handleUpgradeSnapshot({
     ...collected.skipped.map(
       (entry) => `Skipped ${entry.label} (${entry.reason}): ${entry.path}`
     ),
+    ...gapLines,
     "To put them back:",
     `  ${rollback}`,
   ];
@@ -314,13 +345,13 @@ async function handleUpgradeRollback({
       const lines =
         snapshots.length === 0
           ? [
-              `No upgrade snapshots. Make one with: ${commandPrefix()} upgrade snapshot`,
+              `No upgrade snapshots. Make one with: ${command(["upgrade", "snapshot"])}`,
             ]
           : [
               "Choose a snapshot to restore (nothing was changed):",
               ...snapshots.map(
                 (snapshot) =>
-                  `  ${snapshot.manifest.createdAt}  ${snapshot.manifest.purpose} (${snapshot.manifest.entries.length} file(s))\n    ${commandPrefix()} upgrade rollback --rollback-manifest ${quoteShellWord(snapshot.manifestPath)}`
+                  `  ${snapshot.manifest.createdAt}  ${snapshot.manifest.purpose} (${snapshot.manifest.entries.length} file(s))\n    ${command(["upgrade", "rollback", "--rollback-manifest", snapshot.manifestPath])}`
               ),
             ];
       process.stdout.write(

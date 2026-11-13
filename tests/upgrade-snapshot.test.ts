@@ -212,6 +212,82 @@ test("a target changed during the restore is left as it is", async () => {
   expect(await readFile(paths.config, "utf8")).toBe('{"racing":true}\n');
 });
 
+test("a file published at the target after it was displaced is never overwritten, and the step's output is kept", async () => {
+  // Second-family review: a replacement that landed between the last check
+  // and the final rename was overwritten, and only the earlier bytes kept.
+  const paths = await fixture();
+  const snapshot = await snapshotOf(paths);
+  await writeFile(paths.config, '{"step":true}\n');
+  await writeFile(paths.created, "env: migrated\n");
+  await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
+  const result = await restoreUpgradeSnapshot({
+    manifestPath: snapshot.manifestPath,
+    paths: [paths.config, paths.created],
+    afterDisplace: async (path) => {
+      await writeFile(path, `late edit of ${path}\n`);
+    },
+  });
+  const byPath = new Map(
+    result.status === "invalid-manifest"
+      ? []
+      : result.results.map((r) => [r.path, r])
+  );
+  // The late file stays; the step's output was kept before displacement.
+  expect(byPath.get(paths.config)?.status).toBe("conflict");
+  expect(await readFile(paths.config, "utf8")).toBe(
+    `late edit of ${paths.config}\n`
+  );
+  expect(await readFile(byPath.get(paths.config)?.keptAs ?? "", "utf8")).toBe(
+    '{"step":true}\n'
+  );
+  // An absent-before target: the late file is not removed.
+  expect(byPath.get(paths.created)?.status).toBe("moved-aside");
+  expect(await readFile(paths.created, "utf8")).toBe(
+    `late edit of ${paths.created}\n`
+  );
+  expect(await readFile(byPath.get(paths.created)?.keptAs ?? "", "utf8")).toBe(
+    "env: migrated\n"
+  );
+  // No sibling staging or displaced file is left behind.
+  expect(
+    (await readdir(join(work, "project"))).filter((name) =>
+      name.includes(".hack-")
+    )
+  ).toEqual([]);
+});
+
+test("a late edit just before displacement goes back in place and is kept, for a created file too", async () => {
+  const paths = await fixture();
+  const snapshot = await snapshotOf(paths);
+  await writeFile(paths.created, "env: migrated\n");
+  await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
+  const result = await restoreUpgradeSnapshot({
+    manifestPath: snapshot.manifestPath,
+    paths: [paths.created],
+    beforeReplace: async (path) => {
+      await writeFile(path, "env: edited later\n");
+    },
+  });
+  const entry =
+    result.status === "invalid-manifest" ? undefined : result.results[0];
+  expect(entry?.status).toBe("conflict");
+  expect(await readFile(paths.created, "utf8")).toBe("env: edited later\n");
+  expect(await readFile(entry?.keptAs ?? "", "utf8")).toBe(
+    "env: edited later\n"
+  );
+});
+
+test("a restore of a path the snapshot does not hold is refused, not reported as restored", async () => {
+  const paths = await fixture();
+  const snapshot = await snapshotOf(paths);
+  await expect(
+    restoreUpgradeSnapshot({
+      manifestPath: snapshot.manifestPath,
+      paths: [join(work, "typo.env")],
+    })
+  ).rejects.toThrow("not a target");
+});
+
 test("no value reaches the manifest, the results or the messages; storage is private", async () => {
   const paths = await fixture();
   const snapshot = await snapshotOf(paths);

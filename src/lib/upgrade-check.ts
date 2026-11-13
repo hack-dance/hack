@@ -7,7 +7,7 @@ import {
   resolveProjectsRegistryPath,
 } from "./projects-registry.ts";
 import {
-  keyFileOpensStore,
+  inspectStoreKeyState,
   listRetiredEncryptedStores,
   resolveFileSecretStorePaths,
 } from "./secret-store.ts";
@@ -20,8 +20,10 @@ import {
   classifyRegistryEntry,
   inspectUpgradeProject,
   type RegisteredCheckout,
+  type RegistryEntryState,
   registeredCheckouts,
   type UpgradeFinding,
+  type UpgradeFindingStatus,
 } from "./upgrade-check-project.ts";
 
 export type {
@@ -31,63 +33,95 @@ export type {
 
 /**
  * `hack upgrade check` (HACK-2189, the upgrade assistant HACK-2188): a
- * read-only report on the machine and every registered project, ending in an
- * ordered plan and the single next command.
+ * read-only report on the machine and every registered checkout, ending in
+ * an ordered plan and the next command.
  *
  * Contract:
  * - Changes nothing: no file, registry, service, container or key is
- *   written, started or provisioned, and nothing prompts. Host probes are
- *   injected ({@link UpgradeCheckProbes}) and time-limited.
+ *   written, started or provisioned, and nothing prompts (the OS keychain is
+ *   never asked). Host probes are injected ({@link UpgradeCheckProbes}).
+ * - One deadline covers the whole check (registry discovery, classification,
+ *   probes and checkout checks); what it cuts short is `incomplete`.
  * - No value in the report: names, paths, counts, states and codes only.
  * - Dead registry entries (the checkout or its config is gone) are counted
- *   apart from live entries that cannot be read; only live projects get the
- *   per-project checks, so a registry of mostly dead entries stays fast.
- * - A finding is a `blocker` when continuing would fail or lose data; the
- *   report is `ready` exactly when there is none.
+ *   apart from live entries that cannot be read.
+ * - `ready` only when nothing blocks and every required check ran: a
+ *   `blocker` (continuing would fail or lose data) or an `incomplete` check
+ *   (safety not established) makes it false, and the command exit non-zero.
+ * - A plan step carries either an executable command (built from the
+ *   running CLI and quoted arguments, never rewritten text) or a manual
+ *   action, never prose labelled as a command.
  */
 
 export const UPGRADE_CHECK_REPORT_VERSION = 1;
 
+/** How printed commands run the CLI that produced the report. */
+export type UpgradeCommandPrefix = {
+  /** Environment assignments placed before the command. */
+  readonly env: Readonly<Record<string, string>>;
+  /** The executable (and any fixed leading arguments). */
+  readonly argv: readonly string[];
+};
+
 /**
- * How to run the CLI that produced the report. During the prerelease, v5
- * runs through a candidate launcher while stable v4 stays `hack` on PATH,
- * so a bare `hack` in a printed command would run the old CLI. The
+ * During the prerelease, v5 runs through a candidate launcher while stable
+ * v4 stays `hack` on PATH, so a bare `hack` would run the old CLI. The
  * `hack-next` launcher lives at `~/.hack-next/bin/hack-next` (not on PATH);
  * a Compose candidate run also needs `HACK_RUNTIME_BACKEND=compose`.
  */
 export function upgradeCommandPrefix(opts: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly homeDir: string;
-}): string {
+}): UpgradeCommandPrefix {
   const entry = (opts.env.HACK_CANDIDATE_ENTRYPOINT ?? "").trim();
   if (entry === "") {
-    return "hack";
+    return { env: {}, argv: ["hack"] };
   }
   const launcher =
     entry === "hack-next"
-      ? quoteShellWord(join(opts.homeDir, ".hack-next", "bin", "hack-next"))
-      : quoteShellWord(entry);
-  return (opts.env.HACK_RUNTIME_BACKEND ?? "").trim() === "compose"
-    ? `HACK_RUNTIME_BACKEND=compose ${launcher}`
-    : launcher;
+      ? join(opts.homeDir, ".hack-next", "bin", "hack-next")
+      : entry;
+  return {
+    env:
+      (opts.env.HACK_RUNTIME_BACKEND ?? "").trim() === "compose"
+        ? { HACK_RUNTIME_BACKEND: "compose" }
+        : {},
+    argv: [launcher],
+  };
 }
 
-const HACK_COMMAND = /(^|[\s(:`])hack (?=[a-z])/gu;
-
-/** `text` with every `hack <subcommand>` run through `prefix`. */
-export function withUpgradeCommandPrefix(text: string, prefix: string): string {
-  return prefix === "hack"
-    ? text
-    : text.replace(HACK_COMMAND, (_match, lead: string) => `${lead}${prefix} `);
+/** A shell command line: every word quoted on its own. */
+export function renderUpgradeCommand(
+  prefix: UpgradeCommandPrefix,
+  args: readonly string[]
+): string {
+  return [
+    ...Object.entries(prefix.env).map(
+      ([key, value]) => `${key}=${quoteShellWord(value)}`
+    ),
+    ...[...prefix.argv, ...args].map((word) => quoteShellWord(word)),
+  ].join(" ");
 }
+
+/** A finding as reported: its command rendered for the running CLI. */
+export type UpgradeReportFinding = UpgradeFinding & {
+  /** The command line for `args`; null when only `action` applies. */
+  readonly command: string | null;
+};
 
 export type UpgradePlanStep = {
   readonly order: number;
   /** The finding this step resolves, or `snapshot`. */
   readonly id: string;
-  /** `machine`, or the project's registered name. */
+  /** `machine`, or the checkout's registered name. */
   readonly scope: string;
-  readonly command: string;
+  readonly status: UpgradeFindingStatus | "step";
+  /** An executable command line; null for a manual step. */
+  readonly command: string | null;
+  /** Its Hack CLI arguments (after `cli.command`); null for a manual step. */
+  readonly args: readonly string[] | null;
+  /** A manual action: what to do when there is no command, or instead of it. */
+  readonly action: string | null;
   readonly why: string;
   readonly blocker: boolean;
 };
@@ -97,7 +131,13 @@ export type UpgradeProjectReport = {
   readonly root: string;
   readonly state: "live" | "unreadable";
   readonly reason: string | null;
-  readonly findings: readonly UpgradeFinding[];
+  readonly findings: readonly UpgradeReportFinding[];
+};
+
+type ScopedFinding = {
+  readonly scope: string;
+  readonly id: string;
+  readonly summary: string;
 };
 
 export type UpgradeCheckReport = {
@@ -108,45 +148,51 @@ export type UpgradeCheckReport = {
     readonly version: string;
     readonly channel: "stable" | "next";
     readonly candidate_run: boolean;
-    /** How the printed commands run this CLI (`hack`, or the candidate launcher). */
+    /** How printed commands run this CLI, as a command-line prefix. */
     readonly command: string;
   };
-  readonly machine: readonly UpgradeFinding[];
+  /** `disabled` when HACK_HOST_PROBES_DISABLE=1 refused every host probe. */
+  readonly host_probes: "enabled" | "disabled";
+  readonly machine: readonly UpgradeReportFinding[];
   readonly registry: {
     readonly state: "valid" | "absent" | "invalid" | "unreadable";
+    /** Registered projects. */
+    readonly projects: number;
+    /** Checkouts: each project's primary checkout and linked worktrees. */
     readonly total: number;
     readonly live: number;
     /** Dead entries: the checkout or its config is gone. */
-    readonly missing: readonly {
-      readonly name: string;
-      readonly root: string;
-      readonly reason: string;
-    }[];
+    readonly missing: readonly RegistryEntrySummary[];
     /** Entries that exist but cannot be read. */
-    readonly unreadable: readonly {
-      readonly name: string;
-      readonly root: string;
-      readonly reason: string;
-    }[];
+    readonly unreadable: readonly RegistryEntrySummary[];
+    /** Entries the deadline cut short. */
+    readonly unchecked: readonly RegistryEntrySummary[];
     /** Registry records that are not valid project entries. */
     readonly rejected: number;
   };
   readonly projects: readonly UpgradeProjectReport[];
-  readonly blockers: readonly {
-    readonly scope: string;
-    readonly id: string;
-    readonly summary: string;
-  }[];
+  readonly blockers: readonly ScopedFinding[];
+  /** Required checks that could not be performed. */
+  readonly incomplete: readonly ScopedFinding[];
   readonly plan: readonly UpgradePlanStep[];
-  /** The first plan step's command; null when there is nothing to do. */
+  /** The first plan step's command; null when it is manual or there is nothing to do. */
   readonly next_command: string | null;
+  /** The first plan step's manual action when it has no command. */
+  readonly next_action: string | null;
   readonly ready: boolean;
 };
 
+type RegistryEntrySummary = {
+  readonly name: string;
+  readonly root: string;
+  readonly reason: string;
+};
+
 const PROJECT_CONCURRENCY = 8;
+const CLASSIFY_CONCURRENCY = 16;
 const PROBE_TIMEOUT_MS = 12_000;
-/** No project check starts after this much time: the whole check stays under 30 s. */
-const PROJECT_BUDGET_MS = 24_000;
+/** The whole check's budget: nothing starts after it, so it ends under 30 s. */
+const CHECK_BUDGET_MS = 25_000;
 
 /** Runs every check and builds the plan. */
 export async function runUpgradeCheck(opts: {
@@ -155,18 +201,28 @@ export async function runUpgradeCheck(opts: {
   readonly probes: UpgradeCheckProbes;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly now?: () => number;
+  /** Test seams: the whole budget and the per-check limit. */
+  readonly budgetMs?: number;
+  readonly checkTimeoutMs?: number;
 }): Promise<UpgradeCheckReport> {
   const now = opts.now ?? Date.now;
   const started = now();
+  const deadline = Date.now() + (opts.budgetMs ?? CHECK_BUDGET_MS);
   const env = opts.env ?? process.env;
   const prefix = upgradeCommandPrefix({ env, homeDir: opts.homeDir });
-  const prefixed = (finding: UpgradeFinding): UpgradeFinding =>
-    finding.fix === null
-      ? finding
-      : { ...finding, fix: withUpgradeCommandPrefix(finding.fix, prefix) };
+  const render = (finding: UpgradeFinding): UpgradeReportFinding => ({
+    ...finding,
+    command:
+      finding.args === null ? null : renderUpgradeCommand(prefix, finding.args),
+  });
   const [registry, machine] = await Promise.all([
-    inspectRegistry(),
-    inspectMachine({ probes: opts.probes, cliVersion: opts.cliVersion }),
+    inspectRegistry({ deadline }),
+    inspectMachine({
+      probes: opts.probes,
+      cliVersion: opts.cliVersion,
+      env,
+      deadline,
+    }),
   ]);
   const projects = await mapLimit(
     registry.live,
@@ -176,12 +232,15 @@ export async function runUpgradeCheck(opts: {
       root: project.repoRoot,
       state: "live",
       reason: null,
-      findings: await inspectUpgradeProject({
-        project,
-        homeDir: opts.homeDir,
-        nativePreflight: opts.probes.nativePreflight,
-        deadline: started + PROJECT_BUDGET_MS,
-      }),
+      findings: (
+        await inspectUpgradeProject({
+          project,
+          homeDir: opts.homeDir,
+          nativePreflight: opts.probes.nativePreflight,
+          deadline,
+          checkTimeoutMs: opts.checkTimeoutMs,
+        })
+      ).map(render),
     })
   );
   const unreadableProjects: UpgradeProjectReport[] =
@@ -190,18 +249,24 @@ export async function runUpgradeCheck(opts: {
       root: entry.root,
       state: "unreadable",
       reason: entry.reason,
-      findings: [],
+      findings: [
+        render({
+          id: "project-config",
+          status: "blocker",
+          summary: `This live checkout cannot be read (${entry.reason}), so it cannot be upgraded safely.`,
+          args: ["doctor", "--path", entry.root],
+          action:
+            "Fix its permissions or its config file, then rerun the upgrade check.",
+        }),
+      ],
     }));
-  const allProjects = [...projects, ...unreadableProjects]
-    .map((project) => ({
-      ...project,
-      findings: project.findings.map(prefixed),
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const machineFindings = [...machine, ...registry.findings].map(prefixed);
-  const blockers = [
+  const allProjects = [...projects, ...unreadableProjects].sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
+  const machineFindings = [...machine, ...registry.findings].map(render);
+  const scoped = (status: UpgradeFindingStatus): ScopedFinding[] => [
     ...machineFindings
-      .filter((finding) => finding.status === "blocker")
+      .filter((finding) => finding.status === status)
       .map((finding) => ({
         scope: "machine",
         id: finding.id,
@@ -209,7 +274,7 @@ export async function runUpgradeCheck(opts: {
       })),
     ...allProjects.flatMap((project) =>
       project.findings
-        .filter((finding) => finding.status === "blocker")
+        .filter((finding) => finding.status === status)
         .map((finding) => ({
           scope: project.name,
           id: finding.id,
@@ -217,11 +282,14 @@ export async function runUpgradeCheck(opts: {
         }))
     ),
   ];
+  const blockers = scoped("blocker");
+  const incomplete = scoped("incomplete");
   const plan = buildPlan({
     machine: machineFindings,
     projects: allProjects,
     prefix,
   });
+  const first = plan[0];
   const version = opts.cliVersion;
   return {
     report_version: UPGRADE_CHECK_REPORT_VERSION,
@@ -231,15 +299,19 @@ export async function runUpgradeCheck(opts: {
       version,
       channel: version.includes("-next.") ? "next" : "stable",
       candidate_run: isCandidateRun(env),
-      command: prefix,
+      command: renderUpgradeCommand(prefix, []),
     },
+    host_probes: opts.probes.disabled === true ? "disabled" : "enabled",
     machine: machineFindings,
     registry: registry.report,
     projects: allProjects,
     blockers,
+    incomplete,
     plan,
-    next_command: plan[0]?.command ?? null,
-    ready: blockers.length === 0,
+    next_command: first?.command ?? null,
+    next_action:
+      first !== undefined && first.command === null ? first.action : null,
+    ready: blockers.length === 0 && incomplete.length === 0,
   };
 }
 
@@ -247,139 +319,193 @@ export async function runUpgradeCheck(opts: {
 // Registry
 // ---------------------------------------------------------------------------
 
-async function inspectRegistry(): Promise<{
+async function inspectRegistry(opts: { readonly deadline: number }): Promise<{
   readonly report: UpgradeCheckReport["registry"];
   readonly live: readonly RegisteredCheckout[];
   readonly findings: readonly UpgradeFinding[];
 }> {
+  const registryPath = resolveProjectsRegistryPath();
   const empty = {
+    projects: 0,
     total: 0,
     live: 0,
     missing: [],
     unreadable: [],
+    unchecked: [],
     rejected: 0,
   } as const;
-  let read: Awaited<ReturnType<typeof readProjectsRegistryStrict>>;
-  try {
-    read = await readProjectsRegistryStrict();
-  } catch {
+  const read = await withDeadline(
+    readProjectsRegistryStrict().catch(() => "error" as const),
+    opts.deadline
+  );
+  if (read === "timeout" || read === "error" || read.kind !== "valid") {
     return {
-      report: { state: "unreadable", ...empty },
+      report: { state: registryFailureState(read), ...empty },
       live: [],
-      findings: [
-        {
-          id: "registry",
-          status: "blocker",
-          summary:
-            "The projects registry exists but cannot be read, so the projects to upgrade are unknown.",
-          fix: `Check the permissions of ${resolveProjectsRegistryPath()}, then rerun hack upgrade check.`,
-        },
-      ],
-    };
-  }
-  if (read.kind === "invalid") {
-    return {
-      report: { state: "invalid", ...empty },
-      live: [],
-      findings: [
-        {
-          id: "registry",
-          status: "blocker",
-          summary:
-            "The projects registry is not valid JSON or not a registry, so the projects to upgrade are unknown.",
-          fix: `Repair ${resolveProjectsRegistryPath()} (or move it aside and rerun hack in each project), then rerun hack upgrade check.`,
-        },
-      ],
-    };
-  }
-  if (read.kind !== "valid") {
-    return {
-      report: { state: "absent", ...empty },
-      live: [],
-      findings: [
-        {
-          id: "registry",
-          status: "ok",
-          summary: "No projects are registered.",
-          fix: null,
-        },
-      ],
+      findings: [registryReadFinding({ read, registryPath })],
     };
   }
   const entries = read.registry.projects;
   // Every registered checkout: each project's primary and linked worktrees.
-  const projects = entries.flatMap(registeredCheckouts);
-  const states = await mapLimit(projects, 16, async (project) => ({
-    project,
-    state: await classifyRegistryEntry(project),
-  }));
-  const live = states
-    .filter((entry) => entry.state.state === "live")
-    .map((entry) => entry.project);
-  const missing = states.flatMap((entry) =>
-    entry.state.state === "missing"
-      ? [
-          {
-            name: entry.project.name,
-            root: entry.project.repoRoot,
-            reason: entry.state.reason,
-          },
-        ]
-      : []
+  const checkouts = entries.flatMap(registeredCheckouts);
+  const states = await mapLimit(
+    checkouts,
+    CLASSIFY_CONCURRENCY,
+    async (checkout) => {
+      const state = await withDeadline(
+        classifyRegistryEntry(checkout).catch(
+          (): RegistryEntryState => ({
+            state: "unreadable",
+            reason: "it could not be read",
+          })
+        ),
+        opts.deadline
+      );
+      return { checkout, state };
+    }
   );
-  const unreadable = states.flatMap((entry) =>
-    entry.state.state === "unreadable"
-      ? [
-          {
-            name: entry.project.name,
-            root: entry.project.repoRoot,
-            reason: entry.state.reason,
-          },
-        ]
-      : []
-  );
-  const findings: UpgradeFinding[] = [];
-  findings.push({
-    id: "registry",
-    status: "ok",
-    summary: `${entries.length} registered project(s), ${projects.length} checkout(s) with worktrees: ${live.length} live, ${missing.length} dead, ${unreadable.length} unreadable.`,
-    fix: null,
+  const summary = (checkout: RegisteredCheckout, reason: string) => ({
+    name: checkout.name,
+    root: checkout.repoRoot,
+    reason,
   });
-  if (missing.length > 0) {
-    findings.push({
-      id: "registry-dead",
-      status: "warn",
-      summary: `${missing.length} registry entr${missing.length === 1 ? "y points" : "ies point"} at a checkout or config that is gone. They are not live projects that failed to read; pruning them only edits the registry.`,
-      fix: "hack projects prune --dry-run",
-    });
+  const live: RegisteredCheckout[] = [];
+  const missing: RegistryEntrySummary[] = [];
+  const unreadable: RegistryEntrySummary[] = [];
+  const unchecked: RegistryEntrySummary[] = [];
+  for (const { checkout, state } of states) {
+    if (state === "timeout") {
+      unchecked.push(summary(checkout, "not read before the check's deadline"));
+    } else if (state.state === "live") {
+      live.push(checkout);
+    } else if (state.state === "missing") {
+      missing.push(summary(checkout, state.reason));
+    } else {
+      unreadable.push(summary(checkout, state.reason));
+    }
   }
-  if (unreadable.length > 0) {
-    findings.push({
-      id: "registry-unreadable",
-      status: "warn",
-      summary: `${unreadable.length} registered project(s) exist but cannot be read (${unreadable.map((entry) => entry.name).join(", ")}); they were not checked.`,
-      fix: "Fix their permissions or config, then rerun hack upgrade check.",
-    });
-  }
-  if (read.rejected > 0) {
-    findings.push({
-      id: "registry-rejected",
-      status: "warn",
-      summary: `${read.rejected} registry record(s) are not valid project entries and were skipped.`,
-      fix: "hack projects prune --dry-run",
-    });
-  }
+  const findings = registryFindings({
+    projects: entries.length,
+    checkouts: checkouts.length,
+    live: live.length,
+    missing: missing.length,
+    unchecked: unchecked.length,
+    unreadable: unreadable.length,
+    rejected: read.rejected,
+  });
   return {
     report: {
       state: "valid",
-      total: projects.length,
+      projects: entries.length,
+      total: checkouts.length,
       live: live.length,
       missing,
       unreadable,
+      unchecked,
       rejected: read.rejected,
     },
     live,
     findings,
+  };
+}
+
+/** The registry's own findings: its counts, dead entries, cut-short and rejected records. */
+function registryFindings(counts: {
+  readonly projects: number;
+  readonly checkouts: number;
+  readonly live: number;
+  readonly missing: number;
+  readonly unchecked: number;
+  readonly unreadable: number;
+  readonly rejected: number;
+}): UpgradeFinding[] {
+  const findings: UpgradeFinding[] = [
+    {
+      id: "registry",
+      status: "ok",
+      summary: `${counts.projects} registered project(s), ${counts.checkouts} checkout(s) with worktrees: ${counts.live} live, ${counts.missing} dead, ${counts.unreadable} unreadable.`,
+      args: null,
+      action: null,
+    },
+  ];
+  if (counts.missing > 0) {
+    findings.push({
+      id: "registry-dead",
+      status: "warn",
+      summary: `${counts.missing} registry entr${counts.missing === 1 ? "y points" : "ies point"} at a checkout or config that is gone. They are not live projects that failed to read; pruning them only edits the registry.`,
+      args: ["projects", "prune", "--dry-run"],
+      action: null,
+    });
+  }
+  if (counts.unchecked > 0) {
+    findings.push({
+      id: "registry-unchecked",
+      status: "incomplete",
+      summary: `${counts.unchecked} registered checkout(s) could not be read before the check's deadline (a slow or unavailable filesystem?); they were not checked.`,
+      args: ["upgrade", "check"],
+      action: null,
+    });
+  }
+  if (counts.rejected > 0) {
+    findings.push({
+      id: "registry-rejected",
+      status: "warn",
+      summary: `${counts.rejected} registry record(s) are not valid project entries and were skipped.`,
+      args: ["projects", "prune", "--dry-run"],
+      action: null,
+    });
+  }
+  return findings;
+}
+
+type RegistryRead =
+  | "timeout"
+  | "error"
+  | { readonly kind: "absent" | "invalid" };
+
+function registryFailureState(
+  read: RegistryRead
+): "unreadable" | "invalid" | "absent" {
+  if (read === "timeout" || read === "error") {
+    return "unreadable";
+  }
+  return read.kind;
+}
+
+/** The one finding for a registry that is absent, invalid, unreadable or slow. */
+function registryReadFinding(opts: {
+  readonly read: RegistryRead;
+  readonly registryPath: string;
+}): UpgradeFinding {
+  const { read, registryPath } = opts;
+  if (read === "timeout" || read === "error") {
+    return {
+      id: "registry",
+      status: read === "timeout" ? "incomplete" : "blocker",
+      summary:
+        read === "timeout"
+          ? "The projects registry could not be read in time, so the projects to upgrade are unknown."
+          : "The projects registry exists but cannot be read, so the projects to upgrade are unknown.",
+      args: null,
+      action: `Check that ${registryPath} is readable, then rerun the upgrade check.`,
+    };
+  }
+  if (read.kind === "invalid") {
+    return {
+      id: "registry",
+      status: "blocker",
+      summary:
+        "The projects registry is not valid JSON or not a registry, so the projects to upgrade are unknown.",
+      args: null,
+      action: `Repair ${registryPath}, or move it aside and run hack once in each project to register it again; then rerun the upgrade check.`,
+    };
+  }
+  return {
+    id: "registry",
+    status: "ok",
+    summary: "No projects are registered.",
+    args: null,
+    action: null,
   };
 }
 
@@ -390,19 +516,33 @@ async function inspectRegistry(): Promise<{
 async function inspectMachine(opts: {
   readonly probes: UpgradeCheckProbes;
   readonly cliVersion: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly deadline: number;
 }): Promise<readonly UpgradeFinding[]> {
-  const { probes } = opts;
-  const docker = await probe(probes.docker, "unreachable" as const);
+  const { probes, deadline } = opts;
+  const docker = await probe(probes.docker, "unreachable" as const, deadline);
   const [pathHack, daemon, infra, linuxDns, store] = await Promise.all([
-    probe(probes.pathHack, null),
-    probe(probes.daemon, null),
-    probe(() => probes.globalInfra({ docker }), null),
-    probe(probes.linuxDns, undefined),
-    probe(inspectGlobalSecretStore, null),
+    probe(probes.pathHack, null, deadline),
+    probe(probes.daemon, null, deadline),
+    probe(() => probes.globalInfra({ docker }), null, deadline),
+    probe(probes.linuxDns, undefined, deadline),
+    probe(() => inspectGlobalSecretStore({ env: opts.env }), null, deadline),
   ]);
   const proxy =
-    infra?.running === true ? await probe(probes.proxyPorts, null) : null;
+    infra?.running === true
+      ? await probe(probes.proxyPorts, null, deadline)
+      : null;
   const findings: UpgradeFinding[] = [];
+  if (probes.disabled === true) {
+    findings.push({
+      id: "host-probes",
+      status: "incomplete",
+      summary:
+        "Host probes are disabled (HACK_HOST_PROBES_DISABLE=1): Docker, the daemon service, global services, proxy ports and DNS were not checked.",
+      args: null,
+      action: "Unset HACK_HOST_PROBES_DISABLE, then rerun the upgrade check.",
+    });
+  }
   findings.push(
     pathHackFinding({ probe: pathHack, cliVersion: opts.cliVersion })
   );
@@ -417,7 +557,8 @@ async function inspectMachine(opts: {
             status: "info",
             summary:
               "The Linux DNS route is set up by hack global install (listed above).",
-            fix: null,
+            args: null,
+            action: null,
           }
         : linuxDnsFinding(linuxDns)
     );
@@ -425,9 +566,11 @@ async function inspectMachine(opts: {
   findings.push(
     store ?? {
       id: "secret-store",
-      status: "warn",
-      summary: "Not checked: the global secret store check failed.",
-      fix: "hack doctor",
+      status: "incomplete",
+      summary:
+        "Not checked: the global secret store check failed or ran out of time.",
+      args: ["doctor"],
+      action: null,
     }
   );
   return findings;
@@ -438,28 +581,15 @@ function pathHackFinding(opts: {
   readonly cliVersion: string;
 }): UpgradeFinding {
   const found = opts.probe;
+  let summary: string;
   if (found === null) {
-    return {
-      id: "installed",
-      status: "info",
-      summary: `Running ${opts.cliVersion}; the hack on PATH could not be checked.`,
-      fix: null,
-    };
+    summary = `Running ${opts.cliVersion}; the hack on PATH could not be checked.`;
+  } else if (found.path === null) {
+    summary = `Running ${opts.cliVersion}; no hack is on PATH.`;
+  } else {
+    summary = `Running ${opts.cliVersion}; the hack on PATH is ${found.version ?? "an unknown version"} (${found.install}) at ${found.path}.`;
   }
-  if (found.path === null) {
-    return {
-      id: "installed",
-      status: "info",
-      summary: `Running ${opts.cliVersion}; no hack is on PATH.`,
-      fix: null,
-    };
-  }
-  return {
-    id: "installed",
-    status: "info",
-    summary: `Running ${opts.cliVersion}; the hack on PATH is ${found.version ?? "an unknown version"} (${found.install}) at ${found.path}.`,
-    fix: null,
-  };
+  return { id: "installed", status: "info", summary, args: null, action: null };
 }
 
 function daemonFinding(
@@ -470,9 +600,12 @@ function daemonFinding(
       id: "daemon",
       status: "warn",
       summary: "Not checked: the daemon service could not be read.",
-      fix: "hack daemon status",
+      args: ["daemon", "status"],
+      action: null,
     };
   }
+  const step = daemon.nextStep;
+  const hackStep = step?.startsWith("hack ") === true;
   const unmanaged = daemon.running
     ? "running, started directly"
     : "not running";
@@ -484,7 +617,8 @@ function daemonFinding(
     id: "daemon",
     status: daemon.severity === "warn" ? "warn" : "info",
     summary: `hackd ${daemon.running ? "is running" : "is not running"}${daemon.managed ? `, run by ${daemon.manager}` : ""}; login service ${daemon.registered ? "registered" : "not registered"} (${owner}).`,
-    fix: daemon.nextStep,
+    args: hackStep ? (step?.slice("hack ".length).split(" ") ?? null) : null,
+    action: hackStep ? null : step,
   };
 }
 
@@ -502,7 +636,11 @@ function infraFindings(opts: {
         opts.docker === "missing"
           ? "Docker is not installed; the Compose backend needs it."
           : "Docker does not answer; global services and proxy ports were not checked.",
-      fix: null,
+      args: null,
+      action:
+        opts.docker === "missing"
+          ? "Install Docker Engine (or Docker Desktop on macOS)."
+          : "Start Docker, then rerun the upgrade check.",
     });
   }
   if (opts.infra === null || !opts.infra.installed) {
@@ -513,14 +651,16 @@ function infraFindings(opts: {
         opts.infra === null
           ? "Not checked: Hack's global services could not be read."
           : "Hack's global proxy and DNS are not installed on this machine.",
-      fix: "hack global install",
+      args: ["global", "install"],
+      action: null,
     });
   } else if (opts.infra.running === false) {
     findings.push({
       id: "global-infra",
       status: "warn",
       summary: "Hack's global proxy and DNS are installed but not running.",
-      fix: "hack global up",
+      args: ["global", "up"],
+      action: null,
     });
   } else {
     findings.push({
@@ -530,7 +670,8 @@ function infraFindings(opts: {
         opts.infra.running === null
           ? "Hack's global proxy is installed; whether it runs was not checked."
           : "Hack's global proxy and DNS are installed and running.",
-      fix: null,
+      args: null,
+      action: null,
     });
   }
   if (opts.proxy !== null) {
@@ -538,7 +679,8 @@ function infraFindings(opts: {
       id: "proxy-ports",
       status: opts.proxy.status === "ok" ? "ok" : "warn",
       summary: opts.proxy.message,
-      fix: opts.proxy.status === "ok" ? null : "hack doctor",
+      args: opts.proxy.status === "ok" ? null : ["doctor"],
+      action: null,
     });
   }
   return findings;
@@ -552,7 +694,8 @@ function linuxDnsFinding(
       id: "linux-dns",
       status: "warn",
       summary: "Not checked: the Linux DNS route could not be read.",
-      fix: "hack doctor",
+      args: ["doctor"],
+      action: null,
     };
   }
   return inspection.state === "configured"
@@ -560,39 +703,46 @@ function linuxDnsFinding(
         id: "linux-dns",
         status: "ok",
         summary: "The Linux DNS route for Hack's names is configured.",
-        fix: null,
+        args: null,
+        action: null,
       }
     : {
         id: "linux-dns",
         status: "warn",
         summary: `Linux DNS route: ${inspection.state}${inspection.code ? ` (${inspection.code})` : ""}.`,
-        fix: inspection.fix[0] ?? "hack global install",
+        args: ["global", "install"],
+        action: inspection.fix[0] ?? null,
       };
 }
 
 /**
- * The global encrypted secret store and its key, read only: the key file is
- * tried directly, never the keychain or `HACK_SECRETS_FILE_KEY`, so nothing
- * prompts. Blocks only when a registered project reads a store whose key is
- * gone (the #779 rule).
+ * The global encrypted secret store and the key the runtime would use, read
+ * only ({@link inspectStoreKeyState}): never the keychain, never a
+ * provisioned key. A store whose key is known to be gone or wrong blocks
+ * only when a registered project reads it (the #779 rule).
  */
-async function inspectGlobalSecretStore(): Promise<UpgradeFinding> {
+async function inspectGlobalSecretStore(opts: {
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): Promise<UpgradeFinding> {
+  const base = { id: "secret-store" } as const;
   if ((await secretStoreSelectionProblem({})) !== null) {
     return {
-      id: "secret-store",
-      status: "warn",
+      ...base,
+      status: "incomplete",
       summary:
         "The global config that selects the secret store cannot be read; the store was not checked.",
-      fix: "hack doctor",
+      args: ["doctor"],
+      action: null,
     };
   }
   const location = await resolveFileSecretStorePaths({});
   if (!location.active) {
     return {
-      id: "secret-store",
+      ...base,
       status: "ok",
       summary: "Secrets use the OS keychain; no file store to check.",
-      fix: null,
+      args: null,
+      action: null,
     };
   }
   const retired = (await listRetiredEncryptedStores(location.storePath)).length;
@@ -600,16 +750,48 @@ async function inspectGlobalSecretStore(): Promise<UpgradeFinding> {
     retired > 0
       ? ` ${retired} retired store archive(s) are kept beside it.`
       : "";
-  const key = await keyFileOpensStore({
+  const state = await inspectStoreKeyState({
     storePath: location.storePath,
     keyPath: location.keyPath,
+    env: opts.env,
   });
-  if (key === "opens") {
+  if (state.kind === "no-store") {
     return {
-      id: "secret-store",
+      ...base,
       status: "ok",
-      summary: `The global secret store opens with its key file.${retiredNote}`,
-      fix: null,
+      summary: `No global secret store file (nothing is stored in it).${retiredNote}`,
+      args: null,
+      action: null,
+    };
+  }
+  if (state.kind === "opens") {
+    return {
+      ...base,
+      status: "ok",
+      summary: `The global secret store opens with ${state.source === "env" ? "HACK_SECRETS_FILE_KEY from this shell" : "its key file"}.${retiredNote}`,
+      args: null,
+      action: null,
+    };
+  }
+  if (state.kind === "store-unreadable") {
+    return {
+      ...base,
+      status: "incomplete",
+      summary:
+        "The global secret store file cannot be read, so its state is unknown.",
+      args: ["doctor"],
+      action: null,
+    };
+  }
+  if (state.kind === "key-uninspected") {
+    return {
+      ...base,
+      status: "incomplete",
+      summary:
+        "The global secret store's key file is missing; the OS keychain may hold its key, but it was not asked (asking can prompt).",
+      args: ["doctor"],
+      action:
+        "hack doctor asks the OS keychain and reports whether the key is there.",
     };
   }
   const users = await listProjectsUsingSecretStore({
@@ -618,27 +800,35 @@ async function inspectGlobalSecretStore(): Promise<UpgradeFinding> {
   const usedBy =
     users.names.length > 0
       ? ` Read by: ${users.names.join(", ")}.`
-      : " No live registered project reads it.";
-  if (key === "unknown") {
+      : " No registered project reads it.";
+  const blocking: UpgradeFindingStatus =
+    users.names.length > 0 ? "blocker" : "warn";
+  if (state.kind === "key-refused") {
     return {
-      id: "secret-store",
-      status: "warn",
-      summary: `The global secret store or its key file cannot be read.${usedBy}${retiredNote}`,
-      fix: "hack doctor",
+      ...base,
+      status: blocking,
+      summary: `The global secret store's key is refused at runtime (a link, readable by others, or tracked by Git).${usedBy}`,
+      args: ["doctor"],
+      action: state.message,
     };
   }
-  const state =
-    key === "absent"
-      ? "Its key file is missing (or the store is empty)."
-      : "Its key file does not open it.";
-  const blocker = users.names.length > 0;
+  if (state.kind === "wrong-key" && state.source === "env") {
+    return {
+      ...base,
+      status: blocking,
+      summary: `HACK_SECRETS_FILE_KEY in this shell does not open the global secret store.${usedBy}`,
+      args: null,
+      action:
+        "Unset HACK_SECRETS_FILE_KEY or set it to the store's key, then rerun the upgrade check.",
+    };
+  }
   return {
-    id: "secret-store",
-    status: blocker ? "blocker" : "warn",
-    summary: `Global secret store: ${state}${usedBy}${retiredNote}`,
-    fix: blocker
-      ? "Restore the key file (or set HACK_SECRETS_FILE_KEY), or retire the store: hack secrets retire-store --allow-unchecked"
-      : "hack secrets retire-store --allow-unchecked",
+    ...base,
+    status: blocking,
+    summary: `The global secret store ${state.kind === "key-missing" ? "has no key file (and the keychain fallback is off)" : "does not open with its key file"}.${usedBy}${retiredNote}`,
+    args: ["secrets", "retire-store", "--allow-unchecked"],
+    action:
+      "Or restore the store's key file (or set HACK_SECRETS_FILE_KEY) instead of retiring it.",
   };
 }
 
@@ -648,19 +838,22 @@ async function inspectGlobalSecretStore(): Promise<UpgradeFinding> {
 
 /** Machine fixes in the order they should run. */
 const MACHINE_ORDER = [
+  "host-probes",
   "registry",
+  "registry-unchecked",
   "secret-store",
   "registry-dead",
   "registry-rejected",
-  "registry-unreadable",
+  "docker",
   "global-infra",
   "linux-dns",
   "proxy-ports",
   "daemon",
 ] as const;
 
-/** Project fixes in the order they should run. */
+/** Checkout fixes in the order they should run. */
 const PROJECT_ORDER = [
+  "project-config",
   "env-format",
   "env-key",
   "tracked-files",
@@ -668,59 +861,78 @@ const PROJECT_ORDER = [
   "agent-integrations",
 ] as const;
 
+const ACTIONABLE: ReadonlySet<UpgradeFindingStatus> = new Set([
+  "blocker",
+  "incomplete",
+  "warn",
+]);
+
 function buildPlan(opts: {
-  readonly machine: readonly UpgradeFinding[];
+  readonly machine: readonly UpgradeReportFinding[];
   readonly projects: readonly UpgradeProjectReport[];
-  readonly prefix: string;
+  readonly prefix: UpgradeCommandPrefix;
 }): UpgradePlanStep[] {
   type Draft = Omit<UpgradePlanStep, "order">;
-  const actionable = (finding: UpgradeFinding) =>
-    finding.fix !== null &&
-    (finding.status === "warn" || finding.status === "blocker");
-  const byOrder = (order: readonly string[]) => (finding: UpgradeFinding) =>
-    order.indexOf(finding.id) === -1 ? order.length : order.indexOf(finding.id);
-  const machineSteps: Draft[] = [...opts.machine]
-    .filter(actionable)
-    .sort((a, b) => byOrder(MACHINE_ORDER)(a) - byOrder(MACHINE_ORDER)(b))
-    .map((finding) => ({
+  const actionable = (finding: UpgradeReportFinding) =>
+    ACTIONABLE.has(finding.status) &&
+    (finding.args !== null || finding.action !== null);
+  const rank =
+    (order: readonly string[]) => (finding: UpgradeReportFinding) => {
+      const index = order.indexOf(finding.id);
+      return index === -1 ? order.length : index;
+    };
+  const toStep =
+    (scope: string) =>
+    (finding: UpgradeReportFinding): Draft => ({
       id: finding.id,
-      scope: "machine",
-      command: finding.fix ?? "",
+      scope,
+      status: finding.status,
+      command: finding.command,
+      args: finding.args,
+      action: finding.action,
       why: finding.summary,
       blocker: finding.status === "blocker",
-    }));
-  const projectSteps: Draft[] = opts.projects.flatMap((project) =>
+    });
+  const machineSteps = [...opts.machine]
+    .filter(actionable)
+    .sort((a, b) => rank(MACHINE_ORDER)(a) - rank(MACHINE_ORDER)(b))
+    .map(toStep("machine"));
+  const projectSteps = opts.projects.flatMap((project) =>
     [...project.findings]
       .filter(actionable)
-      .sort((a, b) => byOrder(PROJECT_ORDER)(a) - byOrder(PROJECT_ORDER)(b))
-      .map((finding) => ({
-        id: finding.id,
-        scope: project.name,
-        command: finding.fix ?? "",
-        why: finding.summary,
-        blocker: finding.status === "blocker",
-      }))
+      .sort((a, b) => rank(PROJECT_ORDER)(a) - rank(PROJECT_ORDER)(b))
+      .map(toStep(project.name))
   );
-  const blockers = [...machineSteps, ...projectSteps].filter(
-    (step) => step.blocker
-  );
-  const rest = [...machineSteps, ...projectSteps].filter(
-    (step) => !step.blocker
-  );
-  // A snapshot before the first change, so every later step can be undone.
+  const steps = [...machineSteps, ...projectSteps];
+  const severity = (step: Draft) => {
+    if (step.status === "blocker") {
+      return 0;
+    }
+    return step.status === "incomplete" ? 1 : 2;
+  };
+  const ordered = steps
+    .map((step, index) => ({ step, index }))
+    .sort((a, b) => severity(a.step) - severity(b.step) || a.index - b.index)
+    .map(({ step }) => step);
+  // A snapshot first, before any step changes a file, so `hack upgrade
+  // rollback` can put back what the following steps change. It covers
+  // files only: not the Git index, services or containers.
   const snapshot: Draft[] =
-    rest.length > 0
+    ordered.length > 0
       ? [
           {
             id: "snapshot",
             scope: "machine",
-            command: `${opts.prefix} upgrade snapshot`,
-            why: "Keep a copy of the files the next steps change, so the upgrade rollback command can put them back.",
+            status: "step",
+            command: renderUpgradeCommand(opts.prefix, ["upgrade", "snapshot"]),
+            args: ["upgrade", "snapshot"],
+            action: null,
+            why: "Keep a private copy of the files the following steps change, so the upgrade rollback command can put them back.",
             blocker: false,
           },
         ]
       : [];
-  return [...blockers, ...snapshot, ...rest].map((step, index) => ({
+  return [...snapshot, ...ordered].map((step, index) => ({
     order: index + 1,
     ...step,
   }));
@@ -730,18 +942,40 @@ function buildPlan(opts: {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function probe<T, F>(run: () => Promise<T>, fallback: F): Promise<T | F> {
+/** `work`, or `timeout` once `deadline` (epoch ms) passes. */
+async function withDeadline<T>(
+  work: Promise<T>,
+  deadline: number
+): Promise<T | "timeout"> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    return "timeout";
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<"timeout">((done) => {
-    timer = setTimeout(() => done("timeout"), PROBE_TIMEOUT_MS);
+    timer = setTimeout(() => done("timeout"), remaining);
   });
   try {
-    const result = await Promise.race([run(), timeout]);
+    return await Promise.race([work, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A probe's result, or `fallback` when it fails or outlives its limit. */
+async function probe<T, F>(
+  run: () => Promise<T>,
+  fallback: F,
+  deadline: number
+): Promise<T | F> {
+  try {
+    const result = await withDeadline(
+      run(),
+      Math.min(deadline, Date.now() + PROBE_TIMEOUT_MS)
+    );
     return result === "timeout" ? fallback : result;
   } catch {
     return fallback;
-  } finally {
-    clearTimeout(timer);
   }
 }
 

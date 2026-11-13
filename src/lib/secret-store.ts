@@ -559,6 +559,75 @@ export async function keyFileOpensStore(input: {
 }
 
 /**
+ * The state of an encrypted store and the key the runtime would use for it,
+ * for `hack upgrade check` (HACK-2189). Read-only and value-free: nothing is
+ * provisioned, no key or value is returned, and the OS keychain is never
+ * asked (asking can prompt), so a missing key file with the keychain
+ * fallback on is `key-uninspected`, never "the key is gone".
+ *
+ * Follows the runtime's order: `HACK_SECRETS_FILE_KEY` (from `env`) wins;
+ * otherwise the key file, read through the runtime's own reader, so its
+ * refusals (a link, group/other access, tracked by Git) are reported as
+ * `key-refused` even when the bytes would decrypt the store.
+ */
+export async function inspectStoreKeyState(input: {
+  readonly storePath: string;
+  readonly keyPath: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): Promise<
+  | { readonly kind: "no-store" }
+  | { readonly kind: "store-unreadable" }
+  | { readonly kind: "opens"; readonly source: "env" | "file" }
+  | { readonly kind: "wrong-key"; readonly source: "env" | "file" }
+  | { readonly kind: "key-refused"; readonly message: string }
+  | { readonly kind: "key-missing" }
+  | { readonly kind: "key-uninspected" }
+> {
+  const store = await readEncryptedStoreText(input.storePath);
+  if (
+    store.kind === "absent" ||
+    (store.kind === "text" && store.text.length === 0)
+  ) {
+    return { kind: "no-store" };
+  }
+  if (store.kind !== "text") {
+    return { kind: "store-unreadable" };
+  }
+  const envKey = (input.env[ENCRYPTED_FILE_KEY_ENV] ?? "").trim();
+  if (envKey.length > 0) {
+    const opened = storeTextOpensUnder({
+      storePath: input.storePath,
+      text: store.text,
+      key: envKey,
+    });
+    return opened === "opens"
+      ? { kind: "opens", source: "env" }
+      : { kind: "wrong-key", source: "env" };
+  }
+  let fileKey: string | null;
+  try {
+    fileKey = await readEncryptedFileKey({ keyPath: input.keyPath });
+  } catch (error: unknown) {
+    if (error instanceof SecretStoreKeyRefusedError) {
+      return { kind: "key-refused", message: error.message };
+    }
+    return { kind: "store-unreadable" };
+  }
+  if (fileKey === null) {
+    return isKeychainDisabled()
+      ? { kind: "key-missing" }
+      : { kind: "key-uninspected" };
+  }
+  return storeTextOpensUnder({
+    storePath: input.storePath,
+    text: store.text,
+    key: fileKey,
+  }) === "opens"
+    ? { kind: "opens", source: "file" }
+    : { kind: "wrong-key", source: "file" };
+}
+
+/**
  * Whether the encrypted_file key in the OS keychain (the runtime's fallback
  * when a project has no key file) opens the store (HACK-2177). Asked
  * directly, without the key resolution cooldown or cache. `unknown` when

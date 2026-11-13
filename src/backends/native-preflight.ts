@@ -30,6 +30,7 @@ import {
 } from "./native-project-ports.ts";
 import {
   nativeBridgeCapacity,
+  nativeRouteProbeRefusalDetails,
   reviewedNativeRoutes,
 } from "./native-project-routing.ts";
 import {
@@ -1403,7 +1404,7 @@ function routeFindings(opts: {
         specs,
         capacity: 1,
       });
-    } catch {
+    } catch (error) {
       found.push(
         finding(
           {
@@ -1413,11 +1414,7 @@ function routeFindings(opts: {
             service: name,
             field: "healthcheck.x-hack-http",
           },
-          {
-            message:
-              "The route lacks matching reviewed readiness, has an incompatible explicit healthcheck, or also declares a dependency cache.",
-            fix: "Keep the default inferred route probe, or give an explicit healthcheck x-hack-http on the route port. Disabled or command-only healthchecks and dependency-cache routes still refuse.",
-          }
+          nativeRouteProbeRefusalDetails(error)
         )
       );
     }

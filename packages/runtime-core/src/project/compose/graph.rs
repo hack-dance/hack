@@ -69,10 +69,11 @@ pub(super) fn validate(
                 ));
             }
             if condition.condition == "service_healthy"
-                && !target
-                    .healthcheck
-                    .as_ref()
-                    .is_some_and(|h| !h.disabled && (h.test.is_some() || h.native_http.is_some()))
+                && !target.healthcheck.as_ref().is_some_and(|h| {
+                    !h.disabled
+                        && h.native_http.as_ref().is_none_or(|p| p.policy.is_none())
+                        && (h.test.is_some() || h.native_http.is_some())
+                })
             {
                 diagnostics.push(Diagnostic::error("missing_healthcheck",&field,"A healthy dependency needs an explicit enabled healthcheck; image health defaults are not assumed."));
             }

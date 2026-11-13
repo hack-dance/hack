@@ -174,10 +174,14 @@ int main(int argc, char **argv) {
         // On the first request only, health == 1 means success even during startup grace.
         if (sequence == 1 && !publish(directory, "first-sample", argv[8], sequence, health, failures, finished - begun)) return 125;
         if (!publish(directory, "status", argv[8], sequence, health, failures, finished - begun)) return 125;
-        uint64_t next = begun + interval;
+        // Generated route probes check quickly during initial compilation, then
+        // use the reviewed steady interval for the rest of this exec generation.
+        // An unhealthy sample never re-enables the fast startup cadence.
+        uint64_t period = route && !ever_healthy && interval > 1000 ? 1000 : interval;
+        uint64_t next = begun + period;
         while (!stopping && millis(CLOCK_MONOTONIC) < next) {
             uint64_t delay = next - millis(CLOCK_MONOTONIC);
-            if (delay > interval) break;
+            if (delay > period) break;
             struct timespec pause = {.tv_sec = (time_t)(delay / 1000), .tv_nsec = (long)(delay % 1000) * 1000000};
             if (nanosleep(&pause, NULL) && errno != EINTR) return 125;
         }

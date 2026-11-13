@@ -27,10 +27,10 @@ export function isInferredNativeRouteProbe(
     probe.policy === "route" &&
     probe.port === port &&
     probe.path === "/" &&
-    probe.interval_ms === 1000 &&
+    probe.interval_ms === 30_000 &&
     probe.timeout_ms === 1000 &&
     probe.retries === 3 &&
-    probe.start_period_ms === 300_000
+    probe.start_period_ms === 60_000
   );
 }
 function bounded(value: unknown, min: number, max: number): boolean {

@@ -2861,8 +2861,14 @@ shared-source mode; active project bind mounts still use the explicit project sh
 #### Native HTTP readiness probe
 
 For a complete Caddy route with no authored `healthcheck`, native reviews a default
-probe: `GET /` on the route port, a 1000 ms interval and timeout, three consecutive
-failures, and a 300000 ms startup grace matching the foreground startup deadline.
+probe: `GET /` on the route port, a 1000 ms timeout, three consecutive
+failures, and a 60000 ms initial startup grace. It checks every second until its
+first success, then every 30 seconds for the rest of that probe generation.
+After the grace, three failed startup checks make the service unhealthy before
+the usual 300-second graph deadline, so startup names the failed service.
+For a missing listener or HTTP 5xx during boot, check `hack logs`, fix the route
+port, or add an explicit `healthcheck.x-hack-http` with your app's startup budget
+and readiness path.
 A successful TCP connection and complete HTTP/1.0 or HTTP/1.1 response headers are
 required. HTTP 200–499, including `/` returning 404, is ready; 5xx, EOF, non-HTTP
 bytes, a timeout or partial headers are not. Redirects are not followed. At most
@@ -2870,9 +2876,15 @@ four interim 1xx responses may precede the final response, within the same 8 KiB
 header and timeout budgets. The request uses `Host: 127.0.0.1:<port>`.
 
 This proves endpoint readiness, not application correctness. After the first
-success, three consecutive failures make the service unhealthy using the existing
-probe lifecycle; source-reload downtime is not silently called healthy. Final
-HTTPS publication verification accepts 2xx–4xx only with a fresh challenge added
+success, three consecutive failures at the 30-second interval make the service
+unhealthy. Status no longer exposes a ready route endpoint, and a new publication
+or rebind cannot proceed until healthy evidence returns. This does not stop or restart the
+container, withdraw an existing publication, or close its existing relay: route
+traffic continues to the application and may receive its error responses. A
+later successful check restores health; it does not resume one-second probing.
+An inferred probe does not satisfy `depends_on: condition: service_healthy`:
+that condition still requires an explicit enabled healthcheck, as on Compose.
+Final HTTPS publication verification accepts 2xx–4xx only with a fresh challenge added
 by the upstream proxy response handler. Authority denials and routing errors do
 not qualify as the application's 404. No readiness decision follows an external
 redirect. Explicit probes retain the stricter policy below. The generated

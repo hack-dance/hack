@@ -3162,10 +3162,10 @@ test("inferred HTTPS readiness accepts 2xx-4xx without following redirects and r
     policy: "route",
     port: 3000,
     path: "/",
-    interval_ms: 1000,
+    interval_ms: 30_000,
     timeout_ms: 1000,
     retries: 3,
-    start_period_ms: 300_000,
+    start_period_ms: 60_000,
   };
   const plan = {
     services: {

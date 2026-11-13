@@ -142,7 +142,7 @@ test("active reviewed routes request pool allocation with matching existing prob
   }
   expect(refusal).toMatchObject({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: expect.stringContaining("reviewed Caddy labels"),
+    message: expect.stringContaining("no valid reviewed HTTP probe matching"),
   });
   expect(() =>
     reviewedNativeRoutes({
@@ -168,10 +168,10 @@ test("a route without an authored healthcheck accepts only its exact reviewed in
     policy: "route",
     port: 3000,
     path: "/",
-    interval_ms: 1000,
+    interval_ms: 30_000,
     timeout_ms: 1000,
     retries: 3,
-    start_period_ms: 300_000,
+    start_period_ms: 60_000,
   };
   const opts = {
     plan: {

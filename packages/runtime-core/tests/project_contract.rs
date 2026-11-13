@@ -94,6 +94,36 @@ fn standard_route_without_healthcheck_infers_a_reviewed_probe_without_editing_so
 }
 
 #[test]
+fn inferred_route_probe_does_not_satisfy_compose_healthy_dependencies() {
+    let route = format!(
+        "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n"
+    );
+    for condition in ["service_healthy", "service_started"] {
+        let dependency = format!(
+            "  app:\n    image: alpine:3.21\n    depends_on:\n      web: {{condition: {condition}}}\n"
+        );
+        let fixture = Fixture::new(&format!("{route}{dependency}"));
+        let report = fixture.plan();
+        let missing = report
+            .plan
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "missing_healthcheck");
+        assert_eq!(missing, condition == "service_healthy");
+        assert_eq!(
+            report.plan.enrollment_compatible,
+            condition != "service_healthy"
+        );
+        if condition == "service_healthy" {
+            let explicit = "    healthcheck:\n      x-hack-http: {port: 3000, path: /health, interval_ms: 30000, timeout_ms: 1000, retries: 3, start_period_ms: 0}\n";
+            let fixture = Fixture::new(&format!("{route}{explicit}{dependency}"));
+            assert!(fixture.plan().plan.enrollment_compatible);
+            assert!(!fixture.codes().contains(&"missing_healthcheck".into()));
+        }
+    }
+}
+
+#[test]
 fn route_inference_never_replaces_authored_healthchecks_or_accepts_an_authored_policy() {
     let route = format!(
         "{BASIC}    labels:\n      caddy: web.example.hack\n      caddy.reverse_proxy: '{{{{upstreams 3000}}}}'\n      caddy.tls: internal\n"

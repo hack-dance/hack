@@ -42,10 +42,10 @@ impl HttpProbe {
         Self {
             port,
             path: "/".into(),
-            interval_ms: 1_000,
+            interval_ms: 30_000,
             timeout_ms: 1_000,
             retries: 3,
-            start_period_ms: 300_000,
+            start_period_ms: 60_000,
             policy: Some(HttpProbePolicy::Route),
         }
     }
@@ -250,6 +250,14 @@ mod tests {
         );
         let inferred = HttpProbe::inferred_route(3000);
         inferred.validate().unwrap();
+        // Even a timeout on every startup sample exhausts grace and retries
+        // before the frontend's 300-second graph budget. Startup cadence is at
+        // most one second; the steady interval is thirty seconds.
+        assert_eq!(inferred.interval_ms, 30_000);
+        assert!(
+            inferred.start_period_ms + u64::from(inferred.retries) * (1_000 + inferred.timeout_ms)
+                < 300_000
+        );
         assert_eq!(serde_json::to_value(&inferred).unwrap()["policy"], "route");
         assert_eq!(
             inferred
@@ -304,6 +312,15 @@ mod tests {
                 grace: u64,
                 timeout: u64,
                 policy: Option<HttpProbePolicy>,
+            ) -> Self {
+                Self::with_cadence(mode, grace, timeout, policy, 100)
+            }
+            fn with_cadence(
+                mode: usize,
+                grace: u64,
+                timeout: u64,
+                policy: Option<HttpProbePolicy>,
+                interval: u64,
             ) -> Self {
                 let listener = TcpListener::bind("127.0.0.1:0").unwrap();
                 let port = listener.local_addr().unwrap().port();
@@ -377,6 +394,7 @@ mod tests {
                 config.port = port;
                 config.start_period_ms = grace;
                 config.timeout_ms = timeout;
+                config.interval_ms = interval;
                 config.policy = policy;
                 if policy == Some(HttpProbePolicy::Route) {
                     config.path = "/".into();
@@ -419,7 +437,10 @@ mod tests {
                 Some((health, raw.split(' ').nth(2).unwrap().parse().unwrap()))
             }
             fn wait(&mut self, health: Health, after: u64) -> u64 {
-                let deadline = Instant::now() + Duration::from_secs(4);
+                self.wait_for(health, after, Duration::from_secs(4))
+            }
+            fn wait_for(&mut self, health: Health, after: u64, budget: Duration) -> u64 {
+                let deadline = Instant::now() + budget;
                 loop {
                     assert!(
                         self.process.as_mut().unwrap().try_wait().unwrap().is_none(),
@@ -562,6 +583,75 @@ mod tests {
                 b"retained publication"
             );
         }
+        #[test]
+        fn inferred_boot_failures_name_the_service_before_the_graph_deadline() {
+            use crate::project::execution::{
+                self, Condition, Driver, Event, Graph, Observation, Service,
+            };
+            use std::collections::BTreeMap;
+            struct Probed(Fixture);
+            impl Driver for Probed {
+                fn record(&mut self, _: Event<'_>) -> Result<(), CandidateError> {
+                    Ok(())
+                }
+                fn start(&mut self, _: &str) -> Result<(), CandidateError> {
+                    Ok(())
+                }
+                fn observe(&mut self, _: &str) -> Result<Observation, CandidateError> {
+                    Ok(Observation::Running {
+                        health: self.0.sample().map_or(Health::Starting, |s| s.0),
+                    })
+                }
+            }
+            for listening in [false, true] {
+                // Exercise the compiled production helper, with the same grace
+                // and retry rules scaled down; one case has no TCP listener,
+                // the other keeps answering HTTP 500 through startup.
+                let mut fixture = Fixture::with_policy(9, 200, 40, Some(HttpProbePolicy::Route));
+                if !listening {
+                    fixture.stop.store(1, Ordering::SeqCst);
+                    fixture.server.take().unwrap().join().unwrap();
+                }
+                let mut driver = Probed(fixture);
+                let graph = Graph::from_services(BTreeMap::from([(
+                    "web".into(),
+                    Service {
+                        dependencies: BTreeMap::new(),
+                        ready: Condition::Healthy,
+                    },
+                )]))
+                .unwrap();
+                let failure =
+                    execution::run(&graph, &mut driver, Duration::from_secs(3)).unwrap_err();
+                assert_eq!(failure.code, "graph_service_failed");
+                assert_eq!(failure.service.as_deref(), Some("web"));
+                assert!(failure.message.contains("web") && failure.message.contains("unhealthy"));
+                if listening {
+                    assert!(driver.0.accepted.load(Ordering::SeqCst) >= 3);
+                }
+            }
+        }
+
+        #[test]
+        fn inferred_probe_slows_after_first_success_and_does_not_resume_fast_polling() {
+            // Shorten only the steady interval to keep this real-helper test
+            // bounded. Production admission pins it to 30 seconds.
+            let mut f = Fixture::with_cadence(9, 20_000, 40, Some(HttpProbePolicy::Route), 6_000);
+            let starting = f.wait(Health::Starting, 1);
+            f.mode.store(7, Ordering::SeqCst);
+            let ready = f.wait(Health::Healthy, starting);
+            f.mode.store(9, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(1_250));
+            assert_eq!(f.sample().unwrap(), (Health::Healthy, ready));
+            let down = f.wait_for(Health::Unhealthy, ready, Duration::from_secs(22));
+            assert!(down >= ready + 3);
+            // Unhealthy status does not return to the one-second startup loop.
+            thread::sleep(Duration::from_millis(1_250));
+            assert_eq!(f.sample().unwrap(), (Health::Unhealthy, down));
+            f.mode.store(7, Ordering::SeqCst);
+            f.wait_for(Health::Healthy, down, Duration::from_secs(8));
+        }
+
         #[test]
         fn inferred_route_accepts_http_2xx_through_4xx_but_never_tcp_only_or_http_5xx() {
             for (mode, expected) in [

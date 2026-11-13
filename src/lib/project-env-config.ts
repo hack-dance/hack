@@ -3530,6 +3530,28 @@ async function resolveProjectEnvHydrationKey(opts: {
 }
 
 /**
+ * HACK-2169 (F8): legacy migration of keychain secrets never creates a key
+ * file while only `HACK_ENV_SECRET_KEY` holds the key, since the new file
+ * would shadow it and committed secrets encrypted under it would stop
+ * decrypting. Refused before any migration file is written.
+ */
+async function refuseMigrationKeyShadowingEnvironmentKey(opts: {
+  readonly projectRoot: string;
+}): Promise<void> {
+  if (!process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim()) {
+    return;
+  }
+  const fileKey = await readExistingProjectEnvKeyFileText({
+    projectRoot: opts.projectRoot,
+  });
+  if (fileKey === null) {
+    throw new ClosedCliError(
+      `Refusing legacy env migration: ${PROJECT_ENV_SECRET_KEY_ENV} is set but no ${PROJECT_ENV_KEY_FILENAME} exists, and creating one would replace that key for every layer. Store the same key in ${PROJECT_ENV_KEY_FILENAME} (owner-only, untracked) and retry. No env migration files were written.`
+    );
+  }
+}
+
+/**
  * Closed, value-free refusals for writing a secret with `hack env add
  * --secret` or `hack env set` (HACK-2169); the key rules are hydration's.
  */
@@ -3637,13 +3659,26 @@ export type ProjectEnvLayerKeyReport = {
   readonly secretCount: number;
   /** Secrets that open under the readers' key; null when no key is available. */
   readonly openCount: number | null;
+  /** The layer, as `hack env` options select it. */
+  readonly envName: string | null;
+  readonly local: boolean;
+  /**
+   * Names (never values) of the secrets the readers' key does not open,
+   * by scope ("global" or a service), so they can be re-entered; empty
+   * when no key is available.
+   */
+  readonly unopened: readonly {
+    readonly scope: string;
+    readonly name: string;
+  }[];
 };
 
 /**
  * Read-only (HACK-2169): for every committed and machine-local env layer of
  * this project, how many secrets it holds and how many open under the key
  * readers would use (key file, else `HACK_ENV_SECRET_KEY`). Nothing is
- * created, copied or decrypted into the result: it carries counts only.
+ * created, copied or decrypted into the result: it carries counts and the
+ * names of secrets that do not open, never a value.
  * Layers with no secrets, or that cannot be read or parsed, are left out
  * (other checks report those).
  */
@@ -3665,17 +3700,25 @@ export async function inspectProjectEnvLayerKeys(opts: {
   const overlays = await listProjectEnvOverlayNames({
     projectDir: opts.projectDir,
   }).catch(() => [] as readonly string[]);
-  const paths = new Set<string>();
+  const layers = new Map<
+    string,
+    { readonly envName: string | null; readonly local: boolean }
+  >();
   for (const envName of [null, ...overlays]) {
-    paths.add(
-      resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName })
+    layers.set(
+      resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName }),
+      { envName, local: false }
     );
-    paths.add(
-      resolveProjectEnvLocalConfigPath({ projectDir: opts.projectDir, envName })
+    layers.set(
+      resolveProjectEnvLocalConfigPath({
+        projectDir: opts.projectDir,
+        envName,
+      }),
+      { envName, local: true }
     );
   }
   const reports: ProjectEnvLayerKeyReport[] = [];
-  for (const path of paths) {
+  for (const [path, layer] of layers) {
     const file = await readOptionalTextFile(path);
     if (file.kind !== "text") {
       continue;
@@ -3688,27 +3731,35 @@ export async function inspectProjectEnvLayerKeys(opts: {
     if (read.parseError !== undefined) {
       continue;
     }
-    const secrets = Object.values(read.config.values).flatMap((scopeValues) =>
-      Object.values(scopeValues).filter(
-        (value): value is ProjectEnvSecretValue =>
+    const secrets = Object.entries(read.config.values).flatMap(
+      ([scope, scopeValues]) =>
+        Object.entries(scopeValues).flatMap(([name, value]) =>
           value !== null && isProjectEnvSecretValue(value)
-      )
+            ? [{ scope, name, value }]
+            : []
+        )
     );
     if (secrets.length === 0) {
       continue;
     }
+    const unopened =
+      readerKey === null
+        ? []
+        : secrets
+            .filter(
+              (secret) =>
+                !canDecryptProjectEnvValue({
+                  ciphertext: secret.value.secure,
+                  keyText: readerKey,
+                })
+            )
+            .map(({ scope, name }) => ({ scope, name }));
     reports.push({
       path,
+      ...layer,
       secretCount: secrets.length,
-      openCount:
-        readerKey === null
-          ? null
-          : secrets.filter((secret) =>
-              canDecryptProjectEnvValue({
-                ciphertext: secret.secure,
-                keyText: readerKey,
-              })
-            ).length,
+      openCount: readerKey === null ? null : secrets.length - unopened.length,
+      unopened,
     });
   }
   return reports;
@@ -5524,9 +5575,15 @@ export async function migrateLegacyProjectEnv(opts: {
     projectDir: opts.projectDir,
     overlayNames,
   });
-  const keyInfo = baseResolved.values.some(
+  const migratesSecrets = baseResolved.values.some(
     (value) => value.source === "keychain"
-  )
+  );
+  if (migratesSecrets) {
+    await refuseMigrationKeyShadowingEnvironmentKey({
+      projectRoot: opts.projectRoot,
+    });
+  }
+  const keyInfo = migratesSecrets
     ? await ensureProjectEnvSecretKey({ projectRoot: opts.projectRoot })
     : null;
   if (

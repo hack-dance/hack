@@ -5,6 +5,7 @@ import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
 import {
   inspectProjectEnvLayerKeys,
   PROJECT_ENV_SECRET_KEY_ENV,
+  type ProjectEnvLayerKeyReport,
 } from "./project-env-config.ts";
 import { listFileSecretStoreEntries } from "./secret-store.ts";
 
@@ -63,6 +64,13 @@ async function inspectSecretStore(opts: {
           message: `The encrypted secret store ${store} exists but cannot be read; Hack will not read or change it. Make it a regular file this user owns and can read and write (chmod 600 ${store}), then re-run hack doctor.`,
         },
       ];
+    case "store_refused":
+      return [
+        {
+          status: "error",
+          message: `The encrypted secret store ${store} is a symlink, not a regular file, or too large, so Hack refuses to read or change it. Replace it with a regular file this user owns (for a symlink: copy the target's contents to ${store} with mode 600), then re-run hack doctor.`,
+        },
+      ];
     case "key_missing":
       return [
         {
@@ -96,6 +104,38 @@ async function inspectSecretStore(opts: {
   }
 }
 
+/** Most secret names a finding lists before "and N more". */
+const LISTED_SECRET_NAMES = 10;
+
+/**
+ * The `hack env` options that select one secret in one layer, without the
+ * name: `--service`, `--env` and `--local` as needed.
+ */
+function layerOptions(opts: {
+  readonly layer: ProjectEnvLayerKeyReport;
+  readonly scope: string;
+}): string {
+  return [
+    opts.scope === "global" ? null : `--service ${opts.scope}`,
+    opts.layer.envName === null ? null : `--env ${opts.layer.envName}`,
+    opts.layer.local ? "--local" : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" ");
+}
+
+/** Recovery steps for a layer with secrets under more than one key. */
+function mixedLayerRecovery(layer: ProjectEnvLayerKeyReport): string {
+  const listed = layer.unopened.slice(0, LISTED_SECRET_NAMES).map((secret) => {
+    const options = layerOptions({ layer, scope: secret.scope });
+    return options ? `${secret.name} (${options})` : secret.name;
+  });
+  const more = layer.unopened.length - listed.length;
+  const names =
+    more > 0 ? `${listed.join(", ")} and ${more} more` : listed.join(", ");
+  return `Secrets that do not open: ${names}. To recover, read each of their values with the key that encrypted them, remove each with hack env unset <name> (with the options shown; unset needs no key), then store it again with hack env set <name> --secret.`;
+}
+
 /** Findings for env layers whose secrets do not all open under one key. */
 async function inspectEnvLayers(opts: {
   readonly projectRoot: string;
@@ -118,7 +158,7 @@ async function inspectEnvLayers(opts: {
     } else if (layer.openCount < n) {
       findings.push({
         status: "error",
-        message: `${path} holds secrets under more than one key: ${layer.openCount} of ${n} open under the current project env key. This happens when a secret was added with a new key while another key was in use. To recover, use the key that opens the rest to read them, then re-enter them with hack env set <name> --secret so the layer uses one key. Values are never shown here.`,
+        message: `${path} holds secrets under more than one key: ${layer.openCount} of ${n} open under the current project env key. This happens when a secret was added with a new key while another key was in use, and hack env set refuses to add to such a layer until it uses one key. ${mixedLayerRecovery(layer)} Values are never shown here.`,
       });
     }
   }

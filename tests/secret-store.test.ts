@@ -790,13 +790,13 @@ test("encrypted file key provisioning refuses dangling symlinks", async () => {
   await expect(access(target)).rejects.toThrow();
 });
 
-test("encrypted file key provisioning replaces a regular key with private permissions", async () => {
+test("encrypted file key provisioning rewrites the same key as a private regular file", async () => {
   if (!tempDir) {
     throw new Error("Missing temp dir");
   }
   process.env.HACK_SECRETS_FILE_KEY = "synthetic-new-key";
   const keyPath = join(tempDir, "regular-key");
-  await writeFile(keyPath, "synthetic-old-key", { mode: 0o644 });
+  await writeFile(keyPath, "synthetic-new-key", { mode: 0o644 });
   const before = await stat(keyPath);
   await provisionEncryptedFileKey({ keyPath });
   expect(await readFile(keyPath, "utf8")).toBe("synthetic-new-key\n");
@@ -963,6 +963,65 @@ test("explicit key provisioning never replaces the key of a store with entries (
   process.env.HACK_SECRETS_FILE_KEY = "current-key";
   await provisionEncryptedFileKey({ keyPath, storePath });
   expect(await readFile(keyPath, "utf8")).toBe("current-key\n");
+});
+
+test("explicit key provisioning never replaces a different key a store could still need (HACK-2169)", async () => {
+  // No store to check against: the key may serve another store, and a
+  // first-use bootstrap may have just published it for this one.
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  const keyPath = join(tempDir, "other.key");
+  await privateKey(keyPath, "published-key");
+  process.env.HACK_SECRETS_FILE_KEY = "different-key";
+  await expect(provisionEncryptedFileKey({ keyPath })).rejects.toThrow(
+    "no store is configured to check it against"
+  );
+  const storePath = join(tempDir, "empty.enc.json");
+  await expect(
+    provisionEncryptedFileKey({ keyPath, storePath })
+  ).rejects.toThrow("has no entries to show which key is right");
+  expect(await readFile(keyPath, "utf8")).toBe("published-key\n");
+
+  // A key file that exists but cannot be read may be the only copy.
+  if (process.getuid?.() !== 0) {
+    await chmod(keyPath, 0o000);
+    try {
+      await expect(provisionEncryptedFileKey({ keyPath })).rejects.toThrow(
+        "it exists but cannot be read"
+      );
+    } finally {
+      await chmod(keyPath, 0o600);
+    }
+    expect(await readFile(keyPath, "utf8")).toBe("published-key\n");
+  }
+});
+
+test("explicit key provisioning repairs a key file the store's entries do not open (HACK-2169)", async () => {
+  // The environment key opens the store and the key file's does not: the
+  // key file is wrong, and provisioning the right one is a repair.
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  const storePath = join(tempDir, "repair.enc.json");
+  const keyPath = join(tempDir, "repair.key");
+  await privateKey(keyPath, "right-key");
+  await encryptedFileConfig({ storePath, keyPath });
+  await (await resolveSecretStore({ projectName: "app" })).set({
+    key: "TOKEN",
+    value: "under-right-key",
+  });
+  await privateKey(keyPath, "wrong-key");
+  process.env.HACK_SECRETS_FILE_KEY = "right-key";
+  await provisionEncryptedFileKey({ keyPath, storePath });
+  expect(await readFile(keyPath, "utf8")).toBe("right-key\n");
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  expect(
+    await (await resolveSecretStore({ projectName: "app" })).get({
+      key: "TOKEN",
+    })
+  ).toBe("under-right-key");
 });
 
 test("the encrypted_file key must be a private, untracked regular file (HACK-2036)", async () => {

@@ -4,7 +4,9 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,8 +21,10 @@ import {
 import { inspectSecretIntegrity } from "../src/lib/doctor-secret-integrity.ts";
 import {
   PROJECT_ENV_SECRET_KEY_ENV,
+  resolveProjectEnvConfig,
   resolveProjectEnvConfigPath,
   setProjectEnvValue,
+  unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -104,33 +108,65 @@ function globalValues(text: string): Record<string, unknown> {
 }
 
 test("a layer holding secrets under two keys is reported, value-free", async () => {
-  // The F8 aftermath: one secret under the current key, one under another.
+  // The F8 aftermath: one secret under the current key, two under another.
   const repo = await createRepo();
   await setSecret(repo, "FIRST", "synthetic-first-a19c");
   const other = await createRepo();
   await setSecret(other, "SECOND", "synthetic-second-77d0");
+  await setSecret(other, "THIRD", "synthetic-third-e5b9");
   const text = await readFile(repo.envFile, "utf8");
   const parsed = YAML.parse(text) as {
     values: { global: Record<string, unknown> };
   };
-  parsed.values.global.SECOND = globalValues(
-    await readFile(other.envFile, "utf8")
-  ).SECOND;
+  const otherValues = globalValues(await readFile(other.envFile, "utf8"));
+  parsed.values.global.SECOND = otherValues.SECOND;
+  parsed.values.global.THIRD = otherValues.THIRD;
   await writeFile(repo.envFile, YAML.stringify(parsed));
 
   const findings = await inspect(repo);
   expect(findings).toHaveLength(1);
   expect(findings[0]?.status).toBe("error");
-  expect(findings[0]?.message).toContain("more than one key: 1 of 2");
+  expect(findings[0]?.message).toContain("more than one key: 1 of 3");
   expect(findings[0]?.message).toContain("hack env set <name> --secret");
   const keyText = (await readFile(repo.keyFile, "utf8")).trim();
   for (const secret of [
     "synthetic-first-a19c",
     "synthetic-second-77d0",
+    "synthetic-third-e5b9",
     keyText,
   ]) {
     expect(findings[0]?.message).not.toContain(secret);
   }
+  // It names the secrets that do not open, and its advice works: set
+  // refuses while another of them remains, unset needs no key, and the
+  // re-entered values leave one key.
+  expect(findings[0]?.message).toContain(
+    "Secrets that do not open: SECOND, THIRD."
+  );
+  await expect(
+    setSecret(repo, "SECOND", "synthetic-again-41e8")
+  ).rejects.toThrow("nothing was written");
+  for (const key of ["SECOND", "THIRD"]) {
+    await unsetProjectEnvValue({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      scope: "global",
+      key,
+    });
+  }
+  await setSecret(repo, "SECOND", "synthetic-again-41e8");
+  await setSecret(repo, "THIRD", "synthetic-again-90fa");
+  expect(await inspect(repo)).toEqual([]);
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api"],
+  });
+  expect(resolved?.globalEnv.FIRST).toBe("synthetic-first-a19c");
+  expect(resolved?.globalEnv.SECOND).toBe("synthetic-again-41e8");
+  expect(resolved?.globalEnv.THIRD).toBe("synthetic-again-90fa");
 });
 
 test("a layer whose key is missing, or the wrong one, is reported", async () => {
@@ -178,6 +214,23 @@ test("an unreadable store and a store whose key is missing are reported", async 
     );
   } finally {
     await chmod(storePath, 0o600);
+  }
+
+  // A symlinked store: use refuses it, and so does the doctor.
+  const target = `${storePath}.target`;
+  await rename(storePath, target);
+  await symlink(target, storePath);
+  try {
+    const linked = await inspect(repo);
+    expect(linked[0]?.message).toContain(
+      ".hack-secrets.enc.json is a symlink, not a regular file"
+    );
+    await expect(store.get({ key: "TOKEN" })).rejects.toThrow(
+      "Refused to read the encrypted secret store"
+    );
+  } finally {
+    await rm(storePath);
+    await rename(target, storePath);
   }
 
   const keyText = await readFile(keyPath, "utf8");

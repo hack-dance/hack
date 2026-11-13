@@ -21,6 +21,7 @@ import {
   dropRemovedLegacySecretStorePointer,
   migrateLegacyProjectEnv,
   resolveProjectEnvConfig,
+  resolveProjectEnvConfigPath,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -698,4 +699,26 @@ test("env_file order that the default overlay would reverse refuses (HACK-1682)"
   expect(await exists(resolve(repo.projectDir, "hack.env.default.yaml"))).toBe(
     false
   );
+});
+
+test("migration never creates a key file that would shadow HACK_ENV_SECRET_KEY (HACK-2169)", async () => {
+  const repo = await createRepo({
+    vars: [{ key: "SEC", source: "keychain" }],
+    config: encryptedFileConfig({ path: "secrets.enc.json" }),
+  });
+  await setStoreEntries(repo, { SEC: ["synthetic", "base", "7a1c"].join("-") });
+  process.env.HACK_ENV_SECRET_KEY = ["synthetic", "env", "key"].join("-");
+  const envFile = resolveProjectEnvConfigPath({
+    projectDir: repo.projectDir,
+    envName: null,
+  });
+  const envBefore = await readFile(envFile, "utf8").catch(() => null);
+
+  await expect(migrate(repo)).rejects.toThrow(
+    "HACK_ENV_SECRET_KEY is set but no .hack.secret.key exists"
+  );
+  expect(await exists(resolve(repo.projectRoot, ".hack.secret.key"))).toBe(
+    false
+  );
+  expect(await readFile(envFile, "utf8").catch(() => null)).toBe(envBefore);
 });

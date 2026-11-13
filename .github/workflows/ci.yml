@@ -829,11 +829,16 @@ jobs:
           sudo find /usr /opt -xdev -perm /022 \( -type f -o \( -type d ! -perm -1000 \) \) -print0 > "$RUNNER_TEMP/writable.list"
           echo "removing group/other write from $(tr -cd '\0' < "$RUNNER_TEMP/writable.list" | wc -c) entries"
           sudo xargs -0 -r chmod go-w < "$RUNNER_TEMP/writable.list"
-          # Files there owned by another regular account (such as a uid 1000
+          # Files there owned by another regular account (uid >= UID_MIN, as
+          # the product's isSystemAccount draws the line; such as a uid 1000
           # geckodriver reached from /usr/bin) go to root, as on a stock
-          # install; links are changed themselves, never followed.
-          sudo find /usr /opt -xdev ! -uid 0 ! -uid "$(id -u)" -print0 > "$RUNNER_TEMP/foreign.list"
-          echo "giving $(tr -cd '\0' < "$RUNNER_TEMP/foreign.list" | wc -c) entries owned by other accounts to root"
+          # install. System accounts' files stay: the protected system
+          # directory rule must still meet them. Links are changed
+          # themselves, never followed.
+          uid_min=$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)
+          uid_min=${uid_min:-1000}
+          sudo find /usr /opt -xdev -uid +$((uid_min - 1)) ! -uid "$(id -u)" -print0 > "$RUNNER_TEMP/foreign.list"
+          echo "giving $(tr -cd '\0' < "$RUNNER_TEMP/foreign.list" | wc -c) entries owned by other regular accounts (uid >= $uid_min) to root"
           sudo xargs -0 -r chown -h root < "$RUNNER_TEMP/foreign.list"
       - name: Run daemon install flows
         env:

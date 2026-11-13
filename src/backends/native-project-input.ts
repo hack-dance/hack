@@ -171,12 +171,12 @@ export async function readNativeComposeBytes(path: string): Promise<Buffer> {
   }
 }
 
-/** Parse Compose environment syntax without resolving references or reading values. */
+/** Parse Compose environment syntax without resolving values; null is an empty declaration. */
 export function nativeServiceEnvironment(
   value: unknown,
   service: string
 ): Record<string, unknown> {
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     return {};
   }
   if (isRecord(value)) {

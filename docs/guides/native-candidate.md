@@ -1556,6 +1556,10 @@ references separately. There is no consent prompt in this feature.
 | `API_KEY: ${API_KEY}` or `API_KEY: $API_KEY` | The service gets the shell's value. | The service gets an empty value, as with Compose. |
 | `- TOKEN` (a bare name, or `TOKEN:` with no value) | The service gets the shell's value. | The service gets an empty value. Compose would leave it unset instead. |
 
+An entire `environment: null` declaration, including an `environment:` key with
+only comments beneath it, is empty. Preflight and start both accept it; managed
+keys are still added as private references when configured for the service.
+
 A value read from the shell is never written to the reviewed Compose document, a
 plan, a receipt, an env fingerprint or a log. The entry stays a reference and the
 value travels in the same private delivery as Hack managed env. Only the variables

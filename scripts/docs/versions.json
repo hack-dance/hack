@@ -1109,6 +1109,20 @@
         "sha256": "cc0f6df0095daf76f3b5c3c42d20173cd813c0948155276590a975817cc1cd06"
       },
       {
+        "file": "docs/guides/linux-setup.md",
+        "slug": "guides/linux-setup",
+        "title": "Linux host setup",
+        "snapshot": "docs/versions/v5/originals/next16/docs/guides/linux-setup.md",
+        "sha256": "246f65acdc5a29694710c64c39fb8c0c281ffb68bb3c423d952c8791a509f4b4"
+      },
+      {
+        "file": "docs/guides/linux-certificate-trust.md",
+        "slug": "guides/linux-certificate-trust",
+        "title": "Linux certificate trust",
+        "snapshot": "docs/versions/v5/originals/next16/docs/guides/linux-certificate-trust.md",
+        "sha256": "dbd6ba0403ef20aad90cf059c257ec76301ad47d65813ee7d082681cf3ff66b3"
+      },
+      {
         "file": "docs/guides/codex-managed-environments.md",
         "slug": "guides/codex-managed-environments",
         "title": "Cloud and remote development environments",

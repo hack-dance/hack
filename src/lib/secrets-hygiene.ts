@@ -32,6 +32,7 @@ import {
 import {
   isGitIgnoredProjectEnvPath,
   isGitTrackedOrUnknownProjectPath,
+  projectEnvLiveInputPaths,
 } from "./project-env-config.ts";
 
 /**
@@ -91,7 +92,12 @@ export type SecretsHygieneFix =
       /** Asked again after the entry is added: the fix counts only if git now ignores it. */
       readonly verify: { readonly projectRoot: string; readonly path: string };
     }
-  | { readonly kind: "remove_leftover"; readonly leftover: StagingLeftover }
+  | {
+      readonly kind: "remove_leftover";
+      readonly leftover: StagingLeftover;
+      /** Resolved again just before removal: a live input is never removed. */
+      readonly scope?: SecretsHygieneScope;
+    }
   | { readonly kind: "remove_mux"; readonly stale: StaleMuxEnvironment };
 
 /** A directory's identity, captured at inspection and checked before a fix. */
@@ -779,11 +785,10 @@ export async function inspectSecretsHygiene(
   const live = await livePaths(scope);
   const kept: SecretsHygieneFinding[] = [];
   for (const finding of findings) {
-    if (
-      finding.fix?.kind !== "remove_leftover" ||
-      !(await isLive({ path: finding.path, live }))
-    ) {
+    if (finding.fix?.kind !== "remove_leftover") {
       kept.push(finding);
+    } else if (!(await isLive({ path: finding.path, live }))) {
+      kept.push({ ...finding, fix: { ...finding.fix, scope } });
     }
   }
   findings.splice(0, findings.length, ...kept);
@@ -805,16 +810,28 @@ export async function inspectSecretsHygiene(
  * Files the configuration uses (stores, keys, the project and shared keys),
  * as given and resolved.
  */
+/**
+ * Every path current resolution reads (HACK-2165): configured stores and
+ * keys, the shared key, and the project's env inputs (its key, the primary
+ * worktree's key, `hack.config.json` and every YAML layer; see
+ * `projectEnvLiveInputPaths`), each as given and resolved. "unknown" when the
+ * project's inputs cannot be inspected: then nothing counts as removable.
+ */
 async function livePaths(
   scope: SecretsHygieneScope
-): Promise<ReadonlySet<string>> {
+): Promise<ReadonlySet<string> | "unknown"> {
   const paths = [
     ...scope.stores.flatMap((store) => [store.storePath, store.keyPath]),
     ...(scope.sharedKeyPath ? [scope.sharedKeyPath] : []),
-    ...(scope.project
-      ? [join(scope.project.projectRoot, PROJECT_ENV_KEY_FILENAME)]
-      : []),
   ];
+  if (scope.project) {
+    paths.push(join(scope.project.projectRoot, PROJECT_ENV_KEY_FILENAME));
+    try {
+      paths.push(...(await projectEnvLiveInputPaths(scope.project)));
+    } catch {
+      return "unknown";
+    }
+  }
   const live = new Set<string>();
   for (const path of paths) {
     live.add(resolve(path));
@@ -826,11 +843,16 @@ async function livePaths(
   return live;
 }
 
+/**
+ * Whether resolution reads `path`, by its own spelling or resolved. A path,
+ * not an inode: removing another link to a live file never removes the name
+ * resolution reads.
+ */
 async function isLive(opts: {
   readonly path: string;
-  readonly live: ReadonlySet<string>;
+  readonly live: ReadonlySet<string> | "unknown";
 }): Promise<boolean> {
-  if (opts.live.has(resolve(opts.path))) {
+  if (opts.live === "unknown" || opts.live.has(resolve(opts.path))) {
     return true;
   }
   const real = await realpath(opts.path).catch(() => null);
@@ -990,17 +1012,7 @@ export async function applySecretsHygieneFixes(opts: {
     done.add(key);
     let changed = false;
     try {
-      if (!(await guardHolds(finding.guard))) {
-        changed = false;
-      } else if (fix.kind === "chmod") {
-        changed = await tightenMode(fix);
-      } else if (fix.kind === "ignore") {
-        changed = await addIgnoreEntry(fix);
-      } else if (fix.kind === "remove_leftover") {
-        changed = await removeStagingLeftover(fix.leftover);
-      } else {
-        changed = await removeStaleMuxEnvironment(fix.stale);
-      }
+      changed = (await guardHolds(finding.guard)) && (await applyFix(fix));
     } catch {
       changed = false;
     }
@@ -1015,6 +1027,31 @@ export async function applySecretsHygieneFixes(opts: {
     }
   }
   return { applied, skipped };
+}
+
+/** Applies one fix; false when it no longer applies. */
+async function applyFix(fix: SecretsHygieneFix): Promise<boolean> {
+  switch (fix.kind) {
+    case "chmod":
+      return await tightenMode(fix);
+    case "ignore":
+      return await addIgnoreEntry(fix);
+    case "remove_leftover":
+      // The configuration may have changed since inspection: ask again, and
+      // never remove a path current resolution reads.
+      if (
+        fix.scope !== undefined &&
+        (await isLive({
+          path: fix.leftover.path,
+          live: await livePaths(fix.scope),
+        }))
+      ) {
+        return false;
+      }
+      return await removeStagingLeftover(fix.leftover);
+    default:
+      return await removeStaleMuxEnvironment(fix.stale);
+  }
 }
 
 function describeApplied(opts: {

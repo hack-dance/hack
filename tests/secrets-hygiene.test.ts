@@ -721,3 +721,50 @@ test("ignore repair publishes onto the admitted file, never through a link swapp
   expect(swapped).toBe(true);
   expect(await readFile(outside, "utf8")).toBe(before);
 });
+
+test("an env input current resolution reads is never removed, even when its real file looks like a leftover", async () => {
+  const f = await fixture();
+  // A YAML layer whose real file has a staging-shaped name (left by a
+  // recovery that linked the layer to an old staging copy).
+  const real = join(f.projectDir, `.hack.env.yaml.${UUID}.tmp`);
+  await writeFile(real, `values:\n  SENTINEL: ${SENTINEL}\n`, { mode: 0o600 });
+  await backdate(real);
+  // Without the layer it is an ordinary leftover.
+  const before = await inspectSecretsHygiene(f.scope);
+  expect(
+    before.some(
+      (finding) =>
+        finding.fix?.kind === "remove_leftover" && finding.path === real
+    )
+  ).toBe(true);
+  // The layer appears between inspection and --fix: the removal asks again.
+  await symlink(real, join(f.projectDir, "hack.env.yaml"));
+  await applySecretsHygieneFixes({ findings: before, report: () => undefined });
+  expect(await readFile(real, "utf8")).toContain(SENTINEL);
+  // And a fresh inspection never offers it.
+  const after = await inspectSecretsHygiene(f.scope);
+  expect(
+    after.some(
+      (finding) =>
+        finding.fix?.kind === "remove_leftover" && finding.path === real
+    )
+  ).toBe(false);
+});
+
+test("when the project's env inputs cannot be inspected, no leftover is removed", async () => {
+  const f = await fixture();
+  const leftover = join(f.projectRoot, `..hack.secret.key.${UUID}.tmp`);
+  await writeFile(leftover, `${SENTINEL}\n`, { mode: 0o600 });
+  await backdate(leftover);
+  // A configuration path that cannot be resolved (a link to itself).
+  const config = join(f.projectDir, "hack.config.json");
+  await symlink(config, config);
+  const findings = await inspectSecretsHygiene(f.scope);
+  expect(
+    findings.some((finding) => finding.fix?.kind === "remove_leftover")
+  ).toBe(false);
+  await rm(config);
+  // Once it can, the same file is an ordinary leftover again.
+  const later = await inspectSecretsHygiene(f.scope);
+  expect(paths(later)).toContain(leftover);
+});

@@ -9330,6 +9330,20 @@ async function legacyCleanupLiveInputs(opts: {
   return { paths, identities };
 }
 
+/**
+ * The paths current env resolution reads for a project: its key, the shared
+ * key, the primary worktree's key, `hack.config.json` and every YAML layer in
+ * the project and primary-worktree `.hack` directories (HACK-2165, the same
+ * set legacy cleanup keeps). Any cleanup that deletes files must keep these.
+ * Throws when an input cannot be inspected; a caller must then delete nothing.
+ */
+export async function projectEnvLiveInputPaths(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<ReadonlySet<string>> {
+  return (await legacyCleanupLiveInputs(opts)).paths;
+}
+
 async function legacyCleanupInputStat(opts: {
   readonly path: string;
   readonly follow: boolean;

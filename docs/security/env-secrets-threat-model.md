@@ -4,8 +4,9 @@ This document describes how Hack protects project env values and secret keys on 
 developer machine. It lists the assets, the trust boundaries, the threats, the
 mitigations that are merged on `next`, and the gaps that are still open. It tracks
 Linear issue HACK-1127, with the HACK-2163 audit corrections below. Runtime
-claims were checked on 2026-11-13 at `c89f4fd7cc`. The three HACK-2163 gaps
-remain open until their fixes merge; this documentation change does not fix them.
+claims were audited on 2026-11-13 at `c89f4fd7cc`. HACK-2163's containment,
+diagnostic and ignore fixes subsequently merged in #756; the mitigations below
+describe those fixes while retaining the remaining custody limits.
 
 For day-to-day usage, see [Env & secrets](../env.md). This page does not change any
 behavior. Where it names code, the code is the source of truth.
@@ -45,15 +46,16 @@ node code is listed under [open gaps](#open-gaps) so that it is not lost.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="env-secrets-flow.dark.svg">
-  <img src="env-secrets-flow.light.svg" alt="Project env values reach child environments, mux input files and output stores; an environment key override is also inherited today.">
+  <img src="env-secrets-flow.light.svg" alt="Resolved values reach user-child environments after key filtering, mux input files and output stores; parser diagnostics expose only fixed kinds and locations.">
 </picture>
 
 [Diagram source](env-secrets-flow.mmd). Paths depend on the command: a child
 can print injected values, and a background capture stores output before its
 partial scan. A file-backed project key is a decryption input, not an application
-value; the dashed key edge is the open environment-override inheritance gap.
-Legacy JSON diagnostics can disclose input text. The modern YAML loader also
-forwards its parser's message without filtering it; see gap 14 for the distinction.
+value. User-child environments filter key material. Deliberate Hack re-execs
+receive keys explicitly and filter their own user children. Env-layer, legacy
+contract and store diagnostics report fixed kinds and numeric locations without
+source text; see audit items 13 and 14 for their remaining limits.
 
 ## Trust boundaries
 
@@ -129,7 +131,7 @@ HACK-2163 hardens three boundaries found in the env audit:
 | The key is committed. | The root `.gitignore` gets a `.hack.secret.key` entry before the key is created, so a failed entry write leaves no key; an existing checkout-local key git does not ignore is repaired or refused before a `--secret` write uses it, and `hack doctor` reports it as `env-key-unignored` (HACK-1375). Encryption refuses a git-tracked key, including an inherited primary key, before it is copied (#288). `hack doctor` reports `env-key-tracked` at any depth (#309) and the "generated files" check can untrack a root key with `--fix`. |
 | A key copy ships in build output or a static site. | `hack doctor` reports `env-key-public-path` for copies under `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` and `.output/` (#309). |
 | A weak, short or repetitive key. | `env-key-wrong-length` and `env-key-low-entropy` (#309). Generated keys are 32 random bytes in base64url. |
-| Materialized `.hack/.env` or local overrides are committed. | **Open / partial protection.** The managed `.hack/.gitignore` covers `.env` and local YAML names, but does not cover legacy `.env.<overlay>` files. Existing tracked files remain tracked. Do not treat local overrides as protected from commits merely because migration or ignore rules ran. Check the index and local layers yourself (`src/templates.ts`, `src/lib/project-env-config.ts`; see open gap 15). |
+| Materialized `.hack/.env` or local overrides are committed. | Managed ignores cover `.env`, `.env.*` and local YAML names, with exceptions for templates. Existing tracked files remain tracked; Doctor reports shared legacy overlays and directs migration without automatically removing them from the index. Check actual tracking and permissions; ignore rules do not erase Git history or other copies (`src/templates.ts`, `src/lib/project-env-config.ts`; see audit item 15). |
 | A secret leaks into a public artifact through a path nobody listed. | `tests/env-secret-sentinel-scan.test.ts` exercises encrypted-entry workflows with a recording Docker shim, a primary checkout and a worktree. Its fixture permits plaintext in a private `.hack/.env` and checks output, argv and Git artifacts. That is bounded evidence for those inputs, not a product-wide claim that plaintext exists only there. Plain local YAML, mux temporary payloads, application output and background stores need their own custody review. See open gap 12. |
 | A dependency vulnerability ships in Hack. | `bun install --frozen-lockfile`, and the read-only `scripts/dependabot-inventory.ts` lists open alerts (#309). Hack does not sandbox project dependencies that run under `hack host exec`; they receive the injected env by design. |
 

@@ -315,12 +315,12 @@ test("retargeting reclassifies through the ordinary pull_request event", () => {
   expect(workflow.on.pull_request.types).toContain("edited");
 });
 
-test("only next pushes share a cancelling group; main and dispatch remain unique", () => {
+test("next pushes serialize without cancelling active runs; only PRs cancel", () => {
   expect(workflow.concurrency.group).toBe(
     "${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/next' && 'push-next') || format('push-{0}', github.run_id) }}"
   );
   expect(workflow.concurrency["cancel-in-progress"]).toBe(
-    "${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/next') }}"
+    "${{ github.event_name == 'pull_request' }}"
   );
 });
 

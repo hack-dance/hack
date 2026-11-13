@@ -1097,7 +1097,9 @@ test("doctor keeps an encrypted store with an undeclared entry and its key file,
     const storePath = resolve(projectRoot, "secrets.enc.json");
     const keyPath = resolve(projectRoot, "store.key");
     const keyText = `${["synthetic", "store", "key", "51ab"].join("-")}\n`;
-    await writeFile(keyPath, keyText);
+    await writeFile(keyPath, keyText, { mode: 0o600 });
+    // Private, as Hack writes it: a key others can read is refused.
+    await chmod(keyPath, 0o600);
     const declared = ["synthetic", "declared", "51ab"].join("-");
     const undeclared = ["synthetic", "undeclared", "51ab"].join("-");
     const { resolveSecretStore } = await import("../src/lib/secret-store.ts");
@@ -1227,8 +1229,11 @@ test("doctor removes a fully delivered encrypted store, its key file and its poi
     const keyPath = resolve(projectRoot, "store.key");
     await writeFile(
       keyPath,
-      `${["synthetic", "store", "key", "62cd"].join("-")}\n`
+      `${["synthetic", "store", "key", "62cd"].join("-")}\n`,
+      { mode: 0o600 }
     );
+    // Private, as Hack writes it: a key others can read is refused.
+    await chmod(keyPath, 0o600);
     const declared = ["synthetic", "declared", "62cd"].join("-");
     const { resolveSecretStore } = await import("../src/lib/secret-store.ts");
     const store = await resolveSecretStore({

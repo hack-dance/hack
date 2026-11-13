@@ -3005,14 +3005,32 @@ async function setLockedProjectEnvValue(opts: {
   let createdKey = false;
   let storedValue: ProjectEnvStoredValue = opts.value;
   if (opts.secret) {
-    const ensuredKey = await ensureProjectEnvSecretKey({
+    // The same key rules as hydration (HACK-2169): every secret already in
+    // this layer must open with the key readers use, and a key is never
+    // created while only HACK_ENV_SECRET_KEY is set (the new file would
+    // shadow it, so existing secrets would stop decrypting). Checked before
+    // any key or layer is written.
+    // The entry being replaced is left out: overwriting it (re-encrypting a
+    // value whose old ciphertext no longer opens) leaves no mixed keys.
+    const otherScopeValues = { ...(read.config.values[scope] ?? {}) };
+    delete otherScopeValues[opts.key];
+    const resolvedKey = await resolveProjectEnvHydrationKey({
       projectRoot: opts.projectRoot,
+      config: {
+        ...read.config,
+        values: { ...read.config.values, [scope]: otherScopeValues },
+      },
+      secret: true,
+      refuse: projectEnvSetKeyRefusal,
     });
-    createdKey = ensuredKey.created;
+    if (resolvedKey.keyText === null) {
+      throw projectEnvSetKeyRefusal("wrong_key");
+    }
+    createdKey = resolvedKey.createdKey;
     storedValue = stableProjectEnvSecretValue({
       previous: read.config.values[scope]?.[opts.key],
       plaintext: opts.value,
-      keyText: ensuredKey.keyText,
+      keyText: resolvedKey.keyText,
     });
   }
   if (opts.local === true) {
@@ -3336,7 +3354,7 @@ export async function hydrateProjectEnvLocalLayer(opts: {
 
 type ProjectEnvHydrationRefuse = (
   reason: ProjectEnvHydrationRefusalReason
-) => ProjectEnvHydrationRefusalError;
+) => Error;
 
 async function hydrateLockedProjectEnvLayer(opts: {
   readonly projectRoot: string;
@@ -3511,6 +3529,23 @@ async function resolveProjectEnvHydrationKey(opts: {
   return { keyText: ensured.keyText, createdKey: ensured.created };
 }
 
+/**
+ * Closed, value-free refusals for writing a secret with `hack env add
+ * --secret` or `hack env set` (HACK-2169); the key rules are hydration's.
+ */
+function projectEnvSetKeyRefusal(
+  reason: ProjectEnvHydrationRefusalReason
+): ProjectEnvKeyRefusalError {
+  if (reason === "key_env_only") {
+    return new ProjectEnvKeyRefusalError(
+      `Refusing to store a secret: ${PROJECT_ENV_SECRET_KEY_ENV} is set but no ${PROJECT_ENV_KEY_FILENAME} exists. A new key file would be used instead of that key, so existing secrets would stop decrypting. Store the same key in ${PROJECT_ENV_KEY_FILENAME} (owner-only, untracked) and retry; nothing was written.`
+    );
+  }
+  return new ProjectEnvKeyRefusalError(
+    `Refusing to store a secret: a secret already in this env layer does not decrypt under the project env key, or no key is available, and a value encrypted under another key would leave the layer with mixed keys. Restore the matching ${PROJECT_ENV_KEY_FILENAME} (or set ${PROJECT_ENV_SECRET_KEY_ENV} to it) and retry; nothing was written. \`hack doctor\` reports the layer.`
+  );
+}
+
 /** Pure merge of imported entries into one scope; keys are reported sorted. */
 function planProjectEnvHydration(opts: {
   readonly previousScope: Readonly<Record<string, ProjectEnvStoredValue>>;
@@ -3594,6 +3629,89 @@ function canDecryptProjectEnvValue(opts: {
   } catch {
     return false;
   }
+}
+
+/** One env layer's secrets, counted against the key readers use. */
+export type ProjectEnvLayerKeyReport = {
+  readonly path: string;
+  readonly secretCount: number;
+  /** Secrets that open under the readers' key; null when no key is available. */
+  readonly openCount: number | null;
+};
+
+/**
+ * Read-only (HACK-2169): for every committed and machine-local env layer of
+ * this project, how many secrets it holds and how many open under the key
+ * readers would use (key file, else `HACK_ENV_SECRET_KEY`). Nothing is
+ * created, copied or decrypted into the result: it carries counts only.
+ * Layers with no secrets, or that cannot be read or parsed, are left out
+ * (other checks report those).
+ */
+export async function inspectProjectEnvLayerKeys(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<readonly ProjectEnvLayerKeyReport[]> {
+  let fileKey: string | null = null;
+  try {
+    fileKey = await readExistingProjectEnvKeyFileText({
+      projectRoot: opts.projectRoot,
+    });
+  } catch {
+    // A refused key file is reported by the env key check; no key here.
+    fileKey = null;
+  }
+  const readerKey =
+    fileKey ?? (process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() || null);
+  const overlays = await listProjectEnvOverlayNames({
+    projectDir: opts.projectDir,
+  }).catch(() => [] as readonly string[]);
+  const paths = new Set<string>();
+  for (const envName of [null, ...overlays]) {
+    paths.add(
+      resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName })
+    );
+    paths.add(
+      resolveProjectEnvLocalConfigPath({ projectDir: opts.projectDir, envName })
+    );
+  }
+  const reports: ProjectEnvLayerKeyReport[] = [];
+  for (const path of paths) {
+    const file = await readOptionalTextFile(path);
+    if (file.kind !== "text") {
+      continue;
+    }
+    const read = parseProjectEnvConfigText({
+      path,
+      environment: "default",
+      text: file.text,
+    });
+    if (read.parseError !== undefined) {
+      continue;
+    }
+    const secrets = Object.values(read.config.values).flatMap((scopeValues) =>
+      Object.values(scopeValues).filter(
+        (value): value is ProjectEnvSecretValue =>
+          value !== null && isProjectEnvSecretValue(value)
+      )
+    );
+    if (secrets.length === 0) {
+      continue;
+    }
+    reports.push({
+      path,
+      secretCount: secrets.length,
+      openCount:
+        readerKey === null
+          ? null
+          : secrets.filter((secret) =>
+              canDecryptProjectEnvValue({
+                ciphertext: secret.secure,
+                keyText: readerKey,
+              })
+            ).length,
+    });
+  }
+  return reports;
 }
 
 /**

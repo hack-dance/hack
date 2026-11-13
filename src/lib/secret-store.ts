@@ -5,7 +5,7 @@ import {
   randomBytes,
 } from "node:crypto";
 import { stat } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import type {
   CloudSecretProvider,
@@ -14,7 +14,7 @@ import type {
 } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
-import { ensureDir, readOptionalTextFile, readTextFile } from "./fs.ts";
+import { ensureDir, readOptionalTextFile } from "./fs.ts";
 import { resolveUserHomeDir } from "./home-dir.ts";
 import { isKeychainDisabled, keychain } from "./keychain.ts";
 import { NativeKeychainTimeoutError } from "./native-keychain.ts";
@@ -41,9 +41,24 @@ const ENCRYPTED_IV_BYTES = 12;
 const ENCRYPTED_TAG_BYTES = 16;
 /** Decoded ciphertext bound for the whole encrypted store. */
 const ENCRYPTED_CIPHERTEXT_LIMIT = 16 * 1024 * 1024;
+const ENCRYPTED_STORE_READ_REFUSAL =
+  "Refused to read the encrypted secret store: the store path is a symlink, not a regular file, or larger than a store can be. Replace it with a regular file and retry; values omitted.";
+/**
+ * Largest store file read: the base64 ciphertext bound plus the envelope's
+ * fixed fields, with room to spare.
+ */
+const ENCRYPTED_STORE_FILE_LIMIT =
+  Math.ceil((ENCRYPTED_CIPHERTEXT_LIMIT * 4) / 3) + 64 * 1024;
 const ENCRYPTED_STORE_WRITE_REFUSAL =
   "Refused encrypted secret store write: the store path is a symlink or not a regular file. Replace it with a regular file and retry; values omitted.";
-let cachedEncryptedFileKey: string | null = null;
+/**
+ * The encrypted_file key read from (or generated into) the OS keychain item,
+ * cached for this process. Only keychain material is cached (HACK-2169): a
+ * key read from one store's key file, or from the environment, must never
+ * satisfy another store's configured key path, which goes through that
+ * store's own provisioning and recovery rules.
+ */
+let cachedKeychainEncryptedFileKey: string | null = null;
 /** Per-path tail of the in-process mutation queue; see withEncryptedStoreMutation. */
 const encryptedStoreMutationTails = new Map<string, Promise<void>>();
 let encryptedFileKeyFailureCooldownUntilMs = 0;
@@ -153,7 +168,21 @@ export type FileSecretStoreListing = {
       readonly ownEntries: ReadonlyMap<string, string>;
       readonly foreignEntryCount: number;
     }
-  | { readonly kind: "unreadable" }
+  | {
+      readonly kind: "unreadable";
+      /**
+       * Why, for recovery advice (HACK-2169): the store file itself cannot
+       * be read; no key is configured or found; the key file is refused
+       * (a link, open to others, tracked); the key does not open the store
+       * or the file is corrupt; or the cloud configuration is incomplete.
+       */
+      readonly reason:
+        | "store_unreadable"
+        | "key_missing"
+        | "key_refused"
+        | "wrong_key_or_corrupt"
+        | "incomplete_config";
+    }
 );
 
 /**
@@ -185,7 +214,12 @@ export async function listFileSecretStoreEntries(input: {
   } else if (secretsConfig.backend === "cloud") {
     const provider = secretsConfig.cloud.provider;
     if (!provider) {
-      return { kind: "unreadable", storePath, keyPath };
+      return {
+        kind: "unreadable",
+        reason: "incomplete_config",
+        storePath,
+        keyPath,
+      };
     }
     scope = [
       "cloud",
@@ -201,7 +235,12 @@ export async function listFileSecretStoreEntries(input: {
   // empty, so a caller can't mistake it for one with nothing to keep.
   const read = await readOptionalTextFile(storePath);
   if (read.kind === "unreadable") {
-    return { kind: "unreadable", storePath, keyPath };
+    return {
+      kind: "unreadable",
+      reason: "store_unreadable",
+      storePath,
+      keyPath,
+    };
   }
   if (read.kind === "absent" || read.text.length === 0) {
     return {
@@ -212,21 +251,11 @@ export async function listFileSecretStoreEntries(input: {
       foreignEntryCount: 0,
     };
   }
-  let entries: Record<string, string>;
-  try {
-    const { key } = await resolveEncryptedFileKeyMaterial({
-      keyPath,
-      storePath,
-      allowKeyProvisioning: false,
-    });
-    entries = decryptEncryptedEntriesText({
-      filePath: storePath,
-      text: read.text,
-      encryptionKey: key,
-    });
-  } catch {
-    return { kind: "unreadable", storePath, keyPath };
+  const opened = await openListedStore({ storePath, keyPath, text: read.text });
+  if ("reason" in opened) {
+    return { kind: "unreadable", reason: opened.reason, storePath, keyPath };
   }
+  const { entries } = opened;
   const prefix = `${encodeURIComponent(scope)}::`;
   const ownEntries = new Map<string, string>();
   let foreignEntryCount = 0;
@@ -241,6 +270,50 @@ export async function listFileSecretStoreEntries(input: {
     }
   }
   return { kind: "listed", storePath, keyPath, ownEntries, foreignEntryCount };
+}
+
+/**
+ * Decrypts a listed store read-only, never provisioning a key; on failure,
+ * why it could not be opened.
+ */
+async function openListedStore(input: {
+  readonly storePath: string;
+  readonly keyPath: string;
+  readonly text: string;
+}): Promise<
+  | { readonly entries: Record<string, string> }
+  | {
+      readonly reason: "key_missing" | "key_refused" | "wrong_key_or_corrupt";
+    }
+> {
+  let key: string;
+  try {
+    key = (
+      await resolveEncryptedFileKeyMaterial({
+        keyPath: input.keyPath,
+        storePath: input.storePath,
+        allowKeyProvisioning: false,
+      })
+    ).key;
+  } catch {
+    return {
+      reason:
+        (await readOptionalTextFile(input.keyPath)).kind === "absent"
+          ? "key_missing"
+          : "key_refused",
+    };
+  }
+  try {
+    return {
+      entries: decryptEncryptedEntriesText({
+        filePath: input.storePath,
+        text: input.text,
+        encryptionKey: key,
+      }),
+    };
+  } catch {
+    return { reason: "wrong_key_or_corrupt" };
+  }
 }
 
 function decodeScopedKey(encoded: string): string | null {
@@ -680,6 +753,7 @@ export async function provisionEncryptedFileKey(input: {
         projectDir: input.projectDir,
       })
     : undefined;
+  await refuseReplacingStoreKey({ keyPath, storePath });
   const resolved = await resolveEncryptedFileKeyMaterial({
     keyPath,
     storePath,
@@ -689,6 +763,54 @@ export async function provisionEncryptedFileKey(input: {
     keyPath,
     source: resolved.source,
   };
+}
+
+/**
+ * Explicit provisioning writes `HACK_SECRETS_FILE_KEY` to the key file when
+ * it is set. Replacing a different existing key while the store holds
+ * entries would leave them encrypted under a key that may then exist
+ * nowhere (HACK-2169, S3): that is a rotation, which needs re-encryption,
+ * not provisioning. Refused before anything is written.
+ */
+async function refuseReplacingStoreKey(input: {
+  readonly keyPath: string;
+  readonly storePath: string | undefined;
+}): Promise<void> {
+  const envValue = (process.env[ENCRYPTED_FILE_KEY_ENV] ?? "").trim();
+  if (envValue.length === 0) {
+    return;
+  }
+  if (input.storePath === undefined) {
+    return;
+  }
+  const store = await readOptionalTextFile(input.storePath);
+  if (
+    store.kind === "absent" ||
+    (store.kind === "text" && store.text.length === 0)
+  ) {
+    return;
+  }
+  // Compared only; a key file the strict reader refuses (a link, open to
+  // others) is refused by the write itself or replaced as a repair.
+  let existingKey: string | null = null;
+  try {
+    existingKey =
+      (
+        await readReplaceablePrivateFile({
+          path: input.keyPath,
+          directories: [],
+          refusal: () => new Error("not a regular key file"),
+        })
+      )?.text.trim() || null;
+  } catch {
+    existingKey = null;
+  }
+  if (existingKey === null || existingKey === envValue) {
+    return;
+  }
+  throw new SecretStoreKeyUnavailableError(
+    `Refused to replace the encrypted secret key at ${input.keyPath}: ${ENCRYPTED_FILE_KEY_ENV} holds a different key and the store at ${input.storePath} has entries encrypted with the current one (values omitted). Unset ${ENCRYPTED_FILE_KEY_ENV} to keep the current key; changing it is a rotation that re-encrypts the store, which provisioning does not do.`
+  );
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Secret key resolution deliberately walks multiple compatibility sources in order.
@@ -704,7 +826,6 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   const allowKeyProvisioning = input?.allowKeyProvisioning !== false;
   const envValue = (process.env[ENCRYPTED_FILE_KEY_ENV] ?? "").trim();
   if (envValue.length > 0) {
-    cachedEncryptedFileKey = envValue;
     encryptedFileKeyFailureCooldownUntilMs = 0;
     if (allowKeyProvisioning && input?.persistResolvedKey && input.keyPath) {
       await writeEncryptedFileKey({
@@ -724,26 +845,12 @@ async function resolveEncryptedFileKeyMaterial(input?: {
       keyPath: configuredKeyPath,
     });
     if (fileKey) {
-      cachedEncryptedFileKey = fileKey;
       encryptedFileKeyFailureCooldownUntilMs = 0;
       return {
         key: fileKey,
         source: "file",
       };
     }
-  }
-
-  if (!isKeychainDisabled() && cachedEncryptedFileKey) {
-    if (allowKeyProvisioning && input?.persistResolvedKey && input.keyPath) {
-      await writeEncryptedFileKey({
-        keyPath: input.keyPath,
-        key: cachedEncryptedFileKey,
-      });
-    }
-    return {
-      key: cachedEncryptedFileKey,
-      source: "keychain",
-    };
   }
 
   const shouldBootstrapFileKey =
@@ -758,7 +865,6 @@ async function resolveEncryptedFileKeyMaterial(input?: {
       keyPath: configuredKeyPath,
       key: generated,
     });
-    cachedEncryptedFileKey = key;
     encryptedFileKeyFailureCooldownUntilMs = 0;
     return {
       key,
@@ -773,7 +879,6 @@ async function resolveEncryptedFileKeyMaterial(input?: {
       keyPath: configuredKeyPath,
     });
     if (publishedKey) {
-      cachedEncryptedFileKey = publishedKey;
       encryptedFileKeyFailureCooldownUntilMs = 0;
       return {
         key: publishedKey,
@@ -793,7 +898,10 @@ async function resolveEncryptedFileKeyMaterial(input?: {
   }
 
   const nowMs = Date.now();
-  if (nowMs < encryptedFileKeyFailureCooldownUntilMs) {
+  if (
+    cachedKeychainEncryptedFileKey === null &&
+    nowMs < encryptedFileKeyFailureCooldownUntilMs
+  ) {
     throw new SecretStoreKeyUnavailableError(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
@@ -803,20 +911,23 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     );
   }
 
-  let existing: string | undefined;
-  try {
-    existing = (
-      await keychain.get({
-        service: ENCRYPTED_FILE_KEY_SERVICE,
-        name: ENCRYPTED_FILE_KEY_NAME,
-      })
-    )?.trim();
-  } catch (error: unknown) {
-    throw keychainKeyAccessError({
-      error,
-      keyPath: configuredKeyPath,
-      storePath: input?.storePath,
-    });
+  let existing: string | undefined =
+    cachedKeychainEncryptedFileKey ?? undefined;
+  if (existing === undefined) {
+    try {
+      existing = (
+        await keychain.get({
+          service: ENCRYPTED_FILE_KEY_SERVICE,
+          name: ENCRYPTED_FILE_KEY_NAME,
+        })
+      )?.trim();
+    } catch (error: unknown) {
+      throw keychainKeyAccessError({
+        error,
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+      });
+    }
   }
   if (existing) {
     if (allowKeyProvisioning && configuredKeyPath) {
@@ -825,7 +936,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
         key: existing,
       });
     }
-    cachedEncryptedFileKey = existing;
+    cachedKeychainEncryptedFileKey = existing;
     encryptedFileKeyFailureCooldownUntilMs = 0;
     return {
       key: existing,
@@ -857,7 +968,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
       storePath: input?.storePath,
     });
   }
-  cachedEncryptedFileKey = generated;
+  cachedKeychainEncryptedFileKey = generated;
   encryptedFileKeyFailureCooldownUntilMs = 0;
   return {
     key: generated,
@@ -908,12 +1019,70 @@ async function canBootstrapEncryptedFileKey(input: {
   }
 }
 
+/**
+ * Reads the encrypted_file key file (HACK-2036, HACK-2169): opened without
+ * following a link (a symlinked or non-regular key path is refused), and
+ * refused when group or others can read or write it, or when git tracks it
+ * (a committed key ships with the ciphertext). An absent or empty file is
+ * no key. A git status that cannot be established is not treated as
+ * tracked, as for the project env key.
+ */
 async function readEncryptedFileKey(input: {
   readonly keyPath: string;
 }): Promise<string | null> {
-  const raw = await readTextFile(input.keyPath);
-  const key = raw?.trim() ?? "";
-  return key.length > 0 ? key : null;
+  // Only the key file itself must not be a link; writes also check its
+  // directory. A missing directory is no key.
+  const read = await readReplaceablePrivateFile({
+    path: input.keyPath,
+    directories: [],
+    refusal: () =>
+      new SecretStoreKeyUnavailableError(
+        `Refused the encrypted secret key at ${input.keyPath}: it is a symlink or not a regular file (values omitted). Replace it with a regular file this user owns (mode 0600), then retry.`
+      ),
+  });
+  const key = read?.text.trim() ?? "";
+  if (read === null || key.length === 0) {
+    return null;
+  }
+  if ((read.mode & 0o077) !== 0) {
+    throw new SecretStoreKeyUnavailableError(
+      `Refused the encrypted secret key at ${input.keyPath}: other users can read or write it (mode ${(read.mode & 0o777).toString(8)}; values omitted). Run: chmod 600 ${input.keyPath}`
+    );
+  }
+  if ((await isKeyFileTrackedByGit(input.keyPath)) === true) {
+    throw new SecretStoreKeyUnavailableError(
+      `Refused the encrypted secret key at ${input.keyPath}: git tracks it, so it would be shared with the encrypted values (values omitted). Remove it from the repository (git rm --cached), rotate the key, then retry.`
+    );
+  }
+  return key;
+}
+
+/** True when git tracks `path`; null when that cannot be established. */
+async function isKeyFileTrackedByGit(path: string): Promise<boolean | null> {
+  let proc: Bun.Subprocess<"ignore", "ignore", "ignore">;
+  try {
+    proc = Bun.spawn({
+      cmd: [
+        "git",
+        "-C",
+        dirname(path),
+        "ls-files",
+        "--error-unmatch",
+        "--",
+        basename(path),
+      ],
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  } catch {
+    return null;
+  }
+  const exitCode = await proc.exited;
+  if (exitCode === 0) {
+    return true;
+  }
+  return exitCode === 1 ? false : null;
 }
 
 function encryptedFileKeyOptions(input: {
@@ -970,15 +1139,49 @@ async function createOrAdoptEncryptedFileKey(input: {
   return input.key;
 }
 
+/**
+ * Thrown when an encrypted store exists but cannot be read (HACK-2169). Only
+ * a store that does not exist counts as empty: treating an unreadable one as
+ * empty would let the next `set` replace it and lose every earlier entry,
+ * other projects' included in a shared store.
+ */
+export class SecretStoreUnreadableError extends Error {
+  constructor(filePath: string) {
+    super(
+      `The encrypted secret store at ${filePath} exists but could not be read, so it was not read or changed (values omitted). Fix its permissions or ownership (it should be a regular file this user can read and write), then retry.`
+    );
+    this.name = "SecretStoreUnreadableError";
+  }
+}
+
 async function readEncryptedEntries(input: {
   readonly filePath: string;
   readonly encryptionKey: string;
 }): Promise<Record<string, string>> {
-  const text = await readTextFile(input.filePath);
-  if (!text) {
+  // Read without following a link, as writes are: a symlinked or
+  // non-regular store is refused, not read through (HACK-2036). Any other
+  // failure to read an existing store is not "empty" (HACK-2169).
+  let read: Awaited<ReturnType<typeof readReplaceablePrivateFile>>;
+  try {
+    read = await readReplaceablePrivateFile({
+      path: input.filePath,
+      directories: [],
+      refusal: () => new Error(ENCRYPTED_STORE_READ_REFUSAL),
+      maxBytes: ENCRYPTED_STORE_FILE_LIMIT,
+    });
+  } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      error.message === ENCRYPTED_STORE_READ_REFUSAL
+    ) {
+      throw error;
+    }
+    throw new SecretStoreUnreadableError(input.filePath);
+  }
+  if (read === null || read.text.length === 0) {
     return {};
   }
-  return decryptEncryptedEntriesText({ ...input, text });
+  return decryptEncryptedEntriesText({ ...input, text: read.text });
 }
 
 /** Parses and decrypts a store's text; every failure is a fixed, value-free error. */

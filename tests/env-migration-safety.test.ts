@@ -199,7 +199,11 @@ test("a key file inside the project stays while the store it opens stays (HACK-1
     }),
   });
   const keyPath = resolve(repo.projectRoot, "store.key");
-  await writeFile(keyPath, `${["synthetic", "file", "key"].join("-")}\n`);
+  // Private, as Hack writes it: a key others can read is refused.
+  await writeFile(keyPath, `${["synthetic", "file", "key"].join("-")}\n`, {
+    mode: 0o600,
+  });
+  await chmod(keyPath, 0o600);
   await setStoreEntries(repo, {
     SEC: ["synthetic", "declared", "e2b7"].join("-"),
   });
@@ -227,7 +231,11 @@ test("a store whose every entry the layers deliver is still offered with its key
   });
   const storePath = resolve(repo.projectRoot, "secrets.enc.json");
   const keyPath = resolve(repo.projectRoot, "store.key");
-  await writeFile(keyPath, `${["synthetic", "file", "key"].join("-")}\n`);
+  // Private, as Hack writes it: a key others can read is refused.
+  await writeFile(keyPath, `${["synthetic", "file", "key"].join("-")}\n`, {
+    mode: 0o600,
+  });
+  await chmod(keyPath, 0o600);
   await setStoreEntries(repo, {
     SEC: ["synthetic", "declared", "41f0"].join("-"),
     "env.qa.SEC": ["synthetic", "qa", "41f0"].join("-"),

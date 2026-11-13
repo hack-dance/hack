@@ -1027,6 +1027,13 @@ with the original key. Copy `.hack.secret.key` from a machine that has it, or se
 `HACK_ENV_SECRET_KEY` to the same key. Do not run `hack env add --secret` there to
 "generate" a key: a new key cannot decrypt the existing values. When a command needs
 the key and finds none, its error says this instead of suggesting a new key.
+`hack env add --secret` and `hack env set --secret` refuse, before writing anything,
+when `HACK_ENV_SECRET_KEY` is set but no `.hack.secret.key` exists (a new key file
+would be used instead of that key), and when a secret already in the layer does not
+open under the key readers use (the layer would end up with mixed keys). Replacing
+the one entry being set is allowed. `hack doctor`'s `secret integrity` check reports
+a layer whose secrets do not all open under one key, with recovery steps; it never
+shows a value.
 
 Linked worktree behavior:
 
@@ -1497,7 +1504,15 @@ Some older surfaces are still compatibility-oriented:
   The `encrypted_file` store (also used by the `cloud` shim) is replaced atomically
   with mode `0600`, and set/delete hold an in-process queue plus a cooperative
   `<store>.lock` so concurrent writers, including separate processes, do not lose
-  updates. A store path that is a symlink is refused for writes. Explicit key
+  updates. A store path that is a symlink or not a regular file is refused for reads
+  and writes, and a store that exists but cannot be read is never treated as empty,
+  so a write never replaces it. The key file is read without following a link and is
+  refused when other users can read or write it (use mode `0600`) or when git tracks
+  it. Explicit key provisioning (`--provision-key`) refuses to replace a different
+  existing key while the store has entries; that would be a rotation. The
+  process-wide key cache holds only keychain material, so one store's key file never
+  stands in for another store's key. `hack doctor` reports an unreadable store, a
+  missing or refused store key, and a key that does not open the store. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
   key paths or immediate parent directories. A key generated on first use is
   published only when no key file exists, so concurrent first users adopt the key

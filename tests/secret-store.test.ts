@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import * as nodeCrypto from "node:crypto";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -165,7 +166,9 @@ test("encrypted_file backend reads key material from configured keyPath when env
   Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
   const storePath = join(tempDir, "secrets.enc.json");
   const keyPath = join(tempDir, "secrets-file.key");
-  await writeFile(keyPath, "stable-file-key\n");
+  // Private, as Hack writes it: a key others can read is refused.
+  await writeFile(keyPath, "stable-file-key\n", { mode: 0o600 });
+  await chmod(keyPath, 0o600);
   await writeGlobalConfig({
     value: {
       controlPlane: {
@@ -856,3 +859,145 @@ for (const [label, home] of [
     }
   });
 }
+
+async function encryptedFileConfig(input: {
+  readonly storePath: string;
+  readonly keyPath: string;
+}): Promise<void> {
+  await writeGlobalConfig({
+    value: {
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: input.storePath, keyPath: input.keyPath },
+        },
+      },
+    },
+  });
+}
+
+async function privateKey(path: string, key: string): Promise<void> {
+  await writeFile(path, `${key}\n`, { mode: 0o600 });
+  await chmod(path, 0o600);
+}
+
+test("an encrypted store that exists but cannot be read is never replaced (HACK-2169)", async () => {
+  // Audit F7: a read failure counted as an empty store, so the next set
+  // replaced the file and lost every earlier entry.
+  if (!tempDir || process.getuid?.() === 0) {
+    return;
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  const storePath = join(tempDir, "secrets.enc.json");
+  const keyPath = join(tempDir, "secrets-file.key");
+  await privateKey(keyPath, "store-key-f7");
+  await encryptedFileConfig({ storePath, keyPath });
+  const store = await resolveSecretStore({ projectName: "app" });
+  await store.set({ key: "EARLIER", value: "kept-value" });
+  const before = await readFile(storePath, "utf8");
+  await chmod(storePath, 0o000);
+  try {
+    await expect(
+      store.set({ key: "LATER", value: "new-value" })
+    ).rejects.toThrow("exists but could not be read");
+    await expect(store.get({ key: "EARLIER" })).rejects.toThrow(
+      "exists but could not be read"
+    );
+  } finally {
+    await chmod(storePath, 0o600);
+  }
+  expect(await readFile(storePath, "utf8")).toBe(before);
+  expect(await store.get({ key: "EARLIER" })).toBe("kept-value");
+});
+
+test("one store's key file never stands in for another store's key (HACK-2169)", async () => {
+  // Audit F9: with keychain fallback on, a key read from store A's key file
+  // was cached process-wide and handed to store B, whose own key file was
+  // missing, labelled `keychain`.
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
+  const storeA = join(tempDir, "a.enc.json");
+  const keyA = join(tempDir, "a.key");
+  await privateKey(keyA, "store-a-key");
+  await encryptedFileConfig({ storePath: storeA, keyPath: keyA });
+  await (await resolveSecretStore({ projectName: "app" })).set({
+    key: "A_TOKEN",
+    value: "a-value",
+  });
+  const storeB = join(tempDir, "b.enc.json");
+  const keyB = join(tempDir, "b.key");
+  await encryptedFileConfig({ storePath: storeB, keyPath: keyB });
+  const b = await resolveSecretStore({ projectName: "app" });
+  await b.set({ key: "B_TOKEN", value: "b-value" });
+  // Store B got its own key file, not store A's key.
+  const bKey = (await readFile(keyB, "utf8")).trim();
+  expect(bKey.length).toBeGreaterThan(0);
+  expect(bKey).not.toBe("store-a-key");
+  expect(await b.get({ key: "B_TOKEN" })).toBe("b-value");
+});
+
+test("explicit key provisioning never replaces the key of a store with entries (HACK-2169)", async () => {
+  // Audit S3: provisioning wrote HACK_SECRETS_FILE_KEY over a different
+  // existing key, leaving the store's entries under a key kept nowhere.
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  const storePath = join(tempDir, "s3.enc.json");
+  const keyPath = join(tempDir, "s3.key");
+  await privateKey(keyPath, "current-key");
+  await encryptedFileConfig({ storePath, keyPath });
+  await (await resolveSecretStore({ projectName: "app" })).set({
+    key: "TOKEN",
+    value: "under-current-key",
+  });
+  process.env.HACK_SECRETS_FILE_KEY = "different-key";
+  await expect(
+    provisionEncryptedFileKey({ keyPath, storePath })
+  ).rejects.toThrow("Refused to replace the encrypted secret key");
+  expect(await readFile(keyPath, "utf8")).toBe("current-key\n");
+  // The same key, or an empty store, is still provisioned.
+  process.env.HACK_SECRETS_FILE_KEY = "current-key";
+  await provisionEncryptedFileKey({ keyPath, storePath });
+  expect(await readFile(keyPath, "utf8")).toBe("current-key\n");
+});
+
+test("the encrypted_file key must be a private, untracked regular file (HACK-2036)", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  const storePath = join(tempDir, "k.enc.json");
+  const keyPath = join(tempDir, "k.key");
+  await encryptedFileConfig({ storePath, keyPath });
+  // Readable by others: refused.
+  await writeFile(keyPath, "shared-key\n");
+  await chmod(keyPath, 0o644);
+  await expect(resolveSecretStore({ projectName: "app" })).rejects.toThrow(
+    "other users can read or write it"
+  );
+  // A symlink to a private key elsewhere: refused, not followed.
+  await rm(keyPath);
+  const elsewhere = join(tempDir, "elsewhere.key");
+  await privateKey(elsewhere, "linked-key");
+  await symlink(elsewhere, keyPath);
+  await expect(resolveSecretStore({ projectName: "app" })).rejects.toThrow(
+    "is a symlink or not a regular file"
+  );
+  // Tracked by git: refused.
+  await rm(keyPath);
+  await privateKey(keyPath, "tracked-key");
+  const git = (args: string[]) =>
+    Bun.spawnSync(["git", "-C", tempDir as string, ...args], {
+      stdout: "ignore",
+      stderr: "ignore",
+    }).exitCode;
+  if (git(["init", "-q"]) === 0 && git(["add", "k.key"]) === 0) {
+    await expect(resolveSecretStore({ projectName: "app" })).rejects.toThrow(
+      "git tracks it"
+    );
+  }
+});

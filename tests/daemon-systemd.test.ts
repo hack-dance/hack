@@ -4082,7 +4082,7 @@ linuxTest(
             } as unknown as DaemonProcessProof)
           : {
               kind: "refused",
-              reason: pid === child ? childProof : "not-hackd",
+              reason: pid === child ? "foreign-socket" : "not-hackd",
             }
       );
     const stop = (pid: number | null) =>

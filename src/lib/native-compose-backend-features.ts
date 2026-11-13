@@ -109,6 +109,22 @@ export type ComposeBackendFeatureOptions = {
   readonly buildsEnabled?: boolean;
 };
 
+/** Service locations from the same platform predicate used for admission. */
+function foreignPlatformServices(
+  compose: unknown,
+  emulated: ReadonlySet<string> = new Set()
+): string[] {
+  if (!(isRecord(compose) && isRecord(compose.services))) {
+    return [];
+  }
+  return Object.entries(compose.services)
+    .filter(
+      ([name, service]) =>
+        isRecord(service) && isForeignPlatform(service, emulated.has(name))
+    )
+    .map(([name]) => name);
+}
+
 /**
  * Compose treats `external: true` and the legacy `external: {name: ...}` form
  * as a network the project does not own. The runtime's reviewed
@@ -372,6 +388,7 @@ export function hasBasicComposeBuild(compose: unknown): boolean {
 
 /** What doctor reports for one Compose file: closed names and flags only. */
 export type ComposeBackendReading = {
+  readonly foreignPlatformServices?: readonly string[];
   readonly features: ComposeBackendFeature[];
   /** A basic build that native image-project `up` refuses; see {@link hasBasicComposeBuild}. */
   readonly basicBuild: boolean;
@@ -400,12 +417,16 @@ export async function classifyComposeBackendReading(
   opts?: Parameters<typeof readComposeBackendReading>[1]
 ): Promise<ComposeBackendReading> {
   const buildsEnabled = opts?.buildsEnabled === true;
+  const foreign: string[] = [];
+  const features = await classifyAdapted(
+    compose,
+    adaptationCandidates(opts),
+    buildsEnabled,
+    foreign
+  );
   return {
-    features: await classifyAdapted(
-      compose,
-      adaptationCandidates(opts),
-      buildsEnabled
-    ),
+    features,
+    ...(foreign.length ? { foreignPlatformServices: foreign } : {}),
     // With native builds enabled, native `up` builds a basic build itself.
     basicBuild: !buildsEnabled && hasBasicComposeBuild(compose),
   };
@@ -440,7 +461,8 @@ function intersect(
 async function classifyAdapted(
   compose: unknown,
   candidates: readonly (string | undefined)[],
-  buildsEnabled: boolean
+  buildsEnabled: boolean,
+  foreign?: string[]
 ): Promise<ComposeBackendFeature[]> {
   const features = findComposeBackendFeatures(compose, { buildsEnabled });
   const network = features.includes("external_network");
@@ -449,6 +471,7 @@ async function classifyAdapted(
     candidates.every((candidate) => candidate === undefined) ||
     !(network || platform)
   ) {
+    foreign?.push(...foreignPlatformServices(compose));
     return features;
   }
   const services =
@@ -475,6 +498,7 @@ async function classifyAdapted(
       );
     }
   }
+  foreign?.push(...foreignPlatformServices(compose, emulated));
   return findComposeBackendFeatures(compose, {
     isolatedNetworks: isolated,
     emulatedServices: emulated,

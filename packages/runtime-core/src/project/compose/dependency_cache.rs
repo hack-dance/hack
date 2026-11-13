@@ -28,17 +28,32 @@ const DEFAULT_RUNTIME: &[&str] = &[
 pub(super) fn recognized(key: &str) -> bool {
     matches!(key, VOLUME | LOCKFILES | RUNTIME | BOOTSTRAP)
 }
-fn refused() -> CandidateError {
+fn detail(
+    key: &str,
+    message: &'static str,
+    fix: &'static str,
+) -> crate::error::ConfigurationRefusal {
+    let field = match key {
+        VOLUME => "labels.hack.dependencies.cache-volume",
+        LOCKFILES => "labels.hack.dependencies.lockfiles",
+        RUNTIME => "labels.hack.dependencies.runtime-files",
+        BOOTSTRAP => "labels.hack.dependencies.bootstrap",
+        _ => "labels",
+    };
+    crate::error::ConfigurationRefusal::new(field, message, fix)
+}
+fn refused(findings: Vec<crate::error::ConfigurationRefusal>) -> CandidateError {
     problem(
         "invalid_dependency_cache",
-        "Dependency cache requires a literal named volume, bounded relative file paths and a boolean bootstrap declaration; values omitted.",
+        "Dependency cache declarations are invalid; values omitted.",
     )
+    .with_configuration_refusals(findings)
 }
-fn paths(value: Option<&String>, defaults: &[&str]) -> Result<(Vec<String>, bool), CandidateError> {
+fn paths(value: Option<&String>, defaults: &[&str]) -> Option<(Vec<String>, bool)> {
     let mut paths = std::collections::BTreeSet::new();
     if let Some(value) = value {
         if value.len() > 8192 {
-            return Err(refused());
+            return None;
         }
         for path in value.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             if path.len() > 512
@@ -48,11 +63,11 @@ fn paths(value: Option<&String>, defaults: &[&str]) -> Result<(Vec<String>, bool
                     .split('/')
                     .any(|p| p.is_empty() || p == "." || p == "..")
             {
-                return Err(refused());
+                return None;
             }
             paths.insert(path.to_owned());
             if paths.len() > 32 {
-                return Err(refused());
+                return None;
             }
         }
     }
@@ -60,51 +75,105 @@ fn paths(value: Option<&String>, defaults: &[&str]) -> Result<(Vec<String>, bool
     if !explicit {
         paths.extend(defaults.iter().map(|p| (*p).to_owned()));
     }
-    Ok((paths.into_iter().collect(), explicit))
+    Some((paths.into_iter().collect(), explicit))
 }
+/// Collect independent label errors without ever storing a label value in a diagnostic.
+/// The accepted cache and the standalone-bootstrap exception are unchanged.
 pub(super) fn parse(value: Option<&Value>) -> Result<Option<DependencyCachePlan>, CandidateError> {
     let mut labels = BTreeMap::new();
-    let mut insert = |key: &str, value: &Value| -> Result<(), CandidateError> {
+    let mut findings = Vec::new();
+    let mut insert = |key: &str, value: &Value| {
         if !recognized(key) {
-            return Ok(());
+            return;
         }
         let value = match value {
             Value::String(v) => v.clone(),
             Value::Bool(v) if key == BOOTSTRAP => v.to_string(),
-            _ => return Err(refused()),
+            _ => {
+                findings.push(detail(key, "A dependency-cache label has the wrong type.", "Use a string for cache-volume and file lists; bootstrap accepts a boolean or its literal string form."));
+                return;
+            }
         };
         if labels.insert(key.to_owned(), value).is_some() {
-            return Err(refused());
+            findings.push(detail(
+                key,
+                "A dependency-cache label is declared more than once.",
+                "Keep exactly one declaration of this label.",
+            ));
         }
-        Ok(())
     };
     match value {
         None | Some(Value::Null) => return Ok(None),
         Some(Value::Object(values)) => {
             for (key, value) in values {
-                insert(key, value)?;
+                insert(key, value);
             }
         }
         Some(Value::Array(values)) => {
             for value in values {
-                let value = value.as_str().ok_or_else(refused)?;
-                let (key, value) = value.split_once('=').unwrap_or((value, ""));
-                insert(key, &Value::String(value.into()))?;
+                if let Some(value) = value.as_str() {
+                    let (key, value) = value.split_once('=').unwrap_or((value, ""));
+                    insert(key, &Value::String(value.into()));
+                } else {
+                    findings.push(detail(
+                        "",
+                        "The label list contains a non-string entry.",
+                        "Use a mapping or a list of key=value strings for labels.",
+                    ));
+                    return Err(refused(findings));
+                }
             }
         }
-        _ => return Err(refused()),
+        _ => {
+            return Err(refused(vec![detail(
+                "",
+                "Labels are neither a mapping nor a list.",
+                "Use a mapping or a list of key=value strings for labels.",
+            )]));
+        }
     }
     if labels.is_empty() || (labels.len() == 1 && labels.contains_key(BOOTSTRAP)) {
-        return Ok(None);
+        return if findings.is_empty() {
+            Ok(None)
+        } else {
+            Err(refused(findings))
+        };
     }
-    let volume = labels.get(VOLUME).ok_or_else(refused)?.trim().to_owned();
-    super::fields::identifier(&volume).map_err(|_| refused())?;
-    let (lockfiles, lockfiles_explicit) = paths(labels.get(LOCKFILES), DEFAULT_LOCKFILES)?;
-    let (runtime_files, _) = paths(labels.get(RUNTIME), DEFAULT_RUNTIME)?;
+    let volume = labels
+        .get(VOLUME)
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_default();
+    if super::fields::identifier(&volume).is_err() {
+        findings.push(detail(VOLUME, "The dependency cache has no literal named-volume identifier.", "Set hack.dependencies.cache-volume to one declared named volume, without interpolation."));
+    }
+    let lockfiles = paths(labels.get(LOCKFILES), DEFAULT_LOCKFILES);
+    let runtime = paths(labels.get(RUNTIME), DEFAULT_RUNTIME);
+    for (key, valid) in [
+        (LOCKFILES, lockfiles.is_some()),
+        (RUNTIME, runtime.is_some()),
+    ] {
+        if !valid {
+            findings.push(detail(key, "The dependency-cache file list is not a bounded list of relative paths.", "Use at most 32 comma-separated relative paths (512 bytes each, 8192 bytes total), without variables, backslashes, control characters, empty, dot or parent components."));
+        }
+    }
     let bootstrap = match labels.get(BOOTSTRAP).map(String::as_str) {
         None | Some("false") => false,
         Some("true") => true,
-        _ => return Err(refused()),
+        _ => {
+            findings.push(detail(
+                BOOTSTRAP,
+                "The dependency-cache bootstrap declaration is not boolean.",
+                "Use true or false for hack.dependencies.bootstrap.",
+            ));
+            false
+        }
+    };
+    if !findings.is_empty() {
+        return Err(refused(findings));
+    }
+    let (Some((lockfiles, lockfiles_explicit)), Some((runtime_files, _))) = (lockfiles, runtime)
+    else {
+        return Err(refused(vec![]));
     };
     Ok(Some(DependencyCachePlan {
         volume,
@@ -119,6 +188,21 @@ pub(super) fn parse(value: Option<&Value>) -> Result<Option<DependencyCachePlan>
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn duplicate_label_flood_keeps_a_small_error_with_prior_findings() {
+        let mut values = vec![json!("hack.dependencies.lockfiles=private-sentinel"); 4096];
+        values.push(json!(42));
+        let error = parse(Some(&Value::Array(values))).unwrap_err();
+        assert_eq!(error.code, "invalid_dependency_cache");
+        let wire = serde_json::to_value(error).unwrap();
+        let details = wire["configuration_refusals"].as_array().unwrap();
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0]["field"], "labels.hack.dependencies.lockfiles");
+        assert_eq!(details[1]["field"], "labels");
+        assert!(wire.to_string().len() < 8192);
+        assert!(!wire.to_string().contains("private-sentinel"));
+    }
+
     #[test]
     fn actual_declaration_and_list_form_are_equivalent() {
         let map = json!({"hack.dependencies.cache-volume":"node_modules", "hack.dependencies.lockfiles":"bun.lock", "hack.dependencies.runtime-files":"package.json,bunfig.toml,mise.toml,.tool-versions,packages/db/prisma/schema.prisma", "hack.dependencies.bootstrap":"true"});

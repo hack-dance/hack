@@ -144,6 +144,10 @@ pub struct RouteProbeDiagnostic {
 /// `process_refusals`, `plan_change` and `route_probe`.
 #[derive(Debug, Default, Serialize)]
 pub struct RefusalDiagnostics {
+    /// File-only explanations. Every sentence and field is a compile-time literal;
+    /// only validated service names come from the project. Never contains values.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub configuration_refusals: Vec<ConfigurationRefusal>,
     /// Every service whose selected process a private wrapper refused, found in
     /// one pass before any runtime state is reserved.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,6 +157,34 @@ pub struct RefusalDiagnostics {
     pub plan_change: Option<PlanChangeDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_probe: Option<RouteProbeDiagnostic>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConfigurationRefusal {
+    pub text_fixed: bool,
+    pub service: Option<Box<str>>,
+    pub field: &'static str,
+    pub message: &'static str,
+    pub fix: &'static str,
+}
+
+impl ConfigurationRefusal {
+    pub fn new(field: &'static str, message: &'static str, fix: &'static str) -> Self {
+        Self {
+            text_fixed: true,
+            service: None,
+            field,
+            message,
+            fix,
+        }
+    }
+
+    pub fn with_service(mut self, service: &str) -> Self {
+        self.service = CandidateError::new("configuration", "Configuration refusal.")
+            .with_service(service)
+            .service;
+        self
+    }
 }
 
 /// Closed diagnostic vocabulary for the read-only log follower. No stream bytes.
@@ -201,6 +233,17 @@ pub struct CandidateError {
 }
 
 impl CandidateError {
+    pub fn with_configuration_refusals(mut self, mut findings: Vec<ConfigurationRefusal>) -> Self {
+        // Malformed lists can repeat the same field thousands of times. Keep
+        // every distinct explanation, not one copy per authored value. This
+        // also bounds the serialized review error below the CLI pipe budget.
+        let mut seen = std::collections::BTreeSet::new();
+        findings.retain(|item| seen.insert((item.service.clone(), item.field, item.message)));
+        self.refusals
+            .get_or_insert_with(Default::default)
+            .configuration_refusals = findings;
+        self
+    }
     pub fn new(code: &'static str, message: impl Into<ErrorMessage>) -> Self {
         let message = message.into();
         Self {

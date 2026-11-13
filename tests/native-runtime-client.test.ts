@@ -148,6 +148,7 @@ async function fixture() {
     binary,
     `#!${process.execPath}
 if (process.argv.includes("hang")) await Bun.sleep(60_000);
+if (process.argv.includes("configuration-batch")) { console.error(JSON.stringify({code:"invalid_dependency_cache",message:"synthetic-secret-diagnostic",configuration_refusals:Array.from({length:128},(_,i)=>({text_fixed:true,service:"s"+i,field:"labels.hack.dependencies.lockfiles",message:"The file list is invalid.",fix:"Use relative paths without variables."})),startup_logs:[{service:"web",lines:["synthetic-secret-diagnostic"]}]})); process.exit(2); }
 if (process.argv.includes("old-provider")) { console.error(JSON.stringify({code:"provider_pin_changed",message:"synthetic-secret-diagnostic"})); process.exit(2); }
 if (process.argv.includes("fixed-message")) { console.error(JSON.stringify({code:"graph_image",message:"Pinned image architecture or implicit volumes are incompatible.",message_fixed:true,service:"web"})); process.exit(2); }
 if (process.argv.includes("bridge-socket-failure")) { console.error(JSON.stringify({code:"bridge_socket_timeout",message:"Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",message_fixed:true})); process.exit(2); }
@@ -773,6 +774,40 @@ test("managed input uses stdin with EOF and is absent from argv and inherited en
       process.env.HACK_RUNTIME_CLIENT_CANARY = prior;
     }
   }
+});
+
+test("large configuration batches are limited to read-only plan errors", async () => {
+  const runtime = await fixture();
+  const plan = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: [
+      "project",
+      "plan",
+      "--project",
+      runtime.home,
+      "--file",
+      "configuration-batch",
+      "--json",
+    ],
+  }).catch((error: unknown) => error);
+  expect(plan).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(plan).toMatchObject({ nativeCode: "invalid_dependency_cache" });
+  if (!(plan instanceof NativeRuntimeRequestError)) {
+    throw new Error("Expected plan refusal");
+  }
+  expect(plan.nativeConfigurationRefusals).toHaveLength(128);
+  expect(JSON.stringify(plan)).not.toContain("synthetic-secret-diagnostic");
+  const control = await invokeNativeRuntime({
+    runtime,
+    cwd: runtime.home,
+    args: ["graph", "configuration-batch"],
+  }).catch((error: unknown) => error);
+  expect(control).toBeInstanceOf(NativeRuntimeRequestError);
+  expect(control).toMatchObject({
+    nativeCode: undefined,
+    nativeConfigurationRefusals: undefined,
+  });
 });
 
 test("native failure preserves only its validated structured code", async () => {

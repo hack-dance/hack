@@ -1,10 +1,15 @@
 import { isRecord } from "../lib/guards.ts";
+import {
+  type NativeConfigurationRefusal,
+  readNativeConfigurationRefusals,
+} from "./native-configuration-refusals.ts";
 import { nativeFailureDetail } from "./native-runtime-client.ts";
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 export type NativeStartRefusal = {
   readonly code: string;
+  readonly configuration?: readonly NativeConfigurationRefusal[];
   readonly message?: string;
   readonly service?: string;
 };
@@ -29,6 +34,11 @@ export function readNativeStartRefusals(
     const detail = nativeFailureDetail(refusal);
     result.push({
       code: refusal.code,
+      configuration: readNativeConfigurationRefusals(
+        refusal.configuration_refusals
+      )?.filter(
+        (item) => item.service === undefined || services.includes(item.service)
+      ),
       ...(detail.message ? { message: detail.message } : {}),
       ...(detail.service && services.includes(detail.service)
         ? { service: detail.service }

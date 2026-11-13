@@ -212,5 +212,7 @@ export async function runNativePreflightCommand(opts: {
   } else {
     process.stdout.write(renderNativePreflightReport(report));
   }
-  return report.blockers.length === 0 ? 0 : 1;
+  return report.blockers.length === 0 && report.consent_needed.length === 0
+    ? 0
+    : 1;
 }

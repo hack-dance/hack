@@ -24,6 +24,7 @@ import {
 } from "./env-layer-modes.ts";
 import { gitignoreLinePattern, writeTextFileAtomicIfChanged } from "./fs.ts";
 import { isKeychainDisabled } from "./keychain.ts";
+import { livePaths, touchesLiveInput } from "./live-inputs.ts";
 import {
   findStagingLeftovers,
   legacyStagingTargetName,
@@ -34,7 +35,6 @@ import {
   isGitIgnoredProjectEnvPath,
   isGitTrackedOrUnknownProjectPath,
   isInsideGitCheckoutMarker,
-  projectEnvLiveInputPaths,
 } from "./project-env-config.ts";
 
 /**
@@ -1022,65 +1022,14 @@ export async function inspectSecretsHygiene(
     const fix = finding.fix;
     if (fix?.kind !== "remove_leftover" && fix?.kind !== "remove_mux") {
       kept.push(finding);
-    } else if (!(await isLive({ path: removalTarget(fix), live }))) {
+    } else if (
+      !(await touchesLiveInput({ target: removalTarget(fix), live }))
+    ) {
       kept.push({ ...finding, fix: { ...fix, scope } });
     }
   }
   findings.splice(0, findings.length, ...kept);
   return await Promise.all(findings.map(withGuard));
-}
-
-/**
- * Files the configuration uses (stores, keys, the project and shared keys),
- * as given and resolved.
- */
-/**
- * Every path current resolution reads (HACK-2165): configured stores and
- * keys, the shared key, and the project's env inputs (its key, the primary
- * worktree's key, `hack.config.json` and every YAML layer; see
- * `projectEnvLiveInputPaths`), each as given and resolved. "unknown" when the
- * project's inputs cannot be inspected: then nothing counts as removable.
- */
-async function livePaths(
-  scope: SecretsHygieneScope
-): Promise<ReadonlySet<string> | "unknown"> {
-  const paths = [
-    ...scope.stores.flatMap((store) => [store.storePath, store.keyPath]),
-    ...(scope.sharedKeyPath ? [scope.sharedKeyPath] : []),
-  ];
-  if (scope.project) {
-    paths.push(join(scope.project.projectRoot, PROJECT_ENV_KEY_FILENAME));
-    try {
-      paths.push(...(await projectEnvLiveInputPaths(scope.project)));
-    } catch {
-      return "unknown";
-    }
-  }
-  const live = new Set<string>();
-  for (const path of paths) {
-    live.add(resolve(path));
-    const real = await realpath(path).catch(() => null);
-    if (real) {
-      live.add(real);
-    }
-  }
-  return live;
-}
-
-/**
- * Whether resolution reads `path`, by its own spelling or resolved. A path,
- * not an inode: removing another link to a live file never removes the name
- * resolution reads.
- */
-async function isLive(opts: {
-  readonly path: string;
-  readonly live: ReadonlySet<string> | "unknown";
-}): Promise<boolean> {
-  if (opts.live === "unknown" || opts.live.has(resolve(opts.path))) {
-    return true;
-  }
-  const real = await realpath(opts.path).catch(() => null);
-  return real !== null && opts.live.has(real);
 }
 
 /** The directory a fix changes. */
@@ -1262,13 +1211,15 @@ export async function applySecretsHygieneFixes(opts: {
   return { applied, skipped };
 }
 
-/** The file a removal unlinks. */
+/**
+ * What a removal may delete: the leftover file, or the payload directory
+ * (with everything under it, which is why the live check covers what lies
+ * beneath; see `touchesLiveInput`).
+ */
 function removalTarget(
   fix: Extract<SecretsHygieneFix, { kind: "remove_leftover" | "remove_mux" }>
 ): string {
-  return fix.kind === "remove_leftover"
-    ? fix.leftover.path
-    : join(fix.stale.root, "env.json");
+  return fix.kind === "remove_leftover" ? fix.leftover.path : fix.stale.root;
 }
 
 /**
@@ -1295,9 +1246,9 @@ async function removalStillSafe(opts: {
     }
     scopes.push(current);
   }
-  const path = removalTarget(opts.fix);
+  const target = removalTarget(opts.fix);
   for (const scope of scopes) {
-    if (await isLive({ path, live: await livePaths(scope) })) {
+    if (await touchesLiveInput({ target, live: await livePaths(scope) })) {
       return false;
     }
   }

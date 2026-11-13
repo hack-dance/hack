@@ -11,6 +11,13 @@ import {
 import { constants as osConstants, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { childEnvironment } from "../lib/child-environment.ts";
+import {
+  livePaths,
+  resolveLiveInputScope,
+  touchesLiveInput,
+} from "../lib/live-inputs.ts";
+import { findProjectContext } from "../lib/project.ts";
+import type { SecretsHygieneScope } from "../lib/secrets-hygiene.ts";
 
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PREFIX = "hack-mux-env-";
@@ -26,52 +33,55 @@ export const MUX_ENVIRONMENT_TTL_MS = 10 * 60 * 1000;
 // file's: both are set within moments of each other at staging. A payload
 // whose mtime is in the future (clock skew) never counts as expired.
 
-/**
- * Remove this user's staged payloads older than the TTL from `parent`
- * (normally the temp directory). Only `hack-mux-env-*` directories owned by
- * this user with private modes are touched, and only their `env.json` when
- * it is a regular single-link file of this user. Failures are skipped: this
- * is cleanup, never a reason to refuse a new session.
- */
 /** Test seam: told the parent directory of every sweep this process runs. */
 export const sweepObserver: { onSweep?: (parent: string) => void } = {};
 
+/**
+ * Remove this user's staged payloads older than the TTL from `parent`
+ * (normally the temp directory), before a new staging. It uses the doctor's
+ * own path: {@link findStaleMuxEnvironments} (private `hack-mux-env-*`
+ * directories owned by this user) and {@link removeStaleMuxEnvironment} (the
+ * directory found, its own `env.json`, then the directory if empty). Before
+ * any removal the current configuration is resolved (strictly) and a
+ * directory that is, or holds, a file it reads (a configured store or key,
+ * the project or shared key, `hack.config.json`, an env layer) is left
+ * alone; when the configuration cannot be read nothing is removed
+ * (HACK-2181). Failures are skipped: this is cleanup, never a reason to
+ * refuse a new session.
+ */
 export async function sweepStaleMuxEnvironments(opts: {
   readonly parent?: string;
   readonly now?: number;
+  /** The configuration to respect; default: resolved from the working directory. */
+  readonly scope?: () => Promise<SecretsHygieneScope>;
 }): Promise<void> {
   const parent = opts.parent ?? tmpdir();
   sweepObserver.onSweep?.(parent);
-  const now = opts.now ?? Date.now();
-  const uid = process.getuid?.();
-  const names = await readdir(parent).catch(() => [] as string[]);
-  for (const name of names) {
-    if (!name.startsWith(PREFIX)) {
+  const stale = await findStaleMuxEnvironments({
+    tmpDir: parent,
+    now: opts.now,
+  }).catch(() => []);
+  if (stale.length === 0) {
+    return;
+  }
+  const scope = await (
+    opts.scope ??
+    (() =>
+      resolveLiveInputScope({
+        startDir: process.cwd(),
+        strict: true,
+        findProject: findProjectContext,
+      }))
+  )().catch(() => null);
+  if (scope === null) {
+    return;
+  }
+  const live = await livePaths(scope).catch(() => "unknown" as const);
+  for (const entry of stale) {
+    if (await touchesLiveInput({ target: entry.root, live })) {
       continue;
     }
-    const root = join(parent, name);
-    try {
-      const info = await lstat(root);
-      if (
-        !info.isDirectory() ||
-        info.uid !== uid ||
-        (info.mode & 0o077) !== 0 ||
-        now - info.mtimeMs < MUX_ENVIRONMENT_TTL_MS
-      ) {
-        continue;
-      }
-      const payload = join(root, "env.json");
-      const file = await lstat(payload).catch(() => null);
-      if (file) {
-        if (!file.isFile() || file.uid !== uid || file.nlink !== 1) {
-          continue;
-        }
-        await unlink(payload);
-      }
-      await rmdir(root);
-    } catch {
-      // Another process removed or changed it; leave it.
-    }
+    await removeStaleMuxEnvironment(entry).catch(() => false);
   }
 }
 

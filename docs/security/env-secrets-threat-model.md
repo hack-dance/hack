@@ -319,7 +319,13 @@ planned branch or a passing documentation check is not a mitigation.
     permission bits only (macOS extended ACLs are not inspected), and a layer
     created by older code under an unusual umask stays as created until a write
     or `hack doctor --fix` tightens it. An in-project target or local filename
-    is still not proof of private storage on another filesystem.
+    is still not proof of private storage on another filesystem. Git is found
+    the way git finds it: a `.git` entry at or above the path, or `GIT_DIR` in
+    Hack's environment (both fail closed when git cannot answer). A work tree
+    used only through `--git-dir`/`--work-tree` flags or an alias (a bare
+    dotfiles repository, say) leaves neither, so Hack, like plain `git`, cannot
+    see it and neither refuses a write there nor reports one; keep stores and
+    keys out of such a tree, or ignore them in it.
 19. **Open: migration cleanup recheck (HACK-2171).** Cleanup removes the current
     path after an earlier migration/consent decision without rechecking the
     selected file's current bytes and identity under a lock
@@ -330,9 +336,12 @@ planned branch or a passing documentation check is not a mitigation.
 ### Plaintext on disk outside materialization
 
 Local YAML can hold plain values, including values migrated from a v4 dotenv
-file. `writeProjectEnvConfigFile` creates new local layers mode 0600 but keeps an
-existing layer's mode (`src/lib/project-env-config.ts`). Check older files by
-hand; a local filename is not proof of encryption or private permissions.
+file. `writeProjectEnvConfigFile` creates new local layers mode 0600 and drops the
+group and other bits of an existing one on every write, even one that changes
+nothing (`src/lib/project-env-config.ts`); `hack doctor --fix` does the same for
+layers no write has touched since. Until then an older layer keeps the mode it
+was created with, and commands that read it warn. A local filename is not proof
+of encryption.
 
 `stageMuxEnvironment` writes resolved values to `$TMPDIR/hack-mux-env-*/env.json`
 with mode 0600; the pane wrapper consumes and removes that payload

@@ -378,10 +378,11 @@ async function leftoverFindings(opts: {
  * Git metadata for a configured store or key file: one inside the project
  * checkout must be untracked and ignored like the project's own secrets (an
  * anchored entry in the root `.gitignore`); one outside it is exempt.
- * Containment is decided on resolved paths (the file's directory and the
- * root, links followed and, on a case-insensitive disk, in their stored
- * case), so an alias spelling of an in-checkout path is still checked; git
- * is then asked about that resolved spelling.
+ * Containment is decided on resolved paths (the root, and the file itself
+ * when it is a regular file, else its directory; links followed and, where
+ * the platform's realpath returns it, in their stored case), so an alias
+ * spelling of an in-checkout path is still checked; git is then asked about
+ * that resolved spelling.
  */
 async function inProjectIgnore(opts: {
   readonly path: string;
@@ -395,7 +396,14 @@ async function inProjectIgnore(opts: {
   if (!(root && dir)) {
     return null;
   }
-  const resolved = join(dir, basename(opts.path));
+  // A regular file is resolved itself, so its name is in its stored case
+  // too; a link at the final component is not followed (its own name is
+  // what a commit would carry).
+  const entry = await lstat(opts.path).catch(() => null);
+  const resolved =
+    entry?.isFile() === true
+      ? await realpath(opts.path).catch(() => join(dir, basename(opts.path)))
+      : join(dir, basename(opts.path));
   const rel = relative(root, resolved);
   if (rel === "" || isOutside(rel)) {
     return null;

@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { constants as osConstants, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 
 const KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PREFIX = "hack-mux-env-";
@@ -242,7 +243,7 @@ async function runInForeground(
   const forwards: [NodeJS.Signals, () => void][] = [];
   try {
     const child = Bun.spawn([...command], {
-      env: Object.fromEntries(env),
+      env: childEnvironment(Object.fromEntries(env)),
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",

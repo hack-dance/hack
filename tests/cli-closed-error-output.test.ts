@@ -336,3 +336,29 @@ test("an occupied native HTTPS port prints one coded line without the port", asy
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test("follow JSON pre-session failures reserve stdout for stream events", async () => {
+  let stdout = "";
+  const original = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    stdout += String(chunk);
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    for (const error of [new CliUsageError("Invalid tail"), nativeRefusal()]) {
+      output = "";
+      expect(
+        await handleRunCliError({
+          error,
+          jsonRequested: true,
+          logFollowJson: true,
+        })
+      ).toBe(1);
+      expect(stdout).toBe("");
+      expect(output.trim().split("\n")).toHaveLength(1);
+      expect(JSON.parse(output).ok).toBe(false);
+    }
+  } finally {
+    process.stdout.write = original;
+  }
+});

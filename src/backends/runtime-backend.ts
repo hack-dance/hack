@@ -1,3 +1,4 @@
+import { childEnvironment } from "../lib/child-environment.ts";
 import {
   type ComposeStartupPhase,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
@@ -234,7 +235,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
     const env = mergeSpawnEnv(opts.env);
     const proc = Bun.spawn(cmd, {
       cwd: opts.cwd,
-      env,
+      env: childEnvironment(env),
       stdin: "inherit",
       stdout: "pipe",
       stderr: "pipe",
@@ -346,16 +347,6 @@ export const composeRuntimeBackend: RuntimeBackend = {
 
 function mergeSpawnEnv(
   override: Record<string, string> | undefined
-): Record<string, string> | undefined {
-  if (!override) {
-    return undefined;
-  }
-
-  const base: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") {
-      base[key] = value;
-    }
-  }
-  return { ...base, ...override };
+): Record<string, string> {
+  return childEnvironment(process.env, override);
 }

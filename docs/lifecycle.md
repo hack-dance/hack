@@ -488,9 +488,24 @@ its isolated derived branch instance, and `--branch <name>` targets only that ex
 `E_COMPOSE_FAILED`. If Compose exits successfully but one or more containers remain `created`, exit
 non-zero, or enter another failed runtime state, Hack returns `E_STARTUP_INCOMPLETE`. Successful
 one-shot services (`exited` with code 0) are reported under `services.completed` and do not fail startup.
-Hack recognizes dependency installers, services labeled `hack.service.one-shot=true`, and services
+Hack recognizes dependency installers, services with explicit `restart: "no"`, services labeled
+`hack.service.one-shot=true`, and services
 referenced by another service with Compose `condition: service_completed_successfully`. An unrelated
 service that merely exits zero is still treated as incomplete startup.
+
+![Compose startup observation](diagrams/compose-startup.svg)
+
+[Diagram source](diagrams/compose-startup.mmd).
+
+Detached startup re-reads transitional states within the remaining start budget.
+It corroborates container IDs before accepting running or completed services, so
+an old completed container cannot stand in for a replacement that has not started.
+`created` with exit code 0 is pending, not successful completion. Image preparation
+and lifecycle hooks do not consume the observation budget. Each inspection keeps
+its normal 15-second timeout, and two initial reads are allowed even when Compose
+used the whole start budget. Only retries for pending or changing observations
+use the remaining budget. Inspection failures return the Docker/Compose error
+without retrying it as a missing service.
 Lifecycle failures are one of the primary consumers of the `--json` error envelope,
 since hook and process startup are common failure points around `hack up`.
 

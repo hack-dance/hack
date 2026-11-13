@@ -276,10 +276,13 @@ describe("conservative dependency selection", () => {
     expect(result.mode).toBe("selected");
     expect(result.files).not.toContain("tests/b.test.ts");
   });
-  test("the actual repository graph can select a proper subset", () => {
+  test.each([
+    "docs/reference/ci-test-selection.md",
+    "src/commands/env.ts",
+  ])("the actual repository graph selects a proper subset for %s", (path) => {
     const result = selectTests({
       repoRoot,
-      changed: ["docs/reference/ci-test-selection.md"],
+      changed: [path],
     });
     expect(result.mode).toBe("selected");
     expect(result.files.length).toBeLessThan(
@@ -352,6 +355,127 @@ describe("conservative dependency selection", () => {
 });
 
 describe("PR matrix policy", () => {
+  test("ordinary light PRs defer platform and Docker inputs until opt-in or integration", async () => {
+    const selection = {
+      mode: "selected",
+      reason: "fixture",
+      files: [
+        "packages/db/tests/smoke.test.ts",
+        "tests/native-authored-project-start.test.ts",
+      ],
+    } as const;
+    for (const changed of [
+      ["docs/a.md"],
+      ["src/a.ts"],
+      ["packages/runtime-core/README.md"],
+    ]) {
+      const plan = await planPullRequest({
+        repoRoot,
+        changed,
+        draft: false,
+        full: false,
+        selection,
+      });
+      expect(plan).toMatchObject({
+        compiler_hosts: "[]",
+        runtime_core: false,
+        docker_suite: false,
+        defer_macos: true,
+        build_smoke: false,
+        test_shards: "[4,5,6,7,8]",
+        test_files: JSON.stringify(selection.files),
+      });
+    }
+    const input = {
+      repoRoot,
+      changed: ["packages/config-compiler/src/lib.rs"],
+      draft: false,
+      full: false,
+      selection,
+    };
+    expect(await planPullRequest({ ...input, mac: true })).toMatchObject({
+      defer_macos: false,
+      runtime_core: true,
+      docker_suite: false,
+      build_smoke: false,
+      test_shards: "[1,2,3,4,5,6,7,8]",
+    });
+    expect(await planPullRequest({ ...input, e2e: true })).toMatchObject({
+      defer_macos: true,
+      runtime_core: true,
+      docker_suite: true,
+      build_smoke: false,
+      test_shards: "[4,5,6,7,8]",
+    });
+    expect(await planPullRequest({ ...input, full: true })).toMatchObject({
+      defer_macos: false,
+      runtime_core: true,
+      docker_suite: true,
+      build_smoke: true,
+      test_shards: "[1,2,3,4,5,6,7,8]",
+    });
+    expect(
+      await planPullRequest({ ...input, pullRequest: false })
+    ).toMatchObject({
+      defer_macos: false,
+      runtime_core: true,
+      docker_suite: true,
+      build_smoke: true,
+      test_shards: "[1,2,3,4,5,6,7,8]",
+    });
+  });
+  test.each([
+    "packages/runtime-core/src/provider/setup.rs",
+    "packages/relay-guest/src/main.rs",
+    "packages/config-compiler/src/lib.rs",
+    "packages/config-compiler/build.rs",
+    "packages/runtime-core/provider-pins.json",
+    "packages/config-compiler/tests/fixtures/schema-corpus.json",
+    "packages/relay-guest/README.md",
+  ])("light Rust input retains Linux candidate and compiler legs: %s", async (path) => {
+    const input = { repoRoot, changed: [path], draft: false, full: false };
+    const plan = await planPullRequest(input);
+    expect(plan).toMatchObject({
+      runtime_core: true,
+      compiler_rust: true,
+      compiler_hosts: JSON.stringify(
+        COMPILER_HOSTS.filter((host) => host.platform === "linux")
+      ),
+      defer_macos: true,
+      docker_suite: false,
+      build_smoke: false,
+      test_shards: "[4,5,6,7,8]",
+    });
+    expect(await planPullRequest({ ...input, draft: true })).toMatchObject({
+      runtime_core: false,
+      compiler_hosts: "[]",
+      defer_macos: true,
+    });
+  });
+  test("protected inputs and main PRs automatically run full tiers", async () => {
+    for (const input of [
+      { changed: [".github/workflows/ci.yml"] },
+      { changed: ["scripts/ci-test-selection.ts"] },
+      { changed: ["docs/a.md"], baseRef: "main" },
+    ]) {
+      const plan = await planPullRequest({
+        repoRoot,
+        ...input,
+        draft: false,
+        full: false,
+      });
+      expect(plan).toMatchObject({
+        selection_mode: "full",
+        runtime_core: true,
+        test_shards: "[1,2,3,4,5,6,7,8]",
+        docker_suite: true,
+        defer_macos: false,
+        build_smoke: true,
+        compiler_hosts: fullPushPlan({ releaseHosts: input.baseRef === "main" })
+          .compiler_hosts,
+      });
+    }
+  });
   test("drafts keep Linux shards but suppress native jobs, even with ci:full", async () => {
     const plan = await planPullRequest({
       repoRoot,
@@ -372,9 +496,10 @@ describe("PR matrix policy", () => {
   test("only selected macOS files admit macOS unit jobs", async () => {
     const input = {
       repoRoot,
-      changed: ["src/lib/cli-result.ts"],
+      changed: ["src/a.ts"],
       draft: false,
       full: false,
+      mac: true,
     };
     const linux = await planPullRequest({
       ...input,
@@ -405,7 +530,26 @@ describe("PR matrix policy", () => {
       compiler_hosts: JSON.stringify(COMPILER_HOSTS),
     });
   });
-  test("empty PR diffs preserve the full native job fallback", async () => {
+  test("ordinary full runs defer Intel qualification to releases", () => {
+    expect(
+      JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts)
+    ).toEqual(COMPILER_HOSTS.filter((host) => host.os !== "macos-15-intel"));
+  });
+  test("coarse full fallbacks also respect nonrelease compiler hosts", async () => {
+    const plan = await planPullRequest({
+      repoRoot,
+      changed: ["other/rust-toolchain"],
+      draft: false,
+      full: false,
+      releaseHosts: false,
+      pullRequest: false,
+      selection: { mode: "full", reason: "fixture", files: [] },
+    });
+    expect(JSON.parse(plan.compiler_hosts)).toEqual(
+      COMPILER_HOSTS.filter((host) => host.os !== "macos-15-intel")
+    );
+  });
+  test("empty PR diffs fail safe to full tiers", async () => {
     const plan = await planPullRequest({
       repoRoot,
       changed: [],
@@ -414,7 +558,11 @@ describe("PR matrix policy", () => {
       selection: { mode: "full", reason: "empty diff", files: [] },
     });
     expect(plan.runtime_core).toBe(true);
-    expect(JSON.parse(plan.compiler_hosts)).toEqual(COMPILER_HOSTS);
+    expect(plan.compiler_hosts).toBe(
+      fullPushPlan({ releaseHosts: false }).compiler_hosts
+    );
+    expect(plan.defer_macos).toBe(false);
+    expect(plan.docker_suite).toBe(true);
   });
   test("candidate inputs include the compiler consumer dependency", () => {
     expect(touchesCandidate("packages/config-compiler/src/lib.rs")).toBe(true);

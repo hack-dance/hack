@@ -87,6 +87,12 @@ test("successful completion recognizes installers, labels, and Compose completio
       "    depends_on:",
       "      database-init:",
       "        condition: service_completed_successfully",
+      "  standalone-init:",
+      "    image: app",
+      '    restart: "no"',
+      "  restarting-api:",
+      "    image: app",
+      "    restart: on-failure",
       "  exited-api:",
       "    image: app",
       "  profiled-worker:",
@@ -103,24 +109,31 @@ test("successful completion recognizes installers, labels, and Compose completio
     "database-init",
     "installer",
     "migrate",
+    "standalone-init",
   ]);
   expect(
     await discoverSuccessfulCompletionServices({
       composeFile,
       activeProfiles: ["benchmark"],
     })
-  ).toEqual(["database-init", "exited-api", "installer", "migrate"]);
+  ).toEqual([
+    "database-init",
+    "exited-api",
+    "installer",
+    "migrate",
+    "standalone-init",
+  ]);
   expect(
     await discoverSuccessfulCompletionServices({
       composeFile,
       activeProfiles: ["benchmark"],
       selectedServices: ["api"],
     })
-  ).toEqual(["database-init", "installer", "migrate"]);
+  ).toEqual(["database-init", "installer", "migrate", "standalone-init"]);
   expect(
     await discoverSuccessfulCompletionServices({
       composeFile,
       selectedServices: ["database-init"],
     })
-  ).toEqual(["database-init", "installer", "migrate"]);
+  ).toEqual(["database-init", "installer", "migrate", "standalone-init"]);
 });

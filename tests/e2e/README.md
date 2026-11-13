@@ -817,3 +817,18 @@ positive shared system link count, while every private artifact and alternate Gi
 selection remains single-link. It pins and rechecks that exact link count, owner
 IDs, physical path, mode, inode and bytes throughout the attempt. This prerequisite
 does not add engine authority or prove guest/lifecycle acceptance.
+
+### Short Compose initializer
+
+`compose-short-oneshot` runs an unlabelled `restart: "no"` initializer behind
+`depends_on` on an isolated internal bridge. Each detached `up` changes the job's
+configuration, requires a new container ID, and independently verifies its real
+start, exit zero and duration below one second. CI runs three repetitions. For the
+50-run acceptance loop, use:
+
+```sh
+HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_COMPOSE_ONESHOT_RUNS=50 bun tests/e2e/run.ts --only=compose-short-oneshot
+```
+
+The scenario uses cached `alpine:3.20`, exercises the current-source CLI (or
+`HACK_E2E_CLI_BIN`), and tears down its fixture before the harness checks for leaks.

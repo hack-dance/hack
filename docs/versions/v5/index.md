@@ -51,6 +51,8 @@ stays the default.
 - [Overview](native/overview.md): what it is, what it is not, and why to try it.
 - [Try it](native/try-it.md): install, run one project on native, switch back.
 - [Native preflight](native/preflight.md): list blockers before starting a Compose project on native.
+- [Prepare the runtime](native/setup.md): explicit setup, under verification.
+- [Follow native service logs](native/log-follow.md): live observation, under verification.
 - [What works and known limits](native/limits.md)
 
 ## Work with an agent

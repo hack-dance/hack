@@ -608,12 +608,11 @@ fn amd64_emulation_opt_in_is_reviewed_and_never_overrides_declared_arm64() {
     }
 }
 
-/// The candidate's own label review rejects Hack's ownership namespaces (the
-/// list `HACK_OWNERSHIP_LABEL_NAMESPACES` declares in TypeScript), so a
-/// project cannot carry ownership evidence even when the TypeScript classifier
-/// is bypassed. Routing and dependency cache declarations never exempt them.
+/// Authored ownership metadata is inert even when the TypeScript classifier is
+/// bypassed. It neither blocks enrollment nor supplies ownership evidence, and
+/// it does not suppress routing or dependency-cache declarations.
 #[test]
-fn hack_ownership_label_namespaces_block_enrollment() {
+fn hack_ownership_label_namespaces_are_inert_during_enrollment() {
     let owner_label = |fixture: &Fixture| {
         fixture
             .codes()
@@ -635,25 +634,29 @@ fn hack_ownership_label_namespaces_block_enrollment() {
         ] {
             let fixture = Fixture::new(&format!("{BASIC}{labels}"));
             let plan = fixture.plan();
-            assert!(owner_label(&fixture), "{key}: {labels}");
-            assert!(!plan.plan.enrollment_compatible, "{key}");
+            assert!(!owner_label(&fixture), "{key}: {labels}");
+            assert!(plan.plan.enrollment_compatible, "{key}");
+            assert_eq!(
+                plan.plan.services["web"].routing.is_some(),
+                labels.contains("caddy:")
+            );
             assert!(
                 !serde_json::to_string(&plan)
                     .unwrap()
                     .contains("owner-canary")
             );
-            assert_eq!(
-                project::enroll(&fixture.candidate, fixture.options(), &plan.plan_id)
-                    .unwrap_err()
-                    .code,
-                "incompatible_compose"
-            );
             assert!(!fixture.candidate.state_root.exists());
+            let enrolled =
+                project::enroll(&fixture.candidate, fixture.options(), &plan.plan_id).unwrap();
+            assert!(
+                !serde_json::to_string(&enrolled)
+                    .unwrap()
+                    .contains("owner-canary")
+            );
         }
     }
     // The dependency cache declaration form: its own `hack.dependencies.*`
-    // labels are recognized, so without an ownership key nothing else reports
-    // an owner label. With one, the declaration does not exempt it.
+    // labels are recognized; ignored ownership metadata must not suppress them.
     let dependency_cache = |extra: &str| {
         Fixture::new(&format!(
             "services:\n  deps:\n    image: alpine:3.21\n    volumes: ['node_modules:/app/node_modules']\n    labels:\n      hack.dependencies.cache-volume: node_modules\n      hack.dependencies.lockfiles: bun.lock\n      hack.dependencies.bootstrap: 'true'\n{extra}volumes:\n  node_modules: {{}}\n"
@@ -678,20 +681,21 @@ fn hack_ownership_label_namespaces_block_enrollment() {
             plan.plan.services["deps"].dependency_cache.is_some(),
             "{key}"
         );
-        assert!(owner_label(&fixture), "{key}");
-        assert!(!plan.plan.enrollment_compatible, "{key}");
+        assert!(!owner_label(&fixture), "{key}");
+        assert!(plan.plan.enrollment_compatible, "{key}");
         assert!(
             !serde_json::to_string(&plan)
                 .unwrap()
                 .contains("owner-canary")
         );
-        assert_eq!(
-            project::enroll(&fixture.candidate, fixture.options(), &plan.plan_id)
-                .unwrap_err()
-                .code,
-            "incompatible_compose"
-        );
         assert!(!fixture.candidate.state_root.exists());
+        let enrolled =
+            project::enroll(&fixture.candidate, fixture.options(), &plan.plan_id).unwrap();
+        assert!(
+            !serde_json::to_string(&enrolled)
+                .unwrap()
+                .contains("owner-canary")
+        );
     }
     // Near misses outside every ownership namespace stay reviewable. Closer
     // misses (a longer first segment, or another segment under the same
@@ -708,8 +712,8 @@ fn hack_ownership_label_namespaces_block_enrollment() {
 /// Hack's documented one-shot marker (`hack.service.one-shot: "true"`, the
 /// label `hack config import` maps to a native job) is a completion role, not
 /// an ownership or router label. Only that exact key and literal value are
-/// consumed; ownership namespaces next to it and every other `hack.*` key stay
-/// refused, so the marker never widens the `hack.*` reservation.
+/// consumed; generated ownership metadata stays inert while unsupported
+/// semantic `hack.service.*` keys still refuse.
 #[test]
 fn hack_one_shot_marker_is_a_completion_role_not_an_owner_label() {
     const INIT: &str = "services:\n  init:\n    image: alpine:3.20\n    command: [\"true\"]\n";
@@ -738,7 +742,7 @@ fn hack_one_shot_marker_is_a_completion_role_not_an_owner_label() {
             .unwrap()
             .contains("one_shot")
     );
-    // Ownership namespaces next to the marker are never exempt.
+    // Ignored ownership metadata neither supplies evidence nor changes the role.
     for key in [
         "com.docker.compose.project",
         "io.hack-local.owner",
@@ -750,18 +754,22 @@ fn hack_one_shot_marker_is_a_completion_role_not_an_owner_label() {
             "{INIT}    labels:\n      hack.service.one-shot: 'true'\n      '{key}': owner-canary\n"
         ));
         let plan = fixture.plan();
-        assert!(owner_label(&fixture), "{key}");
-        assert!(!plan.plan.enrollment_compatible, "{key}");
+        assert!(!owner_label(&fixture), "{key}");
+        assert!(plan.plan.enrollment_compatible, "{key}");
+        assert!(plan.plan.services["init"].one_shot, "{key}");
         assert!(
             !serde_json::to_string(&plan)
                 .unwrap()
                 .contains("owner-canary")
         );
     }
-    // Any other `hack.*` key, including siblings of the marker, keeps the
-    // ownership refusal: only the exact marker key is recognized.
+    // Nonsemantic Hack metadata is ignored without inventing a one-shot role.
+    let inert = Fixture::new(&format!("{INIT}    labels: {{hack.x: 'true'}}\n"));
+    assert!(!owner_label(&inert));
+    assert!(inert.plan().plan.enrollment_compatible);
+    assert!(!inert.plan().plan.services["init"].one_shot);
+    // Unsupported semantic keys, including siblings of the marker, still refuse.
     for key in [
-        "hack.x",
         "hack.service.other",
         "hack.service.one-shot.extra",
         "hack.service",

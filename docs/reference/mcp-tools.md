@@ -66,7 +66,12 @@ nothing is selected, maps to the registered project whose repo root or project
 directory contains it. When registrations are nested, the deepest one wins. Two
 different registrations at the same root are refused as `ambiguous_project`. A
 project that has a `.hack/` directory but no registration is refused; run
-`hack projects` or any project command in it to register it.
+a registering command in it, for example `hack status`, `hack projects` or
+`hack init` (`hack down`, `ps`, `run`, `exec`, `logs`, `open` and `commands`
+do not register; `hack up` registers on the Compose backend only). A
+`repoRoot` or `path` outside every registered project is refused as
+`path_not_registered`. With no selection the server's working directory is
+used, so check that it is the project you mean before a destructive call.
 
 ## Inputs and identifiers
 
@@ -173,24 +178,38 @@ other way round.
   `capture` (`full` or `metadata`). Validation, argv handling and refusals are
   those of `hack.project.exec` and `hack.project.run`. `data` is
   `{ commandId, cursor, state, expiresAt, reused, capture, liveOutput,
-  stallDetection, limits }`. Retrying with the same `requestKey` and the same
-  inputs returns the existing command (`reused: true`) and never runs it again.
+  stallDetection, limits }`. `expiresAt` is the planned expiry for a command that
+  runs to its timeout (acceptance + `timeoutMs` + retention); one that ends
+  earlier is kept for its retention time after its end. Storage limits can
+  expire a result earlier. Retrying with the same `requestKey` and the same
+  inputs returns the existing command (`reused: true`) while its result is kept;
+  after the result expires the key is refused (`E_RESULT_EXPIRED`) for 7 days,
+  then forgotten. The same key with different inputs is refused
+  (`E_REQUEST_CONFLICT`). Keys are
+  scoped to the project, whichever selector named it.
   The MCP session is the caller for the admission limit of 4 active commands.
 - `read`: required `commandId`. Optional: project selection, `branch`, `after`
-  (cursor), `waitMs` and `maxBytes` (16,384 to 262,144; default 32,768).
+  (cursor; the first read passes the `cursor` from `start`, later reads each
+  `nextCursor`), `waitMs` and `maxBytes` (16,384 to 262,144; default 32,768).
   `waitMs` defaults to 25,000 and is capped at 30,000 (a larger value is refused
   before any child starts), which keeps a call under the shortest known client
   tool-call limit. The call returns early when the command ends, a stall starts
   or the next event would pass `maxBytes`, 1,000 events or 4 × `maxBytes` of
-  serialized events (`nextCursor` always advances). `data` is `{ state, events,
+  serialized events (`nextCursor` always advances). New output alone does not
+  end the wait, so pass a smaller `waitMs` to see output sooner. A wait that
+  elapses is not an error: it returns `timedOut: true` with `reason:
+  "wait_elapsed"`. `data` is `{ state, events,
   nextCursor, gap, timedOut, ended, reason, outcome?, exitCode?, limits }`.
   Output events carry `text` (UTF-8) or `withheld`. An unknown or expired cursor
   gives `gap: true` and one `gap` event naming the earliest cursor.
-- `inspect`: required `commandId`; `data` is the `hack commands show` result. It
-  never contains environment values.
+- `inspect`: required `commandId`; `data` is the `hack commands show` result.
+  Automatic env maps are omitted, but stored caller argv can contain sensitive
+  expanded values and is not redacted, including with metadata-only capture.
 - `cancel`: required `commandId`; `data` says what was confirmed. Stopping a
   `docker compose exec` or `run` client does not prove the process inside the
   container stopped (`containerProcess: "not_confirmed"`).
+  `alreadyEnded: true` means the command had ended before the call; `outcome`
+  is then its recorded outcome.
 
 Every call re-checks project and instance scope: `commandId` must match
 `^cmd_[a-z0-9]{26}$`, and an id from another project or instance fails with
@@ -218,6 +237,18 @@ Differences from the foreground tools:
   command are replaced with `*` before output is announced. Values Hack did not
   inject, or that the command transforms, are not caught. It is defence in
   depth, not a guarantee.
+
+Client notes, from qualifying the tools with Claude Code and the Codex CLI:
+
+- `start` and `cancel` are annotated destructive. A headless `codex exec` has
+  no one to approve them and refuses each call ("MCP tool call requires
+  approval"); give that run `-c
+  'mcp_servers.<name>.default_tools_approval_mode="approve"'` (or answer the
+  prompt in an interactive session). Claude Code in `-p` mode needs the tools
+  allowed, for example `--allowedTools mcp__hack`.
+- Observed in Claude Code 2.1.322: it loads the tools on demand through its
+  tool search, and their names appear with dots replaced
+  (`mcp__hack__hack_project_command_start`).
 
 ## `hack.project.doctor`
 

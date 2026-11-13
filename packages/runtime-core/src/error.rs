@@ -144,6 +144,21 @@ pub struct RefusalDiagnostics {
     pub plan_change: Option<PlanChangeDiagnostic>,
 }
 
+/// Closed diagnostic vocabulary for the read-only log follower. No stream bytes.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogFailurePhase {
+    Admission,
+    PeriodicCheck,
+    FinalCheck,
+    StatusLine,
+    Headers,
+    HttpFraming,
+    FrameHeader,
+    Payload,
+    Timestamp,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CandidateError {
     pub code: &'static str,
@@ -153,6 +168,8 @@ pub struct CandidateError {
     /// internal. Changing `message` after construction must clear this flag.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub message_fixed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_phase: Option<LogFailurePhase>,
     /// Admitted Compose service the error concerns, when one is known. It is a
     /// validated graph identifier, never an engine ID or a value.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,12 +196,18 @@ impl CandidateError {
             code,
             message: message.text,
             message_fixed: message.fixed,
+            log_phase: None,
             service: None,
             cause_code: None,
             stop_failures: None,
             startup_logs: None,
             refusals: None,
         }
+    }
+
+    pub fn with_log_phase(mut self, phase: LogFailurePhase) -> Self {
+        self.log_phase = Some(phase);
+        self
     }
 
     /// Name the admitted service; anything that is not a plain service

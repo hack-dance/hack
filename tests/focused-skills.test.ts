@@ -275,7 +275,8 @@ test("hack-env keeps secret values out of argv and treats get as a plaintext sin
   expect(body).toContain(
     "A secret value never goes in command arguments or agent prompts"
   );
-  expect(body).toContain("are plaintext sinks");
+  expect(body).toContain("print plaintext");
+  expect(body).toContain("`hack secrets get`");
   expect(body).toContain("`hack env explain <KEY>");
   // No rendered example passes a secret-looking value as an argument or
   // assignment.
@@ -292,6 +293,13 @@ test("hack-diagnose reads first in the documented order and repairs only within 
   const spec = focusedSkill("hack-diagnose");
   expect(spec.sections[0]?.id).toBe("diagnose");
   const body = bodyOf("hack-diagnose");
+  const warning = body.indexOf("Logs are not redacted");
+  expect(warning).toBeGreaterThanOrEqual(0);
+  expect(warning).toBeLessThan(
+    body.indexOf("`hack logs --json --no-follow --tail 200`")
+  );
+  expect(body).toContain("JSON is formatting, not redaction");
+  expect(body).toContain("value-free MCP env key inventory");
   const order = [
     "`hack ps --json`",
     "`hack doctor --json`",

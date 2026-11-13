@@ -199,6 +199,7 @@ import {
   composeEnvValuesToRedact,
   composePsTextFallbackAllowed,
   readComposePs,
+  readComposePsResult,
 } from "../lib/compose-ps-result.ts";
 import {
   type ComposeStartupBudgets,
@@ -215,6 +216,7 @@ import {
   buildStartupIncompleteMessage,
   type ComposeServiceState,
   classifyComposeStartupState,
+  waitForComposeStartupState,
 } from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import { resolveDefaultDomain } from "../lib/default-domain.ts";
@@ -652,7 +654,15 @@ const optQuery = defineOption({
     "Raw LogQL selector/query (overrides auto selector built from project + services)",
 } as const);
 
+const optLogTimestamps = defineOption({
+  name: "timestamps",
+  type: "boolean",
+  long: "--timestamps",
+  description: "Include Engine timestamps in native followed logs",
+} as const);
+
 const logsOptions = [
+  optLogTimestamps,
   optPath,
   optProject,
   optBranch,
@@ -991,6 +1001,7 @@ async function readComposeServiceStates(opts: {
   readonly profiles: readonly string[];
   readonly services?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
+  readonly strict?: boolean;
 }): Promise<readonly ComposeServiceState[]> {
   const res = await composeRuntimeBackend.psJson({
     composeFiles: [opts.project.composeFile],
@@ -1000,12 +1011,26 @@ async function readComposeServiceStates(opts: {
     all: true,
     env: opts.env,
   });
-  if (res.exitCode !== 0) {
-    return [];
+  let entries: Record<string, unknown>[];
+  if (opts.strict) {
+    const read = readComposePsResult({
+      result: res,
+      redactValues: Object.values(opts.env ?? {}),
+    });
+    if (!read.ok) {
+      throw read.error;
+    }
+    entries = read.entries;
+  } else {
+    if (res.exitCode !== 0) {
+      return [];
+    }
+    entries = parseJsonLines(res.stdout);
   }
   const serviceFilter = opts.services ? new Set(opts.services) : null;
-  return parseJsonLines(res.stdout)
+  return entries
     .map((entry) => ({
+      containerId: getString(entry, "ID") ?? "",
       service: getString(entry, "Service") ?? "",
       state: (getString(entry, "State") ?? "").toLowerCase(),
       exitCode: parseComposeExitCode(entry.ExitCode),
@@ -1067,13 +1092,19 @@ function resolveDetachedComposeBudgets(detach: boolean): ComposeStartupBudgets {
 function trackComposeStartupPhase(): {
   readonly onStartupPhase: (phase: ComposeStartupPhase) => void;
   readonly phase: () => ComposeStartupPhase;
+  readonly startedAt: () => number;
 } {
   let current: ComposeStartupPhase = "start";
+  let startedAt = performance.now();
   return {
     onStartupPhase: (phase) => {
       current = phase;
+      if (phase === "start") {
+        startedAt = performance.now();
+      }
     },
     phase: () => current,
+    startedAt: () => startedAt,
   };
 }
 
@@ -5842,6 +5873,7 @@ async function runRemoteLifecycleCommand(opts: {
   });
   return await runShell([invocation.bin, ...dispatchArgs], {
     cwd: opts.project.projectRoot,
+    hackReexec: true,
   });
 }
 
@@ -6844,6 +6876,12 @@ async function runUpCommand({
       keepSharedHelpers?.();
     }
 
+    const observationBudgetMs = detach
+      ? Math.max(
+          0,
+          budgets.startupTimeoutMs - (performance.now() - upPhase.startedAt())
+        )
+      : budgets.startupTimeoutMs;
     const afterCode = serviceScoped
       ? 0
       : await runLifecycleCommands({
@@ -6869,13 +6907,6 @@ async function runUpCommand({
       });
     }
 
-    const states = await readComposeServiceStates({
-      project,
-      composeProjectName,
-      profiles,
-      services: targetServices,
-      env: envOverrides.env,
-    });
     const effectiveProfiles = resolveEffectiveComposeProfiles({
       cliProfiles: profiles,
       composeEnv: envOverrides.env,
@@ -6887,8 +6918,18 @@ async function runUpCommand({
         selectedServices: serviceScoped ? targetServices : undefined,
       })
     );
-    const startup = classifyComposeStartupState(states, {
+    const { states, startup } = await waitForComposeStartupState({
       successfulCompletionServices,
+      deadlineMs: performance.now() + observationBudgetMs,
+      read: () =>
+        readComposeServiceStates({
+          project,
+          composeProjectName,
+          profiles,
+          services: targetServices,
+          env: envOverrides.env,
+          strict: true,
+        }),
     });
     if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
       await lifecycleCleanup?.();
@@ -7792,6 +7833,7 @@ async function runRestartUpPhase(opts: {
   readonly code: number;
   readonly phase: "compose" | "lifecycle";
   readonly composePhase?: ComposeStartupPhase;
+  readonly observationBudgetMs?: number;
 }> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
 
@@ -8000,6 +8042,10 @@ async function runRestartUpPhase(opts: {
       // The containers now run: a later failure keeps their helpers.
       keepSharedHelpers?.();
     }
+    const observationBudgetMs = Math.max(
+      0,
+      opts.budgets.startupTimeoutMs - (performance.now() - upPhase.startedAt())
+    );
     const upAfter = await runLifecycleCommands({
       title: "Lifecycle (restart up after)",
       commands: opts.cfg.lifecycle?.up?.after,
@@ -8011,7 +8057,11 @@ async function runRestartUpPhase(opts: {
     if (upAfter !== 0) {
       await lifecycleCleanup?.();
     }
-    return { code: upAfter, phase: "lifecycle" };
+    return {
+      code: upAfter,
+      phase: "lifecycle",
+      observationBudgetMs,
+    };
   } catch (error: unknown) {
     await retainHelpersIfContainersMayRun();
     await lifecycleCleanup?.();
@@ -8210,13 +8260,6 @@ async function runTargetedServiceRestart(opts: {
     };
   }
 
-  const states = await readComposeServiceStates({
-    project: opts.project,
-    composeProjectName: opts.composeProjectName,
-    profiles: opts.profiles,
-    services: opts.services,
-    env: envOverrides.env,
-  });
   const effectiveProfiles = resolveEffectiveComposeProfiles({
     cliProfiles: opts.profiles,
     composeEnv: envOverrides.env,
@@ -8228,8 +8271,18 @@ async function runTargetedServiceRestart(opts: {
       selectedServices: opts.services,
     })
   );
-  const startup = classifyComposeStartupState(states, {
+  const { states, startup } = await waitForComposeStartupState({
     successfulCompletionServices,
+    deadlineMs: upPhase.startedAt() + opts.budgets.startupTimeoutMs,
+    read: () =>
+      readComposeServiceStates({
+        project: opts.project,
+        composeProjectName: opts.composeProjectName,
+        profiles: opts.profiles,
+        services: opts.services,
+        env: envOverrides.env,
+        strict: true,
+      }),
   });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
     return {
@@ -8596,12 +8649,6 @@ async function runRestartCommand({
     });
   }
 
-  const states = await readComposeServiceStates({
-    project,
-    composeProjectName,
-    profiles,
-    env: preflightEnv.env,
-  });
   const effectiveProfiles = resolveEffectiveComposeProfiles({
     cliProfiles: profiles,
     composeEnv: preflightEnv.env,
@@ -8612,10 +8659,7 @@ async function runRestartCommand({
       activeProfiles: effectiveProfiles,
     })
   );
-  const startup = classifyComposeStartupState(states, {
-    successfulCompletionServices,
-  });
-  if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
+  const cleanupIncompleteStartup = async () => {
     // Some containers may still run: keep the helper holders for hack down.
     await stopLifecycleProcessesBestEffort({
       project,
@@ -8629,6 +8673,24 @@ async function runRestartCommand({
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
     });
+  };
+  const { states, startup } = await waitForComposeStartupState({
+    successfulCompletionServices,
+    deadlineMs: performance.now() + (upOutcome.observationBudgetMs ?? 0),
+    read: () =>
+      readComposeServiceStates({
+        project,
+        composeProjectName,
+        profiles,
+        env: preflightEnv.env,
+        strict: true,
+      }),
+  }).catch(async (error: unknown) => {
+    await cleanupIncompleteStartup();
+    throw error;
+  });
+  if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
+    await cleanupIncompleteStartup();
     const message = buildStartupIncompleteMessage({
       composeProject: composeProjectName ?? baseProjectName,
       failed: startup.failed,
@@ -10022,6 +10084,7 @@ async function handleNativeLogs({
       service,
       tail,
       since: args.options.since,
+      timestamps: args.options.timestamps,
       json,
       project: args.options.project,
     });
@@ -10087,6 +10150,12 @@ async function handleLogs({
   if (process.env.HACK_RUNTIME_BACKEND === "native") {
     assertNativeLogFlags(args.options);
   }
+  if (
+    process.env.HACK_RUNTIME_BACKEND !== "native" &&
+    args.options.timestamps
+  ) {
+    throw new CliUsageError("--timestamps currently requires native --follow.");
+  }
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -10102,6 +10171,7 @@ async function handleLogs({
     follow: !args.options.noFollow,
     tail: args.options.tail,
     since: args.options.since,
+    timestamps: args.options.timestamps,
     logFormat: resolveLogFormat({
       json: args.options.json,
       pretty: args.options.pretty,

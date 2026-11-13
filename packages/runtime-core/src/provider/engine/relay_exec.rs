@@ -10,7 +10,7 @@ use reqwest::Method;
 #[cfg(target_os = "macos")]
 use serde_json::json;
 use std::{
-    io::{Read, Write},
+    io::Read,
     os::unix::net::UnixStream,
     time::{Duration, Instant},
 };
@@ -21,6 +21,7 @@ fn refused() -> CandidateError {
         "Private Docker exec transport failed; guest state may require reconciliation. No request was replayed.",
     )
 }
+#[cfg(target_os = "macos")]
 fn remaining(deadline: Instant) -> Result<Duration, CandidateError> {
     deadline
         .checked_duration_since(Instant::now())
@@ -141,22 +142,26 @@ pub(super) fn start_mode(
         "POST /v1.53/exec/{id}/start HTTP/1.1\r\nHost: hack-local\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
-    stream
-        .set_write_timeout(Some(remaining(deadline)?))
-        .map_err(|_| refused())?;
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|_| refused())?;
+    let mut bytes = request.as_bytes();
+    while !bytes.is_empty() {
+        match super::exec_io::write(stream, bytes, deadline) {
+            Ok(0) => return Err(refused()),
+            Ok(n) => bytes = &bytes[n..],
+            Err(error) if super::exec_io::retry(&error) => continue,
+            Err(_) => return Err(refused()),
+        }
+    }
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
         if header.len() >= 8192 {
             return Err(refused());
         }
-        stream
-            .set_read_timeout(Some(remaining(deadline)?))
-            .map_err(|_| refused())?;
         let mut byte = [0];
-        stream.read_exact(&mut byte).map_err(|_| refused())?;
+        match super::exec_io::read(stream, &mut byte, deadline) {
+            Ok(1) => {}
+            Err(error) if super::exec_io::retry(&error) => continue,
+            _ => return Err(refused()),
+        }
         header.push(byte[0]);
     }
     let text = std::str::from_utf8(&header).map_err(|_| refused())?;
@@ -223,6 +228,7 @@ fn decode(
 mod tests {
     use super::*;
     use crate::provider::relay_auth::{Binding, Credential};
+    use std::io::Write;
     fn frame(stream: u8, value: &[u8]) -> Vec<u8> {
         let mut bytes = vec![stream, 0, 0, 0];
         bytes.extend_from_slice(&(value.len() as u32).to_be_bytes());

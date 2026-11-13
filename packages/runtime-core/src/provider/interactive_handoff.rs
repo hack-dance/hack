@@ -224,6 +224,9 @@ mod tests {
     fn handoff_preserves_early_output_and_drops_sender_copy() {
         let (sender, receiver) = UnixStream::pair().unwrap();
         let (session, mut engine) = UnixStream::pair().unwrap();
+        engine
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         engine.write_all(b"first output with upgrade").unwrap();
         send(&sender, Some(session), deadline).unwrap();
@@ -236,9 +239,6 @@ mod tests {
         attached.read_exact(&mut early).unwrap();
         assert_eq!(&early, b"first output with upgrade");
         drop(attached);
-        engine
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
         assert_eq!(engine.read(&mut [0]).unwrap(), 0);
     }
 
@@ -250,13 +250,13 @@ mod tests {
         assert!(receive(&receiver, deadline).unwrap().is_none());
         drop(receiver);
         let (session, mut engine) = UnixStream::pair().unwrap();
+        engine
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
         assert_eq!(
             send(&sender, Some(session), deadline).unwrap_err().code,
             "session_cleanup_uncertain"
         );
-        engine
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
         assert_eq!(engine.read(&mut [0]).unwrap(), 0);
     }
 
@@ -273,6 +273,9 @@ mod tests {
         for count in [2usize, 200] {
             let (sender, receiver) = UnixStream::pair().unwrap();
             let (session, mut engine) = UnixStream::pair().unwrap();
+            engine
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
             let mut tag = 1u8;
             let mut iov = libc::iovec {
                 iov_base: (&mut tag as *mut u8).cast(),
@@ -309,9 +312,6 @@ mod tests {
                     .code,
                 "session_cleanup_uncertain"
             );
-            engine
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
             assert_eq!(
                 engine.read(&mut [0]).unwrap(),
                 0,

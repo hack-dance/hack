@@ -19,9 +19,11 @@ def run(mode):
     original = termios.tcgetattr(slave)
     control, child_control = socket.socketpair()
     engine, child_engine = socket.socketpair()
+    finish, child_finish = socket.socketpair()
     env = {"PATH": "/usr/bin:/bin", "HACK_INTERACTIVE_CHILD": mode,
            "HACK_INTERACTIVE_CONTROL": str(child_control.fileno()),
-           "HACK_INTERACTIVE_ENGINE": str(child_engine.fileno())}
+           "HACK_INTERACTIVE_ENGINE": str(child_engine.fileno()),
+           "HACK_INTERACTIVE_FINISH": str(child_finish.fileno())}
 
     def session():
         os.setsid()
@@ -31,10 +33,12 @@ def run(mode):
         [sys.argv[1], "--exact", "provider::interactive_terminal::tests::child_session",
          "--nocapture", "--test-threads=1"],
         stdin=slave, stdout=slave, stderr=slave, env=env,
-        pass_fds=(child_control.fileno(), child_engine.fileno(), slave), preexec_fn=session,
+        pass_fds=(child_control.fileno(), child_engine.fileno(), child_finish.fileno(), slave),
+        preexec_fn=session,
     )
     child_control.close()
     child_engine.close()
+    child_finish.close()
     control.sendall(bytes(4))
     try:
         deadline = time.monotonic() + 10
@@ -79,7 +83,28 @@ def run(mode):
         else:
             raise AssertionError("unknown scenario")
         assert control.recv(1) == b"D", "child did not finish and restore"
-        assert termios.tcgetattr(slave) == original, "terminal attributes not restored"
+        before_read = termios.tcgetattr(slave)
+        # Darwin sets PENDIN when TIOCSETA restores ICANON. The next tty read
+        # processes it, as the shell would. Keep full equality after that read;
+        # don't mask flags or flush user input to satisfy the assertion.
+        os.set_blocking(slave, False)
+        try:
+            pending = os.read(slave, 1)
+        except BlockingIOError:
+            pending = None
+        finally:
+            os.set_blocking(slave, True)
+        assert pending is None, f"unexpected pending input after restore ({mode})"
+        actual = termios.tcgetattr(slave)
+        names = ("iflag", "oflag", "cflag", "lflag", "ispeed", "ospeed", "cc")
+        differences = [names[i] for i in range(7) if actual[i] != original[i]]
+        assert actual == original, (
+            f"terminal attributes not restored ({mode}): {differences}; "
+            f"lflag xor before read={original[3] ^ before_read[3]:#x}, "
+            f"after read={original[3] ^ actual[3]:#x}"
+        )
+        # Keep the session leader alive until the tty read and comparison finish.
+        finish.sendall(b"F")
         assert process.wait(timeout=5) == 0
     finally:
         if process.poll() is None:
@@ -87,6 +112,7 @@ def run(mode):
         process.wait(timeout=5)
         control.close()
         engine.close()
+        finish.close()
         os.close(master)
         os.close(slave)
 

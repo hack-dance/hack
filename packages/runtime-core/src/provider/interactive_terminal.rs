@@ -501,12 +501,21 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        assert!(control > 2 && engine > 2 && control != engine);
+        let finish: i32 = std::env::var("HACK_INTERACTIVE_FINISH")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(control > 2 && engine > 2 && finish > 2);
+        assert!(control != engine && control != finish && engine != finish);
         // SAFETY: the harness transferred these distinct inherited descriptors
         // to this dedicated process; neither has another Rust owner.
         let control = unsafe { OwnedFd::from_raw_fd(control) };
         let mut report = File::from(control.try_clone().unwrap());
         let mut engine = unsafe { UnixStream::from_raw_fd(engine) };
+        let mut finish = unsafe { UnixStream::from_raw_fd(finish) };
+        finish
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         let mut terminal = Terminal::open().unwrap();
         assert_eq!(terminal.size().unwrap(), (24, 80));
         let (leash, payload) = Leash::receive(control).unwrap();
@@ -526,6 +535,9 @@ mod tests {
         }
         terminal.restore().unwrap();
         report.write_all(b"D").unwrap();
+        let mut ack = [0];
+        finish.read_exact(&mut ack).unwrap();
+        assert_eq!(&ack, b"F");
     }
 
     #[test]

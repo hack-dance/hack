@@ -8,7 +8,6 @@ use crate::provider::interactive_session::{self, Binding, Receipt};
 use base64::Engine as _;
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
     os::unix::net::UnixStream,
     time::{Duration, Instant},
 };
@@ -164,19 +163,10 @@ pub(in crate::provider) fn deliver(
     for mut bytes in [header.as_bytes(), encoded.as_bytes()] {
         while !bytes.is_empty() {
             live()?;
-            stream
-                .set_write_timeout(Some(remaining(deadline)?.min(Duration::from_millis(100))))
-                .map_err(|_| uncertain())?;
-            match stream.write(bytes) {
+            match super::exec_io::write(stream, bytes, deadline) {
                 Ok(0) => return Err(uncertain()),
                 Ok(n) => bytes = &bytes[n..],
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock
-                            | std::io::ErrorKind::TimedOut
-                            | std::io::ErrorKind::Interrupted
-                    ) => {}
+                Err(e) if super::exec_io::retry(&e) => {}
                 Err(_) => return Err(uncertain()),
             }
         }
@@ -200,11 +190,8 @@ fn line(
         if bytes.len() == 64 {
             return Err(uncertain());
         }
-        stream
-            .set_read_timeout(Some(remaining(deadline)?.min(Duration::from_millis(100))))
-            .map_err(|_| uncertain())?;
         let mut byte = [0];
-        match stream.read(&mut byte) {
+        match super::exec_io::read(stream, &mut byte, deadline) {
             Ok(0) => return Err(uncertain()),
             Ok(_) => {
                 bytes.push(byte[0]);
@@ -212,13 +199,7 @@ fn line(
                     return Ok(bytes);
                 }
             }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::Interrupted
-                ) => {}
+            Err(e) if super::exec_io::retry(&e) => {}
             Err(_) => return Err(uncertain()),
         }
     }
@@ -306,6 +287,7 @@ fn wait_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     #[test]
     fn eof_can_precede_exit_publication_but_polling_is_bounded_and_fail_closed() {
         let mut calls = 0;
@@ -383,6 +365,35 @@ mod tests {
             worker.join().unwrap();
         }
     }
+    #[test]
+    fn cancellation_while_waiting_for_marker_sends_no_private_bytes() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let checks = std::cell::Cell::new(0);
+        let started = Instant::now();
+        let error = deliver(
+            &mut client,
+            &BTreeMap::from([("TOKEN".into(), "synthetic-canary".into())]),
+            started + Duration::from_secs(2),
+            &|| {
+                checks.set(checks.get() + 1);
+                if checks.get() > 1 {
+                    Err(CandidateError::new("cancelled", "Cancelled."))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(checks.get(), 2);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        server.set_nonblocking(true).unwrap();
+        assert_eq!(
+            server.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
     #[test]
     fn old_or_malformed_launcher_receives_no_private_bytes() {
         for marker in [

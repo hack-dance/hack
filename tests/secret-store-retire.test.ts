@@ -1267,7 +1267,7 @@ test("a store another registered project's key still opens is not retired", asyn
         projectDir: fixture.bystander.projectDir,
       });
       expect(unknown.kind === "refused" ? unknown.message : "").toContain(
-        "configured key file(s)"
+        "configured key(s)"
       );
       expect(unknown.kind === "refused" ? unknown.message : "").toContain(
         "--allow-unchecked"
@@ -1311,4 +1311,57 @@ test("retire refuses when registered projects could not be checked, unless --all
     allowUnchecked: true,
   });
   expect(allowed.kind).toBe("retired");
+});
+
+test("a store another project opens through the OS keychain is not retired", async () => {
+  // Codex review: a project with no key file falls back to the keychain;
+  // an absent key file was taken as "does not open".
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  // app-b has its own, wrong key file; app-a has none (keychain fallback).
+  const wrongKey = join(fixture.bystander.projectRoot, ".wrong.key");
+  await writeFile(wrongKey, "synthetic-wrong-key\n", { mode: 0o600 });
+  await chmod(wrongKey, 0o600);
+  await writeFile(
+    join(fixture.bystander.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-b",
+      dev_host: "app-b.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: fixture.storePath, keyPath: wrongKey },
+        },
+      },
+    })}\n`
+  );
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
+  const holds = spyOn(keychain, "get").mockImplementation(
+    async () => STORE_KEY
+  );
+  try {
+    const outcome = await retireSecretStore({
+      projectDir: fixture.bystander.projectDir,
+    });
+    expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+      "app-a, through the OS keychain"
+    );
+  } finally {
+    holds.mockRestore();
+  }
+  // A keychain that cannot be asked: unchecked, not "does not open".
+  const locked = spyOn(keychain, "get").mockImplementation(async () => {
+    throw new Error("synthetic keychain locked");
+  });
+  try {
+    const outcome = await retireSecretStore({
+      projectDir: fixture.bystander.projectDir,
+    });
+    expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+      "--allow-unchecked"
+    );
+  } finally {
+    locked.mockRestore();
+  }
+  expect(await readFile(fixture.storePath)).toEqual(before);
 });

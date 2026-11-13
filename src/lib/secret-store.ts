@@ -530,7 +530,7 @@ export async function classifyEncryptedStoreAt(input: {
 export async function keyFileOpensStore(input: {
   readonly storePath: string;
   readonly keyPath: string;
-}): Promise<"opens" | "does_not_open" | "unknown"> {
+}): Promise<"opens" | "does_not_open" | "absent" | "unknown"> {
   const store = await readEncryptedStoreText(input.storePath);
   if (store.kind !== "text" || store.text.length === 0) {
     return store.kind === "absent" ? "does_not_open" : "unknown";
@@ -549,13 +549,64 @@ export async function keyFileOpensStore(input: {
     return "unknown";
   }
   if (key.length === 0) {
+    return "absent";
+  }
+  return storeTextOpensUnder({
+    storePath: input.storePath,
+    text: store.text,
+    key,
+  });
+}
+
+/**
+ * Whether the encrypted_file key in the OS keychain (the runtime's fallback
+ * when a project has no key file) opens the store (HACK-2177). Asked
+ * directly, without the key resolution cooldown or cache. `unknown` when
+ * the keychain cannot be asked; `does_not_open` when the fallback is turned
+ * off or holds no key.
+ */
+export async function keychainKeyOpensStore(input: {
+  readonly storePath: string;
+}): Promise<"opens" | "does_not_open" | "unknown"> {
+  if (isKeychainDisabled()) {
     return "does_not_open";
   }
+  const store = await readEncryptedStoreText(input.storePath);
+  if (store.kind !== "text" || store.text.length === 0) {
+    return store.kind === "absent" ? "does_not_open" : "unknown";
+  }
+  let key: string;
+  try {
+    key =
+      (
+        await keychain.get({
+          service: ENCRYPTED_FILE_KEY_SERVICE,
+          name: ENCRYPTED_FILE_KEY_NAME,
+        })
+      )?.trim() ?? "";
+  } catch {
+    return "unknown";
+  }
+  if (key.length === 0) {
+    return "does_not_open";
+  }
+  return storeTextOpensUnder({
+    storePath: input.storePath,
+    text: store.text,
+    key,
+  });
+}
+
+function storeTextOpensUnder(input: {
+  readonly storePath: string;
+  readonly text: string;
+  readonly key: string;
+}): "opens" | "does_not_open" {
   try {
     decryptEncryptedEntriesText({
       filePath: input.storePath,
-      text: store.text,
-      encryptionKey: key,
+      text: input.text,
+      encryptionKey: input.key,
     });
     return "opens";
   } catch {

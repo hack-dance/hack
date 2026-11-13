@@ -13,6 +13,7 @@ import {
 import {
   classifyEncryptedStoreAt,
   isEncryptedStoreFile,
+  keychainKeyOpensStore,
   keyFileOpensStore,
   resolveFileSecretStorePaths,
   retireEncryptedStoreFile,
@@ -223,19 +224,12 @@ async function otherOpenersRefusal(input: {
     const keyPath = resolve(context.keyPath);
     keyFiles.set(keyPath, [...(keyFiles.get(keyPath) ?? []), context.name]);
   }
-  let unknownKeys = 0;
-  for (const [keyPath, names] of keyFiles) {
-    const state = await keyFileOpensStore({
-      storePath: input.canonical,
-      keyPath,
-    });
-    if (state === "opens") {
-      openers.push(...(names.length > 0 ? names : [`its key file ${keyPath}`]));
-    } else if (state === "unknown") {
-      // A key file that cannot be read was not tested: not "does not open".
-      unknownKeys += 1;
-    }
-  }
+  const evidence = await keyEvidence({
+    storePath: input.canonical,
+    keyFiles,
+  });
+  openers.push(...evidence.openers);
+  const unknownKeys = evidence.unknown;
   if (openers.length > 0) {
     return `The encrypted secret store at ${input.canonical} still opens with a configured key file (${[...new Set(openers)].sort().join(", ")}), so it is not retired; nothing was moved. Check HACK_SECRETS_FILE_KEY and this project's key configuration instead.`;
   }
@@ -246,12 +240,58 @@ async function otherOpenersRefusal(input: {
     return `The projects registry could not be read or is not valid, so whether another project still opens ${input.canonical} is unknown; nothing was moved. Fix the registry, or pass --allow-unchecked to retire it anyway.`;
   }
   if (unknownKeys > 0) {
-    return `${unknownKeys} configured key file(s) for ${input.canonical} could not be read, so whether one still opens it is unknown; nothing was moved. Fix their permissions and run hack doctor, or pass --allow-unchecked to retire it anyway.`;
+    return `${unknownKeys} configured key(s) for ${input.canonical} (a key file, or the OS keychain) could not be read, so whether one still opens it is unknown; nothing was moved. Fix their permissions and run hack doctor, or pass --allow-unchecked to retire it anyway.`;
   }
   if (found.unchecked > 0) {
     return `${found.unchecked} registered project(s) could not be checked (not available, or their Hack config or store file could not be read), so whether one still opens ${input.canonical} is unknown; nothing was moved. Run hack doctor to see them, or pass --allow-unchecked to retire it anyway.`;
   }
   return null;
+}
+
+/**
+ * Which configured keys open the store, read independently of this shell:
+ * each key file directly, and the OS keychain (the runtime's fallback) once
+ * when any checkout has no key file. Returns who opens it, and how many
+ * keys could not be read (never taken as "does not open").
+ */
+async function keyEvidence(input: {
+  readonly storePath: string;
+  readonly keyFiles: ReadonlyMap<string, readonly string[]>;
+}): Promise<{ readonly openers: readonly string[]; readonly unknown: number }> {
+  const openers: string[] = [];
+  const keychainUsers: string[] = [];
+  let keychainReader = false;
+  let unknown = 0;
+  for (const [keyPath, names] of input.keyFiles) {
+    const state = await keyFileOpensStore({
+      storePath: input.storePath,
+      keyPath,
+    });
+    if (state === "opens") {
+      openers.push(...(names.length > 0 ? names : [`its key file ${keyPath}`]));
+    } else if (state === "unknown") {
+      unknown += 1;
+    } else if (state === "absent") {
+      keychainReader = true;
+      keychainUsers.push(...names);
+    }
+  }
+  if (!keychainReader) {
+    return { openers, unknown };
+  }
+  const keychainState = await keychainKeyOpensStore({
+    storePath: input.storePath,
+  });
+  if (keychainState === "opens") {
+    openers.push(
+      ...(keychainUsers.length > 0
+        ? keychainUsers.map((name) => `${name}, through the OS keychain`)
+        : ["the OS keychain"])
+    );
+  } else if (keychainState === "unknown") {
+    unknown += 1;
+  }
+  return { openers, unknown };
 }
 
 /** A registered project's primary checkout and each of its linked worktrees. */

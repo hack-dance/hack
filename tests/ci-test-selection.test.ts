@@ -356,11 +356,13 @@ describe("conservative dependency selection", () => {
 
 describe("PR matrix policy", () => {
   test.each([
-    "src/commands/open.ts",
+    "src/commands/project.ts",
     "src/ui/logger.ts",
     "src/lib/local-network-hint.ts",
   ])("light CLI change gates the portable open output contract on Linux: %s", async (path) => {
+    expect(await Bun.file(resolve(repoRoot, path)).exists()).toBe(true);
     const selection = selectTests({ repoRoot, changed: [path] });
+    expect(selection.mode).toBe("selected");
     const file = "tests/local-network-hint.test.ts";
     expect(selection.files).toContain(file);
     const plan = await planPullRequest({

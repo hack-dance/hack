@@ -754,6 +754,22 @@ test("the global key is audited with the runtime's rules, not only by decrypting
   expect(tracked?.action).toContain("git tracks it");
 });
 
+test("a dead registry entry does not leave a healthy store check incomplete", async () => {
+  // Codex review: a deleted checkout counted as an unchecked store reader,
+  // so a healthy machine could not be ready until stale entries were pruned.
+  const reader = await liveProject("app-reader");
+  await writeRegistry([reader, entry("app-deleted")]);
+  await globalStore({ reader });
+  const report = await check(healthyProbes());
+  const store = report.machine.find((f) => f.id === "secret-store");
+  expect(store?.status).toBe("ok");
+  expect(report.incomplete).toEqual([]);
+  // The dead entry is reported as a registry step, not as store uncertainty.
+  expect(report.machine.find((f) => f.id === "registry-dead")?.status).toBe(
+    "warn"
+  );
+});
+
 test("a project that names its own working key is not blocked by a broken global key", async () => {
   // Codex review: the global key file decided for every reader, though a
   // project may select the global store with its own keyPath.

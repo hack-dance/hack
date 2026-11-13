@@ -103,6 +103,12 @@ type StoreContexts = {
   }[];
   readonly registryRead: boolean;
   readonly unchecked: number;
+  /**
+   * Of `unchecked`: checkouts whose directory does not exist (a deleted
+   * checkout, or an unmounted volume). Retiring counts them as unchecked;
+   * the upgrade check counts them as dead registry entries.
+   */
+  readonly missing: number;
 };
 
 /**
@@ -123,20 +129,24 @@ async function storeContexts(opts: {
   try {
     const read = await readProjectsRegistryStrict();
     if (read.kind === "invalid") {
-      return { contexts: [], registryRead: false, unchecked: 0 };
+      return { contexts: [], registryRead: false, unchecked: 0, missing: 0 };
     }
     projects = read.kind === "valid" ? read.registry.projects : [];
     rejected = read.kind === "valid" ? read.rejected : 0;
   } catch {
-    return { contexts: [], registryRead: false, unchecked: 0 };
+    return { contexts: [], registryRead: false, unchecked: 0, missing: 0 };
   }
   const target = await identity(opts.storePath);
   const contexts: StoreContexts["contexts"][number][] = [];
   let unchecked = rejected;
+  let missing = 0;
   for (const checkout of projects.flatMap(registeredCheckouts)) {
     const location = await checkoutStoreLocation(checkout.projectDir);
     if (location === null) {
       unchecked += 1;
+      if (await directoryMissing(checkout.projectDir)) {
+        missing += 1;
+      }
       continue;
     }
     if (!location.active) {
@@ -153,7 +163,21 @@ async function storeContexts(opts: {
       contexts.push({ ...checkout, keyPath: location.keyPath });
     }
   }
-  return { contexts, registryRead: true, unchecked };
+  return { contexts, registryRead: true, unchecked, missing };
+}
+
+/** Whether `dir` does not exist (as opposed to existing but unreadable). */
+async function directoryMissing(dir: string): Promise<boolean> {
+  try {
+    await stat(dir);
+    return false;
+  } catch (error: unknown) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? error.code
+        : undefined;
+    return code === "ENOENT" || code === "ENOTDIR";
+  }
 }
 
 /**
@@ -215,7 +239,10 @@ export async function listSecretStoreReaders(opts: {
     readonly keyPath: string;
   }[];
   readonly registryRead: boolean;
+  /** Checkouts that could not be checked, not counting missing ones. */
   readonly unchecked: number;
+  /** Registered checkouts whose directory does not exist (dead entries). */
+  readonly missing: number;
 }> {
   const found = await storeContexts(opts);
   const readers: { name: string; projectDir: string; keyPath: string }[] = [];
@@ -227,7 +254,8 @@ export async function listSecretStoreReaders(opts: {
   return {
     readers,
     registryRead: found.registryRead,
-    unchecked: found.unchecked,
+    unchecked: found.unchecked - found.missing,
+    missing: found.missing,
   };
 }
 

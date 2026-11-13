@@ -215,7 +215,8 @@ for (const backend of ["compose", "native"] as const) {
       expect(run.output).toContain(
         `Moved ${KEY} to .hack/hack.env.local.yaml (values omitted).`
       );
-      expect(run.output).toContain("tracked by git and can now be removed");
+      expect(run.output).toContain("tracked by git");
+      expect(run.output).toContain("and can now be removed");
       expect(await status(project)).toEqual([
         " D .hack/hack.env.json",
         " M .hack/docker-compose.yml",

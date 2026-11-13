@@ -628,7 +628,7 @@ function validNativeStatusDrainSelection(args: readonly string[]): boolean {
     args[3] === "--run-id" &&
     NATIVE_RUN.test(args[4] ?? "") &&
     args[5] === "--action" &&
-    args[6] === "status" &&
+    (args[6] === "status" || args[6] === "observe") &&
     args[7] === "--json"
   );
 }

@@ -151,6 +151,21 @@ async function fixture(
   return { scope, runtime, receipt, reply, mapping, attempts };
 }
 
+test.each([
+  undefined,
+  "runtime_not_running",
+  "native_graph_foreground",
+])("authored observation crosses the real bounded runtime transport (%s)", (nativeCode) =>
+  owned(async () => {
+    const f = await fixture(true, null, nativeCode);
+    const result = await nativeAuthoredProjectPs(f);
+    expect(result.status).toBe(
+      nativeCode === undefined ? "observed" : "runtime_not_running"
+    );
+    expect(result.items).toHaveLength(nativeCode === undefined ? 1 : 0);
+    expect(await Bun.file(f.attempts).text()).toBe("status\n");
+  }));
+
 test("clean absence and retained start are distinct, readonly and invoke nothing", () =>
   owned(async () => {
     const f = await fixture(false);

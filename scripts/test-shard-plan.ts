@@ -504,6 +504,27 @@ export const PLATFORM_SENSITIVE_SOURCE =
  */
 export const MACOS_POOL_FILES: Readonly<Record<string, string>> = {};
 
+/**
+ * Files that need both hosts, with the reason: their macOS run (they match
+ * {@link PLATFORM_SENSITIVE_SOURCE} or are listed in {@link MACOS_POOL_FILES})
+ * would otherwise be their only one, while tests in them skip off Linux or
+ * observe Linux-only behavior. They are planned in the macOS pool, which
+ * keeps the pools a partition for the exactly-once coverage check, and are
+ * added to the Linux pool as well (HACK-2142).
+ */
+export const BOTH_POOL_FILES: Readonly<Record<string, string>> = {
+  "tests/daemon-systemd.test.ts":
+    "the systemd user service tests run only on Linux (linuxTest)",
+  "tests/daemon-systemd-cli.test.ts":
+    "the systemd CLI flows run only on Linux (skipIf not linux)",
+  "tests/daemon-process-proof.test.ts":
+    "the /proc process-identity tests run only on Linux",
+  "tests/daemon-detach.test.ts":
+    "detached start differs on Linux (setsid, /proc liveness)",
+  "tests/daemon-socket-permissions.test.ts":
+    "daemon directory trust walks host paths (macOS /var -> /private/var)",
+};
+
 /** Parse a layout name, refused closed. */
 export function parseTestLayout(value: string | undefined): TestLayout {
   if (value === undefined || value === "full") {
@@ -637,16 +658,29 @@ export async function classifyTestPools(opts: {
   readonly repoRoot: string;
   readonly files: readonly string[];
   readonly macosFiles?: Readonly<Record<string, string>>;
+  /** Test seam: files run in both pools (defaults to {@link BOTH_POOL_FILES}). */
+  readonly bothFiles?: Readonly<Record<string, string>>;
   readonly sources?: Readonly<Record<string, string>>;
 }): Promise<{
   readonly macos: readonly string[];
+  /** Includes the {@link BOTH_POOL_FILES} files, which are also in `macos`. */
   readonly linux: readonly string[];
+  /** The files in both pools. */
+  readonly both: readonly string[];
 }> {
   const macosFiles = opts.macosFiles ?? MACOS_POOL_FILES;
+  const bothFiles = opts.bothFiles ?? BOTH_POOL_FILES;
   const cache = new Map<string, string>();
   const macos: string[] = [];
   const linux: string[] = [];
+  const both: string[] = [];
   for (const file of opts.files) {
+    if (Object.hasOwn(bothFiles, file)) {
+      macos.push(file);
+      linux.push(file);
+      both.push(file);
+      continue;
+    }
     const sensitive =
       Object.hasOwn(macosFiles, file) ||
       (await testSourceMatches({
@@ -658,7 +692,7 @@ export async function classifyTestPools(opts: {
       }));
     (sensitive ? macos : linux).push(file);
   }
-  return { macos, linux };
+  return { macos, linux, both };
 }
 
 /**
@@ -738,6 +772,8 @@ export async function buildVerifiedPlan(opts: {
   readonly pool?: TestPool;
   /** Test seam: extra macOS pool files (defaults to {@link MACOS_POOL_FILES}). */
   readonly macosFiles?: Readonly<Record<string, string>>;
+  /** Test seam: files run in both pools (defaults to {@link BOTH_POOL_FILES}). */
+  readonly bothFiles?: Readonly<Record<string, string>>;
   /** Plan only the files that read these sources; `count` shards split them. */
   readonly focus?: readonly TestFocus[];
   /** Validated PR subset. Full discovery/coverage still runs before filtering. */
@@ -773,12 +809,16 @@ export async function buildVerifiedPlan(opts: {
       repoRoot: opts.repoRoot,
       files: tracked,
       macosFiles: opts.macosFiles,
+      bothFiles: opts.bothFiles,
     });
-    // The two pools must partition the full set, so the pooled layout as a
-    // whole still runs every file exactly once.
+    // Apart from the files deliberately run on both hosts (counted in the
+    // macOS pool), the two pools must partition the full set, so the pooled
+    // layout as a whole still runs every file at least once and only those
+    // twice.
+    const both = new Set(pools.both);
     assertShardCoverage({
       expected: tracked,
-      shards: [pools.macos, pools.linux],
+      shards: [pools.macos, pools.linux.filter((file) => !both.has(file))],
     });
     scope = pools[opts.pool];
   } else if (opts.focus) {

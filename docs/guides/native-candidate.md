@@ -942,12 +942,27 @@ compares successful replies' `Content-Length` with `size_bytes`. Only 404 and 41
 mean a file is no longer served. Timeouts, other HTTP errors (403, 429 or 5xx),
 and a missing `Content-Length` are transient failures
 and never reopen a closed issue by themselves. Size mismatches and policy
-refusals are reported separately. The watch never changes pins or mirrors files;
+refusals are reported separately. A size disagreement must repeat on a second HEAD
+from the original pinned URL before it can reopen an issue. The confirmation asks
+for cache revalidation and shares the first request's deadline; an inconsistent
+length or failed confirmation is transient. A second length matching the pin reports
+the file as available. The watch never changes pins or mirrors files;
 availability checks do not verify archive contents.
 The current pins do not record external signature/checksum files: the repository
 hashes decide acceptance, and the existing SmolVM prepare step also checks its
 code signature. The qualification script's optional upstream checksum comparison
 remains a separate check.
+
+Successful `runtime setup --json` output includes `status`, `probe` and a `files`
+array. Each file has `name`, `outcome` (`downloaded`, `resumed` or `reused`),
+`size_bytes`, `downloaded_bytes` and `reused_bytes`. The counts account for pinned
+artifacts this invocation, excluding HTTP headers and discarded prefixes.
+A resumed file counts only its new suffix as downloaded; a server that ignores
+Range restarts the download and counts the whole file as downloaded. Offline
+inputs, verified cache files and complete installed-home reuse report `reused`
+with zero downloaded bytes. Complete-home reuse verifies the installed tree rather
+than reading archive inputs; its reused count is the equivalent pinned archive size.
+No input paths appear in these entries.
 
 Setup calls the same three manual prepare functions in a private staging home,
 verifies the complete provider set, syncs it, then publishes the provider directory

@@ -708,7 +708,7 @@ async function commandVerify(args: readonly string[]): Promise<number> {
     pool: "linux",
   });
   console.log(
-    `test shard plan (pooled): ${macosPlan.files.length} files; ${macosPlan.scope.length} in ${macos.selection.count} macOS shards and ${linuxPlan.scope.length} in ${linux.selection.count} Linux shards cover the full test set exactly once.`
+    `test shard plan (pooled): ${macosPlan.files.length} files; ${macosPlan.scope.length} in ${macos.selection.count} macOS shards and ${linuxPlan.scope.length} in ${linux.selection.count} Linux shards cover the full test set once (the both-pool files on each host).`
   );
   printPlanLoads({ name: "macos shard", plan: macosPlan });
   printPlanLoads({ name: "linux shard", plan: linuxPlan });

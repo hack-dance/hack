@@ -891,3 +891,157 @@ test("HEAD length and failure kinds distinguish broken pins from transient failu
     server.stop(true);
   }
 });
+
+test("a HEAD length disagreement must repeat before it can reopen an issue", async () => {
+  const counts = new Map<string, number>();
+  const signals = new Map<string, AbortSignal[]>();
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      expect(request.method).toBe("HEAD");
+      expect(request.headers.has("authorization")).toBe(false);
+      const path = new URL(request.url).pathname;
+      const count = (counts.get(path) ?? 0) + 1;
+      counts.set(path, count);
+      if (count === 2) {
+        expect(request.headers.get("cache-control")).toBe("no-cache");
+        if (path === "/fails") {
+          return new Response(null, { status: 503 });
+        }
+      }
+      const length =
+        count === 1 || path === "/repeats"
+          ? "6"
+          : path === "/changes"
+            ? "7"
+            : "5";
+      return new Response(null, { headers: { "content-length": length } });
+    },
+  });
+  const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    const seen = signals.get(path) ?? [];
+    if (init?.signal) {
+      seen.push(init.signal);
+    }
+    signals.set(path, seen);
+    return fetch(new URL(path, server.url), init);
+  }) as typeof fetch;
+  try {
+    const checks = await checkPinnedUrls(
+      ["recovers", "changes", "fails", "repeats"].map((name) => ({
+        url: `https://source.test/${name}`,
+        sizeBytes: 5,
+        redirectHosts: [],
+      })),
+      fetcher
+    );
+    expect(checks.map((entry) => entry.kind)).toEqual([
+      "available",
+      "transient",
+      "transient",
+      "invalid",
+    ]);
+    const current = [delta(smolvm, "1.34.1", [])];
+    for (const [index, check] of checks.entries()) {
+      expect(counts.get(`/${check.name}`)).toBe(2);
+      const seen = signals.get(`/${check.name}`);
+      expect(seen).toHaveLength(2);
+      expect(seen?.[0]).toBe(seen?.[1]);
+      expect(
+        plan(
+          current,
+          { number: 7, state: "closed", stateReason: "completed" },
+          "2026-11-12",
+          [check]
+        ).action
+      ).toBe(index === 3 ? "update" : "none");
+    }
+    expect(checks[3]?.problem).toContain("confirmed by a second HEAD");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("unsuccessful length confirmations cannot create or reopen an issue", async () => {
+  const observed = new Map<string, number>();
+  const attempts = new Map<string, number>();
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      expect(request.method).toBe("HEAD");
+      expect(request.headers.has("authorization")).toBe(false);
+      const path = new URL(request.url).pathname;
+      const count = (observed.get(path) ?? 0) + 1;
+      observed.set(path, count);
+      if (count === 1) {
+        return new Response(null, { headers: { "content-length": "6" } });
+      }
+      expect(request.headers.get("cache-control")).toBe("no-cache");
+      if (path === "/gone" || path === "/retired") {
+        return new Response(null, { status: path === "/gone" ? 404 : 410 });
+      }
+      if (path === "/foreign") {
+        return Response.redirect("https://unlisted.test/file", 302);
+      }
+      return new Response(null, {
+        status: 302,
+        headers: path === "/loop" ? { location: "/loop" } : {},
+      });
+    },
+  });
+  const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    expect(url.hostname).toBe("source.test"); // no refused redirect reaches the wire
+    const count = (attempts.get(url.pathname) ?? 0) + 1;
+    attempts.set(url.pathname, count);
+    if (url.pathname === "/timeout" && count === 2) {
+      throw new DOMException("synthetic timeout", "TimeoutError");
+    }
+    return fetch(new URL(url.pathname, server.url), init);
+  }) as typeof fetch;
+  try {
+    const checks = await checkPinnedUrls(
+      ["gone", "retired", "foreign", "missing-redirect", "loop", "timeout"].map(
+        (name) => ({
+          url: `https://source.test/${name}`,
+          sizeBytes: 5,
+          redirectHosts: [],
+        })
+      ),
+      fetcher
+    );
+    expect(checks).toHaveLength(6);
+    const current = [delta(smolvm, "1.34.1", [])];
+    for (const check of checks) {
+      expect(check.kind).toBe("transient");
+      expect(check.problem).not.toContain("upstream no longer serves");
+      expect(attempts.get(`/${check.name}`)).toBe(
+        check.name === "loop" ? 7 : 2
+      );
+      expect(plan(current, null, "2026-11-12", [check]).action).toBe("none");
+      for (const stateReason of ["completed", "not_planned"]) {
+        expect(
+          plan(
+            current,
+            { number: 7, state: "closed", stateReason },
+            "2026-11-12",
+            [check]
+          ).action
+        ).toBe("none");
+      }
+      expect(
+        plan(
+          current,
+          { number: 7, state: "open", stateReason: null },
+          "2026-11-12",
+          [check]
+        ).action
+      ).toBe("update");
+    }
+  } finally {
+    server.stop(true);
+  }
+});

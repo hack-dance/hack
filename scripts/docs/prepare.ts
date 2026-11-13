@@ -19,6 +19,14 @@ const privatePath =
 const external = /^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i;
 const routes = new Map<string, string>();
 
+/** Rename the old editorial label without corrupting source paths or identifiers. */
+export function publishedTerminology(text: string): string {
+  return text.replace(
+    /(?<![\w/.#-])dogfooding(?![\w/-]|\.[a-z\d])/gi,
+    "native runtime use"
+  );
+}
+
 /** Reject invalid manifest paths before any source file is opened. */
 export function resolvePublicSource(file: string): string {
   const source = resolve(repositoryRoot, file);
@@ -403,9 +411,9 @@ async function stageVersion(
       entry.snapshot,
       entry.editorial ? undefined : entry.sha256
     );
-    let text = (
+    let text = publishedTerminology(
       await rewriteLinks(raw, resolvePublicSource(entry.file))
-    ).replace(/dogfooding/gi, "native runtime use");
+    );
     if (entry.slug === "reference/cli") {
       text = publishedCliText(text, version);
     }

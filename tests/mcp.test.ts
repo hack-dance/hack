@@ -828,6 +828,26 @@ test("tools/list publishes names, annotations and required inputs for every tool
       annotations: { title: "Inspect a reviewed task", ...READ_ONLY },
       required: ["task"],
     },
+    {
+      name: "hack.project.command.start",
+      annotations: { title: "Start a background command", ...DESTRUCTIVE },
+      required: ["operation", "service", "cmd", "requestKey"],
+    },
+    {
+      name: "hack.project.command.read",
+      annotations: { title: "Read a background command", ...READ_ONLY },
+      required: ["commandId"],
+    },
+    {
+      name: "hack.project.command.inspect",
+      annotations: { title: "Inspect a background command", ...READ_ONLY },
+      required: ["commandId"],
+    },
+    {
+      name: "hack.project.command.cancel",
+      annotations: { title: "Cancel a background command", ...DESTRUCTIVE },
+      required: ["commandId"],
+    },
   ]);
   const run = listed.tools.find((tool) => tool.name === "hack.project.run");
   expect(run?.inputSchema.properties?.timeoutMs).toMatchObject({

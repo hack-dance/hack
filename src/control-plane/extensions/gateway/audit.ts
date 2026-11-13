@@ -1,7 +1,5 @@
-import { appendFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-
-import { ensureDir } from "../../../lib/fs.ts";
 
 export type GatewayAuditEntry = {
   readonly ts: string;
@@ -28,7 +26,8 @@ export async function appendGatewayAuditEntry(opts: {
 }): Promise<void> {
   try {
     const dir = resolve(opts.rootDir, GATEWAY_DIR);
-    await ensureDir(dir);
+    // Owner-only from creation: hackd appends here (HACK-2142).
+    await mkdir(dir, { recursive: true, mode: 0o700 });
     const path = resolve(dir, AUDIT_FILENAME);
     await appendFile(path, `${JSON.stringify(opts.entry)}\n`);
   } catch {

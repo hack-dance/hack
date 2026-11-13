@@ -54,7 +54,7 @@ import {
   PROJECT_ENV_STATE_FILENAME,
 } from "../constants.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
-import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
+import { listGatewayTokensForStatus } from "../control-plane/extensions/gateway/tokens.ts";
 import {
   probeDaemonApi,
   resolveDaemonAutostartAccess,
@@ -2001,7 +2001,12 @@ async function checkGatewayConfig(): Promise<CheckResult> {
 
 async function checkGatewayTokens(): Promise<CheckResult> {
   const daemonPaths = resolveDaemonPaths({});
-  const tokens = await listGatewayTokens({ rootDir: daemonPaths.root });
+  const { tokens, untrusted } = await listGatewayTokensForStatus({
+    rootDir: daemonPaths.root,
+  });
+  if (untrusted !== null) {
+    return { name: "gateway tokens", status: "warn", message: untrusted };
+  }
   const active = tokens.filter((token) => !token.revokedAt);
   const revoked = tokens.filter((token) => token.revokedAt);
   const writeTokens = active.filter((token) => token.scope === "write");

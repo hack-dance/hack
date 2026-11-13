@@ -17,9 +17,13 @@
  * 5. sets owner and mode, then renames the temporary file over the
  *    destination (a rename replaces a link at the destination; it never
  *    writes through it; a directory there fails the step).
- * The temporary file is removed on every failure, including a signal. A
- * signal stops the stdin reader only while it runs; once it is reaped the
- * handler only cleans up, so a reused pid is never signalled.
+ * The temporary file is removed on every failure, including a signal. The
+ * signal handler never signals any process: a shell cannot tell atomically
+ * whether a child pid is already reaped (and so possibly reused), so the
+ * stdin reader is never cancelled by pid. After a signal it stops on its own,
+ * at end of input (Hack writes the input in full and closes the pipe) or at
+ * the time limit, and until then writes only to the temporary file, already
+ * unlinked.
  * `.` and `..` components are refused, and the file is synced before the
  * rename. Arguments are positional
  * (`/bin/sh -c SCRIPT hack-install BYTES SHA256 DEST MODE`), never
@@ -68,28 +72,31 @@ export function renderStdinInstallScript(opts?: {
     'chain "$dir" || exit 65',
     // Traps first, so no signal can arrive after the file exists but before
     // cleanup is armed. dash skips the EXIT trap when a signal kills it, so
-    // every signal becomes a normal exit (stopping the reader if it runs).
-    "tmp=; reader=",
+    // every signal becomes a normal exit. The handler only exits: it never
+    // signals the reader (see the module comment).
+    "tmp=",
     `trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT`,
-    `trap '[ -z "$reader" ] || kill "$reader" 2>/dev/null; exit 130' HUP INT TERM`,
+    "trap 'exit 130' HUP INT TERM",
     // The name is set before the file exists, and noclobber makes the
     // create exclusive. Only root can write in this directory (checked
     // above), so a per-process name is enough and nothing can pre-empt it.
+    // The shell itself opens the file, as descriptor 4, before the reader
+    // starts: the reader inherits that descriptor and never opens a path, so
+    // a reader outliving a signal cannot recreate the file after the EXIT
+    // trap removed it.
     'tmp="$dir/.hack-install.$$"',
-    'set -C; : > "$tmp"; set +C',
+    'set -C; exec 4> "$tmp"; set +C',
     // One byte past the declared count, so longer input is seen and refused.
     // The read runs in the background on a copy of stdin (an asynchronous
     // list would otherwise read /dev/null) and the shell waits for it: a
-    // trapped signal interrupts `wait` at once, stops the reader and exits,
-    // and the EXIT trap removes the temporary file.
+    // trapped signal interrupts `wait` at once and exits, and the EXIT trap
+    // removes the temporary file. The reader, bounded by its time limit and
+    // by end of input, then writes only to that unlinked file.
     "exec 3<&0",
-    `timeout -k 1 ${seconds} head -c "$((n + 1))" <&3 > "$tmp" & reader=$!`,
-    // The reader is reaped once `wait` returns and its pid may be reused, so
-    // `reader` is cleared on the same line (the handler skips the kill when
-    // it is empty) and the handler then goes back to cleanup only.
-    'rc=0; wait "$reader" || rc=$?; reader=',
-    "trap 'exit 130' HUP INT TERM",
-    '[ "$rc" -eq 0 ] || exit 66',
+    `timeout -k 1 ${seconds} head -c "$((n + 1))" <&3 >&4 & reader=$!`,
+    'wait "$reader" || exit 66',
+    // Later steps (and a caller's appended command) do not inherit either.
+    "exec 3<&- 4>&-",
     '[ "$(wc -c < "$tmp")" -eq "$n" ] || exit 66',
     'printf "%s  %s\\n" "$sum" "$tmp" | sha256sum -c --status || exit 67',
     'chown root:root -- "$tmp"',

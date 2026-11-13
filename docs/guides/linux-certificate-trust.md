@@ -100,10 +100,18 @@ interpreter, locale-path and tool-selection variables are not inherited.
    shared directory) is skipped and reported. The `cert9.db` and `key4.db` files
    themselves must be regular files in that directory, including before
    initialization; dangling links are refused. Each ancestor must be owned by
-   you or root and not group- or world-writable. Hack checks directory and
-   ancestor identities immediately before and after each certutil operation.
-   A change fails the command. These checks detect replacement; they cannot
-   prevent a same-user process from swapping and restoring paths between checks.
+   you or root and not group- or world-writable. Hack records the identity
+   (device and inode) of the directory, each ancestor, `cert9.db` and
+   `key4.db`, and checks them immediately before and after each certutil
+   operation. A changed identity, a removed database file, or a database file
+   that appears other than during a certutil call fails the command; a file
+   that a certutil call creates, such as during `certutil -N`, is recorded
+   after that call. Hack accepts the remaining same-user race: a process
+   running as you can, without Hack noticing, replace the directory, an
+   ancestor or a database file after one check and restore it before the
+   next, replace a database file with one that reuses its device and inode
+   number, or create a missing database file while a certutil call runs, so
+   certutil may write to a database other than the one Hack checked.
    After import or a trust change, Hack reads the stored certificate back and
    compares it with the validated CA.
 

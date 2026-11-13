@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import type { Stats } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -43,6 +44,7 @@ import {
   parseSystemdExecProgram,
   parseSystemdPathList,
   probeSystemdUserManager,
+  programFileProblem,
   readSystemdServicePathDirectories,
   readSystemdServiceStatus,
   renderSystemdUnit,
@@ -132,6 +134,12 @@ const QUOTED_FIRST_WORD = /^"([^"]*)"/;
 let root: string;
 let unitPath: string;
 let program: string;
+/**
+ * The fake service PATH: a directory of this test's own, so the PATH
+ * checks never scan the host's /usr (GitHub's runner image leaves
+ * directories that /usr/bin links into writable by everyone, HACK-2142).
+ */
+let sysBin: string;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "hack-systemd-"));
@@ -145,6 +153,9 @@ beforeEach(async () => {
   await chmod(join(root, "bin"), 0o755);
   await writeFile(program, "#!/bin/sh\n");
   await chmod(program, 0o755);
+  sysBin = join(root, "sysbin");
+  await mkdir(sysBin);
+  await chmod(sysBin, 0o755);
 });
 
 afterEach(async () => {
@@ -162,7 +173,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     showFails: false,
     activeState: null,
     needsReload: false,
-    unitEnvironment: "PATH=/usr/bin:/bin HACK_NO_INTERACTIVE=1",
+    unitEnvironment: `PATH=${sysBin} HACK_NO_INTERACTIVE=1`,
     environmentFiles: "",
     unsetEnvironment: "",
     passEnvironment: "",
@@ -171,7 +182,7 @@ function fakeSystemd(opts: FakeOptions = {}): Fake {
     dropInPaths: "",
     unitSearchPath: null,
     extraExecLines: [],
-    managerEnvironment: `HOME=${root}\nPATH=/usr/bin:/bin\n`,
+    managerEnvironment: `HOME=${root}\nPATH=${sysBin}\n`,
     passwdHome: root,
     namespaceLines: [],
     deps: undefined as unknown as SystemdDeps,
@@ -857,6 +868,7 @@ function startHooks(fake: Fake, hackBinPath = program) {
       const text = renderSystemdUnit({ hackBinPath });
       return Promise.resolve(text ? { hackBinPath, unitText: text } : null);
     },
+    systemPathDirectories: [sysBin],
   };
 }
 
@@ -2510,7 +2522,7 @@ linuxTest(
     await mkdir(own);
     await chmod(own, 0o755);
     expect(
-      await checkServicePathDirectories({ dirs: [own, "/usr/bin"] })
+      await checkServicePathDirectories({ dirs: [own, sysBin] })
     ).toBeNull();
 
     // A writable PATH directory, sticky or not: refused, unchanged.
@@ -3727,5 +3739,121 @@ linuxTest(
         hackHome: join(root, ".hack"),
       })
     ).toMatchObject({ ok: true, notInstalled: true });
+  }
+);
+
+linuxTest(
+  "only a diagnostic naming hackd.service as absent counts as no unit (HACK-2142)",
+  async () => {
+    // Second-family review: the broad "not found" / "No such file" match
+    // read a lost bus or a missing systemctl as "the unit does not exist",
+    // so file-less stop and uninstall reported nothing to do.
+    const fake = fakeSystemd();
+    fake.activeState = "activating";
+    expect(await Bun.file(unitPath).exists()).toBe(false);
+    const withQuery = (result: ServiceCommandResult): SystemdDeps => ({
+      ...fake.deps,
+      run: (command, args) =>
+        command === "systemctl" &&
+        args.some((arg) => arg.startsWith("--property=LoadState,"))
+          ? Promise.resolve(result)
+          : fake.deps.run(command, args),
+    });
+    const stop = (deps: SystemdDeps) =>
+      stopViaSystemdIfInstalled({
+        pid: null,
+        hackHome: join(root, ".hack"),
+        deps,
+      });
+    const uninstall = (deps: SystemdDeps) =>
+      uninstallSystemdUnit({ unitPath, deps, hackHome: join(root, ".hack") });
+    for (const failure of [
+      {
+        exitCode: 1,
+        stdout: "",
+        stderr: "Failed to connect to bus: No such file or directory",
+      },
+      // The runner's own report when systemctl vanished between calls.
+      { exitCode: 127, stdout: "", stderr: "systemctl not found" },
+      // A named-unit line next to another error proves nothing either.
+      {
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          "Unit hackd.service could not be found.\nFailed to connect to bus: No such file or directory",
+      },
+    ]) {
+      const deps = withQuery(failure);
+      fake.calls.length = 0;
+      const stopped = await stop(deps);
+      expect(stopped.refused).toContain("could not report");
+      expect(stopped.refused).toContain("systemctl --user stop hackd.service");
+      const removed = await uninstall(deps);
+      expect(removed.ok).toBe(false);
+      if (!removed.ok) {
+        expect(removed.error).toContain("could not report");
+      }
+      expect(
+        fake.calls.filter((call) =>
+          / (stop|disable|daemon-reload)( |$)/.test(call)
+        )
+      ).toEqual([]);
+    }
+    // The real missing-unit diagnostic (with or without the prefix) stays a
+    // successful no-op.
+    for (const stderr of [
+      "Unit hackd.service could not be found.",
+      "Failed to get properties: Unit hackd.service not found.",
+    ]) {
+      const deps = withQuery({ exitCode: 1, stdout: "", stderr });
+      expect(await stop(deps)).toEqual({
+        handled: false,
+        ownedPid: false,
+        failed: null,
+        refused: null,
+      });
+      expect(await uninstall(deps)).toMatchObject({
+        ok: true,
+        notInstalled: true,
+      });
+    }
+  }
+);
+
+linuxTest(
+  "the system-directory rule for PATH programs, without the host (HACK-2142)",
+  () => {
+    // Reviewer: with every in-process test on a temp PATH directory, the
+    // root-owned system directory branch (setuid helpers owned by system
+    // accounts) had no test; it is exercised here with fixed file details.
+    const file = (fields: { readonly uid: number; readonly mode: number }) =>
+      fields as unknown as Stats;
+    const check = (opts: {
+      readonly owner: number;
+      readonly mode: number;
+      readonly systemDir: boolean;
+    }) =>
+      programFileProblem({
+        path: "/usr/bin/tool",
+        info: file({ uid: opts.owner, mode: 0o10_0000 | opts.mode }),
+        uid: 4321,
+        systemDir: opts.systemDir,
+      });
+    // Root's and this user's programs are fine anywhere.
+    expect(check({ owner: 0, mode: 0o755, systemDir: true })).toBeNull();
+    expect(check({ owner: 4321, mode: 0o755, systemDir: false })).toBeNull();
+    // A system account's setuid helper only in a protected system directory.
+    expect(check({ owner: 1, mode: 0o4755, systemDir: true })).toBeNull();
+    expect(check({ owner: 1, mode: 0o4755, systemDir: false })).toContain(
+      "owned by another user"
+    );
+    // Another regular user's program is never trusted.
+    expect(check({ owner: 54_321, mode: 0o755, systemDir: true })).toContain(
+      "owned by another user"
+    );
+    // A program others can write is refused even in a system directory.
+    expect(check({ owner: 0, mode: 0o775, systemDir: true })).toContain(
+      "writable by other users"
+    );
   }
 );

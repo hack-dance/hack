@@ -276,10 +276,13 @@ describe("conservative dependency selection", () => {
     expect(result.mode).toBe("selected");
     expect(result.files).not.toContain("tests/b.test.ts");
   });
-  test("the actual repository graph can select a proper subset", () => {
+  test.each([
+    "docs/reference/ci-test-selection.md",
+    "src/commands/env.ts",
+  ])("the actual repository graph selects a proper subset for %s", (path) => {
     const result = selectTests({
       repoRoot,
-      changed: ["docs/reference/ci-test-selection.md"],
+      changed: [path],
     });
     expect(result.mode).toBe("selected");
     expect(result.files.length).toBeLessThan(

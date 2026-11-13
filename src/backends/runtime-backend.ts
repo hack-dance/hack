@@ -87,7 +87,7 @@ function shouldDisableExecTty(): boolean {
   return !(process.stdin.isTTY === true && process.stdout.isTTY === true);
 }
 
-function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
+export function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
   return [
     "docker",
     "compose",
@@ -96,6 +96,56 @@ function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
     ...(opts.profiles
       ? opts.profiles.flatMap((profile) => ["--profile", profile] as const)
       : []),
+  ];
+}
+
+/**
+ * `docker compose run --rm` argv. `disableTty` adds `-T`; background commands
+ * always set it because their stdin is closed and they have no terminal.
+ */
+export function buildComposeRunCommand(opts: {
+  readonly options: RuntimeRunOptions;
+  readonly disableTty: boolean;
+  /** `--name` for the one-off container, so its owner can remove it. */
+  readonly containerName?: string;
+}): string[] {
+  const { options } = opts;
+  return [
+    ...buildComposeArgs(options),
+    "run",
+    "--rm",
+    ...(opts.disableTty ? ["-T"] : []),
+    ...(opts.containerName ? ["--name", opts.containerName] : []),
+    ...(options.noDeps ? ["--no-deps"] : []),
+    ...(options.workdir && options.workdir.length > 0
+      ? ["-w", options.workdir]
+      : []),
+    options.service,
+    ...(options.cmdArgs.length > 0 ? options.cmdArgs : []),
+  ];
+}
+
+/** `docker compose exec` argv; `disableTty` adds `-T`. */
+export function buildComposeExecCommand(opts: {
+  readonly options: RuntimeExecOptions;
+  readonly disableTty: boolean;
+  /** `-e NAME=value` for the process in the container (a background marker). */
+  readonly guestEnv?: Readonly<Record<string, string>>;
+}): string[] {
+  const { options } = opts;
+  return [
+    ...buildComposeArgs(options),
+    "exec",
+    ...(opts.disableTty ? ["-T"] : []),
+    ...Object.entries(opts.guestEnv ?? {}).flatMap(([key, value]) => [
+      "-e",
+      `${key}=${value}`,
+    ]),
+    ...(options.workdir && options.workdir.length > 0
+      ? ["-w", options.workdir]
+      : []),
+    options.service,
+    ...(options.cmdArgs.length > 0 ? options.cmdArgs : []),
   ];
 }
 
@@ -275,15 +325,7 @@ export const composeRuntimeBackend: RuntimeBackend = {
     return await run(cmd, { cwd: opts.cwd, env: opts.env });
   },
   async run(opts) {
-    const cmd = [
-      ...buildComposeArgs(opts),
-      "run",
-      "--rm",
-      ...(opts.noDeps ? ["--no-deps"] : []),
-      ...(opts.workdir && opts.workdir.length > 0 ? ["-w", opts.workdir] : []),
-      opts.service,
-      ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),
-    ];
+    const cmd = buildComposeRunCommand({ options: opts, disableTty: false });
     return await run(cmd, {
       cwd: opts.cwd,
       stdin: "inherit",
@@ -294,14 +336,10 @@ export const composeRuntimeBackend: RuntimeBackend = {
     });
   },
   async exec(opts) {
-    const cmd = [
-      ...buildComposeArgs(opts),
-      "exec",
-      ...(shouldDisableExecTty() ? ["-T"] : []),
-      ...(opts.workdir && opts.workdir.length > 0 ? ["-w", opts.workdir] : []),
-      opts.service,
-      ...(opts.cmdArgs.length > 0 ? opts.cmdArgs : []),
-    ];
+    const cmd = buildComposeExecCommand({
+      options: opts,
+      disableTty: shouldDisableExecTty(),
+    });
     return await run(cmd, { cwd: opts.cwd, stdin: "inherit", env: opts.env });
   },
 };

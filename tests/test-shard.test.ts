@@ -25,6 +25,7 @@ import {
 import {
   assertShardCoverage,
   assertSuiteInputs,
+  BOTH_POOL_FILES,
   buildVerifiedPlan,
   DEFAULT_FILE_SECONDS,
   DURATION_TABLE_PATH,
@@ -517,6 +518,17 @@ describe("pooled layout and focused runs (HACK-1960)", () => {
       macosFiles: { "tests/plain.test.ts": "fixture reason" },
     });
     expect(pinned.scope).toContain("tests/plain.test.ts");
+    // A both-pool entry runs on each host; the coverage check still holds.
+    for (const pool of ["macos", "linux"] as const) {
+      const both = await buildVerifiedPlan({
+        repoRoot: root,
+        count: 1,
+        suites: FIXTURE_SUITES,
+        pool,
+        bothFiles: { "tests/plain.test.ts": "fixture reason" },
+      });
+      expect(both.scope).toContain("tests/plain.test.ts");
+    }
   });
 
   test("focus selects files naming the sources directly, through helpers or scripts, not scenario fixtures", async () => {
@@ -576,7 +588,7 @@ describe("pooled layout and focused runs (HACK-1960)", () => {
     ).toBe(false);
   });
 
-  test("the current checkout's CI pools partition every git test file exactly once", async () => {
+  test("the current checkout's CI pools cover every git test file once, both-pool files twice", async () => {
     const tracked = listGitTestFiles({ repoRoot });
     const count = 8;
     const macos = pooledSelection({ index: 1, count });
@@ -593,10 +605,22 @@ describe("pooled layout and focused runs (HACK-1960)", () => {
     });
     expect(linuxPlan.scope).toContain("tests/tmux-private-input.test.ts");
     expect(macosPlan.scope).not.toContain("tests/tmux-private-input.test.ts");
+    // Each pool's shards partition that pool; together they run every file
+    // once, and only the BOTH_POOL_FILES on both hosts (HACK-2142).
+    const both = new Set(Object.keys(BOTH_POOL_FILES));
     expectExactPartition({
-      shards: [...macosPlan.shards, ...linuxPlan.shards],
+      shards: [
+        ...macosPlan.shards,
+        ...linuxPlan.shards.map((shard) =>
+          shard.filter((file) => !both.has(file))
+        ),
+      ],
       files: tracked,
     });
+    for (const file of both) {
+      expect(macosPlan.scope).toContain(file);
+      expect(linuxPlan.scope).toContain(file);
+    }
     for (const shard of [...macosPlan.shards, ...linuxPlan.shards]) {
       expect(shard.length).toBeGreaterThan(0);
     }

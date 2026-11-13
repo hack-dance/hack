@@ -1,3 +1,4 @@
+import { noteNativeExitConfirmed } from "../lib/background-command/native-exit.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
@@ -260,6 +261,9 @@ export async function nativeProjectOneOff(opts: {
   ) {
     throw refused();
   }
+  // A native background command's supervisor holds the admission slot
+  // unless the guest exit code is known; it is, from here on.
+  await noteNativeExitConfirmed();
   return {
     exitCode: value.exit_code,
     stdout,

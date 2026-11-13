@@ -41,6 +41,10 @@ Every tool sets `openWorldHint: false`. Mutating tools set `idempotentHint: fals
 | `hack.project.target` | read-only | `hack project target --json` (provisional) |
 | `hack.project.task.list` | read-only | `hack project task list --json` (provisional; runs nothing) |
 | `hack.project.task.inspect` | read-only | `hack project task inspect --json -- <task>` (provisional; runs nothing) |
+| `hack.project.command.start` | destructive | `hack exec\|run --detach --json --request-key=… -- <service> [cmd...]` |
+| `hack.project.command.read` | read-only | `hack commands read --json -- <commandId>` |
+| `hack.project.command.inspect` | read-only | `hack commands show --json -- <commandId>` |
+| `hack.project.command.cancel` | destructive | `hack commands cancel --json -- <commandId>` |
 
 ## Project selection
 
@@ -152,6 +156,68 @@ starts a container, and the CLI fails when the service is not running.
   `--branch` reach the container command and are never parsed by hack.
 - `data.limits` echoes `{ timeoutMs, outputBytes }`. `outputBytes` is the shared
   8 MiB capture limit.
+
+## Background commands
+
+`hack.project.command.start`, `read`, `inspect` and `cancel` start `exec` or
+`run` in the background and report on it by id and cursor. They are adapters
+over the CLI described in [Background commands](../guides/background-commands.md),
+so a command started through MCP can be read with `hack commands read` and the
+other way round.
+
+- `start`: required `operation` (`exec` or `run`), `service`, `cmd` (an array;
+  `exec` needs at least one entry) and `requestKey`
+  (`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`). Optional: project selection,
+  `branch`, `workdir`, `timeoutMs` (1,000 to 21,600,000; default 1,800,000),
+  `stallAfterMs` (0 to 21,600,000; default 120,000; 0 turns it off) and
+  `capture` (`full` or `metadata`). Validation, argv handling and refusals are
+  those of `hack.project.exec` and `hack.project.run`. `data` is
+  `{ commandId, cursor, state, expiresAt, reused, capture, liveOutput,
+  stallDetection, limits }`. Retrying with the same `requestKey` and the same
+  inputs returns the existing command (`reused: true`) and never runs it again.
+  The MCP session is the caller for the admission limit of 4 active commands.
+- `read`: required `commandId`. Optional: project selection, `branch`, `after`
+  (cursor), `waitMs` and `maxBytes` (16,384 to 262,144; default 32,768).
+  `waitMs` defaults to 25,000 and is capped at 30,000 (a larger value is refused
+  before any child starts), which keeps a call under the shortest known client
+  tool-call limit. The call returns early when the command ends, a stall starts
+  or the next event would pass `maxBytes`, 1,000 events or 4 × `maxBytes` of
+  serialized events (`nextCursor` always advances). `data` is `{ state, events,
+  nextCursor, gap, timedOut, ended, reason, outcome?, exitCode?, limits }`.
+  Output events carry `text` (UTF-8) or `withheld`. An unknown or expired cursor
+  gives `gap: true` and one `gap` event naming the earliest cursor.
+- `inspect`: required `commandId`; `data` is the `hack commands show` result. It
+  never contains environment values.
+- `cancel`: required `commandId`; `data` says what was confirmed. Stopping a
+  `docker compose exec` or `run` client does not prove the process inside the
+  container stopped (`containerProcess: "not_confirmed"`).
+
+Every call re-checks project and instance scope: `commandId` must match
+`^cmd_[a-z0-9]{26}$`, and an id from another project or instance fails with
+`E_COMMAND_NOT_FOUND`. The id grants nothing. Errors reported by the CLI keep
+their registered code (`E_COMMAND_NOT_FOUND`, `E_RESULT_EXPIRED`,
+`E_CAPTURE_DISABLED`, `E_ADMISSION_LIMIT`, `E_REQUEST_CONFLICT`,
+`E_JOURNAL_VERSION`, …) with `reason: "command_error"`. `start` and `cancel`
+write an `mcp-audit.log` line; `read` and `inspect` do not. The `start` line
+records the operation, service, `argv[0]`, the argument count and a SHA-256 of
+the arguments, never the arguments themselves.
+
+Differences from the foreground tools:
+
+- **Capture limit.** Reaching 8 MiB stops capture and records
+  `command.output_truncated`, but the command keeps running to its normal end.
+  The foreground `hack.project.exec` and `hack.project.run` stop the command at
+  8 MiB.
+- **Storage.** Output is stored in private files under the Hack home, where
+  later processes of the same OS user that can select the project can read it
+  (`capture: "metadata"` stores none). It is not readable after its retention
+  time (at most 24 hours after the command ends); the files are physically
+  removed at the next background-command operation, `hack up` or `hack down`,
+  so Hack does not promise physical deletion within 24 hours.
+- **Redaction is partial.** Values Hack had already resolved to inject into the
+  command are replaced with `*` before output is announced. Values Hack did not
+  inject, or that the command transforms, are not caught. It is defence in
+  depth, not a guarantee.
 
 ## `hack.project.doctor`
 

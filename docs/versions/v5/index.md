@@ -25,6 +25,7 @@ Start with [Install](install.md), then [Getting started](getting-started.md).
 
 ## Do a task
 
+- [Upgrade a v4 machine to v5](guides/upgrade-from-v4.md): preparation, rollback and checks awaiting the dogfood run.
 - [Run and inspect a project](guides/run-project.md)
 - [Choose where a command runs](guides/run-commands.md)
 - [Work on another branch](guides/parallel-work.md)

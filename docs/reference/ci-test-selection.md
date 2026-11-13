@@ -82,7 +82,9 @@ files; selected macOS paths remain in the plan and deferral summary. Integration
 pushes and opted-in or automatically full-tier PRs admit macOS shards when their selected pool is
 nonempty. Full discovery and independent Git enumeration still agree before
 filtering. Duplicate/unknown selections fail. Every selected file runs exactly
-once in its active pool or is explicitly deferred. Each file retains its suite
+once per active host pool or is explicitly deferred. `BOTH_POOL_FILES` deliberately
+runs the named daemon files on both hosts so Linux-only cases are exercised too.
+Each file retains its suite
 working directory and Bun preload.
 
 The candidate job follows its crate, its config-compiler path dependency, guest, launcher, helper/toolchain and CI

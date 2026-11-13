@@ -253,6 +253,9 @@ are listed in the [command reference](reference/cli.md).
 
 - One-off command in a fresh service container (deps started as needed): `hack run <service> <cmd...>`.
 - Command inside an already-running service container: `hack exec <service> -- <cmd...>`.
+- Long command you want to start now and read later (or from another process): add `--detach` to
+  `hack exec` or `hack run`, then `hack commands read <id> --follow`. See
+  [Background commands](guides/background-commands.md).
 - Host script that needs hack-stored env: `hack host exec --env <overlay> --scope <service> -- <cmd...>`
   — this is the way to run repo scripts; never read `.env` files directly.
 - Interactive host shell with injected env: `hack host shell --env <overlay> --scope <service>`.

@@ -4,3 +4,4 @@ e069b8546c112e5b5c8ab0ec82fd24a4f19ef16b:.hack/tickets/events/events-2026-03.jso
 939c2b2cb680744707b1d085db0bc0ce8fac32e4:tests/env.test.ts:private-key:7
 0cb0ff2316b05e833119aeae9cc73a0a14329aeb:tests/feedback-review.test.ts:private-key:112
 06f262309db3111e65c8a23324456ef73ac57e83:tests/project-env-hydrate.test.ts:generic-api-key:389
+aeca3e02e464ef11dd72531aa8313045bd8561f5:tests/background-command-scanner.test.ts:generic-api-key:172

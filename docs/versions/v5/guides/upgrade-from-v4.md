@@ -64,6 +64,55 @@ Sources: [candidate channel contract](https://github.com/hack-dance/hack/blob/26
 
 ## 2. Before you start
 
+### Check first
+
+v5 builds that include the upgrade assistant can check the machine before you
+change anything. Run the v5 CLI (on macOS, `"$HOME/.hack-next/bin/hack-next"`
+with `HACK_RUNTIME_BACKEND=compose`):
+
+```sh
+hack upgrade check          # add --json for a machine-readable report
+```
+
+It reads the installed versions, the daemon's login service, the projects
+registry, Hack's global services, proxy ports and DNS, and the global secret
+store. For each live project it reads the env format and key, tracked
+machine-local files, ignore rules, agent integration files and, on Apple
+Silicon, the native preflight. It changes nothing and prints no secret value.
+
+- **Dead registry entries** (the checkout or its config is gone) are counted
+  apart from live projects that cannot be read. Dead entries only need
+  `hack projects prune`; unreadable ones need repair.
+- It ends with an ordered plan and the single next command. It exits 1 and
+  names the blockers when something would make the upgrade fail or lose data,
+  such as a global secret store whose key is gone while a project reads it.
+
+Before you follow the plan, keep a private copy of the files it changes:
+
+```sh
+hack upgrade snapshot
+```
+
+This copies the global Hack config, the projects registry, the encrypted
+secret store and its key (when used), and each live project's `.hack/`
+config, env files, env layers, `.hack/.gitignore` and env key files into
+`~/.hack/upgrade/snapshots/<id>/` (directories 0700, files 0600). The
+manifest records paths, sizes, modes and SHA-256 digests, never values. It
+prints the command that puts the files back:
+
+```sh
+hack upgrade rollback --rollback-manifest <manifest>
+```
+
+Rollback restores each file's exact bytes and mode. A file that changed since
+the snapshot is left as it is unless you add `--overwrite`; whatever rollback
+replaces or removes is kept in the snapshot directory, never deleted.
+`hack upgrade rollback` without a manifest lists the snapshots and changes
+nothing. The snapshot does not cover the daemon's login service or Docker
+state; the steps below still apply.
+
+### Record the current state
+
 Keep the records and backups private: registry and doctor output can identify
 local projects, and ignored env files can contain plaintext secrets. Do not paste
 them into an issue. Use a new backup directory and record its location yourself:

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,6 +16,7 @@ import {
   repairProjectLifecycleSessions,
 } from "../src/lib/project-lifecycle-hygiene.ts";
 import type { MuxBackend } from "../src/mux/mux-backend.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 /** Only mux effects and orphan discovery are faked; state and retirement are real. */
 async function fixture(opts: {
@@ -64,11 +65,11 @@ async function fixture(opts: {
   const boundary = {
     inspect: () => Promise.resolve(inspection),
     backends: () => new Map([["tmux" as const, backend]]),
-    readPanePids: (args: { readonly windowName: string }) =>
+    readPanes: () =>
       Promise.resolve(
         entry.processes.flatMap((process) =>
-          process.windowName === args.windowName && process.panePid
-            ? [process.panePid]
+          process.panePid
+            ? [{ panePid: process.panePid, windowName: process.windowName }]
             : []
         )
       ),
@@ -86,6 +87,125 @@ async function fixture(opts: {
   };
   return { entry, boundary, stopped: () => stopped };
 }
+
+for (const mode of ["survivor", "shell-only", "failed", "malformed"] as const) {
+  test(`doctor repair uses complete live pane inventory (${mode})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "hack-repair-inventory-"));
+    const originalPath = process.env.PATH;
+    try {
+      const bin = join(root, "bin");
+      await mkdir(bin);
+      const output =
+        mode === "survivor"
+          ? `printf '%s\\t%s\\n' ${process.pid} writer ${process.pid} shell`
+          : `printf '%s\\t%s\\n' ${process.pid} shell`;
+      const response =
+        mode === "failed"
+          ? "exit 1"
+          : mode === "malformed"
+            ? "printf 'invalid-inventory\\n'"
+            : output;
+      await writeFile(
+        join(bin, "tmux"),
+        `#!/bin/sh
+[ "$1" = list-panes ] && [ "$2" = -s ] && [ "$3" = -t ] && [ "$4" = '=repair-fixture--lifecycle' ] || exit 93
+${response}
+`,
+        { mode: 0o700 }
+      );
+      process.env.PATH = `${bin}:${originalPath ?? "/usr/bin:/bin"}`;
+      const f = await fixture({
+        root,
+        processes: ["already-exited", "writer"].map((name) => ({
+          name,
+          windowName: name,
+          logPath: join(root, `${name}.log`),
+          panePid: process.pid,
+        })),
+      });
+      let retirementCalls = 0;
+      const result = await repairProjectLifecycleSessions({
+        projectDir: root,
+        projectRoot: root,
+        boundary: {
+          ...f.boundary,
+          // Exercise the production mux query/parser, not the injected inventory.
+          readPanes: undefined,
+          retireSession: async (opts) => {
+            retirementCalls += 1;
+            expect(opts.processes.map((pane) => pane.panePid)).toEqual(
+              mode === "survivor" ? [process.pid] : []
+            );
+            for (const pane of opts.processes) {
+              expect(pane.paneBirth).toBeString();
+            }
+            await opts.assertFresh?.();
+            return await opts.stopSession();
+          },
+        },
+      });
+      if (mode === "failed" || mode === "malformed") {
+        expect(retirementCalls).toBe(0);
+        expect(f.stopped()).toBe(false);
+        expect(result.repairedSessions).toEqual([]);
+        expect(result.failures[0]).toContain(
+          mode === "failed"
+            ? "Could not read current lifecycle pane identity"
+            : "Current lifecycle pane inventory is invalid"
+        );
+        expect(await readLifecycleState({ projectDir: root })).toEqual([
+          f.entry,
+        ]);
+      } else {
+        expect(retirementCalls).toBe(1);
+        expect(f.stopped()).toBe(true);
+        expect(result).toEqual({
+          repairedSessions: [f.entry.sessionName],
+          failures: [],
+        });
+        expect(await readLifecycleState({ projectDir: root })).toEqual([]);
+      }
+    } finally {
+      restoreEnv("PATH", originalPath);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("doctor repair keeps a matching live identity after its mux window disappears", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-repair-lost-window-"));
+  try {
+    const birth = (await readProcessIdentities()).find(
+      (row) => row.pid === process.pid
+    )?.birth;
+    expect(birth).toBeString();
+    const f = await fixture({
+      root,
+      processes: [
+        {
+          name: "lost",
+          windowName: "lost",
+          logPath: join(root, "lost.log"),
+          processGroupId: process.pid,
+          processGroupBirth: birth,
+        },
+      ],
+    });
+    const result = await repairProjectLifecycleSessions({
+      projectDir: root,
+      projectRoot: root,
+      boundary: { ...f.boundary, readPanes: () => Promise.resolve([]) },
+    });
+    expect(f.stopped()).toBe(false);
+    expect(result.repairedSessions).toEqual([]);
+    expect(result.failures[0]).toContain(
+      "Recorded lifecycle identity remains alive outside current mux windows"
+    );
+    expect(await readLifecycleState({ projectDir: root })).toEqual([f.entry]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("doctor repair cannot remove ownership or return before ordered retirement", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-repair-gate-"));

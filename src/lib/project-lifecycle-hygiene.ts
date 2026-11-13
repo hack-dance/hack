@@ -215,7 +215,7 @@ export async function repairProjectLifecycleSessions(opts: {
     readonly inspect?: typeof inspectProjectLifecycleHygiene;
     readonly backends?: typeof getMuxBackends;
     readonly inspectSession?: typeof inspectLifecycleSession;
-    readonly readPanePids?: typeof readRepairPanePids;
+    readonly readPanes?: typeof readRepairPanes;
     readonly retireSession?: ReturnType<
       typeof createLifecycleSessionRetirement
     >;
@@ -225,7 +225,7 @@ export async function repairProjectLifecycleSessions(opts: {
     inspect = inspectProjectLifecycleHygiene,
     backends = getMuxBackends,
     inspectSession = inspectLifecycleSession,
-    readPanePids = readRepairPanePids,
+    readPanes = readRepairPanes,
     retireSession,
   } = opts.boundary ?? {};
   const initial = await inspect(opts);
@@ -268,7 +268,7 @@ export async function repairProjectLifecycleSessions(opts: {
     try {
       const processes = await readRepairPaneIdentities({
         entry: orphan.entry,
-        readPanePids,
+        readPanes,
       });
       killed = await (retireSession ?? createLifecycleSessionRetirement())({
         processes,
@@ -315,57 +315,104 @@ function repairFailureMessage(error: unknown): string {
 /** Refresh only panes belonging to the already ownership-proven mux windows. */
 async function readRepairPaneIdentities(opts: {
   readonly entry: LifecycleStateEntry;
-  readonly readPanePids: typeof readRepairPanePids;
+  readonly readPanes: typeof readRepairPanes;
 }): Promise<
   readonly { readonly panePid?: number; readonly paneBirth?: string }[]
 > {
   if (opts.entry.backend !== "tmux") {
     return opts.entry.processes;
   }
-  const panes = await Promise.all(
-    opts.entry.processes.map((process) =>
-      opts.readPanePids({
-        sessionName: opts.entry.sessionName,
-        windowName: process.windowName,
-      })
-    )
+  const windows = new Set(
+    opts.entry.processes.map((process) => process.windowName)
   );
+  const panes = (
+    await opts.readPanes({ sessionName: opts.entry.sessionName })
+  ).filter((pane) => windows.has(pane.windowName));
+  const hasRecordedIdentity = opts.entry.processes.some(
+    (process) => process.paneBirth || process.processGroupBirth
+  );
+  if (panes.length === 0 && !hasRecordedIdentity) {
+    return [];
+  }
   const identities = await readProcessIdentities();
-  return panes.flatMap((pids) =>
-    pids.map((panePid) => ({
-      panePid,
-      paneBirth: identities.find((row) => row.pid === panePid)?.birth,
-    }))
-  );
+  if (
+    identities.length === 0 ||
+    panes.some((pane) => !identities.some((row) => row.pid === pane.panePid))
+  ) {
+    throw new Error(
+      "Current lifecycle pane identity is unavailable before repair"
+    );
+  }
+  const liveWindows = new Set(panes.map((pane) => pane.windowName));
+  if (
+    opts.entry.processes.some(
+      (process) =>
+        !liveWindows.has(process.windowName) &&
+        identities.some(
+          (row) =>
+            (process.paneBirth &&
+              row.pid === process.panePid &&
+              row.birth === process.paneBirth) ||
+            (process.processGroupBirth &&
+              row.pid === process.processGroupId &&
+              row.birth === process.processGroupBirth)
+        )
+    )
+  ) {
+    throw new Error(
+      "Recorded lifecycle identity remains alive outside current mux windows; retirement is unconfirmed"
+    );
+  }
+  return panes.map(({ panePid }) => ({
+    panePid,
+    paneBirth: identities.find((row) => row.pid === panePid)?.birth,
+  }));
 }
 
-async function readRepairPanePids(opts: {
+async function readRepairPanes(opts: {
   readonly sessionName: string;
-  readonly windowName: string;
-}): Promise<readonly number[]> {
-  const result = await runMuxCommand([
-    "tmux",
-    "list-panes",
-    "-t",
-    `${opts.sessionName}:${opts.windowName}`,
-    "-F",
-    "#{pane_pid}",
-  ]);
+}): Promise<
+  readonly { readonly panePid: number; readonly windowName: string }[]
+> {
+  const result = await runMuxCommand(
+    [
+      "tmux",
+      "list-panes",
+      "-s",
+      "-t",
+      `=${opts.sessionName}`,
+      "-F",
+      "#{pane_pid}\t#{window_name}",
+    ],
+    { maxStdoutBytes: 256 * 1024 }
+  );
   if (result.exitCode !== 0) {
     throw new Error(
       "Could not read current lifecycle pane identity before repair"
     );
   }
-  const pids = result.stdout
-    .split("\n")
-    .map((line) => Number(line.trim()))
-    .filter((pid) => Number.isInteger(pid) && pid > 1);
-  if (pids.length === 0) {
+  const lines = result.stdout.split("\n").filter((line) => line.length > 0);
+  if (lines.length === 0) {
     throw new Error(
       "Current lifecycle pane identity is unavailable before repair"
     );
   }
-  return pids;
+  return lines.map((line) => {
+    const fields = line.split("\t");
+    const panePid = Number(fields[0]);
+    const windowName = fields[1];
+    if (
+      fields.length !== 2 ||
+      !Number.isInteger(panePid) ||
+      panePid <= 1 ||
+      !windowName
+    ) {
+      throw new Error(
+        "Current lifecycle pane inventory is invalid before repair"
+      );
+    }
+    return { panePid, windowName };
+  });
 }
 
 /** Retained group identities cannot authorize signals after their owner changes. */

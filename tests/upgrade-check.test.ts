@@ -1115,6 +1115,26 @@ test("store-only overlays are found under a name set in the legacy hack.toml", a
   );
 });
 
+test("a project directory that cannot be listed is a snapshot gap, not an empty inventory", async () => {
+  if (process.getuid?.() === 0) {
+    return; // root lists any directory
+  }
+  const project = await liveProject("app-unlisted");
+  await writeFile(join(project.projectDir, ".env"), `TOKEN=${SENTINEL}\n`);
+  await writeRegistry([project]);
+  // Searchable (its config still reads) but not listable.
+  await chmod(project.projectDir, 0o300);
+  try {
+    const collected = await collectUpgradeSnapshotTargets();
+    expect(collected.gaps).toContainEqual({
+      name: "app-unlisted",
+      reason: expect.stringContaining("could not be listed"),
+    });
+  } finally {
+    await chmod(project.projectDir, 0o755);
+  }
+});
+
 test("a config path that is a FIFO is refused at once, never waited on", async () => {
   const project = entry("app-fifo");
   await mkdir(project.projectDir, { recursive: true });

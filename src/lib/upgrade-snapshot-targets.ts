@@ -184,7 +184,15 @@ async function projectCandidates(opts: {
 }> {
   const dirName = basename(opts.projectDir);
   const label = (file: string) => `project ${opts.name}: ${dirName}/${file}`;
-  const names = await readdir(opts.projectDir).catch(() => [] as string[]);
+  // An inventory that cannot be read is unknown, not empty: a gap.
+  const listed = await readdir(opts.projectDir).then(
+    (entries) => ({ names: entries, gap: null as string | null }),
+    () => ({
+      names: [] as string[],
+      gap: `its ${basename(opts.projectDir)}/ directory could not be listed, so its env files and layers may be missing from this snapshot`,
+    })
+  );
+  const names = listed.names;
   const envFiles = names.filter(
     (name) =>
       name === PROJECT_ENV_FILENAME ||
@@ -254,7 +262,9 @@ async function projectCandidates(opts: {
           label: `project ${opts.name}: ${relative(opts.root, key.path)} (env key)`,
         })),
     ],
-    gap: migration.gap,
+    gap:
+      [listed.gap, migration.gap].filter((gap) => gap !== null).join("; ") ||
+      null,
   };
 }
 

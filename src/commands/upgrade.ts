@@ -16,6 +16,7 @@ import {
   runUpgradeCheck,
   type UpgradeCheckReport,
   type UpgradeFinding,
+  upgradeCommandPrefix,
 } from "../lib/upgrade-check.ts";
 import { defaultUpgradeCheckProbes } from "../lib/upgrade-check-probes.ts";
 import {
@@ -113,6 +114,14 @@ export const upgradeCommand = defineCommand({
     withHandler(rollbackSpec, handleUpgradeRollback),
   ],
 } as const);
+
+/** How printed commands run this CLI (the candidate launcher during the prerelease). */
+function commandPrefix(): string {
+  return upgradeCommandPrefix({
+    env: process.env,
+    homeDir: resolveUserHomeDir(),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // check
@@ -234,7 +243,7 @@ async function handleUpgradeSnapshot({
     return 1;
   }
   const { snapshot } = created;
-  const rollback = `hack upgrade rollback --rollback-manifest ${quoteShellWord(snapshot.manifestPath)}`;
+  const rollback = `${commandPrefix()} upgrade rollback --rollback-manifest ${quoteShellWord(snapshot.manifestPath)}`;
   if (json) {
     emitCliResult({
       result: okResult({
@@ -304,12 +313,14 @@ async function handleUpgradeRollback({
     } else {
       const lines =
         snapshots.length === 0
-          ? ["No upgrade snapshots. Make one with: hack upgrade snapshot"]
+          ? [
+              `No upgrade snapshots. Make one with: ${commandPrefix()} upgrade snapshot`,
+            ]
           : [
               "Choose a snapshot to restore (nothing was changed):",
               ...snapshots.map(
                 (snapshot) =>
-                  `  ${snapshot.manifest.createdAt}  ${snapshot.manifest.purpose} (${snapshot.manifest.entries.length} file(s))\n    hack upgrade rollback --rollback-manifest ${quoteShellWord(snapshot.manifestPath)}`
+                  `  ${snapshot.manifest.createdAt}  ${snapshot.manifest.purpose} (${snapshot.manifest.entries.length} file(s))\n    ${commandPrefix()} upgrade rollback --rollback-manifest ${quoteShellWord(snapshot.manifestPath)}`
               ),
             ];
       process.stdout.write(

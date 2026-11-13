@@ -54,9 +54,41 @@ export type RegistryEntryState =
   /** It exists but cannot be read: a live project to repair, not prune. */
   | { readonly state: "unreadable"; readonly reason: string };
 
-/** Classifies a registered project from its files only. */
-export async function classifyRegistryEntry(
+/**
+ * One registered checkout: a project's primary checkout or one of its
+ * registered linked worktrees, each checked on its own.
+ */
+export type RegisteredCheckout = {
+  /** The project name, with ` (worktree <dir>)` for a linked worktree. */
+  readonly name: string;
+  readonly repoRoot: string;
+  readonly projectDir: string;
+  readonly projectDirName: string;
+};
+
+/** A registered project's primary checkout and its registered worktrees. */
+export function registeredCheckouts(
   project: RegisteredProject
+): RegisteredCheckout[] {
+  return [
+    {
+      name: project.name,
+      repoRoot: project.repoRoot,
+      projectDir: project.projectDir,
+      projectDirName: project.projectDirName,
+    },
+    ...(project.worktrees ?? []).map((worktree) => ({
+      name: `${project.name} (worktree ${basename(worktree.path)})`,
+      repoRoot: worktree.path,
+      projectDir: resolve(worktree.path, project.projectDirName),
+      projectDirName: project.projectDirName,
+    })),
+  ];
+}
+
+/** Classifies a registered checkout from its files only. */
+export async function classifyRegistryEntry(
+  project: RegisteredCheckout
 ): Promise<RegistryEntryState> {
   const root = await statState(project.repoRoot);
   if (root === "absent") {
@@ -415,7 +447,7 @@ const PROJECT_CHECK_TIMEOUT_MS = 8000;
 
 /** The findings for one live project, in a fixed order. */
 export async function inspectUpgradeProject(opts: {
-  readonly project: RegisteredProject;
+  readonly project: RegisteredCheckout;
   readonly homeDir: string;
   readonly nativePreflight: (opts: {
     readonly projectRoot: string;

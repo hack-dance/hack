@@ -2,6 +2,7 @@ import { lstat, readdir } from "node:fs/promises";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 
 import {
+  PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_CONFIG_FILENAME_PREFIX,
   PROJECT_ENV_CONFIG_FILENAME_SUFFIX,
@@ -15,7 +16,10 @@ import {
   resolveProjectsRegistryPath,
 } from "./projects-registry.ts";
 import { resolveFileSecretStorePaths } from "./secret-store.ts";
-import { classifyRegistryEntry } from "./upgrade-check-project.ts";
+import {
+  classifyRegistryEntry,
+  registeredCheckouts,
+} from "./upgrade-check-project.ts";
 import type { UpgradeSnapshotTarget } from "./upgrade-snapshot.ts";
 
 /**
@@ -25,9 +29,11 @@ import type { UpgradeSnapshotTarget } from "./upgrade-snapshot.ts";
  * registered project: its `.hack/` config, env contract, dotenv files, YAML
  * env layers, `.hack/.gitignore`, and env key files inside the checkout.
  *
- * Only existing regular files are listed; a link or other entry at one of
- * these paths is reported in `skipped` and never followed. A step that
- * creates new files snapshots those paths itself, through the library.
+ * Existing regular files are kept; a path that does not exist yet (an env
+ * layer the migration creates) is recorded as absent, so a rollback moves
+ * aside what a step put there. A link or other entry at one of these paths
+ * is reported in `skipped` and never followed. A step that writes other
+ * files snapshots them itself, through the library.
  */
 export async function collectUpgradeSnapshotTargets(): Promise<{
   readonly targets: readonly UpgradeSnapshotTarget[];
@@ -50,7 +56,9 @@ export async function collectUpgradeSnapshotTargets(): Promise<{
   }
   const registry = await readProjectsRegistryStrict().catch(() => null);
   if (registry?.kind === "valid") {
-    for (const project of registry.registry.projects) {
+    for (const project of registry.registry.projects.flatMap(
+      registeredCheckouts
+    )) {
       if ((await classifyRegistryEntry(project)).state !== "live") {
         continue;
       }
@@ -82,6 +90,9 @@ export async function collectUpgradeSnapshotTargets(): Promise<{
         : ("error" as const)
     );
     if (entry === null) {
+      // Absent now: recorded as absent, so a rollback moves aside what a
+      // step creates there.
+      targets.push({ path, label: candidate.label });
       continue;
     }
     if (entry === "error") {
@@ -96,6 +107,8 @@ export async function collectUpgradeSnapshotTargets(): Promise<{
   }
   return { targets, skipped };
 }
+
+const LEGACY_OVERLAY = /^\.env\.([A-Za-z0-9_-]+)$/u;
 
 async function projectCandidates(opts: {
   readonly name: string;
@@ -112,11 +125,30 @@ async function projectCandidates(opts: {
       (name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
         name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX))
   );
+  // What the env migration writes or creates: the YAML layers (base,
+  // machine-local, and one pair per legacy overlay), the config, the
+  // Compose file it repairs, and .hack/.gitignore; absent ones are recorded
+  // as absent.
+  const overlays = names.flatMap((name) => {
+    const match = LEGACY_OVERLAY.exec(name);
+    return match?.[1] && match[1] !== "state" ? [match[1]] : [];
+  });
+  const layers = [
+    "hack.env.default.yaml",
+    "hack.env.local.yaml",
+    "hack.env.default.local.yaml",
+    ...overlays.flatMap((overlay) => [
+      `hack.env.${overlay}.yaml`,
+      `hack.env.${overlay}.local.yaml`,
+    ]),
+  ];
   const files = [
     PROJECT_CONFIG_FILENAME,
     PROJECT_ENV_CONTRACT_FILENAME,
+    PROJECT_COMPOSE_FILENAME,
     ".gitignore",
     ...envFiles,
+    ...layers,
   ];
   const keys = await resolveEnvKeyCandidates({ projectRoot: opts.root }).catch(
     () => []

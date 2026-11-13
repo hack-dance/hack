@@ -72,6 +72,7 @@ type Entry = {
   projectDirName: ".hack";
   projectDir: string;
   createdAt: string;
+  worktrees?: { path: string; branch: string; lastSeenAt: string }[];
 };
 
 function entry(name: string): Entry {
@@ -297,6 +298,7 @@ test("a host with nothing to do is ready, with no plan and no next command", asy
     version: "5.0.0-next.17",
     channel: "next",
     candidate_run: false,
+    command: "hack",
   });
 });
 
@@ -423,6 +425,60 @@ test("tracked machine-local files and a missing .hack/.gitignore are steps, a tr
   expect(JSON.stringify(blocked)).not.toContain(SENTINEL);
 });
 
+test("a registered linked worktree is checked on its own and can block", async () => {
+  const project = await liveProject("app-wt");
+  const worktreeRoot = join(root, "worktrees", "feature");
+  const worktreeDir = join(worktreeRoot, ".hack");
+  await mkdir(worktreeDir, { recursive: true });
+  await writeFile(
+    join(worktreeDir, "hack.config.json"),
+    `${JSON.stringify({ name: "app-wt" })}\n`
+  );
+  await symlink(
+    join(root, "nowhere.yaml"),
+    join(worktreeDir, "hack.env.default.yaml")
+  );
+  await writeRegistry([
+    {
+      ...project,
+      worktrees: [
+        {
+          path: worktreeRoot,
+          branch: "feature",
+          lastSeenAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    },
+  ]);
+  const report = await check(healthyProbes());
+  expect(report.registry.live).toBe(2);
+  expect(report.ready).toBe(false);
+  expect(report.blockers.map((b) => b.scope)).toEqual([
+    "app-wt (worktree feature)",
+  ]);
+});
+
+test("printed commands run the candidate launcher when the check ran through it", async () => {
+  const legacy = await liveProject("app-legacy");
+  await writeFile(join(legacy.projectDir, "hack.env.json"), "{}\n");
+  await writeRegistry([legacy]);
+  const report = await runUpgradeCheck({
+    cliVersion: "5.0.0-next.17",
+    homeDir: home,
+    probes: healthyProbes(),
+    env: {
+      HACK_CANDIDATE_ENTRYPOINT: "hack-next",
+      HACK_RUNTIME_BACKEND: "compose",
+    },
+  });
+  const launcher = `HACK_RUNTIME_BACKEND=compose ${join(home, ".hack-next", "bin", "hack-next")}`;
+  expect(report.cli.command).toBe(launcher);
+  expect(report.next_command).toBe(`${launcher} upgrade snapshot`);
+  for (const step of report.plan) {
+    expect(step.command.startsWith(`${launcher} `)).toBe(true);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -498,19 +554,29 @@ test("hack upgrade snapshot, then rollback restores exact bytes; a changed file 
       };
     }
   ).data;
-  expect(snapshot.files.map((f) => f.label).sort()).toEqual([
+  const labels = snapshot.files.map((f) => f.label);
+  for (const label of [
     "global: projects.json",
     "project app-a: .hack/.env",
     "project app-a: .hack/hack.config.json",
-  ]);
+    // The env migration's write set, recorded even while absent.
+    "project app-a: .hack/docker-compose.yml",
+    "project app-a: .hack/hack.env.default.yaml",
+    "project app-a: .hack/.gitignore",
+  ]) {
+    expect(labels).toContain(label);
+  }
   expect(made.output).not.toContain(SENTINEL);
   expect(await readFile(snapshot.manifest_path, "utf8")).not.toContain(
     SENTINEL
   );
 
-  // Change one file and delete another, as a manual upgrade step might.
+  // Change one file, delete another and create a layer, as the env
+  // migration does.
   await writeFile(configPath, '{"name":"app-a","v":5}\n');
   await rm(envPath);
+  const layerPath = join(project.projectDir, "hack.env.default.yaml");
+  await writeFile(layerPath, "vars: {}\n");
 
   // Without --overwrite, the changed config is refused; the deleted .env is
   // put back only with --overwrite too (no step recorded what it wrote).
@@ -535,6 +601,8 @@ test("hack upgrade snapshot, then rollback restores exact bytes; a changed file 
   expect(restored.code).toBe(0);
   expect(await readFile(envPath)).toEqual(envBefore);
   expect(await readFile(configPath)).toEqual(configBefore);
+  // The created layer is moved into the snapshot, not left in place.
+  expect(await lstat(layerPath).catch(() => null)).toBeNull();
   expect(restored.output).not.toContain(SENTINEL);
 
   // Without a manifest it lists snapshots and changes nothing.

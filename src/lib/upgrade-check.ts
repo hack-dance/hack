@@ -1,6 +1,8 @@
+import { join } from "node:path";
+
 import { isCandidateRun } from "../daemon/client.ts";
+import { quoteShellWord } from "./logs.ts";
 import {
-  type RegisteredProject,
   readProjectsRegistryStrict,
   resolveProjectsRegistryPath,
 } from "./projects-registry.ts";
@@ -17,6 +19,8 @@ import type { UpgradeCheckProbes } from "./upgrade-check-probes.ts";
 import {
   classifyRegistryEntry,
   inspectUpgradeProject,
+  type RegisteredCheckout,
+  registeredCheckouts,
   type UpgradeFinding,
 } from "./upgrade-check-project.ts";
 
@@ -43,6 +47,39 @@ export type {
  */
 
 export const UPGRADE_CHECK_REPORT_VERSION = 1;
+
+/**
+ * How to run the CLI that produced the report. During the prerelease, v5
+ * runs through a candidate launcher while stable v4 stays `hack` on PATH,
+ * so a bare `hack` in a printed command would run the old CLI. The
+ * `hack-next` launcher lives at `~/.hack-next/bin/hack-next` (not on PATH);
+ * a Compose candidate run also needs `HACK_RUNTIME_BACKEND=compose`.
+ */
+export function upgradeCommandPrefix(opts: {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly homeDir: string;
+}): string {
+  const entry = (opts.env.HACK_CANDIDATE_ENTRYPOINT ?? "").trim();
+  if (entry === "") {
+    return "hack";
+  }
+  const launcher =
+    entry === "hack-next"
+      ? quoteShellWord(join(opts.homeDir, ".hack-next", "bin", "hack-next"))
+      : quoteShellWord(entry);
+  return (opts.env.HACK_RUNTIME_BACKEND ?? "").trim() === "compose"
+    ? `HACK_RUNTIME_BACKEND=compose ${launcher}`
+    : launcher;
+}
+
+const HACK_COMMAND = /(^|[\s(:`])hack (?=[a-z])/gu;
+
+/** `text` with every `hack <subcommand>` run through `prefix`. */
+export function withUpgradeCommandPrefix(text: string, prefix: string): string {
+  return prefix === "hack"
+    ? text
+    : text.replace(HACK_COMMAND, (_match, lead: string) => `${lead}${prefix} `);
+}
 
 export type UpgradePlanStep = {
   readonly order: number;
@@ -71,6 +108,8 @@ export type UpgradeCheckReport = {
     readonly version: string;
     readonly channel: "stable" | "next";
     readonly candidate_run: boolean;
+    /** How the printed commands run this CLI (`hack`, or the candidate launcher). */
+    readonly command: string;
   };
   readonly machine: readonly UpgradeFinding[];
   readonly registry: {
@@ -120,6 +159,11 @@ export async function runUpgradeCheck(opts: {
   const now = opts.now ?? Date.now;
   const started = now();
   const env = opts.env ?? process.env;
+  const prefix = upgradeCommandPrefix({ env, homeDir: opts.homeDir });
+  const prefixed = (finding: UpgradeFinding): UpgradeFinding =>
+    finding.fix === null
+      ? finding
+      : { ...finding, fix: withUpgradeCommandPrefix(finding.fix, prefix) };
   const [registry, machine] = await Promise.all([
     inspectRegistry(),
     inspectMachine({ probes: opts.probes, cliVersion: opts.cliVersion }),
@@ -148,10 +192,13 @@ export async function runUpgradeCheck(opts: {
       reason: entry.reason,
       findings: [],
     }));
-  const allProjects = [...projects, ...unreadableProjects].sort((a, b) =>
-    a.name.localeCompare(b.name)
-  );
-  const machineFindings = [...machine, ...registry.findings];
+  const allProjects = [...projects, ...unreadableProjects]
+    .map((project) => ({
+      ...project,
+      findings: project.findings.map(prefixed),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const machineFindings = [...machine, ...registry.findings].map(prefixed);
   const blockers = [
     ...machineFindings
       .filter((finding) => finding.status === "blocker")
@@ -170,7 +217,11 @@ export async function runUpgradeCheck(opts: {
         }))
     ),
   ];
-  const plan = buildPlan({ machine: machineFindings, projects: allProjects });
+  const plan = buildPlan({
+    machine: machineFindings,
+    projects: allProjects,
+    prefix,
+  });
   const version = opts.cliVersion;
   return {
     report_version: UPGRADE_CHECK_REPORT_VERSION,
@@ -180,6 +231,7 @@ export async function runUpgradeCheck(opts: {
       version,
       channel: version.includes("-next.") ? "next" : "stable",
       candidate_run: isCandidateRun(env),
+      command: prefix,
     },
     machine: machineFindings,
     registry: registry.report,
@@ -197,7 +249,7 @@ export async function runUpgradeCheck(opts: {
 
 async function inspectRegistry(): Promise<{
   readonly report: UpgradeCheckReport["registry"];
-  readonly live: readonly RegisteredProject[];
+  readonly live: readonly RegisteredCheckout[];
   readonly findings: readonly UpgradeFinding[];
 }> {
   const empty = {
@@ -254,7 +306,9 @@ async function inspectRegistry(): Promise<{
       ],
     };
   }
-  const projects = read.registry.projects;
+  const entries = read.registry.projects;
+  // Every registered checkout: each project's primary and linked worktrees.
+  const projects = entries.flatMap(registeredCheckouts);
   const states = await mapLimit(projects, 16, async (project) => ({
     project,
     state: await classifyRegistryEntry(project),
@@ -288,7 +342,7 @@ async function inspectRegistry(): Promise<{
   findings.push({
     id: "registry",
     status: "ok",
-    summary: `${projects.length} registered project(s): ${live.length} live, ${missing.length} dead, ${unreadable.length} unreadable.`,
+    summary: `${entries.length} registered project(s), ${projects.length} checkout(s) with worktrees: ${live.length} live, ${missing.length} dead, ${unreadable.length} unreadable.`,
     fix: null,
   });
   if (missing.length > 0) {
@@ -617,6 +671,7 @@ const PROJECT_ORDER = [
 function buildPlan(opts: {
   readonly machine: readonly UpgradeFinding[];
   readonly projects: readonly UpgradeProjectReport[];
+  readonly prefix: string;
 }): UpgradePlanStep[] {
   type Draft = Omit<UpgradePlanStep, "order">;
   const actionable = (finding: UpgradeFinding) =>
@@ -659,8 +714,8 @@ function buildPlan(opts: {
           {
             id: "snapshot",
             scope: "machine",
-            command: "hack upgrade snapshot",
-            why: "Keep a copy of the files the next steps change, so `hack upgrade rollback` can put them back.",
+            command: `${opts.prefix} upgrade snapshot`,
+            why: "Keep a copy of the files the next steps change, so the upgrade rollback command can put them back.",
             blocker: false,
           },
         ]

@@ -1,5 +1,5 @@
 import { constants, type Stats } from "node:fs";
-import { lstat, open, readdir, stat } from "node:fs/promises";
+import { lstat, open, readdir, realpath, stat } from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -120,6 +120,14 @@ export type SecretsHygieneScope = {
   readonly stores: readonly {
     readonly storePath: string;
     readonly keyPath: string;
+    /**
+     * For paths a project's own configuration chose (it may come from a
+     * cloned repository): fixes and leftover sweeps apply only to files
+     * whose directory resolves inside one of these roots (the checkout and
+     * the Hack home); elsewhere the finding is reported without a fix.
+     * Absent for the user's global configuration.
+     */
+    readonly fixRoots?: readonly string[];
   }[];
   /** Parent of terminal-session payloads; the OS temporary directory. */
   readonly tmpDir?: string;
@@ -136,6 +144,31 @@ const HACK_DIR_STAGED =
 /** Whether a `relative()` result leaves its base (`..` as a path segment). */
 function isOutside(rel: string): boolean {
   return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
+/**
+ * Whether `path`'s directory resolves (links followed) inside one of
+ * `roots`; with no roots, any path qualifies. A directory that can't be
+ * resolved does not.
+ */
+async function fixAllowed(opts: {
+  readonly path: string;
+  readonly roots: readonly string[] | undefined;
+}): Promise<boolean> {
+  if (!opts.roots) {
+    return true;
+  }
+  const dir = await realpath(dirname(opts.path)).catch(() => null);
+  if (!dir) {
+    return false;
+  }
+  for (const root of opts.roots) {
+    const real = await realpath(root).catch(() => null);
+    if (real && (dir === real || !isOutside(relative(real, dir)))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function octal(mode: number): string {
@@ -401,83 +434,115 @@ async function storeFindings(opts: {
   return findings;
 }
 
-/** All findings for a scope; reads metadata, listings and git only. */
-export async function inspectSecretsHygiene(
-  scope: SecretsHygieneScope
-): Promise<readonly SecretsHygieneFinding[]> {
-  const now = scope.now ?? Date.now();
+/** Findings for the project's `.hack`, its root key, and their leftovers. */
+async function projectFindings(opts: {
+  readonly project: NonNullable<SecretsHygieneScope["project"]>;
+  readonly now: number;
+}): Promise<SecretsHygieneFinding[]> {
+  const { project, now } = opts;
   const findings: SecretsHygieneFinding[] = [];
-  if (scope.project) {
-    // Env writers refuse a linked `.hack`; so does this inspection, so no
-    // fix can reach files outside the project through it.
-    const projectDir = await lstat(scope.project.projectDir).catch(() => null);
-    const inspectProjectDir =
-      projectDir?.isDirectory() === true && !projectDir.isSymbolicLink();
-    if (projectDir && !inspectProjectDir) {
-      findings.push({
-        status: "error",
-        path: scope.project.projectDir,
-        message: `${shown(scope.project.projectDir, scope.project)} is a symbolic link or not a directory; Hack does not read, write or fix env files through it. Replace it with a regular directory.`,
-        fix: null,
-      });
-    }
-    for (const candidate of await projectCandidates({
-      project: scope.project,
-      inspectProjectDir,
-    })) {
-      findings.push(
-        ...(await candidateFindings({ candidate, project: scope.project }))
-      );
-    }
-    if (inspectProjectDir) {
-      findings.push(
-        ...(await leftoverFindings({
-          directory: scope.project.projectDir,
-          names: [".env", "hack.env.local.yaml"],
-          accept: HACK_DIR_STAGED,
-          now,
-          project: scope.project,
-        }))
-      );
-    }
+  // Env writers refuse a linked `.hack`; so does this inspection, so no fix
+  // can reach files outside the project through it.
+  const projectDir = await lstat(project.projectDir).catch(() => null);
+  const inspectProjectDir =
+    projectDir?.isDirectory() === true && !projectDir.isSymbolicLink();
+  if (projectDir && !inspectProjectDir) {
+    findings.push({
+      status: "error",
+      path: project.projectDir,
+      message: `${shown(project.projectDir, project)} is a symbolic link or not a directory; Hack does not read, write or fix env files through it. Replace it with a regular directory.`,
+      fix: null,
+    });
+  }
+  for (const candidate of await projectCandidates({
+    project,
+    inspectProjectDir,
+  })) {
+    findings.push(...(await candidateFindings({ candidate, project })));
+  }
+  if (inspectProjectDir) {
     findings.push(
       ...(await leftoverFindings({
-        directory: scope.project.projectRoot,
-        names: [PROJECT_ENV_KEY_FILENAME],
+        directory: project.projectDir,
+        names: [".env", "hack.env.local.yaml"],
+        accept: HACK_DIR_STAGED,
         now,
-        project: scope.project,
+        project,
       }))
     );
   }
-  if (scope.sharedKeyPath) {
-    const candidate: Candidate = {
-      path: scope.sharedKeyPath,
-      holds: "the project env key",
-      ignore: null,
-    };
-    findings.push(
-      ...(await candidateFindings({ candidate, project: null })),
-      ...(await leftoverFindings({
-        directory: dirname(scope.sharedKeyPath),
-        names: [basename(scope.sharedKeyPath)],
-        now,
-        project: null,
-      }))
-    );
+  findings.push(
+    ...(await leftoverFindings({
+      directory: project.projectRoot,
+      names: [PROJECT_ENV_KEY_FILENAME],
+      now,
+      project,
+    }))
+  );
+  return findings;
+}
+
+async function sharedKeyFindings(opts: {
+  readonly path: string;
+  readonly now: number;
+}): Promise<SecretsHygieneFinding[]> {
+  const candidate: Candidate = {
+    path: opts.path,
+    holds: "the project env key",
+    ignore: null,
+  };
+  return [
+    ...(await candidateFindings({ candidate, project: null })),
+    ...(await leftoverFindings({
+      directory: dirname(opts.path),
+      names: [basename(opts.path)],
+      now: opts.now,
+      project: null,
+    })),
+  ];
+}
+
+/** A store finding, without its fix when its path is outside the store's fix roots. */
+async function withinFixRoots(opts: {
+  readonly finding: SecretsHygieneFinding;
+  readonly roots: readonly string[] | undefined;
+}): Promise<SecretsHygieneFinding> {
+  const { finding } = opts;
+  if (
+    !finding.fix ||
+    (await fixAllowed({ path: finding.path, roots: opts.roots }))
+  ) {
+    return finding;
   }
+  return {
+    ...finding,
+    message: `${finding.message} --fix leaves it: the project's configuration names this path, which is outside the project and the Hack home.`,
+    fix: null,
+  };
+}
+
+async function allStoreFindings(opts: {
+  readonly scope: SecretsHygieneScope;
+  readonly now: number;
+}): Promise<SecretsHygieneFinding[]> {
+  const { scope } = opts;
+  const findings: SecretsHygieneFinding[] = [];
   const storeDirs = new Map<string, Set<string>>();
   for (const store of scope.stores) {
-    findings.push(
-      ...(await storeFindings({
-        store,
-        storeKeyFromEnvironment: scope.storeKeyFromEnvironment,
-        project: scope.project,
-      }))
-    );
+    for (const finding of await storeFindings({
+      store,
+      storeKeyFromEnvironment: scope.storeKeyFromEnvironment,
+      project: scope.project,
+    })) {
+      findings.push(await withinFixRoots({ finding, roots: store.fixRoots }));
+    }
     for (const path of [store.storePath, store.keyPath]) {
-      const names = storeDirs.get(dirname(path)) ?? new Set<string>();
-      names.add(basename(path));
-      storeDirs.set(dirname(path), names);
+      // Leftovers are swept only where a fix is allowed.
+      if (await fixAllowed({ path, roots: store.fixRoots })) {
+        const names = storeDirs.get(dirname(path)) ?? new Set<string>();
+        names.add(basename(path));
+        storeDirs.set(dirname(path), names);
+      }
     }
   }
   for (const [directory, names] of storeDirs) {
@@ -485,11 +550,28 @@ export async function inspectSecretsHygiene(
       ...(await leftoverFindings({
         directory,
         names: [...names],
-        now,
+        now: opts.now,
         project: null,
       }))
     );
   }
+  return findings;
+}
+
+/** All findings for a scope; reads metadata, listings and git only. */
+export async function inspectSecretsHygiene(
+  scope: SecretsHygieneScope
+): Promise<readonly SecretsHygieneFinding[]> {
+  const now = scope.now ?? Date.now();
+  const findings: SecretsHygieneFinding[] = [
+    ...(scope.project
+      ? await projectFindings({ project: scope.project, now })
+      : []),
+    ...(scope.sharedKeyPath
+      ? await sharedKeyFindings({ path: scope.sharedKeyPath, now })
+      : []),
+    ...(await allStoreFindings({ scope, now })),
+  ];
   for (const stale of await findStaleMuxEnvironments({
     ...(scope.tmpDir ? { tmpDir: scope.tmpDir } : {}),
     now,

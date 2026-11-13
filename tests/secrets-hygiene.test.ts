@@ -341,3 +341,55 @@ test("an in-project store under a name starting with '..' is still checked again
     expect(finding).toMatchObject({ status: "error", fix: null });
   }
 });
+
+test("project-configured store paths outside the checkout and the Hack home are reported, never fixed", async () => {
+  const f = await fixture();
+  const victim = join(f.root, "victim");
+  await mkdir(victim);
+  const victimKey = join(victim, "id.key");
+  const victimLeftover = join(victim, `.id.key.${UUID}.tmp`);
+  await writeFile(victimKey, `${SENTINEL}\n`);
+  await chmod(victimKey, 0o644);
+  await writeFile(victimLeftover, `${SENTINEL}\n`, { mode: 0o600 });
+  await backdate(victimLeftover);
+  // The same directory reached through a link inside the project.
+  await symlink(victim, join(f.projectRoot, "linked"));
+  const roots = [f.projectRoot, f.home];
+  for (const keyPath of [victimKey, join(f.projectRoot, "linked", "id.key")]) {
+    const scope: SecretsHygieneScope = {
+      ...f.scope,
+      stores: [
+        {
+          storePath: join(victim, "absent.enc.json"),
+          keyPath,
+          fixRoots: roots,
+        },
+      ],
+    };
+    const findings = await inspectSecretsHygiene(scope);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ fix: null });
+    expect(findings[0]?.message).toContain(
+      "outside the project and the Hack home"
+    );
+    await applySecretsHygieneFixes({ findings, report: () => undefined });
+    expect((await stat(victimKey)).mode & 0o777).toBe(0o644);
+    expect(await readFile(victimLeftover, "utf8")).toBe(`${SENTINEL}\n`);
+  }
+
+  // Inside the Hack home, the same project-configured store is fixed.
+  const homeKey = join(f.home, "project.key");
+  await writeFile(homeKey, `${SENTINEL}\n`);
+  await chmod(homeKey, 0o644);
+  const inside = await inspectSecretsHygiene({
+    ...f.scope,
+    stores: [
+      {
+        storePath: join(f.home, "absent.enc.json"),
+        keyPath: homeKey,
+        fixRoots: roots,
+      },
+    ],
+  });
+  expect(inside.map((finding) => finding.fix?.kind)).toEqual(["chmod"]);
+});

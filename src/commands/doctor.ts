@@ -3581,14 +3581,24 @@ async function resolveSecretsHygieneScope(opts: {
   const project = await findDoctorLegacyProjectContext(opts.startDir).catch(
     () => null
   );
-  const stores = new Map<string, { storePath: string; keyPath: string }>();
+  const stores = new Map<string, SecretsHygieneScope["stores"][number]>();
   for (const projectDir of [undefined, project?.projectDir]) {
     const paths = await resolveFileSecretStorePaths({ projectDir }).catch(
       () => null
     );
-    if (paths) {
-      stores.set(`${paths.storePath}\0${paths.keyPath}`, paths);
+    const key = paths ? `${paths.storePath}\0${paths.keyPath}` : null;
+    if (!(paths && key) || stores.has(key)) {
+      continue;
     }
+    // Paths only a project's configuration chose (a cloned repository's
+    // may name any file of the user's) are fixed only inside the checkout
+    // or the Hack home.
+    stores.set(
+      key,
+      projectDir && project
+        ? { ...paths, fixRoots: [project.projectRoot, resolveGlobalHackDir()] }
+        : paths
+    );
   }
   return {
     project: project

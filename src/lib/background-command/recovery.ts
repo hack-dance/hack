@@ -367,6 +367,21 @@ async function takeOverOutput(opts: {
   if (!needsAtRestScrub(opts.meta)) {
     return await announceUnsupervisedOutput(opts);
   }
+  return await cutUnscannedOutput(opts);
+}
+
+/**
+ * Cut output nobody scanned from the stored files and mark it once with
+ * `command.output_truncated` (`reason: "redaction_unavailable"`). For a
+ * command with values to redact, used by every takeover (recovery and a
+ * cancel that finishes the command itself). Returns whether capture is now
+ * truncated.
+ */
+export async function cutUnscannedOutput(opts: {
+  readonly paths: JournalPaths;
+  readonly events: readonly EventEnvelope[];
+  readonly writer: JournalWriter;
+}): Promise<boolean> {
   const dropped = await dropUnscannedOutput({
     paths: opts.paths,
     events: opts.events,

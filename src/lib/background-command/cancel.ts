@@ -2,7 +2,6 @@ import { lstat } from "node:fs/promises";
 import { createPrivateFileExclusive } from "../private-file.ts";
 import { appendCommandAudit, auditEnd } from "./audit.ts";
 import {
-  CAPTURE_LIMIT_BYTES,
   type EventEnvelope,
   emittedOffsets,
   endedEvent,
@@ -25,8 +24,7 @@ import {
 import type { LoadedJournal } from "./reader.ts";
 import {
   childState,
-  dropUnscannedOutput,
-  isNoSpaceError,
+  cutUnscannedOutput,
   needsAtRestScrub,
   type ObserveIdentities,
   type ReadBootTime,
@@ -502,6 +500,25 @@ async function waitForEnd(opts: {
 }
 
 /**
+ * Output nobody scanned cannot be redacted by a canceller: cut it (as
+ * recovery does) before the final record. Returns the final record's
+ * `truncated`.
+ */
+async function truncatedBeforeEnd(opts: {
+  readonly journal: LoadedJournal;
+  readonly events: readonly EventEnvelope[];
+  readonly writer: JournalWriter;
+}): Promise<boolean> {
+  return needsAtRestScrub(opts.journal.meta)
+    ? await cutUnscannedOutput({
+        paths: opts.journal.paths,
+        events: opts.events,
+        writer: opts.writer,
+      })
+    : emittedOffsets(opts.events).truncated;
+}
+
+/**
  * No supervisor recorded the end in time. Re-verify identities, force-stop
  * what still verifies, and write `cancelled` ourselves only once the
  * supervisor is provably gone (a live supervisor stays the only writer).
@@ -560,31 +577,18 @@ async function finishWithoutSupervisor(opts: {
       return null;
     }
     const writer = new JournalWriter(paths, meta, current.at(-1)?.seq ?? 0);
-    // Output nobody scanned cannot be redacted here: cut it (as recovery
-    // does) before the final record.
-    const dropped =
-      needsAtRestScrub(meta) &&
-      (await dropUnscannedOutput({ paths, events: current }));
-    if (dropped) {
-      await writer
-        .write("command.output_truncated", {
-          reason: "redaction_unavailable",
-          capturedBytes: emittedOffsets(current).captured,
-          limitBytes: CAPTURE_LIMIT_BYTES,
-        })
-        .catch((error: unknown) => {
-          if (!isNoSpaceError(error)) {
-            throw error;
-          }
-        });
-    }
+    const truncated = await truncatedBeforeEnd({
+      journal: opts.journal,
+      events: current,
+      writer,
+    });
     const ended = await writer.write("command.ended", {
       outcome: "cancelled",
       reason: owner ? "supervisor_unresponsive" : "cancelled_before_start",
       exitCode: null,
       signal: null,
       durationMs: Math.max(0, Date.now() - Date.parse(meta.acceptedAt)),
-      truncated: dropped || emittedOffsets(current).truncated,
+      truncated,
       suppressed: meta.capture === "metadata",
       containerProcess: opts.containerProcess,
       ...(opts.descendants === "not_confirmed"

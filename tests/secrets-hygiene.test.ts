@@ -393,3 +393,28 @@ test("project-configured store paths outside the checkout and the Hack home are 
   });
   expect(inside.map((finding) => finding.fix?.kind)).toEqual(["chmod"]);
 });
+
+test("an in-checkout store configured through an alias spelling is still checked against git", async () => {
+  const f = await fixture();
+  const secrets = join(f.projectRoot, "secrets");
+  await mkdir(secrets);
+  const keyPath = join(secrets, "store.key");
+  await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+  await git(f.projectRoot, ["add", "-f", "--", keyPath]);
+  // A link outside the checkout that names the checkout root.
+  const alias = join(f.root, "alias");
+  await symlink(f.projectRoot, alias);
+  const aliasedKey = join(alias, "secrets", "store.key");
+  const findings = await inspectSecretsHygiene({
+    ...f.scope,
+    stores: [
+      {
+        storePath: join(alias, "secrets", "absent.enc.json"),
+        keyPath: aliasedKey,
+      },
+    ],
+  });
+  expect(findings).toEqual([
+    expect.objectContaining({ status: "error", path: aliasedKey, fix: null }),
+  ]);
+});

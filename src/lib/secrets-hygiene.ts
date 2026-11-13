@@ -68,6 +68,11 @@ type Candidate = {
     readonly projectRoot: string;
     readonly gitignorePath: string;
     readonly entry: string;
+    /**
+     * The path git is asked about, spelled relative to `projectRoot`, when it
+     * differs from the candidate's (a resolved alias); defaults to it.
+     */
+    readonly gitPath?: string;
   } | null;
 };
 
@@ -282,7 +287,10 @@ async function gitFindings(opts: {
   if (!ignore) {
     return [];
   }
-  const target = { projectRoot: ignore.projectRoot, path: candidate.path };
+  const target = {
+    projectRoot: ignore.projectRoot,
+    path: ignore.gitPath ?? candidate.path,
+  };
   if (await isGitTrackedOrUnknownProjectPath(target)) {
     return [
       {
@@ -370,20 +378,31 @@ async function leftoverFindings(opts: {
  * Git metadata for a configured store or key file: one inside the project
  * checkout must be untracked and ignored like the project's own secrets (an
  * anchored entry in the root `.gitignore`); one outside it is exempt.
+ * Containment is decided on resolved paths (the file's directory and the
+ * root, links followed and, on a case-insensitive disk, in their stored
+ * case), so an alias spelling of an in-checkout path is still checked; git
+ * is then asked about that resolved spelling.
  */
-function inProjectIgnore(opts: {
+async function inProjectIgnore(opts: {
   readonly path: string;
   readonly project: SecretsHygieneScope["project"];
-}): Candidate["ignore"] {
+}): Promise<Candidate["ignore"]> {
   if (!opts.project) {
     return null;
   }
-  const rel = relative(opts.project.projectRoot, opts.path);
+  const root = await realpath(opts.project.projectRoot).catch(() => null);
+  const dir = await realpath(dirname(opts.path)).catch(() => null);
+  if (!(root && dir)) {
+    return null;
+  }
+  const resolved = join(dir, basename(opts.path));
+  const rel = relative(root, resolved);
   if (rel === "" || isOutside(rel)) {
     return null;
   }
   return {
-    projectRoot: opts.project.projectRoot,
+    projectRoot: root,
+    gitPath: resolved,
     gitignorePath: join(opts.project.projectRoot, ".gitignore"),
     entry: `/${rel.split(sep).join("/")}`,
   };
@@ -400,7 +419,7 @@ async function storeFindings(opts: {
     { path: storePath, holds: "an encrypted secret store" },
     { path: keyPath, holds: "an encrypted store key" },
   ] as const) {
-    const ignore = inProjectIgnore({
+    const ignore = await inProjectIgnore({
       path: candidate.path,
       project: opts.project,
     });

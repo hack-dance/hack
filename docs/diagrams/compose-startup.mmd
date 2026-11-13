@@ -1,12 +1,18 @@
 stateDiagram-v2
     direction TB
     [*] --> Observe
+    Observe --> Incomplete: inspection failed
     Observe --> Pending: created or missing
     Observe --> Corroborate: running or exited
     Pending --> Observe: budget remains
     Pending --> Incomplete: budget exhausted
-    Corroborate --> Observe: identity changed
+    Corroborate --> Observe: changed IDs, budget remains
+    Corroborate --> Incomplete: changed IDs, budget exhausted
     Corroborate --> Complete: same IDs, running or recognized exit 0
     Corroborate --> Incomplete: same IDs, failed state
+    note right of Observe
+        Each read has a 15 s limit.
+        Always allow the initial pair.
+    end note
     Complete --> [*]
     Incomplete --> [*]

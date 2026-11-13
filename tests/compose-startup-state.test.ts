@@ -12,7 +12,6 @@ async function observe(opts: {
 }) {
   let elapsed = 0;
   let reads = 0;
-  const budgets: number[] = [];
   const result = await waitForComposeStartupState({
     deadlineMs: opts.budgetMs ?? 1000,
     successfulCompletionServices: new Set(["init"]),
@@ -20,8 +19,7 @@ async function observe(opts: {
     sleep: async (ms) => {
       elapsed += ms;
     },
-    read: async (timeoutMs) => {
-      budgets.push(timeoutMs);
+    read: async () => {
       elapsed += opts.sampleMs ?? 10;
       const sample = opts.samples[Math.min(reads++, opts.samples.length - 1)];
       if (!sample) {
@@ -30,7 +28,7 @@ async function observe(opts: {
       return sample;
     },
   });
-  return { ...result, reads, elapsed, budgets };
+  return { ...result, reads, elapsed };
 }
 
 function job(state: string, exitCode = 0, containerId = "current") {
@@ -59,7 +57,6 @@ test("old exit zero cannot mask a replacement that never starts", async () => {
   expect(result.startup.failed).toEqual(["init"]);
   expect(result.startup.completed).toEqual([]);
   expect(result.elapsed).toBeGreaterThanOrEqual(1000);
-  expect(result.budgets.at(-1)).toBeLessThan(1000);
 });
 
 test("replacement exit 17 remains a failure", async () => {
@@ -80,11 +77,18 @@ test("zero exit without a completion hint remains a failure", async () => {
   expect(result.startup.failed).toEqual(["api"]);
 });
 
-test("an exhausted start budget does not grant an uncorroborated success", async () => {
-  const result = await observe({ samples: [job("exited")], budgetMs: 5 });
-  expect(result.startup.failed).toEqual(["init"]);
-  expect(result.reads).toBe(1);
-});
+for (const budgetMs of [0, 5, 100]) {
+  test(`healthy startup receives corroborating reads with ${budgetMs} ms remaining`, async () => {
+    const result = await observe({
+      samples: [job("exited")],
+      sampleMs: 150,
+      budgetMs,
+    });
+    expect(result.startup.completed).toEqual(["init"]);
+    expect(result.startup.failed).toEqual([]);
+    expect(result.reads).toBe(2);
+  });
+}
 
 test("other running services cannot mask an initializer missing during replacement", async () => {
   const server = {
@@ -99,4 +103,37 @@ test("other running services cannot mask an initializer missing during replaceme
   expect(result.startup.failed).toEqual(["init"]);
   expect(result.startup.completed).toEqual([]);
   expect(result.elapsed).toBeGreaterThanOrEqual(1000);
+});
+
+test("deadline names only the service whose container identity changed", async () => {
+  const server = {
+    containerId: "server",
+    service: "api",
+    state: "running",
+    exitCode: 0,
+  };
+  const result = await observe({
+    samples: [
+      [server, ...job("exited", 0, "old")],
+      [server, ...job("running")],
+    ],
+    budgetMs: 5,
+  });
+  expect(result.startup.running).toEqual(["api"]);
+  expect(result.startup.failed).toEqual(["init"]);
+});
+test("a Docker inspection failure is propagated without retries", async () => {
+  let reads = 0;
+  await expect(
+    waitForComposeStartupState({
+      read: async () => {
+        reads++;
+        throw new Error("inspection failed");
+      },
+      successfulCompletionServices: new Set(),
+      deadlineMs: 1000,
+      now: () => 0,
+    })
+  ).rejects.toThrow("inspection failed");
+  expect(reads).toBe(1);
 });

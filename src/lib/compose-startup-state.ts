@@ -7,12 +7,15 @@ export type ComposeServiceState = {
 
 /**
  * Settle fresh Docker observations within the start phase's remaining budget.
+ * Each read keeps the normal inspection timeout, including two corroborating
+ * reads when Compose has spent the start budget. Only pending-state retries
+ * consume that remaining budget; no new start budget is granted.
  * Never carry success across container replacement: corroborate the identity
  * listing, then classify only the latest states. A job can finish between reads
  * without ever being observed running. Created is not a successful exit zero.
  */
 export async function waitForComposeStartupState(opts: {
-  readonly read: (timeoutMs: number) => Promise<readonly ComposeServiceState[]>;
+  readonly read: () => Promise<readonly ComposeServiceState[]>;
   readonly successfulCompletionServices: ReadonlySet<string>;
   readonly deadlineMs: number;
   readonly now?: () => number;
@@ -24,9 +27,11 @@ export async function waitForComposeStartupState(opts: {
   const now = opts.now ?? (() => performance.now());
   const sleep = opts.sleep ?? ((ms) => Bun.sleep(ms));
   let previous: readonly ComposeServiceState[] = [];
+  let reads = 0;
   const seenServices = new Set<string>();
   for (;;) {
-    const observed = await opts.read(Math.max(1, opts.deadlineMs - now()));
+    const observed = await opts.read();
+    reads += 1;
     for (const entry of observed) {
       seenServices.add(entry.service);
     }
@@ -45,10 +50,20 @@ export async function waitForComposeStartupState(opts: {
         .map((entry) => `${entry.service}:${entry.containerId ?? ""}`)
         .sort()
         .join("\n");
-    const stable =
-      observed.length > 0 &&
-      observed.every((entry) => entry.containerId) &&
-      identity(observed) === identity(previous);
+    const unsettledServices = new Set(
+      states
+        .filter((entry) => {
+          const current = observed.filter((s) => s.service === entry.service);
+          const prior = previous.filter((s) => s.service === entry.service);
+          return (
+            current.length === 0 ||
+            current.some((s) => !s.containerId) ||
+            identity(current) !== identity(prior)
+          );
+        })
+        .map((entry) => entry.service)
+    );
+    const stable = observed.length > 0 && unsettledServices.size === 0;
     const pending = states.some(
       (entry) =>
         !entry.containerId ||
@@ -58,22 +73,20 @@ export async function waitForComposeStartupState(opts: {
       return { states, startup };
     }
     const remaining = opts.deadlineMs - now();
-    if (remaining <= 0) {
+    if (reads >= 2 && remaining <= 0) {
       return {
         states,
-        startup: stable
-          ? startup
-          : {
-              running: [],
-              completed: [],
-              failed: states.map((s) => s.service),
-            },
+        startup: {
+          running: startup.running.filter((s) => !unsettledServices.has(s)),
+          completed: startup.completed.filter((s) => !unsettledServices.has(s)),
+          failed: [...new Set([...startup.failed, ...unsettledServices])],
+        },
       };
     }
     previous = observed;
     // Corroborate a terminal/running listing immediately; wait only while
     // Docker still reports a transitional state or no containers.
-    if (pending || states.length === 0) {
+    if (reads >= 2 && (pending || states.length === 0)) {
       await sleep(Math.min(100, remaining));
     }
   }

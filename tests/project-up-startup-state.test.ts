@@ -51,6 +51,9 @@ const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const upDetachSelections: Array<boolean | undefined> = [];
 const upStartupTimeouts: Array<number | undefined> = [];
 let upExitCode = 0;
+let psExitCode = 0;
+let upDurationMs = 0;
+let psDurationMs = 0;
 /** Detached phases the mocked backend reports before returning upExitCode. */
 let upReportedPhases: readonly ("images" | "start")[] = [];
 const upImageTimeouts: Array<number | undefined> = [];
@@ -115,6 +118,9 @@ const runtimeBackendMock = await registerScopedModuleMock({
         for (const phase of upReportedPhases) {
           opts.onStartupPhase?.(phase);
         }
+        if (upDurationMs) {
+          await Bun.sleep(upDurationMs);
+        }
         return upExitCode;
       },
       down: async () => {
@@ -125,8 +131,11 @@ const runtimeBackendMock = await registerScopedModuleMock({
         readonly env?: Readonly<Record<string, string>>;
       }) => {
         psEnvs.push(withoutComposeEnvReferences(opts.env));
+        if (psDurationMs) {
+          await Bun.sleep(psDurationMs);
+        }
         return {
-          exitCode: 0,
+          exitCode: psExitCode,
           stdout: (psSnapshots.shift() ?? psRows)
             .map((row) => {
               const entry = JSON.parse(row);
@@ -136,7 +145,7 @@ const runtimeBackendMock = await registerScopedModuleMock({
               });
             })
             .join("\n"),
-          stderr: "",
+          stderr: psExitCode ? "Cannot connect to the Docker daemon" : "",
         };
       },
       ps: async () => 0,
@@ -208,6 +217,9 @@ afterEach(async () => {
   upStartupTimeouts.length = 0;
   upDetachSelections.length = 0;
   upExitCode = 0;
+  psExitCode = 0;
+  upDurationMs = 0;
+  psDurationMs = 0;
   upReportedPhases = [];
   upImageTimeouts.length = 0;
   restoreEnv("HACK_COMPOSE_IMAGE_TIMEOUT_MS", originalImageTimeout);
@@ -581,7 +593,6 @@ test("failed targeted restart does not record its service's env as applied", asy
 test("up --json emits E_STARTUP_INCOMPLETE for a created service", async () => {
   process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   const projectRoot = await createProject();
-  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   psRows.push(
     JSON.stringify({ Service: "api", State: "created", ExitCode: 0 })
   );
@@ -1336,3 +1347,24 @@ for (const action of ["up", "restart"] as const) {
     expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
   });
 }
+
+test("up confirms healthy Docker states after Compose consumes most of the start budget", async () => {
+  const projectRoot = await createProject();
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
+  upReportedPhases = ["images", "start"];
+  upDurationMs = 900;
+  psDurationMs = 150;
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  expect(psEnvs).toHaveLength(2);
+});
+test("up reports a Docker inspection error without waiting out the start budget", async () => {
+  const projectRoot = await createProject();
+  psExitCode = 1;
+  await expect(runDetachedUp({ projectRoot })).rejects.toMatchObject({
+    code: "E_DOCKER_UNAVAILABLE",
+  });
+  expect(psEnvs).toHaveLength(1);
+});

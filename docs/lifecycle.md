@@ -501,7 +501,11 @@ Detached startup re-reads transitional states within the remaining start budget.
 It corroborates container IDs before accepting running or completed services, so
 an old completed container cannot stand in for a replacement that has not started.
 `created` with exit code 0 is pending, not successful completion. Image preparation
-and lifecycle hooks do not consume the observation budget.
+and lifecycle hooks do not consume the observation budget. Each inspection keeps
+its normal 15-second timeout, and two initial reads are allowed even when Compose
+used the whole start budget. Only retries for pending or changing observations
+use the remaining budget. Inspection failures return the Docker/Compose error
+without retrying it as a missing service.
 Lifecycle failures are one of the primary consumers of the `--json` error envelope,
 since hook and process startup are common failure points around `hack up`.
 

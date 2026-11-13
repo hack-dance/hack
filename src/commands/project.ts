@@ -199,6 +199,7 @@ import {
   composeEnvValuesToRedact,
   composePsTextFallbackAllowed,
   readComposePs,
+  readComposePsResult,
 } from "../lib/compose-ps-result.ts";
 import {
   type ComposeStartupBudgets,
@@ -991,7 +992,7 @@ async function readComposeServiceStates(opts: {
   readonly profiles: readonly string[];
   readonly services?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
-  readonly timeoutMs?: number;
+  readonly strict?: boolean;
 }): Promise<readonly ComposeServiceState[]> {
   const res = await composeRuntimeBackend.psJson({
     composeFiles: [opts.project.composeFile],
@@ -1000,13 +1001,19 @@ async function readComposeServiceStates(opts: {
     cwd: dirname(opts.project.composeFile),
     all: true,
     env: opts.env,
-    timeoutMs: opts.timeoutMs,
   });
-  if (res.exitCode !== 0) {
+  const read = readComposePsResult({
+    result: res,
+    redactValues: Object.values(opts.env ?? {}),
+  });
+  if (!read.ok) {
+    if (opts.strict) {
+      throw read.error;
+    }
     return [];
   }
   const serviceFilter = opts.services ? new Set(opts.services) : null;
-  return parseJsonLines(res.stdout)
+  return read.entries
     .map((entry) => ({
       containerId: getString(entry, "ID") ?? "",
       service: getString(entry, "Service") ?? "",
@@ -6921,14 +6928,14 @@ async function runUpCommand({
     const { states, startup } = await waitForComposeStartupState({
       successfulCompletionServices,
       deadlineMs: performance.now() + observationBudgetMs,
-      read: (timeoutMs) =>
+      read: () =>
         readComposeServiceStates({
           project,
           composeProjectName,
           profiles,
           services: targetServices,
           env: envOverrides.env,
-          timeoutMs,
+          strict: true,
         }),
     });
     if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
@@ -8274,14 +8281,14 @@ async function runTargetedServiceRestart(opts: {
   const { states, startup } = await waitForComposeStartupState({
     successfulCompletionServices,
     deadlineMs: upPhase.startedAt() + opts.budgets.startupTimeoutMs,
-    read: (timeoutMs) =>
+    read: () =>
       readComposeServiceStates({
         project: opts.project,
         composeProjectName: opts.composeProjectName,
         profiles: opts.profiles,
         services: opts.services,
         env: envOverrides.env,
-        timeoutMs,
+        strict: true,
       }),
   });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {
@@ -8662,13 +8669,13 @@ async function runRestartCommand({
   const { states, startup } = await waitForComposeStartupState({
     successfulCompletionServices,
     deadlineMs: performance.now() + (upOutcome.observationBudgetMs ?? 0),
-    read: (timeoutMs) =>
+    read: () =>
       readComposeServiceStates({
         project,
         composeProjectName,
         profiles,
         env: preflightEnv.env,
-        timeoutMs,
+        strict: true,
       }),
   });
   if (startupSnapshotIsIncomplete({ states, failed: startup.failed })) {

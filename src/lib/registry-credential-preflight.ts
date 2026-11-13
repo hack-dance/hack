@@ -118,7 +118,10 @@ export async function discoverDependencyBootstrapServices(opts: {
   }
 }
 
-/** Services that may legitimately exit zero after startup instead of staying running. */
+/**
+ * Services that may exit zero after startup. Explicit `restart: "no"` is a
+ * completion hint; Docker's default when the policy is omitted is not.
+ */
 export async function discoverSuccessfulCompletionServices(opts: {
   readonly composeFile: string;
   readonly activeProfiles?: readonly string[];

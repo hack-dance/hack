@@ -59,7 +59,7 @@ Manual bundle users run the adjacent `hack-v5 native setup`. Their default home 
 `$HACK_HOME/native-runtime` or `~/.hack/native-runtime`; an absolute
 `HACK_NATIVE_HOME` selects another home. Managed `hack-next` keeps its version's
 receipt-owned home and refuses a differing override. See
-[home selection and moving homes](../../guides/candidate-install.md#prepare-the-native-runtime-once).
+[home selection and moving homes](setup.md#manual-homes).
 
 ## Check before starting
 

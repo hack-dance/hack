@@ -50,13 +50,25 @@ sizes and hashes and never falls back to downloading missing offline inputs. See
 the [complete setup contract](full-reference.md#manual-candidate-upgrade-and-rollback)
 for filenames and recovery details.
 
+## Manual homes
+
+Manual bundle users run the adjacent `hack-v5 native setup`. Its default home is
+`$HACK_HOME/native-runtime` or `~/.hack/native-runtime`; an absolute
+`HACK_NATIVE_HOME` overrides that default. Managed `hack-next` instead keeps its
+version's receipt-owned home and refuses a differing override.
+
+To move a manual home, stop its projects and runtime with the old home and
+matching executor, preserve that home for retained data, then select a fresh
+absolute `HACK_NATIVE_HOME` and run `hack-v5 native setup` again. Setup does not
+move receipts, disks or project data. Keep each home with its matching executor.
+
 ## Older setup-only homes
 
 If you ran next.16's `runtime setup` and never started a project, finish setup,
 run `up` then `down` with that same next.16 launcher, and confirm its runtime is
 `stopped` before upgrading. Older executors cannot prove setup-only quiescence;
 do not delete receipts to bypass an upgrade refusal. See the
-[home and upgrade workaround](../../guides/candidate-install.md#prepare-the-native-runtime-once).
+[upgrade and recovery reference](full-reference.md#manual-candidate-upgrade-and-rollback).
 
 The frontend command above is intended for next.17; installed next.16 retains
 the [older setup procedure](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/docs/native/try-it.md).

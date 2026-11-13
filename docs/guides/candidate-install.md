@@ -15,7 +15,7 @@ exact release tag over HTTPS, review it, then run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.15/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -209,10 +209,10 @@ file against your channel root:
 ```sh
 dir=$(mktemp -d) && cd "$dir" &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.15/hack-next-manager-darwin-arm64 \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-manager-darwin-arm64 \
   --output hack-next-manager-darwin-arm64 &&
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.15/INSTALLER-SHA256SUMS \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/INSTALLER-SHA256SUMS \
   --output INSTALLER-SHA256SUMS &&
 grep '[ *]hack-next-manager-darwin-arm64$' INSTALLER-SHA256SUMS > manager.sha256 &&
 shasum -a 256 --check manager.sha256 &&

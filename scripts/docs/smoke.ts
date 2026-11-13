@@ -44,6 +44,9 @@ for (const version of ["v4", "v5"] as const) {
   for (const { slug } of pages) {
     const route = `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
     const html = await read(route);
+    if (/<img\b[^>]*\bsrc=["'](?:https?:)?\/\//i.test(html)) {
+      throw new Error(`Remote image embed in rendered page: ${route}`);
+    }
     if (!html.includes(`href="https://hack.foo${route}"`)) {
       throw new Error(`Canonical missing: ${route}`);
     }
@@ -207,6 +210,8 @@ const recipeEntryPoints = new Set([
   "env",
   "reference/configuration-fields",
   "guides/upgrade-from-v4",
+  "native/setup",
+  "native/log-follow",
 ]);
 const v5Slugs = new Set(
   [...versions.v5.entries, ...versions.v5.editorial].map((page) => page.slug)

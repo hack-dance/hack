@@ -46,6 +46,13 @@ export const DAEMON_AUTOSTART_DISABLE_ENV = "HACK_DAEMON_AUTOSTART_DISABLE";
  */
 const CANDIDATE_ENTRYPOINT_ENV = "HACK_CANDIDATE_ENTRYPOINT";
 
+/** The installer/checkout launcher marks candidate runs independently of PATH. */
+export function isCandidateRun(
+  env: Readonly<Record<string, string | undefined>> = process.env
+): boolean {
+  return (env[CANDIDATE_ENTRYPOINT_ENV] ?? "").trim() !== "";
+}
+
 export type DaemonAutostartBlockReason = "candidate" | "disabled";
 
 export type DaemonAutostartAccess =
@@ -83,12 +90,12 @@ export function resolveDaemonAutostartAccess(
       message: `hackd autostart is disabled by ${DAEMON_AUTOSTART_DISABLE_ENV}=1.`,
     };
   }
-  if ((env[CANDIDATE_ENTRYPOINT_ENV] ?? "").trim() !== "") {
+  if (isCandidateRun(env)) {
     return {
       allowed: false,
       reason: "candidate",
       message:
-        "hackd autostart is disabled for a candidate run: it would start the stable hackd. Start a daemon explicitly with `hack daemon start` if you need one.",
+        "hackd autostart is disabled for a candidate run: it would start the stable hackd. hackd is optional for candidate Compose workflows.",
     };
   }
   return { allowed: true };

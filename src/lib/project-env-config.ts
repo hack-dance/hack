@@ -3674,30 +3674,45 @@ export type ProjectEnvLayerKeyReport = {
 };
 
 /**
- * Overlay names that have a machine-local layer
- * (`hack.env.<name>.local.yaml`), whether or not the committed overlay
- * exists. `default` is excluded: that file is the legacy-compatible local
- * default layer, not an overlay. Unlistable directories yield none.
+ * Every overlay name an env layer file in the project dir implies, for the
+ * integrity inspection: `hack.env.<name>.yaml` and
+ * `hack.env.<name>.local.yaml`, regular files or symlinks (in-project
+ * links are supported layers; the read checks where they lead). This adds
+ * what {@link listProjectEnvOverlayNames} leaves out: overlays that exist
+ * only as their machine-local layer, and symlinked layers. `default` and
+ * the bare local file are default layers, not overlays. Unlistable
+ * directories yield none.
  */
-async function listProjectEnvLocalOnlyOverlayNames(opts: {
+async function listProjectEnvInspectedOverlayNames(opts: {
   readonly projectDir: string;
 }): Promise<readonly string[]> {
-  const suffix = `.${PROJECT_ENV_LOCAL_SEGMENT}${PROJECT_ENV_CONFIG_FILENAME_SUFFIX}`;
+  const localSuffix = `.${PROJECT_ENV_LOCAL_SEGMENT}`;
   const entries = await readdir(opts.projectDir, { withFileTypes: true }).catch(
     () => []
   );
   return entries
-    .filter((entry) => entry.isFile())
+    .filter((entry) => entry.isFile() || entry.isSymbolicLink())
     .map((entry) => entry.name)
     .filter(
       (name) =>
         name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
-        name.endsWith(suffix)
+        name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
     )
     .map((name) =>
-      name.slice(PROJECT_ENV_CONFIG_FILENAME_PREFIX.length, -suffix.length)
+      name.slice(
+        PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
+        -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length
+      )
     )
-    .filter((name) => name.length > 0 && name !== "default");
+    .map((name) =>
+      name.endsWith(localSuffix) ? name.slice(0, -localSuffix.length) : name
+    )
+    .filter(
+      (name) =>
+        name.length > 0 &&
+        name !== "default" &&
+        name !== PROJECT_ENV_LOCAL_SEGMENT
+    );
 }
 
 /**
@@ -3728,11 +3743,12 @@ export async function inspectProjectEnvLayerKeys(opts: {
     projectDir: opts.projectDir,
   }).catch(() => [] as readonly string[]);
   // An overlay may exist only as its machine-local layer (`env set --env
-  // <name> --local` writes no committed file); inspect those too.
+  // <name> --local` writes no committed file), or as a symlinked layer;
+  // inspect those too.
   const overlays = [
     ...new Set([
       ...committedOverlays,
-      ...(await listProjectEnvLocalOnlyOverlayNames(opts)),
+      ...(await listProjectEnvInspectedOverlayNames(opts)),
     ]),
   ];
   const layers = new Map<
@@ -3772,14 +3788,26 @@ export async function inspectProjectEnvLayerKeys(opts: {
   }
   const reports: ProjectEnvLayerKeyReport[] = [];
   for (const [path, layer] of layers) {
-    const file = await readOptionalTextFile(path);
-    if (file.kind !== "text") {
+    // The read runtime makes: an in-project symlinked layer is read, and a
+    // layer leading outside the project, or not to a regular file, is
+    // skipped (the env checks report it).
+    let text: string | null;
+    try {
+      text = await readProjectEnvLayerText({
+        projectRoot: opts.projectRoot,
+        path,
+        strictRead: true,
+      });
+    } catch {
+      continue;
+    }
+    if (text === null) {
       continue;
     }
     const read = parseProjectEnvConfigText({
       path,
       environment: "default",
-      text: file.text,
+      text,
     });
     if (read.parseError !== undefined) {
       continue;

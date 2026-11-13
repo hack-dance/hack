@@ -242,6 +242,38 @@ test("an overlay that exists only as its machine-local layer is inspected", asyn
   expect(findings[0]?.message).toContain("SECOND (--env staging --local)");
 });
 
+test("a symlinked overlay layer inside the project is inspected", async () => {
+  const repo = await createRepo();
+  await setSecret(repo, "FIRST", "synthetic-first-8a2e");
+  const other = await createRepo();
+  await setSecret(other, "SECOND", "synthetic-second-f310");
+  await setSecret(other, "THIRD", "synthetic-third-4b6d");
+  // The layer lives elsewhere in the project; the overlay name is a link.
+  const layers = resolve(repo.projectRoot, "env-layers");
+  await mkdir(layers);
+  const target = resolve(layers, "staging.local.yaml");
+  const parsed = YAML.parse(await readFile(repo.envFile, "utf8")) as {
+    values: { global: Record<string, unknown> };
+  };
+  const otherValues = globalValues(await readFile(other.envFile, "utf8"));
+  parsed.values.global.SECOND = otherValues.SECOND;
+  parsed.values.global.THIRD = otherValues.THIRD;
+  await writeFile(target, YAML.stringify(parsed));
+  await symlink(
+    target,
+    resolve(repo.projectDir, "hack.env.staging.local.yaml")
+  );
+
+  const findings = await inspect(repo);
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.message).toContain(
+    ".hack/hack.env.staging.local.yaml holds secrets under more than one key"
+  );
+  expect(findings[0]?.message).toContain(
+    "SECOND (--env staging --local), THIRD (--env staging --local)"
+  );
+});
+
 test("an overlay named local never relabels the local default layer", async () => {
   // hack.env.local.local.yaml makes `local` an overlay name whose committed
   // path is this project's local default layer.

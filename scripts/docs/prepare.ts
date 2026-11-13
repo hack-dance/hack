@@ -154,6 +154,8 @@ const nativeSectionOrder = [
   "overview",
   "try-it",
   "preflight",
+  "setup",
+  "log-follow",
   "limits",
   "install",
   "reference",

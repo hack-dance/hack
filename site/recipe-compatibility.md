@@ -1,8 +1,8 @@
-# Recipes on the next.15 site
+# Recipe compatibility on the next.16 site
 
-The v5 runtime corpus is pinned to `v5.0.0-next.15`
-(`278aeb1cee5b136d7bae0ddfcd5f3741e9579524`). Six recipe pages publish directly
-from their hashed release snapshots. Five retain editorial link corrections based on
+The v5 runtime corpus is pinned to `v5.0.0-next.16`
+(`b21c3b189841c1a3cbb8af2b76414fa347dc7057`). Six recipe pages publish directly
+from their hashed release snapshots. Five retain their next.15 editorial audit and link corrections based on
 `278aeb1cee5b136d7bae0ddfcd5f3741e9579524`, with explicit `sourceRevision`,
 `sourceLabel` and `sourceFile` metadata:
 
@@ -12,12 +12,15 @@ from their hashed release snapshots. Five retain editorial link corrections base
 - Config examples: matching corrected mounts, including separate monorepo anchors.
 - Tunnels: the host-scoped token and the command-reference OAuth pointer.
 
-Those example links now name the runtime pin. The tagged recipes already include
-the mount and token-scope corrections; the editorial copies retain corrected link
-depth and example-directory links. All five source files are byte-identical at the
-previous correction revision and at next.15.
+Those example links intentionally retain the audited next.15 revision. The
+example directories and env/dependency configuration readers are unchanged
+between next.15 and next.16. The only recipe-source change adds a file-tree
+diagram to Config examples; the project schema is unchanged. The tagged recipes
+include the mount and token-scope corrections; the editorial copies retain
+corrected link depth and example-directory links.
 
-All eleven pages fit next.15; none needs a newer runtime. This is a source
+The audit below records the next.15 surface; no recipe execution was repeated
+for next.16. All eleven pages fit next.15. This is a source
 compatibility audit, not a new execution of their examples. The pages retain
 the original authors' execution evidence and platform limits.
 
@@ -76,7 +79,7 @@ secret-input command with a synthetic value, reads it through the host scope,
 and verifies it is absent from the web and global scopes. These checks do not
 start containers or a tunnel. The corrected mount variants were not rerun with
 Docker; the affected pages distinguish that correction from their original
-execution evidence. The runtime pin remains next.15.
+execution evidence. The runtime pin is now next.16; historical audit labels remain explicit.
 
 ## Publication
 
@@ -87,4 +90,4 @@ recipes and their index, environment and configuration entry points. Environment
 recipe links are appended during site preparation, keeping the hashed release
 snapshot and its provenance instead of a separate editorial copy.
 Snapshot hashes, public-link boundaries, retired
-surface checks and the next.15 installer pin remain enforced.
+surface checks and the next.16 installer pin remain enforced.

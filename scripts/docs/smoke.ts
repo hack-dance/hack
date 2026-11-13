@@ -207,6 +207,8 @@ const recipeEntryPoints = new Set([
   "env",
   "reference/configuration-fields",
   "guides/upgrade-from-v4",
+  "native/setup",
+  "native/log-follow",
 ]);
 const v5Slugs = new Set(
   [...versions.v5.entries, ...versions.v5.editorial].map((page) => page.slug)

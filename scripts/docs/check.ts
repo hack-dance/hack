@@ -508,6 +508,11 @@ for (const [file, facts] of [
   ["reference/cli.md", ["--native-preflight"]],
   ["native/preflight.md", ["runtime_review.status", "ready: false"]],
   ["guides/proxy-network-repair.md", ["hack global up", "ok: null"]],
+  ["native/setup.md", ["under verification", "runtime setup", "next.16"]],
+  [
+    "native/log-follow.md",
+    ["under verification", "--follow", "native_log_stopped_idle"],
+  ],
 ] as const) {
   const text = await Bun.file(resolve(v5Root, file)).text();
   for (const fact of facts) {

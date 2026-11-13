@@ -22,7 +22,7 @@ terminal).
 - `hack exec <service> -- <cmd...>` — command in an already-running service container
 - `hack session` — persistent project workspaces (tmux-first)
 - `hack doctor` / `hack doctor --fix` — validate and repair local setup
-- `hack daemon` — optional local daemon for faster JSON project status
+- `hack daemon` — optional local daemon for faster JSON project status; `hack daemon install` starts it at login (launchd on macOS, a systemd user unit on Linux). On Linux without linger it still stops at your last logout and does not start at boot; `loginctl enable-linger` changes that
 - `hack agent onboard` — print an onboarding prompt for an existing project
 - Optional agent interfaces — the [`hack` plugin, its skills and the separate MCP server](integrations.md)
 
@@ -213,6 +213,43 @@ guidance instead of silently opening the dev host. For a custom `dev_host` outsi
 route for it.
 
 ## Running things (decision guide)
+
+For an existing container, `exec` takes a service and a command tail; the explicit
+separator form below keeps the child command's flags out of Hack's options.
+
+```mermaid
+---
+title: Exec command form
+---
+railroad-ebnf-beta
+  exec = "hack" "exec" service "--" command { argument } ;
+```
+
+For a one-off container, `run` takes a service and an optional command tail;
+omitting the command uses the service's default command.
+
+```mermaid
+---
+title: Run command form
+---
+railroad-ebnf-beta
+  run = "hack" "run" service [ [ "--" ] command { argument } ] ;
+```
+
+For a finite log snapshot, `logs` can select a service and use `--no-follow`
+instead of starting another command inside a container.
+
+```mermaid
+---
+title: Logs command form
+---
+railroad-ebnf-beta
+  logs = "hack" "logs" [ service ] [ "--no-follow" ] ;
+```
+
+These are common forms, not exhaustive grammars: `exec` also accepts an omitted
+separator, Hack's options belong before the command tail, and more log options
+are listed in the [command reference](reference/cli.md).
 
 - One-off command in a fresh service container (deps started as needed): `hack run <service> <cmd...>`.
 - Command inside an already-running service container: `hack exec <service> -- <cmd...>`.
@@ -710,6 +747,10 @@ A non-default `HACK_HOME` disables hackd launchd management, host-trust launchd
 environment registration, and native DNS launchd inspection/restarts. Set
 `HACK_LAUNCHD_ALLOW_ISOLATED_HOME=1` to opt in to these host-wide effects.
 `HACK_LAUNCHD_DISABLE=1` always disables launchd access, including with that opt-in.
+On Linux a non-default `HACK_HOME` likewise disables management of the `hackd.service`
+systemd user unit (opt in with `HACK_SYSTEMD_ALLOW_ISOLATED_HOME=1`), and
+`HACK_SYSTEMD_DISABLE=1` always disables it. See
+[Keeping hackd running](architecture.md#keeping-hackd-running).
 
 ## Lifecycle
 

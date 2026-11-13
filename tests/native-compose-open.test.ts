@@ -64,7 +64,7 @@ async function fixture(): Promise<string> {
     join(root, ".hack", "hack.project.json"),
     "malformed authored input must never be parsed for saved open"
   );
-  for (const name of ["docker", "compiler", "open"]) {
+  for (const name of ["docker", "compiler", "open", "getent"]) {
     const path = join(root, name);
     await Bun.write(
       path,
@@ -293,14 +293,15 @@ test("legacy open JSON preserves authored host behavior without a native store",
     join(root, ".hack", "hack.config.json"),
     JSON.stringify({
       name: "fixture",
-      dev_host: "legacy.dev.test",
+      // A literal keeps this authored-host selection test independent of host DNS.
+      dev_host: "192.0.2.10",
       oauth: { enabled: false },
     })
   );
   await Bun.write(join(root, ".hack", "docker-compose.yml"), "services: {}\n");
   const result = await invoke(root, ["--json"]);
   expect(result.code).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({ url: "https://legacy.dev.test" });
+  expect(JSON.parse(result.stdout)).toEqual({ url: "https://192.0.2.10" });
   expect(
     await Bun.file(
       join(root, ".hack", ".internal", "native-compose", ".gitignore")

@@ -239,6 +239,7 @@ import {
   isGitTrackedOrUnknownProjectPath,
   type LegacyComposeEnvFileReference,
   LegacyDotenvMigrationRefusalError,
+  LegacyEnvCleanupError,
   type LegacyProjectEnvMigration,
   listProjectEnvPlaintextEntries,
   migrateLegacyProjectEnv,
@@ -262,6 +263,7 @@ import {
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
+import { inspectProxyLoopback } from "../lib/proxy-loopback.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import {
@@ -1005,10 +1007,10 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     });
   }
 
-  // Check proxy port forwarding (detects VPN/Tailscale conflicts)
+  // Authenticate loopback independently of direct container reachability.
   results.push(
-    await runCheck(s, "proxy ports", () => checkProxyPortForwarding(), {
-      timeoutMs: 5000,
+    await runCheck(s, "proxy ports", () => inspectProxyLoopback(), {
+      timeoutMs: 8000,
     })
   );
   results.push(
@@ -2596,90 +2598,6 @@ async function checkGrafanaReachable(): Promise<CheckResult> {
       message: `Unable to reach http://${host} (is global infra up?)`,
     };
   }
-}
-
-/**
- * Checks if proxy port forwarding is working correctly.
- * Detects the specific issue where IPv4 port 443 fails while IPv6 works,
- * which is often caused by VPN software (e.g., Tailscale) interfering
- * with Docker/OrbStack port forwarding.
- */
-async function checkProxyPortForwarding(): Promise<CheckResult> {
-  const { createConnection } = await import("node:net");
-
-  const testTcpConnect = (
-    host: string,
-    port: number,
-    timeoutMs: number
-  ): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const socket = createConnection({ host, port, timeout: timeoutMs });
-      socket.on("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.on("error", () => {
-        socket.destroy();
-        resolve(false);
-      });
-      socket.on("timeout", () => {
-        socket.destroy();
-        resolve(false);
-      });
-    });
-  };
-
-  // Test container IP directly (primary method - bypasses port forwarding)
-  const containerPort443 = await testTcpConnect(DEFAULT_CADDY_IP, 443, 2000);
-
-  // If container IP works, everything is fine
-  if (containerPort443) {
-    return {
-      name: "proxy ports",
-      status: "ok",
-      message: `Caddy reachable (${DEFAULT_CADDY_IP}:443)`,
-    };
-  }
-
-  // Container IP failed, check localhost as fallback
-  const [ipv4Port80, ipv4Port443] = await Promise.all([
-    testTcpConnect("127.0.0.1", 80, 2000),
-    testTcpConnect("127.0.0.1", 443, 2000),
-  ]);
-
-  // If localhost port 443 works, still OK
-  if (ipv4Port443) {
-    return {
-      name: "proxy ports",
-      status: "ok",
-      message: "Port 80 and 443 forwarding OK (127.0.0.1)",
-    };
-  }
-
-  // Both container IP and localhost fail - Caddy probably isn't running
-  if (!(ipv4Port80 || ipv4Port443)) {
-    return {
-      name: "proxy ports",
-      status: "warn",
-      message: "Caddy not reachable (run: hack global up)",
-    };
-  }
-
-  // Port 80 works but 443 fails - OrbStack port forwarding issue
-  if (ipv4Port80 && !ipv4Port443) {
-    return {
-      name: "proxy ports",
-      status: "warn",
-      message:
-        "Port 443 not forwarding properly. Fix: hack global install (configures DNS to use container IP)",
-    };
-  }
-
-  return {
-    name: "proxy ports",
-    status: "warn",
-    message: `Port forwarding partial: container=${containerPort443}, localhost:443=${ipv4Port443}`,
-  };
 }
 
 async function checkProject({
@@ -4534,6 +4452,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     projectDir: project.projectDir,
     projectName,
     paths: cleanupCandidates,
+    context: migrated.cleanupContext,
     acceptTrackedChanges: opts.acceptTrackedChanges,
   });
   await printMigrationProtectionHint(project);
@@ -4580,6 +4499,7 @@ async function offerDoctorEnvCleanup(opts: {
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
   readonly acceptTrackedChanges: boolean;
 }): Promise<void> {
   const untracked: string[] = [];
@@ -4592,6 +4512,17 @@ async function offerDoctorEnvCleanup(opts: {
       ? tracked
       : untracked
     ).push(path);
+  }
+
+  // A key cannot be removed while its tracked store still exists. Include an
+  // untracked key in that store's later consent batch, keeping the dependency
+  // intact whether tracked cleanup is accepted, declined or refused.
+  const store = opts.context?.store;
+  if (store && tracked.includes(store.path)) {
+    const keyIndex = untracked.indexOf(store.keyPath);
+    if (keyIndex !== -1) {
+      tracked.push(...untracked.splice(keyIndex, 1));
+    }
   }
 
   if (untracked.length > 0) {
@@ -4614,6 +4545,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: untracked,
+        context: opts.context,
       });
     }
   }
@@ -4621,7 +4553,7 @@ async function offerDoctorEnvCleanup(opts: {
   if (tracked.length > 0) {
     note(
       [
-        "These legacy env files are tracked by git and can now be removed. Teammates share them, so commit the removal together with the new env layers:",
+        "These legacy env files are tracked by git, or are keys kept with a tracked store, and can now be removed. Teammates share the tracked files, so commit their removal together with the new env layers:",
         ...tracked.map((path) => `- ${path}`),
       ].join("\n"),
       "env cleanup"
@@ -4637,6 +4569,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: tracked,
+        context: opts.context,
       });
     } else {
       note(
@@ -4650,18 +4583,41 @@ async function offerDoctorEnvCleanup(opts: {
 /**
  * Removes confirmed legacy env files. Once the encrypted secret store itself is
  * gone, its pointer leaves `hack.config.json` too; the migration kept it so a
- * declined or failed removal leaves the store readable.
+ * declined removal keeps the store readable. Partial failures reconcile the
+ * pointer against confirmed removals before the cleanup error is rethrown.
  */
-async function removeDoctorEnvCleanup(opts: {
+export async function removeDoctorEnvCleanup(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
 }): Promise<void> {
-  const removed = await removeLegacyProjectEnvArtifacts({
-    paths: opts.paths,
-    projectRoot: opts.projectRoot,
-  });
+  let removed: readonly string[];
+  try {
+    removed = await removeLegacyProjectEnvArtifacts({
+      paths: opts.paths,
+      projectRoot: opts.projectRoot,
+      context: opts.context,
+    });
+  } catch (error) {
+    if (error instanceof LegacyEnvCleanupError) {
+      try {
+        await dropRemovedLegacySecretStorePointer({
+          projectRoot: opts.projectRoot,
+          projectDir: opts.projectDir,
+          projectName: opts.projectName,
+          removed: error.removedPaths,
+        });
+      } catch {
+        note(
+          "Could not reconcile the legacy secret store pointer. Check hack.config.json for a pointer to the removed store before retrying cleanup (values omitted).",
+          "env cleanup"
+        );
+      }
+    }
+    throw error;
+  }
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
   }

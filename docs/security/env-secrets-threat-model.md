@@ -290,34 +290,27 @@ planned branch or a passing documentation check is not a mitigation.
     session is followed until Hack's next record; ancestors of `.hack/.internal/`
     are not checked for other writers; staged multiplexer payloads are removed by
     the next staging, not by an independent reaper.
-17. **Open: secret-store and key integrity (HACK-2169).** In
-    `src/lib/secret-store.ts`, an unreadable encrypted store can be treated as empty
-    by `readEncryptedEntries`; a later mutation can replace it with only the new
-    entry. The process-global key cache is not bound to a store/key path, so a
-    cached key can be reused for another store whose key is absent. Explicit key
-    provisioning can replace an existing key without authenticating and re-encrypting
-    the store under the new one. Separately, project env add/set can create a file
-    key despite a working environment-only project key; file precedence then hides
-    that environment key from reads (`src/lib/project-env-config.ts`,
-    `src/commands/env.ts`). These are integrity and recoverability gaps, not safe
-    rotation paths. Keep them open until the corresponding fixes merge.
-18. **Open: local-layer symlinks, ignores and modes (HACK-2165).** Hydration checks
-    whether the logical local path is tracked before resolving an allowed
-    in-project symlink; the writer can then replace its tracked shared target.
-    Ordinary local add/set and hydrate can warn about failed ignore setup and
-    still write, and named local layers can already be tracked
-    (`src/lib/project-env-config.ts`, `src/lib/project-env-layer-path.ts`,
-    `src/lib/fs.ts`). Existing local-layer modes are preserved. Legacy dotenv
-    inspection also follows symlinks through `readTextFile`, including links
-    outside the project (`src/lib/hack-env.ts`); mutation checks do not protect
-    that read path. Keep these gaps open until the hygiene fixes merge; an
-    in-project target or local filename is not proof of private storage.
-19. **Open: migration cleanup recheck (HACK-2171).** Cleanup removes the current
-    path after an earlier migration/consent decision without rechecking the
-    selected file's current bytes and identity under a lock
-    (`removeLegacyProjectEnvArtifacts` in `src/lib/project-env-config.ts`,
-    cleanup callers in `src/commands/doctor.ts`). Edits made between that decision
-    and removal can be lost. Keep this open until cleanup revalidation merges.
+17. **Narrowed: secret-store and key integrity (HACK-2169, #766).** Unreadable or
+    malformed stores refuse mutation instead of becoming an empty store. Configured
+    file-key lookup does not borrow a cached key from another path; provisioning
+    refuses to replace a different existing key. An environment-only project key
+    is retained without creating a shadowing file key. Shared key-writer locks
+    serialize provisioning and cleanup. These are preservation checks, not a
+    rotation or recovery mechanism for keys already lost.
+18. **Narrowed: local-layer symlinks and Git privacy (HACK-2165, #762).**
+    Machine-local writes refuse linked or tracked destinations, unknown tracking
+    inside a checkout and ineffective ignore rules. Legacy dotenv inspection uses
+    no-follow reads. Local naming and ignores still do not prove private historical
+    permissions or erase earlier copies; inspect Doctor's findings and retain the
+    remaining filesystem-race limits described above.
+19. **Mitigated: stale migration cleanup decisions (HACK-2171).** Cleanup carries
+    content and file-identity receipts from before migration, then rechecks them
+    and current scoped delivery under writer locks after consent. Each unlink
+    rechecks its target. Refusals preserve remaining files and report confirmed
+    removals; automatic cleanup warns and continues the original command. Writers
+    outside Hack's cooperative locks can still race the final unlink. The daemon
+    also reports unconfirmed secret deletion as HTTP 500 `partial_failure`,
+    retaining the completed dotenv result instead of claiming success.
 
 ### Plaintext on disk outside materialization
 

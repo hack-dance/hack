@@ -1151,6 +1151,7 @@ mod tests {
                     timeout_ms: 100,
                     retries: 1,
                     start_period_ms: 0,
+                    policy: None,
                 },
                 allocation: "1".repeat(32),
                 generation: "2".repeat(32),

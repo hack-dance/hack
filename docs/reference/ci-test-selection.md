@@ -2,9 +2,13 @@
 
 A PR uses a light tier by default: typecheck, lint/privacy, secret scan, docs
 checks when relevant, and selected Linux unit files on five Linux shards. It runs
-no macOS jobs, Docker E2E shards, candidate/compiler host qualification, state-model
-job or CLI/release build smoke. Ready PRs that change protected CI inputs (including
-workflows, selectors, scripts, suite helpers, manifests and lockfiles) automatically
+no macOS jobs, Docker E2E shards, state-model job or CLI/release build smoke.
+Ready Rust-input PRs retain the Linux Candidate core leg and both Linux compiler
+hosts (including Rust checks); macOS stays in the heavy tier. This covers
+non-Markdown inputs under runtime-core/config-compiler (including pins, fixtures
+and generated data), plus all relay-guest inputs. Ready PRs that
+change protected CI inputs (including workflows, selectors, scripts, suite helpers,
+manifests, lockfiles and Rust toolchains) automatically
 run every ordinary PR tier, as `ci:full` would. Ready PRs targeting `main` retain
 the full tier, including the Intel compiler. Missing diffs or an unavailable base
 policy also fall back to full tiers. Linux unit-test preflight
@@ -23,6 +27,11 @@ the default tier, including the protected-input and `main` exceptions. A selecto
 fallback alone widens files; the independent shell guard also enables full tiers.
 Adding/removing labels, pushing, changing readiness or retargeting recomputes
 scope; metadata edits can cancel the active run.
+
+The required `test` fan-in also depends on `linux-process-lifetime`. When that
+tier is enabled, failure, cancellation, missing results or an unexpected skip
+fails `test`, even when every unit shard passed. Its planned out-of-scope skip
+passes. Branch rules are unchanged.
 
 Drafts keep the same deferrals even when labeled and both fan-ins fail with
 skipped: draft. GitHub accepts skipped required jobs, so a skipped job alone is
@@ -169,7 +178,7 @@ scoped attempts also block older full evidence; only successful scoped runs may
 be skipped. For a newer scoped push at the same SHA, the refusal also names the
 run and tells the operator to wait for success or use `gh run rerun RUN_ID`.
 An older full run cannot supersede that red or unfinished evidence. A new full
-dispatch can supersede it once that newer run succeeds.
+dispatch can supersede it once the dispatch succeeds.
 External app requirements retain
 their own exact-head/app identity checks. Stable release preparation remains
 push-only on `main` and rejects cancellation.

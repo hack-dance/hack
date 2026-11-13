@@ -7,7 +7,7 @@ flowchart TD
   guard -->|Yes or unavailable policy| allpr
   event -->|Draft PR| draft[Draft Linux tier]
   draft --> draftgate[Fan-ins fail: skipped draft]
-  labels -->|Default| light[Selected Linux tests and static checks]
+  labels -->|Default| light[Linux checks plus relevant Rust legs]
   light --> deferred[Name deferred macOS files]
   deferred --> prgate[Required test and docs checks]
   labels -->|ci:mac or ci:e2e| tier[Selected opted-in tier]

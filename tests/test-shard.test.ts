@@ -1301,7 +1301,12 @@ describe("hosted test CI fan-in", () => {
     const workflow = await ciWorkflow();
     const fanIn = workflow.jobs.test;
     expect(fanIn?.name ?? "test").toBe("test");
-    expect(fanIn?.needs).toEqual(["changes", "test-shard", "test-focus"]);
+    expect(fanIn?.needs).toEqual([
+      "changes",
+      "test-shard",
+      "test-focus",
+      "linux-process-lifetime",
+    ]);
     expect(fanIn?.if).toBe("${{ always() }}");
     const gate = fanIn?.steps.find(
       (step) => step.name === "Reject failed or skipped test shards"
@@ -1309,6 +1314,12 @@ describe("hosted test CI fan-in", () => {
     expect(gate?.env?.SHARD_RESULT).toBe("${{ needs.test-shard.result }}");
     expect(gate?.env?.FOCUS_RESULT).toBe("${{ needs.test-focus.result }}");
     expect(gate?.env?.CHANGES_RESULT).toBe("${{ needs.changes.result }}");
+    expect(gate?.env?.LIFETIME_RESULT).toBe(
+      "${{ needs.linux-process-lifetime.result }}"
+    );
+    expect(gate?.env?.LIFETIME_ENABLED).toBe(
+      "${{ needs.changes.outputs.docker_suite }}"
+    );
     expect(gate?.run).toContain('if [ "$SHARD_RESULT" != "success" ]; then');
     expect(gate?.run).toContain("exit 1");
     if (!gate?.run) {
@@ -1347,6 +1358,8 @@ describe("hosted test CI fan-in", () => {
           TEST_FOCUS: focus,
           SHARD_RESULT: shards,
           FOCUS_RESULT: focused,
+          LIFETIME_ENABLED: "false",
+          LIFETIME_RESULT: "skipped",
         },
         stdout: "ignore",
         timeout: 5000,
@@ -1355,6 +1368,36 @@ describe("hosted test CI fan-in", () => {
         run.exitCode,
         `changes=${changes} suite=${suite} focus=${focus} shards=${shards} focused=${focused}`
       ).toBe(exitCode);
+    }
+    for (const [enabled, result, exitCode] of [
+      ["true", "success", 0],
+      ["true", "failure", 1],
+      ["true", "cancelled", 1],
+      ["true", "skipped", 1],
+      ["true", "", 1],
+      ["false", "skipped", 0],
+      ["false", "failure", 1],
+      ["false", "success", 1],
+      ["", "skipped", 1],
+    ] as const) {
+      const run = Bun.spawnSync(["bash", "-e", "-u", "-c", gate.run], {
+        env: {
+          ...process.env,
+          PR_DRAFT: "false",
+          CHANGES_RESULT: "success",
+          SCOPE: "fixture",
+          SUITE: "true",
+          SHARD_RESULT: "success",
+          FOCUS_RESULT: "success",
+          LIFETIME_ENABLED: enabled,
+          LIFETIME_RESULT: result,
+        },
+        stdout: "ignore",
+        timeout: 5000,
+      });
+      expect(run.exitCode, `lifetime enabled=${enabled} result=${result}`).toBe(
+        exitCode
+      );
     }
     const named = Object.entries(workflow.jobs).filter(
       ([key, job]) => (job.name ?? key) === "test"

@@ -24,6 +24,27 @@ function compilerHosts(
   );
 }
 
+/** Apply the PR host tier without removing the Linux Rust safety checks. */
+function selectedCompilerHosts(opts: {
+  readonly draft: boolean;
+  readonly mac: boolean;
+  readonly linuxRust: boolean;
+  readonly releaseHosts: boolean;
+  readonly nativeHosts: boolean;
+  readonly coarseHosts: string;
+}): ReturnType<typeof compilerHosts> {
+  if (opts.draft) {
+    return [];
+  }
+  return compilerHosts(opts.releaseHosts).filter(
+    (host) =>
+      (opts.linuxRust && host.platform === "linux") ||
+      (opts.mac &&
+        (opts.nativeHosts ||
+          opts.coarseHosts.includes(JSON.stringify(host.os))))
+  );
+}
+
 /** Main and explicit release qualification retain every compiler architecture. */
 export function fullPushPlan(
   opts: { readonly releaseHosts?: boolean } = {}
@@ -52,6 +73,27 @@ export function touchesCandidate(path: string): boolean {
 export function touchesCompilerHost(path: string): boolean {
   return /^(?:packages\/config-compiler\/|scripts\/build-config-compiler\.ts$|mise\.toml$|\.github\/|(?:.*\/)?rust-toolchain(?:\.toml)?$)/.test(
     path
+  );
+}
+
+/** Rust crate inputs retain Linux checks even when the PR defers macOS. */
+export function touchesRustInput(path: string): boolean {
+  return (
+    /^packages\/relay-guest\//.test(path) ||
+    (/^packages\/(?:runtime-core|config-compiler)\//.test(path) &&
+      !path.endsWith(".md"))
+  );
+}
+
+function shouldRunCandidate(opts: {
+  readonly linuxRust: boolean;
+  readonly mac: boolean;
+  readonly full: boolean;
+  readonly changed: readonly string[] | null;
+}): boolean {
+  return (
+    opts.linuxRust ||
+    (opts.mac && (opts.full || (opts.changed?.some(touchesCandidate) ?? true)))
   );
 }
 
@@ -86,18 +128,21 @@ export async function planPullRequest(opts: {
     files: selection.files,
   });
   const integration = opts.pullRequest === false;
+  const linuxRust =
+    !opts.draft && (opts.changed?.some(touchesRustInput) ?? false);
   const mac = !opts.draft && (integration || full || opts.mac === true);
   const e2e = !opts.draft && (integration || full || opts.e2e === true);
   const macos = mac && pools.macos.length > 0 ? [1, 2, 3] : [];
   const linux = [4, 5, 6, 7, 8];
   const allJobs = full;
-  const nativeHosts = allJobs || opts.changed?.some(touchesCompilerHost);
-  const compiler = mac
-    ? compilerHosts(stablePr || opts.releaseHosts === true).filter(
-        (host) =>
-          nativeHosts || coarse.compiler_hosts.includes(JSON.stringify(host.os))
-      )
-    : [];
+  const compiler = selectedCompilerHosts({
+    draft: opts.draft,
+    mac,
+    linuxRust,
+    releaseHosts: stablePr || opts.releaseHosts === true,
+    nativeHosts: allJobs || (opts.changed?.some(touchesCompilerHost) ?? false),
+    coarseHosts: coarse.compiler_hosts,
+  });
   return {
     ...coarse,
     // All PRs use the selector, including docs and native-only changes. The
@@ -106,8 +151,13 @@ export async function planPullRequest(opts: {
     test_focus: "",
     test_layout: "pooled",
     compiler_hosts: JSON.stringify(compiler),
-    runtime_core:
-      mac && (allJobs || (opts.changed?.some(touchesCandidate) ?? true)),
+    compiler_rust: coarse.compiler_rust || linuxRust,
+    runtime_core: shouldRunCandidate({
+      linuxRust,
+      mac,
+      full: allJobs,
+      changed: opts.changed,
+    }),
     draft: opts.draft,
     test_files: JSON.stringify(selection.files),
     test_shards: JSON.stringify([...macos, ...linux]),

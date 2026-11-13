@@ -388,7 +388,7 @@ function missingFullCi(
   pushRunId?: number
 ): Error {
   const pushRecovery = pushRunId
-    ? ` Wait for the scoped push run ${pushRunId} at this commit to succeed, or rerun it with: gh run rerun ${pushRunId} . An older full run cannot supersede this running, failed or cancelled scoped run. A new full dispatch may supersede it once that newer run succeeds.`
+    ? ` Wait for the scoped push run ${pushRunId} at this commit to succeed, or rerun it with: gh run rerun ${pushRunId} . An older full run cannot supersede this running, failed or cancelled scoped run. A new full dispatch may supersede it once the dispatch succeeds.`
     : "";
   return new Error(
     `${reason}.${pushRecovery} A release-full CI run is required at next@${sourceRevision}; a green subset is insufficient. Freeze next at this SHA, run: gh workflow run ci.yml --ref next -f full=true ; wait for success, then retry the prerelease plan.`

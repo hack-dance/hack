@@ -202,6 +202,7 @@ for (const path of [
   "src/lib/guards.ts",
   "src/lib/cli-result.ts",
   "packages/config-compiler/Cargo.toml",
+  "packages/config-compiler/rust-toolchain.toml",
   "packages/runtime-core/Cargo.lock",
 ]) {
   test(`protected input ${path} automatically qualifies every ordinary PR tier`, async () => {
@@ -267,6 +268,49 @@ test("ready PRs into main retain every tier and Intel without release evidence",
     ci_evidence: "scoped",
   });
 });
+for (const path of [
+  "packages/runtime-core/src/provider/setup.rs",
+  "packages/relay-guest/src/main.rs",
+  "packages/config-compiler/src/lib.rs",
+  "packages/config-compiler/build.rs",
+  "packages/runtime-core/provider-pins.json",
+  "packages/config-compiler/tests/fixtures/schema-corpus.json",
+  "packages/relay-guest/README.md",
+]) {
+  test(`light Rust input ${path} retains Linux checks without native Mac tiers`, async () => {
+    const outputs = await scope({ path });
+    expect(JSON.parse(outputs.compiler_hosts ?? "null")).toEqual(
+      JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts).filter(
+        (host: { platform: string }) => host.platform === "linux"
+      )
+    );
+    expect(outputs).toMatchObject({
+      runtime_core: "true",
+      compiler_rust: "true",
+      test_shards: "[4,5,6,7,8]",
+      defer_macos: "true",
+      docker_suite: "false",
+      build_smoke: "false",
+    });
+    expect(await scope({ path, draft: true })).toMatchObject({
+      runtime_core: "false",
+      compiler_hosts: "[]",
+      defer_macos: "true",
+    });
+    const mac = await scope({ path, tierPlan: true, mac: true });
+    expect(
+      JSON.parse(mac.compiler_hosts ?? "null")
+        .map((host: { os: string }) => host.os)
+        .sort()
+    ).toEqual(
+      JSON.parse(fullPushPlan({ releaseHosts: false }).compiler_hosts)
+        .map((host: { os: string }) => host.os)
+        .sort()
+    );
+    expect(mac.runtime_core).toBe("true");
+    expect(mac.defer_macos).toBe("false");
+  });
+}
 test("retargeting reclassifies through the ordinary pull_request event", () => {
   expect(workflow.on.pull_request.types).toContain("edited");
 });

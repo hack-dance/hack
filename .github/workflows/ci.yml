@@ -83,6 +83,7 @@ jobs:
           unset CI_READ_TOKEN
           # This guard is independent of the selector and its fallback list.
           full=false
+          linux_rust=false
           base=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
             parents=$(git rev-list --parents -n 1 HEAD) || parents=""
@@ -108,8 +109,14 @@ jobs:
               if [ ! -s "$RUNNER_TEMP/ci-paths" ]; then full=true; fi
               while IFS= read -r -d '' path; do
                 case "$path" in
+                  packages/runtime-core/*.md|packages/config-compiler/*.md) ;;
+                  packages/runtime-core/*|packages/config-compiler/*|packages/relay-guest/*)
+                    linux_rust=true ;;
+                esac
+                case "$path" in
                   scripts/*|.github/*|tests/preload.ts|tests/helpers/*|src/lib/guards.ts|src/lib/cli-result.ts|\
                   package.json|*/package.json|bun.lock|*/bun.lock|bun.lockb|*/bun.lockb|Cargo.toml|*/Cargo.toml|Cargo.lock|*/Cargo.lock|\
+                  rust-toolchain|*/rust-toolchain|rust-toolchain.toml|*/rust-toolchain.toml|\
                   bunfig.toml|*/bunfig.toml|tsconfig*.json|*/tsconfig*.json|mise.toml)
                     full=true ;;
                 esac
@@ -182,13 +189,24 @@ jobs:
               if [ "$full" = "true" ]; then builds=true; fi
             fi
             if [ "$mac" != "true" ]; then
-              printf 'compiler_hosts=[]\nruntime_core=false\ntest_shards=[4,5,6,7,8]\ndefer_macos=true\n' >> "$GITHUB_OUTPUT"
+              compiler='[]'; native=false
+              if [ "$PR_DRAFT" != "true" ] && [ "$linux_rust" = "true" ]; then
+                compiler='[{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"}]'
+                native=true
+                echo 'compiler_rust=true' >> "$GITHUB_OUTPUT"
+              fi
+              printf 'compiler_hosts=%s\nruntime_core=%s\ntest_shards=[4,5,6,7,8]\ndefer_macos=true\n' "$compiler" "$native" >> "$GITHUB_OUTPUT"
             else
               echo 'defer_macos=false' >> "$GITHUB_OUTPUT"
+              if [ "$linux_rust" = "true" ] && [ "$full" != "true" ]; then
+                compiler=$(sed -n 's/^compiler_hosts=//p' "$GITHUB_OUTPUT" | tail -n 1)
+                compiler=$(jq -c '. + [{"os":"ubuntu-latest","platform":"linux","arch":"x64"},{"os":"ubuntu-24.04-arm","platform":"linux","arch":"arm64"}] | unique_by(.os) | map(select(.os != "macos-15-intel"))' <<< "${compiler:-[]}")
+                printf 'compiler_hosts=%s\ncompiler_rust=true\nruntime_core=true\n' "$compiler" >> "$GITHUB_OUTPUT"
+              fi
             fi
             if [ "$e2e" != "true" ]; then echo 'docker_suite=false' >> "$GITHUB_OUTPUT"; fi
             printf 'build_smoke=%s\n' "$builds" >> "$GITHUB_OUTPUT"
-            echo 'Light PRs defer macOS, Docker and build smoke to integration. Labels opt in; protected inputs, unavailable policy/diff and ready PRs into main automatically run full tiers.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Light PRs defer macOS, Docker and build smoke to integration; Rust crate inputs keep Linux candidate/compiler checks. Labels opt in; protected inputs, unavailable policy/diff and ready PRs into main automatically run full tiers.' >> "$GITHUB_STEP_SUMMARY"
           else
             printf 'defer_macos=false\nbuild_smoke=true\n' >> "$GITHUB_OUTPUT"
           fi
@@ -347,11 +365,11 @@ jobs:
     name: Candidate core (${{ matrix.os }})
     needs: changes
     # Ready PRs follow candidate/guest/launcher/toolchain/CI inputs. Drafts
-    # defer both hosts; full modes run both, scoped next pushes follow inputs.
+    # defer both hosts; Rust light PRs keep Linux, heavy tiers allow both hosts.
     if: ${{ needs.changes.outputs.runtime_core == 'true' }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(needs.changes.outputs.defer_macos == 'true' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     permissions:
@@ -852,7 +870,7 @@ jobs:
     # succeed; when it runs a focus instead, the focused job must. A cancelled
     # result fails, as do a failure, a failed scope or any skip of
     # the job in scope still fails rather than surfacing as a skipped check.
-    needs: [changes, test-shard, test-focus]
+    needs: [changes, test-shard, test-focus, linux-process-lifetime]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -867,6 +885,8 @@ jobs:
           TEST_FOCUS: ${{ needs.changes.outputs.test_focus }}
           SHARD_RESULT: ${{ needs.test-shard.result }}
           FOCUS_RESULT: ${{ needs.test-focus.result }}
+          LIFETIME_ENABLED: ${{ needs.changes.outputs.docker_suite }}
+          LIFETIME_RESULT: ${{ needs.linux-process-lifetime.result }}
         run: |
           if [ "$PR_DRAFT" = "true" ]; then
             echo "skipped: draft — full pull-request evidence is required before merge"
@@ -884,6 +904,10 @@ jobs:
             echo "test focus did not succeed (result: $FOCUS_RESULT)"
             exit 1
           fi
+          case "$LIFETIME_ENABLED:$LIFETIME_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Linux process lifetime evidence did not match its plan (enabled: $LIFETIME_ENABLED, result: $LIFETIME_RESULT)" >&2; exit 1 ;;
+          esac
           if [ "$SUITE" != "true" ]; then
             if [ -z "$TEST_FOCUS" ]; then
               echo "scope $SCOPE runs neither the bun shards nor a focus"

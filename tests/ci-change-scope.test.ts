@@ -34,7 +34,7 @@ type Workflow = {
       readonly if?: string;
       readonly outputs?: Record<string, string>;
       readonly strategy?: {
-        readonly matrix?: { readonly include?: unknown };
+        readonly matrix?: { readonly include?: unknown; readonly os?: unknown };
       };
       readonly steps?: readonly {
         readonly name?: string;
@@ -358,6 +358,9 @@ describe("CI workflow wiring", () => {
     ).toBe("${{ needs.changes.outputs.compiler_rust == 'true' }}");
     expect(jobs["runtime-core"]?.if).toBe(
       "${{ needs.changes.outputs.runtime_core == 'true' }}"
+    );
+    expect(jobs["runtime-core"]?.strategy?.matrix?.os).toBe(
+      "${{ fromJSON(needs.changes.outputs.defer_macos == 'true' && '[\"ubuntu-latest\"]' || '[\"ubuntu-latest\",\"macos-latest\"]') }}"
     );
     for (const name of [
       "runtime-images",

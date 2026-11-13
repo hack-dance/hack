@@ -367,7 +367,7 @@ describe("PR matrix policy", () => {
     for (const changed of [
       ["docs/a.md"],
       ["src/a.ts"],
-      ["packages/runtime-core/src/main.rs"],
+      ["packages/runtime-core/README.md"],
     ]) {
       const plan = await planPullRequest({
         repoRoot,
@@ -402,7 +402,7 @@ describe("PR matrix policy", () => {
     });
     expect(await planPullRequest({ ...input, e2e: true })).toMatchObject({
       defer_macos: true,
-      runtime_core: false,
+      runtime_core: true,
       docker_suite: true,
       build_smoke: false,
       test_shards: "[4,5,6,7,8]",
@@ -422,6 +422,34 @@ describe("PR matrix policy", () => {
       docker_suite: true,
       build_smoke: true,
       test_shards: "[1,2,3,4,5,6,7,8]",
+    });
+  });
+  test.each([
+    "packages/runtime-core/src/provider/setup.rs",
+    "packages/relay-guest/src/main.rs",
+    "packages/config-compiler/src/lib.rs",
+    "packages/config-compiler/build.rs",
+    "packages/runtime-core/provider-pins.json",
+    "packages/config-compiler/tests/fixtures/schema-corpus.json",
+    "packages/relay-guest/README.md",
+  ])("light Rust input retains Linux candidate and compiler legs: %s", async (path) => {
+    const input = { repoRoot, changed: [path], draft: false, full: false };
+    const plan = await planPullRequest(input);
+    expect(plan).toMatchObject({
+      runtime_core: true,
+      compiler_rust: true,
+      compiler_hosts: JSON.stringify(
+        COMPILER_HOSTS.filter((host) => host.platform === "linux")
+      ),
+      defer_macos: true,
+      docker_suite: false,
+      build_smoke: false,
+      test_shards: "[4,5,6,7,8]",
+    });
+    expect(await planPullRequest({ ...input, draft: true })).toMatchObject({
+      runtime_core: false,
+      compiler_hosts: "[]",
+      defer_macos: true,
     });
   });
   test("protected inputs and main PRs automatically run full tiers", async () => {

@@ -101,7 +101,7 @@ pub(super) fn removal_selection(
 fn refused() -> CandidateError {
     error(
         "graph_live_owner_recovery",
-        "Same-boot recovery requires an unchanged fully ready graph, confirmed dead foreground/relay owner, held publication locks, and exact cleanup inventories; evidence retained.",
+        "Same-boot recovery requires an unchanged graph with settled startup bindings, confirmed dead foreground/relay owner, held publication locks, and exact cleanup inventories; evidence retained.",
     )
 }
 fn digest(value: &impl Serialize) -> Result<String, CandidateError> {
@@ -134,16 +134,27 @@ fn no_pending(root: &Path, receipt: &Receipt) -> Result<(), CandidateError> {
     startup::require_dependency_rebind_complete(root, receipt)?;
     dead_owner_cleanup::require_historical_recovery(root, receipt)
 }
-fn ready(receipt: &Receipt) -> Result<(), CandidateError> {
-    ready_startup(receipt)?;
+/// Advisory selection only. Recovery repeats the settled binding and journal
+/// checks under the provider lease and exact dead-publication witnesses.
+pub(super) fn failed_start_recoverable(root: &Path, receipt: &Receipt) -> bool {
+    receipt.phase == "failed-retained"
+        && recoverable_settled(receipt).is_ok()
+        && no_pending(root, receipt).is_ok()
+}
+
+fn recoverable_settled(receipt: &Receipt) -> Result<(), CandidateError> {
+    settled_startup(receipt)?;
     if receipt.relay_cleanup.is_some() {
         return Err(refused());
     }
     Ok(())
 }
-fn ready_startup(receipt: &Receipt) -> Result<(), CandidateError> {
+// This module only admits exact-dead-owner recovery. Its callers validate new
+// recovery intents, resume those same intents, and archive completed prior
+// recoveries; this predicate is never a readiness check for up or restore.
+fn settled_startup(receipt: &Receipt) -> Result<(), CandidateError> {
     let startup = receipt.relay_startup.as_ref().ok_or_else(refused)?;
-    if receipt.phase != "ready-observed"
+    if !["ready-observed", "failed-retained"].contains(&receipt.phase.as_str())
         || !startup.valid(receipt)
         || startup.services.values().any(|s| {
             !matches!(
@@ -175,10 +186,10 @@ fn validate(
     boot: &str,
 ) -> Result<(), CandidateError> {
     if let Some(enrollment) = &intent.enrollment {
-        ready_startup(&intent.original)?;
+        settled_startup(&intent.original)?;
         enrollment.validate(&intent.original)?;
     } else {
-        ready(&intent.original)?;
+        recoverable_settled(&intent.original)?;
     }
     intent.relay.validate()?;
     if intent.version
@@ -261,7 +272,7 @@ fn archive_prior(root: &Path, current: &Receipt, expected: &str) -> Result<(), C
     if prior.original_sha256 == expected {
         return Ok(());
     }
-    ready_startup(current)?;
+    settled_startup(current)?;
     if digest(current)? != expected || exists(&root.join("live-owner-cleanup.pending"))? {
         return Err(refused());
     }
@@ -371,7 +382,7 @@ pub fn recover_live_owner(
     let mut intent = if exists(&root.join(FILE))? {
         state::read::<Intent>(&root.join(FILE))?
     } else {
-        ready_startup(&receipt)?;
+        settled_startup(&receipt)?;
         if digest(&receipt)? != expected {
             return Err(refused());
         }
@@ -792,21 +803,45 @@ mod tests {
     }
 
     #[test]
-    fn only_fully_ready_receipts_are_admitted() {
+    fn ready_and_failed_receipts_require_settled_startup_bindings() {
+        let fixture = super::super::tests::Fixture::new();
         let mut value = receipt();
-        ready(&value).unwrap();
-        for phase in [
-            "preparing",
-            "failed-retained",
-            "cleanup-intent",
-            "stopped-data-retained",
-        ] {
+        recoverable_settled(&value).unwrap();
+        assert!(!failed_start_recoverable(&fixture.0, &value));
+        value.phase = "failed-retained".into();
+        recoverable_settled(&value).unwrap();
+        assert!(failed_start_recoverable(&fixture.0, &value));
+        fs::write(fixture.0.join("state.pending"), b"uncertain effect").unwrap();
+        assert!(!failed_start_recoverable(&fixture.0, &value));
+        fs::remove_file(fixture.0.join("state.pending")).unwrap();
+        let mut unsettled = value.clone();
+        unsettled.resources.insert(
+            "container:web".into(),
+            serde_json::from_value(json!({
+                "kind":"container","key":"web","name":"owned-web","id":"7".repeat(64),
+                "image":format!("sha256:{}", "8".repeat(64)),"phase":"started"
+            }))
+            .unwrap(),
+        );
+        let startup = unsettled.relay_startup.as_mut().unwrap();
+        startup.control_only = false;
+        startup.services.insert(
+            "web".into(),
+            serde_json::from_value(json!({
+                "generation":"6".repeat(32), "phase":"prepared", "started_at":null,
+                "bindings":{"content":{"slot":0,"port":8080,"aliases":[],"process":null}}
+            }))
+            .unwrap(),
+        );
+        assert!(unsettled.relay_startup.as_ref().unwrap().valid(&unsettled));
+        assert!(!failed_start_recoverable(&fixture.0, &unsettled));
+        for phase in ["preparing", "cleanup-intent", "stopped-data-retained"] {
             value.phase = phase.into();
-            assert!(ready(&value).is_err());
+            assert!(recoverable_settled(&value).is_err());
         }
         value = receipt();
         value.relay_startup = None;
-        assert!(ready(&value).is_err());
+        assert!(recoverable_settled(&value).is_err());
     }
     #[test]
     fn enrolled_recovery_versions_require_the_unchanged_legacy_pending_shape() {
@@ -818,7 +853,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        assert!(ready(&original).is_err());
+        assert!(recoverable_settled(&original).is_err());
         let mut selected = completed(original.clone());
         selected.enrollment = Some(
             serde_json::from_value(

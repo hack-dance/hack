@@ -4,15 +4,21 @@ import {
   chmod,
   lstat,
   mkdtemp,
+  readdir,
   readFile,
+  realpath,
   rm,
   symlink,
   unlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  findStaleMuxEnvironments,
+  MUX_ENVIRONMENT_TTL_MS,
+  removeStaleMuxEnvironment,
   runMuxEnvironment,
   stageMuxEnvironment,
 } from "../src/mux/private-environment.ts";
@@ -32,9 +38,20 @@ afterAll(async () => {
   await rm(testTmp, { recursive: true, force: true });
 });
 
+/**
+ * Payloads are staged in a private directory of this file, never the host's
+ * temporary directory, so the stale-payload sweep cannot reach real state.
+ */
+const STAGE_DIR = await mkdtemp(join(tmpdir(), "mux-env-stage-"));
+afterAll(async () => {
+  await rm(STAGE_DIR, { recursive: true, force: true });
+});
+const stage = (env: Readonly<Record<string, string>>) =>
+  stageMuxEnvironment(env, { tmpDir: STAGE_DIR });
+
 test("private mux payload is owner-only, consumed before spawn, and preserves assignments", async () => {
   const root = await mkdtemp(join(tmpdir(), "mux-env-test-"));
-  const payload = await stageMuxEnvironment({
+  const payload = await stage({
     UID: "fake-uid",
     NODE_ENV: "selected",
     FAKE_KEY: "fake-key",
@@ -67,7 +84,7 @@ test("private mux payload is owner-only, consumed before spawn, and preserves as
 
 test("private mux input refuses public, malformed, oversized, and symlinked payloads", async () => {
   for (const kind of ["public", "malformed", "oversized", "symlink"] as const) {
-    const payload = await stageMuxEnvironment({ UID: "fake-uid" });
+    const payload = await stage({ UID: "fake-uid" });
     const foreign = join(dirname(payload.path), "foreign");
     try {
       if (kind === "public") {
@@ -112,7 +129,7 @@ test("private mux input refuses public, malformed, oversized, and symlinked payl
  */
 test("the launcher waits through a group SIGINT that the command handles", async () => {
   const root = await mkdtemp(join(tmpdir(), "mux-env-signal-"));
-  const payload = await stageMuxEnvironment({ FAKE_KEY: "fake-key" });
+  const payload = await stage({ FAKE_KEY: "fake-key" });
   try {
     const ready = join(root, "ready");
     const done = join(root, "done");
@@ -153,3 +170,73 @@ test("the launcher waits through a group SIGINT that the command handles", async
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+async function expire(path: string): Promise<void> {
+  const old = (Date.now() - MUX_ENVIRONMENT_TTL_MS - 60_000) / 1000;
+  await utimes(path, old, old);
+}
+
+test("an expired payload is refused and removed, never delivered (HACK-2165)", async () => {
+  const payload = await stage({ FAKE_KEY: "synthetic-expired" });
+  await expire(payload.path);
+  expect(await runMuxEnvironment(payload.path, ["true"])).toBe(1);
+  expect(await lstat(dirname(payload.path)).catch(() => null)).toBeNull();
+});
+
+test("the next staging sweeps payloads of sessions that never ran; recent ones stay (HACK-2165)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mux-env-sweep-"));
+  try {
+    const stale = await stageMuxEnvironment(
+      { FAKE_KEY: "synthetic-stale" },
+      { tmpDir: dir }
+    );
+    const recent = await stageMuxEnvironment(
+      { FAKE_KEY: "synthetic-recent" },
+      { tmpDir: dir }
+    );
+    await expire(dirname(stale.path));
+    const found = await findStaleMuxEnvironments({ tmpDir: dir });
+    expect(found.map((entry) => entry.root)).toEqual([dirname(stale.path)]);
+
+    const next = await stageMuxEnvironment(
+      { FAKE_KEY: "synthetic-next" },
+      { tmpDir: dir }
+    );
+    const left = (await readdir(dir)).sort();
+    expect(left).toEqual(
+      [dirname(recent.path), dirname(next.path)]
+        .map((path) => path.slice(path.lastIndexOf("/") + 1))
+        .sort()
+    );
+    // A directory that changed identity is never removed.
+    expect(await removeStaleMuxEnvironment(found[0]!)).toBe(false);
+    await recent.cleanup();
+    await next.cleanup();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale payloads are named by the resolved path staging returns, even through a linked temp directory", async () => {
+  // macOS keeps the temporary directory behind /var -> /private/var; a link
+  // here stands in for it.
+  const real = await mkdtemp(join(tmpdir(), "mux-env-real-"));
+  const linked = `${real}-link`;
+  await symlink(real, linked);
+  try {
+    const staged = await stageMuxEnvironment(
+      { FAKE_KEY: "synthetic-linked" },
+      { tmpDir: linked }
+    );
+    await expire(dirname(staged.path));
+    const found = await findStaleMuxEnvironments({ tmpDir: linked });
+    expect(found.map((entry) => entry.root)).toEqual([dirname(staged.path)]);
+    expect(dirname(staged.path).startsWith(`${await realpath(real)}/`)).toBe(
+      true
+    );
+    expect(await removeStaleMuxEnvironment(found[0]!)).toBe(true);
+  } finally {
+    await rm(linked, { force: true });
+    await rm(real, { recursive: true, force: true });
+  }
+});

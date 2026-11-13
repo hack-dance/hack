@@ -25,6 +25,7 @@ import type {
   SecretsConfig,
 } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
+import { childEnvironment } from "./child-environment.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { envParseDiagnostic } from "./env-parse-diagnostic.ts";
 import { ensureDir } from "./fs.ts";
@@ -228,19 +229,33 @@ export type FileSecretStoreListing = {
 /**
  * Where the encrypted file store (also the cloud shim's) for this context
  * lives, from configuration only: nothing is read, opened or provisioned.
- * `active` is false when the backend is the OS keychain.
+ * `active` is false when the backend is the OS keychain. Used by store
+ * retirement (HACK-2177) and `hack doctor`'s secrets hygiene (HACK-2165).
  */
 export async function resolveFileSecretStorePaths(input: {
   /** Omitted: only the global configuration applies (no project). */
   readonly projectDir?: string;
+  /**
+   * Reject, instead of falling back to the default paths, when the
+   * configuration cannot be read or does not parse (HACK-2165): for callers
+   * that must tell an absent setting from an unknown one.
+   */
+  readonly strict?: boolean;
 }): Promise<{
   readonly active: boolean;
   readonly storePath: string;
   readonly keyPath: string;
 }> {
-  const secretsConfig = (
-    await readControlPlaneConfig({ projectDir: input.projectDir })
-  ).config.secrets;
+  const controlPlane = await readControlPlaneConfig({
+    projectDir: input.projectDir,
+    strict: input.strict === true,
+  });
+  if (input.strict === true && controlPlane.parseError) {
+    throw new Error(
+      "Encrypted store paths are unknown: the configuration does not parse"
+    );
+  }
+  const secretsConfig = controlPlane.config.secrets;
   return {
     active:
       secretsConfig.backend === "encrypted_file" ||
@@ -1794,6 +1809,8 @@ async function isKeyFileTrackedByGit(path: string): Promise<boolean | null> {
         "--",
         basename(path),
       ],
+      // Never hand Hack's own key material to the git child (#756).
+      env: childEnvironment(),
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",

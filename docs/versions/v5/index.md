@@ -11,7 +11,14 @@ macOS) is opt-in and ships only through the `hack-next` channel, not in the stab
 archives or the Homebrew formula. Read [Upgrade from v4](upgrade.md) for what
 changed and what was retired.
 
-Start with [Install](install.md), then [Getting started](getting-started.md).
+## Start here
+
+1. [Install v5](install.md): choose a channel and set up Compose routing.
+2. [First project on Compose](getting-started.md): set up, start, open, read logs and stop.
+3. [Upgrade from v4](upgrade.md): back up first, try one project and roll back.
+4. [Try native on Apple Silicon](native/start.md): prepare, check, start and return to Compose.
+
+[Troubleshooting](troubleshooting.md) maps common Doctor findings to their fixes.
 [What's new in 5.0](../guides/v5-release-notes.md) summarizes the release.
 v5 prerelease bundles are Apple Silicon macOS only; see
 [Install](install.md#prerequisites) for platform support.

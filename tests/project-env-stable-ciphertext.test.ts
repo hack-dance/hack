@@ -518,9 +518,18 @@ async function assertKilledWriteIsRecoverable(layer: Layer): Promise<void> {
   worker.kill("SIGKILL");
   await worker.exited;
 
-  const abandoned = (await readdir(repo.projectDir)).filter((name) =>
-    name.endsWith(".tmp")
-  );
+  // A machine-local write stages in the self-ignoring `.hack-staging/`
+  // (HACK-2165); a shared layer write stages as a sibling.
+  const stagingDir = await readdir(
+    join(repo.projectDir, ".hack-staging")
+  ).catch(() => [] as string[]);
+  const abandoned = [
+    ...(await readdir(repo.projectDir)).filter((name) => name.endsWith(".tmp")),
+    ...stagingDir
+      .filter((name) => name.endsWith(".tmp"))
+      .map((name) => `.hack-staging/${name}`),
+  ];
+  expect(abandoned[0]?.startsWith(".hack-staging/")).toBe(layer === "local");
   expect(abandoned).toHaveLength(1);
   const staged = await readFile(
     join(repo.projectDir, abandoned[0] ?? ""),

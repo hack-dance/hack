@@ -8,6 +8,7 @@ import {
 import { handleRunCliError } from "../../src/cli/run.ts";
 import { ClosedCliError } from "../../src/lib/cli-result.ts";
 import {
+  nativeDetachedUpFailedServices,
   nativeDetachedUpFailure,
   nativeDetachedUpReady,
   nativeDetachedUpShellVariables,
@@ -165,6 +166,7 @@ if (role === "channel-holder") {
       "wrapped-provider-pin",
       "immediate-failure",
       "exit-first-failure",
+      "failed-services",
     ].includes(mode)
       ? await handleRunCliError({ error, jsonRequested: true })
       : 1;
@@ -266,6 +268,26 @@ if (role === "channel-holder") {
         if (["immediate-failure", "exit-first-failure"].includes(mode)) {
           process.exit(1);
         }
+        return 1;
+      }
+      if (mode === "failed-services") {
+        // A service's process exited during startup: only its name may cross
+        // IPC. Unsafe names and anything resembling output are dropped.
+        nativeDetachedUpFailedServices([
+          "web",
+          "api",
+          "web",
+          "synthetic private value",
+          "line\nbreak",
+        ]);
+        await nativeDetachedUpFailure(
+          new NativeRuntimeRequestError({
+            message: "synthetic-private-value",
+            nativeCode: "engine_rejected",
+          })
+        );
+        server.stop(true);
+        process.off("SIGTERM", terminate);
         return 1;
       }
       if (mode === "unsafe-failure") {

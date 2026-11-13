@@ -17,6 +17,7 @@ import {
   HackCliError,
   type HackErrorCode,
 } from "./cli-result.ts";
+import { preparePrivateStaging } from "./private-staging.ts";
 
 export async function pathExists(absolutePath: string): Promise<boolean> {
   try {
@@ -386,7 +387,8 @@ export class AtomicWriteConflictError extends ClosedCliError {
  * account belongs to), so keeping group-readable mode bits under a different
  * group could widen who can read the file.
  *
- * An existing target keeps its permission bits, owner and group, and an
+ * An existing target keeps its permission bits (less group and other bits
+ * with `tightenExisting`), owner and group, and an
  * existing symlink keeps pointing where it did: the replacement lands at the
  * link's resolved path, as a plain write through the link would. A new file
  * gets the umask default, or `createMode` (still narrowed by the umask) when
@@ -415,6 +417,12 @@ export async function writeTextFileAtomicIfChanged(
     /** Permission bits for a file this write creates; an existing file keeps its own. */
     readonly createMode?: number;
     /**
+     * Private file: an existing target that changes loses its group and
+     * other permission bits (a 0644 file becomes 0600); owner and special
+     * bits are kept. Without it an existing file keeps its mode exactly.
+     */
+    readonly tightenExisting?: boolean;
+    /**
      * Never resolve the destination through a symlink (HACK-2165): a link
      * at `absolutePath` is refused, and the commit renames onto
      * `absolutePath` itself, so the file replaced is the one the caller's
@@ -431,6 +439,11 @@ export async function writeTextFileAtomicIfChanged(
     throw new AtomicWriteConflictError();
   }
   if (existing.kind === "existing" && existing.text === content) {
+    await tightenUnchangedTarget({
+      path: absolutePath,
+      existing,
+      options,
+    });
     return { changed: false };
   }
   const target = await atomicWriteDestination({
@@ -453,10 +466,12 @@ export async function writeTextFileAtomicIfChanged(
       });
     }
   }
-  const staging = join(
-    dirname(target),
-    `.${basename(target)}.${randomUUID()}.tmp`
-  );
+  const prepared = await stagingForAtomicWrite({
+    target,
+    path: absolutePath,
+    private: options.tightenExisting === true,
+  });
+  const staging = prepared.path;
   const file = await openAtomicWriteStaging({
     staging,
     path: absolutePath,
@@ -467,7 +482,7 @@ export async function writeTextFileAtomicIfChanged(
     if (existing.kind === "existing") {
       // chown can clear set-id bits, so the mode is applied after it.
       await preserveOwnership({ file, existing, path: absolutePath });
-      await file.chmod(existing.mode);
+      await file.chmod(replacementMode({ existing, options }));
     }
     await file.writeFile(content, "utf8");
     await file.sync();
@@ -481,6 +496,7 @@ export async function writeTextFileAtomicIfChanged(
     }
     await options.validatePath?.(absolutePath);
     await options.validatePath?.(target);
+    await prepared.recheck();
     await rename(staging, target);
     committed = true;
   } catch (error: unknown) {
@@ -494,6 +510,102 @@ export async function writeTextFileAtomicIfChanged(
   }
   await syncDirectoryBestEffort(dirname(target));
   return { changed: true };
+}
+
+/**
+ * Where an atomic write stages its contents. A private write (one that
+ * holds machine-local values, marked by `tightenExisting`) stages in the
+ * self-ignoring private directory next to the target, so a copy a crash
+ * leaves is never visible to git, whatever ignore rules the project has
+ * (see `private-staging.ts`). Other writes keep the `.<name>.<uuid>.tmp`
+ * sibling.
+ */
+async function stagingForAtomicWrite(opts: {
+  readonly target: string;
+  readonly path: string;
+  readonly private: boolean;
+}): Promise<{
+  readonly path: string;
+  readonly recheck: () => Promise<void>;
+}> {
+  if (!opts.private) {
+    return {
+      path: join(
+        dirname(opts.target),
+        `.${basename(opts.target)}.${randomUUID()}.tmp`
+      ),
+      recheck: async () => undefined,
+    };
+  }
+  const refusal = () =>
+    new AtomicWriteRefusedError({
+      path: opts.path,
+      reason: "directory_not_writable",
+    });
+  try {
+    return await preparePrivateStaging({ target: opts.target, refusal });
+  } catch (error: unknown) {
+    if (error instanceof AtomicWriteRefusedError) {
+      throw error;
+    }
+    throw atomicWriteStagingError({ error, path: opts.path });
+  }
+}
+
+/** The mode a replacement of an existing target gets (see `tightenExisting`). */
+function replacementMode(opts: {
+  readonly existing: { readonly mode: number };
+  readonly options: { readonly tightenExisting?: boolean };
+}): number {
+  return opts.options.tightenExisting === true
+    ? opts.existing.mode & ~0o077
+    : opts.existing.mode;
+}
+
+/**
+ * `tightenExisting` for a write that changes nothing: drops the group and
+ * other bits of the resolved target in place, through a no-follow handle on
+ * the path the policy check admitted. The contents are not rewritten.
+ */
+async function tightenUnchangedTarget(opts: {
+  readonly path: string;
+  readonly existing: { readonly mode: number };
+  readonly options: {
+    readonly tightenExisting?: boolean;
+    readonly noFollowTarget?: boolean;
+    readonly validatePath?: (path: string) => Promise<void>;
+  };
+}): Promise<void> {
+  if (
+    opts.options.tightenExisting !== true ||
+    (opts.existing.mode & 0o077) === 0
+  ) {
+    return;
+  }
+  // With noFollowTarget the admitted path itself, never a link's target
+  // (the no-follow open below refuses a link that appears meanwhile).
+  const target =
+    opts.options.noFollowTarget === true
+      ? opts.path
+      : await realpath(opts.path);
+  await opts.options.validatePath?.(target);
+  // Best effort: a file another user owns (chmod EPERM) keeps working as it
+  // did; the read-time report and `hack doctor` still name it.
+  const file = await open(
+    target,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+  ).catch(() => null);
+  if (!file) {
+    return;
+  }
+  try {
+    const info = await file.stat();
+    if (info.isFile() && (info.mode & 0o077) !== 0) {
+      await file.chmod(info.mode & 0o7700).catch(() => undefined);
+    }
+  } finally {
+    await file.close();
+  }
 }
 
 /**
@@ -841,7 +953,7 @@ const GITIGNORE_TRAILING_SPACES = / +$/;
  * pattern (`  .hack.secret.key` names a file that starts with two spaces).
  * Escaped trailing spaces (`\ `) are not unescaped: no Hack entry ends in one.
  */
-function gitignoreLinePattern(line: string): string {
+export function gitignoreLinePattern(line: string): string {
   return line
     .replace(GITIGNORE_LINE_CR, "")
     .replace(GITIGNORE_TRAILING_SPACES, "");

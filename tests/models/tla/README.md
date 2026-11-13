@@ -56,6 +56,11 @@ No credentials or running VM are needed.
 
 ## Native foreground recovery lease takeover
 
+The companion [PreReady coverage](native-frontend-recovery/COVERAGE.md) checks
+settled pre-Ready selection, durable admission release and startup exclusion
+during incomplete recovery: 160 states and three intentional negative controls.
+It adds no authority for pending effects or live/uncertain host processes.
+
 `native-frontend-recovery/Recovery.tla` models the explicit saved-run frontend
 recovery lease protocol. The positive configuration exhausts **602 distinct
 states** (695 generated, maximum depth 22). It bounds one lease to two new candidates,

@@ -1,0 +1,34 @@
+---
+title: CLI update · verification and recovery
+---
+stateDiagram-v2
+  direction TB
+  [*] --> Current
+  Current --> Downloading : confirmed update
+  Downloading --> Verified : layout and hashes pass
+  Downloading --> Refused : transfer or integrity refusal
+  Verified --> AssetsPublished : staged version passes
+  AssetsPublished --> CompilerPublished : matching compiler
+  CompilerPublished --> Installed : CLI rename last
+  Verified --> Restored : caught failure
+  AssetsPublished --> Restored : caught failure
+  CompilerPublished --> Restored : caught failure
+  Installed --> Restored : caught sync failure
+  AssetsPublished --> Uncertain : hard kill
+  CompilerPublished --> Uncertain : hard kill
+  Restored --> Current : old files restored
+  Refused --> Current : install unchanged
+  Uncertain --> Current : retained backup recovery
+  note right of Downloading
+    Fresh retries share one deadline.
+    Uncertain cancellation refuses retry.
+  end note
+  note right of Installed
+    Previous files and value-free manifest retained.
+    No power-loss atomicity across directories.
+  end note
+  class Current idle
+  class Downloading,AssetsPublished,CompilerPublished live
+  class Verified,Installed,Restored ok
+  class Refused fail
+  class Uncertain wait

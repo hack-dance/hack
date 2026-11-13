@@ -38,6 +38,56 @@ fn image() -> String {
 fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":image()}}})
 }
+
+#[test]
+fn recovery_settled_selection_keeps_never_created_members_but_refuses_pending_effects() {
+    let prepared = prepare(basic(), json!({"web":{}}), &ManagedValues::new());
+    let config = configuration(&prepared, OWNER).unwrap();
+    let original =
+        Receipt::preparing(&config, OWNER, "12345678-abcd-abcd-abcd-123456789abc").unwrap();
+    assert!(original.require_recovery_settled().is_err());
+    for phase in [
+        Phase::FailedRetained,
+        Phase::StopIntent,
+        Phase::Stopped,
+        Phase::RemovalIntent,
+    ] {
+        let mut receipt = original.clone();
+        receipt.phase = phase;
+        receipt.require_recovery_settled().unwrap();
+        for settled in ["created", "started", "stopped", "removed"] {
+            let mut next = receipt.clone();
+            let resource = next.resources.get_mut("container:web").unwrap();
+            resource.id = Some("1".repeat(64));
+            resource.phase = settled.into();
+            next.require_recovery_settled().unwrap();
+        }
+        for pending in [
+            "create-intent",
+            "start-intent",
+            "uncertain",
+            "stop-intent",
+            "remove-intent",
+        ] {
+            let mut next = receipt.clone();
+            let resource = next.resources.get_mut("container:web").unwrap();
+            resource.id = Some("1".repeat(64));
+            resource.phase = pending.into();
+            assert!(next.require_recovery_settled().is_err(), "{pending}");
+        }
+        let mut wire = serde_json::to_value(&receipt).unwrap();
+        wire["failure"] = json!({"service":"web","observation":{"state":"exited","code":7}});
+        let failed: Receipt = serde_json::from_value(wire).unwrap();
+        failed.require_recovery_settled().unwrap();
+    }
+    let mut removed = original;
+    removed.phase = Phase::Removed;
+    assert!(removed.require_recovery_settled().is_err());
+    for resource in removed.resources.values_mut() {
+        resource.phase = "removed".into();
+    }
+    removed.require_recovery_settled().unwrap();
+}
 fn two_bridges() -> Value {
     json!({"schema_version":1,"name":"fixture","networks":{"outbound":{"internal":false},"inside":{"internal":true}},"services":{
         "db":{"image":image(),"networks":{"inside":{"aliases":["db-reader"]}}},

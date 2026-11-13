@@ -26,6 +26,7 @@ import { backgroundCommandComposeScenario } from "./scenarios/background-command
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
 import { composeConfigHashDriftScenario } from "./scenarios/compose-config-hash-drift.ts";
 import { composeForegroundSignalScenario } from "./scenarios/compose-foreground-signal.ts";
+import { composeShortOneshotScenario } from "./scenarios/compose-short-oneshot.ts";
 import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
 import { dependencyCacheBootstrapScenario } from "./scenarios/dependency-cache-bootstrap.ts";
 import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-package.ts";
@@ -127,6 +128,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   portableMultiserviceScenario,
   portableBootstrapNegativesScenario,
   composeConfigHashDriftScenario,
+  composeShortOneshotScenario,
   composeForegroundSignalScenario,
   mcpLogsComposeScenario,
   backgroundCommandComposeScenario,

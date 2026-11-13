@@ -118,9 +118,7 @@ test("the Compose scaffold is unchanged when the backend is compose or omitted",
   expect(parseCompose(omitted).networks["hack-dev"]).toEqual({
     external: true,
   });
-  expect(findComposeBackendFeatures(parseCompose(omitted))).toEqual([
-    "external_network",
-  ]);
+  expect(findComposeBackendFeatures(parseCompose(omitted))).toEqual([]);
 });
 
 test("the native scaffold isolates the ingress network and probes each route at its upstream port", () => {
@@ -282,9 +280,7 @@ test("hack init --auto on the Compose backend keeps the Compose scaffold and nex
 
   const yaml = await Bun.file(join(repo, ".hack", "docker-compose.yml")).text();
   expect(yaml).not.toContain("x-hack");
-  expect(findComposeBackendFeatures(parseCompose(yaml))).toEqual([
-    "external_network",
-  ]);
+  expect(findComposeBackendFeatures(parseCompose(yaml))).toEqual([]);
 }, 30_000);
 
 test("hack init --auto refuses an existing .hack/ with a coded line, no stack and non-interactive next steps (HACK-2069)", async () => {

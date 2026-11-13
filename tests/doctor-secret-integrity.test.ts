@@ -537,6 +537,17 @@ test("a layer that exists but cannot be read or parsed is an error, not success"
   } finally {
     await chmod(staging, 0o600);
   }
+  // A layer name that is not a regular file (a directory), with no
+  // committed overlay beside it: runtime refuses it, so it is reported.
+  await rm(staging);
+  const notAFile = resolve(repo.projectDir, "hack.env.review.local.yaml");
+  await mkdir(notAFile);
+  const nonRegular = await inspect(repo);
+  expect(nonRegular).toHaveLength(1);
+  expect(nonRegular[0]?.message).toContain(
+    ".hack/hack.env.review.local.yaml exists but could not be read"
+  );
+  await rm(notAFile, { recursive: true });
   // A project directory whose layers cannot be listed is an error too.
   await chmod(repo.projectDir, 0o300);
   try {

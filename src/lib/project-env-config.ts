@@ -3690,8 +3690,9 @@ export type ProjectEnvLayerKeyReport = {
 /**
  * Every overlay name an env layer file in the project dir implies, for the
  * integrity inspection: `hack.env.<name>.yaml` and
- * `hack.env.<name>.local.yaml`, regular files or symlinks (in-project
- * links are supported layers; the read checks where they lead). This adds
+ * `hack.env.<name>.local.yaml`, of any entry type (in-project links are
+ * supported layers; the read checks where they lead and reports anything
+ * runtime refuses, such as a directory). This adds
  * what {@link listProjectEnvOverlayNames} leaves out: overlays that exist
  * only as their machine-local layer, and symlinked layers. `default` and
  * the bare local file are default layers, not overlays. Unlistable
@@ -3711,29 +3712,32 @@ async function listProjectEnvInspectedOverlayNames(opts: {
       throw error;
     }
   );
-  return entries
-    .filter((entry) => entry.isFile() || entry.isSymbolicLink())
-    .map((entry) => entry.name)
-    .filter(
-      (name) =>
-        name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
-        name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
-    )
-    .map((name) =>
-      name.slice(
-        PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
-        -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length
+  return (
+    entries
+      // Any entry type: a directory or other non-regular entry named like a
+      // layer is an existing layer runtime refuses, so its read reports it.
+      .map((entry) => entry.name)
+      .filter(
+        (name) =>
+          name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+          name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
       )
-    )
-    .map((name) =>
-      name.endsWith(localSuffix) ? name.slice(0, -localSuffix.length) : name
-    )
-    .filter(
-      (name) =>
-        name.length > 0 &&
-        name !== "default" &&
-        name !== PROJECT_ENV_LOCAL_SEGMENT
-    );
+      .map((name) =>
+        name.slice(
+          PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
+          -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length
+        )
+      )
+      .map((name) =>
+        name.endsWith(localSuffix) ? name.slice(0, -localSuffix.length) : name
+      )
+      .filter(
+        (name) =>
+          name.length > 0 &&
+          name !== "default" &&
+          name !== PROJECT_ENV_LOCAL_SEGMENT
+      )
+  );
 }
 
 /**

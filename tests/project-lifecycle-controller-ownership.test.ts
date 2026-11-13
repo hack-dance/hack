@@ -26,6 +26,10 @@ import {
   type MuxSessionCreateResult,
 } from "../src/mux/mux-backend.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
+import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
+
+// Staging sweeps the temp directory: never the developer's real one.
+isolateMuxTempDir();
 
 /**
  * Lifecycle-session creation for projects with shared helpers, driven

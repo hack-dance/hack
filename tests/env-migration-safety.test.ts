@@ -21,6 +21,7 @@ import {
   dropRemovedLegacySecretStorePointer,
   migrateLegacyProjectEnv,
   resolveProjectEnvConfig,
+  resolveProjectEnvConfigPath,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
@@ -199,7 +200,11 @@ test("a key file inside the project stays while the store it opens stays (HACK-1
     }),
   });
   const keyPath = resolve(repo.projectRoot, "store.key");
-  await writeFile(keyPath, `${["synthetic", "file", "key"].join("-")}\n`);
+  // Private, as Hack writes it: a key others can read is refused.
+  await writeFile(keyPath, `${["synthetic", "file", "key"].join("-")}\n`, {
+    mode: 0o600,
+  });
+  await chmod(keyPath, 0o600);
   await setStoreEntries(repo, {
     SEC: ["synthetic", "declared", "e2b7"].join("-"),
   });
@@ -227,7 +232,11 @@ test("a store whose every entry the layers deliver is still offered with its key
   });
   const storePath = resolve(repo.projectRoot, "secrets.enc.json");
   const keyPath = resolve(repo.projectRoot, "store.key");
-  await writeFile(keyPath, `${["synthetic", "file", "key"].join("-")}\n`);
+  // Private, as Hack writes it: a key others can read is refused.
+  await writeFile(keyPath, `${["synthetic", "file", "key"].join("-")}\n`, {
+    mode: 0o600,
+  });
+  await chmod(keyPath, 0o600);
   await setStoreEntries(repo, {
     SEC: ["synthetic", "declared", "41f0"].join("-"),
     "env.qa.SEC": ["synthetic", "qa", "41f0"].join("-"),
@@ -690,4 +699,26 @@ test("env_file order that the default overlay would reverse refuses (HACK-1682)"
   expect(await exists(resolve(repo.projectDir, "hack.env.default.yaml"))).toBe(
     false
   );
+});
+
+test("migration never creates a key file that would shadow HACK_ENV_SECRET_KEY (HACK-2169)", async () => {
+  const repo = await createRepo({
+    vars: [{ key: "SEC", source: "keychain" }],
+    config: encryptedFileConfig({ path: "secrets.enc.json" }),
+  });
+  await setStoreEntries(repo, { SEC: ["synthetic", "base", "7a1c"].join("-") });
+  process.env.HACK_ENV_SECRET_KEY = ["synthetic", "env", "key"].join("-");
+  const envFile = resolveProjectEnvConfigPath({
+    projectDir: repo.projectDir,
+    envName: null,
+  });
+  const envBefore = await readFile(envFile, "utf8").catch(() => null);
+
+  await expect(migrate(repo)).rejects.toThrow(
+    "HACK_ENV_SECRET_KEY is set but no .hack.secret.key exists"
+  );
+  expect(await exists(resolve(repo.projectRoot, ".hack.secret.key"))).toBe(
+    false
+  );
+  expect(await readFile(envFile, "utf8").catch(() => null)).toBe(envBefore);
 });

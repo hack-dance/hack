@@ -414,6 +414,14 @@ export async function writeTextFileAtomicIfChanged(
     readonly validatePath?: (path: string) => Promise<void>;
     /** Permission bits for a file this write creates; an existing file keeps its own. */
     readonly createMode?: number;
+    /**
+     * Never resolve the destination through a symlink (HACK-2165): a link
+     * at `absolutePath` is refused, and the commit renames onto
+     * `absolutePath` itself, so the file replaced is the one the caller's
+     * checks admitted. A link swapped in after the check is replaced by the
+     * rename, never written through.
+     */
+    readonly noFollowTarget?: boolean;
   } = {}
 ): Promise<{ readonly changed: boolean }> {
   await options.validatePath?.(absolutePath);
@@ -425,8 +433,11 @@ export async function writeTextFileAtomicIfChanged(
   if (existing.kind === "existing" && existing.text === content) {
     return { changed: false };
   }
-  const target =
-    existing.kind === "absent" ? absolutePath : await realpath(absolutePath);
+  const target = await atomicWriteDestination({
+    path: absolutePath,
+    absent: existing.kind === "absent",
+    noFollow: options.noFollowTarget === true,
+  });
   await options.validatePath?.(target);
   if (existing.kind === "existing") {
     try {
@@ -483,6 +494,29 @@ export async function writeTextFileAtomicIfChanged(
   }
   await syncDirectoryBestEffort(dirname(target));
   return { changed: true };
+}
+
+/**
+ * The file an atomic write replaces: the path itself when it is absent or
+ * when `noFollow` is set (a link there is then refused, never resolved);
+ * otherwise the file an existing link resolves to.
+ */
+async function atomicWriteDestination(opts: {
+  readonly path: string;
+  readonly absent: boolean;
+  readonly noFollow: boolean;
+}): Promise<string> {
+  if (opts.noFollow) {
+    const entry = await lstat(opts.path).catch(() => null);
+    if (entry?.isSymbolicLink()) {
+      throw new AtomicWriteRefusedError({
+        path: opts.path,
+        reason: "not_regular_file",
+      });
+    }
+    return opts.path;
+  }
+  return opts.absent ? opts.path : await realpath(opts.path);
 }
 
 /**

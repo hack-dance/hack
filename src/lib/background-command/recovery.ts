@@ -1,5 +1,5 @@
 import { closeSync, constants, openSync } from "node:fs";
-import { lstat } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import {
   ProjectsRegistryLockTimeoutError,
   withProjectsRegistryLock,
@@ -17,6 +17,8 @@ import {
   JournalWriter,
   OUTPUT_EVENT_LIMIT,
   outputPath,
+  outputWasCut,
+  placeReservedMarker,
   readChild,
   readEvents,
   readOwner,
@@ -266,6 +268,12 @@ async function recoverLocked(
   }
   const events = await reconcileTail(opts.paths, opts.tailIo);
   if (endedEvent(events)) {
+    // Tail repair may have just published the dead supervisor's end: its
+    // takeover still cuts output nobody scanned, without any new record
+    // (an ended journal takes no more events).
+    if (needsAtRestScrub(opts.meta)) {
+      await dropUnscannedOutput({ paths: opts.paths, events });
+    }
     return events;
   }
   const writer = new JournalWriter(
@@ -274,9 +282,11 @@ async function recoverLocked(
     events.at(-1)?.seq ?? 0,
     opts.append
   );
-  // On a full disk announcing stops (ENOSPC is caught there); the reserve
-  // stays untouched for the final record.
-  const truncated = await announceUnsupervisedOutput({
+  // Before anything else: output the supervisor never scanned is dropped
+  // from disk when it had values to redact (they are not available here),
+  // otherwise announced. On a full disk announcing stops (ENOSPC is caught
+  // there); the reserve stays untouched for the final record.
+  const truncated = await takeOverOutput({
     paths: opts.paths,
     meta: opts.meta,
     events,
@@ -299,7 +309,7 @@ async function recoverLocked(
     return await readEvents(opts.paths);
   }
   const finalTruncated = overdue
-    ? (await announceUnsupervisedOutput({
+    ? (await takeOverOutput({
         paths: opts.paths,
         meta: opts.meta,
         events: await readEvents(opts.paths),
@@ -338,6 +348,131 @@ async function recoveredContainerProcess(opts: {
     (await readChild(opts.paths)) !== null ||
     (await lstat(opts.paths.spawning).catch(() => null)) !== null;
   return spawned ? "not_confirmed" : "not_applicable";
+}
+
+/**
+ * Output that landed after the supervisor was lost. Without the redaction
+ * values (only the supervisor ever held them, over a pipe), a command that
+ * had values to redact cannot have that output stored safely: each stream
+ * file is cut back to the bytes the supervisor had scanned and announced,
+ * and one `command.output_truncated` with `reason: "redaction_unavailable"`
+ * marks it. A command still running keeps appending, so every takeover cuts
+ * again. With no values to redact the output is announced, marked
+ * `unsupervised`. Returns whether capture is now truncated.
+ */
+async function takeOverOutput(opts: {
+  readonly paths: JournalPaths;
+  readonly meta: CommandMeta;
+  readonly events: readonly EventEnvelope[];
+  readonly writer: JournalWriter;
+  readonly final: boolean;
+}): Promise<boolean> {
+  if (!needsAtRestScrub(opts.meta)) {
+    return await announceUnsupervisedOutput(opts);
+  }
+  return await cutUnscannedOutput(opts);
+}
+
+/**
+ * Cut output nobody scanned from the stored files and mark it once with
+ * `command.output_truncated` (`reason: "redaction_unavailable"`). For a
+ * command with values to redact, used by every takeover (recovery and a
+ * cancel that finishes the command itself). Returns whether capture is now
+ * truncated.
+ */
+export async function cutUnscannedOutput(opts: {
+  readonly paths: JournalPaths;
+  readonly events: readonly EventEnvelope[];
+  readonly writer: JournalWriter;
+}): Promise<boolean> {
+  // The marker comes first: if the event below cannot be written (full
+  // disk) or the process is interrupted after the cut, a later takeover
+  // still finds it, publishes the event and reports the capture truncated.
+  // Program order only: the marker, the cut and the directory are not
+  // fsynced, so this does not hold across power loss and is not a
+  // guarantee of durable erasure.
+  const dropped = await dropUnscannedOutput({
+    paths: opts.paths,
+    events: opts.events,
+    beforeCut: async () =>
+      await placeReservedMarker({
+        pending: opts.paths.outputCutPending,
+        marker: opts.paths.outputCut,
+      }),
+  });
+  const marked = opts.events.some(
+    (event) =>
+      event.type === "command.output_truncated" &&
+      event.payload.reason === "redaction_unavailable"
+  );
+  // A cut recorded only by its marker (the event's append failed, or the
+  // process died after the cut) gets its public event now.
+  const cut = dropped || (await outputWasCut(opts.paths));
+  if (cut && !marked) {
+    await opts.writer
+      .write("command.output_truncated", {
+        reason: "redaction_unavailable",
+        capturedBytes: emittedOffsets(opts.events).captured,
+        limitBytes: CAPTURE_LIMIT_BYTES,
+      })
+      .catch((error: unknown) => {
+        // The cut already freed space; a full disk only loses the marker.
+        if (!isNoSpaceError(error)) {
+          throw error;
+        }
+      });
+  }
+  return cut || marked || emittedOffsets(opts.events).truncated;
+}
+
+/** Full capture with values to redact: unscanned output must not stay on disk. */
+export function needsAtRestScrub(meta: CommandMeta): boolean {
+  return meta.capture === "full" && meta.redaction.values > 0;
+}
+
+/**
+ * Cut each stream file back to the bytes covered by output events (which
+ * the supervisor redacted before announcing them). Returns whether anything
+ * was dropped. Cutting allocates nothing, so it works on a full disk.
+ */
+export async function dropUnscannedOutput(opts: {
+  readonly paths: JournalPaths;
+  readonly events: readonly EventEnvelope[];
+  /**
+   * Runs once, before the first byte is cut: a record of the cut placed
+   * here survives a crash in the middle (overstating `truncated` if the cut
+   * then fails is the safe direction).
+   */
+  readonly beforeCut?: () => Promise<void>;
+}): Promise<boolean> {
+  // Only output the supervisor redacted counts: output an older Hack
+  // announced as `unsupervised` was never scanned and is cut too (reads
+  // already withhold it when there are values to redact).
+  const offsets = emittedOffsets(
+    opts.events.filter((event) => event.payload.unsupervised !== true)
+  );
+  let dropped = false;
+  for (const stream of ["stdout", "stderr"] as const) {
+    const handle = await open(
+      outputPath(opts.paths, stream),
+      constants.O_WRONLY | constants.O_NOFOLLOW
+    ).catch(() => null);
+    if (!handle) {
+      continue;
+    }
+    try {
+      if ((await handle.stat()).size > offsets[stream]) {
+        if (!dropped) {
+          await opts.beforeCut?.();
+        }
+        await handle.truncate(offsets[stream]);
+        dropped = true;
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  return dropped;
 }
 
 /**

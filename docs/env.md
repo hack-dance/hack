@@ -109,10 +109,12 @@ removal; committing an automatic index removal would delete teammates' copies.
   does not make it writable for Hack; add a write bit instead. When it lacks
   the managed block, `hack doctor` warns and names the fix (make it writable,
   then run
-  `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`
-  and `hack env hydrate` still write the local layer, print the same warning
-  on stderr (so `--json` output on stdout stays valid JSON), and leave the
-  file unchanged. Interactive `hack init` that overwrites an existing scaffold
+  `hack doctor --fix`), and `--fix` leaves it unchanged. `hack env set --local`,
+  `add --local`, `unset --local` and `hack env hydrate` print the same warning
+  on stderr (so `--json` output on stdout stays valid JSON) and leave the
+  file unchanged; they write the local layer only when another rule (for
+  example a root `.gitignore` entry) still ignores it, and otherwise refuse
+  (see "Machine-local writes" below). Interactive `hack init` that overwrites an existing scaffold
   prints the same warning and leaves the file unchanged. A read-only file that
   already has the block is fine.
 - runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
@@ -402,8 +404,10 @@ so readers never see a partial file. An existing file with group or other access
 tightened to `0600` even when its contents are unchanged. These write and update paths
 refuse, with a fixed message that names no file or value, an env file that is a symlink
 (including a dangling one) or not a regular file, or one whose `.hack` directory is a
-symlink. Replace the link with a regular file or directory to continue. Code paths
-that only read an env file do not apply this check and still follow a symlink.
+symlink. Replace the link with a regular file or directory to continue. Reads of
+these files, including legacy resolution and `hack env list`, refuse the same links
+before reading, so a link to a dotenv file outside the project is never parsed or
+printed.
 
 For host execution, `hack host exec`, `hack host shell`, and lifecycle hooks/processes use a host-local view.
 That means Hack prefers host-usable values when it can:
@@ -739,6 +743,35 @@ a local destination already tracked by Git. Values declared as `keychain` migrat
 layers as ciphertext.
 Migration requires effective ignore protection before writing plaintext. It refuses
 an outdated read-only `.hack/.gitignore` or a local destination that Git does not ignore.
+
+Machine-local writes (`hack env set`, `add` and `unset` with `--local`, and `hack env
+hydrate`) apply the same protection before every write, to every local layer
+(`hack.env.local.yaml` and each `hack.env.<overlay>.local.yaml`). They refuse, with a
+message that names the file and no value:
+
+- a local layer that is a symbolic link, wherever it points (Git checks the link's
+  name, while a write would replace the file it names, which may be tracked);
+- a local layer that Git tracks, or one whose tracking Git cannot report inside a
+  checkout;
+- a local layer that no effective rule ignores, after Hack has tried once to restore
+  the managed `.hack/.gitignore` block (a read-only file, or a later rule that
+  re-includes the layer, leaves it unignored).
+
+Outside a Git checkout nothing can commit the layer, so these checks pass. Hack decides
+"outside a checkout" only on confirmed absence: it looks for a `.git` entry above both the
+project path you gave and its resolved path, and treats an entry it cannot inspect, or a
+path it cannot resolve, as inside. The same checks apply to a legacy `.hack/.env` (or
+overlay) that `hack env set` or `unset` rewrites in a project without env layers, after
+Hack adds its `info/exclude` entry. A machine-local write replaces the checked path
+itself: it never resolves the destination through a symbolic link.
+
+**What these protections cover.** Hack protects machine-local values and keys against
+accidental collection by Git and against other users of the machine: it refuses or
+reports a file Git tracks, cannot report on, or does not ignore; it keeps files private
+to your user; and it binds each check to the file it actually opens or replaces. A
+process already running as your user is out of scope: it can read the key and every
+machine-local file directly, so Hack adds no machinery whose only purpose is to defeat
+such a process racing its checks.
 Without `hack.env.json`, `set --local` still writes `.hack/.env`; if a contract is
 added later, migration keeps those values machine-local too.
 
@@ -1113,6 +1146,20 @@ with the original key. Copy `.hack.secret.key` from a machine that has it, or se
 `HACK_ENV_SECRET_KEY` to the same key. Do not run `hack env add --secret` there to
 "generate" a key: a new key cannot decrypt the existing values. When a command needs
 the key and finds none, its error says this instead of suggesting a new key.
+`hack env add --secret` and `hack env set --secret` refuse, before writing anything,
+when `HACK_ENV_SECRET_KEY` is set but no `.hack.secret.key` exists (a new key file
+would be used instead of that key), and when a secret already in the layer does not
+open under the key readers use (the layer would end up with mixed keys). Replacing
+the one entry being set is allowed. `hack doctor`'s `secret integrity` check reports
+a layer whose secrets do not all open under one key, naming the secrets that do not
+open (never a value). To recover, read those values with the key that encrypted
+them, remove each with `hack env unset` (which needs no key), then store it again
+with `hack env set --secret`. A layer that exists but cannot be read or parsed, a
+directory whose layers cannot be listed, or inherited layers that cannot be
+resolved are reported as errors, never as success. In a linked worktree it also
+checks the primary checkout's local layers that the worktree inherits. Legacy env
+migration refuses the same way when `HACK_ENV_SECRET_KEY` is set but no
+`.hack.secret.key` exists.
 
 Linked worktree behavior:
 
@@ -1586,7 +1633,29 @@ Some older surfaces are still compatibility-oriented:
   The `encrypted_file` store (also used by the `cloud` shim) is replaced atomically
   with mode `0600`, and set/delete hold an in-process queue plus a cooperative
   `<store>.lock` so concurrent writers, including separate processes, do not lose
-  updates. A store path that is a symlink is refused for writes. Explicit key
+  updates. A store path that is a symlink or not a regular file is refused for reads
+  and writes, and a store that exists but cannot be read is never treated as empty,
+  so a write never replaces it. The key file is read without following a link and is
+  refused when other users can read or write it (use mode `0600`) or when git tracks
+  it. Inside a git work tree whose git cannot answer (it fails, is missing, or takes
+  more than 5 s), the key is refused too, rather than guessed untracked. Whether the
+  key is in a work tree is decided from its real directory (symlinks resolved, as
+  git does); outside any repository git is not run. A key file Hack wrote has always been `0600`, so this refuses only key files
+  made or changed by hand, and the error gives the `chmod`. Explicit key
+  provisioning (`--provision-key`) with `HACK_SECRETS_FILE_KEY` set never replaces
+  a different existing key, or one it cannot read: a key path can serve more than
+  one store (the default one is shared), and a key that does not open one store
+  may be the only key for another. Changing a key is a rotation, which re-encrypts;
+  move a key file aside yourself (keeping a copy) only once no store needs it.
+  With no key file, it writes the key only when the configured store is absent or
+  empty, or opens under that key; a store it cannot read, or a symlinked one, is
+  refused, since a new key file could shadow the key that opens it. Every key
+  writer (explicit provisioning, keychain persistence and the first-use key)
+  holds the key file's own `<key>.lock`, and each write checks the file again just
+  before it lands, so a concurrent writer's key is kept, never overwritten. The
+  process-wide key cache holds only keychain material, so one store's key file never
+  stands in for another store's key. `hack doctor` reports an unreadable or refused
+  store, a missing or refused store key, and a key that does not open the store. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
   key paths or immediate parent directories. A key generated on first use is
   published only when no key file exists, so concurrent first users adopt the key

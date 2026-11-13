@@ -409,7 +409,7 @@ test("an in-checkout store configured through an alias spelling is still checked
     ...f.scope,
     stores: [
       {
-        storePath: join(alias, "secrets", "absent.enc.json"),
+        storePath: join(f.home, "absent.enc.json"),
         keyPath: aliasedKey,
       },
     ],
@@ -431,7 +431,7 @@ test("an ignore entry for a path with glob characters is literal and verified (g
   await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
   const scope: SecretsHygieneScope = {
     ...f.scope,
-    stores: [{ storePath: join(dir, "absent.enc.json"), keyPath }],
+    stores: [{ storePath: join(f.home, "absent.enc.json"), keyPath }],
   };
   const findings = await inspectSecretsHygiene(scope);
   expect(findings.map((finding) => finding.fix)).toEqual([
@@ -452,7 +452,7 @@ test("a store whose name ends with a space is reported with no automatic ignore 
   await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
   const findings = await inspectSecretsHygiene({
     ...f.scope,
-    stores: [{ storePath: join(f.projectRoot, "absent.enc.json"), keyPath }],
+    stores: [{ storePath: join(f.home, "absent.enc.json"), keyPath }],
   });
   expect(findings).toEqual([
     expect.objectContaining({ status: "warn", path: keyPath, fix: null }),
@@ -481,7 +481,7 @@ test("a configured path with a line break never becomes an ignore entry", async 
   const before = await readFile(join(f.projectRoot, ".gitignore"), "utf8");
   const findings = await inspectSecretsHygiene({
     ...f.scope,
-    stores: [{ storePath: join(dir, "absent.enc.json"), keyPath: crafted }],
+    stores: [{ storePath: join(f.home, "absent.enc.json"), keyPath: crafted }],
   });
   expect(findings).toEqual([
     expect.objectContaining({ path: crafted, fix: null }),
@@ -508,4 +508,29 @@ test("names in findings are shell-quoted in commands and never printed with cont
   expect(text).not.toContain("\u001b");
   expect(text).not.toContain("\u0007");
   expect(text).toContain("no command is printed");
+});
+
+test("an in-checkout store and key that do not exist yet are ignored before first use", async () => {
+  const f = await fixture();
+  // Configured relative to the checkout; neither the files nor their
+  // directory exist yet.
+  const storePath = join(f.projectRoot, "secrets", "store.enc.json");
+  const keyPath = join(f.projectRoot, "secrets", "store.key");
+  const scope: SecretsHygieneScope = {
+    ...f.scope,
+    stores: [{ storePath, keyPath }],
+  };
+  const findings = await inspectSecretsHygiene(scope);
+  expect(findings.map((finding) => finding.fix?.kind).sort()).toEqual([
+    "ignore",
+    "ignore",
+  ]);
+  expect(
+    await applySecretsHygieneFixes({ findings, report: () => undefined })
+  ).toEqual({ applied: 2, skipped: 0 });
+  expect(await inspectSecretsHygiene(scope)).toEqual([]);
+  // A file created there later is already ignored.
+  await mkdir(join(f.projectRoot, "secrets"));
+  await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+  expect(await inspectSecretsHygiene(scope)).toEqual([]);
 });

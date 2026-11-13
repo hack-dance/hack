@@ -391,12 +391,20 @@ async function gitFindings(opts: {
 async function candidateFindings(opts: {
   readonly candidate: Candidate;
   readonly project: SecretsHygieneScope["project"];
+  /**
+   * The file is created later by its writer (a configured store or key):
+   * when absent, git must already ignore where it will be created, so a
+   * first write never produces a file git can collect.
+   */
+  readonly beforeCreation?: boolean;
 }): Promise<SecretsHygieneFinding[]> {
   const stats = await lstat(opts.candidate.path).catch(() => null);
-  if (!stats) {
-    return [];
-  }
   const name = shown(opts.candidate.path, opts.project);
+  if (!stats) {
+    return opts.beforeCreation === true && opts.candidate.ignore
+      ? await gitFindings({ candidate: opts.candidate, name })
+      : [];
+  }
   return [
     ...fileFindings({ candidate: opts.candidate, stats, name }),
     ...(stats.isSymbolicLink()
@@ -453,6 +461,28 @@ async function leftoverFindings(opts: {
  * spelling of an in-checkout path is still checked; git is then asked about
  * that resolved spelling.
  */
+/**
+ * `path` resolved through its nearest existing ancestor (links followed),
+ * with the components that do not exist yet appended; null when nothing on
+ * the way can be resolved.
+ */
+async function resolveExisting(path: string): Promise<string | null> {
+  const missing: string[] = [];
+  let current = path;
+  while (true) {
+    const real = await realpath(current).catch(() => null);
+    if (real) {
+      return join(real, ...missing.reverse());
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    missing.push(basename(current));
+    current = parent;
+  }
+}
+
 async function inProjectIgnore(opts: {
   readonly path: string;
   readonly project: SecretsHygieneScope["project"];
@@ -461,7 +491,7 @@ async function inProjectIgnore(opts: {
     return null;
   }
   const root = await realpath(opts.project.projectRoot).catch(() => null);
-  const dir = await realpath(dirname(opts.path)).catch(() => null);
+  const dir = await resolveExisting(dirname(opts.path));
   if (!(root && dir)) {
     return null;
   }
@@ -504,6 +534,7 @@ async function storeFindings(opts: {
       ...(await candidateFindings({
         candidate: { ...candidate, ignore },
         project: opts.project,
+        beforeCreation: true,
       }))
     );
   }

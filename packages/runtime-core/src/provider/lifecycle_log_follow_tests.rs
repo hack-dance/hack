@@ -65,7 +65,7 @@ fn headers(stream: &mut std::os::unix::net::UnixStream) {
         }
         assert!(request.len() < 4096);
     }
-    assert!(request.contains("/logs?follow=1&stdout=1&stderr=1&timestamps=1&tail=0"));
+    assert!(request.contains("/logs?follow=1&stdout=1&stderr=1&timestamps=0&tail=0"));
     stream
         .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
         .unwrap();
@@ -90,14 +90,18 @@ fn active_log_transport_does_not_hold_or_wait_for_lifecycle_leases() {
                 &socket,
                 &"a".repeat(64),
                 "web",
-                0,
-                None,
+                crate::provider::engine::log_follow::LogOptions {
+                    tail: 0,
+                    since: None,
+                    timestamps: false,
+                },
                 || Ok(running.load(Ordering::SeqCst)),
                 &mut Output(tx),
             )
         });
         let mut engine = accept(&listener);
         headers(&mut engine);
+        rx.recv_timeout(Duration::from_secs(3)).unwrap(); // Attached control event.
         frame(&mut engine, &rx);
         drop(held);
         assert!(!follower.is_finished());
@@ -128,23 +132,35 @@ fn stopped_service_idle_timeout_is_not_a_clean_stream_end() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::scope(|scope| {
         let follower = scope.spawn(|| {
-            crate::provider::engine::log_follow::follow_socket(
+            let mut output = Vec::new();
+            let result = crate::provider::engine::log_follow::follow_socket(
                 &socket,
                 &"a".repeat(64),
                 "web",
-                0,
-                None,
+                crate::provider::engine::log_follow::LogOptions {
+                    tail: 0,
+                    since: None,
+                    timestamps: false,
+                },
                 || Ok(false),
-                &mut std::io::sink(),
-            )
+                &mut output,
+            );
+            (result, output)
         });
         let mut engine = accept(&listener);
         headers(&mut engine);
+        // Deliberately stop halfway through a mux payload. The prefix must be
+        // delivered before the five-second idle refusal, even without frame EOF.
+        engine.write_all(b"\x01\0\0\0\0\0\0\x08tail").unwrap();
         // Keep the fake transport open: a stopped container is not an HTTP EOF.
-        assert_eq!(
-            follower.join().unwrap().unwrap_err().code,
-            "native_log_stopped_idle"
-        );
+        let (result, output) = follower.join().unwrap();
+        assert_eq!(result.unwrap_err().code, "native_log_stopped_idle");
+        let events: Vec<serde_json::Value> = output
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(events[1]["data"], "dGFpbA==");
         drop(engine);
     });
 }

@@ -5,10 +5,13 @@
  * argument. With `linger`, the launcher stays alive after printing its result
  * so a test can kill its whole session.
  */
+
+import { nativeBackgroundEnvironment } from "../../src/commands/background-command-start.ts";
 import { startBackgroundCommand } from "../../src/lib/background-command/launch.ts";
 
 type LauncherConfig = {
   readonly argv: readonly string[];
+  readonly native?: boolean;
   readonly cwd: string;
   readonly requestKey?: string;
   readonly timeoutMs?: number;
@@ -55,7 +58,7 @@ try {
       ...(config.capture === undefined ? {} : { capture: config.capture }),
     },
     operation: "exec",
-    backend: "compose",
+    backend: config.native ? "native" : "compose",
     projectId: "fixture",
     projectRoot: config.cwd,
     projectDir: null,
@@ -66,7 +69,7 @@ try {
     child: {
       argv: config.argv,
       cwd: config.cwd,
-      env,
+      env: config.native ? nativeBackgroundEnvironment() : env,
       ...(config.guest
         ? { guest: { ...config.guest, compose: [...config.guest.compose] } }
         : {}),

@@ -25,6 +25,7 @@ import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { connect as tlsConnect } from "node:tls";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { listenPublishedUnixSocket } from "../lib/unix-socket-publish.ts";
@@ -151,6 +152,7 @@ export function spawnNativeHttpsChild(input: SpawnInput): HttpsChild {
       directory = mkdtempSync(join(tmpdir(), "hk-https-pipe-"));
       const fifo = join(directory, "stdin");
       const made = Bun.spawnSync(["/usr/bin/mkfifo", "-m", "600", fifo], {
+        env: childEnvironment(),
         stdout: "ignore",
         stderr: "ignore",
         timeout: 5000,
@@ -171,7 +173,7 @@ export function spawnNativeHttpsChild(input: SpawnInput): HttpsChild {
         ]
       : [...input.argv];
     const child = Bun.spawn(argv, {
-      env: input.env,
+      env: childEnvironment(input.env),
       stdin: "ignore",
       stdout: "ignore",
       stderr: input.nativeDiagnostics ? "pipe" : "ignore",

@@ -1,4 +1,5 @@
 import { appendFile } from "node:fs/promises";
+import { childEnvironment } from "../../../lib/child-environment.ts";
 
 import type { JobStatus, JobStore } from "./job-store.ts";
 
@@ -60,7 +61,7 @@ export async function runJob(opts: {
   try {
     proc = Bun.spawn([...command], {
       cwd: opts.cwd,
-      env: buildEnv(opts.env),
+      env: childEnvironment(buildEnv(opts.env)),
       stdout: "pipe",
       stderr: "pipe",
     });

@@ -1,5 +1,6 @@
 import { lstat, readdir, readlink, realpath } from "node:fs/promises";
 import { basename, isAbsolute, resolve } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 
 import { readTextFile, writeTextFile } from "../lib/fs.ts";
 import { readObservedProcesses } from "../lib/host-command-observation.ts";
@@ -246,6 +247,7 @@ async function listOpenUnixSockets(opts: {
 
 async function listProcessTable(): Promise<readonly string[]> {
   const proc = Bun.spawn(["ps", "-axo", "pid=,command="], {
+    env: childEnvironment(),
     stdout: "pipe",
     stderr: "ignore",
     stdin: "ignore",

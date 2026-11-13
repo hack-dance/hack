@@ -15,7 +15,7 @@ run it:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.15/hack-next-install.sh \
+  https://github.com/hack-dance/hack/releases/download/v5.0.0-next.16/hack-next-install.sh \
   --output hack-next-install.sh
 less hack-next-install.sh
 sh hack-next-install.sh
@@ -36,7 +36,7 @@ A `hack-next` install keeps each version in its own folder. The two paths you ne
 are the native program and its private home:
 
 ```sh
-V=5.0.0-next.15   # the version you installed; `hack-next --manager status` shows it
+V=5.0.0-next.16   # the version you installed; `hack-next --manager status` shows it
 NATIVE="$HOME/.hack-next/versions/$V/bundle/hack-native"
 NATIVE_HOME="$HOME/.hack-next/versions/$V/native-home"
 ```
@@ -55,9 +55,10 @@ is verified before consent and reused without prompting, downloading or preparin
 For scripts, use `runtime setup --no-interactive --accept-downloads`. Without
 `--accept-downloads`, a noninteractive run needing preparation fails with
 `E_INTERACTIVE_REQUIRED`. Complete matching installs need no flag.
-Add `--json` for per-file `downloaded`, `resumed` or `reused` outcomes and exact
+Add `--json` for per-file `downloaded`, `resumed`, `reused` or `offline` outcomes and exact
 `size_bytes`, `downloaded_bytes` and `reused_bytes` counts, alongside `status` and
-`probe`. Offline files and verified complete installations report zero downloaded bytes.
+`probe`. Offline inputs report zero downloaded bytes. A verified complete
+installation reports `status: "reused"` and an empty `files` list: no archive was read.
 Connections time out after 15 seconds, each read after 60 seconds, and each file
 has a 30-minute overall deadline including redirects. A `setup_pin_unavailable`
 error means upstream returned 404 or 410; update Hack or use offline archives.

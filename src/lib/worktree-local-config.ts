@@ -4,6 +4,7 @@ import {
   PROJECT_CONFIG_FILENAME,
   PROJECT_CONFIG_LEGACY_FILENAME,
 } from "../constants.ts";
+import { childEnvironment } from "./child-environment.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isSlimExecutionMode } from "./execution-mode.ts";
 import { isRecord } from "./guards.ts";
@@ -479,7 +480,7 @@ export async function readGitInspection(opts: {
     }
     throwIfCancelled(signal);
     const child = Bun.spawn(["git", "-C", projectRoot, ...args], {
-      env,
+      env: childEnvironment(env),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",

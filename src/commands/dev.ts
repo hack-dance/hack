@@ -3,6 +3,7 @@ import { lstat, open, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath } from "../cli/options.ts";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { hasDevMutationAcl } from "../lib/dev-acl.ts";
 import { isRecord, isStringArray } from "../lib/guards.ts";
 import { exec } from "../lib/shell.ts";
@@ -205,6 +206,7 @@ export const devCommand = withHandler(
     let child: ReturnType<typeof Bun.spawn>;
     try {
       child = Bun.spawn(command, {
+        env: childEnvironment(),
         cwd: root,
         stdin: "inherit",
         stdout: "inherit",

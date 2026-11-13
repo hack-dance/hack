@@ -1,4 +1,8 @@
 import {
+  childEnvironment,
+  hackReexecEnvironment,
+} from "./child-environment.ts";
+import {
   beginNativeCpuChild,
   nativeCpuCommandCategory,
 } from "./native-cpu-diagnostics.ts";
@@ -44,15 +48,17 @@ class StdoutOverflow extends Error {}
  */
 function buildSpawnEnv(
   override: Record<string, string> | undefined,
-  unsetKeys: readonly string[] = []
+  unsetKeys: readonly string[] = [],
+  hackReexec = false
 ): Record<string, string> {
-  const base: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string" && !unsetKeys.includes(key)) {
-      base[key] = value;
+  if (hackReexec) {
+    const base = hackReexecEnvironment();
+    for (const key of unsetKeys) {
+      delete base[key];
     }
+    return hackReexecEnvironment({ ...base, ...override });
   }
-  return override ? { ...base, ...override } : base;
+  return childEnvironment(process.env, override, unsetKeys);
 }
 
 export async function exec(
@@ -119,6 +125,8 @@ export async function exec(
 }
 
 export interface RunOptions {
+  /** Deliberate Hack re-exec only: retain credentials needed to decrypt layers. */
+  readonly hackReexec?: boolean;
   readonly cwd?: string;
   readonly env?: Record<string, string>;
   /** Remove explicitly unset authored destinations from the inherited host environment. */
@@ -211,7 +219,8 @@ export async function run(
     return await runWithTerminalGroup({
       command,
       cwd: options.cwd,
-      env: buildSpawnEnv(options.env, options.unsetEnvKeys),
+      hackReexec: options.hackReexec,
+      env: buildSpawnEnv(options.env, options.unsetEnvKeys, options.hackReexec),
       stdout: options.stdout,
       stderr: options.stderr,
       stdin: options.stdin,
@@ -232,7 +241,7 @@ export async function run(
   }
   const proc = Bun.spawn(command, {
     cwd: options.cwd,
-    env: buildSpawnEnv(options.env, options.unsetEnvKeys),
+    env: buildSpawnEnv(options.env, options.unsetEnvKeys, options.hackReexec),
     stdin: options.privateIo?.stdin ?? options.stdin ?? "inherit",
     stdout:
       options.privateIo?.stdout ??

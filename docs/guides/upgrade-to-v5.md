@@ -8,9 +8,9 @@ is the runtime layer underneath and the product boundary around it.
 
 ## What stays the same
 
-- Docker Compose is the default backend. `hack up`, `hack down`, `hack logs`,
-  `hack env`, `hack host exec` and the rest behave as in v4.
-- Project configuration stays in `.hack/`. No config rewrite is required.
+- Docker Compose is the ordinary CLI's default backend. Familiar command names
+  remain, but env migration and value handling need review before upgrading.
+- Project configuration stays in `.hack/`; legacy env files can be migrated.
 - Shared local routing, `.hack.local` names and certificate trust are unchanged.
 
 ## What is new
@@ -62,7 +62,36 @@ repository but are unsupported; see [unsupported retained surfaces](../extension
    [Qualify a project on v5](v5-dogfooding.md).
 
 When 5.0.0 ships, `brew upgrade hack` or the release installer moves the stable
-executable to v5. Projects need no changes to keep running on Compose.
+executable to v5. Review env migration before the Compose trial.
+
+## Secrets after upgrading
+
+This section will link the Doctor env hygiene check (HACK-2165) and the
+protect-in-place command (HACK-2166) after their implementations merge. They are
+pending at this audit; no command form is promised here.
+
+Until then, check by hand:
+
+- Check ownership and permissions of `.hack/hack.env.local.yaml` and
+  `.hack/hack.env.<name>.local.yaml`. New local layers are created mode 0600,
+  but existing layers keep their modes. Keep local layers owner-only and do
+  not assume an upgrade tightened old files.
+- Check Git's tracked-file list for `.hack/.env.<name>` and
+  `hack.env*.local.yaml`. The managed ignore block does not cover legacy
+  overlay dotenv names, and ignoring an already tracked file does not untrack
+  it. Review and remove any tracked sensitive files from the index without
+  deleting the local copy; treat earlier commits as a possible disclosure.
+- Values migrated from v4 plaintext dotenv files remain plain until re-added
+  with `--secret`. `hack env list` can print those values. Inspect names and
+  provenance instead; re-add a sensitive value through a hidden prompt or
+  `--value-stdin`, never as a command argument.
+- Keep the project key and all backup copies private. Review logs, MCP results,
+  multiplexer temporary files and retained background output as possible
+  plaintext sinks; encryption at rest does not protect those outputs.
+
+See [Env and secrets](../env.md#legacy-repos-and-migration) and the
+[threat model](../security/env-secrets-threat-model.md). These are manual checks,
+not evidence that the real-machine upgrade or rollback has passed.
 
 ## The daemon after an upgrade
 

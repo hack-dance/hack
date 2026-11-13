@@ -20,12 +20,20 @@ import {
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
 import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
+import { isRecord } from "../src/lib/guards.ts";
 import { readProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
+let composeUpReturned = false;
+const lifecycleStops: {
+  afterUp: boolean;
+  hadRuntimeState: boolean;
+  composeProject: string;
+}[] = [];
 const psRows: string[] = [];
+const psSnapshots: string[][] = [];
 const errorMessages: string[] = [];
 const warnMessages: string[] = [];
 const upComposeContents: string[] = [];
@@ -49,6 +57,9 @@ const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const upDetachSelections: Array<boolean | undefined> = [];
 const upStartupTimeouts: Array<number | undefined> = [];
 let upExitCode = 0;
+let psExitCode = 0;
+let upDurationMs = 0;
+let psDurationMs = 0;
 /** Detached phases the mocked backend reports before returning upExitCode. */
 let upReportedPhases: readonly ("images" | "start")[] = [];
 const upImageTimeouts: Array<number | undefined> = [];
@@ -113,6 +124,10 @@ const runtimeBackendMock = await registerScopedModuleMock({
         for (const phase of upReportedPhases) {
           opts.onStartupPhase?.(phase);
         }
+        if (upDurationMs) {
+          await Bun.sleep(upDurationMs);
+        }
+        composeUpReturned = true;
         return upExitCode;
       },
       down: async () => {
@@ -123,10 +138,21 @@ const runtimeBackendMock = await registerScopedModuleMock({
         readonly env?: Readonly<Record<string, string>>;
       }) => {
         psEnvs.push(withoutComposeEnvReferences(opts.env));
+        if (psDurationMs) {
+          await Bun.sleep(psDurationMs);
+        }
         return {
-          exitCode: 0,
-          stdout: psRows.join("\n"),
-          stderr: "",
+          exitCode: psExitCode,
+          stdout: (psSnapshots.shift() ?? psRows)
+            .map((row) => {
+              const entry = JSON.parse(row);
+              return JSON.stringify({
+                ID: `container-${entry.Service}`,
+                ...entry,
+              });
+            })
+            .join("\n"),
+          stderr: psExitCode ? "Cannot connect to the Docker daemon" : "",
         };
       },
       ps: async () => 0,
@@ -135,6 +161,27 @@ const runtimeBackendMock = await registerScopedModuleMock({
         return runExitCode;
       },
       exec: async () => 0,
+    },
+  },
+});
+
+const lifecycleControllerMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/project-lifecycle-controller.ts",
+  overrides: {
+    stopLifecycleProcessController: async (opts: {
+      readonly project: { readonly projectDir: string };
+      readonly composeProject: string;
+    }) => {
+      const entry = await readProjectRuntimeStateEntry({
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+      });
+      lifecycleStops.push({
+        afterUp: composeUpReturned,
+        hadRuntimeState: entry !== null,
+        composeProject: opts.composeProject,
+      });
     },
   },
 });
@@ -172,6 +219,7 @@ const { restartCommand, upCommand, runCommand } = await import(
 );
 
 beforeAll(() => {
+  lifecycleControllerMock.activate();
   branchesMock.activate();
   runtimeBackendMock.activate();
   runtimeProjectsMock.activate();
@@ -187,7 +235,10 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  composeUpReturned = false;
+  lifecycleStops.length = 0;
   psRows.length = 0;
+  psSnapshots.length = 0;
   errorMessages.length = 0;
   warnMessages.length = 0;
   upEnvs.length = 0;
@@ -197,6 +248,9 @@ afterEach(async () => {
   upStartupTimeouts.length = 0;
   upDetachSelections.length = 0;
   upExitCode = 0;
+  psExitCode = 0;
+  upDurationMs = 0;
+  psDurationMs = 0;
   upReportedPhases = [];
   upImageTimeouts.length = 0;
   restoreEnv("HACK_COMPOSE_IMAGE_TIMEOUT_MS", originalImageTimeout);
@@ -223,6 +277,7 @@ afterEach(async () => {
 });
 
 afterAll(() => {
+  lifecycleControllerMock.deactivate();
   branchesMock.deactivate();
   runtimeBackendMock.deactivate();
   runtimeProjectsMock.deactivate();
@@ -232,6 +287,7 @@ afterAll(() => {
 
 test("up returns failure when compose reports a created service after exit zero", async () => {
   const projectRoot = await createProject();
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   psRows.push(
     JSON.stringify({ Service: "api", State: "created", ExitCode: 0 })
   );
@@ -245,6 +301,7 @@ test("up returns failure when compose reports a created service after exit zero"
 });
 
 test("up returns failure when compose reports no services after exit zero", async () => {
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   const projectRoot = await createProject();
 
   const exitCode = await runDetachedUp({ projectRoot });
@@ -254,6 +311,57 @@ test("up returns failure when compose reports no services after exit zero", asyn
     "Startup incomplete for startup-state-test: Compose reported no services after startup"
   );
 });
+
+for (const sequence of [
+  ["created", "running", "exited"],
+  ["created", "exited", "exited"],
+  ["exited", "exited"],
+  ["old-exited", "created", "exited", "exited"],
+  ["old-exited", "created", "failed", "failed"],
+]) {
+  test(`up settles Docker one-shot observations: ${sequence.join(" -> ")}`, async () => {
+    const projectRoot = await createProject();
+    const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
+    const document = YAML.parse(await readFile(composeFile, "utf8"));
+    if (
+      !(
+        isRecord(document) &&
+        isRecord(document.services) &&
+        isRecord(document.services.api)
+      )
+    ) {
+      throw new Error("Missing fixture API service");
+    }
+    document.services.api.restart = "no";
+    await writeFile(composeFile, YAML.stringify(document));
+    for (const state of sequence) {
+      psSnapshots.push([
+        JSON.stringify({
+          ID:
+            state === "old-exited"
+              ? "previous-container"
+              : "replacement-container",
+          Service: "api",
+          State:
+            state === "old-exited" || state === "failed" ? "exited" : state,
+          ExitCode: state === "failed" ? 17 : 0,
+        }),
+      ]);
+    }
+    const final = sequence.at(-1);
+    psRows.push(
+      JSON.stringify({
+        ID: "replacement-container",
+        Service: "api",
+        State: "exited",
+        ExitCode: final === "failed" ? 17 : 0,
+      })
+    );
+    const exitCode = await runDetachedUp({ projectRoot });
+    expect(exitCode).toBe(final === "failed" ? 1 : 0);
+    expect(psEnvs.length).toBeGreaterThanOrEqual(2);
+  });
+}
 
 test("up accepts running services and successful Compose completion gates", async () => {
   const projectRoot = await createProject();
@@ -305,7 +413,7 @@ test("up accepts profiles delivered through COMPOSE_PROFILES", async () => {
   expect(upEnvs).toEqual([
     { COMPOSE_PROFILES: "benchmark,diagnostics", SHARED_MODE: "compose" },
   ]);
-  expect(psEnvs).toEqual(upEnvs);
+  expect(psEnvs).toEqual([...upEnvs, ...upEnvs]);
 });
 
 test("up accepts wildcard COMPOSE_PROFILES", async () => {
@@ -373,6 +481,7 @@ test("registry credentials must exist in the bootstrap service scope", async () 
 
 test("restart returns failure when compose reports a created service after exit zero", async () => {
   const projectRoot = await createProject();
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   psRows.push(
     JSON.stringify({ Service: "api", State: "created", ExitCode: 0 })
   );
@@ -411,6 +520,7 @@ test("targeted restart preserves delivered Compose environment", async () => {
   expect(errorMessages).toEqual([]);
   expect(upServiceSelections).toEqual([["migrate"]]);
   expect(psEnvs).toEqual([
+    { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
     { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
   ]);
 });
@@ -513,6 +623,7 @@ test("failed targeted restart does not record its service's env as applied", asy
 });
 
 test("up --json emits E_STARTUP_INCOMPLETE for a created service", async () => {
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
   const projectRoot = await createProject();
   psRows.push(
     JSON.stringify({ Service: "api", State: "created", ExitCode: 0 })
@@ -1268,3 +1379,47 @@ for (const action of ["up", "restart"] as const) {
     expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
   });
 }
+
+test("up confirms healthy Docker states after Compose consumes most of the start budget", async () => {
+  const projectRoot = await createProject();
+  process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "1000";
+  upReportedPhases = ["images", "start"];
+  upDurationMs = 900;
+  psDurationMs = 150;
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+  );
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  expect(psEnvs).toHaveLength(2);
+});
+test("up reports a Docker inspection error without waiting out the start budget", async () => {
+  const projectRoot = await createProject();
+  psExitCode = 1;
+  await expect(runDetachedUp({ projectRoot })).rejects.toMatchObject({
+    code: "E_DOCKER_UNAVAILABLE",
+  });
+  expect(psEnvs).toHaveLength(1);
+});
+
+test("full restart cleans lifecycle state before propagating a Docker inspection failure", async () => {
+  const projectRoot = await createProject();
+  const projectDir = resolve(projectRoot, ".hack");
+  psExitCode = 1;
+  await expect(runRestart({ projectRoot })).rejects.toMatchObject({
+    code: "E_DOCKER_UNAVAILABLE",
+  });
+  expect(psEnvs).toHaveLength(1);
+  expect(lifecycleStops.filter((entry) => entry.afterUp)).toEqual([
+    {
+      afterUp: true,
+      hadRuntimeState: true,
+      composeProject: "startup-state-test",
+    },
+  ]);
+  expect(
+    await readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "startup-state-test",
+    })
+  ).toBeNull();
+});

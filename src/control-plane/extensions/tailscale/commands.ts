@@ -1,3 +1,4 @@
+import { childEnvironment } from "../../../lib/child-environment.ts";
 import { updateGlobalConfig } from "../../../lib/config.ts";
 import {
   getRecord,
@@ -330,6 +331,7 @@ async function runTailscale(opts: {
   readonly inherit: boolean;
 }): Promise<number> {
   const proc = Bun.spawn(["tailscale", ...opts.args], {
+    env: childEnvironment(),
     stdin: opts.inherit ? "inherit" : "ignore",
     stdout: opts.inherit ? "inherit" : "pipe",
     stderr: "inherit",

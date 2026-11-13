@@ -3,6 +3,7 @@ use serde_json::{Map, Value};
 mod dependency_cache;
 mod fields;
 mod graph;
+mod hack_conventions;
 mod one_shot;
 mod ownership_labels;
 mod ports;
@@ -120,11 +121,12 @@ pub(super) fn compile(
             };
             keys(
                 v,
-                &["driver", "external", "x-hack-disposable-cache"],
+                &["driver", "external", "x-hack-disposable-cache", "labels"],
                 &field,
                 &mut diagnostics,
             );
             let disposable_caches = disposable_caches(v.get("x-hack-disposable-cache"))?;
+            ignored_resource_labels(v.get("labels"), &field, &mut diagnostics)?;
             if boolean(v.get("external"), false)? {
                 diagnostics.push(Diagnostic::error(
                     "external_volume",
@@ -144,6 +146,7 @@ pub(super) fn compile(
         }
     }
     let mut networks = BTreeMap::new();
+    let mut hack_networks = std::collections::BTreeSet::new();
     if let Some(value) = m.get("networks") {
         for (name, value) in object(value)? {
             identifier(name)?;
@@ -156,11 +159,32 @@ pub(super) fn compile(
             };
             keys(
                 v,
-                &["driver", "internal", "external", "x-hack-isolated"],
+                &[
+                    "driver",
+                    "internal",
+                    "external",
+                    "x-hack-isolated",
+                    "name",
+                    "labels",
+                ],
                 &field,
                 &mut diagnostics,
             );
-            let external = boolean(v.get("external"), false)?;
+            let (external, hack_identity) = hack_conventions::network(name, v)?;
+            let hack_network = hack_identity.is_some();
+            if hack_identity.is_some_and(|identity| !hack_networks.insert(identity)) {
+                diagnostics.push(Diagnostic::error(
+                    "duplicate_hack_network", &field,
+                    "Several logical declarations refer to the same Hack shared network; keep one declaration rather than splitting its topology.",
+                ));
+            }
+            ignored_resource_labels(v.get("labels"), &field, &mut diagnostics)?;
+            if v.contains_key("name") && !hack_network {
+                diagnostics.push(Diagnostic::error(
+                    "unsupported_network_name", &format!("{field}.name"),
+                    "Only the exact Hack shared-network names are mapped automatically; other named network identities are not adopted.",
+                ));
+            }
             let isolated = boolean(v.get("x-hack-isolated"), false)?;
             if isolated && !external {
                 return Err(problem(
@@ -168,11 +192,17 @@ pub(super) fn compile(
                     "x-hack-isolated requires an external network declaration to replace.",
                 ));
             }
-            if external && !isolated {
+            if external && !isolated && !hack_network {
                 diagnostics.push(Diagnostic::error(
                     "external_network",
                     &field,
                     "External/global networks cannot be adopted by candidate enrollment.",
+                ));
+            }
+            if hack_network {
+                diagnostics.push(Diagnostic::warning(
+                    "hack_network_mapped", &field,
+                    "Hack's shared Compose network becomes a native-owned project-local bridge. Cross-project container DNS and Docker's global Caddy network are not shared; native publishes routes separately.",
                 ));
             }
             if isolated {
@@ -256,17 +286,29 @@ const ROUTER_LABEL_WORDS: [&str; 2] = ["caddy", "traefik"];
 /// Runtime and Hack namespaces: the exact key and everything under it.
 const RESERVED_LABEL_NAMESPACES: [&str; 2] = ["hack", "com.docker.compose"];
 
+fn ignored_resource_labels(
+    value: Option<&Value>,
+    field: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<(), CandidateError> {
+    if !redacted_map(value, false)?.is_empty() {
+        diagnostics.push(Diagnostic::warning("labels_not_applied", &format!("{field}.labels"), "Authored resource labels are metadata only and are never applied to native Engine resources."));
+    }
+    Ok(())
+}
+
 /// Whether a service label is plain metadata: outside every Hack ownership
 /// namespace, every router label family and every reserved namespace. Such a
 /// label is never sent to the engine (graph labels are ownership-only), so it
 /// cannot change a run. The TypeScript admission mirrors this rule
 /// (`isInertMetadataLabel` in `src/backends/native-project-routing.ts`).
 pub(crate) fn inert_metadata_label(key: &str) -> bool {
-    !ownership_labels::is_hack_ownership_label(key)
-        && !ROUTER_LABEL_WORDS.iter().any(|word| key.starts_with(word))
-        && !RESERVED_LABEL_NAMESPACES
-            .iter()
-            .any(|prefix| key == *prefix || key.starts_with(&format!("{prefix}.")))
+    hack_conventions::ignored_label(key)
+        || (!ownership_labels::is_hack_ownership_label(key)
+            && !ROUTER_LABEL_WORDS.iter().any(|word| key.starts_with(word))
+            && !RESERVED_LABEL_NAMESPACES
+                .iter()
+                .any(|prefix| key == *prefix || key.starts_with(&format!("{prefix}."))))
 }
 
 #[cfg(test)]
@@ -276,13 +318,16 @@ mod inert_label_tests {
     /// The same table as `tests/native-project-routing.test.ts`: the CLI
     /// admission and this review must agree key by key.
     #[test]
-    fn metadata_labels_are_inert_and_router_runtime_and_ownership_labels_are_not() {
+    fn metadata_labels_are_inert_and_semantic_router_labels_are_not() {
         for key in [
             "other",
             "com.example.team",
             "org.opencontainers.image.source",
             "hackathon",
             "com.docker.composed",
+            "com.docker.compose.project",
+            "hack.custom",
+            "io.hack-local.owner",
         ] {
             assert!(inert_metadata_label(key), "{key}");
         }
@@ -292,12 +337,6 @@ mod inert_label_tests {
             "caddy_ingress_network",
             "caddy_0",
             "traefik.enable",
-            "hack",
-            "hack.custom",
-            "com.docker.compose",
-            "com.docker.compose.project",
-            "io.hack-local",
-            "io.hack-local.owner",
         ] {
             assert!(!inert_metadata_label(key), "{key}");
         }

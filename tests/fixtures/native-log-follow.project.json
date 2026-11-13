@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "name": "native-log-follow",
+  "services": {
+    "web": {
+      "image": "alpine:3.21",
+      "entrypoint": { "exec": [] },
+      "command": {
+        "exec": [
+          "/bin/sh",
+          "-c",
+          "n=0; while :; do printf 'web-%s\\n' \"$n\"; n=$((n+1)); sleep 1; done"
+        ]
+      },
+      "readiness": {
+        "kind": "exec",
+        "command": { "exec": ["/bin/true"] },
+        "interval": "1s",
+        "timeout": "1s",
+        "retries": 5
+      }
+    },
+    "db": {
+      "image": "alpine:3.21",
+      "entrypoint": { "exec": [] },
+      "command": {
+        "exec": [
+          "/bin/sh",
+          "-c",
+          "n=0; while :; do printf 'db-%s\\n' \"$n\" >&2; n=$((n+1)); sleep 5; done"
+        ]
+      },
+      "readiness": {
+        "kind": "exec",
+        "command": { "exec": ["/bin/true"] },
+        "interval": "1s",
+        "timeout": "1s",
+        "retries": 5
+      }
+    }
+  }
+}

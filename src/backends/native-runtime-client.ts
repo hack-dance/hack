@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { childEnvironment } from "../lib/child-environment.ts";
 import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
@@ -30,6 +31,7 @@ const NATIVE_RUN = /^[a-f0-9]{32}$/;
 const NATIVE_HASH = /^[a-f0-9]{64}$/;
 interface NativeFailure {
   readonly code: string;
+  readonly logPhase?: NativeLogFailurePhase;
   readonly causeCode?: string;
   /** Runtime message the runtime marked as a compile-time literal (value-free). */
   readonly message?: string;
@@ -40,6 +42,22 @@ interface NativeFailure {
   /** Services and closed fields a process wrapper refused; value-free. */
   readonly processRefusals?: readonly NativeProcessRefusal[];
   readonly planChange?: NativePlanChange;
+}
+
+const NATIVE_LOG_PHASES = [
+  "admission",
+  "periodic-check",
+  "final-check",
+  "status-line",
+  "headers",
+  "http-framing",
+  "frame-header",
+  "payload",
+  "timestamp",
+] as const;
+export type NativeLogFailurePhase = (typeof NATIVE_LOG_PHASES)[number];
+function nativeLogPhase(value: unknown): NativeLogFailurePhase | undefined {
+  return NATIVE_LOG_PHASES.find((phase) => phase === value);
 }
 
 const FIXED_MESSAGE = /^[\x20-\x7e]{1,400}$/;
@@ -368,7 +386,7 @@ export async function invokeNativeRuntime(opts: {
     [opts.runtime.binary, "--candidate-root", opts.runtime.home, ...opts.args],
     {
       cwd: opts.cwd,
-      env,
+      env: childEnvironment(env),
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -795,8 +813,10 @@ function nativeFailureFromReply(
     cause: value.cause_code,
   });
   const planChange = readNativePlanChange(value.plan_change);
+  const logPhase = nativeLogPhase(value.log_phase);
   return {
     code: value.code,
+    ...(logPhase ? { logPhase } : {}),
     ...(causeCode ? { causeCode } : {}),
     ...nativeFailureDetail(value),
     ...(planChange ? { planChange } : {}),
@@ -882,6 +902,7 @@ export async function readNativeFailureCodes(
 ): Promise<
   | {
       readonly code: string;
+      readonly logPhase?: NativeLogFailurePhase;
       readonly causeCode?: string;
       readonly message?: string;
       readonly service?: string;
@@ -893,6 +914,7 @@ export async function readNativeFailureCodes(
     ? undefined
     : {
         code: failure.code,
+        ...(failure.logPhase ? { logPhase: failure.logPhase } : {}),
         ...(failure.causeCode ? { causeCode: failure.causeCode } : {}),
         ...(failure.message ? { message: failure.message } : {}),
         ...(failure.service ? { service: failure.service } : {}),

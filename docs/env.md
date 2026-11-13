@@ -978,13 +978,13 @@ removing anything. A legacy store and its key use their separate owner locks,
 including the key lock shared by every store using that path.
 Changed sources or delivery refuse cleanup with reconciliation
 advice; migration writes already completed remain. Confirmed removals before a
-failure are named. Implicit cleanup warns and lets the original command continue
-even if a lock times out, a key is unavailable or a file is unreadable.
-Once YAML layers exist, rerunning migration may not import changed legacy
-values. Keep the copies and keys, reconcile chosen values with `env set KEY
---value-stdin` (use `--local` for machine-local values, add `--secret` for secrets
-and preserve scope/overlay), check
-delivery, then remove only copies confirmed obsolete. Editors and older writers
+failure are named. Implicit commands retain legacy files; cleanup needs the
+separate explicit invocation and its snapshot and successful-project-run checks.
+A completed migration is a no-op on retry. Keep the copies and keys if legacy
+values changed afterward. Restore the snapshot with `--preserve-changes` to keep
+later edits privately, or reconcile chosen values with `env set KEY --value-stdin`
+(use `--local` for machine-local values, add `--secret` for secrets and preserve
+scope/overlay). Check delivery before previewing cleanup again. Editors and older writers
 that do not take Hack's locks can still race a filesystem operation.
 
 ### Concurrent writes to one env file
@@ -1639,8 +1639,7 @@ An overlay that exists only in the store, such as a value from
 overlay file. A stored overlay whose name can't be an env layer name refuses
 (`E_CONFIG_INVALID`). The separate cleanup preview lists a configured store inside the project only
 when the env layers now deliver every entry it holds for this project and it holds none for
-another; otherwise it keeps the store and names the entries that would be lost, never their
-values. A store it can't list (its key isn't available, it can't be read, or the backend is
+another; otherwise the store is kept. A store it can't list (its key isn't available, it can't be read, or the backend is
 the keychain) is kept too. A store key file inside the project is offered only when no store
 that needs it stays behind. Project env keys (including the shared Git key), current
 YAML layers and project config files are never legacy cleanup targets, even when

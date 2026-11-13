@@ -3006,10 +3006,10 @@ async function protectionLayers(opts: ProtectionOptions) {
       PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
       -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length
     );
-    const local = stem.endsWith(".local") || (stem === "local" && !legacyLocal);
+    const baseLocal = stem === "local" && !legacyLocal;
+    const local = stem.endsWith(".local") || baseLocal;
     const overlay = stem.endsWith(".local") ? stem.slice(0, -6) : stem;
-    const environment =
-      overlay === "default" || (overlay === "local" && local) ? null : overlay;
+    const environment = overlay === "default" || baseLocal ? null : overlay;
     if (opts.envName !== undefined && opts.envName !== environment) {
       continue;
     }

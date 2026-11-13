@@ -934,20 +934,34 @@ compatibility. V4 and candidate homes remain separate; this procedure does not
 migrate V4 data into the candidate or replace the installed `hack`. DNS, trust and
 client configuration are outside this bundle-selection procedure.
 
-Provider setup is separate and explicit. Prepare the native runtime with:
+Provider setup is explicit and available from the candidate frontend, without a
+second binary or home argument:
 
 ```sh
-./hack-native --candidate-root /absolute/private/candidate-home runtime setup
+hack-next native setup
+# For noninteractive use:
+hack-next native setup --accept-downloads --json
 ```
 
-`runtime setup` lists the pinned SmolVM, Docker engine and four Alpine guest
+`native setup` lists the pinned SmolVM, Docker engine and four Alpine guest
 packages with their exact compressed byte lengths, source hosts, SHA-256 hashes, private cache and
 install destination, then asks once when preparation is needed. `--no-interactive` (or
 truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case and
 surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
-`--accept-downloads` explicitly consents. No provider download happens from `up`,
-the installer, the probe or any other implicit path. The optional BuildKit client
+`--accept-downloads` explicitly consents. Interactive `up` can offer setup with
+the same explicit consent; noninteractive `up` refuses until setup is complete.
+The installer and probe never download provider files. The optional BuildKit client
 is still prepared separately below.
+
+Manual bundle frontends use `$HACK_HOME/native-runtime` or
+`~/.hack/native-runtime` by default, with an absolute `HACK_NATIVE_HOME` override.
+Managed `hack-next` uses the version's receipt-owned home. See
+[native first use and moving homes](candidate-install.md#prepare-the-native-runtime-once).
+The lower-level `hack-native --candidate-root /absolute/private/home runtime setup`
+remains available for explicit runtime administration. Its read-only
+`runtime setup inspect --json` reports installation records without creating a
+home, acquiring a lease or hashing provider trees. Only the manager's
+`--quiescence` inspection takes existing locks; startup verifies full content.
 
 The executable embeds `provider-pins.json` and checks its hashes against the
 manual preparation pins. HTTPS redirects may use only the original host and the

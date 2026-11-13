@@ -53,6 +53,14 @@ export const launcherBytes = () =>
     '#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -P "$(dirname "$0")/.." && pwd -P)\nif [ "${1-}" = --manager ]; then shift; exec "$root/manager" --root "$root" "$@"; fi\nexec "$root/manager" --root "$root" run -- "$@"\n'
   );
 const nonce = () => randomUUID().replaceAll("-", "");
+/** Setup inspection consumes no project credentials or ambient native selectors. */
+function childSetupInspectionEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const name of ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"]) {
+    environment[name] = process.env[name];
+  }
+  return environment;
+}
 function lexists(path: string) {
   try {
     lstatSync(path);
@@ -526,11 +534,12 @@ export class Channel {
       return environment;
     }
     Reflect.deleteProperty(environment, "HACK_GLOBAL_CONFIG_PATH");
+    const selectedHome = this.path(`versions/${version}/native-home`);
     return {
       ...environment,
       HACK_RUNTIME_BACKEND: "native",
       HACK_NATIVE_BINARY: this.path(`versions/${version}/bundle/hack-native`),
-      HACK_NATIVE_HOME: this.path(`versions/${version}/native-home`),
+      HACK_NATIVE_HOME: selectedHome,
       HACK_HOME: this.path(`versions/${version}/cli-home`),
     };
   }
@@ -558,7 +567,7 @@ export class Channel {
           "--json",
         ],
         {
-          env: this.environment(version),
+          env: childSetupInspectionEnvironment(),
           stdin: "ignore",
           stdout: "pipe",
           stderr: "ignore",
@@ -577,13 +586,56 @@ export class Channel {
         "Candidate runtime is active or ambiguous; selection preserved."
       );
       if (status.phase === "uninitialized") {
-        requireThat(
-          readdirSync(join(directory, "native-home")).length === 0,
-          "Uninitialized home contains state; inspect it through its owning CLI."
-        );
+        this.requireSetupOnlyHome(directory);
       }
       this.validate(managerUpgrade);
     }
+  }
+  /** Setup artifacts alone own no VM. Unknown uninitialized state remains a
+   * refusal, including old executors that cannot prove the setup-only predicate.
+   */
+  private requireSetupOnlyHome(directory: string) {
+    const home = join(directory, "native-home");
+    if (readdirSync(home).length === 0) {
+      return;
+    }
+    const result = Bun.spawnSync(
+      [
+        join(directory, "bundle/hack-native"),
+        "--candidate-root",
+        home,
+        "runtime",
+        "setup",
+        "inspect",
+        "--json",
+        "--quiescence",
+      ],
+      {
+        env: childSetupInspectionEnvironment(),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "ignore",
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+      }
+    );
+    requireThat(
+      result.exitCode === 0 && result.stdout.length <= 1024 * 1024,
+      "Uninitialized home could not be inspected; selection preserved."
+    );
+    let inspection: unknown;
+    try {
+      inspection = JSON.parse(result.stdout.toString());
+    } catch {
+      throw new Error(
+        "Malformed native setup inspection; selection preserved."
+      );
+    }
+    const report = object(inspection);
+    requireThat(
+      report.protocol_version === 1 && report.setup_only === true,
+      "Uninitialized home contains runtime or unknown state; inspect it through its owning CLI."
+    );
   }
   select(version: string | null) {
     this.requireQuiescent(this.state.selected);
@@ -912,16 +964,30 @@ export class Channel {
     this.validate();
   }
   async run(arguments_: string[]) {
-    const backend = process.env.HACK_RUNTIME_BACKEND || "native";
+    let backend = process.env.HACK_RUNTIME_BACKEND || "native";
     requireThat(
       backend === "native" || backend === "compose",
       "HACK_RUNTIME_BACKEND must be native or compose (unset selects native)."
     );
+    // Explicit native operations select native setup even from a Compose shell.
+    if (
+      arguments_.filter((argument) => argument !== "--no-interactive")[0] ===
+      "native"
+    ) {
+      backend = "native";
+    }
     const version = this.state.selected;
     requireThat(
       version !== null,
       "No candidate selected. Use your ordinary stable hack command."
     );
+    if (backend === "native") {
+      const override = process.env.HACK_NATIVE_HOME?.trim();
+      requireThat(
+        !override || override === this.path(`versions/${version}/native-home`),
+        "hack-next uses its receipt-owned native home for safe upgrades; use the bundle's hack-v5 launcher for a custom HACK_NATIVE_HOME."
+      );
+    }
     const checksum = this.state.installed[version];
     requireThat(checksum, "Missing selected receipt.");
     const directory = this.verifyVersion(version, checksum);

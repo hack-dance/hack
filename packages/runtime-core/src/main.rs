@@ -230,8 +230,27 @@ fn run() -> Result<(), CandidateError> {
             "Supply --candidate-root explicitly, or use the matching candidate launcher.",
         ));
     }
-    let requested = resolve_candidate_root(Path::new(&arguments[1]))?;
     let command: Vec<&str> = arguments[2..].iter().map(String::as_str).collect();
+    // First-use observation/setup must work before installed-home discovery:
+    // an absent home is an ordinary installation state, not provider_state.
+    if installed_entrypoint() {
+        let home = Path::new(&arguments[1]);
+        match command.as_slice() {
+            ["runtime", "setup", "inspect", "--json", "--quiescence"] => {
+                return print_json(
+                    &hack_runtime_core::provider::setup::inspect_home_quiescence(home)?,
+                );
+            }
+            ["runtime", "setup", "inspect", "--json"] => {
+                return print_json(&hack_runtime_core::provider::setup::inspect_home(home)?);
+            }
+            ["runtime", "setup", arguments @ ..] => {
+                return runtime_setup_cli::run_home(home, arguments);
+            }
+            _ => {}
+        }
+    }
+    let requested = resolve_candidate_root(Path::new(&arguments[1]))?;
     match command.as_slice() {
         [] | ["--help"] | ["help"] => {
             println!(
@@ -965,6 +984,11 @@ fn run() -> Result<(), CandidateError> {
                     print_json(&serde_json::json!({ "removed": base_id }))?
                 }
             }
+        }
+        ["runtime", "setup", "inspect", "--json"] => {
+            print_json(&hack_runtime_core::provider::setup::inspect_candidate(
+                &discover_candidate(&requested)?,
+            )?)?;
         }
         ["runtime", "setup", arguments @ ..] => {
             runtime_setup_cli::run(&discover_candidate(&requested)?, arguments)?;

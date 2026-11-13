@@ -53,14 +53,19 @@ function scratch() {
   return root;
 }
 const revision = "a".repeat(40);
-function fixtureArchive(root: string, version = "5.0.0-next.1") {
+function fixtureArchive(
+  root: string,
+  version = "5.0.0-next.1",
+  nativeScript = "fixture-native",
+  launcherScript = "fixture-launcher"
+) {
   const bundle = join(root, `bundle-${version}`);
   mkdirSync(bundle, { mode: 0o700 });
   const files: Record<string, Uint8Array> = {
-    "hack-native": Buffer.from("fixture-native"),
+    "hack-native": Buffer.from(nativeScript),
     "hack-relay-guest": Buffer.from("fixture-guest"),
     "hack-cli": Buffer.from("fixture-cli"),
-    "hack-v5": Buffer.from("fixture-launcher"),
+    "hack-v5": Buffer.from(launcherScript),
     "provider-pins.json": Buffer.from("{}\n"),
     "README.md": Buffer.from("fixture\n"),
     "prerelease.json": jsonBytes({
@@ -115,6 +120,118 @@ async function installed() {
   await f.channel.install("5.0.0-next.1", input.archive, input.checksum);
   return f;
 }
+
+fixtureTest(
+  "managed launches refuse a custom home instead of hiding it from quiescence",
+  async () => {
+    const f = await installed();
+    const previous = process.env.HACK_NATIVE_HOME;
+    try {
+      process.env.HACK_NATIVE_HOME = join(f.root, "custom");
+      await expect(f.channel.run(["up"])).rejects.toThrow(
+        "receipt-owned native home"
+      );
+      expect(() => f.channel.requireQuiescent("5.0.0-next.1")).not.toThrow();
+      expect(f.channel.environment("5.0.0-next.1").HACK_NATIVE_HOME).toBe(
+        join(f.channel.root, "versions/5.0.0-next.1/native-home")
+      );
+      // Compose retains its existing removal of native selectors.
+      expect(
+        f.channel.environment("5.0.0-next.1", "compose").HACK_NATIVE_HOME
+      ).toBeUndefined();
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "HACK_NATIVE_HOME");
+      } else {
+        process.env.HACK_NATIVE_HOME = previous;
+      }
+    }
+  }
+);
+
+fixtureTest(
+  "uninitialized setup-only homes require the manager's quiescence inspection",
+  async () => {
+    const f = fixture({ quiescence: undefined });
+    const calls = join(f.root, "native-calls");
+    const native = `#!/bin/sh
+if [ -n "$HACK_NATIVE_HOME" ]; then exit 90; fi
+printf '%s\\n' "$*" >> '${calls}'
+case "$4" in
+  status|down) printf '%s\\n' '{"phase":"uninitialized","process_alive":false}' ;;
+  setup)
+    if [ "$7" != --quiescence ]; then exit 91; fi
+    if [ -f "$2/.hack-local/run/smolvm/owner.json" ]; then ready=false; else ready=true; fi
+    printf '{"protocol_version":1,"setup_only":%s}\\n' "$ready"
+    ;;
+  *) exit 92 ;;
+esac
+`;
+    const input = fixtureArchive(f.root, "5.0.0-next.1", native);
+    await f.channel.install("5.0.0-next.1", input.archive, input.checksum);
+    const state = join(
+      f.channel.root,
+      "versions/5.0.0-next.1/native-home/.hack-local"
+    );
+    mkdirSync(join(state, "setup/downloads"), { recursive: true, mode: 0o700 });
+    const previous = process.env.HACK_NATIVE_HOME;
+    try {
+      process.env.HACK_NATIVE_HOME = join(f.root, "ambient-custom-home");
+      f.channel.requireQuiescent("5.0.0-next.1");
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "HACK_NATIVE_HOME");
+      } else {
+        process.env.HACK_NATIVE_HOME = previous;
+      }
+    }
+    expect(readFileSync(calls, "utf8")).toContain(
+      "runtime setup inspect --json --quiescence"
+    );
+    mkdirSync(join(state, "run/smolvm"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(state, "run/smolvm/owner.json"), "unknown", {
+      mode: 0o600,
+    });
+    expect(() => f.channel.requireQuiescent("5.0.0-next.1")).toThrow(
+      "runtime or unknown state"
+    );
+  }
+);
+
+fixtureTest(
+  "explicit native setup selects the receipt home even when Compose is the ambient backend",
+  async () => {
+    const f = fixture();
+    const selected = join(f.root, "selected-native-home");
+    const launcher = `#!/bin/sh
+printf '%s' "$HACK_NATIVE_HOME" > '${selected}'
+exit 7
+`;
+    const input = fixtureArchive(
+      f.root,
+      "5.0.0-next.1",
+      "fixture-native",
+      launcher
+    );
+    await f.channel.install("5.0.0-next.1", input.archive, input.checksum);
+    const previous = process.env.HACK_RUNTIME_BACKEND;
+    try {
+      process.env.HACK_RUNTIME_BACKEND = "compose";
+      expect(await f.channel.run(["--no-interactive", "native", "setup"])).toBe(
+        7
+      );
+      expect(readFileSync(selected, "utf8")).toBe(
+        join(f.channel.root, "versions/5.0.0-next.1/native-home")
+      );
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "HACK_RUNTIME_BACKEND");
+      } else {
+        process.env.HACK_RUNTIME_BACKEND = previous;
+      }
+    }
+  }
+);
 
 describe("standalone manager ownership and atomic state", () => {
   fixtureTest(

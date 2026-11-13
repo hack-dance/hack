@@ -2,6 +2,11 @@
 //! Preparation uses the manual entrypoints in an isolated staging home. A single rename
 //! publishes the complete provider set; interrupted staging can be discarded and rebuilt.
 mod download;
+mod inspection;
+pub use inspection::{
+    Inspection, InstallationState, create_home, inspect_candidate, inspect_home,
+    inspect_home_quiescence, validate_home_path,
+};
 #[cfg(test)]
 mod tests;
 
@@ -14,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FilePin {
     pub url: String,
     pub archive_sha256: String,

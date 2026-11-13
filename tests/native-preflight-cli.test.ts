@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { NativePreflightReport } from "../src/backends/native-preflight.ts";
+import { nativeSetupInspection } from "./helpers/native-setup-inspection.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -87,6 +88,7 @@ exit 1
   );
   const write = async (name: string, value: unknown) =>
     await writeFile(join(stub, name), JSON.stringify(value));
+  await write("runtime-setup.out", nativeSetupInspection());
   return {
     root,
     project,
@@ -319,8 +321,12 @@ test(
     // Authored values and the runtime's own text never reach the output.
     expect(output).not.toContain(PRIVATE);
     expect(output).not.toContain("runtime text");
-    // The only runtime requests are the two reviews: nothing is started.
-    expect(await f.calls()).toEqual(["project plan", "project plan"]);
+    // Installation inspection and the two project reviews start nothing.
+    expect(await f.calls()).toEqual([
+      "runtime setup",
+      "project plan",
+      "project plan",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -364,6 +370,7 @@ test(
     expect(human.stdout).toBe(
       [
         "Native preflight for .hack/docker-compose.yml",
+        "Runtime setup: ready. Native runtime is set up.",
         "Runtime review: completed.",
         "",
         "No blockers. Native up should admit this project.",
@@ -556,7 +563,10 @@ test(
     expect(up.output).toContain(
       "Run `hack doctor --native-preflight` to list every blocker with its fix."
     );
-    expect(await f.calls()).toEqual(["runtime check-project-share"]);
+    expect(await f.calls()).toEqual([
+      "runtime setup",
+      "runtime check-project-share",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -641,7 +651,8 @@ test(
     expect((await f.normalized()).networks?.shared).toMatchObject({
       "x-hack-isolated": true,
     });
-    const [original, normalized] = await f.argv();
+    const [setup, original, normalized] = await f.argv();
+    expect(setup).toContain("runtime setup inspect --json");
     expect(original).toContain("project plan --project ");
     expect(original).toContain("--profile dev --profile ops --json");
     expect(original).not.toContain("--normalized-file");
@@ -686,7 +697,7 @@ test(
       code: "native_adaptation_invalid",
     });
     expect(codes(invalidAdaptation.report, "runtime")).toEqual([]);
-    expect(await adaptation.calls()).toEqual([]);
+    expect(await adaptation.calls()).toEqual(["runtime setup"]);
 
     const config = await fixture({ services: { web: { image: IMAGE } } });
     await writeFile(join(config.projectDir, "hack.config.json"), "{ not json");
@@ -1210,7 +1221,8 @@ test("preflight reports the Compose budget before sending context for more than 
     result.report.blockers.some((entry) => entry.code === "service_budget")
   ).toBe(true);
   const args = await f.argv();
-  expect(args).toHaveLength(1);
+  expect(args).toHaveLength(2);
+  expect(args[0]).toContain("runtime setup inspect --json");
   expect(args.join("\n")).not.toContain("--start-managed-service");
   expect(args.join("\n")).not.toContain(PRIVATE);
 });

@@ -16,6 +16,7 @@ import { NATIVE_CONFIGURATION_REFUSAL } from "../src/backends/native-project-sta
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { foreignComposeNetworkNames } from "../src/lib/native-hack-compose-conventions.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import { nativeSetupShellReply } from "./helpers/native-setup-inspection.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -78,6 +79,7 @@ async function fixture(compose: Record<string, unknown>) {
   await writeFile(
     binary,
     `#!/bin/sh
+${nativeSetupShellReply()}
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
 printf '%s' '{"code":"runtime_not_running"}' >&2

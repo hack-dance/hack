@@ -90,6 +90,7 @@ import {
   invokeNativeRuntime,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
+import { requireNativeSetup } from "../backends/native-runtime-setup.ts";
 import type { NativeServiceExit } from "../backends/native-service-exit-monitor.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
@@ -6353,6 +6354,23 @@ async function handleUp({
     noteNativeBackendBeta({ json: args.options.json === true });
   }
   const native = resolveNativeRuntimeSelection();
+  if (native) {
+    refuseUnsupportedNativeUpOptions({
+      restart: false,
+      target: args.options.target,
+      services: args.positionals.services,
+    });
+    const setupExit = await requireNativeSetup({
+      runtime: native,
+      cwd: ctx.cwd,
+      json: args.options.json === true,
+    });
+    if (setupExit !== 0) {
+      return setupExit;
+    }
+    // Detached children and setup continuations use exactly the selected home.
+    process.env.HACK_NATIVE_HOME = native.home;
+  }
   if ((args.options.detach || args.options.json) && native) {
     refuseUnsupportedNativeUpOptions({
       restart: false,

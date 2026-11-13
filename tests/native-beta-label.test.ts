@@ -92,7 +92,7 @@ test("native selection without a candidate says where the native backend comes f
   const message = String((refusal as Error).message);
   // The contract the candidate launcher relies on stays the first sentence.
   expect(message).toStartWith(
-    "Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths."
+    "Native runtime requires an adjacent bundled hack-native or an absolute HACK_NATIVE_BINARY path."
   );
   expect(message).toContain("beta");
   expect(message).toContain("Apple Silicon macOS");

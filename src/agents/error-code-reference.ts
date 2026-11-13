@@ -16,6 +16,11 @@ type ErrorCodeGuide = {
 };
 
 const ERROR_CODE_GUIDES: Readonly<Record<HackErrorCode, ErrorCodeGuide>> = {
+  E_NATIVE_SETUP_REQUIRED: {
+    meaning:
+      "The selected native home needs runtime setup before project startup.",
+    readFirst: "`hack doctor --native-preflight --json`",
+  },
   E_DOCKER_UNAVAILABLE: {
     meaning: "The container runtime CLI or engine cannot be reached.",
     readFirst: "`hack doctor --json`",

@@ -43,6 +43,11 @@ import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import {
+  inspectNativeSetup,
+  type NativeSetupState,
+  nativeSetupGuidance,
+} from "./native-runtime-setup.ts";
 import { shellReference } from "./native-shell-environment.ts";
 import { NATIVE_START_REFUSAL_ENTRIES } from "./native-start-refusal-entries.ts";
 import { readNativeStartRefusals } from "./native-start-refusals.ts";
@@ -109,6 +114,12 @@ export type NativePreflightReport = {
   readonly compose_file: string;
   /** No blocker was found and the runtime review completed. */
   readonly ready: boolean;
+  readonly runtime_setup: {
+    readonly state: NativeSetupState;
+    readonly installation_state?: NativeSetupState;
+    readonly code: string;
+    readonly fix: string;
+  };
   readonly runtime_review: {
     readonly status: NativePreflightReviewStatus;
     /**
@@ -1462,12 +1473,60 @@ export type NativePreflightOptions = {
   readonly invoke?: typeof invokeNativeRuntime;
 };
 
-/** Runs both gates over one project and merges their findings. */
+function hasSelectedRuntime(
+  runtime: NativePreflightOptions["runtime"]
+): runtime is NativeRuntimeSelection {
+  return runtime !== null && runtime !== "incomplete";
+}
+
+async function collectSetupFinding(
+  opts: NativePreflightOptions
+): Promise<NativePreflightReport["runtime_setup"]> {
+  let runtimeSetup: NativePreflightReport["runtime_setup"] = {
+    state: "unavailable",
+    code: "native_selection_unavailable",
+    fix: "Select a native candidate to inspect its installation; run this command through hack-next or the candidate bundle.",
+  };
+  if (hasSelectedRuntime(opts.runtime)) {
+    try {
+      const inspected = await inspectNativeSetup({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        invoke: opts.invoke,
+      });
+      runtimeSetup = {
+        state: inspected.state,
+        installation_state: inspected.installation_state,
+        code: inspected.code,
+        fix: nativeSetupGuidance(inspected),
+      };
+    } catch {
+      runtimeSetup = {
+        state: "unavailable",
+        code: "native_setup_unavailable",
+        fix: "Native runtime installation could not be inspected; update the selected candidate and check access to its home.",
+      };
+    }
+  }
+  return runtimeSetup;
+}
+
+/** Runs installation, CLI and runtime gates over the same selected project. */
 export async function collectNativePreflight(
   opts: NativePreflightOptions
 ): Promise<NativePreflightReport> {
+  const runtimeSetup = await collectSetupFinding(opts);
   const adapted = await adaptForPreflight(opts);
   const cli = [...opts.settings, ...adapted.findings];
+  if (hasSelectedRuntime(opts.runtime) && runtimeSetup.state !== "ready") {
+    cli.push({
+      severity: "blocker",
+      gate: "cli",
+      code: "native_runtime_setup",
+      message: `Native runtime setup: ${runtimeSetup.state.replaceAll("_", " ")}.`,
+      fix: runtimeSetup.fix,
+    });
+  }
   let runtime: RuntimeReview = {
     review:
       opts.runtime === "incomplete"
@@ -1490,7 +1549,10 @@ export async function collectNativePreflight(
         review: { status: "skipped", code: "native_adaptation_invalid" },
         findings: [],
       };
-    } else if (opts.runtime !== null && opts.runtime !== "incomplete") {
+    } else if (
+      hasSelectedRuntime(opts.runtime) &&
+      runtimeSetup.state === "ready"
+    ) {
       runtime = await collectNativeRuntimeFindings({
         runtime: opts.runtime,
         projectRoot: opts.projectRoot,
@@ -1542,7 +1604,11 @@ export async function collectNativePreflight(
     report_version: 1,
     backend: "native",
     compose_file: relative(opts.projectRoot, opts.composeFile),
-    ready: blockers.length === 0 && runtime.review.status === "completed",
+    ready:
+      blockers.length === 0 &&
+      runtime.review.status === "completed" &&
+      runtimeSetup.state === "ready",
+    runtime_setup: runtimeSetup,
     runtime_review: runtime.review,
     blockers,
     warnings: all.filter((found) => found.severity === "warning"),
@@ -1589,6 +1655,7 @@ export function renderNativePreflightReport(
 ): string {
   const lines = [
     `Native preflight for ${report.compose_file}`,
+    `Runtime setup: ${report.runtime_setup.state.replaceAll("_", " ")}. ${report.runtime_setup.fix}`,
     reviewLine(report.runtime_review),
     "",
   ];

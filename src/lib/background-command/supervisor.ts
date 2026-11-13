@@ -644,8 +644,11 @@ export class OutputCapture {
     // CAPTURE_LIMIT_BYTES (8 MiB) scanned against at most
     // REDACTION_VALUES_LIMIT (1,024) values, once per command, in this
     // command's own supervisor, with at most CALLER_ACTIVE_LIMIT (4) per
-    // caller and HOME_ACTIVE_LIMIT (16) per Hack home running. The worst
-    // accepted case measured about 15 s of CPU.
+    // caller and HOME_ACTIVE_LIMIT (16) per Hack home running. Matching is
+    // one pass whatever the number of values: 8 MiB against 1,024 values of
+    // 32 bytes took under 0.4 s of CPU on the development host, random or
+    // adversarial (scripts/bench-output-scanner.ts); a measured workload,
+    // not a guarantee for every value set or machine.
     const deadlineMono = final ? undefined : performance.now() + POLL_WORK_MS;
     for (const stream of ["stdout", "stderr"] as const) {
       const now = performance.now();

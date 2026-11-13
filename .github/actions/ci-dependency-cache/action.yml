@@ -1,0 +1,49 @@
+name: CI dependency cache
+description: Cache downloaded packages and native build dependencies without skipping verification
+inputs:
+  mode:
+    description: bun or rust
+    default: bun
+  kind:
+    description: Separate compiler and candidate target trees
+    default: compiler
+  target:
+    description: Cargo target directory to retain
+    default: .hack-local/config-compiler-target
+runs:
+  using: composite
+  steps:
+    - name: Cache Bun downloads
+      if: inputs.mode == 'bun'
+      uses: actions/cache@v4
+      with:
+        path: ~/.bun/install/cache
+        key: ci-bun-v1-${{ runner.os }}-${{ runner.arch }}-1.4.4-${{ hashFiles('bun.lock') }}
+        restore-keys: ci-bun-v1-${{ runner.os }}-${{ runner.arch }}-1.4.4-
+    - name: Identify native cache toolchain
+      if: inputs.mode == 'rust'
+      id: image
+      shell: bash
+      run: |
+        printf 'image=%s\n' "${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
+        printf 'CARGO_INCREMENTAL=0\nZIG_GLOBAL_CACHE_DIR=%s/ci-zig-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+    - name: Restore Cargo and Zig build data on pull requests
+      if: inputs.mode == 'rust' && github.event_name == 'pull_request'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git/db
+          ${{ inputs.target }}
+          ${{ runner.temp }}/ci-zig-cache
+        key: ci-native-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.image }}-${{ inputs.kind }}-rust1.97.1-zig0.15.2-${{ hashFiles('mise.toml', 'packages/**/Cargo.lock') }}
+    - name: Cache Cargo and Zig build data on trusted events
+      if: inputs.mode == 'rust' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/next' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git/db
+          ${{ inputs.target }}
+          ${{ runner.temp }}/ci-zig-cache
+        key: ci-native-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.image }}-${{ inputs.kind }}-rust1.97.1-zig0.15.2-${{ hashFiles('mise.toml', 'packages/**/Cargo.lock') }}

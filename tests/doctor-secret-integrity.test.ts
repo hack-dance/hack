@@ -28,6 +28,7 @@ import {
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { runFixtureGit } from "./helpers/fixture-git.ts";
 
 /**
  * HACK-2169: `hack doctor` reports stores and env layers whose secrets cannot
@@ -37,10 +38,14 @@ import { restoreEnv } from "./helpers/env.ts";
 const tempDirs = new Set<string>();
 const previousEnvKey = process.env[PROJECT_ENV_SECRET_KEY_ENV];
 const previousStoreKey = process.env.HACK_SECRETS_FILE_KEY;
+const previousCI = process.env.CI;
+const previousMode = process.env.HACK_EXECUTION_MODE;
 
 afterEach(async () => {
   restoreEnv(PROJECT_ENV_SECRET_KEY_ENV, previousEnvKey);
   restoreEnv("HACK_SECRETS_FILE_KEY", previousStoreKey);
+  restoreEnv("CI", previousCI);
+  restoreEnv("HACK_EXECUTION_MODE", previousMode);
   for (const dir of tempDirs) {
     await rm(dir, { recursive: true, force: true });
   }
@@ -382,4 +387,65 @@ test("an unreadable store and a store whose key is missing are reported", async 
   for (const secret of ["synthetic-store-5e61", keyText.trim()]) {
     expect(keyMissing[0]?.message).not.toContain(secret);
   }
+});
+
+test("a linked worktree's inherited primary local layer is inspected", async () => {
+  // Runtime reads the primary checkout's local layers in a linked worktree
+  // (outside CI and slim mode), so the doctor inspects them too.
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  const primary = await createRepo();
+  const git = async (cwd: string, args: readonly string[]) => {
+    const result = await runFixtureGit({ cwd, args });
+    expect(result.exitCode).toBe(0);
+  };
+  await git(primary.projectRoot, ["init", "-q", "-b", "main"]);
+  await git(primary.projectRoot, ["add", "."]);
+  await git(primary.projectRoot, ["commit", "-q", "-m", "fixture"]);
+  const linkedRoot = resolve(primary.projectRoot, "..", "linked");
+  await git(primary.projectRoot, [
+    "worktree",
+    "add",
+    "-q",
+    "-b",
+    "linked",
+    linkedRoot,
+  ]);
+  const linked = {
+    projectRoot: linkedRoot,
+    projectDir: resolve(linkedRoot, ".hack"),
+  };
+  await setProjectEnvValue({
+    projectRoot: primary.projectRoot,
+    projectDir: primary.projectDir,
+    envName: null,
+    scope: "global",
+    key: "FIRST",
+    value: "synthetic-first-c18e",
+    secret: true,
+    local: true,
+  });
+  const inspectLinked = async () =>
+    await inspectSecretIntegrity({ ...linked, projectName: "integrity" });
+  expect(await inspectLinked()).toEqual([]);
+
+  const other = await createRepo();
+  await setSecret(other, "SECOND", "synthetic-second-6f93");
+  await setSecret(other, "THIRD", "synthetic-third-b07a");
+  const localPath = resolve(primary.projectDir, "hack.env.local.yaml");
+  const parsed = YAML.parse(await readFile(localPath, "utf8")) as {
+    values: { global: Record<string, unknown> };
+  };
+  const otherValues = globalValues(await readFile(other.envFile, "utf8"));
+  parsed.values.global.SECOND = otherValues.SECOND;
+  parsed.values.global.THIRD = otherValues.THIRD;
+  await writeFile(localPath, YAML.stringify(parsed));
+
+  const findings = await inspectLinked();
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.message).toContain(
+    "(in the primary checkout, which this worktree inherits"
+  );
+  expect(findings[0]?.message).toContain("more than one key: 1 of 3");
+  expect(findings[0]?.message).toContain("SECOND (--local), THIRD (--local)");
 });

@@ -143,7 +143,12 @@ async function inspectEnvLayers(opts: {
 }): Promise<SecretIntegrityFinding[]> {
   const findings: SecretIntegrityFinding[] = [];
   for (const layer of await inspectProjectEnvLayerKeys(opts)) {
-    const path = displayPath({ ...opts, path: layer.path });
+    const shown = displayPath({ ...opts, path: layer.path });
+    // An inherited layer lives in the primary checkout: say so, since
+    // `hack env` here does not change it.
+    const path = layer.inherited
+      ? `${shown} (in the primary checkout, which this worktree inherits; run the hack env steps below there)`
+      : shown;
     const n = layer.secretCount;
     if (layer.openCount === null) {
       findings.push({

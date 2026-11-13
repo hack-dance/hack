@@ -3663,6 +3663,11 @@ export type ProjectEnvLayerKeyReport = {
   readonly envName: string | null;
   readonly local: boolean;
   /**
+   * True for a primary checkout's local layer that this linked worktree
+   * inherits: `hack env` must be run in the primary checkout to change it.
+   */
+  readonly inherited: boolean;
+  /**
    * Names (never values) of the secrets the readers' key does not open,
    * by scope ("global" or a service), so they can be re-entered; empty
    * when no key is available.
@@ -3739,6 +3744,40 @@ export async function inspectProjectEnvLayerKeys(opts: {
   }
   const readerKey =
     fileKey ?? (process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() || null);
+  const reports: ProjectEnvLayerKeyReport[] = [];
+  for (const layer of await listInspectedProjectEnvLayers(opts)) {
+    // Each layer is read the way runtime reads it; one it would refuse, or
+    // that cannot be read or parsed, is skipped (other checks report it).
+    const text = await layer.read().catch(() => null);
+    const report =
+      text === null
+        ? null
+        : projectEnvLayerKeyReport({ ...layer, text, readerKey });
+    if (report !== null) {
+      reports.push(report);
+    }
+  }
+  return reports;
+}
+
+type InspectedProjectEnvLayer = {
+  readonly path: string;
+  readonly envName: string | null;
+  readonly local: boolean;
+  readonly inherited: boolean;
+  readonly read: () => Promise<string | null>;
+};
+
+/**
+ * The layers runtime may read for this checkout, each with runtime's read:
+ * the committed and machine-local layers of every overlay found here, and,
+ * in a linked worktree that inherits local inputs, the primary checkout's
+ * local default and overlay layers (read with the same inheritance guards).
+ */
+async function listInspectedProjectEnvLayers(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<readonly InspectedProjectEnvLayer[]> {
   const committedOverlays = await listProjectEnvOverlayNames({
     projectDir: opts.projectDir,
   }).catch(() => [] as readonly string[]);
@@ -3751,31 +3790,38 @@ export async function inspectProjectEnvLayerKeys(opts: {
       ...(await listProjectEnvInspectedOverlayNames(opts)),
     ]),
   ];
-  const layers = new Map<
-    string,
-    { readonly envName: string | null; readonly local: boolean }
-  >();
+  const layers = new Map<string, InspectedProjectEnvLayer>();
   // The first label for a path wins, and the default layers come first.
   // Defensive: overlay discovery already leaves out `local` in a non-legacy
   // project, so no overlay path can collide with a default layer today;
   // this keeps a default layer's `--local` advice correct if that changes.
-  const addLayer = (
-    path: string,
-    layer: { readonly envName: string | null; readonly local: boolean }
-  ) => {
-    if (!layers.has(path)) {
-      layers.set(path, layer);
+  const addLayer = (layer: Omit<InspectedProjectEnvLayer, "read">) => {
+    if (!layers.has(layer.path)) {
+      layers.set(layer.path, {
+        ...layer,
+        read: () =>
+          readProjectEnvLayerText({
+            projectRoot: opts.projectRoot,
+            path: layer.path,
+            strictRead: true,
+          }),
+      });
     }
   };
   for (const envName of [null, ...overlays]) {
-    addLayer(
-      resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName }),
-      { envName, local: false }
-    );
+    addLayer({
+      path: resolveProjectEnvConfigPath({
+        projectDir: opts.projectDir,
+        envName,
+      }),
+      envName,
+      local: false,
+      inherited: false,
+    });
     // The file `hack env set/unset --local` acts on, including a
     // legacy-compatible local default layer.
-    addLayer(
-      await resolveProjectEnvEffectiveLocalConfigPath({
+    addLayer({
+      path: await resolveProjectEnvEffectiveLocalConfigPath({
         ...opts,
         envName,
       }).catch(() =>
@@ -3784,67 +3830,126 @@ export async function inspectProjectEnvLayerKeys(opts: {
           envName,
         })
       ),
-      { envName, local: true }
-    );
-  }
-  const reports: ProjectEnvLayerKeyReport[] = [];
-  for (const [path, layer] of layers) {
-    // The read runtime makes: an in-project symlinked layer is read, and a
-    // layer leading outside the project, or not to a regular file, is
-    // skipped (the env checks report it).
-    let text: string | null;
-    try {
-      text = await readProjectEnvLayerText({
-        projectRoot: opts.projectRoot,
-        path,
-        strictRead: true,
-      });
-    } catch {
-      continue;
-    }
-    if (text === null) {
-      continue;
-    }
-    const read = parseProjectEnvConfigText({
-      path,
-      environment: "default",
-      text,
-    });
-    if (read.parseError !== undefined) {
-      continue;
-    }
-    const secrets = Object.entries(read.config.values).flatMap(
-      ([scope, scopeValues]) =>
-        Object.entries(scopeValues).flatMap(([name, value]) =>
-          value !== null && isProjectEnvSecretValue(value)
-            ? [{ scope, name, value }]
-            : []
-        )
-    );
-    if (secrets.length === 0) {
-      continue;
-    }
-    const unopened =
-      readerKey === null
-        ? []
-        : secrets
-            .filter(
-              (secret) =>
-                !canDecryptProjectEnvValue({
-                  ciphertext: secret.value.secure,
-                  keyText: readerKey,
-                })
-            )
-            .map(({ scope, name }) => ({ scope, name }));
-    reports.push({
-      path,
-      ...layer,
-      secretCount: secrets.length,
-      openCount: readerKey === null ? null : secrets.length - unopened.length,
-      unopened,
+      envName,
+      local: true,
+      inherited: false,
     });
   }
-  return reports;
+  return [
+    ...layers.values(),
+    ...(await listInheritedProjectEnvLayers({ ...opts, overlays })),
+  ];
+}
+
+/**
+ * The primary checkout's local layers a linked worktree inherits, as
+ * `readProjectEnvLayers` selects them: its effective local default layer
+ * and the local layer of each overlay name (this checkout's and the
+ * primary's own). None outside a linked worktree that inherits.
+ */
+async function listInheritedProjectEnvLayers(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly overlays: readonly string[];
+}): Promise<readonly InspectedProjectEnvLayer[]> {
+  const primaryDir = await resolvePrimaryLocalProjectDir(opts).catch(
+    () => null
+  );
+  if (primaryDir === null) {
+    return [];
+  }
+  const primaryRoot = dirname(primaryDir);
+  const primaryOverlays = await listProjectEnvInspectedOverlayNames({
+    projectDir: primaryDir,
+  });
+  const read = (path: string) => async () => {
+    await assertProjectEnvLayerPath({ projectRoot: primaryRoot, path });
+    await validatePrimaryLocalFile(path);
+    return await readPrimaryLocalFile(path);
+  };
+  const defaultPath = await resolveProjectEnvEffectiveLocalConfigPath({
+    projectRoot: primaryRoot,
+    projectDir: primaryDir,
+    envName: null,
+  }).catch(() => null);
+  const layers: InspectedProjectEnvLayer[] =
+    defaultPath === null
+      ? []
+      : [
+          {
+            path: defaultPath,
+            envName: null,
+            local: true,
+            inherited: true,
+            read: read(defaultPath),
+          },
+        ];
+  for (const envName of new Set([...opts.overlays, ...primaryOverlays])) {
+    const path = resolveProjectEnvLocalConfigPath({
+      projectDir: primaryDir,
+      envName,
+    });
+    layers.push({
+      path,
+      envName,
+      local: true,
+      inherited: true,
+      read: read(path),
+    });
+  }
+  return layers;
+}
+
+/** One layer's secret counts against the readers' key; null without secrets. */
+function projectEnvLayerKeyReport(opts: {
+  readonly path: string;
+  readonly envName: string | null;
+  readonly local: boolean;
+  readonly inherited: boolean;
+  readonly text: string;
+  readonly readerKey: string | null;
+}): ProjectEnvLayerKeyReport | null {
+  const read = parseProjectEnvConfigText({
+    path: opts.path,
+    environment: "default",
+    text: opts.text,
+  });
+  if (read.parseError !== undefined) {
+    return null;
+  }
+  const secrets = Object.entries(read.config.values).flatMap(
+    ([scope, scopeValues]) =>
+      Object.entries(scopeValues).flatMap(([name, value]) =>
+        value !== null && isProjectEnvSecretValue(value)
+          ? [{ scope, name, value }]
+          : []
+      )
+  );
+  if (secrets.length === 0) {
+    return null;
+  }
+  const readerKey = opts.readerKey;
+  const unopened =
+    readerKey === null
+      ? []
+      : secrets
+          .filter(
+            (secret) =>
+              !canDecryptProjectEnvValue({
+                ciphertext: secret.value.secure,
+                keyText: readerKey,
+              })
+          )
+          .map(({ scope, name }) => ({ scope, name }));
+  return {
+    path: opts.path,
+    envName: opts.envName,
+    local: opts.local,
+    inherited: opts.inherited,
+    secretCount: secrets.length,
+    openCount: readerKey === null ? null : secrets.length - unopened.length,
+    unopened,
+  };
 }
 
 /**

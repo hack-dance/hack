@@ -20,6 +20,7 @@ import {
   resolveSecretStoreDescriptor,
 } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { runFixtureGitSync } from "./helpers/fixture-git.ts";
 
 let tempDir: string | null = null;
 let previousHome: string | undefined;
@@ -1076,14 +1077,13 @@ test("the encrypted_file key must be a private, untracked regular file (HACK-203
   // Tracked by git: refused.
   await rm(keyPath);
   await privateKey(keyPath, "tracked-key");
-  const git = (args: string[]) =>
-    Bun.spawnSync(["git", "-C", tempDir as string, ...args], {
-      stdout: "ignore",
-      stderr: "ignore",
-    }).exitCode;
-  if (git(["init", "-q"]) === 0 && git(["add", "k.key"]) === 0) {
-    await expect(resolveSecretStore({ projectName: "app" })).rejects.toThrow(
-      "git tracks it"
-    );
+  for (const args of [
+    ["init", "-q"],
+    ["add", "k.key"],
+  ]) {
+    expect(runFixtureGitSync({ cwd: tempDir, args }).exitCode).toBe(0);
   }
+  await expect(resolveSecretStore({ projectName: "app" })).rejects.toThrow(
+    "git tracks it"
+  );
 });

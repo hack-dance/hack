@@ -26,3 +26,12 @@ identity, real Engine observations and the VM absence proof are assumptions.
 The model excludes multiple sessions, physical descriptor transfer, terminal job
 control and scheduler fairness. There is no eventual-cleanup claim. A normal exec
 exit can leave descendants and therefore retains its receipt until exact cleanup.
+
+Descriptor truncation is covered separately by `interactive_handoff` tests. A pure
+parser regression preserves Darwin's original ancillary header length while
+limiting copied bytes; it rejects the message without reading padding as file
+descriptors. The kernel regression receives two or 200 descriptors in an isolated
+child and checks that refusal preserves standard streams and sentinel sockets.
+Darwin can install rights whose numbers are omitted from a truncated reply; the
+short-lived receiver exits to release those rights. The receipt remains uncertain
+and no start is replayed. Linux execution does not qualify Darwin's kernel path.

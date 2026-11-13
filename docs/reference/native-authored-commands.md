@@ -556,6 +556,11 @@ the UUID and an exact project/branch `hack down` command. Only same-incarnation
 container absence or a proven stop of the bound VM boot retires it. A new boot
 alone is not proof. Receipt bookkeeping failures do not block container cleanup.
 
+A malformed or truncated descriptor handoff also retains the receipt and refuses
+without replay. The receiver closes only descriptors present in the copied reply.
+On macOS, the kernel may install additional descriptors whose numbers were omitted
+by truncation; the short-lived native child releases them when it exits.
+
 ![Interactive session states](../diagrams/interactive-session.svg)
 
 The [diagram source](../diagrams/interactive-session.mmd) and

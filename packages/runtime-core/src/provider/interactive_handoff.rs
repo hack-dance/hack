@@ -102,8 +102,73 @@ pub(super) fn send(
     }
 }
 
+/// Decode only complete descriptor integers inside the copied control bytes.
+/// Darwin copyout_control truncates the bytes but preserves the original
+/// cmsg_len; trusting that length would adopt unrelated stack integers as fds.
+/// This parser creates no descriptor ownership, so malformed lengths can be
+/// tested without closing any process resources.
+fn copied_rights(bytes: &[u8], copied: usize) -> (Vec<i32>, bool) {
+    let mut invalid = copied > bytes.len();
+    let bytes = &bytes[..copied.min(bytes.len())];
+    let base = unsafe { libc::CMSG_LEN(0) } as usize;
+    let mut offset = 0;
+    let mut descriptors = Vec::new();
+    while offset < bytes.len() {
+        if bytes.len() - offset < size_of::<libc::cmsghdr>() {
+            invalid = true;
+            break;
+        }
+        // SAFETY: a whole cmsghdr fits in this initialized byte slice; its
+        // fields are integers, and read_unaligned accepts arbitrary alignment.
+        let header = unsafe {
+            bytes
+                .as_ptr()
+                .add(offset)
+                .cast::<libc::cmsghdr>()
+                .read_unaligned()
+        };
+        // cmsg_len is usize on Linux and u32 on Darwin.
+        #[allow(clippy::unnecessary_cast)]
+        let length = header.cmsg_len as usize;
+        if length < base || bytes.len() - offset < base {
+            invalid = true;
+            break;
+        }
+        let available = length.min(bytes.len() - offset);
+        invalid |= length > available;
+        if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
+            invalid |= (length - base) % size_of::<i32>() != 0
+                || (available - base) % size_of::<i32>() != 0;
+            for chunk in bytes[offset + base..offset + available].chunks_exact(size_of::<i32>()) {
+                let fd = i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if fd < 0 || descriptors.contains(&fd) {
+                    invalid = true;
+                } else {
+                    descriptors.push(fd);
+                }
+            }
+        } else {
+            invalid = true;
+        }
+        if length > available {
+            break;
+        }
+        // Header and payload are bounded by the small receive buffer. Advance
+        // by the platform's padding, never by an unbounded claimed length.
+        let space = unsafe { libc::CMSG_SPACE((length - base) as u32) } as usize;
+        if space >= bytes.len() - offset {
+            break;
+        }
+        offset += space;
+    }
+    (descriptors, invalid)
+}
+
 /// Received descriptors are owned immediately, including on truncated/invalid
 /// messages. No descriptor is exposed until its count, type and CLOEXEC are valid.
+/// Darwin may install additional rights that it does not copy out on truncation.
+/// Their numbers are unknowable: refuse without guessing or replay, and let the
+/// short-lived receiving CLI process release them when it exits.
 pub(super) fn receive(
     control: &UnixStream,
     deadline: Instant,
@@ -140,36 +205,18 @@ pub(super) fn receive(
         if count < 0 {
             return Err(refused());
         }
-        let mut descriptors = Vec::new();
-        let mut invalid = false;
-        // SAFETY: the kernel populated these headers within msg_controllen.
-        // Every SCM_RIGHTS integer transfers ownership once, even on refusal.
-        unsafe {
-            let mut header = libc::CMSG_FIRSTHDR(&message);
-            while !header.is_null() {
-                let length = (*header).cmsg_len as usize;
-                let base = libc::CMSG_LEN(0) as usize;
-                if length < base {
-                    invalid = true;
-                    break;
-                }
-                if (*header).cmsg_level == libc::SOL_SOCKET
-                    && (*header).cmsg_type == libc::SCM_RIGHTS
-                {
-                    invalid |= (length - base) % size_of::<i32>() != 0;
-                    for index in 0..(length - base) / size_of::<i32>() {
-                        let fd = libc::CMSG_DATA(header)
-                            .cast::<i32>()
-                            .add(index)
-                            .read_unaligned();
-                        descriptors.push(OwnedFd::from_raw_fd(fd));
-                    }
-                } else {
-                    invalid = true;
-                }
-                header = libc::CMSG_NXTHDR(&message, header);
-            }
-        }
+        // SAFETY: ancillary is initialized storage of this exact byte size;
+        // the parser borrows it and never reads beyond the returned length.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(ancillary.as_ptr().cast::<u8>(), size_of_val(&ancillary))
+        };
+        let (raw, invalid) = copied_rights(bytes, message.msg_controllen as usize);
+        // SAFETY: only complete SCM_RIGHTS integers copied by this recvmsg are
+        // returned, each once. Each such descriptor transfers ownership to us.
+        let mut descriptors: Vec<OwnedFd> = raw
+            .into_iter()
+            .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
+            .collect();
         for fd in &descriptors {
             // SAFETY: OwnedFd keeps this descriptor alive; macOS requires an
             // explicit CLOEXEC since it lacks MSG_CMSG_CLOEXEC.
@@ -276,6 +323,20 @@ mod tests {
             engine
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "provider::interactive_handoff::tests::truncated_rights_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("HACK_HANDOFF_TEST_CHILD", "1")
+                .stdin(std::process::Stdio::from(OwnedFd::from(receiver)))
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut child = command.spawn().unwrap();
+            drop(command);
             let mut tag = 1u8;
             let mut iov = libc::iovec {
                 iov_base: (&mut tag as *mut u8).cast(),
@@ -306,11 +367,20 @@ mod tests {
                 );
             }
             drop(session);
-            assert_eq!(
-                receive(&receiver, Instant::now() + Duration::from_secs(1))
-                    .unwrap_err()
-                    .code,
-                "session_cleanup_uncertain"
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("isolated handoff receiver exceeded its deadline");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
             );
             assert_eq!(
                 engine.read(&mut [0]).unwrap(),
@@ -319,6 +389,96 @@ mod tests {
             );
         }
     }
+    #[test]
+    #[ignore = "isolated receiver launched by multiple_and_truncated_rights_close_every_received_copy"]
+    fn truncated_rights_child() {
+        if std::env::var("HACK_HANDOFF_TEST_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        // SAFETY: the parent installed the control socket as this process's
+        // stdin through Stdio. No other Rust object owns fd 0 in this child.
+        let receiver = unsafe { UnixStream::from_raw_fd(0) };
+        let (mut sentinel, mut peer) = UnixStream::pair().unwrap();
+        let protected = [0, 1, 2, sentinel.as_raw_fd(), peer.as_raw_fd()];
+        let before = protected.map(|fd| unsafe { libc::fcntl(fd, libc::F_GETFD) });
+        assert!(before.iter().all(|flags| *flags >= 0));
+        assert_eq!(
+            receive(&receiver, Instant::now() + Duration::from_secs(2))
+                .unwrap_err()
+                .code,
+            "session_cleanup_uncertain"
+        );
+        let after = protected.map(|fd| unsafe { libc::fcntl(fd, libc::F_GETFD) });
+        assert_eq!(
+            after, before,
+            "refusal must not close unrelated descriptors"
+        );
+        sentinel.write_all(b"alive").unwrap();
+        let mut value = [0; 5];
+        peer.read_exact(&mut value).unwrap();
+        assert_eq!(&value, b"alive");
+        // macOS may have installed uncopied rights. This isolated process
+        // exits to close them; the parent requires EOF after that exit.
+    }
+
+    fn control_bytes(fds: &[i32], claimed: usize) -> Vec<u8> {
+        let mut bytes = vec![0; 512];
+        // SAFETY: storage fits this header and the supplied test descriptors;
+        // unaligned accesses do not assume Vec<u8> has cmsghdr alignment.
+        unsafe {
+            let mut header: libc::cmsghdr = zeroed();
+            header.cmsg_level = libc::SOL_SOCKET;
+            header.cmsg_type = libc::SCM_RIGHTS;
+            header.cmsg_len = libc::CMSG_LEN((claimed * size_of::<i32>()) as u32) as _;
+            bytes
+                .as_mut_ptr()
+                .cast::<libc::cmsghdr>()
+                .write_unaligned(header);
+            let base = libc::CMSG_LEN(0) as usize;
+            for (index, fd) in fds.iter().enumerate() {
+                bytes
+                    .as_mut_ptr()
+                    .add(base + index * size_of::<i32>())
+                    .cast::<i32>()
+                    .write_unaligned(*fd);
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn claimed_control_length_cannot_adopt_uncopied_zero_padding() {
+        let bytes = control_bytes(&[41], 200);
+        let copied = unsafe { libc::CMSG_LEN(size_of::<i32>() as u32) } as usize;
+        assert_eq!(copied_rights(&bytes, copied), (vec![41], true));
+        let mut shorter = bytes[..copied].to_vec();
+        shorter.extend_from_slice(&[0, 0]);
+        assert_eq!(copied_rights(&shorter, shorter.len()), (vec![41], true));
+        assert_eq!(
+            copied_rights(&bytes, size_of::<libc::cmsghdr>() - 1),
+            (vec![], true)
+        );
+        assert_eq!(
+            copied_rights(&bytes[..copied], usize::MAX),
+            (vec![41], true)
+        );
+    }
+
+    #[test]
+    fn complete_control_returns_each_received_integer_once() {
+        let bytes = control_bytes(&[41, 42], 2);
+        let copied = unsafe { libc::CMSG_LEN(2 * size_of::<i32>() as u32) } as usize;
+        assert_eq!(copied_rights(&bytes, copied), (vec![41, 42], false));
+        assert_eq!(
+            copied_rights(&control_bytes(&[41, 41], 2), copied),
+            (vec![41], true)
+        );
+        assert_eq!(
+            copied_rights(&control_bytes(&[-1, 42], 2), copied),
+            (vec![42], true)
+        );
+    }
+
     #[test]
     fn datagram_is_not_an_engine_stream() {
         let (sender, receiver) = UnixStream::pair().unwrap();

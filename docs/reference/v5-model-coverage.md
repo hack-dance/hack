@@ -85,7 +85,7 @@ liveness/reachability controls have their own documented assumptions.
 | [native-cache-reconcile](../../tests/models/tla/native-cache-reconcile/CacheReconcile.tla) | 2,208 | 5 |
 | [pre-ready-retirement](../../tests/models/tla/pre-ready-retirement/Retirement.tla) | 10,965 | 8 |
 | [native-persistent-enrollment](../../tests/models/tla/native-persistent-enrollment/Enrollment.tla) | 38 | 6 |
-| [native-frontend-recovery](../../tests/models/tla/native-frontend-recovery/Recovery.tla) | 1752 | 12 |
+| [native-frontend-recovery](../../tests/models/tla/native-frontend-recovery/COVERAGE.md) | 1752 + 160 pre-Ready | 16 |
 | [native-storage-witness](../../tests/models/tla/native-storage-witness/Witness.tla) | 352 | 19 |
 | [native-file-material](../../tests/models/tla/native-file-material/Material.tla) | 8,388 | 12 |
 | [native-foreground-down-hooks](../../tests/models/tla/native-foreground-down-hooks/DownHooks.tla) | 1,246 | 6 |

@@ -3796,7 +3796,22 @@ For adopted projects, plain `down` also selects exact-proof recovery of a
 Recovery rechecks owner death, boot, incarnation, selected receipt and resource
 inventories under its lease. Unsettled bindings, uncertain owners, corrupt or
 partial journals and changed identities still refuse by name; they grant no
-cleanup authority. Authored pre-Ready recovery is unchanged.
+cleanup authority.
+
+For authored projects, plain `down` and `down --recover` use the same recovery
+proof when the frontend never saved Ready. A saved start and source envelope,
+an absent Ready mapping, an exact dead admission owner (or a freshly held
+admission), and a settled native receipt are required. Runtime Ready, failed,
+and cleanup phases may be selected; `preparing`, pending writes and uncertain
+resource effects refuse. Never-created resources must have no ID and must be
+proved absent by exact name and labels before cleanup marks them removed.
+Existing host-process and hook records require proof of settlement; recovery
+does not signal saved PIDs. The original receipt and resource identities stay
+fixed, cleanup progress only advances, and files retire only after authenticated
+Removed with null observations. A version 3 frontend intent keeps incomplete
+recovery blocking startup, including the gap between admission release and
+completion. Graph2 and fully enrolled Graph4 receipts are supported; source and
+topology recovery remain outside this proof. Nothing recompiles or replays startup.
 
 Failure evidence is retained by startup and effectful verification, and by owned
 cleanup for listeners that exited before cleanup stops them. The first recorded

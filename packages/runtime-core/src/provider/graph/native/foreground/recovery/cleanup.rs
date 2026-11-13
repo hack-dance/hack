@@ -20,7 +20,7 @@ impl<'a> Context<'a> {
         let intent = match admitted.intent.take() {
             Some(intent) => intent,
             None => Intent {
-                version: 1,
+                version: 2,
                 kind: IntentKind::NativeGraphLiveOwnerRecovery,
                 run: admitted.run.into(),
                 journal_parent: admitted.root_identity,
@@ -28,7 +28,7 @@ impl<'a> Context<'a> {
                 receipt_sha256: admitted.receipt_sha256.clone(),
                 publication: admitted.lease.selected().clone(),
                 progress: Progress::Cleanup,
-                receipt_progress: 0,
+                receipt_progress: receipt_progress(&admitted.original)?,
                 resource_progress: resource_progress(&admitted.original)?,
                 environment: crate::provider::native_environment::Inventory::capture(
                     admitted.candidate,

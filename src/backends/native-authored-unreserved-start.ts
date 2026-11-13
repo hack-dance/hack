@@ -15,6 +15,16 @@ function refused(): never {
   );
 }
 
+/** A successful inspection proves a journal exists; cleanup still needs its own proof. */
+export class NativeAuthoredReservedStartError extends Error {
+  constructor() {
+    super(
+      "Native startup has reserved runtime state; stored-generation recovery is required. Values omitted."
+    );
+    this.name = "NativeAuthoredReservedStartError";
+  }
+}
+
 /**
  * Read-only selection for explicit recovery: true only when a startup intent is
  * retained without a Ready mapping or a frontend recovery intent. Any refusal
@@ -27,7 +37,7 @@ export async function nativeAuthoredUnreservedStartSelected(
   try {
     return await withNativeAuthoredProjectStatus(
       { ...scope },
-      async (saved) => await Promise.resolve(saved.pending)
+      async (saved) => await Promise.resolve(saved.unreservedCandidate)
     );
   } catch {
     return false;
@@ -102,7 +112,8 @@ export async function retireNativeAuthoredUnreservedStart(opts: {
     }
     if (refusal === undefined) {
       // A journal exists; this attempt belongs to receipt-owned recovery.
-      return refused();
+      remaining();
+      throw new NativeAuthoredReservedStartError();
     }
     remaining();
     await admission.assertHeld();

@@ -9,6 +9,8 @@ import {
   type serveNativeAuthoredProject,
 } from "../src/backends/native-authored-project-start.ts";
 import { NativeAuthoredProjectNotStartedError } from "../src/backends/native-authored-runtime-binary.ts";
+import { NativeAuthoredStopUnavailableError } from "../src/backends/native-authored-stop-errors.ts";
+import { NativeAuthoredReservedStartError } from "../src/backends/native-authored-unreserved-start.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {
@@ -722,6 +724,83 @@ macTest(
     expect(code).toBe(0);
     expect(calls).toBe(1);
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "plain down and explicit recovery share proven pre-Ready cleanup without startup",
+  async () => {
+    for (const recover of [false, true]) {
+      const selected = await fixture();
+      const calls: string[] = [];
+      const code = await tryNativeAuthoredCommand({
+        ...selected,
+        options: { ...selected.options, operation: "down", recover },
+        stop: async () => {
+          calls.push("stop");
+          throw new NativeAuthoredStopUnavailableError();
+        },
+        unreservedSelected: async () => true,
+        retireUnreserved: async () => {
+          calls.push("unreserved");
+          throw new NativeAuthoredReservedStartError();
+        },
+        nothingToRecover: async () => false,
+        recover: async () => {
+          calls.push("recover");
+          return {} as Awaited<ReturnType<typeof recoverNativeAuthoredProject>>;
+        },
+        serve: async () => {
+          throw new Error("Must not replay startup");
+        },
+      });
+      expect(code).toBe(0);
+      expect(calls).toEqual(
+        recover ? ["unreserved", "recover"] : ["stop", "unreserved", "recover"]
+      );
+    }
+  }
+);
+
+macTest(
+  "down preserves cancellation, uncertain dispatch and busy unreserved outcomes without recovery",
+  async () => {
+    for (const failure of ["SIGINT", "SIGTERM", "uncertain", "busy"] as const) {
+      const selected = await fixture();
+      let recoveries = 0;
+      const result = tryNativeAuthoredCommand({
+        ...selected,
+        options: {
+          ...selected.options,
+          operation: "down",
+          recover: failure === "busy",
+        },
+        stop: async () => {
+          if (failure === "SIGINT" || failure === "SIGTERM") {
+            process.emit(failure);
+            throw new NativeAuthoredStopUnavailableError();
+          }
+          throw new Error("stop dispatched; outcome uncertain");
+        },
+        unreservedSelected: async () => true,
+        retireUnreserved: async () => {
+          throw new Error("admission busy");
+        },
+        nothingToRecover: async () => false,
+        recover: async () => {
+          recoveries++;
+          throw new Error("must not recover");
+        },
+      });
+      if (failure === "SIGINT" || failure === "SIGTERM") {
+        expect(await result).toBe(failure === "SIGINT" ? 130 : 143);
+      } else {
+        await expect(result).rejects.toThrow(
+          failure === "busy" ? "recovery is incomplete" : "stop is unconfirmed"
+        );
+      }
+      expect(recoveries).toBe(0);
+    }
   }
 );
 

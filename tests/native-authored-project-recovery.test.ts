@@ -140,7 +140,11 @@ function removed() {
     ),
   });
 }
-async function fixture(bootSession = false, liveStop = false) {
+async function fixture(
+  bootSession = false,
+  liveStop = false,
+  preReady?: "interrupted" | "released"
+) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-frontend-recovery-"))
   );
@@ -163,7 +167,11 @@ async function fixture(bootSession = false, liveStop = false) {
     ...(liveStop ? ["phase='reserve';"] : []),
     "const start = await admission.reserve({review:receipt.review});",
     ...(liveStop ? ["phase='publish';"] : []),
-    "const ready=await admission.publish({expectedStart:start,record:{version:2,kind:'native-authored-project-run',receipt}});",
+    ...(preReady
+      ? []
+      : [
+          "const ready=await admission.publish({expectedStart:start,record:{version:2,kind:'native-authored-project-run',receipt}});",
+        ]),
     ...(liveStop
       ? [
           `const {captureNativeAuthoredProcessIncarnation}=await import(${JSON.stringify(join(import.meta.dir, "../src/backends/native-authored-process-incarnation.ts"))});`,
@@ -176,8 +184,12 @@ async function fixture(bootSession = false, liveStop = false) {
           "void (async()=>{while(!(await Bun.file(scope.projectRoot+'/stop-original').exists()))await Bun.sleep(10);if(native.exitCode===null)native.kill('SIGKILL');await native.exited;await Bun.write(scope.projectRoot+'/native-settled','yes');process.exit(77)})();",
         ]
       : []),
-    "await Bun.write(scope.projectRoot+'/witness','ready');",
-    "await new Promise(resolve=>setTimeout(resolve,120000)); });",
+    ...(preReady === "released"
+      ? ["}); await Bun.write(scope.projectRoot+'/witness','ready');"]
+      : [
+          "await Bun.write(scope.projectRoot+'/witness','ready');",
+          "await new Promise(resolve=>setTimeout(resolve,120000)); });",
+        ]),
     ...(liveStop
       ? [
           "} catch {await Bun.write(scope.projectRoot+'/setup-failure',phase);throw new Error('Original fixture setup refused; values omitted.')} finally {if(native){if(native.exitCode===null)native.kill('SIGKILL');await native.exited;await Bun.write(scope.projectRoot+'/native-settled','yes');}}",
@@ -240,6 +252,9 @@ async function fixture(bootSession = false, liveStop = false) {
   if (liveStop) {
     censusPids.add(Number(await Bun.file(join(root, "native-pid")).text()));
     censusPids.add(child.pid);
+  }
+  if (preReady === "released") {
+    expect(await child.exited).toBe(0);
   }
   const dir = join(scope.projectDir, ".internal", "native-authored-runs");
   const key = createHash("sha256")
@@ -350,6 +365,81 @@ async function fixture(bootSession = false, liveStop = false) {
   };
 }
 
+for (const admission of ["interrupted", "released"] as const) {
+  test(`pre-Ready recovery with ${admission} admission retains its origin and retires without replay`, async () => {
+    const current = await fixture(true, false, admission);
+    if (admission === "interrupted") {
+      await expect(
+        recoverNativeAuthoredProject(current.options)
+      ).rejects.toThrow();
+      expect(current.calls).toEqual([]);
+      await current.kill();
+    }
+    current.selection.receipt = parseNativeAuthoredReceipt({
+      ...receipt(),
+      phase: "failed-retained",
+    });
+    let startupEntered = false;
+    const result = await recoverNativeAuthoredProject({
+      ...current.options,
+      request: async (opts) => {
+        await expect(
+          withNativeAuthoredProjectAdmission(current.scope, async () => {
+            startupEntered = true;
+          })
+        ).rejects.toThrow();
+        return await current.request(opts);
+      },
+    });
+    expect(result.receipt.phase).toBe("removed");
+    expect(startupEntered).toBe(false);
+    expect(current.cleanupCalls()).toBe(1);
+    const intent = JSON.parse(await Bun.file(current.paths.intent).text());
+    expect(intent.record.version).toBe(3);
+    expect(intent.record.ready).toBeNull();
+    expect(intent.record.admission_held).toBe(admission === "released");
+    expect(intent.record.admission_releasing).toBe(admission === "released");
+    expect(intent.record.phase).toBe("complete");
+    expect((await readdir(current.paths.dir)).sort()).toEqual(
+      [".gitignore", basename(current.paths.intent)].sort()
+    );
+    await recoverNativeAuthoredProject(current.options);
+    expect(current.cleanupCalls()).toBe(1);
+    await withNativeAuthoredProjectAdmission(current.scope, async () => {
+      startupEntered = true;
+    });
+    expect(startupEntered).toBe(true);
+  });
+}
+
+test("pre-Ready selection accepts runtime Ready and cleanup origins but refuses preparing and pending effects before cleanup", async () => {
+  for (const phase of [
+    "ready-observed",
+    "stop-intent",
+    "stopped",
+    "removal-intent",
+    "removed",
+    "preparing",
+  ] as const) {
+    const current = await fixture(true, false, "interrupted");
+    await current.kill();
+    current.selection.receipt = parseNativeAuthoredReceipt({
+      ...(phase === "removed" ? removed() : receipt()),
+      phase,
+    });
+    if (phase === "preparing") {
+      await expect(
+        recoverNativeAuthoredProject(current.options)
+      ).rejects.toThrow();
+      expect(current.cleanupCalls()).toBe(0);
+      expect(await Bun.file(current.paths.start).exists()).toBe(true);
+    } else {
+      await recoverNativeAuthoredProject(current.options);
+      expect(current.cleanupCalls()).toBe(1);
+    }
+  }
+}, 30_000);
+
 test("explicit frontend recovery refuses a live admission before any native request", async () => {
   const current = await fixture();
   await expect(recoverNativeAuthoredProject(current.options)).rejects.toThrow();
@@ -359,6 +449,100 @@ test("explicit frontend recovery refuses a live admission before any native requ
   ).toEqual(receipt());
   expect(await Bun.file(current.paths.intent).exists()).toBe(false);
 });
+
+test("fresh pre-Ready admission survives crashes around durable release and retains a failed release exactly", async () => {
+  for (const stage of ["prepared", "armed", "released", "error"] as const) {
+    const current = await fixture(true, false, "released");
+    current.selection.receipt = parseNativeAuthoredReceipt({
+      ...receipt(),
+      phase: "failed-retained",
+    });
+    const witness = join(current.root, "recovery-crash");
+    const effects = join(current.root, "cleanup-calls");
+    const program = [
+      "import {spyOn} from 'bun:test'; import * as files from 'node:fs/promises';",
+      `import {recoverNativeAuthoredProject} from ${JSON.stringify(join(import.meta.dir, "../src/backends/native-authored-project-recovery.ts"))};`,
+      `const paths=${JSON.stringify(current.paths)},stage=${JSON.stringify(stage)},witness=${JSON.stringify(witness)};`,
+      "const pause=async()=>{await Bun.write(witness,stage);await new Promise(resolve=>setTimeout(resolve,120000));};",
+      "const rename=files.rename,rmdir=files.rmdir,unlink=files.unlink;",
+      "spyOn(files,'unlink').mockImplementation(async(path)=>{await unlink(path);if(stage==='prepared'&&path===paths.intent+'.pending')await pause();});",
+      "spyOn(files,'rename').mockImplementation(async(from,to)=>{await rename(from,to);if(to===paths.intent){const {record}=await Bun.file(to).json();if((stage==='prepared'&&record.phase==='prepared')||(stage==='armed'&&record.admission_releasing)){await pause();}}});",
+      "spyOn(files,'rmdir').mockImplementation(async(path,...args)=>{await rmdir(path,...args);if(stage==='released'&&path===paths.admission)await pause();});",
+      `const selection=${JSON.stringify(current.selection)},result=${JSON.stringify(current.result)};`,
+      `try {await recoverNativeAuthoredProject({scope:${JSON.stringify(current.scope)},runtime:${JSON.stringify(current.options.runtime)},timeoutMs:30000,request:async opts=>{`,
+      "if(opts.args[2]==='recovery-selection')return selection;",
+      `if(opts.args[2]==='recover-live-owner'){await files.appendFile(${JSON.stringify(effects)},'cleanup'+String.fromCharCode(10));return result;}`,
+      "if(stage==='error')throw new Error('inspection unavailable');return {receipt:result.receipt,observations:{web:null}};}});throw new Error('unexpected completion');}catch{if(stage!=='error')throw new Error('unexpected refusal');await Bun.write(witness,stage);process.exitCode=77;}",
+    ].join("\n");
+    const child = Bun.spawn([process.execPath, "--eval", program], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: privateCliEnv({ root: current.root }),
+    });
+    fixtures.push({ root: current.root, child });
+    await waitForFileContent({
+      path: witness,
+      what: "pre-Ready recovery crash",
+      budgetMs: 5000,
+      complete: (text) => (text === stage ? text : undefined),
+    });
+    if (stage === "error") {
+      expect(await child.exited).toBe(77);
+    } else {
+      child.kill("SIGKILL");
+      expect(await child.exited).toBe(137);
+    }
+    const saved = JSON.parse(
+      await Bun.file(current.paths.intent).text()
+    ).record;
+    expect(saved.version).toBe(3);
+    expect(saved.admission_held).toBe(true);
+    if (stage === "released") {
+      expect(await lstat(current.paths.admission).catch(() => null)).toBeNull();
+      let entered = false;
+      await expect(
+        withNativeAuthoredProjectAdmission(current.scope, async () => {
+          entered = true;
+        })
+      ).rejects.toThrow();
+      expect(entered).toBe(false);
+      expect(await nativeAuthoredProjectNothingToRecover(current.scope)).toBe(
+        false
+      );
+      // An absent lock is insufficient: the exact intent must have authorized
+      // its release. Preserve the original bytes to resume the legitimate case.
+      const bytes = await Bun.file(current.paths.intent).text();
+      const unarmed = JSON.parse(bytes);
+      unarmed.record.admission_releasing = false;
+      await Bun.write(current.paths.intent, JSON.stringify(unarmed));
+      await expect(
+        recoverNativeAuthoredProject(current.options)
+      ).rejects.toThrow();
+      expect(current.cleanupCalls()).toBe(0);
+      await Bun.write(current.paths.intent, bytes);
+    } else {
+      expect((await lstat(current.paths.admission)).ino).toBe(
+        saved.admission.directory.ino
+      );
+      expect((await lstat(join(current.paths.admission, "owner"))).ino).toBe(
+        saved.admission.file.ino
+      );
+    }
+    await recoverNativeAuthoredProject(current.options);
+    const prior = (
+      await Bun.file(effects)
+        .text()
+        .catch(() => "")
+    ).trim()
+      ? 1
+      : 0;
+    expect(prior + current.cleanupCalls()).toBe(1);
+    expect(
+      JSON.parse(await Bun.file(current.paths.intent).text()).record.phase
+    ).toBe("complete");
+  }
+}, 30_000);
 
 test("dead frontend recovery binds the stored run, holds startup, retires only after Removed/null and archives completed history", async () => {
   const current = await fixture();

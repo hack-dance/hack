@@ -20,7 +20,7 @@ type ModelContract = {
   readonly alternativeWitnesses?: readonly ModelWitness[];
   readonly additionalControls?: readonly {
     readonly name: string;
-    readonly module?: "TerminalReuse" | "MetadataAliasing";
+    readonly module?: "TerminalReuse" | "MetadataAliasing" | "PreReady";
     readonly negative: boolean;
     readonly states?: number;
     readonly invariant?: string;
@@ -310,6 +310,41 @@ const contracts: readonly ModelContract[] = [
       "pending = 0",
     ],
     additionalControls: [
+      {
+        name: "pre-ready-positive",
+        module: "PreReady",
+        negative: false,
+        states: 160,
+      },
+      {
+        name: "pre-ready-negative",
+        module: "PreReady",
+        negative: true,
+        invariant: "OnlySettledCleanup",
+        action: "Cleanup",
+        fields: ["unsafeCleanup = TRUE", "intent = TRUE", "removed = TRUE"],
+      },
+      {
+        name: "pre-ready-release",
+        module: "PreReady",
+        negative: true,
+        invariant: "ReleaseRecorded",
+        action: "Release",
+        fields: ["unsafeRelease = TRUE", "release = FALSE", 'owner = "none"'],
+      },
+      {
+        name: "pre-ready-replay",
+        module: "PreReady",
+        negative: true,
+        invariant: "NoReplay",
+        action: "StartAnother",
+        fields: [
+          "starts = 2",
+          "intent = TRUE",
+          "complete = FALSE",
+          "files = FALSE",
+        ],
+      },
       {
         name: "live-launcher-recovery",
         negative: true,

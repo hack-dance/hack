@@ -5,10 +5,9 @@
 /// `src/lib/hack-ownership-labels.ts`, the source of truth;
 /// `tests/hack-ownership-labels.test.ts` fails when the two lists differ.
 ///
-/// A project must not declare a label in these namespaces, because the native
-/// runtime and native-config Compose trust them as ownership evidence. The
-/// TypeScript classifier rejects such labels first; the candidate's own label
-/// review rejects them again so a bypassed classifier cannot pass one through.
+/// Authored Compose declarations in these namespaces are ignored metadata and
+/// never reach Engine resources. The native runtime generates its own labels
+/// and verifies those independently; an authored declaration grants nothing.
 pub(super) const HACK_OWNERSHIP_LABEL_NAMESPACES: [&str; 4] = [
     "io.hack-local.",
     "io.hack.native-config.",

@@ -1,4 +1,5 @@
 import { lstatSync, realpathSync } from "node:fs";
+import { childEnvironment } from "./child-environment.ts";
 import { createNativeComposeEngineIdentityObserver } from "./native-compose-engine-identity.ts";
 import { refuseNativeComposeFile } from "./native-compose-file-bytes.ts";
 import { NATIVE_COMPOSE_VM_FILE_LIMIT } from "./native-compose-vm-file-protocol.ts";
@@ -220,7 +221,7 @@ export function createNativeComposeVmFileClient(opts: {
         // Preserve the selected command name for Docker multiplexer binaries.
         // check() still binds that selection to the captured physical executable.
         const child = Bun.spawn([selected, ...command], {
-          env: environment,
+          env: childEnvironment(environment),
           stdin: bytes ?? "ignore",
           stdout: "pipe",
           stderr: "pipe",

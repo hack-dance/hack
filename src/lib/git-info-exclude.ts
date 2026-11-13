@@ -114,7 +114,11 @@ export function renderHackGitInfoExcludeBlock(opts: {
   return {
     beginMarker: `# managed by hack — machine-local generated files under ${anchor} (do not edit between markers)`,
     endMarker: `# end managed by hack: ${anchor}`,
-    entries: HACK_DIR_GITIGNORE_ENTRIES.map((entry) => `${escaped}${entry}`),
+    entries: HACK_DIR_GITIGNORE_ENTRIES.map((entry) =>
+      entry.startsWith("!")
+        ? `!${escaped}${entry.slice(1)}`
+        : `${escaped}${entry}`
+    ),
   };
 }
 

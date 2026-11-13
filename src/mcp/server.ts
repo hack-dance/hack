@@ -22,6 +22,7 @@ import {
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
 import { CALLER_ENV } from "../lib/background-command/launch.ts";
+import { hackReexecEnvironment } from "../lib/child-environment.ts";
 import {
   HACK_ERROR_CODES,
   HackCliError,
@@ -2484,7 +2485,10 @@ async function runHackCommand(opts: {
     const proc = Bun.spawn(cmd, {
       detached: true,
       cwd: opts.cwd ?? opts.context.cwd,
-      env: { ...buildChildEnv(opts.context.env), ...opts.extraEnv },
+      env: hackReexecEnvironment({
+        ...buildChildEnv(opts.context.env),
+        ...opts.extraEnv,
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -2574,7 +2578,7 @@ async function runHackLogCollect(opts: {
     const proc = Bun.spawn(cmd, {
       detached: true,
       cwd: opts.context.cwd,
-      env: buildChildEnv(opts.context.env),
+      env: hackReexecEnvironment(buildChildEnv(opts.context.env)),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

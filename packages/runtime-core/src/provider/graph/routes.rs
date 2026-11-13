@@ -151,7 +151,9 @@ mod tests {
                 literal_redacted: true,
             },
         );
-        assert!(validate_services(&owner_plan, &owner_graph, true).is_err());
+        // An authored Compose owner label is ignored metadata, not route or
+        // Engine authority; fresh native ownership is generated separately.
+        assert!(validate_services(&owner_plan, &owner_graph, true).is_ok());
         for hosts in [
             vec![],
             vec!["UPPER.example".into()],

@@ -8,6 +8,10 @@ import {
   removeStaleMuxEnvironment,
   type StaleMuxEnvironment,
 } from "../mux/private-environment.ts";
+import {
+  MACHINE_LOCAL_LAYER_NAME,
+  PLAINTEXT_DOTENV_NAME,
+} from "./env-layer-modes.ts";
 import { ensureGitignoreEntry } from "./fs.ts";
 import { isKeychainDisabled } from "./keychain.ts";
 import {
@@ -103,8 +107,8 @@ export type SecretsHygieneScope = {
   readonly now?: number;
 };
 
-const LOCAL_LAYER = /^hack\.env(\.[^/]+)?\.local\.yaml$/;
-const PLAINTEXT_DOTENV = /^\.env(\.[A-Za-z0-9_-]+)?$/;
+const LOCAL_LAYER = MACHINE_LOCAL_LAYER_NAME;
+const PLAINTEXT_DOTENV = PLAINTEXT_DOTENV_NAME;
 const HACK_DIR_STAGED =
   /^(\.env(\.[A-Za-z0-9_-]+)?|hack\.env\..*yaml|\.gitignore)$/;
 
@@ -319,12 +323,13 @@ async function storeFindings(opts: {
     !key &&
     !opts.storeKeyFromEnvironment
   ) {
-    const keychain =
-      process.platform === "darwin" && !isKeychainDisabled()
-        ? " Hack can read it only if the system keychain still holds its key."
-        : "";
+    const keychainMayHoldKey =
+      process.platform === "darwin" && !isKeychainDisabled();
+    const keychain = keychainMayHoldKey
+      ? " Hack can read it only if the system keychain still holds its key."
+      : "";
     findings.push({
-      status: "error",
+      status: keychainMayHoldKey ? "warn" : "error",
       path: storePath,
       message: `Encrypted secret store ${storePath}: store present, key missing, cannot be read (no key file at ${keyPath}; HACK_SECRETS_FILE_KEY is not set).${keychain} Restore the key file to read it. Hack never deletes a store or a key; remove the store yourself once you no longer need its values.`,
       fix: null,

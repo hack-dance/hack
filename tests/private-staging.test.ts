@@ -201,3 +201,25 @@ test("a linked or shared staging directory is refused before anything is staged"
   ).rejects.toThrow("synthetic staging refusal");
   expect(await readdir(join(shared, PRIVATE_STAGING_DIRNAME))).toEqual([]);
 });
+
+test("a staging directory whose .gitignore does not ignore everything is refused (a committed one included)", async () => {
+  const root = await tempDir();
+  const staging = join(root, PRIVATE_STAGING_DIRNAME);
+  // As git would check it out under umask 077: private, owned by the user.
+  await mkdir(staging, { mode: 0o700 });
+  await writeFile(join(staging, ".gitignore"), "!*.tmp\n");
+  await expect(
+    preparePrivateStaging({ target: join(root, ".env"), refusal })
+  ).rejects.toThrow("synthetic staging refusal");
+  expect(await readdir(staging)).toEqual([".gitignore"]);
+
+  const linkedRoot = await tempDir();
+  const linkedStaging = join(linkedRoot, PRIVATE_STAGING_DIRNAME);
+  await mkdir(linkedStaging, { mode: 0o700 });
+  const elsewhere = join(linkedRoot, "elsewhere-ignore");
+  await writeFile(elsewhere, "*\n");
+  await symlink(elsewhere, join(linkedStaging, ".gitignore"));
+  await expect(
+    preparePrivateStaging({ target: join(linkedRoot, ".env"), refusal })
+  ).rejects.toThrow("synthetic staging refusal");
+});

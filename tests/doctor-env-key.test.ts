@@ -181,8 +181,10 @@ describe("env key doctor diagnostic", () => {
     // HACK-2165: the old key leaves the worktree (never a committable
     // `.old` sibling) and secrets are re-added without argv values.
     const remedy = inspection.findings[0]?.remedy ?? "";
+    // A unique, private copy (mktemp), so a later rotation never overwrites
+    // it, and the key is removed only after the copy is written.
     expect(remedy).toContain(
-      `install -m 600 ${KEY_FILE} ~/.hack/retired-keys/`
+      `k="$(mktemp ~/.hack/retired-keys/hack-secret-key.XXXXXXXX)" && cat ${KEY_FILE} > "$k" && rm ${KEY_FILE}`
     );
     expect(remedy).toContain("--value-stdin");
     expect(remedy).not.toContain(".old");

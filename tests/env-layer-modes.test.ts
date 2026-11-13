@@ -26,6 +26,9 @@ test("loose machine-local env files are reported once, by name and mode only (HA
     [".env", 0o640],
     [".env.state.json", 0o644],
     ["hack.env.default.yaml", 0o644],
+    // Committed templates hold no values and are never reported.
+    [".env.example", 0o644],
+    [".env.sample", 0o644],
   ];
   for (const [name, mode] of files) {
     await writeFile(join(projectDir, name), `KEY=${SENTINEL}\n`, { mode });

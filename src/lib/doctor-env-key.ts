@@ -232,7 +232,10 @@ const READD_SECRET =
   "re-add each secret with '<value-source> | hack env add KEY --secret --value-stdin' (or omit the value in a terminal for a hidden prompt)";
 
 function rotateRemedy(path: (suffix?: string) => string): string {
-  return `keep a recoverable copy of the old key outside the worktree first ('install -d -m 700 ${RETIRED_KEY_DIR} && install -m 600 ${path()} ${RETIRED_KEY_DIR}/'), then 'rm ${path()}' and ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
+  // mktemp gives each retired copy its own name (0600), so a second rotation,
+  // here or in another project, never overwrites the first; the key is only
+  // removed once its copy is written.
+  return `keep a recoverable copy of the old key outside the worktree, then remove it: 'install -d -m 700 ${RETIRED_KEY_DIR} && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${path()} > "$k" && rm ${path()}'. Then ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
 }
 
 async function inspectCandidate(opts: {

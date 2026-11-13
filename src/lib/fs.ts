@@ -17,6 +17,7 @@ import {
   HackCliError,
   type HackErrorCode,
 } from "./cli-result.ts";
+import { preparePrivateStaging } from "./private-staging.ts";
 
 export async function pathExists(absolutePath: string): Promise<boolean> {
   try {
@@ -454,10 +455,12 @@ export async function writeTextFileAtomicIfChanged(
       });
     }
   }
-  const staging = join(
-    dirname(target),
-    `.${basename(target)}.${randomUUID()}.tmp`
-  );
+  const prepared = await stagingForAtomicWrite({
+    target,
+    path: absolutePath,
+    private: options.tightenExisting === true,
+  });
+  const staging = prepared.path;
   const file = await openAtomicWriteStaging({
     staging,
     path: absolutePath,
@@ -482,6 +485,7 @@ export async function writeTextFileAtomicIfChanged(
     }
     await options.validatePath?.(absolutePath);
     await options.validatePath?.(target);
+    await prepared.recheck();
     await rename(staging, target);
     committed = true;
   } catch (error: unknown) {
@@ -495,6 +499,46 @@ export async function writeTextFileAtomicIfChanged(
   }
   await syncDirectoryBestEffort(dirname(target));
   return { changed: true };
+}
+
+/**
+ * Where an atomic write stages its contents. A private write (one that
+ * holds machine-local values, marked by `tightenExisting`) stages in the
+ * self-ignoring private directory next to the target, so a copy a crash
+ * leaves is never visible to git, whatever ignore rules the project has
+ * (see `private-staging.ts`). Other writes keep the `.<name>.<uuid>.tmp`
+ * sibling.
+ */
+async function stagingForAtomicWrite(opts: {
+  readonly target: string;
+  readonly path: string;
+  readonly private: boolean;
+}): Promise<{
+  readonly path: string;
+  readonly recheck: () => Promise<void>;
+}> {
+  if (!opts.private) {
+    return {
+      path: join(
+        dirname(opts.target),
+        `.${basename(opts.target)}.${randomUUID()}.tmp`
+      ),
+      recheck: async () => undefined,
+    };
+  }
+  const refusal = () =>
+    new AtomicWriteRefusedError({
+      path: opts.path,
+      reason: "directory_not_writable",
+    });
+  try {
+    return await preparePrivateStaging({ target: opts.target, refusal });
+  } catch (error: unknown) {
+    if (error instanceof AtomicWriteRefusedError) {
+      throw error;
+    }
+    throw atomicWriteStagingError({ error, path: opts.path });
+  }
 }
 
 /** The mode a replacement of an existing target gets (see `tightenExisting`). */
@@ -528,11 +572,19 @@ async function tightenUnchangedTarget(opts: {
   }
   const target = await realpath(opts.path);
   await opts.options.validatePath?.(target);
-  const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+  // Best effort: a file another user owns (chmod EPERM) keeps working as it
+  // did; the read-time report and `hack doctor` still name it.
+  const file = await open(
+    target,
+    constants.O_RDONLY | constants.O_NOFOLLOW
+  ).catch(() => null);
+  if (!file) {
+    return;
+  }
   try {
     const info = await file.stat();
     if (info.isFile() && (info.mode & 0o077) !== 0) {
-      await file.chmod(info.mode & 0o7700);
+      await file.chmod(info.mode & 0o7700).catch(() => undefined);
     }
   } finally {
     await file.close();

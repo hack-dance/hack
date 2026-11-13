@@ -13,8 +13,19 @@ import { join } from "node:path";
  * stdout stays valid.
  */
 
-const LOCAL_LAYER = /^hack\.env(\.[^/]+)?\.local\.yaml$/;
-const PLAINTEXT_DOTENV = /^\.env(\.[A-Za-z0-9_-]+)?$/;
+/** A machine-local env layer: `hack.env.local.yaml`, `hack.env.<overlay>.local.yaml`. */
+export const MACHINE_LOCAL_LAYER_NAME = /^hack\.env(\.[^/]+)?\.local\.yaml$/;
+
+/**
+ * A plaintext `.hack/.env` or `.hack/.env.<overlay>` file. Committed
+ * templates (`.env.example`, `.sample`, `.template`, `.dist`) hold no values
+ * and are excluded; backups (`.bak`, `.old`, ...) may and are not.
+ */
+export const PLAINTEXT_DOTENV_NAME =
+  /^\.env(\.(?!(?:example|sample|template|dist)$)[A-Za-z0-9_-]+)?$/;
+
+const LOCAL_LAYER = MACHINE_LOCAL_LAYER_NAME;
+const PLAINTEXT_DOTENV = PLAINTEXT_DOTENV_NAME;
 
 const reported = new Set<string>();
 

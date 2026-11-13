@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -159,6 +160,25 @@ test("a write that changes nothing still tightens a loose machine-local layer (H
   await write();
   expect((await stat(layer)).mode & 0o777).toBe(0o600);
   expect(await readFile(layer, "utf8")).toBe(before);
+});
+
+test("a machine-local write stages in the private directory, never as a sibling (HACK-2165)", async () => {
+  const repo = await layersRepo();
+  await setProjectEnvValue({
+    ...repo,
+    envName: null,
+    scope: "global",
+    key: "STAGED_PRIVATELY",
+    value: "synthetic-staged",
+    secret: false,
+    local: true,
+  });
+  const names = await readdir(repo.projectDir);
+  expect(names.filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  expect(names).toContain(".hack-staging");
+  expect(await readdir(resolve(repo.projectDir, ".hack-staging"))).toEqual([
+    ".gitignore",
+  ]);
 });
 
 test("a tracked (shared) layer keeps its mode on a write", async () => {

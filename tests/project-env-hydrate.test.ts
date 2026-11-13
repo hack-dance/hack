@@ -191,10 +191,20 @@ function ivSegment(ciphertext: string): string {
   return ciphertext.split(":")[1] ?? "";
 }
 
+/**
+ * Staging copies left in `.hack`: legacy siblings and, for machine-local
+ * writes, files in the self-ignoring `.hack-staging/` (HACK-2165).
+ */
 async function stagingFiles(repo: Repo): Promise<string[]> {
-  return (await readdir(repo.projectDir)).filter((name) =>
-    name.endsWith(".tmp")
+  const staged = await readdir(resolve(repo.projectDir, ".hack-staging")).catch(
+    () => [] as string[]
   );
+  return [
+    ...(await readdir(repo.projectDir)).filter((name) => name.endsWith(".tmp")),
+    ...staged
+      .filter((name) => name.endsWith(".tmp"))
+      .map((name) => `.hack-staging/${name}`),
+  ];
 }
 
 function lockPath(repo: Repo): string {

@@ -187,7 +187,7 @@ export async function preparePrivateStaging(opts: {
   if (!(identity && isPrivateDirectory(identity))) {
     throw opts.refusal();
   }
-  await ensureSelfIgnore(directory);
+  await ensureSelfIgnore({ directory, refusal: opts.refusal });
   const leftovers = await findStagingLeftovers({
     directory: dirname(opts.target),
     names: [basename(opts.target)],
@@ -211,23 +211,58 @@ export async function preparePrivateStaging(opts: {
   };
 }
 
-/** `*` ignores every entry, the `.gitignore` itself included. */
-async function ensureSelfIgnore(directory: string): Promise<void> {
+const SELF_IGNORE = "*\n";
+
+/**
+ * `*` ignores every entry, the `.gitignore` itself included. An existing
+ * `.gitignore` (for example one a repository committed) is trusted only when
+ * it is a regular file of this user's holding exactly that line; anything
+ * else could leave staging copies visible to git, so it is refused.
+ */
+async function ensureSelfIgnore(opts: {
+  readonly directory: string;
+  readonly refusal: () => Error;
+}): Promise<void> {
+  const path = join(opts.directory, ".gitignore");
   let file: Awaited<ReturnType<typeof open>> | null = null;
   try {
     file = await open(
-      join(directory, ".gitignore"),
+      path,
       constants.O_CREAT |
         constants.O_EXCL |
         constants.O_NOFOLLOW |
         constants.O_WRONLY,
       0o600
     );
-    await file.writeFile("*\n", "utf8");
+    await file.writeFile(SELF_IGNORE, "utf8");
+    return;
   } catch (error: unknown) {
     if (!isExisting(error)) {
       throw error;
     }
+  } finally {
+    await file?.close();
+  }
+  if (!(await isOwnSelfIgnore(path))) {
+    throw opts.refusal();
+  }
+}
+
+async function isOwnSelfIgnore(path: string): Promise<boolean> {
+  let file: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const info = await file.stat();
+    if (
+      !info.isFile() ||
+      info.uid !== process.getuid?.() ||
+      info.size !== SELF_IGNORE.length
+    ) {
+      return false;
+    }
+    return (await file.readFile("utf8")) === SELF_IGNORE;
+  } catch {
+    return false;
   } finally {
     await file?.close();
   }

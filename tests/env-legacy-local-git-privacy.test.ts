@@ -205,3 +205,69 @@ test(
   },
   { timeout: 60_000 }
 );
+
+test(
+  "the case-insensitive tracking probe gets no Hack key material (HACK-2163)",
+  async () => {
+    const projectRoot = join(base(), "modern");
+    const projectDir = join(projectRoot, ".hack");
+    await mkdir(projectDir, { recursive: true });
+    await git(projectRoot, ["init", "-q", "-b", "main"]);
+    await writeFile(
+      join(projectDir, "docker-compose.yml"),
+      "services:\n  api:\n    image: alpine:3.20\n"
+    );
+    await writeFile(
+      join(projectDir, "hack.config.json"),
+      `${JSON.stringify({ name: "probe-env", dev_host: "probe-env.hack" })}\n`
+    );
+    await writeFile(
+      join(projectDir, "hack.env.default.yaml"),
+      "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+    );
+    const keySentinel = "synthetic-probe-key-sentinel";
+    const spawnLog = join(base(), "spawn.jsonl");
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        "--preload",
+        resolve(import.meta.dir, "fixtures/spawn-argv-recorder.ts"),
+        ENTRYPOINT,
+        "env",
+        "set",
+        "PROBE_VALUE",
+        "--local",
+        "--value-stdin",
+        "--path",
+        projectRoot,
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: env({
+          HACK_ENV_SECRET_KEY: keySentinel,
+          HACK_TEST_SPAWN_ARGV_LOG: spawnLog,
+        }),
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    proc.stdin.write(`${SENTINEL}\n`);
+    await proc.stdin.end();
+    expect(await proc.exited).toBe(0);
+    const spawns = (await readFile(spawnLog, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { argv: unknown; env: unknown });
+    const probes = spawns.filter((spawn) =>
+      JSON.stringify(spawn.argv).includes(":(icase,literal)")
+    );
+    expect(probes.length).toBeGreaterThan(0);
+    for (const probe of probes) {
+      // An explicit environment, without the key: never inherited wholesale.
+      expect(probe.env).not.toBeNull();
+      expect(JSON.stringify(probe.env)).not.toContain(keySentinel);
+    }
+  },
+  { timeout: 60_000 }
+);

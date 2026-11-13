@@ -3835,6 +3835,8 @@ async function isGitTrackedProjectEnvPathAnyCase(opts: {
 }): Promise<boolean | null> {
   try {
     const proc = Bun.spawn({
+      // Hack key material never reaches a tool (HACK-2163).
+      env: childEnvironment(),
       cmd: [
         "git",
         "-C",

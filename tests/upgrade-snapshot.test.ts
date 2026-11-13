@@ -460,6 +460,31 @@ test("when the snapshot's copy cannot be published, the displaced file's locatio
   expect(await readFile(entry?.keptAs ?? "", "utf8")).toBe('{"step":true}\n');
 });
 
+test("a regular file that becomes unreadable mid-restore goes back in place", async () => {
+  // Codex review: a regular file that could not be read after displacement
+  // was treated as a non-file and left out of place.
+  if (process.getuid?.() === 0) {
+    return; // root reads any file
+  }
+  const paths = await fixture();
+  const snapshot = await snapshotOf(paths);
+  await writeFile(paths.config, '{"step":true}\n');
+  await recordUpgradeSnapshotAfter({ manifestPath: snapshot.manifestPath });
+  const result = await restoreUpgradeSnapshot({
+    manifestPath: snapshot.manifestPath,
+    paths: [paths.config],
+    beforeReplace: async (path) => {
+      await chmod(path, 0o000);
+    },
+  });
+  const entry =
+    result.status === "invalid-manifest" ? undefined : result.results[0];
+  expect(entry?.status).toBe("conflict");
+  // The file is back at its path, untouched.
+  await chmod(paths.config, 0o644);
+  expect(await readFile(paths.config, "utf8")).toBe('{"step":true}\n');
+});
+
 test("a restore of a path the snapshot does not hold is refused, not reported as restored", async () => {
   const paths = await fixture();
   const snapshot = await snapshotOf(paths);

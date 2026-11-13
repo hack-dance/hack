@@ -867,6 +867,14 @@ async function displaceTarget(input: {
         };
   }
   const moved = await readTargetBytes(kept);
+  if (moved.kind === "refused") {
+    const entry = await lstatOrNull(kept);
+    if (entry !== null && entry !== "error" && entry.isFile()) {
+      // A regular file that changed after the checks (now unreadable, or
+      // too large): a late edit, so it goes back in place.
+      return await lateEditBack({ kept, path: input.path });
+    }
+  }
   if (moved.kind === "refused" || moved.state.kind !== "file") {
     return {
       kind: "stopped",
@@ -879,22 +887,34 @@ async function displaceTarget(input: {
   }
   if (!(sameState(moved.state, input.expected) || input.overwrite)) {
     // A late edit: link that same file back into place.
-    if (await linkBack({ from: kept, path: input.path })) {
-      return {
-        kind: "stopped",
-        outcome: { status: "conflict", message: MESSAGES.conflict },
-      };
-    }
-    return {
-      kind: "stopped",
-      outcome: {
-        status: "conflict",
-        message: MESSAGES.strandedAt,
-        keptAs: kept,
-      },
-    };
+    return await lateEditBack({ kept, path: input.path });
   }
   return { kind: "displaced", keptAs: kept };
+}
+
+/**
+ * A late edit found in the displaced file: link that same file back into
+ * place (refused if the name was taken meanwhile, then reported where it
+ * is kept). Either way the target is a conflict, never restored over it.
+ */
+async function lateEditBack(input: {
+  readonly kept: string;
+  readonly path: string;
+}): Promise<{ readonly kind: "stopped"; readonly outcome: RestoreOutcome }> {
+  if (await linkBack({ from: input.kept, path: input.path })) {
+    return {
+      kind: "stopped",
+      outcome: { status: "conflict", message: MESSAGES.conflict },
+    };
+  }
+  return {
+    kind: "stopped",
+    outcome: {
+      status: "conflict",
+      message: MESSAGES.strandedAt,
+      keptAs: input.kept,
+    },
+  };
 }
 
 /**

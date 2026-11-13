@@ -530,6 +530,8 @@ command-only or disabled checks on routed services still need review. A complete
 HTTP response from 200 through 499 can establish inferred endpoint readiness,
 including an application's 404; 5xx, incomplete responses and timeouts cannot.
 This does not establish application correctness.
+Inferred readiness also does not satisfy `depends_on: condition: service_healthy`;
+that dependency still requires an explicit enabled healthcheck.
 
 The usual 300-second deadline belongs to the entire graph. Dependencies consume
 it too; a 240-second probe grace does not reset or extend it. For slow startup,

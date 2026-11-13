@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeDoctorEnvCleanup } from "../src/commands/doctor.ts";
 import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
 import {
   finishImplicitLegacyEnvMigration,
@@ -257,6 +258,53 @@ test.skipIf(process.getuid?.() === 0)(
         expect(await Bun.file(options.keyPath).exists()).toBe(true);
       } finally {
         await chmod(options.projectDir, 0o700);
+      }
+    });
+  }
+);
+
+test.skipIf(process.getuid?.() === 0)(
+  "doctor drops the removed store pointer before surfacing a later cleanup failure (HACK-2179)",
+  async () => {
+    await withMigratedStore(async (options) => {
+      const key = await readFile(options.keyPath, "utf8");
+      const store = await readFile(options.storePath, "utf8");
+      const printed: string[] = [];
+      const stdoutWrite = process.stdout.write;
+      const stderrWrite = process.stderr.write;
+      const capture = (chunk: unknown): boolean => {
+        printed.push(String(chunk));
+        return true;
+      };
+      await chmod(options.projectDir, 0o500);
+      let error: unknown;
+      try {
+        process.stdout.write = capture as typeof process.stdout.write;
+        process.stderr.write = capture as typeof process.stderr.write;
+        error = await removeDoctorEnvCleanup({
+          ...options,
+          paths: [options.storePath, options.contractPath, options.keyPath],
+        }).catch((caught: unknown) => caught);
+      } finally {
+        process.stdout.write = stdoutWrite;
+        process.stderr.write = stderrWrite;
+        await chmod(options.projectDir, 0o700);
+      }
+      expect(error).toBeInstanceOf(LegacyEnvCleanupError);
+      if (!(error instanceof LegacyEnvCleanupError)) {
+        throw new Error("Expected doctor to surface the cleanup failure");
+      }
+      expect(error.removedPaths).toEqual([options.storePath]);
+      expect(await Bun.file(options.storePath).exists()).toBe(false);
+      expect(await Bun.file(options.contractPath).exists()).toBe(true);
+      expect(await readFile(options.keyPath, "utf8")).toBe(key);
+      const config = JSON.parse(
+        await readFile(join(options.projectDir, "hack.config.json"), "utf8")
+      );
+      expect(config.controlPlane).toBeUndefined();
+      for (const value of [SENTINEL, key.trim(), store]) {
+        expect(printed.join("")).not.toContain(value);
+        expect(error.message).not.toContain(value);
       }
     });
   }

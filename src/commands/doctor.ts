@@ -239,6 +239,7 @@ import {
   isGitTrackedOrUnknownProjectPath,
   type LegacyComposeEnvFileReference,
   LegacyDotenvMigrationRefusalError,
+  LegacyEnvCleanupError,
   type LegacyProjectEnvMigration,
   listProjectEnvPlaintextEntries,
   migrateLegacyProjectEnv,
@@ -4577,20 +4578,34 @@ async function offerDoctorEnvCleanup(opts: {
 /**
  * Removes confirmed legacy env files. Once the encrypted secret store itself is
  * gone, its pointer leaves `hack.config.json` too; the migration kept it so a
- * declined or failed removal leaves the store readable.
+ * declined removal keeps the store readable. Partial failures reconcile the
+ * pointer against confirmed removals before the cleanup error is rethrown.
  */
-async function removeDoctorEnvCleanup(opts: {
+export async function removeDoctorEnvCleanup(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
   readonly context?: LegacyProjectEnvMigration["cleanupContext"];
 }): Promise<void> {
-  const removed = await removeLegacyProjectEnvArtifacts({
-    paths: opts.paths,
-    projectRoot: opts.projectRoot,
-    context: opts.context,
-  });
+  let removed: readonly string[];
+  try {
+    removed = await removeLegacyProjectEnvArtifacts({
+      paths: opts.paths,
+      projectRoot: opts.projectRoot,
+      context: opts.context,
+    });
+  } catch (error) {
+    if (error instanceof LegacyEnvCleanupError) {
+      await dropRemovedLegacySecretStorePointer({
+        projectRoot: opts.projectRoot,
+        projectDir: opts.projectDir,
+        projectName: opts.projectName,
+        removed: error.removedPaths,
+      });
+    }
+    throw error;
+  }
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
   }

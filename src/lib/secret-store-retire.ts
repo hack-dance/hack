@@ -6,7 +6,7 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { readOptionalTextFile } from "./fs.ts";
 import { readHackEnvContract, readHackEnvRuntimeConfig } from "./hack-env.ts";
-import { readProjectsRegistry } from "./projects-registry.ts";
+import { readProjectsRegistryStrict } from "./projects-registry.ts";
 import {
   type FileSecretStoreListing,
   isEncryptedStoreFile,
@@ -84,7 +84,7 @@ export async function secretStoreSelectionProblem(opts: {
 export type SecretStoreUsers = {
   /** Names only, sorted. */
   readonly names: readonly string[];
-  /** False when the registry could not be read. */
+  /** False when the registry could not be read or is not a valid registry. */
   readonly registryRead: boolean;
   /** Registered projects whose store selection could not be checked. */
   readonly unchecked: number;
@@ -106,11 +106,15 @@ export async function listProjectsUsingSecretStore(opts: {
     readonly projectDir: string;
   }[];
   try {
-    projects = (await readProjectsRegistry()).projects;
+    const read = await readProjectsRegistryStrict();
+    if (read.kind === "invalid") {
+      return { names: [], registryRead: false, unchecked: 0 };
+    }
+    projects = read.kind === "valid" ? read.registry.projects : [];
   } catch {
     return { names: [], registryRead: false, unchecked: 0 };
   }
-  const target = await stat(opts.storePath).catch(() => null);
+  const target = await identity(opts.storePath);
   const names = new Set<string>();
   let unchecked = 0;
   for (const project of projects) {
@@ -131,9 +135,18 @@ export async function listProjectsUsingSecretStore(opts: {
       unchecked += 1;
       continue;
     }
-    if (
-      location.active &&
-      (await sameStoreFile({ path: location.storePath, opts, target })) &&
+    if (!location.active) {
+      continue;
+    }
+    const same = await sameStoreFile({
+      path: location.storePath,
+      opts,
+      target,
+    });
+    if (same === "unknown") {
+      unchecked += 1;
+    } else if (
+      same === "same" &&
       (await projectUsesSecretStore({ projectDir: project.projectDir }))
     ) {
       names.add(project.name);
@@ -142,24 +155,51 @@ export async function listProjectsUsingSecretStore(opts: {
   return { names: [...names].sort(), registryRead: true, unchecked };
 }
 
-/** The same configured path, or the same existing file (device and inode). */
+/**
+ * A file's device and inode: `absent` when nothing is there, `unknown` when
+ * that cannot be established (for example EACCES or EIO).
+ */
+async function identity(
+  path: string
+): Promise<
+  { readonly dev: number; readonly ino: number } | "absent" | "unknown"
+> {
+  try {
+    const info = await stat(path);
+    return { dev: info.dev, ino: info.ino };
+  } catch (error: unknown) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+    return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unknown";
+  }
+}
+
+/**
+ * Whether a configured store path is the store: the same resolved path, or
+ * the same existing file (device and inode). `unknown` when a file's
+ * identity cannot be established, never taken as "different".
+ */
 async function sameStoreFile(input: {
   readonly path: string;
   readonly opts: { readonly storePath: string };
-  readonly target: { readonly dev: number; readonly ino: number } | null;
-}): Promise<boolean> {
+  readonly target: Awaited<ReturnType<typeof identity>>;
+}): Promise<"same" | "different" | "unknown"> {
   if (resolve(input.path) === resolve(input.opts.storePath)) {
-    return true;
+    return "same";
   }
-  if (input.target === null) {
-    return false;
+  const candidate = await identity(input.path);
+  if (candidate === "absent" || input.target === "absent") {
+    return "different";
   }
-  const candidate = await stat(input.path).catch(() => null);
-  return (
-    candidate !== null &&
-    candidate.dev === input.target.dev &&
+  if (candidate === "unknown" || input.target === "unknown") {
+    return "unknown";
+  }
+  return candidate.dev === input.target.dev &&
     candidate.ino === input.target.ino
-  );
+    ? "same"
+    : "different";
 }
 
 /**
@@ -179,6 +219,8 @@ export type SecretStoreRetireOutcome =
       readonly kind: "retired";
       readonly from: string;
       readonly to: string;
+      /** A replacement found at the store path while moving, kept too. */
+      readonly replacement: string | null;
       readonly keyPath: string;
     }
   | { readonly kind: "refused"; readonly message: string };

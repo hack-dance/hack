@@ -96,7 +96,7 @@ const retireStoreSpec = defineCommand({
   group: "Secrets",
   description: [
     "For an encrypted_file (or cloud shim) store that hack doctor reports with a missing or wrong key.",
-    "Renames the store to <store>.retired-<UTC time> in the same directory: nothing is deleted, read or printed,",
+    "Moves the store into a new directory <store>.retired-<UTC time>/ beside it: nothing is deleted, read or printed,",
     "and the key file is left alone. It prints how to put the store back. The store is the one this project",
     "selects (--path or the current directory), or the global one outside a project. Refused for a store that",
     "opens with the key in use, or that is unreadable for another reason. Without a TTY (or with",
@@ -306,6 +306,11 @@ async function handleSecretsRetireStore({
       `Moved the encrypted secret store ${outcome.from} to ${outcome.to}.`,
       "Nothing was deleted, and no entry was read or printed. The key file was left alone.",
       `To put it back (while no store is at ${outcome.from}): mv ${quoteShellWord(outcome.to)} ${quoteShellWord(outcome.from)}`,
+      ...(outcome.replacement === null
+        ? []
+        : [
+            `A different file appeared at ${outcome.from} while moving; it was kept at ${outcome.replacement}.`,
+          ]),
     ].join("\n"),
   });
   return 0;

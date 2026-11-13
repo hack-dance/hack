@@ -1660,8 +1660,8 @@ Some older surfaces are still compatibility-oriented:
   it (its legacy env contract declares a store-backed value, or plaintext is kept
   in the backend), and a warning elsewhere. The finding names the registered
   projects that read the store, and offers two ways forward: restore the key, or
-  run `hack secrets retire-store`. That command renames the store to
-  `<store>.retired-<UTC time>` beside itself, deletes and prints nothing, and says
+  run `hack secrets retire-store`. That command moves the store into a new
+  directory `<store>.retired-<UTC time>/` beside it, deletes and prints nothing, and says
   how to move it back. It needs `--yes` without a terminal. Doctor then lists
   retired files as information. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked

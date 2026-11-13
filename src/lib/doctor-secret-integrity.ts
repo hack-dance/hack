@@ -177,10 +177,10 @@ function describeStoreUsers(users: SecretStoreUsers): string {
       ? `Registered projects that read it: ${users.names.join(", ")}.`
       : null;
   if (!users.registryRead) {
-    return "The projects registry could not be read, so which registered projects read it is unknown.";
+    return "The projects registry could not be read or is not valid, so which registered projects read it is unknown.";
   }
   if (users.unchecked > 0) {
-    const gap = `${users.unchecked} registered project(s) could not be checked (their Hack config cannot be read), so the list may be incomplete.`;
+    const gap = `${users.unchecked} registered project(s) could not be checked (their Hack config or store file could not be read), so the list may be incomplete.`;
     return named === null
       ? `No checked registered project reads it, but ${gap}`
       : `${named} ${gap}`;

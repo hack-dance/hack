@@ -172,6 +172,32 @@ export async function readProjectsRegistry(opts?: {
   return out ?? { version: REGISTRY_VERSION, projects: [] };
 }
 
+/**
+ * Strict read for callers that must not take an unreadable or invalid
+ * registry for an empty one (HACK-2177): `absent` (no file), `valid`, or
+ * `invalid` (not JSON, or not a registry). A file that cannot be read
+ * throws {@link ProjectsRegistryReadError}, as {@link readProjectsRegistry}.
+ */
+export async function readProjectsRegistryStrict(opts?: {
+  readonly registryPath?: string;
+}): Promise<
+  | { readonly kind: "absent" | "invalid" }
+  | { readonly kind: "valid"; readonly registry: ProjectsRegistry }
+> {
+  const text = await readRegistryText(opts?.registryPath ?? getRegistryPath());
+  if (text === null) {
+    return { kind: "absent" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { kind: "invalid" };
+  }
+  const registry = parseRegistry(parsed);
+  return registry === null ? { kind: "invalid" } : { kind: "valid", registry };
+}
+
 type RegistrationUpsertOptions = {
   readonly project: ProjectContext;
   readonly nowIso?: string;

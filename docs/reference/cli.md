@@ -2439,7 +2439,7 @@ hack secrets retire-store [options]
 ```
 
 For an encrypted_file (or cloud shim) store that hack doctor reports with a missing or wrong key.
-Renames the store to <store>.retired-<UTC time> in the same directory: nothing is deleted, read or printed,
+Moves the store into a new directory <store>.retired-<UTC time>/ beside it: nothing is deleted, read or printed,
 and the key file is left alone. It prints how to put the store back. The store is the one this project
 selects (--path or the current directory), or the global one outside a project. Refused for a store that
 opens with the key in use, or that is unreadable for another reason. Without a TTY (or with

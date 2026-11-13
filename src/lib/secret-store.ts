@@ -3,18 +3,21 @@ import {
   createDecipheriv,
   createHash,
   randomBytes,
+  randomUUID,
 } from "node:crypto";
 import {
+  link,
   lstat,
-  open,
+  mkdir,
   readdir,
   readFile,
   realpath,
   rename,
+  rmdir,
   stat,
   unlink,
 } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import type {
   CloudSecretProvider,
@@ -268,22 +271,30 @@ export class SecretStoreRetireError extends Error {
 }
 
 /**
- * Moves an encrypted store file aside (HACK-2177), never deleting it. Under
- * the store's mutation lock:
+ * Moves an encrypted store file aside (HACK-2177), never deleting it or
+ * replacing a file this call did not create. Under the store's lock:
  *
  * 1. the store must be a regular file, and not the key file itself (same
  *    device and inode, so an alias or hard link of the key is refused);
  * 2. `recheck` runs (eligibility, classified again under the lock);
- * 3. the archive name `<store>.retired-<UTC stamp>` is created exclusively
- *    as an empty placeholder (refused if that name exists);
- * 4. `rename` moves whatever file is at the store path at that instant over
- *    the placeholder, after checking the placeholder is still the same
- *    empty file.
+ * 3. a new directory `<store>.retired-<UTC stamp>/` is created exclusively
+ *    (mode 0700; refused if the name exists);
+ * 4. the store gets a second name `<dir>/<store name>` with a hard link,
+ *    which never replaces an existing file: that is the archive;
+ * 5. whatever is at the store path at that instant is renamed into the
+ *    new directory under an unpredictable, checked-free `.source-<uuid>`
+ *    name. When it is the archived file (same
+ *    device and inode) that extra name is removed; when a writer outside
+ *    the lock had replaced the store, the replacement stays there too.
  *
- * Nothing is unlinked: if a writer outside the lock replaced the store in
- * between, the replacement is what gets archived, and the only file ever
- * replaced is the empty placeholder this call created. Nothing is read or
- * decrypted; the key file is not touched.
+ * Every rename target, and the only name ever removed, is inside the
+ * directory this call created; nothing outside it is replaced or removed.
+ * The one window left is a file planted at the unpredictable source name
+ * between its check and the rename, by a process writing into that
+ * private (0700) directory.
+ * On a failure before step 5 the directory is removed with rmdir, which
+ * refuses unless it is empty. Nothing is read or decrypted; the key file
+ * is not touched.
  */
 export async function retireEncryptedStoreFile(input: {
   readonly storePath: string;
@@ -297,11 +308,19 @@ export async function retireEncryptedStoreFile(input: {
    */
   readonly recheck?: () => Promise<string | null>;
   /**
-   * Test seam: runs just before the rename, after the placeholder check,
-   * so a test can replace the store as a writer outside the lock would.
+   * Test seam: runs after the archive link, just before the store path is
+   * renamed, so a test can replace the store as a writer outside the lock
+   * would.
    */
   readonly beforeMove?: () => Promise<void>;
-}): Promise<{ readonly from: string; readonly to: string }> {
+  /** Test seam: runs right after the archive directory is created. */
+  readonly afterDirectory?: (dir: string) => Promise<void>;
+}): Promise<{
+  readonly from: string;
+  readonly to: string;
+  /** Set when a replacement was found at the store path and kept too. */
+  readonly replacement: string | null;
+}> {
   const storePath = input.storePath;
   return await withEncryptedStoreMutation({
     filePath: storePath,
@@ -315,15 +334,18 @@ export async function retireEncryptedStoreFile(input: {
         .toISOString()
         .replace(STAMP_SEPARATORS, "")
         .replace(STAMP_MILLISECONDS, "Z");
-      const to = `${storePath}${RETIRED_STORE_INFIX}${stamp}`;
-      const placeholder = await createRetirePlaceholder({ storePath, to });
-      await moveStoreOverPlaceholder({
+      const dir = `${storePath}${RETIRED_STORE_INFIX}${stamp}`;
+      const to = join(dir, basename(storePath));
+      await createRetireDirectory({ storePath, dir });
+      await input.afterDirectory?.(dir);
+      const archived = await linkIntoRetireDirectory({ storePath, dir, to });
+      await input.beforeMove?.();
+      const replacement = await moveSourceIntoRetireDirectory({
         storePath,
-        to,
-        placeholder,
-        beforeMove: input.beforeMove,
+        dir,
+        archived,
       });
-      return { from: storePath, to };
+      return { from: storePath, to, replacement };
     },
   });
 }
@@ -359,80 +381,84 @@ async function assertRetirableStoreFile(input: {
   }
 }
 
-/**
- * Renames the store over the placeholder, after checking the placeholder is
- * still the same empty file; on any failure the placeholder (only if still
- * ours) is removed and nothing has moved.
- */
-async function moveStoreOverPlaceholder(input: {
+/** Creates the archive directory exclusively (0700); refuses if the name exists. */
+async function createRetireDirectory(input: {
   readonly storePath: string;
-  readonly to: string;
-  readonly placeholder: { readonly dev: number; readonly ino: number };
-  readonly beforeMove?: () => Promise<void>;
+  readonly dir: string;
 }): Promise<void> {
   try {
-    const current = await lstat(input.to).catch(() => null);
-    if (
-      current === null ||
-      !current.isFile() ||
-      current.dev !== input.placeholder.dev ||
-      current.ino !== input.placeholder.ino ||
-      current.size !== 0
-    ) {
-      throw new SecretStoreRetireError(
-        `${input.to} changed while retiring; nothing was moved and it was left as it is.`
-      );
-    }
-    await input.beforeMove?.();
-    await rename(input.storePath, input.to);
-  } catch (error: unknown) {
-    await removeOwnPlaceholder(input);
-    if (error instanceof SecretStoreRetireError) {
-      throw error;
-    }
-    throw new SecretStoreRetireError(
-      `Could not move ${input.storePath} to ${input.to} (${errorCode(error)}); nothing was moved. To retire it by hand: mv ${quoteShellWord(input.storePath)} ${quoteShellWord(input.to)}`
-    );
-  }
-}
-
-/** Creates the archive name exclusively (an empty 0600 file); refuses if it exists. */
-async function createRetirePlaceholder(input: {
-  readonly storePath: string;
-  readonly to: string;
-}): Promise<{ readonly dev: number; readonly ino: number }> {
-  let handle: Awaited<ReturnType<typeof open>>;
-  try {
-    handle = await open(input.to, "wx", 0o600);
+    await mkdir(input.dir, { mode: 0o700 });
   } catch (error: unknown) {
     throw new SecretStoreRetireError(
       errorCode(error) === "EEXIST"
-        ? `${input.to} already exists; nothing was moved. Retry in a second.`
-        : `Could not create ${input.to} (${errorCode(error)}); nothing was moved. To retire it by hand: mv ${quoteShellWord(input.storePath)} ${quoteShellWord(input.to)}`
+        ? `${input.dir} already exists; nothing was moved. Retry in a second.`
+        : `Could not create ${input.dir} (${errorCode(error)}); nothing was moved. To retire the store by hand: mkdir ${quoteShellWord(input.dir)} && mv ${quoteShellWord(input.storePath)} ${quoteShellWord(input.dir)}/`
     );
-  }
-  try {
-    const created = await handle.stat();
-    return { dev: created.dev, ino: created.ino };
-  } finally {
-    await handle.close();
   }
 }
 
-/** Removes the placeholder only while it is still the empty file this call made. */
-async function removeOwnPlaceholder(input: {
+/**
+ * Links the store into the archive directory (a hard link never replaces an
+ * existing file) and returns the archived file's identity. On failure the
+ * directory is removed only if it is still empty (rmdir refuses otherwise).
+ */
+async function linkIntoRetireDirectory(input: {
+  readonly storePath: string;
+  readonly dir: string;
   readonly to: string;
-  readonly placeholder: { readonly dev: number; readonly ino: number };
-}): Promise<void> {
-  const current = await lstat(input.to).catch(() => null);
-  if (
-    current?.isFile() === true &&
-    current.dev === input.placeholder.dev &&
-    current.ino === input.placeholder.ino &&
-    current.size === 0
-  ) {
-    await unlink(input.to).catch(() => undefined);
+}): Promise<{ readonly dev: number; readonly ino: number }> {
+  try {
+    await link(input.storePath, input.to);
+    const archived = await lstat(input.to);
+    return { dev: archived.dev, ino: archived.ino };
+  } catch (error: unknown) {
+    await rmdir(input.dir).catch(() => undefined);
+    throw new SecretStoreRetireError(
+      `Could not link ${input.storePath} into ${input.dir} (${errorCode(error)}); nothing was moved. To retire it by hand: mv ${quoteShellWord(input.storePath)} ${quoteShellWord(input.dir)}/`
+    );
   }
+}
+
+/**
+ * Renames whatever is at the store path into the archive directory, and
+ * removes that extra name only when it is the archived file itself. A
+ * replacement written meanwhile by a writer outside the lock is kept, and
+ * its path returned. Both names are inside the directory this call made.
+ */
+async function moveSourceIntoRetireDirectory(input: {
+  readonly storePath: string;
+  readonly dir: string;
+  readonly archived: { readonly dev: number; readonly ino: number };
+}): Promise<string | null> {
+  // An unpredictable name in the directory this call created, checked to
+  // be free first: the rename never replaces a file planted there.
+  const source = join(input.dir, `.source-${randomUUID()}`);
+  if ((await lstat(source).catch(() => null)) !== null) {
+    throw new SecretStoreRetireError(
+      `The store was archived at ${join(input.dir, basename(input.storePath))}, but ${source} appeared meanwhile, so ${input.storePath} was left in place. Nothing was deleted; remove ${quoteShellWord(input.storePath)} by hand once you have checked it.`
+    );
+  }
+  try {
+    await rename(input.storePath, source);
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") {
+      // Already gone: the archive holds the store; nothing else to keep.
+      return null;
+    }
+    throw new SecretStoreRetireError(
+      `The store was archived at ${join(input.dir, basename(input.storePath))}, but ${input.storePath} could not be moved (${errorCode(error)}), so both names hold it. Nothing was deleted. Remove ${quoteShellWord(input.storePath)} by hand once you have checked it, or keep the archive.`
+    );
+  }
+  const moved = await lstat(source).catch(() => null);
+  if (
+    moved?.isFile() === true &&
+    moved.dev === input.archived.dev &&
+    moved.ino === input.archived.ino
+  ) {
+    await unlink(source);
+    return null;
+  }
+  return source;
 }
 
 function errorCode(error: unknown): string {
@@ -462,16 +488,33 @@ export async function isEncryptedStoreFile(
   }
 }
 
-/** Retired copies of `storePath` in its directory, oldest first. */
+/**
+ * Retired copies of `storePath`, oldest first: `<dir>/<store name>` for
+ * each `<store>.retired-<stamp>/` directory (and a bare file of that name,
+ * as an earlier build of this command left).
+ */
 export async function listRetiredEncryptedStores(
   storePath: string
 ): Promise<readonly string[]> {
   const prefix = `${basename(storePath)}${RETIRED_STORE_INFIX}`;
-  const entries = await readdir(dirname(storePath)).catch(() => [] as string[]);
-  return entries
-    .filter((name) => name.startsWith(prefix))
-    .sort()
-    .map((name) => resolve(dirname(storePath), name));
+  const entries = await readdir(dirname(storePath), {
+    withFileTypes: true,
+  }).catch(() => []);
+  const candidates = entries
+    .filter((entry) => entry.name.startsWith(prefix))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((entry) => {
+      const path = resolve(dirname(storePath), entry.name);
+      return entry.isDirectory() ? join(path, basename(storePath)) : path;
+    });
+  // Only archives still there: a directory emptied by a restore is not one.
+  const present: string[] = [];
+  for (const path of candidates) {
+    if ((await lstat(path).catch(() => null))?.isFile() === true) {
+      present.push(path);
+    }
+  }
+  return present;
 }
 
 /** The listing's reason for each way a store file read can fail. */

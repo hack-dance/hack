@@ -394,9 +394,10 @@ entries.
 2. **Retire the store** when the key is gone for good:
    `hack secrets retire-store`, run in a project that selects the store or
    outside any project for the global one. Without a terminal, add `--yes`.
-   - It renames the store to `<store>.retired-<UTC time>` in the same
-     directory. It deletes nothing, reads and prints no entry, and leaves the
-     key file alone.
+   - It moves the store into a new directory `<store>.retired-<UTC time>/`
+     beside it, keeping its name. It deletes nothing, reads and prints no
+     entry, and leaves the key file alone. It only retires a file that is a
+     Hack encrypted store.
    - It prints the `mv` command that puts the store back.
    - Afterwards Doctor lists the retired file as information, and the project
      check no longer fails.

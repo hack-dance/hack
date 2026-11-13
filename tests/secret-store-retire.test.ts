@@ -274,7 +274,8 @@ test("retire-store refuses without --yes when it cannot prompt, then retires, an
     name.startsWith("secrets.enc.json.retired-")
   );
   expect(kept).toHaveLength(1);
-  const retiredPath = join(fixture.hackHome, kept[0] ?? "");
+  // The archive is the store, under its own name, in a new directory.
+  const retiredPath = join(fixture.hackHome, kept[0] ?? "", "secrets.enc.json");
   expect(await readFile(retiredPath)).toEqual(before);
   expect(retired.output).toContain(`to ${retiredPath}`);
   expect(retired.output).toContain(`mv ${retiredPath} ${fixture.storePath}`);
@@ -289,7 +290,7 @@ test("retire-store refuses without --yes when it cannot prompt, then retires, an
     expect(after).toHaveLength(1);
     expect(after[0]?.status).toBe("info");
     expect(after[0]?.message).toContain(
-      `Retired secret store kept at ~/.hack/${kept[0]}`
+      `Retired secret store kept at ~/.hack/${kept[0]}/secrets.enc.json`
     );
     expect(after[0]?.message).toContain(
       `mv ${retiredPath} ${fixture.storePath}`
@@ -529,6 +530,7 @@ test("a store replaced at the moment of the move is archived, never deleted, and
   // Second-family review blocker: link then unlink removed a replacement a
   // writer outside the lock put at the store path between the two steps.
   const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
   const replacement = Buffer.from("synthetic-replacement-store-bytes\n");
   const outcome = await retireEncryptedStoreFile({
     storePath: fixture.storePath,
@@ -541,10 +543,26 @@ test("a store replaced at the moment of the move is archived, never deleted, and
       await rename(staged, fixture.storePath);
     },
   });
-  expect(outcome.to).toBe(`${fixture.storePath}.retired-20261113T120000Z`);
-  // The replacement is what was archived; nothing at either name was lost.
-  expect(await readFile(outcome.to)).toEqual(replacement);
+  const dir = `${fixture.storePath}.retired-20261113T120000Z`;
+  expect(outcome.to).toBe(join(dir, "secrets.enc.json"));
+  // Neither file is lost: the archive holds the store that was linked, and
+  // the replacement put at the store path meanwhile is kept beside it.
+  expect(await readFile(outcome.to)).toEqual(before);
+  expect(outcome.replacement?.startsWith(join(dir, ".source-"))).toBe(true);
+  expect(await readFile(outcome.replacement ?? "")).toEqual(replacement);
   expect(await lstat(fixture.storePath).catch(() => null)).toBeNull();
+
+  // Without a replacement, the extra name is removed: only the archive.
+  const plain = join(fixture.hackHome, "plain.enc.json");
+  await writeFile(plain, "synthetic-plain-store\n");
+  const plainOutcome = await retireEncryptedStoreFile({
+    storePath: plain,
+    now: new Date("2026-11-13T12:00:00Z"),
+  });
+  expect(plainOutcome.replacement).toBeNull();
+  expect(await readdir(`${plain}.retired-20261113T120000Z`)).toEqual([
+    "plain.enc.json",
+  ]);
 
   // An archive name that already exists is never replaced.
   const second = join(fixture.hackHome, "secrets.enc.json");
@@ -555,8 +573,27 @@ test("a store replaced at the moment of the move is archived, never deleted, and
       now: new Date("2026-11-13T12:00:00Z"),
     })
   ).rejects.toThrow("already exists; nothing was moved");
-  expect(await readFile(outcome.to)).toEqual(replacement);
+  expect(await readFile(outcome.to)).toEqual(before);
+  expect(await readFile(outcome.replacement ?? "")).toEqual(replacement);
   expect(await readFile(second, "utf8")).toBe("synthetic-second-store\n");
+
+  // A file planted at the archive name, inside the new directory, before
+  // the link: the link refuses, and nothing is removed or replaced.
+  const third = join(fixture.hackHome, "third.enc.json");
+  await writeFile(third, "synthetic-third-store\n");
+  let planted = "";
+  await expect(
+    retireEncryptedStoreFile({
+      storePath: third,
+      now: new Date("2026-11-13T12:00:00Z"),
+      afterDirectory: async (made) => {
+        planted = join(made, "third.enc.json");
+        await writeFile(planted, "synthetic-planted\n");
+      },
+    })
+  ).rejects.toThrow("nothing was moved");
+  expect(await readFile(planted, "utf8")).toBe("synthetic-planted\n");
+  expect(await readFile(third, "utf8")).toBe("synthetic-third-store\n");
 });
 
 test("a store that is its own key file is not retired, through any spelling", async () => {
@@ -768,4 +805,55 @@ test("printed chmod and git rm guidance quotes a hostile key path", async () => 
   const refused = (await inspect(fixture.reader, "app-a"))[0];
   expect(refused?.message).toContain(`chmod 600 ${quoted}`);
   expect(refused?.message).toContain(`git rm --cached ${quoted}`);
+});
+
+test('a malformed registry, or a store identity that cannot be read, is never "no registered project reads it"', async () => {
+  // Second-family review: an invalid registry read as empty, and an
+  // identity lookup failure counted as "different", both produced the
+  // definitive no-readers wording.
+  const fixture = await setUp();
+  const registry = join(fixture.hackHome, "projects.json");
+  const text = await readFile(registry, "utf8");
+  await writeFile(registry, "{ not a registry");
+  try {
+    const malformed = (await inspect(fixture.bystander, "app-b"))[0];
+    expect(malformed?.message).toContain(
+      "The projects registry could not be read or is not valid"
+    );
+    expect(malformed?.message).not.toContain("No registered project reads it.");
+  } finally {
+    await writeFile(registry, text);
+  }
+  if (process.getuid?.() === 0) {
+    return;
+  }
+  // app-a reaches the store through an alias whose directory cannot be
+  // searched: its identity is unknown, so it counts as unchecked.
+  const hidden = join(fixture.home, "hidden");
+  await mkdir(hidden);
+  await symlink(fixture.hackHome, join(hidden, "alias"));
+  await writeFile(
+    join(fixture.reader.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-a",
+      dev_host: "app-a.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: {
+            path: join(hidden, "alias", "secrets.enc.json"),
+            keyPath: fixture.keyPath,
+          },
+        },
+      },
+    })}\n`
+  );
+  await chmod(hidden, 0o000);
+  try {
+    const unknown = (await inspect(fixture.bystander, "app-b"))[0];
+    expect(unknown?.message).toContain("could not be checked");
+    expect(unknown?.message).not.toContain("No registered project reads it.");
+  } finally {
+    await chmod(hidden, 0o755);
+  }
 });

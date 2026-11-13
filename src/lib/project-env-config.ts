@@ -8320,17 +8320,72 @@ async function readLegacyDotenvText(opts: {
   return read.kind === "absent" ? null : read.text;
 }
 
+/** Keys and YAML inputs remain live after legacy migration, even if a backend named them. */
+async function legacyCleanupLiveInputs(opts: {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+}): Promise<ReadonlySet<string>> {
+  const paths = new Set([resolveProjectEnvKeyPath(opts)]);
+  const shared = await resolveProjectEnvSharedKeyLocation(opts);
+  if (shared) {
+    paths.add(shared.path);
+  }
+  const primaryRoot = await resolveGitPrimaryWorktreeRoot({
+    repoRoot: opts.projectRoot,
+  });
+  const directories = new Set([opts.projectDir]);
+  if (primaryRoot && primaryRoot !== opts.projectRoot) {
+    paths.add(resolveProjectEnvKeyPath({ projectRoot: primaryRoot }));
+    directories.add(resolve(primaryRoot, HACK_PROJECT_DIR_PRIMARY));
+  }
+  for (const directory of directories) {
+    paths.add(resolve(directory, PROJECT_CONFIG_FILENAME));
+    if (!(await pathExists(directory))) {
+      continue;
+    }
+    for (const name of await readdir(directory)) {
+      if (
+        name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+      ) {
+        paths.add(resolve(directory, name));
+      }
+    }
+  }
+  return paths;
+}
+
+async function assertLegacyCleanupDoesNotRemoveLiveInputs(opts: {
+  readonly projectRoot: string;
+  readonly paths: readonly string[];
+}): Promise<void> {
+  const live = await legacyCleanupLiveInputs({
+    ...opts,
+    projectDir: resolve(opts.projectRoot, HACK_PROJECT_DIR_PRIMARY),
+  });
+  if (opts.paths.some((path) => live.has(resolve(path)))) {
+    throw new ClosedCliError(
+      "Refusing legacy env cleanup: a target is a current project env key, configuration or YAML layer. Keep live env inputs; migrated values still need them (values omitted)."
+    );
+  }
+}
+
 export async function removeLegacyProjectEnvArtifacts(opts: {
   readonly projectRoot: string;
   readonly paths: readonly string[];
 }): Promise<readonly string[]> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  await assertLegacyCleanupDoesNotRemoveLiveInputs(opts);
   const removed: string[] = [];
   for (const path of opts.paths) {
     if (!(await pathExists(path))) {
       continue;
     }
     await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+    await assertLegacyCleanupDoesNotRemoveLiveInputs({
+      ...opts,
+      paths: [path],
+    });
     await rm(path, { recursive: false, force: true });
     removed.push(path);
   }
@@ -8627,10 +8682,14 @@ export async function collectLegacyProjectEnvCleanupCandidates(opts: {
   const blockedPaths = new Set(
     opts.composeEnvFileReferences.map((reference) => reference.resolvedPath)
   );
+  const liveInputs = await legacyCleanupLiveInputs(opts);
   const retainedEnvFiles: RetainedLegacyEnvFile[] = [];
   const allowed: string[] = [];
   const blocked: string[] = [];
   for (const path of candidates) {
+    if (liveInputs.has(path)) {
+      continue;
+    }
     if (await pathExists(path)) {
       // Value retention is independent of Compose references: repairing Compose
       // must never promote a file holding undelivered values into cleanup.

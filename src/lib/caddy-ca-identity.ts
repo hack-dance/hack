@@ -1,4 +1,5 @@
 import { X509Certificate } from "node:crypto";
+import { isIP } from "node:net";
 
 import { GLOBAL_CADDY_PROJECT_NAME } from "../constants.ts";
 import { readTextFile } from "./fs.ts";
@@ -15,7 +16,7 @@ const SINGLE_CERTIFICATE =
   /^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----$/;
 const ROOT_PATH = "/data/caddy/pki/authorities/local/root.crt";
 const INSPECT_FORMAT =
-  '{"id":{{json .Id}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}';
+  '{"id":{{json .Id}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .NetworkSettings.Ports}}}';
 /**
  * Select Hack's Caddy by its Compose labels with the project fixed, never
  * through the user-writable Compose file: a file whose top-level `name:` was
@@ -37,7 +38,62 @@ export type CaddyCaIdentity = {
   readonly message: string;
   /** Present only when a current runtime CA was validated and export comparison succeeded. */
   readonly currentPem?: string;
+  /** Loopback addresses covered by the running container's actual 80/443 publications. */
+  readonly loopbackPorts?: Readonly<Record<80 | 443, readonly string[]>>;
 };
+
+/** Unknown/malformed publication metadata never implies a wildcard bind. */
+function publishedLoopbackPorts(
+  value: unknown
+): CaddyCaIdentity["loopbackPorts"] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const ports: Record<80 | 443, string[]> = { 80: [], 443: [] };
+  for (const port of [80, 443] as const) {
+    const bindings = loopbackBindings(value[`${port}/tcp`], port);
+    if (!bindings) {
+      return undefined;
+    }
+    ports[port] = bindings;
+  }
+  return ports;
+}
+
+function loopbackBindings(
+  value: unknown,
+  port: 80 | 443
+): string[] | undefined {
+  if (value === null || value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.length > 32) {
+    return undefined;
+  }
+  const addresses = new Set<string>();
+  for (const binding of value) {
+    if (
+      !isRecord(binding) ||
+      typeof binding.HostIp !== "string" ||
+      typeof binding.HostPort !== "string"
+    ) {
+      return undefined;
+    }
+    if (binding.HostPort !== String(port)) {
+      continue;
+    }
+    const address = binding.HostIp;
+    if (address !== "" && !isIP(address)) {
+      return undefined;
+    }
+    if (address === "" || address === "0.0.0.0" || address === "::") {
+      addresses.add(address || "0.0.0.0");
+    } else if (address.startsWith("127.") || address === "::1") {
+      addresses.add(address);
+    }
+  }
+  return [...addresses];
+}
 
 function parseCa(pem: string): X509Certificate | null {
   if (
@@ -123,6 +179,7 @@ export async function inspectCaddyCaIdentity(opts: {
     message: "Current running Caddy CA identity could not be verified",
   };
   let runtimePem: string;
+  let loopbackPorts: CaddyCaIdentity["loopbackPorts"];
   try {
     const selected = await execute(SELECT_CADDY, {
       timeoutMs,
@@ -144,12 +201,13 @@ export async function inspectCaddyCaIdentity(opts: {
       ],
       { timeoutMs, stdin: "ignore" }
     );
-    if (
-      inspected.exitCode !== 0 ||
-      !matchesRunningCaddy(JSON.parse(inspected.stdout), id)
-    ) {
+    const metadata: unknown = JSON.parse(inspected.stdout);
+    if (inspected.exitCode !== 0 || !matchesRunningCaddy(metadata, id)) {
       return unavailable;
     }
+    loopbackPorts = isRecord(metadata)
+      ? publishedLoopbackPorts(metadata.ports)
+      : undefined;
     const copied = await copyRuntimeRoot({ id, execute, timeoutMs });
     if (copied === null) {
       return unavailable;
@@ -193,11 +251,12 @@ export async function inspectCaddyCaIdentity(opts: {
     };
   }
   const currentPem = current.toString();
+  const witness = { currentPem, ...(loopbackPorts ? { loopbackPorts } : {}) };
   if (exportedPem === null) {
     return {
       state: "missing",
       message: "Caddy CA export is missing; the running Caddy CA was verified",
-      currentPem,
+      ...witness,
     };
   }
   const exported = parseCa(exportedPem);
@@ -206,19 +265,19 @@ export async function inspectCaddyCaIdentity(opts: {
       state: "stale",
       message:
         "Exported Caddy CA is invalid and needs refresh from the verified running root",
-      currentPem,
+      ...witness,
     };
   }
   return current.raw.equals(exported.raw)
     ? {
         state: "current",
         message: "Exported Caddy CA matches the running Caddy root certificate",
-        currentPem,
+        ...witness,
       }
     : {
         state: "stale",
         message:
           "Exported Caddy CA differs from the running Caddy root certificate",
-        currentPem,
+        ...witness,
       };
 }

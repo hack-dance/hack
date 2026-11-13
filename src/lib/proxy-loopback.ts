@@ -11,8 +11,7 @@ import { listHostTcpListeners } from "./proxy-port-listeners.ts";
 import { exec } from "./shell.ts";
 
 const PROBE_TIMEOUT_MS = 1000;
-const LOOPBACK_ADDRESSES = ["127.0.0.1", "::1"] as const;
-const MAPPED_LOOPBACK = /^::ffff:7f[\da-f]{2}:[\da-f]{1,4}$/i;
+const MAPPED_LOOPBACK = /^::ffff:(7f[\da-f]{2}):([\da-f]{1,4})$/i;
 const WHITESPACE = /\s+/;
 type ProbeState = "ok" | "timeout" | "unreachable" | "tls-error";
 type Endpoint = { readonly address: string; readonly port: number };
@@ -29,6 +28,8 @@ export type ProxyLoopbackReport = {
   readonly message: string;
   /** Only a verified running proxy root permits an interception diagnosis. */
   readonly verified: boolean;
+  /** At least one selected endpoint passed; doctor still reports any other failed endpoint. */
+  readonly reachable: boolean;
 };
 
 /**
@@ -42,6 +43,7 @@ export function probeProxyLoopback(opts: ProbeOptions): Promise<ProbeState> {
     (opts.protocol ?? (opts.port === 443 ? "https" : "http")) === "https";
   return new Promise((resolve) => {
     let settled = false;
+    let connected = false;
     const done = (state: ProbeState) => {
       if (settled) {
         return;
@@ -64,6 +66,9 @@ export function probeProxyLoopback(opts: ProbeOptions): Promise<ProbeState> {
       () => done("timeout"),
       opts.timeoutMs ?? PROBE_TIMEOUT_MS
     );
+    socket.once("connect", () => {
+      connected = true;
+    });
     if ("authorized" in socket) {
       socket.once("secureConnect", () =>
         done(socket.authorized ? "ok" : "tls-error")
@@ -71,14 +76,8 @@ export function probeProxyLoopback(opts: ProbeOptions): Promise<ProbeState> {
     } else {
       socket.once("connect", () => done("ok"));
     }
-    socket.once("error", (error: NodeJS.ErrnoException) => {
-      const unreachable = [
-        "ECONNREFUSED",
-        "ENETUNREACH",
-        "EHOSTUNREACH",
-        "EAFNOSUPPORT",
-      ].includes(error.code ?? "");
-      done(unreachable || !https ? "unreachable" : "tls-error");
+    socket.once("error", () => {
+      done(connected && https ? "tls-error" : "unreachable");
     });
   });
 }
@@ -146,24 +145,53 @@ export async function inspectProxyLoopback(
       name: "proxy ports",
       status: "warn",
       verified: false,
+      reachable: false,
       message:
         "Cannot verify loopback forwarding: the running Hack proxy's internal CA is unavailable. Check global proxy status and the caddy local ca diagnostic.",
     };
   }
   const caPem = identity.currentPem;
+  if (!identity.loopbackPorts) {
+    return {
+      name: "proxy ports",
+      status: "warn",
+      verified: false,
+      reachable: false,
+      message:
+        "Cannot verify loopback forwarding: the running proxy's published port bindings are unavailable.",
+    };
+  }
+  const endpoints = (opts.ports ?? ([80, 443] as const)).flatMap((port) => {
+    const published =
+      port === 80 || port === 443 ? (identity.loopbackPorts?.[port] ?? []) : [];
+    const candidates = opts.addresses ?? published.map(defaultLoopbackAddress);
+    return [...new Set(candidates)]
+      .filter((address) =>
+        published.some((binding) => sameLoopbackAddress(address, binding))
+      )
+      .map((address) => ({ address, port }));
+  });
+  if (!endpoints.length) {
+    return {
+      name: "proxy ports",
+      status: "ok",
+      verified: false,
+      reachable: false,
+      message:
+        "Loopback check skipped: the proxy does not publish the selected ports on these loopback addresses. Review proxy.bind_address and local DNS overrides if loopback access is needed.",
+    };
+  }
   const observations = await Promise.all(
-    (opts.addresses ?? LOOPBACK_ADDRESSES).flatMap((address) =>
-      (opts.ports ?? [80, 443]).map(
-        async (port): Promise<Observation> => ({
+    endpoints.map(
+      async ({ address, port }): Promise<Observation> => ({
+        address,
+        port,
+        state: await (opts.probe ?? probeProxyLoopback)({
           address,
           port,
-          state: await (opts.probe ?? probeProxyLoopback)({
-            address,
-            port,
-            caPem,
-          }),
-        })
-      )
+          caPem,
+        }),
+      })
     )
   );
   const failed = observations.filter(
@@ -176,10 +204,44 @@ export async function inspectProxyLoopback(
     name: "proxy ports",
     status: failed.length ? "warn" : "ok",
     verified: true,
+    reachable: observations.some((observation) => observation.state === "ok"),
     message: failed.length
       ? failureMessage(failed, listeners ?? [])
       : `Loopback ports reachable (${observations.map(hostPort).join(", ")}); HTTPS verifies against the running Hack proxy's internal CA.`,
   };
+}
+
+function defaultLoopbackAddress(binding: string): string {
+  if (binding === "0.0.0.0") {
+    return "127.0.0.1";
+  }
+  return binding === "::" ? "::1" : binding;
+}
+
+function loopbackV4(address: string): string | null {
+  if (isIP(address) === 4 && address.startsWith("127.")) {
+    return address;
+  }
+  if (address.startsWith("::ffff:127.")) {
+    return address.slice(7);
+  }
+  const mapped = MAPPED_LOOPBACK.exec(address);
+  if (!(mapped?.[1] && mapped[2])) {
+    return null;
+  }
+  const upper = Number.parseInt(mapped[1], 16);
+  const lower = Number.parseInt(mapped[2], 16);
+  return [upper >> 8, upper & 255, lower >> 8, lower & 255].join(".");
+}
+
+function sameLoopbackAddress(address: string, binding: string): boolean {
+  if (binding === "::") {
+    return address === "::1";
+  }
+  const v4 = loopbackV4(address);
+  return binding === "0.0.0.0"
+    ? v4 !== null
+    : address === binding || v4 === binding;
 }
 
 function isLoopback(address: string): boolean {
@@ -212,7 +274,7 @@ export async function resolveProxyLoopbackAddresses(opts: {
     if (result.exitCode !== 0) {
       return [];
     }
-    return [
+    const addresses = [
       ...new Set(
         result.stdout.split("\n").flatMap((line) => {
           const fields = line.trim().split(WHITESPACE);
@@ -226,7 +288,9 @@ export async function resolveProxyLoopbackAddresses(opts: {
           return address && isIP(address) ? [address] : [];
         })
       ),
-    ].slice(0, 16);
+    ];
+    // Truncation could hide a working fallback after failed loopback answers.
+    return addresses.length > 16 ? [] : addresses;
   } catch {
     return [];
   }
@@ -248,17 +312,18 @@ export async function openProxyLoopbackWarning(opts: {
     return null;
   }
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
-  const addresses = [
-    ...new Set(
-      (isIP(hostname)
-        ? [hostname]
-        : await (
-            opts.lookup ??
-            ((name) => resolveProxyLoopbackAddresses({ hostname: name }))
-          )(hostname)
-      ).filter(isLoopback)
-    ),
-  ];
+  const resolved = isIP(hostname)
+    ? [hostname]
+    : await (
+        opts.lookup ??
+        ((name) => resolveProxyLoopbackAddresses({ hostname: name }))
+      )(hostname);
+  // A browser may fall back to another DNS path. This guard only proves a
+  // complete failure when every candidate uses the inspected loopback path.
+  if (resolved.some((address) => !isLoopback(address))) {
+    return null;
+  }
+  const addresses = [...new Set(resolved.filter(isLoopback))];
   if (!addresses.length) {
     return null;
   }
@@ -266,5 +331,7 @@ export async function openProxyLoopbackWarning(opts: {
     addresses,
     ports: [url.protocol === "https:" ? 443 : 80],
   });
-  return report.verified && report.status === "warn" ? report.message : null;
+  return report.verified && !report.reachable && report.status === "warn"
+    ? report.message
+    : null;
 }

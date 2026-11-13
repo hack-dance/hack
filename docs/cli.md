@@ -31,15 +31,19 @@ and errors expand with wrapped detail and recovery guidance. `hack doctor --json
 fully detailed automation surface. Generic macOS resolver setup is shown only when those resolver
 checks need attention.
 
-With the Compose proxy running, the `proxy ports` check tests IPv4 and IPv6 loopback
-independently. HTTPS must verify against the running proxy's internal CA using its
+With the Compose proxy running, the `proxy ports` check tests its published IPv4 and
+IPv6 loopback bindings independently. An IPv4-only, IPv6-only or LAN bind does not
+imply a listener on the other loopback family. HTTPS must verify against the running
+proxy's internal CA using its
 schemas hostname; an unrelated TCP listener cannot pass. A warning names the failed
 port and any listener process visible without privilege. Check competing listeners,
 a VPN's serve feature, the container runtime's HTTPS setting, and local DNS overrides.
 This warning has no automatic repair. Hostnames resolving directly to the container
 address use a different path and can still work. `hack open` checks the selected URL's
-loopback path before opening it or printing JSON, and refuses a confirmed failure with
-the same diagnosis. An unavailable runtime CA remains a doctor warning rather than
+loopback path before opening it or printing JSON, and refuses when every checked
+loopback path fails and no non-loopback DNS alternative exists. A healthy family or a
+direct-container DNS alternative preserves browser fallback; doctor still warns about
+individual failed bindings. An unavailable runtime CA remains a doctor warning rather than
 proof that a listener is foreign.
 
 On macOS, a healthy terminal connection does not establish browser connectivity.

@@ -18,6 +18,7 @@ const loadCa = () =>
     state: "current" as const,
     message: "verified",
     currentPem: CURRENT_CA_PEM,
+    loopbackPorts: { 80: ["0.0.0.0", "::"], 443: ["0.0.0.0", "::"] },
   });
 const noListeners = () => Promise.resolve([]);
 
@@ -85,6 +86,7 @@ test("a running root still authenticates when its exported copy is stale or miss
         state,
         message: "runtime root verified",
         currentPem: CURRENT_CA_PEM,
+        loopbackPorts: { 80: ["0.0.0.0", "::"], 443: ["0.0.0.0", "::"] },
       }),
       probe: async () => "ok",
       listListeners: async () => {
@@ -110,11 +112,103 @@ test("missing running-CA evidence warns without probing unrelated host listeners
   expect(report.message).toContain("internal CA is unavailable");
 });
 
+test("doctor and open probe only the running proxy's published loopback bindings", async () => {
+  for (const [bindings, expected] of [
+    [["127.0.0.1"], ["127.0.0.1"]],
+    [["::1"], ["::1"]],
+    [["0.0.0.0"], ["127.0.0.1"]],
+    [["::"], ["::1"]],
+    [
+      ["0.0.0.0", "::"],
+      ["127.0.0.1", "::1"],
+    ],
+    [[], []],
+  ] as const) {
+    const calls: string[] = [];
+    const inspect: typeof inspectProxyLoopback = (opts) =>
+      inspectProxyLoopback({
+        ...opts,
+        loadCa: async () => ({
+          ...(await loadCa()),
+          loopbackPorts: { 80: bindings, 443: bindings },
+        }),
+        probe: async ({ address, port }) => {
+          calls.push(`${address}/${port}`);
+          return "ok";
+        },
+      });
+    const report = await inspect();
+    expect(report.status).toBe("ok");
+    expect(calls.sort()).toEqual(
+      expected
+        .flatMap((address) => [80, 443].map((port) => `${address}/${port}`))
+        .sort()
+    );
+    calls.length = 0;
+    expect(
+      await openProxyLoopbackWarning({
+        url: "https://app.example.test",
+        lookup: async () => ["127.0.0.1", "::1"],
+        inspect,
+      })
+    ).toBeNull();
+    expect(calls).toEqual(expected.map((address) => `${address}/443`));
+    if (!expected.length) {
+      expect(report.message).toContain("Loopback check skipped");
+    }
+  }
+});
+
+test("the two published ports can bind different families, and missing publication data stays unknown", async () => {
+  const calls: string[] = [];
+  const report = await inspectProxyLoopback({
+    loadCa: async () => ({
+      ...(await loadCa()),
+      loopbackPorts: { 80: ["127.0.0.1"], 443: ["::1"] },
+    }),
+    probe: async ({ address, port }) => {
+      calls.push(`${address}/${port}`);
+      return "ok";
+    },
+  });
+  expect(report.status).toBe("ok");
+  expect(calls).toEqual(["127.0.0.1/80", "::1/443"]);
+  expect(
+    await openProxyLoopbackWarning({
+      url: "https://[::1]",
+      inspect: (opts) =>
+        inspectProxyLoopback({
+          ...opts,
+          loadCa: async () => ({
+            ...(await loadCa()),
+            loopbackPorts: { 80: ["127.0.0.1"], 443: ["127.0.0.1"] },
+          }),
+          probe: async () => {
+            throw new Error("IPv6 is not published");
+          },
+        }),
+    })
+  ).toBeNull();
+  const unknown = await inspectProxyLoopback({
+    loadCa: async () => ({
+      state: "current",
+      message: "verified",
+      currentPem: CURRENT_CA_PEM,
+    }),
+    probe: async () => {
+      throw new Error("no publication evidence");
+    },
+  });
+  expect(unknown.status).toBe("warn");
+  expect(unknown.verified).toBe(false);
+  expect(unknown.message).toContain("port bindings are unavailable");
+});
+
 test("open checks only the selected URL's resolved loopback family and returns the same diagnosis", async () => {
   const addresses: string[] = [];
   const warning = await openProxyLoopbackWarning({
     url: "https://app.example.test",
-    lookup: async () => ["127.0.0.1", "192.0.2.10", "127.0.0.1"],
+    lookup: async () => ["127.0.0.1", "127.0.0.1"],
     inspect: (opts) => {
       expect(opts?.addresses).toEqual(["127.0.0.1"]);
       expect(opts?.ports).toEqual([443]);
@@ -157,6 +251,50 @@ test("open preserves direct-container routes, custom ports, and non-HTTP targets
       })
     ).toBeNull();
   }
+});
+
+test("doctor warns for one failed family while open preserves healthy family and container DNS fallback", async () => {
+  for (const failing of ["127.0.0.1", "::1"]) {
+    const inspect: typeof inspectProxyLoopback = (opts) =>
+      inspectProxyLoopback({
+        ...opts,
+        loadCa,
+        probe: async ({ address }) => (address === failing ? "timeout" : "ok"),
+        listListeners: noListeners,
+      });
+    expect((await inspect()).status).toBe("warn");
+    expect(
+      await openProxyLoopbackWarning({
+        url: "https://app.example.test",
+        lookup: async () => ["127.0.0.1", "::1"],
+        inspect,
+      })
+    ).toBeNull();
+  }
+  expect(
+    await openProxyLoopbackWarning({
+      url: "https://app.example.test",
+      lookup: async () => ["127.0.0.1", "172.30.0.2"],
+      inspect: async () => {
+        throw new Error(
+          "direct-container alternative must preserve browser fallback"
+        );
+      },
+    })
+  ).toBeNull();
+  expect(
+    await openProxyLoopbackWarning({
+      url: "https://app.example.test",
+      lookup: async () => ["127.0.0.1", "::1"],
+      inspect: (opts) =>
+        inspectProxyLoopback({
+          ...opts,
+          loadCa,
+          probe: async () => "timeout",
+          listListeners: noListeners,
+        }),
+    })
+  ).toContain("port 443 on loopback");
 });
 
 test("open recognizes loopback literals without DNS, including mapped IPv4", async () => {
@@ -251,6 +389,21 @@ test("system resolver boundary preserves both Mac families and bounds output and
       execute: async () => {
         throw new Error("missing resolver");
       },
+    })
+  ).toEqual([]);
+});
+
+test("an oversized DNS answer remains unknown instead of hiding a fallback behind truncation", async () => {
+  const stdout = [
+    ...Array.from({ length: 16 }, (_, i) => `127.0.0.${i + 1} STREAM`),
+    "172.30.0.2 STREAM",
+    "",
+  ].join("\n");
+  expect(
+    await resolveProxyLoopbackAddresses({
+      hostname: "app.example.test",
+      platform: "linux",
+      execute: async () => ({ exitCode: 0, stdout, stderr: "" }),
     })
   ).toEqual([]);
 });

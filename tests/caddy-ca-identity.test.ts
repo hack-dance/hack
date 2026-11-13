@@ -79,6 +79,7 @@ function fixture(
     readonly throwAt?: number;
     readonly now?: number;
     readonly timeoutMs?: number;
+    readonly ports?: unknown;
   } = {}
 ) {
   const calls: {
@@ -136,6 +137,7 @@ function fixture(
                     running: true,
                     project: "hack-dev-proxy",
                     service: "caddy",
+                    ...(opts.ports === undefined ? {} : { ports: opts.ports }),
                   }
                 : opts.metadata
             ),
@@ -203,6 +205,35 @@ test("interactive diagnostics can shorten each runtime CA read without changing 
   expect((await f.run()).state).toBe("current");
   expect(f.calls).toHaveLength(3);
   expect(f.calls.every((call) => call.options?.timeoutMs === 1000)).toBe(true);
+});
+
+test("runtime port metadata distinguishes wildcard, single-family, LAN and remapped publications", async () => {
+  for (const [hosts, port, expected] of [
+    [["0.0.0.0", "::"], "443", ["0.0.0.0", "::"]],
+    [["0.0.0.0"], "443", ["0.0.0.0"]],
+    [["127.0.0.1"], "443", ["127.0.0.1"]],
+    [["::1"], "443", ["::1"]],
+    [["192.0.2.10"], "443", []],
+    [["0.0.0.0"], "8443", []],
+  ] as const) {
+    const f = fixture({
+      ports: {
+        "80/tcp": null,
+        "443/tcp": hosts.map((HostIp) => ({ HostIp, HostPort: port })),
+      },
+    });
+    expect((await f.run()).loopbackPorts).toEqual({ 80: [], 443: expected });
+  }
+  expect(
+    (
+      await fixture({
+        ports: { "443/tcp": [{ HostIp: 123, HostPort: "443" }] },
+      }).run()
+    ).loopbackPorts
+  ).toBeUndefined();
+  expect(
+    (await fixture({ ports: "invalid" }).run()).loopbackPorts
+  ).toBeUndefined();
 });
 
 test("rotation is stale even when both CA subjects are identical", async () => {

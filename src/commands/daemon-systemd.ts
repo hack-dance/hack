@@ -4,8 +4,10 @@ import { dirname, resolve } from "node:path";
 import { GLOBAL_DAEMON_DIR_NAME } from "../constants.ts";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
+  type DaemonProcessProbe,
   type DaemonProcessProof,
   type DaemonProcessRefusal,
+  defaultDaemonIdentityExpectation,
   describeDaemonProcessRefusal,
   proveOwnedDaemonProcess,
 } from "../daemon/process.ts";
@@ -455,6 +457,8 @@ export async function stopViaSystemdIfInstalled(opts: {
    * {@link proveOwnedDaemonProcess} on `<hackHome>/daemon`. Tests pin it.
    */
   readonly proveDaemon?: (pid: number) => Promise<DaemonProcessProof>;
+  /** Test seam for the default proof's observations. */
+  readonly probe?: DaemonProcessProbe;
 }): Promise<{
   readonly handled: boolean;
   readonly ownedPid: boolean;
@@ -505,6 +509,7 @@ export async function stopViaSystemdIfInstalled(opts: {
     status,
     daemonRoot: resolve(opts.hackHome, GLOBAL_DAEMON_DIR_NAME),
     prove: opts.proveDaemon,
+    probe: opts.probe,
   });
   if (mainProcess.kind === "refused") {
     return { ...none, refused: mainProcess.message };
@@ -621,6 +626,7 @@ async function checkMainProcessServesHome(opts: {
   readonly status: SystemdServiceStatus;
   readonly daemonRoot: string;
   readonly prove?: (pid: number) => Promise<DaemonProcessProof>;
+  readonly probe?: DaemonProcessProbe;
 }): Promise<
   | { readonly kind: "ours" | "none" }
   | { readonly kind: "refused"; readonly message: string }
@@ -629,10 +635,22 @@ async function checkMainProcessServesHome(opts: {
   if (pid === null) {
     return { kind: "none" };
   }
+  // systemd names this process; it may run another install or checkout
+  // than this CLI, so any foreground daemon start counts as hackd, and the
+  // socket in this home's daemon directory proves the home.
+  const expectation = {
+    ...(await defaultDaemonIdentityExpectation()),
+    anyBunEntry: true,
+  };
   const proof = await (
     opts.prove ??
     ((candidate: number) =>
-      proveOwnedDaemonProcess({ pid: candidate, daemonRoot: opts.daemonRoot }))
+      proveOwnedDaemonProcess({
+        pid: candidate,
+        daemonRoot: opts.daemonRoot,
+        expectation,
+        probe: opts.probe,
+      }))
   )(pid);
   if (proof.kind === "owned") {
     return { kind: "ours" };
@@ -640,9 +658,15 @@ async function checkMainProcessServesHome(opts: {
   if (proof.reason === "not-running") {
     return { kind: "none" };
   }
+  // Still starting: its socket may not be bound yet, which is not evidence
+  // of another home.
+  const why =
+    opts.status.activeState === "activating"
+      ? "systemd reports it still starting, so it may not have bound its socket yet; run hack daemon stop again in a moment"
+      : "it may serve another Hack home (a reload changes the unit's configuration, not the running process)";
   return {
     kind: "refused",
-    message: `Not stopping ${SYSTEMD_UNIT_NAME}: its main process (pid ${pid}) is not proven to be the hackd of this Hack home (${opts.daemonRoot}): ${describeDaemonProcessRefusal(proof.reason)}. It may serve another Hack home (a reload changes the unit's configuration, not the running process). Check: systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
+    message: `Not stopping ${SYSTEMD_UNIT_NAME}: its main process (pid ${pid}) is not proven to be the hackd of this Hack home (${opts.daemonRoot}): ${describeDaemonProcessRefusal(proof.reason)}. ${why}. Check: systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
   };
 }
 

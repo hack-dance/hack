@@ -21,7 +21,11 @@ import {
   withSystemdIncompatibleNextStep,
 } from "../src/commands/daemon-systemd.ts";
 import { resolveDaemonPaths } from "../src/daemon/paths.ts";
-import type { DaemonProcessProof } from "../src/daemon/process.ts";
+import type {
+  DaemonProcessProbe,
+  DaemonProcessProof,
+} from "../src/daemon/process.ts";
+import type { ProcessImage } from "../src/daemon/process-image.ts";
 import { summarizeSystemdService } from "../src/daemon/service-summary.ts";
 import {
   buildDaemonRepairMessage,
@@ -3971,5 +3975,82 @@ linuxTest(
     fake.calls.length = 0;
     expect((await stop()).handled).toBe(true);
     expect(fake.calls).toContain("systemctl --user stop hackd.service");
+  }
+);
+
+linuxTest(
+  "stop accepts this home's daemon run by another install, through the real proof",
+  async () => {
+    // Reviewer: the unit may run another hack than this CLI (a Bun launcher
+    // or the dev shim, `bun <other entry> daemon start --foreground`); the
+    // image check only accepted this CLI's own entry file, so stop refused
+    // this home's daemon. The socket proves the home.
+    const child = Bun.spawn(["sleep", "30"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    try {
+      const fake = fakeSystemd({ active: true, mainPid: child.pid });
+      await installSystemdUnit({
+        unitPath,
+        unitText: unitText(),
+        deps: fake.deps,
+      });
+      let image: ProcessImage = {
+        executable: "/usr/local/bin/bun",
+        argv: [
+          "/usr/local/bin/bun",
+          "/srv/other-checkout/index.ts",
+          "daemon",
+          "start",
+          "--foreground",
+        ],
+        cwd: "/",
+      };
+      let socketOwners = new Set([child.pid]);
+      const probe: DaemonProcessProbe = {
+        birth: () => Promise.resolve("ticks:1"),
+        image: () => Promise.resolve(image),
+        socketOwners: () => Promise.resolve(socketOwners),
+      };
+      const stop = () =>
+        stopViaSystemdIfInstalled({
+          probe,
+          pid: null,
+          hackHome: join(root, ".hack"),
+          deps: fake.deps,
+        });
+      fake.active = true;
+      expect((await stop()).handled).toBe(true);
+      // Not a hackd at all: refused.
+      fake.active = true;
+      image = {
+        executable: "/usr/bin/python3",
+        argv: ["/usr/bin/python3", "daemon", "start", "--foreground"],
+        cwd: "/",
+      };
+      expect((await stop()).refused).toContain("not proven");
+      // Still starting, socket not bound yet: says so instead of blaming
+      // another home.
+      image = {
+        executable: "/usr/local/bin/bun",
+        argv: [
+          "/usr/local/bin/bun",
+          "/srv/x/index.ts",
+          "daemon",
+          "start",
+          "--foreground",
+        ],
+        cwd: "/",
+      };
+      socketOwners = new Set();
+      fake.activeState = "activating";
+      const starting = await stop();
+      expect(starting.refused).toContain("still starting");
+      expect(starting.refused).not.toContain("may serve another Hack home");
+    } finally {
+      child.kill();
+      await child.exited;
+    }
   }
 );

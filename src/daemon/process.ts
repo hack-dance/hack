@@ -328,6 +328,14 @@ export const defaultDaemonProcessProbe: DaemonProcessProbe = {
  */
 export interface DaemonIdentityExpectation {
   readonly entryFiles: ReadonlySet<string>;
+  /**
+   * Accept a source run of any entry file (still a foreground daemon
+   * start). Only for a process whose identity comes from elsewhere, such
+   * as hackd.service's main process as systemd reports it: the unit may run
+   * another install or checkout than this CLI (a Bun launcher, the dev
+   * shim), and the socket proves which home it serves (HACK-2052).
+   */
+  readonly anyBunEntry?: boolean;
 }
 
 let defaultExpectation: Promise<DaemonIdentityExpectation> | null = null;
@@ -917,7 +925,8 @@ export function isHackDaemonImage(opts: {
   }
   return (
     entry !== null &&
-    opts.expectation.entryFiles.has(entry) &&
+    (opts.expectation.anyBunEntry === true ||
+      opts.expectation.entryFiles.has(entry)) &&
     isForegroundDaemonStartArgs(argv.slice(entryIndex + 1))
   );
 }

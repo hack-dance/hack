@@ -723,7 +723,7 @@ pub(super) fn compile(
     volumes: &BTreeMap<String, VolumePlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<BTreeMap<String, ServicePlan>, CandidateError> {
-    if values.is_empty() || values.len() > 64 {
+    if values.is_empty() || values.len() > super::super::MAX_COMPOSE_SERVICES {
         return Err(problem(
             "service_budget",
             "Compose requires 1 to 64 services in WU03.",

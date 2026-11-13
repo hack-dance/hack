@@ -495,9 +495,9 @@ export function withoutBunRuntimeEnv(
 }
 
 /**
- * Full capture redacts every resolved value; matching costs bytes x values,
- * so a command with more distinct values than `REDACTION_VALUES_LIMIT` is
- * refused before anything is accepted rather than stalling its supervisor.
+ * Full capture redacts every resolved value; a command with more distinct
+ * values than `REDACTION_VALUES_LIMIT` is refused before anything is
+ * accepted, which bounds the supervisor's matcher.
  */
 function assertRedactionValuesBounded(values: readonly string[]): void {
   const count = encodeSecrets({ values, minLength: REDACT_MIN_BYTES }).length;

@@ -167,19 +167,9 @@ fn port_refused(message: impl Into<crate::ErrorMessage>) -> CandidateError {
     error("graph_port_publication", message)
 }
 
-/// File-local admission shared by read-only review and the foreground driver.
-/// This never resolves images or private inputs and cannot contact a provider.
-pub(crate) fn compose_start_refusals(plan: &project::PlanData) -> Vec<CandidateError> {
-    let mut errors = Vec::new();
-    if let Err(error) = loopback_publications(plan, true) {
-        errors.push(error);
-    }
-    if let Err(error) = declared_configuration(plan, true, true) {
-        errors.push(error);
-    }
-    if !plan.enrollment_compatible {
-        return errors;
-    }
+/// Default readiness for file review. Routing is assumed enrolled and every
+/// declared dependency initializer admitted; the CLI separately checks those grants.
+pub(crate) fn compose_start_readiness(plan: &project::PlanData) -> BTreeMap<String, Condition> {
     let mut goals = plan
         .services
         .iter()
@@ -218,44 +208,141 @@ pub(crate) fn compose_start_refusals(plan: &project::PlanData) -> Vec<CandidateE
             goals.insert(name.clone(), Condition::Healthy);
         }
     }
-    let graph = match Graph::from_plan(plan, &goals) {
-        Ok(graph) => graph,
+    goals
+}
+
+struct FileLocalAdmission {
+    graph: Graph,
+    networks: BTreeSet<String>,
+    volumes: BTreeSet<String>,
+    publications: BTreeMap<String, Vec<LoopbackPort>>,
+    restart_policies: BTreeMap<String, super::restart_policy::RestartPolicy>,
+    capabilities: BTreeMap<String, Vec<String>>,
+}
+
+struct FileLocalContext<'a> {
+    plan: &'a project::PlanData,
+    readiness: &'a BTreeMap<String, Condition>,
+    managed_services: &'a BTreeSet<String>,
+    host_services: &'a BTreeSet<String>,
+    routing_enrolled: bool,
+    loopback_ports: bool,
+}
+
+fn collect_admission<T>(
+    errors: &mut Vec<CandidateError>,
+    result: Result<T, CandidateError>,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
         Err(error) => {
             errors.push(error);
-            return errors;
+            None
         }
-    };
-    if let Err(error) = routes::validate_plan(plan, &graph, true) {
-        errors.push(error);
     }
-    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
-        if let Err(error) = project::capabilities::effective(service.capabilities.as_ref()) {
-            errors.push(error.with_service(name));
-        }
-        if let Some(cache) = &service.dependency_cache {
-            if let Some(volume) = plan.volumes.get(&cache.volume) {
-                if let Err(error) = validate_disposable_cache(true, &volume.disposable_caches) {
-                    errors.push(error.with_service(name));
+}
+
+/// The single assembly of file-local start checks. It performs no acquisition or
+/// provider I/O. Start uses its admitted products or first refusal; review exposes
+/// every refusal. Every active service's capabilities are present on success.
+fn file_local_admission(
+    context: FileLocalContext<'_>,
+) -> Result<FileLocalAdmission, Vec<CandidateError>> {
+    let FileLocalContext {
+        plan,
+        readiness,
+        managed_services,
+        host_services,
+        routing_enrolled,
+        loopback_ports,
+    } = context;
+    let mut errors = Vec::new();
+    let graph = collect_admission(&mut errors, Graph::from_plan(plan, readiness));
+    let mut capabilities = BTreeMap::new();
+    let mut restart_policies = BTreeMap::new();
+    if let Some(graph) = &graph {
+        collect_admission(
+            &mut errors,
+            routes::validate_plan(plan, graph, routing_enrolled),
+        );
+        for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+            let ready = graph.services[name].ready;
+            for result in [
+                validate_readiness_role(service, ready),
+                validate_probe(service, ready),
+            ] {
+                collect_admission(
+                    &mut errors,
+                    result.map_err(|error| error.with_service(name)),
+                );
+            }
+            if let Some(effective) = collect_admission(
+                &mut errors,
+                project::capabilities::effective(service.capabilities.as_ref())
+                    .map_err(|error| error.with_service(name)),
+            ) {
+                capabilities.insert(name.clone(), effective);
+            }
+            if let Some(cache) = &service.dependency_cache {
+                if let Some(volume) = plan.volumes.get(&cache.volume) {
+                    collect_admission(
+                        &mut errors,
+                        validate_disposable_cache(true, &volume.disposable_caches)
+                            .map_err(|error| error.with_service(name)),
+                    );
                 }
             }
-        }
-        if let Err(error) = validate_readiness_role(service, graph.services[name].ready) {
-            errors.push(error.with_service(name));
-        }
-        if let Err(error) = validate_probe(service, graph.services[name].ready) {
-            errors.push(error.with_service(name));
-        }
-        if let Err(error) = super::restart_policy::admit(&super::restart_policy::Admission {
-            service,
-            ready: graph.services[name].ready,
-            // Private delivery and resolved host bindings are checked only at start.
-            managed_environment: false,
-            host_dependencies: !service.extra_hosts.is_empty(),
-        }) {
-            errors.push(error.with_service(name));
+            if let Some(Some(policy)) = collect_admission(
+                &mut errors,
+                super::restart_policy::admit(&super::restart_policy::Admission {
+                    service,
+                    ready,
+                    managed_environment: managed_services.contains(name),
+                    host_dependencies: !service.extra_hosts.is_empty()
+                        || host_services.contains(name),
+                })
+                .map_err(|error| error.with_service(name)),
+            ) {
+                restart_policies.insert(name.clone(), policy);
+            }
         }
     }
-    errors
+    let publications = collect_admission(&mut errors, loopback_publications(plan, loopback_ports));
+    let configuration = collect_admission(
+        &mut errors,
+        declared_configuration(plan, loopback_ports, routing_enrolled),
+    );
+    match (graph, publications, configuration) {
+        (Some(graph), Some(publications), Some((networks, volumes))) if errors.is_empty() => {
+            Ok(FileLocalAdmission {
+                graph,
+                networks,
+                volumes,
+                publications,
+                restart_policies,
+                capabilities,
+            })
+        }
+        _ => Err(errors),
+    }
+}
+
+/// Names-only review context changes findings, never plan or ownership identity.
+pub(crate) fn compose_start_refusals(
+    plan: &project::PlanData,
+    readiness: &BTreeMap<String, Condition>,
+    managed_services: &BTreeSet<String>,
+) -> Vec<CandidateError> {
+    file_local_admission(FileLocalContext {
+        plan,
+        readiness,
+        managed_services,
+        host_services: &BTreeSet::new(),
+        routing_enrolled: true,
+        loopback_ports: true,
+    })
+    .err()
+    .unwrap_or_default()
 }
 
 fn validate_disposable_cache(shared: bool, directories: &[String]) -> Result<(), CandidateError> {
@@ -536,13 +623,35 @@ pub(super) fn prepare_delivery(
     {
         return Err(super::dependency_hosts::refused());
     }
-    let graph = Graph::from_plan(&inputs.review.plan, readiness)?;
     let plan = &inputs.review.plan;
-    routes::validate_plan(plan, &graph, routing_enrolled)?;
-    for (name, service) in plan.services.iter().filter(|(_, service)| service.active) {
-        validate_readiness_role(service, graph.services[name].ready)?;
-        validate_probe(service, graph.services[name].ready)?;
-    }
+    let managed_services = plan
+        .services
+        .keys()
+        .filter(|name| inputs.service_requires_managed_environment(name))
+        .cloned()
+        .collect();
+    let host_services = inputs
+        .services
+        .iter()
+        .filter(|(_, service)| !service.extra_hosts.is_empty())
+        .map(|(name, _)| name.clone())
+        .collect();
+    let FileLocalAdmission {
+        graph,
+        networks,
+        volumes,
+        publications,
+        restart_policies,
+        capabilities,
+    } = file_local_admission(FileLocalContext {
+        plan,
+        readiness,
+        managed_services: &managed_services,
+        host_services: &host_services,
+        routing_enrolled,
+        loopback_ports,
+    })
+    .map_err(|errors| errors.into_iter().next().unwrap_or_else(unsupported))?;
     let dependency_cache::Resolved {
         current: caches,
         legacy: legacy_caches,
@@ -573,25 +682,6 @@ pub(super) fn prepare_delivery(
             legacy: BTreeMap::new(),
         }
     };
-    let publications = loopback_publications(plan, loopback_ports)?;
-    // Restart policies lower to the engine's own policy only for service classes
-    // whose guards do not depend on a single container incarnation.
-    let mut restart_policies = BTreeMap::new();
-    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
-        if let Some(policy) = super::restart_policy::admit(&super::restart_policy::Admission {
-            service,
-            ready: graph.services[name].ready,
-            managed_environment: inputs.service_requires_managed_environment(name),
-            host_dependencies: !service.extra_hosts.is_empty()
-                || inputs
-                    .services
-                    .get(name)
-                    .is_some_and(|values| !values.extra_hosts.is_empty()),
-        })? {
-            restart_policies.insert(name.clone(), policy);
-        }
-    }
-    let (networks, volumes) = declared_configuration(plan, loopback_ports, routing_enrolled)?;
     for service in plan.services.values().filter(|s| s.active) {
         // Acquisition binds these inputs; a model-only review cannot grant them.
         if service.image.as_deref().is_none_or(|v| !image_id(v)) {
@@ -614,9 +704,6 @@ pub(super) fn prepare_delivery(
             } else {
                 Vec::new()
             };
-            // A shared dependency cache has consumers outside this graph; its
-            // directories can never be selected through one graph's declaration.
-            validate_disposable_cache(cache.is_some(), &disposable_caches)?;
             let resource = Resource {
                 routing: None,
                 loopback_ports: Vec::new(),
@@ -746,7 +833,7 @@ pub(super) fn prepare_delivery(
         // Compose-file services get Docker's default capability set adjusted by the
         // reviewed cap_add/cap_drop, emitted explicitly after CapDrop ALL so the request
         // never depends on the engine's implicit default. no-new-privileges stays set.
-        let mut capabilities = project::capabilities::effective(service.capabilities.as_ref())?;
+        let mut capabilities = capabilities[name].clone();
         // Virtiofs preserves the host uid. Root services need DAC_OVERRIDE to
         // traverse/write an explicitly shared tree owned by that uid, so it is kept
         // even when cap_drop removes it. Read-only mounts still enforce read-only access.

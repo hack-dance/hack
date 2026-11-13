@@ -27,12 +27,27 @@ type StartupFailure = {
   readonly code: string;
   readonly message?: string;
   readonly service?: string;
+  /** Names only: services whose process failed during startup. Never their output. */
+  readonly failedServices?: readonly string[];
   readonly startupPhase?: "static-preflight";
 };
 let publishFailure: ((failure: StartupFailure) => Promise<void>) | undefined;
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const FAILURE_MESSAGE = /^[\x20-\x7e]{1,400}$/;
 const FAILURE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
+const FAILED_SERVICES_LIMIT = 32;
+let failedStartupServices: readonly string[] = [];
+
+/**
+ * Record which services failed during a detached startup. Names only: the
+ * owner has no terminal, and service output never crosses IPC.
+ */
+export function nativeDetachedUpFailedServices(names: readonly string[]): void {
+  failedStartupServices = [...new Set(names)]
+    .filter((name) => FAILURE_SERVICE.test(name))
+    .sort()
+    .slice(0, FAILED_SERVICES_LIMIT);
+}
 
 /** Only the runtime's validated fixed detail crosses IPC; never an Error's text or logs. */
 export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
@@ -44,7 +59,11 @@ export async function nativeDetachedUpFailure(error: unknown): Promise<void> {
   );
   const failure = nativeRuntimeFailure(error);
   if (isStartupFailure(failure)) {
-    await publishFailure(failure);
+    await publishFailure(
+      failedStartupServices.length > 0 && failure.service === undefined
+        ? { ...failure, failedServices: failedStartupServices }
+        : failure
+    );
   }
 }
 
@@ -52,7 +71,9 @@ function isStartupFailure(value: unknown): value is StartupFailure {
   return (
     isRecord(value) &&
     Object.keys(value).every((key) =>
-      ["code", "message", "service", "startupPhase"].includes(key)
+      ["code", "message", "service", "failedServices", "startupPhase"].includes(
+        key
+      )
     ) &&
     typeof value.code === "string" &&
     FAILURE_CODE.test(value.code) &&
@@ -62,6 +83,13 @@ function isStartupFailure(value: unknown): value is StartupFailure {
     (value.service === undefined ||
       (typeof value.service === "string" &&
         FAILURE_SERVICE.test(value.service))) &&
+    (value.failedServices === undefined ||
+      (Array.isArray(value.failedServices) &&
+        value.failedServices.length > 0 &&
+        value.failedServices.length <= FAILED_SERVICES_LIMIT &&
+        value.failedServices.every(
+          (name) => typeof name === "string" && FAILURE_SERVICE.test(name)
+        ))) &&
     (value.startupPhase === undefined ||
       value.startupPhase === "static-preflight")
   );
@@ -97,9 +125,12 @@ function startupFailureError(failure: StartupFailure): HackCliError {
       message: `Native detached startup refused (${failure.code}); nothing was started.${detail} Fix the reported configuration and retry; run hack doctor --native-preflight to list every static blocker.`,
     });
   }
+  const failed = failure.failedServices?.length
+    ? ` Failed during startup: ${failure.failedServices.join(", ")}. A detached start does not keep service output; run hack up without -d in a terminal to see each failed service's last lines (managed values redacted, not saved).`
+    : "";
   return new HackCliError({
     code: "E_STARTUP_INCOMPLETE",
-    message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}`,
+    message: `Native detached startup failed (${failure.code}); inspect hack ps before retrying; retained owners and recovery evidence are preserved.${detail}${failed}`,
   });
 }
 
@@ -225,6 +256,7 @@ export async function runNativeDetachedOwner(opts: {
     publishReady = undefined;
     publishShellVariables = undefined;
     publishFailure = undefined;
+    failedStartupServices = [];
     process.off("disconnect", disconnected);
     process.off("message", message);
     if (process.connected) {

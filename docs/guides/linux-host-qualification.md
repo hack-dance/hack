@@ -7,8 +7,8 @@ what happens to them when Docker recreates the network and when the host
 reboots. Those last two have so far been covered only by unit tests with fake
 system tools; this runbook is how a person checks them on a real host.
 
-One person can run it in about 30 minutes on a host that is already
-provisioned. Every step is a command to paste, then something to look at. The
+One person should be able to run it in about 30 minutes on a host that is
+already provisioned (an estimate; the first run records real times). Every step is a command to paste, then something to look at. The
 [pass criteria](#pass-criteria) say what counts as a pass. Write the results
 into the [result record](#result-record).
 
@@ -112,7 +112,10 @@ the checkout can change later without affecting the unit.
 ## 3. Set up DNS, trust and the daemon
 
 Run these in an interactive SSH session, not a script: Hack asks before every
-root step, and a run that cannot prompt changes nothing.
+root step (the DNS route and the trust store), and a run that cannot prompt
+skips those. It is not a dry run, though: before the prompts,
+`hack global install` creates Docker networks, writes files under `~/.hack`,
+starts the proxy and DNS containers and may start `hackd`.
 
 ```sh
 hack global install
@@ -173,16 +176,27 @@ fi
 echo "-- proxy containers"
 docker ps -a --filter label=com.docker.compose.project=hack-dev-proxy --format '{{.Names}} {{.Status}}'
 echo "-- lookups"
-getent hosts schemas.hack || echo "schemas.hack: no answer"
-if getent hosts example.com >/dev/null; then echo "example.com: resolves"; else echo "example.com: no answer"; fi
-curl -sS -o /dev/null -w 'https://schemas.hack/hack.config.schema.json -> HTTP %{http_code}\n' \
-  https://schemas.hack/hack.config.schema.json || echo "curl failed"
+timeout 10 getent hosts schemas.hack || echo "schemas.hack: no answer"
+if timeout 10 getent hosts example.com >/dev/null; then echo "example.com: resolves"; else echo "example.com: no answer"; fi
+curl -sS --connect-timeout 5 --max-time 15 -o /dev/null \
+  -w 'https://schemas.hack/hack.config.schema.json -> HTTP %{http_code}\n' \
+  https://schemas.hack/hack.config.schema.json || echo "curl failed (exit $?)"
 echo "-- hack"
 command -v hack
 hack --version
-hack global status --json | jq -c '{host_dns: .host_dns, summary: .summary}'
-hack daemon status --json | jq -c '{running, api_ok, pid, managed_by, service}'
-hack doctor --json | jq -c '.data.checks[] | select(.id == "linux dns route" or .id == "daemon service" or .id == "daemon") | {id, status, detail}'
+timeout 60 hack global status --json | jq -c '{host_dns: .host_dns, summary: .summary}'
+# hackd can need a few seconds after boot or a restart: wait up to 30 seconds.
+tries=0
+until timeout 20 hack daemon status --json | jq -e '.api_ok == true' >/dev/null 2>&1 || [ "$tries" -ge 15 ]; do
+  tries=$((tries + 1))
+  sleep 2
+done
+status=$(timeout 20 hack daemon status --json)
+echo "daemon status exit=$? waited=$((tries * 2))s"
+echo "$status" | jq -c '{running, api_ok, pid, managed_by, service}'
+checks=$(timeout 120 hack doctor --json)
+echo "doctor exit=$?"
+echo "$checks" | jq -c '.data.checks[] | select(.id == "linux dns route" or .id == "daemon service" or .id == "daemon") | {id, status, detail}'
 } 2>&1 | tee "$HOME/hack-qual-$label.txt"
 EOF
 sh ~/hack-qual-snapshot.sh baseline
@@ -201,16 +215,21 @@ systemctl --user show hackd.service -p NRestarts -p MainPID
 systemctl --user kill --signal=SIGKILL hackd.service
 sleep 5
 systemctl --user show hackd.service -p NRestarts -p MainPID -p ActiveState
+sleep 10
+hack daemon status --json | jq -c '{running, api_ok, managed_by}'
 ```
 
-Expect `NRestarts` one higher, a new `MainPID` and `ActiveState=active`.
+Expect `NRestarts` one higher, a new `MainPID` and `ActiveState=active`, then
+`running` and `api_ok` true and `managed_by` `"systemd"`.
 
 ## 5. Recreate the Docker network
 
 Docker gives the `hack-dev` bridge a new interface name (`br-<network id>`)
 each time it creates the network. Only `hack global install` applies the route
-itself; `hack global up` does not. So after the steps below, the only thing
-that can put the route on the new bridge is Hack's udev rule.
+itself; `hack global up` does not, and it does not create a missing network
+either. So below, you remove the network and create it again with plain
+Docker, using Hack's subnet and gateway. After that, the only thing that can
+put the route on the new bridge is Hack's udev rule.
 
 ```sh
 grep '^bridge=' ~/hack-qual-baseline.txt
@@ -222,12 +241,16 @@ default). Then:
 
 ```sh
 docker network rm hack-dev
+docker network create --subnet 172.30.0.0/16 --gateway 172.30.0.1 hack-dev
+ip -o -4 addr show | awk '$4 ~ /^172\.30\.0\.1\// {print "new bridge=" $2}'
 hack global up
 sleep 15
 sh ~/hack-qual-snapshot.sh recreated
 ```
 
-Do not run `hack global install` in this step. If `docker network rm` reports
+Both Docker commands must succeed, and the new bridge must differ from the
+one in `baseline`. Do not run `hack global install` in this step: it applies
+the route itself, so the step would no longer test the udev rule. If `docker network rm` reports
 active endpoints, record the output of
 `docker network inspect hack-dev --format '{{range .Containers}}{{.Name}} {{end}}'`
 and stop: the runbook's assumption that nothing else uses the network does not
@@ -264,7 +287,8 @@ name, so review them before attaching them anywhere public.
 
 ## Pass criteria
 
-Each row is one check. The run passes when every row passes. A row that
+Each row is one check. The run passes when every row passes; the one defined
+exception is B2's `deferred` outcome, described under it. Any other row that
 cannot be checked (for example the console showed the host did not boot) is a
 fail with a note, not a skip.
 
@@ -277,14 +301,14 @@ fail with a note, not a skip.
 | P3 | Hack's own view | `host_dns.state` is `configured`; doctor `linux dns route` is `ok` |
 | P4 | Name lookups | `schemas.hack` answers `172.30.0.2`; `example.com: resolves` (ordinary DNS still works) |
 | P5 | TLS | The `curl` line prints `HTTP 200` and no `curl failed`; a certificate error means trust did not apply |
-| P6 | Daemon service | `ActiveState=active`; `managed_by` is `"systemd"`; doctor `daemon service` is `ok`; `service.summary` starts with `installed, enabled, active` |
-| P7 | Crash restart | After `SIGKILL`, `NRestarts` went up by one and `hackd.service` is active again with a new `MainPID` |
+| P6 | Daemon service and API | `ActiveState=active`; `running` and `api_ok` are `true`; `managed_by` is `"systemd"`; `service.summary` starts with `installed, enabled, active`; doctor `daemon service` and `daemon` are both `ok` |
+| P7 | Crash restart | After `SIGKILL`, `NRestarts` went up by one, `hackd.service` is active again with a new `MainPID`, and `running` and `api_ok` are `true` with `managed_by` `"systemd"` |
 
 ### Network recreated
 
 | ID | Check | Pass |
 | --- | --- | --- |
-| R1 | New bridge | `bridge=` names a different interface than in `baseline` |
+| R1 | New bridge | `docker network rm` and `docker network create` succeeded, and `bridge=` names a different interface than in `baseline` |
 | R2 | Route reapplied without `hack global install` | The P2 values hold on the new bridge; `hack-dns@<new bridge>.service` shows `Result=success` and `ExecMainStatus=0` |
 | R3 | Hack's own view and lookups | P3, P4 and P5 hold |
 
@@ -292,15 +316,30 @@ fail with a note, not a skip.
 
 | ID | Check | Pass |
 | --- | --- | --- |
-| B1 | `hackd` started at boot | In `rebooted`, `ActiveState=active`, and its `ActiveEnterTimestamp` is earlier than the session `Timestamp` (it started before you logged in) |
-| B2 | Route at boot | In `rebooted`, with no `hack` command run since boot: the P2 values hold on the bridge, and `hack-dns@<bridge>.service` shows `Result=success`. If `rebooted` shows `bridge=none`, Docker had not created the bridge yet; record that, and B4 decides whether the route followed the bridge when it appeared |
+| B1 | `hackd` started at boot | In `rebooted`, `ActiveState=active`, and its `ActiveEnterTimestamp` is earlier than the session `Timestamp` (it started before you logged in); P6 holds in the same snapshot |
+| B2 | Route at boot | In `rebooted`, with no `hack` command run since boot: the P2 values hold on the bridge, and `hack-dns@<bridge>.service` shows `Result=success`. Scored `pass`, `deferred` or `fail`; see below |
 | B3 | Containers | Recorded either way. Stopped is the expected state today (no restart policy); it is not a fail |
 | B4 | Everything after `hack global up` | In `rebooted-up`, P2 to P6 hold, still without running `hack global install` |
 
-If B2 fails but B4 passes, note it: the route then depends on something
-`hack global up` does, not on the boot. If P2 to P5 fail in `rebooted-up`,
-run `hack doctor` and record its `linux dns route` code; the table in
+B2 has three outcomes:
+
+- **pass**: the bridge exists in `rebooted` and carries the route.
+- **deferred**: `rebooted` shows `bridge=none`, so Docker had not created the
+  bridge before your login. The route at boot was then not tested; B4 shows
+  whether it followed the bridge when the bridge appeared. A run with B2
+  `deferred` and every other row passing is a pass with that limit, and the
+  result record must say `deferred`, not `pass`.
+- **fail**: the bridge exists in `rebooted` without the route. The run fails,
+  even if B4 passes. Record `sudo journalctl -b -u 'hack-dns@*' --no-pager`.
+
+If P2 to P5 fail in any snapshot, run `hack doctor` and record its
+`linux dns route` code; the table in
 [Check and remove](linux-setup.md#check-and-remove) says what each code means.
+
+If a step runs more than 10 minutes over its time in the
+[timeline](#timeline), stop and record it as a fail with what it was waiting
+for. The times are estimates and have not been measured yet; record the real
+ones.
 
 ## Result record
 
@@ -320,15 +359,17 @@ Date (UTC):        <date>
 
 P1 <pass|fail>  P2 <...>  P3 <...>  P4 <...>  P5 <...>  P6 <...>  P7 <...>
 R1 <...>  R2 <...>  R3 <...>
-B1 <...>  B2 <...>  B3 <stopped|running>  B4 <...>
+B1 <...>  B2 <pass|deferred|fail>  B3 <stopped|running>  B4 <...>
 Needed `hack daemon restart` after install: <yes|no>
+Time per step (min): 1 <..> 2 <..> 3 <..> 4 <..> 5 <..> 6 <..>
 Notes: <anything unexpected, with the snapshot file and line>
 ```
 
 ## Clean up
 
-On a disposable VM, deleting the VM is enough. To return the same host to its
-starting state instead:
+On a disposable VM, deleting the VM is enough. To remove Hack's service and DNS
+route from the host instead (this does not undo the rest: the packages, the
+`docker` group membership, Bun, the checkout and the trusted CA stay):
 
 ```sh
 hack daemon uninstall

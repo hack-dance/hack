@@ -56,6 +56,38 @@ pub(super) fn record(
     receipt.startup_failure = Some(failure);
     Ok(())
 }
+/// Fold in pre-stop evidence only for the same container, keeping the first
+/// recorded failure. False is diagnostic only; it must not obstruct cleanup.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn capture_for_cleanup(receipt: &mut Receipt, failure: Failure) -> bool {
+    if receipt.startup_failure.is_some() {
+        return true;
+    }
+    if !failure.valid(receipt)
+        || receipt
+            .resources
+            .get(&format!("container:{}", failure.service))
+            .and_then(|resource| resource.id.as_deref())
+            != Some(failure.container.as_str())
+    {
+        return false;
+    }
+    receipt.startup_failure = Some(failure);
+    true
+}
+
+/// Diagnostics must not abort cleanup when the frontend's stderr pipe is gone.
+#[cfg(target_os = "macos")]
+pub(super) fn unrecorded() {
+    write_unrecorded(&mut std::io::stderr());
+}
+#[cfg(any(target_os = "macos", test))]
+fn write_unrecorded(output: &mut impl std::io::Write) {
+    let _ = writeln!(
+        output,
+        "startup_failure_unrecorded: listener failure evidence could not be retained before cleanup."
+    );
+}
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn preserve_listener_error(
     root: &Path,
@@ -85,6 +117,39 @@ mod tests {
 
     fn receipt() -> Receipt {
         serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"preparing","readiness":{"redis":"started"},"resources":{"container:redis":{"key":"redis","kind":"container","name":format!("hkg-{}-container-0", "a".repeat(32)),"id":"e".repeat(64),"phase":"started","image":format!("sha256:{}", "f".repeat(64))}}})).unwrap()
+    }
+    #[test]
+    fn lost_diagnostic_pipe_does_not_abort_cleanup_evidence_handling() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        drop(reader);
+        write_unrecorded(&mut writer);
+        let mut cleaned = receipt();
+        record(&mut cleaned, "redis", Observation::Exited { code: 7 }).unwrap();
+        cleaned.phase = "stopped-data-retained".into();
+        cleaned.resources.get_mut("container:redis").unwrap().id = None;
+        let root = super::super::tests::Fixture::new();
+        crate::provider::state::write(&root.0.join("state.json"), &cleaned).unwrap();
+        assert!(super::super::load_at(root.0.clone(), &cleaned.run, &cleaned.owner).is_ok());
+    }
+    #[test]
+    fn cleanup_capture_keeps_first_failure_and_refuses_replaced_container_without_writing() {
+        let mut original = receipt();
+        record(&mut original, "redis", Observation::Exited { code: 7 }).unwrap();
+        let first = original.startup_failure.clone().unwrap();
+        let mut later = first.clone();
+        later.observation = Observation::Exited { code: 8 };
+        assert!(capture_for_cleanup(&mut original, later));
+        assert_eq!(original.startup_failure, Some(first.clone()));
+        let mut replaced = receipt();
+        replaced.resources.get_mut("container:redis").unwrap().id = Some("9".repeat(64));
+        let bytes = serde_json::to_vec(&replaced).unwrap();
+        assert!(!capture_for_cleanup(&mut replaced, first.clone()));
+        assert_eq!(serde_json::to_vec(&replaced).unwrap(), bytes);
+        let mut current = receipt();
+        assert!(capture_for_cleanup(&mut current, first.clone()));
+        assert!(capture_for_cleanup(&mut current, first.clone()));
+        assert_eq!(current.startup_failure, Some(first));
     }
     #[test]
     fn failure_survives_cleanup_and_legacy_receipts_remain_readable() {

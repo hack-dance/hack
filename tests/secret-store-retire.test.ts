@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import {
   buildDoctorRecoveryGuidance,
@@ -35,6 +35,7 @@ import {
 } from "../src/lib/secret-store.ts";
 import {
   describeRetireTarget,
+  listProjectsUsingSecretStore,
   planSecretStoreRetire,
   retireSecretStore,
 } from "../src/lib/secret-store-retire.ts";
@@ -1476,6 +1477,71 @@ test("a store another project opens through the OS keychain is not retired", asy
     locked.mockRestore();
   }
   expect(await readFile(fixture.storePath)).toEqual(before);
+});
+
+test("readers that share a display name stay separate readers", async () => {
+  // Second-family review: readers were deduplicated by display name, so a
+  // second registered project with the same name lost all its readers, and
+  // which one survived depended on registry order.
+  const fixture = await setUp();
+  await createProject({ name: "app-a-twin", readsStore: true });
+  const registry = join(fixture.hackHome, "projects.json");
+  const parsed = JSON.parse(await readFile(registry, "utf8")) as {
+    projects: { name: string }[];
+  };
+  for (const project of parsed.projects) {
+    if (project.name === "app-a-twin") {
+      project.name = "app-a";
+    }
+  }
+  const seen: string[] = [];
+  for (const projects of [parsed.projects, [...parsed.projects].reverse()]) {
+    await writeFile(registry, JSON.stringify({ ...parsed, projects }));
+    const users = await listProjectsUsingSecretStore({
+      storePath: fixture.storePath,
+    });
+    expect(users.names).toEqual(["app-a"]);
+    expect(users.readers.map((reader) => reader.name)).toEqual([
+      "app-a",
+      "app-a",
+    ]);
+    expect(
+      users.readers.map((reader) => basename(dirname(reader.project))).sort()
+    ).toEqual(["app-a", "app-a-twin"]);
+    seen.push(JSON.stringify(users.readers));
+  }
+  // The same readers in the same order, whatever the registry order.
+  expect(seen[0]).toBe(seen[1] as string);
+});
+
+test("one checkout registered under two names keeps both names", async () => {
+  // Second-family review: keying readers by directory alone dropped the
+  // second name of a checkout registered twice, depending on registry order.
+  const fixture = await setUp();
+  const registry = join(fixture.hackHome, "projects.json");
+  const parsed = JSON.parse(await readFile(registry, "utf8")) as {
+    projects: { name: string }[];
+  };
+  const original = parsed.projects.find((project) => project.name === "app-a");
+  expect(original).toBeDefined();
+  const projects = [
+    ...parsed.projects,
+    { ...original, id: "app-a-alias-id", name: "app-a-alias" },
+  ];
+  const seen: string[] = [];
+  for (const order of [projects, [...projects].reverse()]) {
+    await writeFile(registry, JSON.stringify({ ...parsed, projects: order }));
+    const users = await listProjectsUsingSecretStore({
+      storePath: fixture.storePath,
+    });
+    expect(users.names).toEqual(["app-a", "app-a-alias"]);
+    expect(users.readers.map((reader) => reader.name)).toEqual([
+      "app-a",
+      "app-a-alias",
+    ]);
+    seen.push(JSON.stringify(users));
+  }
+  expect(seen[0]).toBe(seen[1] as string);
 });
 
 test("an invalid worktree entry inside a valid project makes the reader scan incomplete", async () => {

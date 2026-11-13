@@ -590,7 +590,14 @@ fn exact_owned_cleanup_archives_partial_rebind_and_unblocks_fresh_restore() {
     )
     .unwrap();
     assert!(require_complete(&root, &original).is_err());
+    // A newly captured failure belongs to cleanup's receipt, never to the
+    // persisted pre-cleanup generation that keys this rebind archive.
     let mut cleaned = original.clone();
+    startup_failure::record(&mut cleaned, "web", Observation::Exited { code: 7 }).unwrap();
+    assert_ne!(
+        service_exec_generation(&original).unwrap(),
+        service_exec_generation(&cleaned).unwrap()
+    );
     cleaned.phase = "stopped-data-retained".into();
     assert!(archive_after_cleanup(&root, &original, &cleaned, "old-boot").is_err());
     cleaned.resources.get_mut("container:web").unwrap().phase = "absent".into();

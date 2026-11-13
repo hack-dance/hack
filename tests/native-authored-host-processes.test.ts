@@ -216,6 +216,65 @@ ownedCase(
   }
 );
 ownedCase(
+  "pre-Ready observation refuses live host records without stopping and accepts settled records without retiring",
+  async (f) => {
+    await withNativeAuthoredProjectAdmission(f.scope, async (admission) => {
+      const owner = await createNativeAuthoredHostProcesses({
+        scope: f.scope,
+        run,
+        semanticHash: semantic,
+        projectName: "fixture",
+        lifecycle: f.lifecycle,
+        report: () => f.report,
+        resolveValues: () => Promise.resolve({ TOKEN: canary }),
+        assertFresh: admission.assertHeld,
+        signal: f.abort.signal,
+        remaining: f.remaining,
+      });
+      unknown = true;
+      try {
+        await owner.start();
+        const calls = await readFile(`${f.state}.calls`, "utf8");
+        const check = {
+          scope: f.scope,
+          run,
+          assertFresh: admission.assertHeld,
+          checkOnly: true,
+        };
+        await expect(
+          retireNativeAuthoredHostProcesses(check)
+        ).rejects.toThrow();
+        const later = (await readFile(`${f.state}.calls`, "utf8")).slice(
+          calls.length
+        );
+        expect(later).not.toContain("send-keys");
+        expect(later).not.toContain("kill-session");
+        await owner.stop();
+        await retireNativeAuthoredHostProcesses(check);
+        const path = join(
+          f.projectDir,
+          ".internal/native-authored-runs",
+          `${run}.host-process-owner.json`
+        );
+        expect(await Bun.file(path).exists()).toBe(true);
+        await retireNativeAuthoredHostProcesses({ ...check, checkOnly: false });
+        expect(await Bun.file(path).exists()).toBe(false);
+        // Recovery removed its publication; close still releases the original
+        // fixture owner's held directory handles while refusing changed proof.
+        await expect(owner.close()).rejects.toThrow();
+        unknown = false;
+      } finally {
+        if (unknown) {
+          await owner.stop();
+          await owner.close();
+          unknown = false;
+        }
+      }
+    });
+  }
+);
+
+ownedCase(
   "recovery uses the saved exact controller identity and refuses a foreign live token before any stop",
   async (f) => {
     await withNativeAuthoredProjectAdmission(f.scope, async (admission) => {

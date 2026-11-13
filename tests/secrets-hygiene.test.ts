@@ -322,3 +322,22 @@ test("a fix is skipped when its directory was replaced after inspection", async 
   ).toEqual({ applied: 0, skipped: 1 });
   expect(await readFile(otherIgnore, "utf8")).toBe("kept\n");
 });
+
+test("an in-project store under a name starting with '..' is still checked against git", async () => {
+  const f = await fixture();
+  const dir = join(f.projectRoot, "..secrets");
+  await mkdir(dir);
+  const storePath = join(dir, "store.enc.json");
+  const keyPath = join(dir, "store.key");
+  await writeFile(storePath, "{}\n", { mode: 0o600 });
+  await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
+  await git(f.projectRoot, ["add", "-f", "--", keyPath, storePath]);
+  const findings = await inspectSecretsHygiene({
+    ...f.scope,
+    stores: [{ storePath, keyPath }],
+  });
+  expect(paths(findings)).toEqual([keyPath, storePath].sort());
+  for (const finding of findings) {
+    expect(finding).toMatchObject({ status: "error", fix: null });
+  }
+});

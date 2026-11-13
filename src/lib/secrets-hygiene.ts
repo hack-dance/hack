@@ -133,6 +133,11 @@ const PLAINTEXT_DOTENV = PLAINTEXT_DOTENV_NAME;
 const HACK_DIR_STAGED =
   /^(\.env(\.[A-Za-z0-9_-]+)?|hack\.env\..*yaml|\.gitignore)$/;
 
+/** Whether a `relative()` result leaves its base (`..` as a path segment). */
+function isOutside(rel: string): boolean {
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
 function octal(mode: number): string {
   return (mode & 0o777).toString(8).padStart(4, "0");
 }
@@ -142,7 +147,7 @@ function shown(path: string, project: SecretsHygieneScope["project"]): string {
     return path;
   }
   const rel = relative(project.projectRoot, path);
-  return rel.startsWith("..") ? path : rel;
+  return isOutside(rel) ? path : rel;
 }
 
 /** What a file in `.hack` holds, or null when it holds no env values. */
@@ -341,7 +346,7 @@ function inProjectIgnore(opts: {
     return null;
   }
   const rel = relative(opts.project.projectRoot, opts.path);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+  if (rel === "" || isOutside(rel)) {
     return null;
   }
   return {

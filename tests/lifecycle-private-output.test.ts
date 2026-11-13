@@ -16,6 +16,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runLifecycleCommands } from "../src/commands/project.ts";
 import { runLifecycleCommandChild } from "../src/lib/lifecycle-command-child.ts";
 import {
   appendLifecycleLogRecord,
@@ -27,6 +28,7 @@ import {
 import {
   appendPrivateFile,
   ensurePrivateDirectory,
+  migrateToPrivateCopy,
   PrivatePathRefusedError,
 } from "../src/lib/private-file.ts";
 import { wrapLifecyclePersistentCommand } from "../src/lib/project-lifecycle-controller.ts";
@@ -101,6 +103,74 @@ describe("private files and directories", () => {
     expect(
       (await readdir(root)).filter((name) => name.endsWith(".private"))
     ).toEqual([]);
+  });
+
+  test("migration never publishes a short copy: the original stays and no staging file is left", async () => {
+    const file = join(root, "old.log");
+    await writeFile(file, "history\n", { mode: 0o644 });
+    await chmod(file, 0o644);
+    const identity = await lstat(file);
+    // The copy's only (and so final) chunk is written short, then refused.
+    let calls = 0;
+    await expect(
+      migrateToPrivateCopy({
+        path: file,
+        identity,
+        write: async (handle, bytes) => {
+          calls += 1;
+          return calls === 1
+            ? (await handle.write(bytes, 0, 3)).bytesWritten
+            : 0;
+        },
+      })
+    ).rejects.toThrow("Short write");
+    expect(await readFile(file, "utf8")).toBe("history\n");
+    expect((await lstat(file)).ino).toBe(identity.ino);
+    expect(
+      (await readdir(root)).filter((name) => name.endsWith(".private"))
+    ).toEqual([]);
+  });
+
+  test("a second migration from a stale view skips, so a record appended after the first survives", async () => {
+    const file = join(root, "old.log");
+    await writeFile(file, "history\n", { mode: 0o644 });
+    await chmod(file, 0o644);
+    const stale = await lstat(file);
+    // Writer A migrates and appends.
+    await appendPrivateFile({ path: file, data: "record A\n" });
+    // Writer B saw the old inode too; its migration finds it already gone.
+    expect(await migrateToPrivateCopy({ path: file, identity: stale })).toBe(
+      false
+    );
+    await appendPrivateFile({ path: file, data: "record B\n" });
+    expect(await readFile(file, "utf8")).toBe("history\nrecord A\nrecord B\n");
+  });
+
+  test("output appended to the old log while it is copied is carried over", async () => {
+    const file = join(root, "old.log");
+    await writeFile(file, "history\n", { mode: 0o644 });
+    await chmod(file, 0o644);
+    const identity = await lstat(file);
+    // A shell holding the old inode appends while the copy runs.
+    const shell = await open(file, "a");
+    let appended = false;
+    try {
+      await migrateToPrivateCopy({
+        path: file,
+        identity,
+        write: async (handle, bytes) => {
+          if (!appended) {
+            appended = true;
+            await shell.write("late line\n");
+          }
+          return (await handle.write(bytes, 0, bytes.length)).bytesWritten;
+        },
+      });
+    } finally {
+      await shell.close();
+    }
+    expect(await readFile(file, "utf8")).toBe("history\nlate line\n");
+    expect(await mode(file)).toBe(0o600);
   });
 
   test("a planted symlink, hard link or FIFO is refused and its target is untouched", async () => {
@@ -245,6 +315,36 @@ describe("lifecycle log", () => {
       await lstat(join(root, "elsewhere.log")).catch(() => null)
     ).toBeNull();
   }, 60_000);
+
+  test("a log the hook itself makes unsafe changes only persistence: the hook succeeds and the next one runs", async () => {
+    const projectDir = join(root, "repo", ".hack");
+    await mkdir(projectDir, { recursive: true });
+    const logPath = resolveLifecycleLogPath({
+      projectDir,
+      composeProject: "demo",
+    });
+    const outside = join(root, "outside.log");
+    const marker = join(root, "second-ran");
+    const code = await runLifecycleCommands({
+      title: "up.before",
+      commands: [
+        {
+          name: "first",
+          // Swaps its own log for a symlink before printing, then prints, exits 0.
+          command: `ln -sfn '${outside}' '${logPath}'; echo one; echo two`,
+        },
+        { name: "second", command: `touch '${marker}'` },
+      ],
+      projectRoot: join(root, "repo"),
+      env: {},
+      projectDir,
+      composeProject: "demo",
+      routeStdoutToStderr: true,
+    });
+    expect(code).toBe(0);
+    expect((await lstat(marker)).isFile()).toBe(true);
+    expect(await lstat(outside).catch(() => null)).toBeNull();
+  });
 
   test("a persistent command is not run when its private FIFO cannot be created", async () => {
     const marker = join(root, "ran");

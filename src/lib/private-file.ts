@@ -15,6 +15,7 @@ import { ClosedCliError } from "./cli-result.ts";
 import { publishFileExclusive } from "./exclusive-publish.ts";
 import { closedFileWriteError } from "./fs.ts";
 import { isRecord } from "./guards.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
 /**
  * Bounded, no-follow reads and exclusive creates for private key material.
@@ -599,26 +600,45 @@ export async function openPrivateAppend(path: string): Promise<FileHandle> {
   if ((info.mode & 0o077) === 0) {
     return handle;
   }
+  await handle.close();
   // Group or other could read it, and chmod does not revoke a descriptor a
   // reader already holds: move its contents to a new private inode, so that
-  // reader sees nothing written from now on.
-  try {
-    await replaceWithPrivateCopy({ path, identity: info });
-  } finally {
-    await handle.close();
-  }
+  // reader sees nothing written from now on. One migration at a time.
+  await withProjectsRegistryLock({
+    lockPath: `${path}.migrate.lock`,
+    label: "private log migration",
+    run: async () => {
+      await migrateToPrivateCopy({ path, identity: info });
+    },
+  });
   return await openVerifiedAppend(path);
 }
 
+/** Seam for tests: one positioned write; returns the bytes written. */
+export type WriteChunk = (
+  handle: FileHandle,
+  bytes: Uint8Array
+) => Promise<number>;
+
+const writeChunk: WriteChunk = async (handle, bytes) =>
+  (await handle.write(bytes, 0, bytes.length)).bytesWritten;
+
 /**
- * Copy an open file's contents into a new private (0600) file beside it and
- * rename that over `path`. The old inode is left to whoever still holds it.
+ * Replace the file at `path` with a private (0600) copy, if the path still
+ * names the broad-mode inode `identity` (call it under the migration lock;
+ * another writer may already have migrated it, and then nothing happens).
+ * Every chunk is written in full or the copy fails, so a short write never
+ * publishes a truncated history; on failure the original stays in place and
+ * only this call's staging file is removed. Output appended to the old inode
+ * while copying is carried over after the rename. Returns whether it
+ * replaced the file.
  */
-async function replaceWithPrivateCopy(opts: {
+export async function migrateToPrivateCopy(opts: {
   readonly path: string;
-  /** The verified file: the copy reads exactly this inode. */
   readonly identity: Stats;
-}): Promise<void> {
+  readonly write?: WriteChunk;
+}): Promise<boolean> {
+  const write = opts.write ?? writeChunk;
   const from = await open(
     opts.path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
@@ -627,62 +647,84 @@ async function replaceWithPrivateCopy(opts: {
     const current = await from.stat();
     if (
       current.dev !== opts.identity.dev ||
-      current.ino !== opts.identity.ino
+      current.ino !== opts.identity.ino ||
+      (current.mode & 0o077) === 0
     ) {
-      throw new PrivatePathRefusedError(
-        opts.path,
-        "a file replaced while it was checked"
-      );
+      return false;
     }
-    await copyIntoPrivateFile({ path: opts.path, from });
+    const staging = join(
+      dirname(opts.path),
+      `.${basename(opts.path)}.${randomUUID()}.private`
+    );
+    const copy = await open(
+      staging,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600
+    );
+    let copied = 0;
+    try {
+      copied = await copyAll({ from, to: copy, start: 0, write });
+      await copy.sync();
+    } catch (error: unknown) {
+      await copy.close();
+      await unlink(staging).catch(() => undefined);
+      throw error;
+    }
+    await copy.close();
+    await rename(staging, opts.path).catch(async (error: unknown) => {
+      await unlink(staging).catch(() => undefined);
+      throw error;
+    });
+    // Carry over anything appended to the old inode while it was copied.
+    const fresh = await openVerifiedAppend(opts.path);
+    try {
+      await copyAll({ from, to: fresh, start: copied, write });
+    } finally {
+      await fresh.close();
+    }
+    return true;
   } finally {
     await from.close();
   }
 }
 
-async function copyIntoPrivateFile(opts: {
-  readonly path: string;
+/** Copy `from` (from `start` to its end) to `to`, every chunk in full. */
+async function copyAll(opts: {
   readonly from: FileHandle;
-}): Promise<void> {
-  const staging = join(
-    dirname(opts.path),
-    `.${basename(opts.path)}.${randomUUID()}.private`
-  );
-  const copy = await open(
-    staging,
-    constants.O_WRONLY |
-      constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_NOFOLLOW,
-    0o600
-  );
-  try {
-    const buffer = Buffer.alloc(64 * 1024);
-    let position = 0;
-    for (;;) {
-      const { bytesRead } = await opts.from.read(
-        buffer,
-        0,
-        buffer.length,
-        position
-      );
-      if (bytesRead === 0) {
-        break;
-      }
-      await copy.write(buffer, 0, bytesRead);
-      position += bytesRead;
+  readonly to: FileHandle;
+  readonly start: number;
+  readonly write: WriteChunk;
+}): Promise<number> {
+  const buffer = Buffer.alloc(64 * 1024);
+  let position = opts.start;
+  for (;;) {
+    const { bytesRead } = await opts.from.read(
+      buffer,
+      0,
+      buffer.length,
+      position
+    );
+    if (bytesRead === 0) {
+      return position;
     }
-    await copy.sync();
-  } catch (error: unknown) {
-    await copy.close();
-    await unlink(staging).catch(() => undefined);
-    throw error;
+    let done = 0;
+    while (done < bytesRead) {
+      const written = await opts.write(
+        opts.to,
+        buffer.subarray(done, bytesRead)
+      );
+      if (written <= 0) {
+        throw Object.assign(new Error("Short write while copying a log."), {
+          code: "ENOSPC",
+        });
+      }
+      done += written;
+    }
+    position += bytesRead;
   }
-  await copy.close();
-  await rename(staging, opts.path).catch(async (error: unknown) => {
-    await unlink(staging).catch(() => undefined);
-    throw error;
-  });
 }
 
 /** Open for appending, refusing anything but this user's single-link regular file. */

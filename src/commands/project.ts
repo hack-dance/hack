@@ -252,9 +252,9 @@ import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import { runLifecycleCommandChild } from "../lib/lifecycle-command-child.ts";
 import {
-  appendLifecycleLogRecord,
   createLifecycleLogSink,
   drainLifecycleOutput,
+  type LifecycleLogSink,
   readLifecycleState,
   resolveLifecycleComposeProjectName,
   resolveLifecycleLogPath,
@@ -1830,12 +1830,10 @@ function runLifecycleChild(opts: {
   readonly composeProject: string;
   readonly service: string;
   readonly signal?: AbortSignal;
+  /** The hook's log sink, shared with its end record. */
+  readonly sink: LifecycleLogSink;
 }): Promise<number> {
-  const sink = createLifecycleLogSink({
-    projectDir: opts.projectDir,
-    composeProject: opts.composeProject,
-    warn: (message) => logger.warn({ message }),
-  });
+  const { sink } = opts;
   return runLifecycleCommandChild({
     command: opts.command,
     cwd: opts.cwd,
@@ -1851,7 +1849,14 @@ function runLifecycleChild(opts: {
   });
 }
 
-async function runLifecycleCommands(opts: {
+/**
+ * Run a lifecycle phase's commands in order. Exported for tests. A log that
+ * cannot be written (a refused path, an I/O error) changes only
+ * persistence: nothing is written through it, the problem is reported once
+ * per hook, and the hook's output and result, and the commands after it,
+ * are unaffected.
+ */
+export async function runLifecycleCommands(opts: {
   readonly title: string;
   readonly commands: readonly ProjectLifecycleCommand[] | undefined;
   readonly projectRoot: string;
@@ -1908,18 +1913,19 @@ async function runLifecycleCommands(opts: {
       cwd: cmd.cwd,
     });
 
-    await appendLifecycleLogRecord({
+    const sink = createLifecycleLogSink({
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
-      record: {
-        timestamp: new Date().toISOString(),
-        service: serviceName,
-        stream: "meta",
-        message: `[start] ${opts.title}: ${label}`,
-      },
+      warn: (message) => logger.warn({ message }),
     });
-
+    await sink.append({
+      timestamp: new Date().toISOString(),
+      service: serviceName,
+      stream: "meta",
+      message: `[start] ${opts.title}: ${label}`,
+    });
     const exitCode = await runLifecycleChild({
+      sink,
       command: cmd.command,
       cwd,
       env: await mergeLifecycleCommandEnv(opts.env),
@@ -1930,15 +1936,11 @@ async function runLifecycleCommands(opts: {
       signal: opts.signal,
     });
 
-    await appendLifecycleLogRecord({
-      projectDir: opts.projectDir,
-      composeProject: opts.composeProject,
-      record: {
-        timestamp: new Date().toISOString(),
-        service: serviceName,
-        stream: "meta",
-        message: `[end] ${opts.title}: exit ${exitCode}`,
-      },
+    await sink.append({
+      timestamp: new Date().toISOString(),
+      service: serviceName,
+      stream: "meta",
+      message: `[end] ${opts.title}: exit ${exitCode}`,
     });
 
     if (exitCode !== 0) {

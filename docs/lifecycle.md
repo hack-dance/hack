@@ -527,8 +527,10 @@ Notes:
   until Hack's next record). An older log that group
   or others could read is copied to a new private file before the next record, so a reader that
   already had the old file open sees no new output; an older directory is tightened to 0700. If a
-  hook's log cannot be written while it runs (a refused path, an I/O error), Hack reports that once
-  and keeps showing the hook's output; it is just not saved. Private modes do not protect
+  hook's log cannot be written (a refused path, an I/O error), Hack writes nothing through it,
+  reports that once and still runs the hook and the ones after it, showing their output; it is just
+  not saved. A persistent process is not started while its log is unsafe, since its shell would
+  follow a link. Private modes do not protect
   them from your own tools, agents or backups. A persistent process's output reaches its log
   through a FIFO (mode 0600) in a directory that `mktemp -d` creates privately; if it cannot be
   created, the process is not started. If tmux pane state disappears before teardown, `hack down` still uses that persisted metadata to clean up any live lifecycle process groups instead of leaving orphaned host processes behind.

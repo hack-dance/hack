@@ -82,6 +82,7 @@ async function refused(
   expect(String(error)).toContain(
     "Reconcile chosen values with hack env set KEY --value-stdin"
   );
+  expect(String(error)).toContain("--local for machine-local values");
   expect(String(error)).not.toContain(SENTINEL);
 }
 

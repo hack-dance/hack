@@ -904,9 +904,10 @@ removing anything. Changed sources or delivery refuse cleanup with reconciliatio
 advice; migration writes already completed remain. Confirmed removals before a
 failure are named. Implicit cleanup warns and lets the original command continue
 even if a lock times out, a key is unavailable or a file is unreadable.
-Once YAML layers exist, rerunning migration does not import changed legacy
+Once YAML layers exist, rerunning migration may not import changed legacy
 values. Keep the copies and keys, reconcile chosen values with `env set KEY
---value-stdin` (add `--secret` for secrets and preserve scope/overlay), check
+--value-stdin` (use `--local` for machine-local values, add `--secret` for secrets
+and preserve scope/overlay), check
 delivery, then remove only copies confirmed obsolete. Editors and older writers
 that do not take Hack's locks can still race a filesystem operation.
 

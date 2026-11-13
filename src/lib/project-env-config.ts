@@ -8901,7 +8901,7 @@ async function removeLegacyProjectEnvArtifactsUnderLocks(opts: {
 }
 
 const LEGACY_CLEANUP_RECOVERY =
-  "Keep the remaining legacy copies and existing keys. Once YAML layers exist, rerunning migration does not import changed legacy values. Reconcile chosen values with hack env set KEY --value-stdin (add --secret for secrets and preserve --env/--service), check delivery, then remove only copies confirmed obsolete. Values omitted.";
+  "Keep the remaining legacy copies and existing keys. Once YAML layers exist, rerunning migration may not import changed legacy values. Reconcile chosen values with hack env set KEY --value-stdin (use --local for machine-local values, add --secret for secrets and preserve --env/--service), check delivery, then remove only copies confirmed obsolete. Values omitted.";
 
 /** A value-free cleanup outcome, including every removal confirmed before failure. */
 export class LegacyEnvCleanupError extends ClosedCliError {

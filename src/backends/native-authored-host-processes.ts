@@ -155,10 +155,7 @@ function entry(value: unknown): LifecycleStateEntry | null {
   const processes: LifecycleStateEntry["processes"][number][] = [];
   for (const process of value.processes) {
     if (
-      !(
-        isRecord(process) &&
-        keys(process, "logPath,name,panePid,processGroupId,windowName")
-      ) ||
+      !(isRecord(process) && keys(process, lifecycleProcessKeys(process))) ||
       typeof process.name !== "string" ||
       typeof process.windowName !== "string" ||
       typeof process.logPath !== "string" ||
@@ -171,12 +168,16 @@ function entry(value: unknown): LifecycleStateEntry | null {
     ) {
       return refuse();
     }
+    const paneBirth = lifecycleBirth(process.paneBirth);
+    const processGroupBirth = lifecycleBirth(process.processGroupBirth);
     processes.push({
       name: process.name,
       windowName: process.windowName,
       logPath: process.logPath,
       panePid: process.panePid,
+      ...(paneBirth === undefined ? {} : { paneBirth }),
       processGroupId: process.processGroupId,
+      ...(processGroupBirth === undefined ? {} : { processGroupBirth }),
     });
   }
   return {
@@ -190,6 +191,32 @@ function entry(value: unknown): LifecycleStateEntry | null {
     processes,
     updatedAt: value.updatedAt,
   };
+}
+
+/** Optional incarnation metadata from the shared controller; no other keys widen. */
+function lifecycleBirth(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 128 ||
+    value.trim() !== value
+  ) {
+    return refuse();
+  }
+  return value;
+}
+
+function lifecycleProcessKeys(value: Record<string, unknown>): string {
+  const fields = ["logPath", "name", "panePid", "processGroupId", "windowName"];
+  for (const field of ["paneBirth", "processGroupBirth"]) {
+    if (Object.hasOwn(value, field)) {
+      fields.push(field);
+    }
+  }
+  return fields.sort().join(",");
 }
 
 /** Strict bounded read of the shared metadata-only controller file. Legacy files

@@ -16,7 +16,10 @@ import {
   retireNativeAuthoredHostProcesses,
 } from "../src/backends/native-authored-host-processes.ts";
 import { withNativeAuthoredProjectAdmission } from "../src/backends/native-authored-project-run.ts";
-import { resolveLifecycleStatePath } from "../src/lib/lifecycle-runtime.ts";
+import {
+  readLifecycleState,
+  resolveLifecycleStatePath,
+} from "../src/lib/lifecycle-runtime.ts";
 import type { NativeEnvironmentPlan } from "../src/lib/native-env-plan-protocol.ts";
 import { selectNativeHostLifecycle } from "../src/lib/native-host-lifecycle-contract.ts";
 import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
@@ -45,7 +48,7 @@ async function fixture() {
   roots.add(root);
   const projectDir = join(root, ".hack");
   const bin = join(root, "bin");
-  await mkdir(projectDir);
+  await mkdir(projectDir, { mode: 0o700 });
   await mkdir(bin);
   await writeLifecycleMuxFixture(bin);
   const before = {
@@ -53,7 +56,9 @@ async function fixture() {
     HACK_SESSIONS_MUX: process.env.HACK_SESSIONS_MUX,
     HACK_TEST_MUX_STATE: process.env.HACK_TEST_MUX_STATE,
   };
+  const previousUmask = process.umask(0o077);
   restore = () => {
+    process.umask(previousUmask);
     for (const [key, value] of Object.entries(before)) {
       if (value === undefined) {
         delete process.env[key];
@@ -197,6 +202,11 @@ ownedCase(
         unknown = true;
         await owner.start();
         await owner.assertReady();
+        const process = (
+          await readLifecycleState({ projectDir: f.projectDir })
+        )[0]?.processes[0];
+        expect(process?.paneBirth).toBeString();
+        expect(process?.processGroupBirth).toBeString();
         expect(await readFile(join(f.root, "value-seen"), "utf8")).toBe(canary);
         expect(await readFile(join(f.root, "endpoint-seen"), "utf8")).toBe(
           "http://127.0.0.1:4321"

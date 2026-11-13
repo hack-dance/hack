@@ -213,6 +213,9 @@ async function runInitAuto(opts: {
   readonly root: string;
   readonly repo: string;
   readonly backend: string | undefined;
+  /** Let init discover services (default: --no-discovery). */
+  readonly discovery?: boolean;
+  readonly name?: string;
 }): Promise<{ exitCode: number; output: string }> {
   const proc = Bun.spawn({
     cmd: [
@@ -220,9 +223,9 @@ async function runInitAuto(opts: {
       join(REPO_ROOT, "index.ts"),
       "init",
       "--auto",
-      "--no-discovery",
+      ...(opts.discovery ? [] : ["--no-discovery"]),
       "--name",
-      "synthetic",
+      opts.name ?? "synthetic",
       "--path",
       opts.repo,
     ],
@@ -311,3 +314,58 @@ test("hack init --auto refuses an existing .hack/ with a coded line, no stack an
     expect(await Bun.file(configPath).text()).toBe(before);
   }
 }, 60_000);
+
+test("hack init --auto says when it wrote a placeholder, and stays quiet when it found a service", async () => {
+  // Found while dogfooding: a repository with nothing discovery recognises
+  // got a Bun "dev" placeholder, "Initialized" and "Next: hack up", and the
+  // first up failed with the missing script.
+  const root = await createTempDir();
+  const empty = join(root, "no-service");
+  await mkdir(empty, { recursive: true });
+  await writeFile(join(empty, "main.py"), 'print("hi")\n');
+  const missed = await runInitAuto({
+    root,
+    repo: empty,
+    backend: "compose",
+    discovery: true,
+    name: "no-service",
+  });
+  expect(missed.exitCode).toBe(0);
+  expect(missed.output).toContain(
+    "No runnable service was found in this repository"
+  );
+  expect(missed.output).toContain('placeholder service "app"');
+  expect(missed.output).toContain(
+    "Next: edit .hack/docker-compose.yml, then hack up"
+  );
+
+  const found = join(root, "has-service");
+  await mkdir(found, { recursive: true });
+  await writeFile(
+    join(found, "package.json"),
+    JSON.stringify({ name: "has-service", scripts: { dev: "bun server.ts" } })
+  );
+  const discovered = await runInitAuto({
+    root,
+    repo: found,
+    backend: "compose",
+    discovery: true,
+    name: "has-service",
+  });
+  expect(discovered.exitCode).toBe(0);
+  expect(discovered.output).not.toContain("placeholder");
+  expect(discovered.output).toContain("Next: hack up");
+
+  // --no-discovery asked for the minimal scaffold: its output is unchanged.
+  const skippedRepo = join(root, "skipped");
+  await mkdir(skippedRepo, { recursive: true });
+  const skipped = await runInitAuto({
+    root,
+    repo: skippedRepo,
+    backend: "compose",
+    name: "skipped",
+  });
+  expect(skipped.exitCode).toBe(0);
+  expect(skipped.output).not.toContain("placeholder");
+  expect(skipped.output).toContain("Next: hack up --detach && hack open");
+});

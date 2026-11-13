@@ -1,9 +1,9 @@
 # Native backend reference
 
 This is the detailed reference for the native backend (beta). It is long and
-precise. For a short introduction, read the [overview](../native/README.md),
-[try it](../native/try-it.md) and
-[what works and known limits](../native/limits.md). The
+precise. For the first run, use [Try native on Apple Silicon](https://hack.foo/docs/v5/native/start).
+The [overview](../native/README.md) and
+[known limits](../native/limits.md) explain its scope. The
 [reference map](../native/reference.md) lists this page's sections by topic.
 
 The native backend is beta. `hack-native` is an opt-in Apple Silicon macOS executor installed alongside
@@ -99,49 +99,29 @@ mkdir -m 700 /absolute/private/candidate-home
 ./hack-native --candidate-root /absolute/private/candidate-home --version
 ```
 
-The home must already exist, be owned by the current user, and have mode `0700`.
+The home must already exist, be owned by the current user, and have mode `0700`,
+except that `runtime setup` and its read-only `inspect` accept an absent home.
+Setup creates missing directories privately after consent.
 Use its canonical absolute path without symlink components (on macOS, use
-`/private/tmp` rather than `/tmp`). Every command requires this explicit home,
+`/private/tmp` rather than `/tmp`). Every lower-level `hack-native` command requires this explicit home,
 including help and version. Its `checkout` field is the historical receipt name
 for this stable home; `channel` reports `installed-candidate`. State remains under
 `<home>/.hack-local`. Keep this home fixed across binary upgrades: receipts and
 child processes bind to its identity. Moving an executable is supported; moving
 an active home or adopting another installation's state is not.
 
-Run the normal project CLI through the bundle's `hack-v5` entrypoint:
-
-```sh
-export HACK_NATIVE_HOME=/absolute/private/candidate-home
-/absolute/copied/hack-native-bundle/hack-v5 ps --path /absolute/project
-```
-
-Keep the bundle together and invoke this entrypoint by its full path (do not copy
-or symlink only the script). With `HACK_RUNTIME_BACKEND` unset (or `native`) it
-selects the native backend and the adjacent executor, even if an inherited
-`HACK_NATIVE_BINARY` selects another binary. An explicit
-`HACK_RUNTIME_BACKEND=compose` runs the same bundled CLI on the Compose backend
-with your own Hack home and existing global routing services. It needs no
-`HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
-code 64. The [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends)
-describes Compose testing and its shared-state limits: run stable `hack global up`,
-then any stable `hack doctor` or `hack doctor --fix`, then stable `hack daemon stop`,
-confirm `pgrep -fl "hack daemon start"` prints nothing, and run no stable `hack`
-command while the candidate uses your Hack home. Stable `hack global up` (v4.2.0)
-starts a stopped `hackd` again, and so does stable `hack doctor --fix` (it asks
-first only in a terminal). If the check lists a process, the guide gives the
-launchd remedy. The entrypoint turns off daemon autostart in newer builds, so the
-candidate does not start the stable `hackd` on its own: a candidate
-`hack doctor --fix` skips its `hackd` repair without asking and prints the
-command to run yourself, which runs the stable CLI. Do not commit the
-project's generated `.hack/.internal/` directory; newer generators rewrite files
-such as `compose.override.yml`. The entrypoint preserves arguments, exit codes and
-signals through `exec`, and never replaces the installed `hack`. Project-specific
-native adaptation, dependency and routing selections remain explicit; this entrypoint
-does not prepare a provider or migrate existing projects. An unversioned local
-build reports the repository package version. A versioned prerelease build reports
-its explicit candidate version and includes source provenance. The `hack-v5`
-entrypoint alone does not identify a published release. Unsupported native workflows still
-report their existing refusal rather than falling back to Docker.
+For normal project commands, follow the short
+[native start page](https://hack.foo/docs/v5/native/start). Manual bundle users
+use the adjacent `hack-v5` entrypoint and keep the bundle together. It defaults to
+`$HACK_HOME/native-runtime` or `~/.hack/native-runtime`; an absolute
+`HACK_NATIVE_HOME` overrides that default. The [candidate installer guide](candidate-install.md#test-both-backends)
+defines backend selectors, private versus shared homes, stable-daemon quiescence
+and returning to Compose. Prepare the provider explicitly with `native setup`.
+Neither entrypoint migrates a project or falls back to Docker for an unsupported native command. An unversioned
+local build reports its repository version; only a versioned bundle includes
+candidate version provenance. The entrypoint alone does not identify a release.
+`hack-v5` passes arguments, exit codes and signals through `exec`; it never replaces
+the installed stable executable.
 
 Native `up` accepts an explicit branch or the branch inferred from a linked Git
 worktree when its exact source root can be shared with a fresh or matching pool.
@@ -934,24 +914,17 @@ compatibility. V4 and candidate homes remain separate; this procedure does not
 migrate V4 data into the candidate or replace the installed `hack`. DNS, trust and
 client configuration are outside this bundle-selection procedure.
 
-Provider setup is explicit and available from the candidate frontend, without a
-second binary or home argument:
-
-```sh
-hack-next native setup
-# For noninteractive use:
-hack-next native setup --accept-downloads --json
-```
-
-`native setup` lists the pinned SmolVM, Docker engine and four Alpine guest
-packages with their exact compressed byte lengths, source hosts, SHA-256 hashes, private cache and
-install destination, then asks once when preparation is needed. `--no-interactive` (or
+For ordinary setup and consent, use the short
+[native start page](https://hack.foo/docs/v5/native/start#prepare-the-runtime).
+The remainder describes the setup and recovery contract. `--no-interactive` (or
 truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case and
 surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
 `--accept-downloads` explicitly consents. Interactive `up` can offer setup with
 the same explicit consent; noninteractive `up` refuses until setup is complete.
 The installer and probe never download provider files. The optional BuildKit client
 is still prepared separately below.
+Setup lists the pinned SmolVM, Docker engine and four Alpine guest packages,
+including exact compressed sizes, hosts, hashes, private cache and destinations.
 
 Manual bundle frontends use `$HACK_HOME/native-runtime` or
 `~/.hack/native-runtime` by default, with an absolute `HACK_NATIVE_HOME` override.

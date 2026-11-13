@@ -129,6 +129,21 @@ function fixture(
             ? { exitCode: EXEC_STDOUT_OVERFLOW_EXIT, stdout: "", stderr: "" }
             : { exitCode: 0, stdout: asExecStdout(archive), stderr: "" };
         }
+        // Docker projects the selected field, rather than returning both
+        // runtime and requested bindings regardless of the inspect template.
+        const format = cmd[cmd.indexOf("--format") + 1] ?? "";
+        const portFields: Record<string, unknown> = {};
+        for (const [, field, source] of format.matchAll(
+          /"(\w+)":\{\{json \.(NetworkSettings\.Ports|HostConfig\.PortBindings)\}\}/g
+        )) {
+          const value =
+            source === "NetworkSettings.Ports"
+              ? opts.ports
+              : opts.requestedPorts;
+          if (field && value !== undefined) {
+            portFields[field] = value;
+          }
+        }
         const outputs = [
           opts.selected ?? ID,
           opts.inspectOutput ??
@@ -139,10 +154,7 @@ function fixture(
                     running: true,
                     project: "hack-dev-proxy",
                     service: "caddy",
-                    ...(opts.ports === undefined ? {} : { ports: opts.ports }),
-                    ...(opts.requestedPorts === undefined
-                      ? {}
-                      : { requestedPorts: opts.requestedPorts }),
+                    ...portFields,
                   }
                 : opts.metadata
             ),

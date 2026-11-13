@@ -9,6 +9,7 @@ import {
 } from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
+  nativeDetachedUpFailedServices,
   nativeDetachedUpShellVariables,
   nativeShellForwardingNotice,
 } from "../lib/native-detached-up.ts";
@@ -2500,6 +2501,9 @@ async function startNativeProjectAttempt(
                 nativeProcessRefusals = diagnostic.processRefusals;
               },
               onStartupLogs: (logs) => {
+                // Names only: a detached owner cannot show output, so the
+                // waiting command names the services and points at foreground up.
+                nativeDetachedUpFailedServices(logs.map((log) => log.service));
                 startupLogReport = formatNativeStartupLogReport({
                   logs,
                   managedEnvironment: input.managedEnvironment,

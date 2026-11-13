@@ -1397,9 +1397,13 @@ test(
     });
     expect(baseSet.exitCode).toBe(0);
 
+    // Private, as Hack writes these files: a 0644 plaintext overlay makes
+    // env commands warn on stderr (HACK-2165), and this run shares one
+    // terminal stream for stdout and stderr while it parses the JSON.
     await writeFile(
       resolve(projectDir, ".env.qa"),
-      "PUBLIC_URL=https://qa-file.test\n"
+      "PUBLIC_URL=https://qa-file.test\n",
+      { mode: 0o600 }
     );
 
     const listResult = await runHack({

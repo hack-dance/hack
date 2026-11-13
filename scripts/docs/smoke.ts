@@ -207,9 +207,15 @@ console.log(
 const recipeLinks = new Map<string, string>();
 const recipeEntryPoints = new Set([
   "index",
+  "install",
+  "getting-started",
+  "upgrade",
+  "release-notes",
   "env",
   "reference/configuration-fields",
   "guides/upgrade-from-v4",
+  "native/start",
+  "troubleshooting",
   "native/setup",
   "native/log-follow",
 ]);

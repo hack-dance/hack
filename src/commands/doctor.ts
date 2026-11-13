@@ -3176,11 +3176,16 @@ async function checkSecretIntegrity({
       message: "Every stored secret opens with the key in use",
     };
   }
+  // Information alone (a retired store kept beside its old name) is ok.
+  let status: CheckResult["status"] = "ok";
+  if (findings.some((finding) => finding.status === "error")) {
+    status = "error";
+  } else if (findings.some((finding) => finding.status === "warn")) {
+    status = "warn";
+  }
   return {
     name: SECRET_INTEGRITY_CHECK,
-    status: findings.some((finding) => finding.status === "error")
-      ? "error"
-      : "warn",
+    status,
     message: findings.map((finding) => finding.message).join("\n"),
   };
 }
@@ -3561,9 +3566,12 @@ export async function resolveSecretsHygieneScope(opts: {
   const project = await tolerate(findDoctorLegacyProjectContext(opts.startDir));
   const stores = new Map<string, SecretsHygieneScope["stores"][number]>();
   for (const projectDir of [undefined, project?.projectDir]) {
-    const paths = await tolerate(
+    const resolved = await tolerate(
       resolveFileSecretStorePaths({ projectDir, strict })
     );
+    const paths = resolved
+      ? { storePath: resolved.storePath, keyPath: resolved.keyPath }
+      : null;
     const key = paths ? `${paths.storePath}\0${paths.keyPath}` : null;
     if (!(paths && key) || stores.has(key)) {
       continue;
@@ -6030,6 +6038,7 @@ async function renderRecoveryGuidance(
   const hasActions =
     guidance.temporaryBreakage.length > 0 ||
     guidance.configurationRepair.length > 0 ||
+    (guidance.choices?.length ?? 0) > 0 ||
     guidance.followUp.length > 0;
 
   if (!hasActions) {

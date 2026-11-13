@@ -1514,6 +1514,36 @@ test("readers that share a display name stay separate readers", async () => {
   expect(seen[0]).toBe(seen[1] as string);
 });
 
+test("one checkout registered under two names keeps both names", async () => {
+  // Second-family review: keying readers by directory alone dropped the
+  // second name of a checkout registered twice, depending on registry order.
+  const fixture = await setUp();
+  const registry = join(fixture.hackHome, "projects.json");
+  const parsed = JSON.parse(await readFile(registry, "utf8")) as {
+    projects: { name: string }[];
+  };
+  const original = parsed.projects.find((project) => project.name === "app-a");
+  expect(original).toBeDefined();
+  const projects = [
+    ...parsed.projects,
+    { ...original, id: "app-a-alias-id", name: "app-a-alias" },
+  ];
+  const seen: string[] = [];
+  for (const order of [projects, [...projects].reverse()]) {
+    await writeFile(registry, JSON.stringify({ ...parsed, projects: order }));
+    const users = await listProjectsUsingSecretStore({
+      storePath: fixture.storePath,
+    });
+    expect(users.names).toEqual(["app-a", "app-a-alias"]);
+    expect(users.readers.map((reader) => reader.name)).toEqual([
+      "app-a",
+      "app-a-alias",
+    ]);
+    seen.push(JSON.stringify(users));
+  }
+  expect(seen[0]).toBe(seen[1] as string);
+});
+
 test("an invalid worktree entry inside a valid project makes the reader scan incomplete", async () => {
   // Codex review: the strict read counted rejected project entries but not
   // rejected worktree entries, which were dropped silently.

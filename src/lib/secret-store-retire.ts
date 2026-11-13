@@ -241,16 +241,25 @@ export async function listProjectsUsingSecretStore(opts: {
   readonly storePath: string;
 }): Promise<SecretStoreUsers> {
   const found = await storeContexts(opts);
-  // One reader per checkout directory. Two checkouts can share a display
-  // name (two registered projects with one name, or a project named like
-  // another project's worktree label); neither may hide the other.
+  // One reader per checkout directory and display name. Two checkouts can
+  // share a name (two registered projects with one name, or a project named
+  // like another project's worktree label) and one checkout can be
+  // registered under two names; no entry may hide another, whatever the
+  // registry order.
   const byCheckout = new Map<string, SecretStoreReader>();
+  const reads = new Map<string, boolean>();
   for (const context of found.contexts) {
-    if (
-      !byCheckout.has(context.projectDir) &&
-      (await projectUsesSecretStore({ projectDir: context.projectDir }))
-    ) {
-      byCheckout.set(context.projectDir, {
+    const key = `${context.projectDir}\0${context.name}`;
+    if (byCheckout.has(key)) {
+      continue;
+    }
+    let uses = reads.get(context.projectDir);
+    if (uses === undefined) {
+      uses = await projectUsesSecretStore({ projectDir: context.projectDir });
+      reads.set(context.projectDir, uses);
+    }
+    if (uses) {
+      byCheckout.set(key, {
         name: context.name,
         project: context.project,
         projectName: context.projectName,

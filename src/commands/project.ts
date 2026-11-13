@@ -362,7 +362,10 @@ import {
   readProjectsRegistry,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
-import { openProxyLoopbackWarning } from "../lib/proxy-loopback.ts";
+import {
+  openProxyLoopbackWarning,
+  openUnresolvedHostWarning,
+} from "../lib/proxy-loopback.ts";
 import {
   discoverDependencyBootstrapServices,
   discoverSuccessfulCompletionServices,
@@ -10485,6 +10488,7 @@ export async function emitOpenOrigin(opts: {
   readonly json: boolean;
   readonly origin: "compose" | "native";
   readonly checkLoopback?: typeof openProxyLoopbackWarning;
+  readonly checkResolution?: typeof openUnresolvedHostWarning;
 }): Promise<number> {
   const warning =
     opts.origin === "compose"
@@ -10495,10 +10499,31 @@ export async function emitOpenOrigin(opts: {
   if (warning) {
     throw new HackCliError({ code: "E_GLOBAL_INFRA_DOWN", message: warning });
   }
+  // A URL whose host has no address is still the right URL, so this is a
+  // warning, not a refusal: JSON keeps `url` and adds `dns` and `hint`.
+  // Compose origins only, like the loopback check: native routes have their
+  // own DNS path and checks, and a native open stays free of host probes.
+  const unresolved =
+    opts.origin === "compose"
+      ? await (opts.checkResolution ?? openUnresolvedHostWarning)({
+          url: opts.url,
+        })
+      : null;
   if (opts.json) {
-    process.stdout.write(`${JSON.stringify({ url: opts.url }, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify(
+        unresolved
+          ? { url: opts.url, dns: "unresolved", hint: unresolved }
+          : { url: opts.url },
+        null,
+        2
+      )}\n`
+    );
     noteBrowserTargetsForLocalNetworkHint([opts.url]);
     return 0;
+  }
+  if (unresolved) {
+    logger.warn({ message: unresolved });
   }
   logger.step({ message: `Opening ${opts.url}` });
   noteBrowserTargetsForLocalNetworkHint([opts.url]);

@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { createConnection, isIP } from "node:net";
 import { connect } from "node:tls";
 import { LEGACY_SCHEMAS_HOST } from "../constants.ts";
@@ -294,6 +295,109 @@ export async function resolveProxyLoopbackAddresses(opts: {
   } catch {
     return [];
   }
+}
+
+/** Whether the system resolver has any address for a hostname. */
+export type HostResolution = "resolves" | "no-answer" | "unknown";
+
+/**
+ * Ask the system resolver (hosts file and local overrides included) whether a
+ * hostname has any address. "no-answer" is a definite miss; a failed or
+ * unavailable lookup is "unknown" and must never be reported as a miss.
+ */
+export async function hostResolution(opts: {
+  readonly hostname: string;
+  readonly platform?: NodeJS.Platform;
+  readonly execute?: typeof exec;
+}): Promise<HostResolution> {
+  const mac = (opts.platform ?? process.platform) === "darwin";
+  try {
+    const result = await (opts.execute ?? exec)(
+      mac
+        ? ["/usr/bin/dscacheutil", "-q", "host", "-a", "name", opts.hostname]
+        : ["getent", "ahosts", opts.hostname],
+      { timeoutMs: 500, stdin: "ignore", maxStdoutBytes: 16_384 }
+    );
+    // getent exits 2 when the name is not found; dscacheutil exits 0 with no
+    // records. Any other failure says nothing about the name.
+    if (result.exitCode !== 0) {
+      return !mac && result.exitCode === 2 ? "no-answer" : "unknown";
+    }
+    const found = result.stdout.split("\n").some((line) => {
+      const fields = line.trim().split(WHITESPACE);
+      if (mac && !["ip_address:", "ipv6_address:"].includes(fields[0] ?? "")) {
+        return false;
+      }
+      const address = fields[mac ? 1 : 0];
+      return Boolean(address) && isIP(address ?? "") !== 0;
+    });
+    return found ? "resolves" : "no-answer";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function macResolverFileExists(domain: string): Promise<boolean> {
+  return (
+    (await stat(`/etc/resolver/${domain}`).catch(() => null))?.isFile() === true
+  );
+}
+
+/** True when any parent domain of the hostname has a resolver file. */
+async function hasResolverFile(opts: {
+  readonly hostname: string;
+  readonly exists: (domain: string) => Promise<boolean>;
+}): Promise<boolean> {
+  const labels = opts.hostname.split(".");
+  for (let start = 0; start < labels.length; start += 1) {
+    if (await opts.exists(labels.slice(start).join("."))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * One sentence for a URL whose host has no address on this machine, or null.
+ * IP literals, localhost names and non-HTTP schemes are not checked.
+ */
+export async function openUnresolvedHostWarning(opts: {
+  readonly url: string;
+  readonly resolve?: (hostname: string) => Promise<HostResolution>;
+  readonly platform?: NodeJS.Platform;
+  readonly resolverFileExists?: (domain: string) => Promise<boolean>;
+}): Promise<string | null> {
+  const url = new URL(opts.url);
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    isIP(hostname) !== 0 ||
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost")
+  ) {
+    return null;
+  }
+  let resolution = await (
+    opts.resolve ?? ((name) => hostResolution({ hostname: name }))
+  )(hostname);
+  // On macOS a multi-label .local name with no /etc/resolver file for any
+  // parent domain is asked over multicast DNS, which takes about ten seconds
+  // to give up: the bounded lookup above times out as "unknown". No resolver
+  // file means Hack's DNS for that suffix was never set up on this Mac.
+  if (
+    resolution === "unknown" &&
+    (opts.platform ?? process.platform) === "darwin" &&
+    hostname.endsWith(".local") &&
+    !(await hasResolverFile({
+      hostname,
+      exists: opts.resolverFileExists ?? macResolverFileExists,
+    }))
+  ) {
+    resolution = "no-answer";
+  }
+  return resolution === "no-answer"
+    ? `${hostname} has no address on this machine, so the URL will not open. Run hack doctor to see the DNS checks; hack global install sets up Hack's domains (it asks for sudo once). A machine set up by an earlier Hack version may only resolve the older suffix: either run hack global install, or give the project a host under a suffix that already resolves here with hack config set dev_host <name>.<suffix>.`
+    : null;
 }
 
 /**

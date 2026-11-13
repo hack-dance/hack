@@ -11,8 +11,10 @@ import {
 } from "node:tls";
 import { LEGACY_SCHEMAS_HOST } from "../src/constants.ts";
 import {
+  hostResolution,
   inspectProxyLoopback,
   openProxyLoopbackWarning,
+  openUnresolvedHostWarning,
   probeProxyLoopback,
   resolveProxyLoopbackAddresses,
 } from "../src/lib/proxy-loopback.ts";
@@ -700,4 +702,120 @@ test("a silent TCP listener passes HTTP reachability but HTTPS times out and clo
     })
   ).toBe("timeout");
   expect(performance.now() - started).toBeLessThan(1000);
+});
+
+const execResult = (exitCode: number, stdout: string) =>
+  Promise.resolve({ exitCode, stdout, stderr: "", signal: null }) as never;
+
+test("host resolution separates a definite miss from an unknown lookup on both platforms", async () => {
+  const run = (
+    platform: "darwin" | "linux",
+    exitCode: number,
+    stdout: string
+  ) =>
+    hostResolution({
+      hostname: "app.example.test",
+      platform,
+      execute: () => execResult(exitCode, stdout),
+    });
+  expect(await run("darwin", 0, "name: app\nip_address: 172.30.0.2\n")).toBe(
+    "resolves"
+  );
+  expect(await run("darwin", 0, "name: app\nipv6_address: fd00::2\n")).toBe(
+    "resolves"
+  );
+  // dscacheutil exits 0 with no records for a name that has no address.
+  expect(await run("darwin", 0, "")).toBe("no-answer");
+  expect(await run("darwin", 1, "")).toBe("unknown");
+  expect(await run("linux", 0, "172.30.0.2 STREAM app.example.test\n")).toBe(
+    "resolves"
+  );
+  // getent exits 2 when the name is not found; other failures say nothing.
+  expect(await run("linux", 2, "")).toBe("no-answer");
+  expect(await run("linux", 1, "")).toBe("unknown");
+  expect(
+    await hostResolution({
+      hostname: "app.example.test",
+      platform: "darwin",
+      execute: () => Promise.reject(new Error("timed out")),
+    })
+  ).toBe("unknown");
+});
+
+test("open warns only for a host that definitely has no address, and never for literals or localhost", async () => {
+  let lookups = 0;
+  const resolveAs = (answer: "resolves" | "no-answer" | "unknown") => () => {
+    lookups += 1;
+    return Promise.resolve(answer);
+  };
+  const miss = await openUnresolvedHostWarning({
+    url: "https://app.example.test",
+    resolve: resolveAs("no-answer"),
+    platform: "linux",
+  });
+  expect(miss).toContain("app.example.test has no address on this machine");
+  expect(miss).toContain("hack global install");
+  expect(miss).toContain("hack doctor");
+  expect(
+    await openUnresolvedHostWarning({
+      url: "https://app.example.test",
+      resolve: resolveAs("resolves"),
+      platform: "linux",
+    })
+  ).toBeNull();
+  // Unknown is never reported as a miss off macOS or off .local names.
+  for (const [url, platform] of [
+    ["https://app.example.test", "linux"],
+    ["https://app.example.test", "darwin"],
+    ["https://app.hack.local", "linux"],
+  ] as const) {
+    expect(
+      await openUnresolvedHostWarning({
+        url,
+        resolve: resolveAs("unknown"),
+        platform,
+        resolverFileExists: () => Promise.resolve(false),
+      })
+    ).toBeNull();
+  }
+  lookups = 0;
+  for (const url of [
+    "https://127.0.0.1",
+    "https://[::1]",
+    "http://localhost:3000",
+    "http://api.localhost",
+    "postgres://db.example.test/app",
+  ]) {
+    expect(
+      await openUnresolvedHostWarning({ url, resolve: resolveAs("no-answer") })
+    ).toBeNull();
+  }
+  expect(lookups).toBe(0);
+});
+
+test("a .local host with no resolver file on macOS is a miss even when the bounded lookup times out", async () => {
+  // Without /etc/resolver/<suffix> macOS asks multicast DNS and takes about
+  // ten seconds to give up, so the bounded lookup reports unknown. Found on a
+  // machine set up by an earlier version that only resolves the older suffix.
+  const asked: string[] = [];
+  const warning = await openUnresolvedHostWarning({
+    url: "https://app.hack.local",
+    resolve: () => Promise.resolve("unknown"),
+    platform: "darwin",
+    resolverFileExists: (domain) => {
+      asked.push(domain);
+      return Promise.resolve(false);
+    },
+  });
+  expect(warning).toContain("app.hack.local has no address on this machine");
+  expect(asked).toEqual(["app.hack.local", "hack.local", "local"]);
+  // A resolver file for any parent domain means the suffix is set up: unknown stays unknown.
+  expect(
+    await openUnresolvedHostWarning({
+      url: "https://app.hack.local",
+      resolve: () => Promise.resolve("unknown"),
+      platform: "darwin",
+      resolverFileExists: (domain) => Promise.resolve(domain === "hack.local"),
+    })
+  ).toBeNull();
 });

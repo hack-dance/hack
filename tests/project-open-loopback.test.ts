@@ -47,3 +47,42 @@ test("native loopback origin bypasses Compose DNS, Docker and CA probes even if 
     write.mockRestore();
   }
 });
+
+test("open keeps the URL and adds a DNS hint when the host has no address", async () => {
+  const hint = "app.example.test has no address on this machine";
+  const write = spyOn(process.stdout, "write").mockImplementation(() => true);
+  try {
+    expect(
+      await emitOpenOrigin({
+        url: "https://app.example.test",
+        json: true,
+        origin: "compose",
+        checkLoopback: async () => null,
+        checkResolution: async () => hint,
+      })
+    ).toBe(0);
+    expect(write).toHaveBeenCalledWith(
+      `${JSON.stringify(
+        { url: "https://app.example.test", dns: "unresolved", hint },
+        null,
+        2
+      )}\n`
+    );
+    write.mockClear();
+    // A host that resolves keeps the exact earlier JSON shape.
+    expect(
+      await emitOpenOrigin({
+        url: "https://app.example.test",
+        json: true,
+        origin: "compose",
+        checkLoopback: async () => null,
+        checkResolution: async () => null,
+      })
+    ).toBe(0);
+    expect(write).toHaveBeenCalledWith(
+      `${JSON.stringify({ url: "https://app.example.test" }, null, 2)}\n`
+    );
+  } finally {
+    write.mockRestore();
+  }
+});

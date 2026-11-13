@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
 /**
  * Legacy `.hack/.env` mutations (`hack env set` and `unset` in a project
@@ -87,7 +88,7 @@ async function run(
 async function git(cwd: string, args: readonly string[]): Promise<void> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
-    env: env(),
+    env: fixtureGitEnv({ env: { HOME: join(base(), "home") } }),
     stdout: "ignore",
     stderr: "ignore",
   });

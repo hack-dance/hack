@@ -76,10 +76,15 @@ function matchesRunningCaddy(value: unknown, id: string): boolean {
 async function copyRuntimeRoot(opts: {
   readonly id: string;
   readonly execute: typeof exec;
+  readonly timeoutMs: number;
 }): Promise<{ readonly pem: string } | { readonly invalid: true } | null> {
   const copied = await opts.execute(
     ["docker", "cp", `${opts.id}:${ROOT_PATH}`, "-"],
-    { timeoutMs: 5000, stdin: "ignore", maxStdoutBytes: MAX_ARCHIVE_BYTES }
+    {
+      timeoutMs: opts.timeoutMs,
+      stdin: "ignore",
+      maxStdoutBytes: MAX_ARCHIVE_BYTES,
+    }
   );
   if (copied.exitCode === EXEC_STDOUT_OVERFLOW_EXIT) {
     return { invalid: true };
@@ -107,8 +112,11 @@ export async function inspectCaddyCaIdentity(opts: {
   readonly exec?: typeof exec;
   readonly readTextFile?: typeof readTextFile;
   readonly now?: number;
+  /** Per Docker read; interactive diagnostics can use a shorter allowance. */
+  readonly timeoutMs?: number;
 }): Promise<CaddyCaIdentity> {
   const execute = opts.exec ?? exec;
+  const timeoutMs = opts.timeoutMs ?? 5000;
   const read = opts.readTextFile ?? readTextFile;
   const unavailable: CaddyCaIdentity = {
     state: "unavailable",
@@ -117,7 +125,7 @@ export async function inspectCaddyCaIdentity(opts: {
   let runtimePem: string;
   try {
     const selected = await execute(SELECT_CADDY, {
-      timeoutMs: 5000,
+      timeoutMs,
       stdin: "ignore",
     });
     const id = selected.stdout.trim();
@@ -134,7 +142,7 @@ export async function inspectCaddyCaIdentity(opts: {
         INSPECT_FORMAT,
         id,
       ],
-      { timeoutMs: 5000, stdin: "ignore" }
+      { timeoutMs, stdin: "ignore" }
     );
     if (
       inspected.exitCode !== 0 ||
@@ -142,7 +150,7 @@ export async function inspectCaddyCaIdentity(opts: {
     ) {
       return unavailable;
     }
-    const copied = await copyRuntimeRoot({ id, execute });
+    const copied = await copyRuntimeRoot({ id, execute, timeoutMs });
     if (copied === null) {
       return unavailable;
     }

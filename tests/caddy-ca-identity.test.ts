@@ -78,6 +78,7 @@ function fixture(
     readonly failureAt?: number;
     readonly throwAt?: number;
     readonly now?: number;
+    readonly timeoutMs?: number;
   } = {}
 ) {
   const calls: {
@@ -89,6 +90,7 @@ function fixture(
     inspectCaddyCaIdentity({
       certPath: "/owned/export/root.crt",
       now: opts.now ?? now,
+      timeoutMs: opts.timeoutMs,
       readTextFile: async (path) => {
         // The runtime root is never read back from a path.
         expect(path).toBe("/owned/export/root.crt");
@@ -194,6 +196,13 @@ test("unchanged CA uses exact owned running container and bounded public-certifi
     { timeoutMs: 5000, stdin: "ignore" },
     { timeoutMs: 5000, stdin: "ignore", maxStdoutBytes: 98_304 },
   ]);
+});
+
+test("interactive diagnostics can shorten each runtime CA read without changing the default", async () => {
+  const f = fixture({ timeoutMs: 1000 });
+  expect((await f.run()).state).toBe("current");
+  expect(f.calls).toHaveLength(3);
+  expect(f.calls.every((call) => call.options?.timeoutMs === 1000)).toBe(true);
 });
 
 test("rotation is stale even when both CA subjects are identical", async () => {

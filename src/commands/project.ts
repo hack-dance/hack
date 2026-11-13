@@ -356,6 +356,7 @@ import {
   readProjectsRegistry,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
+import { openProxyLoopbackWarning } from "../lib/proxy-loopback.ts";
 import {
   discoverDependencyBootstrapServices,
   discoverSuccessfulCompletionServices,
@@ -10495,10 +10496,17 @@ async function handleOpen({
   return await emitOpenOrigin({ url, json });
 }
 
-async function emitOpenOrigin(opts: {
+export async function emitOpenOrigin(opts: {
   readonly url: string;
   readonly json: boolean;
+  readonly checkLoopback?: typeof openProxyLoopbackWarning;
 }): Promise<number> {
+  const warning = await (opts.checkLoopback ?? openProxyLoopbackWarning)({
+    url: opts.url,
+  });
+  if (warning) {
+    throw new HackCliError({ code: "E_GLOBAL_INFRA_DOWN", message: warning });
+  }
   if (opts.json) {
     process.stdout.write(`${JSON.stringify({ url: opts.url }, null, 2)}\n`);
     noteBrowserTargetsForLocalNetworkHint([opts.url]);

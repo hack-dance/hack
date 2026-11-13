@@ -1,0 +1,16 @@
+flowchart TD
+  D[Doctor: both loopback families, ports 80 and 443] --> C[Read public CA from the running Hack proxy]
+  O[Open: selected URL resolves to loopback on port 80 or 443] --> C
+  C -->|Unavailable| U[Doctor warning; no interception claim]
+  C -->|Verified runtime root| P[Probe each loopback endpoint with a short timeout]
+  P -->|HTTPS| T[Verify CA chain and proxy schemas hostname via SNI]
+  P -->|HTTP| H[Check TCP reachability]
+  T -->|Valid| S[Endpoint passes]
+  H -->|Connected| S
+  T -->|Timeout or verification failure| F[Warn with failed port, affected DNS paths and visible listeners]
+  H -->|Timeout or refusal| F
+  F --> R[Open refuses before URL output or browser launch; no automatic repair]
+  class S ok
+  class P wait
+  class F,R fail
+  class U idle

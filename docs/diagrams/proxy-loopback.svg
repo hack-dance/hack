@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="pele pele-flowchart" viewBox="0 0 669 920" width="669" height="920" style="max-width:100%;height:auto;--_bg:var(--pele-bg,#fff);--_fg:var(--pele-fg,#1f1f1f);--_m:var(--pele-muted,#6e6e6e);--_l:var(--pele-line,#1f1f1f);--_s:var(--pele-surface,#f3f3f3);--_a:var(--pele-surface-alt,#e6e6e6);--_b:var(--pele-border,#8a8a8a);--_c:var(--pele-accent,#5b7bd5);color:var(--_fg);--_r:var(--pele-radius,4px);--_fm:var(--pele-font-mono,Geist Mono);font:15px sans-serif;letter-spacing:normal;word-spacing:normal;text-transform:none;direction:ltr;font-family:var(--pele-font,Geist)" fill="var(--_fg)" role="graphics-document document" aria-roledescription="flowchart" data-theme="light"><style><![CDATA[/* Hack Dance house theme for Pele 1.9.x: ink on cream (fleet palette B). Light by default; dark via [data-theme=dark].
+   Colour only for meaning (house classes). Never resize label text: Pele sized label boxes for its own font size. */
+.pele {
+  --pele-font: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --pele-font-mono: "Geist Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --pele-bg: #F3EFE3;
+  --pele-fg: #1D1D1B;
+  --pele-muted: #3D3C37;
+  --pele-line: #3D3C37;
+  --pele-surface: #FBF9F1;
+  --pele-surface-alt: #E8E4D8;
+  --pele-border: #66625A;
+  --pele-accent: #1D1D1B;
+  --pele-critical: #C2461F;
+  --pele-error: #C2461F;
+  --pele-radius: 8px;
+  --pele-title-weight: 600;
+  --pele-heading-weight: 600;
+  --pele-bold-weight: 600;
+  --pele-series-1: #5b3df5; --pele-series-2: #0e9f8a; --pele-series-3: #e08a00; --pele-series-4: #d6345a;
+  --pele-series-5: #2f7de1; --pele-series-6: #8a5cf6; --pele-series-7: #4f9d2d; --pele-series-8: #a0674b;
+  /* semantic state tints (house classes) */
+  --hd-live: #4B4790;  --hd-live-bg: #E6E4F0;
+  --hd-wait: #34506E;  --hd-wait-bg: #D3DBE5;
+  --hd-ok:   #3A7A2E;  --hd-ok-bg:   #E2EBD9;
+  --hd-fail: #C2461F;  --hd-fail-bg: #F5E0D6;
+  --hd-idle: #8A8576;  --hd-idle-bg: #E8E4D8;
+  background: var(--pele-bg);
+}
+.pele[data-theme="dark"], [data-theme="dark"] .pele {
+  --pele-bg: #11100E;
+  --pele-fg: #EDE8D9;
+  --pele-muted: #C9C3B2;
+  --pele-line: #C9C3B2;
+  --pele-surface: #191815;
+  --pele-surface-alt: #1B1A17;
+  --pele-border: #8F897A;
+  --pele-accent: #EDE8D9;
+  --pele-critical: #FF7A52;
+  --pele-error: #FF7A52;
+  --pele-series-1: #9a86ff; --pele-series-2: #3fd1b8; --pele-series-3: #ffb547; --pele-series-4: #ff6b8b;
+  --pele-series-5: #6aa8ff; --pele-series-6: #c4a5ff; --pele-series-7: #8fd16a; --pele-series-8: #d29b7f;
+  --hd-live: #A39CE0;  --hd-live-bg: #24223A;
+  --hd-wait: #9DB4CF;  --hd-wait-bg: #22303D;
+  --hd-ok:   #7CC25E;  --hd-ok-bg:   #1C2A17;
+  --hd-fail: #FF7A52;  --hd-fail-bg: #33190F;
+  --hd-idle: #7A7466;  --hd-idle-bg: #1B1A17;
+}
+/* polish */
+.pele .pele-edge path { stroke-width: 1.4px; stroke-linecap: round; }
+.pele .pele-edge-label rect { fill: var(--pele-bg); }
+.pele .pele-edge-label text { fill: var(--pele-muted); }
+.pele .pele-cluster-label, .pele .pele-title { letter-spacing: .01em; }
+.pele .pele-node > rect, .pele .pele-node > path, .pele .pele-node > polygon, .pele .pele-node > circle, .pele .pele-node > ellipse { stroke-width: 1.2px; }
+/* house semantic classes: in Mermaid write `classDef live stroke-width:1.6px` + `class X live` */
+.pele .live > rect, .pele .live > path, .pele .live > polygon, .pele .live > circle, .pele .live > ellipse { fill: var(--hd-live-bg) !important; stroke: var(--hd-live) !important; }
+.pele .wait > rect, .pele .wait > path, .pele .wait > polygon, .pele .wait > circle, .pele .wait > ellipse { fill: var(--hd-wait-bg) !important; stroke: var(--hd-wait) !important; }
+.pele .ok   > rect, .pele .ok   > path, .pele .ok   > polygon, .pele .ok > circle, .pele .ok > ellipse { fill: var(--hd-ok-bg)   !important; stroke: var(--hd-ok)   !important; }
+.pele .fail > rect, .pele .fail > path, .pele .fail > polygon, .pele .fail > circle, .pele .fail > ellipse { fill: var(--hd-fail-bg) !important; stroke: var(--hd-fail) !important; }
+.pele .idle > rect, .pele .idle > path, .pele .idle > polygon, .pele .idle > circle, .pele .idle > ellipse { fill: var(--hd-idle-bg) !important; stroke: var(--hd-idle) !important; stroke-dasharray: 4 3; }
+.pele .live .pele-label { fill: var(--hd-live); font-weight: 600; }
+.pele .wait .pele-label { fill: var(--hd-wait); font-weight: 600; }
+.pele .ok   .pele-label { fill: var(--hd-ok);   font-weight: 600; }
+.pele .fail .pele-label { fill: var(--hd-fail); font-weight: 600; }
+.pele .idle .pele-label { fill: var(--hd-idle); }
+]]></style><g class="pele-edges" fill="none" stroke="var(--_l)" stroke-linecap="round"><g class="pele-edge" data-id="L_D_C_0"><path d="M127.88,108C127.88,125.5 200.51,125.5 200.51,143L200.51,149"/><path class="pele-marker" d="M200.51,156L197.15,148L203.87,148Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_O_C_0"><path d="M368.54,108C368.54,125.5 295.9,125.5 295.9,143L295.9,149"/><path class="pele-marker" d="M295.9,156L292.54,148L299.26,148Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_C_U_0"><path d="M200.51,220C200.51,230.25 143.51,230.25 143.51,240.5L143.51,295"/><path class="pele-marker" d="M143.51,302L140.15,294L146.87,294Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_C_P_0"><path d="M295.9,220C295.9,230.25 352.9,230.25 352.9,240.5L352.9,285"/><path class="pele-marker" d="M352.9,292L349.54,284L356.26,284Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_P_T_0"><path d="M316.45,376C316.45,386.25 175.93,386.25 175.93,396.5L175.93,441"/><path class="pele-marker" d="M175.93,448L172.57,440L179.29,440Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_P_H_0"><path d="M389.36,376C389.36,386.25 529.88,386.25 529.88,396.5L529.88,459.5"/><path class="pele-marker" d="M529.88,466.5L526.52,458.5L533.24,458.5Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_T_S_0"><path d="M155.58,532L155.58,576.5C155.58,630.54 225.92,630.54 225.92,684.58L225.92,690.58"/><path class="pele-marker" d="M225.92,697.58L222.56,689.58L229.28,689.58Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_H_S_0"><path d="M473.97,513.5L473.97,576.5C473.97,630.54 268.81,630.54 268.81,684.58L268.81,690.58"/><path class="pele-marker" d="M268.81,697.58L265.45,689.58L272.17,689.58Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_T_F_0"><path d="M228.63,532C228.63,542.25 281.47,542.25 281.47,552.5L281.47,576.5C281.47,621.29 412.81,621.29 412.81,666.08L412.81,672.08"/><path class="pele-marker" d="M412.81,679.08L409.45,671.08L416.17,671.08Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_H_F_0"><path d="M585.78,513.5L585.78,576.5C585.78,621.29 504.07,621.29 504.07,666.08L504.07,672.08"/><path class="pele-marker" d="M504.07,679.08L500.71,671.08L507.43,671.08Z" fill="var(--_l)" stroke="none"/></g><g class="pele-edge" data-id="L_F_R_0"><path d="M458.44,763.08L458.44,804.08"/><path class="pele-marker" d="M458.44,811.08L455.08,803.08L461.8,803.08Z" fill="var(--_l)" stroke="none"/></g></g><g class="pele-edge-labels" font-size="13"><g class="pele-edge-label" data-id="L_C_U_0"><rect x="105.55" y="242.5" width="75.91" height="20" rx="3" fill="var(--_bg)"/><text x="143.51" y="257.05" text-anchor="middle">Unavailable</text></g><g class="pele-edge-label" data-id="L_C_P_0"><rect x="290.38" y="242.5" width="125.04" height="20" rx="3" fill="var(--_bg)"/><text x="352.9" y="257.05" text-anchor="middle">Verified runtime root</text></g><g class="pele-edge-label" data-id="L_P_T_0"><rect x="150.62" y="398.5" width="50.61" height="20" rx="3" fill="var(--_bg)"/><text x="175.93" y="413.05" text-anchor="middle">HTTPS</text></g><g class="pele-edge-label" data-id="L_P_H_0"><rect x="508.91" y="398.5" width="41.94" height="20" rx="3" fill="var(--_bg)"/><text x="529.88" y="413.05" text-anchor="middle">HTTP</text></g><g class="pele-edge-label" data-id="L_T_S_0"><rect x="137.13" y="554.5" width="36.9" height="20" rx="3" fill="var(--_bg)"/><text x="155.58" y="569.05" text-anchor="middle">Valid</text></g><g class="pele-edge-label" data-id="L_H_S_0"><rect x="438.54" y="554.5" width="70.87" height="20" rx="3" fill="var(--_bg)"/><text x="473.97" y="569.05" text-anchor="middle">Connected</text></g><g class="pele-edge-label" data-id="L_T_F_0"><rect x="194.03" y="554.5" width="174.88" height="20" rx="3" fill="var(--_bg)"/><text x="281.47" y="569.05" text-anchor="middle">Timeout or verification failure</text></g><g class="pele-edge-label" data-id="L_H_F_0"><rect x="529.41" y="554.5" width="112.75" height="20" rx="3" fill="var(--_bg)"/><text x="585.78" y="569.05" text-anchor="middle">Timeout or refusal</text></g></g><g class="pele-nodes"><g class="pele-node pele-shape-rect" data-id="D" transform="translate(127.88,76)"><rect x="-103.87" y="-32" width="207.75" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Doctor: both loopback</tspan><tspan x="0" y="15.25">families, ports 80 and 443</tspan></text></g><g class="pele-node pele-shape-rect" data-id="C" transform="translate(248.21,188)"><rect x="-99.7" y="-32" width="199.4" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Read public CA from the</tspan><tspan x="0" y="15.25">running Hack proxy</tspan></text></g><g class="pele-node pele-shape-rect" data-id="O" transform="translate(368.54,66)"><rect x="-96.79" y="-42" width="193.58" height="84" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-14.75">Open: selected URL</tspan><tspan x="0" y="5.25">resolves to loopback on</tspan><tspan x="0" y="25.25">port 80 or 443</tspan></text></g><g class="pele-node pele-shape-rect idle" data-id="U" transform="translate(143.51,334)"><rect x="-80.94" y="-32" width="161.88" height="64" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-4.75">Doctor warning; no</tspan><tspan x="0" y="15.25">interception claim</tspan></text></g><g class="pele-node pele-shape-rect wait" data-id="P" transform="translate(352.9,334)"><rect x="-88.45" y="-42" width="176.91" height="84" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-14.75">Probe each loopback</tspan><tspan x="0" y="5.25">endpoint with a short</tspan><tspan x="0" y="25.25">timeout</tspan></text></g><g class="pele-node pele-shape-rect" data-id="T" transform="translate(175.93,490)"><rect x="-104.7" y="-42" width="209.4" height="84" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-14.75">Verify CA chain and proxy</tspan><tspan x="0" y="5.25">schemas hostname via</tspan><tspan x="0" y="25.25">SNI</tspan></text></g><g class="pele-node pele-shape-rect" data-id="H" transform="translate(529.88,490)"><rect x="-96.35" y="-23.5" width="192.71" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Check TCP reachability</text></g><g class="pele-node pele-shape-rect ok" data-id="S" transform="translate(247.37,721.08)"><rect x="-73.45" y="-23.5" width="146.89" height="47" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" x="0" y="5.25" text-anchor="middle">Endpoint passes</text></g><g class="pele-node pele-shape-rect fail" data-id="F" transform="translate(458.44,721.08)"><rect x="-97.63" y="-42" width="195.26" height="84" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-14.75">Warn with failed port,</tspan><tspan x="0" y="5.25">affected DNS paths and</tspan><tspan x="0" y="25.25">visible listeners</tspan></text></g><g class="pele-node pele-shape-rect fail" data-id="R" transform="translate(458.44,853.08)"><rect x="-103.45" y="-42" width="206.91" height="84" fill="var(--_s)" stroke="var(--_b)" style="rx:var(--_r)"/><text class="pele-label" text-anchor="middle" xml:space="preserve"><tspan x="0" y="-14.75">Open refuses before URL</tspan><tspan x="0" y="5.25">output or browser launch;</tspan><tspan x="0" y="25.25">no automatic repair</tspan></text></g></g></svg>

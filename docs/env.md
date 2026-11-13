@@ -1545,6 +1545,8 @@ only, so it runs even when Docker is not reachable; the other `--migrate-env-con
 repairs still need Docker. As with any migration, `hack doctor` then offers to remove the
 legacy `.hack/.env*` files that Compose no longer references (a non-interactive run
 accepts for untracked files, and for git-tracked ones only with `--accept-tracked-env-changes`).
+An untracked legacy store key joins its tracked store's confirmation batch, so
+declining tracked cleanup keeps both files and the store remains readable.
 Files Compose still names as `env_file` are offered only when the Compose repair
 removed those references. Without `hack.env.json`, a legacy file that git tracks, or one
 whose status git cannot report in a git checkout, is never offered, because the migrated

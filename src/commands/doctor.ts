@@ -4591,6 +4591,17 @@ async function offerDoctorEnvCleanup(opts: {
     ).push(path);
   }
 
+  // A key cannot be removed while its tracked store still exists. Include an
+  // untracked key in that store's later consent batch, keeping the dependency
+  // intact whether tracked cleanup is accepted, declined or refused.
+  const store = opts.context?.store;
+  if (store && tracked.includes(store.path)) {
+    const keyIndex = untracked.indexOf(store.keyPath);
+    if (keyIndex !== -1) {
+      tracked.push(...untracked.splice(keyIndex, 1));
+    }
+  }
+
   if (untracked.length > 0) {
     note(
       [
@@ -4619,7 +4630,7 @@ async function offerDoctorEnvCleanup(opts: {
   if (tracked.length > 0) {
     note(
       [
-        "These legacy env files are tracked by git and can now be removed. Teammates share them, so commit the removal together with the new env layers:",
+        "These legacy env files are tracked by git, or are keys kept with a tracked store, and can now be removed. Teammates share the tracked files, so commit their removal together with the new env layers:",
         ...tracked.map((path) => `- ${path}`),
       ].join("\n"),
       "env cleanup"

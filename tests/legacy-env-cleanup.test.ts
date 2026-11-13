@@ -205,6 +205,16 @@ test("a changed YAML store value keeps the unchanged encrypted store and key", a
   });
 });
 
+test("cleanup refuses a key-only batch while its store remains", async () => {
+  await withMigratedStore(async (options) => {
+    const bytes = await readFile(options.storePath, "utf8");
+    const key = await readFile(options.keyPath, "utf8");
+    await refused({ ...options, paths: [options.keyPath] });
+    expect(await readFile(options.storePath, "utf8")).toBe(bytes);
+    expect(await readFile(options.keyPath, "utf8")).toBe(key);
+  });
+});
+
 test.skipIf(process.getuid?.() === 0)(
   "an unreadable store is kept with its key",
   async () => {

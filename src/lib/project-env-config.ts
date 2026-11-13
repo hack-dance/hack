@@ -93,7 +93,10 @@ import {
   acquireNativeManagedEnvFile,
   assertNativeProjectInputRoot,
 } from "./native-project-inputs.ts";
-import { writePrivateEnvFileIfChanged } from "./private-env-file.ts";
+import {
+  readPrivateEnvFile,
+  writePrivateEnvFileIfChanged,
+} from "./private-env-file.ts";
 import {
   createPrivateFileExclusive,
   decodeCanonicalBase64,
@@ -234,6 +237,25 @@ export type ProjectEnvResolvedConfig = ProjectEnvResolvedMetadata & {
     Record<string, Readonly<Record<string, string>>>
   >;
 };
+
+/** Select names and flags with the same scope refusal as value selection. */
+export function selectProjectEnvMetadata(opts: {
+  readonly resolved: ProjectEnvResolvedMetadata;
+  readonly scopeName?: string | null;
+}): EffectiveEnvMetadata[string] {
+  const scopeName = normalizeProjectEnvScopeName({ scopeName: opts.scopeName });
+  const scoped = Object.hasOwn(opts.resolved.effectiveMetadata, scopeName)
+    ? opts.resolved.effectiveMetadata[scopeName]
+    : undefined;
+  if (!scoped) {
+    throw new ClosedCliError(
+      unknownProjectEnvScopeMessage({
+        configuredScopes: Object.keys(opts.resolved.effectiveMetadata),
+      })
+    );
+  }
+  return { ...scoped };
+}
 
 export function selectProjectEnvValues(opts: {
   readonly resolved: ProjectEnvResolvedConfig;
@@ -812,6 +834,13 @@ export async function isGitIgnoredProjectEnvPath(opts: {
  * Whether `startDir` or an ancestor holds a `.git` entry (directory, linked
  * worktree file or symlink), or `GIT_DIR` points git elsewhere. It does not ask
  * git, so it still answers when git itself refuses to run in the checkout.
+ *
+ * Fails closed (HACK-2165): the ancestors of both the given spelling and its
+ * resolved path are walked, so an alias outside a repository that names a
+ * project inside one is still inside; a start directory that can't be
+ * resolved, or an ancestor whose `.git` entry can't be inspected (anything
+ * but "absent"), counts as inside, since only confirmed absence may exempt a
+ * write from git's privacy checks.
  */
 async function isInsideGitCheckoutMarker(opts: {
   readonly startDir: string;
@@ -819,10 +848,30 @@ async function isInsideGitCheckoutMarker(opts: {
   if ((process.env.GIT_DIR ?? "").trim().length > 0) {
     return true;
   }
-  let current = resolve(opts.startDir);
+  const resolvedStart = await realpath(opts.startDir).catch(() => null);
+  if (resolvedStart === null) {
+    return true;
+  }
+  for (const start of new Set([resolve(opts.startDir), resolvedStart])) {
+    if (await hasGitMarkerAncestor(start)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function hasGitMarkerAncestor(start: string): Promise<boolean> {
+  let current = start;
   while (true) {
-    const marker = await lstat(resolve(current, ".git")).catch(() => null);
-    if (marker !== null) {
+    const marker = await lstat(resolve(current, ".git")).then(
+      () => true,
+      (error: unknown) =>
+        !(
+          isRecord(error) &&
+          (error.code === "ENOENT" || error.code === "ENOTDIR")
+        )
+    );
+    if (marker) {
       return true;
     }
     const parent = dirname(current);
@@ -1568,15 +1617,24 @@ type ProjectEnvLayers = NonNullable<
  * not a portable public plan or an atomic snapshot of configuration inputs.
  */
 export async function resolveProjectEnvMetadata(
-  opts: ProjectEnvResolveOptions
+  opts: ProjectEnvResolveOptions & { readonly fileDiagnostics?: boolean }
 ): Promise<ProjectEnvResolvedMetadata | null> {
   try {
-    const layers = await readProjectEnvLayers({ ...opts, strictRead: true });
+    const layers = await readProjectEnvLayers({
+      ...opts,
+      strictRead: !opts.fileDiagnostics,
+    });
     return layers
       ? projectEnvProjection({ layers, serviceNames: opts.serviceNames })
           .metadata
       : null;
-  } catch {
+  } catch (error) {
+    if (
+      opts.fileDiagnostics &&
+      (error instanceof ClosedCliError || error instanceof HackCliError)
+    ) {
+      throw error;
+    }
     throw new Error(
       "Cannot resolve project env metadata: selected configuration is invalid or unreadable."
     );
@@ -2940,6 +2998,257 @@ async function readProjectEnvLayerForMutation(opts: {
   return { read, text };
 }
 
+/** Names-only inventory of a plaintext entry; never contains its value. */
+export type ProjectEnvPlaintextEntry = {
+  readonly key: string;
+  readonly scope: string;
+  readonly filePath: string;
+  readonly environment: string | null;
+  readonly local: boolean;
+};
+
+type ProtectionOptions = {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  /** Undefined selects every overlay in this checkout; null selects base layers. */
+  readonly envName?: string | null;
+};
+
+/** Inspect this checkout's layers only; inherited primary layers are not mutation targets. */
+async function protectionLayers(opts: ProtectionOptions) {
+  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  const legacyLocal = await isLegacyTrackedLocalOverlay(opts);
+  const layers: {
+    filePath: string;
+    environment: string | null;
+    local: boolean;
+  }[] = [];
+  for (const entry of await readdir(opts.projectDir, { withFileTypes: true })) {
+    if (
+      !(
+        entry.name.startsWith(PROJECT_ENV_CONFIG_FILENAME_PREFIX) &&
+        entry.name.endsWith(PROJECT_ENV_CONFIG_FILENAME_SUFFIX)
+      )
+    ) {
+      continue;
+    }
+    const stem = entry.name.slice(
+      PROJECT_ENV_CONFIG_FILENAME_PREFIX.length,
+      -PROJECT_ENV_CONFIG_FILENAME_SUFFIX.length
+    );
+    const baseLocal = stem === "local" && !legacyLocal;
+    const local = stem.endsWith(".local") || baseLocal;
+    const overlay = stem.endsWith(".local") ? stem.slice(0, -6) : stem;
+    const environment = overlay === "default" || baseLocal ? null : overlay;
+    if (opts.envName !== undefined && opts.envName !== environment) {
+      continue;
+    }
+    layers.push({
+      filePath: resolve(opts.projectDir, entry.name),
+      environment,
+      local,
+    });
+  }
+  return layers.sort((left, right) =>
+    left.filePath.localeCompare(right.filePath)
+  );
+}
+
+function plaintextEntries(opts: {
+  readonly config: ProjectEnvConfig;
+  readonly layer: {
+    readonly filePath: string;
+    readonly environment: string | null;
+    readonly local: boolean;
+  };
+}): ProjectEnvPlaintextEntry[] {
+  const entries: ProjectEnvPlaintextEntry[] = [];
+  for (const [scope, values] of Object.entries(opts.config.values)) {
+    for (const [key, value] of Object.entries(values)) {
+      if (value !== null && !isProjectEnvSecretValue(value)) {
+        entries.push({ key, scope, ...opts.layer });
+      }
+    }
+  }
+  return entries.sort(
+    (left, right) =>
+      left.scope.localeCompare(right.scope) || left.key.localeCompare(right.key)
+  );
+}
+
+/** List plaintext keys, scopes and layers without acquiring a key or returning values. */
+export async function listProjectEnvPlaintextEntries(
+  opts: ProtectionOptions
+): Promise<ProjectEnvPlaintextEntry[]> {
+  const entries: ProjectEnvPlaintextEntry[] = [];
+  for (const layer of await protectionLayers(opts)) {
+    const { read } = await readProjectEnvLayerForMutation({
+      projectRoot: opts.projectRoot,
+      path: layer.filePath,
+      environment: layer.environment ?? "default",
+    });
+    entries.push(...plaintextEntries({ config: read.config, layer }));
+  }
+  return entries;
+}
+
+/** Validate the project's existing ciphertext before any conversion can split its key. */
+async function protectionKey(
+  opts: ProtectionOptions & {
+    readonly targets: readonly {
+      readonly key: string;
+      readonly scope?: string;
+    }[];
+  }
+): Promise<string | null> {
+  const matched = new Set<number>();
+  const ciphertexts: string[] = [];
+  let hasPlaintext = false;
+  for (const layer of await protectionLayers({ ...opts, envName: undefined })) {
+    const { read } = await readProjectEnvLayerForMutation({
+      projectRoot: opts.projectRoot,
+      path: layer.filePath,
+      environment: layer.environment ?? "default",
+    });
+    for (const [scope, entries] of Object.entries(read.config.values)) {
+      for (const [key, value] of Object.entries(entries)) {
+        if (isProjectEnvSecretValue(value)) {
+          ciphertexts.push(value.secure);
+        }
+        if (opts.envName !== undefined && opts.envName !== layer.environment) {
+          continue;
+        }
+        for (const [index, target] of opts.targets.entries()) {
+          if (
+            target.key === key &&
+            (target.scope === undefined || target.scope === scope)
+          ) {
+            matched.add(index);
+            hasPlaintext ||= value !== null && !isProjectEnvSecretValue(value);
+          }
+        }
+      }
+    }
+  }
+  if (matched.size !== opts.targets.length) {
+    throw new ClosedCliError(
+      "One or more requested env keys do not exist in the selected layers. Run hack env protect to inspect plaintext names, then retry (values omitted)."
+    );
+  }
+  if (!hasPlaintext) {
+    return null;
+  }
+  const existing = await resolveProjectEnvKey({
+    projectRoot: opts.projectRoot,
+    required: false,
+    forEncryption: true,
+  });
+  if (!existing && ciphertexts.length > 0) {
+    throw new ProjectEnvKeyMissingError(missingProjectEnvKeyHint());
+  }
+  const keyText = existing ?? (await ensureProjectEnvSecretKey(opts)).keyText;
+  for (const ciphertext of ciphertexts) {
+    decryptProjectEnvValue({ ciphertext, keyText });
+  }
+  return keyText;
+}
+
+/**
+ * Encrypt chosen plaintext entries in place, preserving every scope and overlay.
+ * Each file is re-read under its writer lock and published with a content CAS.
+ * Already encrypted entries and null removals are unchanged. Files commit
+ * independently; a retry safely finishes a partially completed multi-file run.
+ */
+export async function protectProjectEnvEntries(
+  opts: ProtectionOptions & {
+    readonly targets: readonly {
+      readonly key: string;
+      readonly scope?: string;
+    }[];
+  }
+): Promise<ProjectEnvPlaintextEntry[]> {
+  for (const target of opts.targets) {
+    if (!PROJECT_ENV_KEY_PATTERN.test(target.key)) {
+      throw new ClosedCliError(ENV_KEY_INVALID_MESSAGE);
+    }
+    if (target.scope !== undefined) {
+      assertValidProjectEnvScopeName({ scopeName: target.scope });
+    }
+  }
+  // Refuse malformed layers before changing any file or acquiring key material.
+  const keyText = await protectionKey(opts);
+  if (keyText === null) {
+    return [];
+  }
+  const protectedEntries: ProjectEnvPlaintextEntry[] = [];
+  for (const layer of await protectionLayers(opts)) {
+    const changed = await withEnvLayerLock({
+      layerPath: layer.filePath,
+      run: async () => {
+        const { read, text } = await readProjectEnvLayerForMutation({
+          projectRoot: opts.projectRoot,
+          path: layer.filePath,
+          environment: layer.environment ?? "default",
+        });
+        const selected = plaintextEntries({
+          config: read.config,
+          layer,
+        }).filter((entry) =>
+          opts.targets.some(
+            (target) =>
+              target.key === entry.key &&
+              (target.scope === undefined || target.scope === entry.scope)
+          )
+        );
+        if (selected.length === 0) {
+          return [];
+        }
+        for (const entries of Object.values(read.config.values)) {
+          for (const value of Object.values(entries)) {
+            if (isProjectEnvSecretValue(value)) {
+              decryptProjectEnvValue({ ciphertext: value.secure, keyText });
+            }
+          }
+        }
+        const values: ProjectEnvValuesByScope = Object.fromEntries(
+          Object.entries(read.config.values).map(([scope, entries]) => [
+            scope,
+            { ...entries },
+          ])
+        );
+        for (const entry of selected) {
+          const scope = values[entry.scope];
+          const value = scope?.[entry.key];
+          if (
+            !scope ||
+            value === undefined ||
+            value === null ||
+            isProjectEnvSecretValue(value)
+          ) {
+            continue;
+          }
+          scope[entry.key] = stableProjectEnvSecretValue({
+            previous: value,
+            plaintext: String(value),
+            keyText,
+          });
+        }
+        await writeProjectEnvConfigFile({
+          projectRoot: opts.projectRoot,
+          path: layer.filePath,
+          config: { ...read.config, values },
+          expectedExisting: text,
+          machineLocal: layer.local,
+        });
+        return selected;
+      },
+    });
+    protectedEntries.push(...changed);
+  }
+  return protectedEntries;
+}
+
 export async function setProjectEnvValue(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -3736,26 +4045,191 @@ async function writeProjectEnvConfigFile(opts: {
   /**
    * A machine-local layer, which may hold plaintext values: when this write
    * creates it, it is private (0600) from creation. An existing layer keeps
-   * its mode.
+   * its mode. The write is refused unless
+   * {@link assertMachineLocalLayerWriteDestination} admits the path.
    */
   readonly machineLocal?: boolean;
 }): Promise<boolean> {
   const text = serializeProjectEnvConfig(opts.config);
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
+  if (opts.machineLocal === true) {
+    await assertMachineLocalLayerWriteDestination({
+      projectRoot: opts.projectRoot,
+      path: opts.path,
+    });
+  }
   // Rename-committed: an interrupted mutation leaves the previous layer intact.
   return (
     await writeTextFileAtomicIfChanged(opts.path, text, {
       ...(opts.expectedExisting === undefined
         ? {}
         : { expectedExisting: opts.expectedExisting }),
-      ...(opts.machineLocal === true ? { createMode: 0o600 } : {}),
-      validatePath: async (path) =>
+      ...(opts.machineLocal === true
+        ? { createMode: 0o600, noFollowTarget: true }
+        : {}),
+      validatePath: async (path) => {
         await assertProjectEnvLayerPath({
           projectRoot: opts.projectRoot,
           path,
-        }),
+        });
+        if (opts.machineLocal === true) {
+          // Again immediately before the commit rename.
+          await assertMachineLocalLayerNotLinked({ path: opts.path });
+        }
+      },
     })
   ).changed;
+}
+
+/** Fixed, value-free refusals of a machine-local layer write. */
+export const MACHINE_LOCAL_LAYER_REFUSALS = {
+  linked: (path: string) =>
+    `Refused machine-local env write: ${path} is a symbolic link. A machine-local layer must be a regular file, so a value can never reach the file the link names (which may be tracked). Replace the link with a regular file and retry; values omitted.`,
+  tracked: (path: string) =>
+    `Refused machine-local env write: git tracks ${path}, so the value would be committed. Untrack it with \`git rm --cached -- ${path}\` and retry; values omitted.`,
+  trackingUnknown: (path: string) =>
+    `Refused machine-local env write: this checkout is a git repository, but git could not report whether it tracks ${path}, so the value could be committed. Make \`git status\` work in this checkout and retry; values omitted.`,
+  notIgnored: (path: string) =>
+    `Refused machine-local env write: git does not ignore ${path}, so the value could be committed. Make .hack/.gitignore writable (or ignore that path, and remove any rule that re-includes it) and retry; values omitted.`,
+} as const;
+
+async function assertMachineLocalLayerNotLinked(opts: {
+  readonly path: string;
+}): Promise<void> {
+  const entry = await lstat(opts.path).catch(() => null);
+  if (entry?.isSymbolicLink()) {
+    throw new ClosedCliError(MACHINE_LOCAL_LAYER_REFUSALS.linked(opts.path));
+  }
+}
+
+/**
+ * Whether git tracks a file whose path matches `path` ignoring case: on a
+ * case-insensitive filesystem a write to `hack.env.qa.local.yaml` replaces a
+ * tracked `Hack.env.qa.local.yaml`, which the exact `ls-files` check misses.
+ * Null when git can't say.
+ */
+async function isGitTrackedProjectEnvPathAnyCase(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<boolean | null> {
+  try {
+    const proc = Bun.spawn({
+      // Hack key material never reaches a tool (HACK-2163).
+      env: childEnvironment(),
+      cmd: [
+        "git",
+        "-C",
+        opts.projectRoot,
+        "ls-files",
+        "-z",
+        "--",
+        `:(icase,literal)${toGitRelativePath(opts)}`,
+      ],
+      stderr: "ignore",
+      stdin: "ignore",
+      stdout: "pipe",
+    });
+    const [listed, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    return exitCode === 0 ? listed.length > 0 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether git may collect a machine-local layer at `path`, failing closed
+ * inside a checkout: `tracked` when git tracks it, `tracking_unknown` when
+ * git can't say, `not_ignored` when no effective rule ignores it. Outside
+ * every checkout nothing can collect it, so the answer is `null`.
+ */
+async function machineLocalLayerGitProblem(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<"tracked" | "tracking_unknown" | "not_ignored" | null> {
+  const tracked = await isGitTrackedProjectEnvPath(opts);
+  const inCheckout = () =>
+    isInsideGitCheckoutMarker({ startDir: opts.projectRoot });
+  if (tracked === true) {
+    return "tracked";
+  }
+  const trackedAnyCase = await isGitTrackedProjectEnvPathAnyCase(opts);
+  if (trackedAnyCase === true) {
+    return "tracked";
+  }
+  if (trackedAnyCase === null && (await inCheckout())) {
+    return "tracking_unknown";
+  }
+  if (tracked === null && (await inCheckout())) {
+    return "tracking_unknown";
+  }
+  const ignored = await isGitIgnoredProjectEnvPath(opts);
+  if (ignored === true || (ignored === null && !(await inCheckout()))) {
+    return null;
+  }
+  return "not_ignored";
+}
+
+/**
+ * Refuses, without any repair, a machine-local file (for example a legacy
+ * `.hack/.env`) that git tracks, whose tracking git can't report inside a
+ * checkout, or that no effective rule ignores (HACK-2165). Callers repair
+ * ignore rules first, the way their write path does.
+ */
+export async function assertMachineLocalFileGitPrivate(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<void> {
+  const problem = await machineLocalLayerGitProblem(opts);
+  if (problem === "tracked") {
+    throw new ClosedCliError(MACHINE_LOCAL_LAYER_REFUSALS.tracked(opts.path));
+  }
+  if (problem === "tracking_unknown") {
+    throw new ClosedCliError(
+      MACHINE_LOCAL_LAYER_REFUSALS.trackingUnknown(opts.path)
+    );
+  }
+  if (problem === "not_ignored") {
+    throw new ClosedCliError(
+      MACHINE_LOCAL_LAYER_REFUSALS.notIgnored(opts.path)
+    );
+  }
+}
+
+/**
+ * Admits a machine-local layer write only to a regular file (or a new one)
+ * that git neither tracks nor could collect (HACK-2165): a symlink is refused
+ * outright, since the tracking and ignore checks test the link's name while
+ * the writer would replace the file it resolves to. When the layer is not
+ * ignored, the managed `.hack/.gitignore` block is repaired once and the
+ * outcome checked again; a warning is not enough for a private value.
+ */
+async function assertMachineLocalLayerWriteDestination(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<void> {
+  await assertMachineLocalLayerNotLinked(opts);
+  let problem = await machineLocalLayerGitProblem(opts);
+  if (problem === "not_ignored") {
+    // Silent: a caller has already warned about a read-only file.
+    await ensureHackDirGitignore({ projectDir: dirname(opts.path) });
+    problem = await machineLocalLayerGitProblem(opts);
+  }
+  if (problem === "tracked") {
+    throw new ClosedCliError(MACHINE_LOCAL_LAYER_REFUSALS.tracked(opts.path));
+  }
+  if (problem === "tracking_unknown") {
+    throw new ClosedCliError(
+      MACHINE_LOCAL_LAYER_REFUSALS.trackingUnknown(opts.path)
+    );
+  }
+  if (problem === "not_ignored") {
+    throw new ClosedCliError(
+      MACHINE_LOCAL_LAYER_REFUSALS.notIgnored(opts.path)
+    );
+  }
 }
 
 export async function materializeProjectEnv(opts: {
@@ -4110,6 +4584,8 @@ function formatProjectEnvStateValue(opts: {
 async function resolveProjectEnvKey(opts: {
   readonly projectRoot: string;
   readonly required: boolean;
+  /** Existing files use the encryption owner's tracked-key/ignore/adoption checks. */
+  readonly forEncryption?: boolean;
   readonly nativeSelection?: { readonly signal?: AbortSignal };
 }): Promise<string | null> {
   if (opts.nativeSelection) {
@@ -4122,6 +4598,9 @@ async function resolveProjectEnvKey(opts: {
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
   const localKey = await readLegacyProjectEnvKeyFile({ path: keyPath });
   if (localKey) {
+    if (opts.forEncryption) {
+      return (await ensureProjectEnvSecretKey(opts)).keyText;
+    }
     return localKey;
   }
   const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
@@ -4132,12 +4611,18 @@ async function resolveProjectEnvKey(opts: {
       ? null
       : await readLegacyProjectEnvKeyFile({ path: sharedKeyPath });
   if (sharedKey) {
+    if (opts.forEncryption) {
+      return (await ensureProjectEnvSecretKey(opts)).keyText;
+    }
     return sharedKey;
   }
   const inheritedKey = await resolveInheritedProjectEnvKey({
     projectRoot: opts.projectRoot,
   });
   if (inheritedKey) {
+    if (opts.forEncryption) {
+      return (await ensureProjectEnvSecretKey(opts)).keyText;
+    }
     return inheritedKey.keyText;
   }
   const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
@@ -6829,15 +7314,20 @@ export async function findUnmigratedLegacyDotenv(opts: {
   let malformedCount = 0;
   for (const envName of [...(state.ok ? [] : [null]), ...overlayNames]) {
     const path = resolveEnvFilePath({ projectDir: opts.projectDir, envName });
-    const read = await readOptionalTextFile(path);
-    if (read.kind === "unreadable") {
+    // No-follow (HACK-2165): a linked or non-regular file is reported as
+    // unreadable and never read, so a link out of the project names no keys.
+    let text: string | null;
+    try {
+      text = await readPrivateEnvFile({ envFile: path });
+    } catch {
       unreadableFiles.push(basename(path));
+      continue;
     }
-    if (read.kind !== "text") {
+    if (text === null) {
       continue;
     }
     const delivered = await deliveredLayerValues({ ...opts, envName });
-    for (const [key, value] of Object.entries(parseDotEnv(read.text))) {
+    for (const [key, value] of Object.entries(parseDotEnv(text))) {
       if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
         malformedCount += 1;
       } else if (delivered[key] !== value) {

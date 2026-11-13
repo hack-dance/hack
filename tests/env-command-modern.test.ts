@@ -53,7 +53,7 @@ test("modern env list masks secret values by default", async () => {
     "api",
   ]);
   expect(textResult.exitCode).toBe(0);
-  expect(textResult.stdout).toContain("SERVICE_TOKEN\tapi\t***");
+  expect(textResult.stdout).toContain("SERVICE_TOKEN\tapi\tset");
   expect(textResult.stdout).not.toContain("super-secret-token");
 
   const jsonResult = await runCliWithCapturedOutput([
@@ -70,7 +70,11 @@ test("modern env list masks secret values by default", async () => {
   expect(jsonResult.stdout).toContain('"storage": {');
   expect(jsonResult.stdout).toContain('"backend": "project_key"');
   expect(jsonResult.stdout).toContain('"key": "SERVICE_TOKEN"');
-  expect(jsonResult.stdout).toContain('"value": "***"');
+  expect(jsonResult.stdout).not.toContain('"value":');
+  expect(jsonResult.stdout).toContain('"has_value": true');
+  expect(jsonResult.stdout).toContain('"layer":');
+  expect(jsonResult.stdout).not.toContain("synthetic_plaintext_list_sentinel");
+  expect(textResult.stdout).not.toContain("synthetic_plaintext_list_sentinel");
   expect(jsonResult.stdout).not.toContain("super-secret-token");
   expect(jsonResult.stdout).not.toContain('"materialized"');
   expect(jsonResult.stdout).toContain('"materialized_keys": []');
@@ -154,7 +158,7 @@ async function createProject(): Promise<string> {
     envName: null,
     scope: "global",
     key: "GLOBAL_FLAG",
-    value: "1",
+    value: "synthetic_plaintext_list_sentinel",
     secret: false,
   });
   await setProjectEnvValue({

@@ -1,3 +1,4 @@
+import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   createLifecycleProcessController,
   installLifecycleSignalCleanup,
@@ -362,7 +363,10 @@ import {
   readProjectsRegistry,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
-import { openProxyLoopbackWarning } from "../lib/proxy-loopback.ts";
+import {
+  openProxyLoopbackWarning,
+  openUnresolvedHostWarning,
+} from "../lib/proxy-loopback.ts";
 import {
   discoverDependencyBootstrapServices,
   discoverSuccessfulCompletionServices,
@@ -1453,6 +1457,8 @@ export async function resolveModernComposeEnvOverrides(opts: {
     envName: opts.envName,
     serviceNames: opts.allServiceNames,
   });
+  // After a successful read, so a refusal stays one line.
+  await reportLooseEnvLayerModes({ projectDir: opts.project.projectDir });
   if (!modern) {
     return null;
   }
@@ -1545,6 +1551,8 @@ export async function resolveLifecycleEnvForProject(opts: {
     envName: opts.envName,
     serviceNames,
   });
+  // After a successful read, so a refusal stays one line.
+  await reportLooseEnvLayerModes({ projectDir: opts.project.projectDir });
   if (modern) {
     return selectProjectEnvValuesForExecutionTarget({
       resolved: modern,
@@ -4284,8 +4292,18 @@ async function handleInitAuto({
     message: `Initialized ${HACK_PROJECT_DIR_PRIMARY}/ for ${slug}`,
   });
   const next = initNextSteps({ backend, devHost });
+  // Discovery ran and found nothing: the scaffold is a placeholder that only
+  // starts if the project happens to have a Bun "dev" script. Say so instead
+  // of sending the user straight to `up`. An explicit --manual or
+  // --no-discovery asked for the minimal scaffold and keeps its output.
+  const placeholder = !(useDiscovery || skipDiscovery);
+  if (placeholder) {
+    logger.warn({ message: initPlaceholderNotice() });
+  }
   logger.info({
-    message: `Next: ${next.autoCommand}`,
+    message: placeholder
+      ? `Next: edit ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME}, then ${next.autoCommand}`
+      : `Next: ${next.autoCommand}`,
   });
   logger.info({
     message: next.routing,
@@ -4300,6 +4318,11 @@ async function handleInitAuto({
   }
 
   return 0;
+}
+
+/** What a placeholder scaffold is and what to change, in one sentence. */
+export function initPlaceholderNotice(): string {
+  return `No runnable service was found in this repository, so ${HACK_PROJECT_DIR_PRIMARY}/${PROJECT_COMPOSE_FILENAME} has a placeholder service "app" (a Bun image running "bun run dev"). Set its image and command to how this project starts before hack up; hack init --with claude or --with codex hands that to an agent.`;
 }
 
 async function writeInitScaffoldFile(opts: {
@@ -10485,6 +10508,7 @@ export async function emitOpenOrigin(opts: {
   readonly json: boolean;
   readonly origin: "compose" | "native";
   readonly checkLoopback?: typeof openProxyLoopbackWarning;
+  readonly checkResolution?: typeof openUnresolvedHostWarning;
 }): Promise<number> {
   const warning =
     opts.origin === "compose"
@@ -10495,10 +10519,31 @@ export async function emitOpenOrigin(opts: {
   if (warning) {
     throw new HackCliError({ code: "E_GLOBAL_INFRA_DOWN", message: warning });
   }
+  // A URL whose host has no address is still the right URL, so this is a
+  // warning, not a refusal: JSON keeps `url` and adds `dns` and `hint`.
+  // Compose origins only, like the loopback check: native routes have their
+  // own DNS path and checks, and a native open stays free of host probes.
+  const unresolved =
+    opts.origin === "compose"
+      ? await (opts.checkResolution ?? openUnresolvedHostWarning)({
+          url: opts.url,
+        })
+      : null;
   if (opts.json) {
-    process.stdout.write(`${JSON.stringify({ url: opts.url }, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify(
+        unresolved
+          ? { url: opts.url, dns: unresolved.dns, hint: unresolved.hint }
+          : { url: opts.url },
+        null,
+        2
+      )}\n`
+    );
     noteBrowserTargetsForLocalNetworkHint([opts.url]);
     return 0;
+  }
+  if (unresolved) {
+    logger.warn({ message: unresolved.hint });
   }
   logger.step({ message: `Opening ${opts.url}` });
   noteBrowserTargetsForLocalNetworkHint([opts.url]);

@@ -4461,22 +4461,22 @@
       {
         "slug": "install",
         "title": "Install v5",
-        "sourceRevision": "6ab1acece79609bc102e23bd24263691aaf0d5ea",
-        "sourceLabel": "Current command audit (next 6ab1acec)",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
         "sourceFile": "docs/reference/cli.md"
       },
       {
         "slug": "getting-started",
         "title": "First project on Compose",
-        "sourceRevision": "6ab1acece79609bc102e23bd24263691aaf0d5ea",
-        "sourceLabel": "Current command audit (next 6ab1acec)",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
         "sourceFile": "docs/reference/cli.md"
       },
       {
         "slug": "upgrade",
         "title": "Upgrade from v4",
-        "sourceRevision": "6ab1acece79609bc102e23bd24263691aaf0d5ea",
-        "sourceLabel": "Current command audit (next 6ab1acec)",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
         "sourceFile": "docs/reference/cli.md"
       },
       {
@@ -4649,15 +4649,15 @@
       {
         "slug": "native/start",
         "title": "Try native on Apple Silicon",
-        "sourceRevision": "6ab1acece79609bc102e23bd24263691aaf0d5ea",
-        "sourceLabel": "Current command audit (next 6ab1acec)",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
         "sourceFile": "docs/guides/native-candidate.md"
       },
       {
         "slug": "troubleshooting",
         "title": "Troubleshooting",
-        "sourceRevision": "6ab1acece79609bc102e23bd24263691aaf0d5ea",
-        "sourceLabel": "Current command audit (next 6ab1acec)",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
         "sourceFile": "docs/env.md"
       }
     ]

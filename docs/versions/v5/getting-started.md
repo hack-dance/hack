@@ -48,6 +48,13 @@ match your app. Check the local URL in the service's routing labels. Commit shar
 configuration, but never the project key `.hack.secret.key` or local env layers.
 [Project setup](guides/init-project.md) explains discovery and custom domains.
 
+For noninteractive setup, `hack init --auto` uses discovery defaults. In builds
+containing merged #791, intended for next.17, it warns **“No runnable service was
+found”** when discovery wrote a placeholder `app` service (a Bun image running
+`bun run dev`). Set that service's image and command to how your app really starts
+before `up`. The notice does not appear for a discovered service or when you
+explicitly chose `--manual` or `--no-discovery`.
+
 ## Start and open
 
 ```sh
@@ -59,6 +66,15 @@ hack open
 Expect the declared services in `ps` and the app's local URL from `open`.
 If a project has several URLs, choose the app's route. A worker-only project may
 have no URL. Sign in or load a page that reads data to check the app itself.
+
+With #791, Compose `open` warns when the host's DNS looks wrong; the URL is still
+printed or opened. `open --json` adds `dns: "unresolved"` for a confirmed missing
+address, or `dns: "unconfigured"` on a Mac whose Hack DNS suffix is not set up and
+whose lookup did not answer in time. A machine upgraded from v4 may resolve only
+the older suffix. Follow the hint: use the same Compose-selected v5 CLI to run
+`hack global install`, or choose a host under a working suffix with
+`hack config set dev_host <name>.<suffix>`. Review host-change prompts.
+See [the DNS troubleshooting row](troubleshooting.md).
 
 A failed startup prints a reason. Read it before retrying; use
 [troubleshooting](troubleshooting.md) and `hack doctor` for setup problems.

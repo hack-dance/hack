@@ -638,13 +638,18 @@ async function recoverPhase(
  */
 export async function retireNativeAuthoredRecoveredHooks(
   store: Store,
-  run: string
+  run: string,
+  /** Caller has already proved retained host processes stopped. Observe only;
+   * the normal retirement still requires their owner file to be retired first. */
+  checkOnly = false
 ): Promise<void> {
   const saved = await optionalCapture(ownerPath(store));
   if (!saved) {
     return;
   }
-  await absent(join(store.root.path, `${run}.host-process-owner.json`));
+  if (!checkOnly) {
+    await absent(join(store.root.path, `${run}.host-process-owner.json`));
+  }
   const owner = parseOwner(JSON.parse(saved.text));
   if (
     owner.run !== run ||
@@ -665,6 +670,9 @@ export async function retireNativeAuthoredRecoveredHooks(
   await unchanged(saved.pin);
   for (const group of groups) {
     requireAbsentGroup(group);
+  }
+  if (checkOnly) {
+    return;
   }
   await unlink(ownerPath(store));
   await synchronizeDirectories(store.held);

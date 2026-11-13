@@ -15,7 +15,7 @@ const LIMIT: usize = 64 * 1024;
 fn refused() -> CandidateError {
     error(
         "native_graph_live_owner_recovery",
-        "Native same-boot recovery requires the exact complete Ready selection, dead boot-qualified publisher and unchanged durable progress; evidence retained.",
+        "Native same-boot recovery requires an exact settled resource selection, dead boot-qualified publisher and unchanged durable progress; pending effects and evidence are retained.",
     )
 }
 fn digest(bytes: &[u8]) -> String {
@@ -96,7 +96,7 @@ struct Intent {
 }
 fn receipt_progress(receipt: &Receipt) -> Result<u8, CandidateError> {
     match receipt.phase {
-        Phase::ReadyObserved => Ok(0),
+        Phase::ReadyObserved | Phase::FailedRetained => Ok(0),
         Phase::StopIntent => Ok(1),
         Phase::Stopped => Ok(2),
         Phase::RemovalIntent => Ok(3),
@@ -110,8 +110,9 @@ fn resource_progress(receipt: &Receipt) -> Result<BTreeMap<String, u8>, Candidat
         .iter()
         .map(|(key, resource)| {
             let rank = match (&resource.kind, resource.phase.as_str()) {
-                (Kind::Container, "started") | (Kind::Network, "created") => 0,
-                (Kind::Network, "remove-intent") => 1,
+                (Kind::Container, "created" | "started") | (Kind::Network, "created") => 0,
+                (Kind::Container | Kind::Network, "reserved") if resource.id.is_none() => 0,
+                (Kind::Container, "stopped") | (Kind::Network, "remove-intent") => 1,
                 (Kind::Container | Kind::Network, "removed") => 2,
                 _ => return Err(refused()),
             };
@@ -121,7 +122,7 @@ fn resource_progress(receipt: &Receipt) -> Result<BTreeMap<String, u8>, Candidat
 }
 impl Intent {
     fn original(&self, run: &str) -> Result<Receipt, CandidateError> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
             || self.run != run
             || self.original.len() > 64 * 1024
             || !super::super::super::hex(&self.receipt_sha256, 64)
@@ -131,11 +132,19 @@ impl Intent {
             return Err(refused());
         }
         let receipt: Receipt = serde_json::from_str(&self.original).map_err(|_| refused())?;
-        receipt.require_recovery_ready().map_err(|_| refused())?;
+        if self.version == 1 {
+            receipt.require_recovery_ready().map_err(|_| refused())?;
+        } else {
+            receipt.require_recovery_settled().map_err(|_| refused())?;
+        }
         if receipt.review.scope().run != run
+            || self.receipt_progress < receipt_progress(&receipt)?
             || self.resource_progress.keys().ne(receipt.resources.keys())
             || self.resource_progress.iter().any(|(key, rank)| {
-                *rank > 2 || (*rank == 1 && receipt.resources[key].kind != Kind::Network)
+                *rank > 2
+                    || (self.version == 1
+                        && *rank == 1
+                        && receipt.resources[key].kind != Kind::Network)
             })
         {
             return Err(refused());
@@ -153,12 +162,16 @@ impl Intent {
         let rank = receipt_progress(current)?;
         let resources = resource_progress(current)?;
         if id(root)? != self.journal_parent
+            || rank < receipt_progress(original)?
             || rank < self.receipt_progress
             || (rank == 0 && digest(bytes.as_bytes()) != self.receipt_sha256)
             || (self.progress != Progress::Cleanup && rank != 4)
             || resources
                 .iter()
                 .any(|(key, rank)| *rank < self.resource_progress[key])
+            || resources.iter().any(|(key, rank)| {
+                *rank == 0 && current.resources[key].phase != original.resources[key].phase
+            })
         {
             return Err(refused());
         }
@@ -225,7 +238,7 @@ impl Admitted<'_> {
         })
     }
 }
-/// Select only a dead boot-qualified complete Ready publication, or its unchanged
+/// Select only a dead boot-qualified settled publication, or its unchanged
 /// committed recovery intent. No file is created or repaired, and no provider
 /// operation, private acquisition, signal or cleanup is performed.
 pub fn select(candidate: &Candidate, run: &str) -> Result<Selection, CandidateError> {
@@ -271,7 +284,7 @@ fn admit<'a>(candidate: &'a Candidate, run: &'a str) -> Result<Admitted<'a>, Can
             (original, intent.receipt_sha256.clone())
         }
         None => {
-            current.require_recovery_ready().map_err(|_| refused())?;
+            current.require_recovery_settled().map_err(|_| refused())?;
             Progress::Cleanup.verify(&lease)?;
             (current, digest(bytes.as_bytes()))
         }

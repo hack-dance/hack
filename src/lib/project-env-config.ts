@@ -3727,12 +3727,19 @@ async function writeProjectEnvConfigFile(opts: {
   /**
    * A machine-local layer, which may hold plaintext values: when this write
    * creates it, it is private (0600) from creation. An existing layer keeps
-   * its mode.
+   * its mode. The write is refused unless
+   * {@link assertMachineLocalLayerWriteDestination} admits the path.
    */
   readonly machineLocal?: boolean;
 }): Promise<boolean> {
   const text = serializeProjectEnvConfig(opts.config);
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
+  if (opts.machineLocal === true) {
+    await assertMachineLocalLayerWriteDestination({
+      projectRoot: opts.projectRoot,
+      path: opts.path,
+    });
+  }
   // Rename-committed: an interrupted mutation leaves the previous layer intact.
   return (
     await writeTextFileAtomicIfChanged(opts.path, text, {
@@ -3740,13 +3747,100 @@ async function writeProjectEnvConfigFile(opts: {
         ? {}
         : { expectedExisting: opts.expectedExisting }),
       ...(opts.machineLocal === true ? { createMode: 0o600 } : {}),
-      validatePath: async (path) =>
+      validatePath: async (path) => {
         await assertProjectEnvLayerPath({
           projectRoot: opts.projectRoot,
           path,
-        }),
+        });
+        if (opts.machineLocal === true) {
+          // Again immediately before the commit rename.
+          await assertMachineLocalLayerNotLinked({ path: opts.path });
+        }
+      },
     })
   ).changed;
+}
+
+/** Fixed, value-free refusals of a machine-local layer write. */
+export const MACHINE_LOCAL_LAYER_REFUSALS = {
+  linked: (path: string) =>
+    `Refused machine-local env write: ${path} is a symbolic link. A machine-local layer must be a regular file, so a value can never reach the file the link names (which may be tracked). Replace the link with a regular file and retry; values omitted.`,
+  tracked: (path: string) =>
+    `Refused machine-local env write: git tracks ${path}, so the value would be committed. Untrack it with \`git rm --cached -- ${path}\` and retry; values omitted.`,
+  trackingUnknown: (path: string) =>
+    `Refused machine-local env write: this checkout is a git repository, but git could not report whether it tracks ${path}, so the value could be committed. Make \`git status\` work in this checkout and retry; values omitted.`,
+  notIgnored: (path: string) =>
+    `Refused machine-local env write: git does not ignore ${path}, so the value could be committed. Make .hack/.gitignore writable (or ignore that path, and remove any rule that re-includes it) and retry; values omitted.`,
+} as const;
+
+async function assertMachineLocalLayerNotLinked(opts: {
+  readonly path: string;
+}): Promise<void> {
+  const entry = await lstat(opts.path).catch(() => null);
+  if (entry?.isSymbolicLink()) {
+    throw new ClosedCliError(MACHINE_LOCAL_LAYER_REFUSALS.linked(opts.path));
+  }
+}
+
+/**
+ * Whether git may collect a machine-local layer at `path`, failing closed
+ * inside a checkout: `tracked` when git tracks it, `tracking_unknown` when
+ * git can't say, `not_ignored` when no effective rule ignores it. Outside
+ * every checkout nothing can collect it, so the answer is `null`.
+ */
+async function machineLocalLayerGitProblem(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<"tracked" | "tracking_unknown" | "not_ignored" | null> {
+  const tracked = await isGitTrackedProjectEnvPath(opts);
+  const inCheckout = () =>
+    isInsideGitCheckoutMarker({ startDir: opts.projectRoot });
+  if (tracked === true) {
+    return "tracked";
+  }
+  if (tracked === null && (await inCheckout())) {
+    return "tracking_unknown";
+  }
+  const ignored = await isGitIgnoredProjectEnvPath(opts);
+  if (ignored === true || (ignored === null && !(await inCheckout()))) {
+    return null;
+  }
+  return "not_ignored";
+}
+
+/**
+ * Admits a machine-local layer write only to a regular file (or a new one)
+ * that git neither tracks nor could collect (HACK-2165): a symlink is refused
+ * outright, since the tracking and ignore checks test the link's name while
+ * the writer would replace the file it resolves to. When the layer is not
+ * ignored, the managed `.hack/.gitignore` block is repaired once and the
+ * outcome checked again; a warning is not enough for a private value.
+ */
+async function assertMachineLocalLayerWriteDestination(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<void> {
+  await assertMachineLocalLayerNotLinked(opts);
+  let problem = await machineLocalLayerGitProblem(opts);
+  if (problem === "not_ignored") {
+    await ensureHackDirGitignoreForLocalEnvWrite({
+      projectDir: dirname(opts.path),
+    });
+    problem = await machineLocalLayerGitProblem(opts);
+  }
+  if (problem === "tracked") {
+    throw new ClosedCliError(MACHINE_LOCAL_LAYER_REFUSALS.tracked(opts.path));
+  }
+  if (problem === "tracking_unknown") {
+    throw new ClosedCliError(
+      MACHINE_LOCAL_LAYER_REFUSALS.trackingUnknown(opts.path)
+    );
+  }
+  if (problem === "not_ignored") {
+    throw new ClosedCliError(
+      MACHINE_LOCAL_LAYER_REFUSALS.notIgnored(opts.path)
+    );
+  }
 }
 
 export async function materializeProjectEnv(opts: {

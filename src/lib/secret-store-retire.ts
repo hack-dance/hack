@@ -1,12 +1,15 @@
 import { lstat, realpath, stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 import { PROJECT_CONFIG_FILENAME } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { readOptionalTextFile } from "./fs.ts";
 import { readHackEnvContract, readHackEnvRuntimeConfig } from "./hack-env.ts";
-import { readProjectsRegistryStrict } from "./projects-registry.ts";
+import {
+  type RegisteredProject,
+  readProjectsRegistryStrict,
+} from "./projects-registry.ts";
 import {
   classifyEncryptedStoreAt,
   isEncryptedStoreFile,
@@ -100,10 +103,7 @@ export type SecretStoreUsers = {
 export async function listProjectsUsingSecretStore(opts: {
   readonly storePath: string;
 }): Promise<SecretStoreUsers> {
-  let projects: readonly {
-    readonly name: string;
-    readonly projectDir: string;
-  }[];
+  let projects: readonly RegisteredProject[];
   // Registry entries that are not valid projects: unknown, so unchecked.
   let rejected = 0;
   try {
@@ -119,7 +119,10 @@ export async function listProjectsUsingSecretStore(opts: {
   const target = await identity(opts.storePath);
   const names = new Set<string>();
   let unchecked = rejected;
-  for (const project of projects) {
+  // A project's linked worktrees are registered under it, not as projects
+  // of their own, and each can have its own env contract and store config:
+  // every checkout is a context of its own.
+  for (const project of projects.flatMap(registeredCheckouts)) {
     let location: Awaited<ReturnType<typeof resolveFileSecretStorePaths>>;
     try {
       if (
@@ -155,6 +158,19 @@ export async function listProjectsUsingSecretStore(opts: {
     }
   }
   return { names: [...names].sort(), registryRead: true, unchecked };
+}
+
+/** A registered project's primary checkout and each of its linked worktrees. */
+function registeredCheckouts(
+  project: RegisteredProject
+): { readonly name: string; readonly projectDir: string }[] {
+  return [
+    { name: project.name, projectDir: project.projectDir },
+    ...(project.worktrees ?? []).map((worktree) => ({
+      name: `${project.name} (worktree ${basename(worktree.path)})`,
+      projectDir: resolve(worktree.path, project.projectDirName),
+    })),
+  ];
 }
 
 /**

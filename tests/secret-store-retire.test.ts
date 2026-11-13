@@ -1139,3 +1139,48 @@ test("a configured store path that is itself a symlink is not retired", async ()
   expect(await readFile(fixture.storePath)).toEqual(before);
   expect((await lstat(link)).isSymbolicLink()).toBe(true);
 });
+
+test("a registered worktree that reads the store is named, even when its primary checkout does not", async () => {
+  // Codex review: linked worktrees are registered under their project, not
+  // as projects; the scan checked only the primary checkout.
+  const fixture = await setUp();
+  // A worktree of app-b whose env contract reads the store.
+  const worktreeRoot = join(root, "repos", "app-b-feature");
+  const worktreeDir = join(worktreeRoot, ".hack");
+  await mkdir(worktreeDir, { recursive: true });
+  await writeFile(
+    join(worktreeDir, "hack.config.json"),
+    `${JSON.stringify({ name: "app-b", dev_host: "app-b.hack" })}\n`
+  );
+  await writeFile(
+    join(worktreeDir, "hack.env.json"),
+    `${JSON.stringify({ version: 1, vars: [{ key: "TOKEN", source: "keychain" }] })}\n`
+  );
+  const registry = join(fixture.hackHome, "projects.json");
+  const parsed = JSON.parse(await readFile(registry, "utf8")) as {
+    projects: { name: string; worktrees?: unknown[] }[];
+  };
+  for (const project of parsed.projects) {
+    if (project.name === "app-b") {
+      project.worktrees = [
+        {
+          path: worktreeRoot,
+          branch: "feature",
+          lastSeenAt: "2026-11-13T12:00:00.000Z",
+        },
+      ];
+    }
+  }
+  await writeFile(registry, JSON.stringify(parsed));
+  // Only app-a's primary checkout and app-b's worktree read the store.
+  const finding = (await inspect(fixture.bystander, "app-b"))[0];
+  expect(finding?.message).toContain(
+    "Registered projects that read it: app-a, app-b (worktree app-b-feature)."
+  );
+  // A worktree whose config cannot be read is unchecked, not "no reader".
+  await writeFile(join(worktreeDir, "hack.config.json"), "{ bad");
+  const partial = (await inspect(fixture.bystander, "app-b"))[0];
+  expect(partial?.message).toContain(
+    "1 registered project(s) could not be checked"
+  );
+});

@@ -101,6 +101,12 @@ pub trait Driver {
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError>;
     fn start(&mut self, service: &str) -> Result<(), CandidateError>;
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError>;
+
+    /// Add reviewed readiness context to an observed failure, without copying
+    /// application output or private configuration into the error.
+    fn service_failure(&self, service: &str, state: Observation) -> CandidateError {
+        failed_service_error("graph_service_failed", service, state)
+    }
 }
 fn error(code: &'static str, message: impl Into<crate::ErrorMessage>) -> CandidateError {
     CandidateError::new(code, message)
@@ -266,7 +272,7 @@ fn inspect(
         observations.insert(name.into(), state);
     }
     if state.failed() {
-        return Err(failed_service_error("graph_service_failed", name, state));
+        return Err(driver.service_failure(name, state));
     }
     Ok(state)
 }
@@ -293,8 +299,8 @@ pub(crate) fn failed_service_error(
     )
     .with_service(name)
 }
-fn before_deadline(deadline: Instant) -> Result<(), CandidateError> {
-    if Instant::now() >= deadline {
+fn before_deadline(deadline: Instant, now: Instant) -> Result<(), CandidateError> {
+    if now >= deadline {
         return Err(error(
             "graph_timeout",
             "Graph readiness deadline exceeded; owned state is retained.",
@@ -316,7 +322,17 @@ fn run_with_wait(
     graph: &Graph,
     driver: &mut impl Driver,
     timeout: Duration,
+    wait: impl FnMut(Duration),
+) -> Result<(), CandidateError> {
+    run_with_clock(graph, driver, timeout, wait, Instant::now)
+}
+
+fn run_with_clock(
+    graph: &Graph,
+    driver: &mut impl Driver,
+    timeout: Duration,
     mut wait: impl FnMut(Duration),
+    mut now: impl FnMut() -> Instant,
 ) -> Result<(), CandidateError> {
     let order = graph.execution_order()?;
     if timeout.is_zero() || timeout > Duration::from_secs(600) {
@@ -325,15 +341,15 @@ fn run_with_wait(
             "Graph timeout must be greater than zero and at most 600 seconds.",
         ));
     }
-    let deadline = Instant::now() + timeout;
+    let deadline = now() + timeout;
     let mut started = BTreeSet::<String>::new();
     let mut observations = BTreeMap::new();
     loop {
-        before_deadline(deadline)?;
+        before_deadline(deadline, now())?;
         driver.check_cancelled()?;
         for name in &started {
             inspect(driver, name, &mut observations)?;
-            before_deadline(deadline)?;
+            before_deadline(deadline, now())?;
             driver.check_cancelled()?;
         }
         for name in &order {
@@ -349,7 +365,7 @@ fn run_with_wait(
                     break;
                 }
                 let state = inspect(driver, dependency, &mut observations)?;
-                before_deadline(deadline)?;
+                before_deadline(deadline, now())?;
                 driver.check_cancelled()?;
                 if !state.satisfies(*condition) {
                     ready = false;
@@ -359,10 +375,10 @@ fn run_with_wait(
             if !ready {
                 continue;
             }
-            before_deadline(deadline)?;
+            before_deadline(deadline, now())?;
             driver.check_cancelled()?;
             driver.record(Event::StartIntent { service: name })?;
-            before_deadline(deadline)?;
+            before_deadline(deadline, now())?;
             driver.check_cancelled()?;
             if let Err(failure) = driver.start(name) {
                 driver.record(Event::StartUncertain { service: name })?;
@@ -371,14 +387,14 @@ fn run_with_wait(
             driver.record(Event::Started { service: name })?;
             started.insert(name.clone());
             inspect(driver, name, &mut observations)?;
-            before_deadline(deadline)?;
+            before_deadline(deadline, now())?;
             driver.check_cancelled()?;
         }
         if started.len() == graph.services.len() {
             let mut ready = true;
             for (name, service) in &graph.services {
                 let state = inspect(driver, name, &mut observations)?;
-                before_deadline(deadline)?;
+                before_deadline(deadline, now())?;
                 driver.check_cancelled()?;
                 ready &= state.satisfies(service.ready);
             }
@@ -387,9 +403,13 @@ fn run_with_wait(
                 return Ok(());
             }
         }
-        wait(Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())));
+        wait(Duration::from_millis(100).min(deadline.saturating_duration_since(now())));
     }
 }
+
+#[cfg(all(test, feature = "native-http-probe"))]
+#[path = "route_probe_clock_tests.rs"]
+mod route_probe_clock_tests;
 
 #[cfg(test)]
 mod tests {

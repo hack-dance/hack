@@ -3191,6 +3191,82 @@ test("HTTPS startup refuses a non-2xx reviewed health response", async () => {
   expect(events).toContain("https-close");
 });
 
+test("inferred HTTPS readiness accepts 2xx-4xx without following redirects and rejects 5xx", async () => {
+  const probe = {
+    policy: "route",
+    port: 3000,
+    path: "/",
+    interval_ms: 30_000,
+    timeout_ms: 1000,
+    retries: 3,
+    start_period_ms: 240_000,
+  };
+  const plan = {
+    services: {
+      web: {
+        routing: { port: 3000, hostnames: ["web.example.hack"] },
+        healthcheck: { disabled: false, native_http: probe },
+      },
+    },
+  };
+  for (const statusCode of [200, 204, 299, 301, 399, 400, 404, 499]) {
+    const calls: string[] = [];
+    await verifyHttpsRoutes(
+      {
+        httpsPort: 18_443,
+        verifyHostname: async (hostname, path) => {
+          calls.push(hostname);
+          expect(path).toBe("/");
+          return {
+            statusCode,
+            location: "https://foreign.invalid/",
+            upstreamVerified: true,
+          };
+        },
+      },
+      plan,
+      new Set(["web"])
+    );
+    expect(calls).toEqual(["web.example.hack"]);
+  }
+  for (const statusCode of [199, 500, 503, 599, 600]) {
+    await expect(
+      verifyHttpsRoutes(
+        {
+          httpsPort: 18_443,
+          verifyHostname: async () => ({ statusCode, upstreamVerified: true }),
+        },
+        plan,
+        new Set(["web"])
+      )
+    ).rejects.toThrow();
+  }
+  for (const statusCode of [200, 403, 404, 421, 502]) {
+    await expect(
+      verifyHttpsRoutes(
+        { httpsPort: 18_443, verifyHostname: async () => ({ statusCode }) },
+        plan,
+        new Set(["web"])
+      )
+    ).rejects.toThrow("UPSTREAM_RESPONSE_UNCONFIRMED");
+  }
+  const explicit = {
+    services: {
+      web: {
+        ...plan.services.web,
+        healthcheck: { native_http: { ...probe, policy: undefined } },
+      },
+    },
+  };
+  await expect(
+    verifyHttpsRoutes(
+      { httpsPort: 18_443, verifyHostname: async () => ({ statusCode: 404 }) },
+      explicit,
+      new Set(["web"])
+    )
+  ).rejects.toThrow();
+});
+
 test("HTTPS redirects terminate only at verified same-service reviewed aliases", async () => {
   const plan = {
     services: {

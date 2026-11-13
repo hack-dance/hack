@@ -108,10 +108,118 @@ fn freshExec(args: []const [:0]u8) !void {
     // stdin was fully consumed to EOF; the command receives no secret input bytes.
     return execCommand(args[2..], &env);
 }
+
+/// The private envelope uses only printable base64, so Docker's detach-key
+/// scanner cannot interpret its contents. Nothing is sent until echo is off;
+/// user input is withheld until the restored-terminal acknowledgement.
+fn interactiveFreshExec(args: []const [:0]u8) !void {
+    if (args.len < 3 or args.len > 4099) return error.Arguments;
+    const started = try bootSeconds();
+    const saved = try std.posix.tcgetattr(0);
+    var raw = saved;
+    raw.iflag.BRKINT = false;
+    raw.iflag.ICRNL = false;
+    raw.iflag.INLCR = false;
+    raw.iflag.IGNCR = false;
+    raw.iflag.ISTRIP = false;
+    raw.iflag.IXON = false;
+    raw.iflag.PARMRK = false;
+    raw.oflag.OPOST = false;
+    raw.lflag.ECHO = false;
+    raw.lflag.ECHONL = false;
+    raw.lflag.ICANON = false;
+    raw.lflag.ISIG = false;
+    raw.lflag.IEXTEN = false;
+    raw.cflag.CSIZE = .CS8;
+    raw.cflag.PARENB = false;
+    raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+    raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+    try std.posix.tcsetattr(0, .NOW, raw);
+    // On failure leave echo disabled, including for bytes still in flight.
+    // The guest launcher targets Linux; Zig has no portable tcflush wrapper.
+    errdefer _ = std.os.linux.ioctl(0, std.os.linux.T.CFLSH, 0); // TCIFLUSH
+    var hello: [64]u8 = undefined;
+    const marker = try std.fmt.bufPrint(&hello, "HKEE2 {d}\n", .{started});
+    if (try std.posix.write(1, marker) != marker.len) return error.Transport;
+    var env = try interactiveEnvelope(started);
+    defer env.deinit();
+    try std.posix.tcsetattr(0, .DRAIN, saved);
+    const ack = "HKEE2 OK\n";
+    if (try std.posix.write(1, ack) != ack.len) return error.Transport;
+    return execCommand(args[2..], &env);
+}
+
+fn privateRead(destination: []u8, started: u64) !void {
+    var used: usize = 0;
+    while (used < destination.len) {
+        const now = try bootSeconds();
+        if (now >= started + 5) return error.Expired;
+        var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
+        if (try std.posix.poll(&fds, @intCast((started + 5 - now) * 1000)) == 0) return error.Expired;
+        const n = try std.posix.read(0, destination[used..]);
+        if (n == 0) return error.Transport;
+        used += n;
+    }
+}
+
+fn interactiveEnvelope(started: u64) !std.process.EnvMap {
+    var header: [32]u8 = undefined;
+    defer std.crypto.secureZero(u8, &header);
+    var used: usize = 0;
+    while (true) {
+        if (used == header.len) return error.Payload;
+        try privateRead(header[used..][0..1], started);
+        used += 1;
+        if (header[used - 1] == '\n') break;
+    }
+    if (!std.mem.startsWith(u8, header[0..used], "HKEE2 ")) return error.Payload;
+    const digits = header[6 .. used - 1];
+    if (digits.len == 0 or digits[0] == '0') return error.Payload;
+    for (digits) |c| if (!std.ascii.isDigit(c)) return error.Payload;
+    const length = try std.fmt.parseInt(usize, digits, 10);
+    const encoded = try allocator.alloc(u8, 87384);
+    defer {
+        std.crypto.secureZero(u8, encoded);
+        allocator.free(encoded);
+    }
+    if (length == 0 or length > encoded.len) return error.Payload;
+    try privateRead(encoded[0..length], started);
+    const decoder = std.base64.standard.Decoder;
+    const decoded_length = try decoder.calcSizeForSlice(encoded[0..length]);
+    if (decoded_length == 0 or decoded_length > 65536) return error.Payload;
+    const decoded = try allocator.alloc(u8, 65536);
+    defer {
+        std.crypto.secureZero(u8, decoded);
+        allocator.free(decoded);
+    }
+    try decoder.decode(decoded[0..decoded_length], encoded[0..length]);
+    // JSON may allocate decoded escape sequences. Keep all parse storage in a
+    // bounded arena which is wiped before the acknowledgement, too.
+    const storage = try allocator.alloc(u8, 512 * 1024);
+    defer {
+        std.crypto.secureZero(u8, storage);
+        allocator.free(storage);
+    }
+    var fixed = std.heap.FixedBufferAllocator.init(storage);
+    const parsed = try std.json.parseFromSlice(std.json.Value, fixed.allocator(), decoded[0..decoded_length], .{ .duplicate_field_behavior = .@"error" });
+    defer parsed.deinit();
+    const values = try freshValues(parsed.value, started, try bootSeconds());
+    var env = try std.process.getEnvMap(allocator);
+    errdefer env.deinit();
+    var entries = values.iterator();
+    while (entries.next()) |entry| try env.put(entry.key_ptr.*, entry.value_ptr.string);
+    // The host is still gating keystrokes. Pending bytes mean a bad envelope,
+    // not command input; never restore echo over them.
+    var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
+    if (try std.posix.poll(&fds, 0) != 0) return error.Payload;
+    _ = try freshValues(parsed.value, started, try bootSeconds());
+    return env;
+}
 fn run() !void {
     try std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 });
     const raw = try std.process.argsAlloc(allocator);
     if (raw.len > 1 and std.mem.eql(u8, raw[1], "--exec-environment-stdin-v1")) return freshExec(raw);
+    if (raw.len > 1 and std.mem.eql(u8, raw[1], "--exec-environment-tty-v2")) return interactiveFreshExec(raw);
     const health = raw.len > 1 and std.mem.eql(u8, raw[1], "--health");
     const mounted_exec = raw.len > 1 and std.mem.eql(u8, raw[1], "--exec-mounted-v1");
     if (health) {

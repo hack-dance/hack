@@ -32,6 +32,7 @@ pub enum Action {
     Cleanup,
     Logs,
     Exec,
+    InteractiveExec,
     Run,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,7 +79,7 @@ impl Request {
             || self.review != review.review_id()
             || match (&self.action, &self.logs, &self.exec, &self.one_off) {
                 (Action::Logs, Some(logs), None, None) => !logs.valid(),
-                (Action::Exec, None, Some(exec), None) => !exec.valid(),
+                (Action::Exec | Action::InteractiveExec, None, Some(exec), None) => !exec.valid(),
                 (Action::Run, None, None, Some(one_off)) => !one_off.valid(),
                 (Action::Status | Action::Cleanup, None, None, None) => false,
                 _ => true,
@@ -106,6 +107,13 @@ struct Reply {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "kebab-case", deny_unknown_fields)]
 enum Outcome {
+    Interactive {
+        receipt: Receipt,
+        session: crate::provider::interactive_session::Receipt,
+    },
+    InteractiveRefused {
+        session: String,
+    },
     Exec {
         exec: runtime::ServiceExec,
     },
@@ -163,6 +171,37 @@ impl Reply {
             return Err(refused());
         }
         let receipt = match &self.result {
+            Outcome::Interactive { receipt, session } => {
+                let selected = exec_selected.ok_or_else(refused)?;
+                let binding = &session.binding;
+                if action != Action::InteractiveExec
+                    || !session.valid()
+                    || session.exec.is_none()
+                    || binding.backend != crate::provider::interactive_session::Backend::Authored
+                    || binding.run != review.scope().run
+                    || binding.namespace != review.scope().namespace
+                    || binding.owner != receipt.owner
+                    || binding.boot != receipt.boot
+                    || binding.service != selected.service
+                    || receipt.phase != Phase::ReadyObserved
+                    || receipt
+                        .resources
+                        .get(&format!("container:{}", selected.service))
+                        .and_then(|r| r.id.as_deref())
+                        != Some(binding.container.as_str())
+                {
+                    return Err(refused());
+                }
+                receipt
+            }
+            Outcome::InteractiveRefused { session } => {
+                if action != Action::InteractiveExec
+                    || !crate::provider::environment_recovery::uuid(session)
+                {
+                    return Err(refused());
+                }
+                return Ok(());
+            }
             Outcome::Exec { exec } => {
                 if action != Action::Exec || !exec.valid(exec_selected.ok_or_else(refused)?) {
                     return Err(refused());
@@ -359,7 +398,32 @@ pub fn serve_with_storage_tool(
             continue;
         }
         publication.verify()?;
+        let mut attached = None;
         let result = match request.action {
+            Action::InteractiveExec => {
+                let selected = request.exec.as_ref().ok_or_else(refused)?;
+                let client = transport::ClientWatch::new(&stream)?;
+                let check = || {
+                    publication.verify()?;
+                    if signals.pending() || client.disconnected() {
+                        return Err(refused());
+                    }
+                    read_pin.verify(candidate)
+                };
+                match runtime::interactive_exec(candidate, &receipt, selected, &check) {
+                    Ok(session) => {
+                        attached = Some(session.stream);
+                        Ok(Outcome::Interactive {
+                            receipt: receipt.clone(),
+                            session: session.receipt,
+                        })
+                    }
+                    Err(error) if error.session().is_some() => Ok(Outcome::InteractiveRefused {
+                        session: error.session().ok_or_else(refused)?.to_owned(),
+                    }),
+                    Err(error) => Err(error),
+                }
+            }
             Action::Status => inspect(candidate, &run).map(|snapshot| Outcome::Status { snapshot }),
             Action::Cleanup => clean().map(|receipt| Outcome::Cleaned { receipt }),
             Action::Exec => {
@@ -425,6 +489,20 @@ pub fn serve_with_storage_tool(
             };
             return Ok(receipt);
         }
+        if request.action == Action::InteractiveExec {
+            // The connected stream is handed over before the bound reply; its
+            // recipient validates that reply before using the fd. Sending
+            // consumes our copy even on error, so the owner never holds a shell.
+            if crate::provider::interactive_handoff::send(
+                &stream,
+                attached,
+                std::time::Instant::now() + Duration::from_secs(5),
+            )
+            .is_err()
+            {
+                continue;
+            }
+        }
         let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
     }
 }
@@ -438,7 +516,10 @@ pub fn request(
     candidate: &Candidate,
     options: RequestOptions<'_>,
 ) -> Result<Value, CandidateError> {
-    if matches!(options.action, Action::Logs | Action::Exec | Action::Run) {
+    if matches!(
+        options.action,
+        Action::Logs | Action::Exec | Action::InteractiveExec | Action::Run
+    ) {
         return Err(refused());
     }
     request_selected(candidate, options.run, options.action, None, None, None)
@@ -495,6 +576,76 @@ pub fn one_off(
         return Err(refused());
     }
     request_selected(candidate, run, Action::Run, None, None, Some(selected))
+}
+/// The live owner creates and starts under its normal guards, then returns the
+/// connected fd. The caller streams without retaining an owner/provider lease.
+pub(in crate::provider) fn interactive(
+    candidate: &Candidate,
+    run: &str,
+    service: &str,
+    argv: &[String],
+    workdir: Option<&str>,
+    pins: (&str, &str, &str),
+    leash: &crate::provider::interactive_terminal::Leash,
+) -> Result<crate::provider::engine::interactive_exec::Attached, CandidateError> {
+    let selected = runtime::ExecSelection {
+        service: service.into(),
+        argv: argv.to_vec(),
+        workdir: workdir.map(str::to_owned),
+    };
+    if !selected.valid() {
+        return Err(refused());
+    }
+    let pin = owner::Pin::load(candidate, run)?;
+    let review = pin.review();
+    let expected = journal::read_control(candidate, review)?;
+    if (
+        expected.owner.as_str(),
+        review.review_id(),
+        review.scope().namespace,
+    ) != pins
+    {
+        return Err(refused());
+    }
+    let mut stream = pin.connect()?;
+    let _lifetime = leash.watch_control(&stream)?;
+    let input = Request {
+        version: 2,
+        kind: RequestKind::NativeGraphControl,
+        run: run.into(),
+        review: review.review_id().into(),
+        action: Action::InteractiveExec,
+        logs: None,
+        exec: Some(selected.clone()),
+        one_off: None,
+    };
+    transport::write(&mut stream, &input, Duration::from_secs(5))?;
+    let descriptor = crate::provider::interactive_handoff::receive(
+        &stream,
+        std::time::Instant::now() + Duration::from_secs(40),
+    )?;
+    let reply: Reply = transport::read(&mut stream, Duration::from_secs(5), LIMIT)?;
+    reply.validate(
+        &expected,
+        Action::InteractiveExec,
+        None,
+        Some(&selected),
+        None,
+    )?;
+    match reply.result {
+        Outcome::Interactive { session, .. } => {
+            let result = (|| {
+                journal::read_control(candidate, review)?.check_binding(&expected)?;
+                pin.verify()?;
+                let stream = descriptor.ok_or_else(refused)?;
+                Ok(crate::provider::engine::interactive_exec::Attached { receipt: session.clone(), stream })
+            })();
+            result.map_err(|_: CandidateError| CandidateError::new("session_cleanup_uncertain", "Interactive session handoff changed; the session was retained and no start was replayed.").with_session(&session.session))
+        }
+        Outcome::InteractiveRefused { session } => Err(CandidateError::new("session_cleanup_uncertain", "Interactive admission ended after its durable intent; the session was retained and no start was replayed.").with_session(&session)),
+        Outcome::Refused { code, .. } => Err(refused().with_cause_code(code)),
+        _ => Err(refused()),
+    }
 }
 fn request_selected(
     candidate: &Candidate,

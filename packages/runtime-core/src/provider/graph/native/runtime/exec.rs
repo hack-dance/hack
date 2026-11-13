@@ -172,3 +172,73 @@ pub(super) fn execute_with<B: Backend>(
     }
     Ok(result)
 }
+
+#[cfg(target_os = "macos")]
+pub(in crate::provider::graph::native) fn interactive(
+    candidate: &Candidate,
+    expected: &Receipt,
+    selected: &ExecSelection,
+    guard: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<crate::provider::engine::interactive_exec::Attached, CandidateError> {
+    use crate::provider::interactive_session::{Backend as SessionBackend, Binding};
+    if !selected.valid() {
+        return Err(refused());
+    }
+    guard()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let engine = Engine::connect_command_until(candidate, deadline)?;
+    let (receipt, _) = journal::load(
+        candidate,
+        expected.review.scope().run,
+        engine.guest().incarnation(),
+        engine.guest().boot_id(),
+    )?;
+    receipt.check_binding(expected)?;
+    if receipt.phase != Phase::ReadyObserved || !receipt.readiness.contains_key(&selected.service) {
+        return Err(refused());
+    }
+    let owned = OwnedBackend {
+        engine,
+        launcher: None,
+        leases: BTreeMap::new(),
+    };
+    let backend = GuardedBackend {
+        backend: &owned,
+        guard: Some(guard),
+    };
+    let resource = receipt
+        .resources
+        .get(&format!("container:{}", selected.service))
+        .filter(|r| r.kind == Kind::Container)
+        .ok_or_else(refused)?;
+    let container = resource.id.clone().ok_or_else(refused)?;
+    let generation = member(&backend, &receipt, resource)?;
+    let fresh = || {
+        guard()?;
+        managed_environment::remaining_until(deadline)?;
+        journal::read_control(candidate, &expected.review)?.check_binding(expected)?;
+        snapshot_until(&backend, receipt.clone(), Some(deadline))?;
+        if member(&backend, &receipt, resource)? != generation {
+            return Err(refused());
+        }
+        Ok(())
+    };
+    fresh()?;
+    owned.engine.interactive_start(
+        candidate,
+        Binding {
+            backend: SessionBackend::Authored,
+            namespace: receipt.review.scope().namespace.to_owned(),
+            run: receipt.review.scope().run.to_owned(),
+            owner: receipt.owner.clone(),
+            boot: receipt.boot.clone(),
+            container,
+            generation: generation.clone(),
+            service: selected.service.clone(),
+        },
+        &selected.argv,
+        selected.workdir.as_deref(),
+        deadline,
+        &fresh,
+    )
+}

@@ -1,4 +1,5 @@
 mod graph_cli;
+mod interactive_exec_cli;
 mod log_follow_cli;
 mod normalized_cli;
 mod prepared_base_cli;
@@ -367,6 +368,21 @@ fn run() -> Result<(), CandidateError> {
         }
         ["graph", "logs-follow", arguments @ ..] => {
             log_follow_cli::command(&discover_candidate(&requested)?, arguments)?;
+        }
+        ["graph", "exec-interactive", arguments @ ..] => {
+            let code = interactive_exec_cli::command(&discover_candidate(&requested)?, arguments)?;
+            std::process::exit(code);
+        }
+        [
+            "graph",
+            "interactive-sessions",
+            "--run-id",
+            run,
+            "--service",
+            service,
+            "--json",
+        ] => {
+            interactive_exec_cli::sessions(&discover_candidate(&requested)?, run, service)?;
         }
         ["graph", arguments @ ..] => {
             let candidate = discover_candidate(&requested)?;

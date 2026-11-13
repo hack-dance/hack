@@ -4,7 +4,7 @@ An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
 current command slice supports whole-project foreground or detached `up` and foreground `restart`,
 owner-mediated `down` and explicit stored-generation `down --recover`, saved-run
-`ps`, live service `logs --follow`, finite `logs --no-follow`, noninteractive service `exec` and one-off
+`ps`, live service `logs --follow`, finite `logs --no-follow`, terminal or finite service `exec` and one-off
 service `run` on macOS with an absolute `HACK_NATIVE_BINARY` and private canonical
 `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
@@ -75,7 +75,7 @@ provider contact. A refusal names no option value, path or project detail.
 | `down --recover` | Explicit retirement of a complete stored generation whose owners are dead, or of a pending startup intent that never reserved runtime state; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
 | `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
 | `logs` | `logs SERVICE --follow` (the default), or `--no-follow`; `--tail` from 0 through 1000 with follow, 1 through 1000 with no-follow (default 200), plain or `--json`; `--since` and `--timestamps` with follow | Omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, `--until`, query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options; TTY-configured services in follow mode |
-| `exec` | `exec SERVICE -- COMMAND ARG...` with closed stdin, no TTY and an optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, interactive or TTY input, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
+| `exec` | `exec SERVICE -- COMMAND ARG...`; terminal input/output selects a TTY session, otherwise finite exec with closed stdin; optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
 | `run` | `run SERVICE -- COMMAND ARG...` through a ready foreground owner, closed stdin, no TTY, optional absolute `--workdir`; member must have no mounts | The `exec` option refusals above; source, persistent-data or private-env mounts refuse before the one-off effect |
 | `restart` | Whole-project proven stop followed by fresh foreground `up`; `--branch`, `--profile` and `--env` select the fresh generation | Service subsets, `--json`, `--detach`, `--target`, recovery and other unsupported foreground options; missing or unproven stop prevents startup |
 
@@ -498,8 +498,8 @@ not qualify a live provider or application log behavior.
 `exec SERVICE -- COMMAND ARG...` sends one command to an already running authored
 service through its authenticated foreground owner. Arguments are literal, including
 empty arguments, spaces and shell characters. `--workdir` selects an absolute guest
-directory; the service's existing environment and user remain in force. Stdin is
-closed and no TTY is allocated. Interactive input, TTY control, env/profile overrides,
+directory; the service's existing environment and user remain in force. Without
+terminal input and output, stdin is closed and no TTY is allocated. Env/profile overrides,
 multiple services and JSON formatting are unsupported. No shell is inserted.
 
 The owner verifies the admitted service, full resource ownership, guest boot, image,
@@ -519,6 +519,51 @@ already-written bytes cannot be retracted. No request is replayed and the foregr
 project is not stopped. Inspect the service before
 deciding whether another command is appropriate. Offline controls do not qualify
 installed native exec or live application behavior.
+
+## Interactive service exec
+
+When both stdin and stdout are terminals, `hack exec SERVICE -- /bin/sh` opens a
+TTY session. `HACK_NO_INTERACTIVE=1` selects the finite path instead. The shell is
+explicit: Hack never inserts one. Authored commands inherit the service's startup
+environment. The authenticated owner checks the same service and generation,
+creates and starts the exec, then hands its connected Engine stream to the native
+terminal child. The owner remains available for `down` and `restart`; no mutation
+lease is held during the session.
+
+The native home holds at most 1024 retained sessions across all projects.
+`session_receipt_limit` refuses further admission without discarding evidence;
+run `hack down` for a project with retained sessions to release its receipts.
+This includes normally exited commands whose background descendants remain
+unproven. The command's known exit status is still preserved.
+
+Terminal output combines the command's stdout and stderr. Ctrl-C, Ctrl-Z and other
+terminal bytes go to the guest PTY; window-size changes are forwarded. Docker's
+Ctrl-P Ctrl-Q sequence disconnects the transport. Disconnecting does not prove
+that the command or its descendants stopped. The native child restores terminal
+attributes on exit or frontend loss; the frontend has a second snapshot for native
+child failure. If restoration fails, Hack names `stty sane` as the repair.
+
+Before create, Hack durably records a value-free session UUID bound to the exact
+owner, run, boot, container and start generation; it records the exec ID before
+start. A known refusal before create dispatch withdraws only its own intent;
+uncertain dispatch retains it. Neither operation is replayed. An exec exit code is returned when
+known, but EOF or process exit cannot retire the session receipt because background
+descendants may remain. Retained evidence produces `session_cleanup_uncertain`,
+the UUID and an exact project/branch `hack down` command. Only same-incarnation
+container absence or a proven stop of the bound VM boot retires it. A new boot
+alone is not proof. Receipt bookkeeping failures do not block container cleanup.
+
+![Interactive session states](../diagrams/interactive-session.svg)
+
+The [diagram source](../diagrams/interactive-session.mmd) and
+[model coverage](../../tests/models/tla/interactive-session/COVERAGE.md) name the
+guards and finite proof limits. Retirement is also allowed from any earlier
+intent-bearing state once the same exact cleanup proof holds.
+
+The PTY fixtures qualify local input/output, cancellation, private delivery and
+restoration boundaries. Real Engine job control, detach keys, macOS descriptor
+handoff, down/restart during a session and VM loss require the real-VM acceptance
+run described in the [candidate guide](../guides/native-candidate.md#interactive-exec-acceptance).
 
 ## Finite one-off service run
 

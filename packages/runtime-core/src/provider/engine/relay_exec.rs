@@ -122,7 +122,19 @@ pub(super) fn start(
     id: &str,
     deadline: Instant,
 ) -> Result<(), CandidateError> {
-    let body = r#"{"Detach":false,"Tty":false}"#;
+    start_mode(stream, id, deadline, false)
+}
+pub(super) fn start_mode(
+    stream: &mut UnixStream,
+    id: &str,
+    deadline: Instant,
+    tty: bool,
+) -> Result<(), CandidateError> {
+    let body = if tty {
+        r#"{"Detach":false,"Tty":true}"#
+    } else {
+        r#"{"Detach":false,"Tty":false}"#
+    };
     let request = format!(
         "POST /v1.53/exec/{id}/start HTTP/1.1\r\nHost: hack-local\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
@@ -236,6 +248,26 @@ mod tests {
         stream.read_exact(&mut body).unwrap();
         bytes.extend(body);
         bytes
+    }
+    #[test]
+    fn interactive_upgrade_preserves_output_in_the_header_read() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let wire = request(&mut server);
+            assert!(wire.ends_with(br#"{"Detach":false,"Tty":true}"#));
+            server.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nfirst-output").unwrap();
+        });
+        start_mode(
+            &mut client,
+            &"a".repeat(64),
+            Instant::now() + Duration::from_secs(2),
+            true,
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        client.read_to_end(&mut output).unwrap();
+        assert_eq!(output, b"first-output");
+        worker.join().unwrap();
     }
     #[test]
     fn real_upgrade_keeps_private_stdin_out_of_http_and_reads_fragmented_output() {

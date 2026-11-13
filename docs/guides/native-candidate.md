@@ -3980,8 +3980,9 @@ are allowed.
 With the same explicit native binary/home selection used for `up`, run
 `hack exec --path /absolute/project SERVICE -- /bin/echo hello`. The command targets
 the current owned project/branch mapping, preserves binary stdout/stderr and the
-command exit code, and never falls back to Compose. It is noninteractive, with a
-30-second observation budget; a timeout may leave the command running and is not
+command exit code, and never falls back to Compose. With piped input/output or
+`HACK_NO_INTERACTIVE=1`, it uses finite exec with a 30-second observation budget;
+a timeout may leave the command running and is not
 retried. `--env` and `--profile` changes are refused. A command name such as `bun`
 uses the selected container's PATH; no host PATH or implicit shell is used. Normal
 `hack exec` resolves the saved startup overlay and AWS profile again, and delivers
@@ -3996,6 +3997,50 @@ Legacy mappings without explicit selectors and services with older launcher moun
 refuse before execution; restart with the matching candidate to adopt this path.
 Services without managed values use ordinary exec. The native live qualification
 of this fresh-delivery path remains separate from its unit and transport tests.
+
+With terminal stdin and stdout, `hack exec SERVICE -- /bin/sh` selects interactive
+exec. It streams both guest output channels through the terminal, forwards resize
+and terminal control bytes, and releases the provider mutation lease after attach.
+`down` and `restart` can proceed while the session is open. Authored projects use
+their foreground owner for admission and inherit startup environment values.
+
+For adopted services with managed values, the pinned guest launcher disables echo
+and enters raw mode before announcing readiness. Hack then sends a bounded base64
+private envelope, waits for the launcher's acknowledgement after terminal
+restoration, and only then forwards user input. The envelope cannot contain Docker
+detach-control bytes. Old launcher mounts refuse before any value is sent; restart
+the service with the matching runtime to enable this mode. The launcher returns
+125 if admission or exec fails, including an exec failure after acknowledgement.
+This does not isolate values from other processes running as the same container
+user, which already share access to the command's environment.
+
+Interactive managed-env exec refuses if fresh delivery is unavailable; it does
+not reuse mounted startup values. Finite exec retains its existing behavior.
+
+An interactive command's exit code does not prove its descendants are gone. Hack
+retains a value-free session receipt and prints `session_cleanup_uncertain` with
+its UUID and exact `hack down` remedy until the same container incarnation is
+absent or its VM boot is proven stopped. EOF, detach, a dead exec process and a
+changed boot alone are not cleanup proof. No uncertain command is replayed.
+
+### Interactive exec acceptance
+
+On the built current-branch runtime and CLI, exercise authored and adopted services:
+
+- A shell with foreground/background jobs; Ctrl-C, Ctrl-Z, `fg` and resize.
+- Ctrl-P Ctrl-Q disconnect, retaining its UUID and cleanup remedy.
+- A background process that survives shell exit; receipt remains until `down`.
+- `down` and restart from another terminal while the session is active; the owner
+  stays responsive and the old session never attaches to the new generation.
+- Native child death and frontend death, including an idle terminal; attributes
+  restore, owned children settle, and uncertain sessions remain discoverable.
+- VM loss, followed by exact stopped-boot proof; a new boot alone cannot retire
+  an older receipt.
+- Fresh adopted env with a synthetic canary and detach-control bytes; no private
+  bytes echo, the intended command receives the values, and an old launcher refuses
+  before delivery.
+
+Linux PTY and fake-Engine tests do not qualify these real Engine/VM effects.
 
 
 Managed HTTPS authority startup uses the same five-second provider-lock admission

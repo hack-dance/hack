@@ -67,6 +67,130 @@ fn validate(options: &ServiceExecOptions<'_>) -> Result<(), CandidateError> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn interactive(
+    candidate: &Candidate,
+    options: &ServiceExecOptions<'_>,
+    managed: Option<&crate::provider::managed_environment::Managed>,
+    live: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<crate::provider::engine::interactive_exec::Attached, CandidateError> {
+    use crate::provider::interactive_session::{Backend, Binding};
+    use std::time::Instant;
+    validate(options)?;
+    live()?;
+    let deadline = Instant::now() + options.timeout;
+    let engine = Engine::connect_command_until(candidate, deadline)?;
+    let (receipt, root) = load(candidate, &engine, options.run)?;
+    if receipt.environment_attached && managed.is_none() {
+        return Err(error(
+            "interactive_exec_environment_required",
+            "Interactive exec requires fresh selected-service environment delivery; no startup-environment fallback was attempted.",
+        ));
+    }
+    super::startup::require_dependency_rebind_complete(&root, &receipt)?;
+    let pending = root
+        .join("state.pending")
+        .try_exists()
+        .map_err(|_| refused())?;
+    let resource = binding(&receipt, engine.guest().boot_id(), pending, options)?;
+    let container = inspect_resource(&engine, &receipt, resource)?.ok_or_else(refused)?;
+    let generation = container["State"]["StartedAt"]
+        .as_str()
+        .filter(|s| crate::provider::engine::log_follow::valid_timestamp(s))
+        .ok_or_else(refused)?
+        .to_owned();
+    let slot = if receipt.environment_attached {
+        crate::provider::environment_recovery::active_exec_slot(
+            candidate,
+            engine.guest(),
+            &receipt.run,
+            options.service,
+            &resource.name,
+            mounted_environment_slot(&container)?.as_deref(),
+        )?
+    } else {
+        None
+    };
+    if managed.is_none() && slot.is_some() && !options.argv[0].starts_with('/') {
+        #[cfg(feature = "environment-launcher")]
+        require_current_launcher(&container, &super::launcher::current_source())?;
+        #[cfg(not(feature = "environment-launcher"))]
+        return Err(refused());
+    }
+    let argv = if let Some(managed) = managed {
+        #[cfg(feature = "environment-launcher")]
+        {
+            managed.validate_binding(&receipt.plan_id, &receipt.run)?;
+            if !receipt.environment_attached
+                || managed.values().len() != 1
+                || managed
+                    .values()
+                    .get(options.service)
+                    .is_none_or(|v| v.is_empty())
+            {
+                return Err(refused());
+            }
+            require_current_launcher(&container, &super::launcher::current_source())?;
+            let mut argv = vec![
+                "/run/hack-environment-launcher".into(),
+                "--exec-environment-tty-v2".into(),
+            ];
+            argv.extend_from_slice(options.argv);
+            argv
+        }
+        #[cfg(not(feature = "environment-launcher"))]
+        {
+            let _ = managed;
+            return Err(refused());
+        }
+    } else {
+        managed_exec_argv(&container, slot.as_deref(), options.argv)?
+    };
+    let fresh = || {
+        live()?;
+        crate::provider::managed_environment::remaining_until(deadline)?;
+        let (current, root) = load(candidate, &engine, options.run)?;
+        super::startup::require_dependency_rebind_complete(&root, &current)?;
+        binding(
+            &current,
+            engine.guest().boot_id(),
+            root.join("state.pending")
+                .try_exists()
+                .map_err(|_| refused())?,
+            options,
+        )?;
+        let value = inspect_resource(&engine, &receipt, resource)?.ok_or_else(refused)?;
+        if value["State"]["Running"] != true
+            || value["State"]["Paused"] != false
+            || value["State"]["Restarting"] != false
+            || value["State"]["StartedAt"] != generation
+        {
+            return Err(refused());
+        }
+        Ok(())
+    };
+    fresh()?;
+    let attached = engine.interactive_start(
+        candidate,
+        Binding {
+            backend: Backend::Adopted,
+            namespace: receipt.namespace.clone(),
+            run: receipt.run.clone(),
+            owner: receipt.owner.clone(),
+            boot: engine.guest().boot_id().to_owned(),
+            container: options.expected_container.to_owned(),
+            generation: generation.clone(),
+            service: options.service.to_owned(),
+        },
+        &argv,
+        options.workdir,
+        deadline,
+        &fresh,
+    )?;
+    // No provider mutation lease crosses the return into the terminal loop.
+    Ok(attached)
+}
+
 /// Execute argv once with stdin closed and TTY disabled, retaining the VM mutation
 /// lease throughout. A timeout or interrupted response is uncertain: the command
 /// may still run and must not be replayed automatically. Inherits container user,

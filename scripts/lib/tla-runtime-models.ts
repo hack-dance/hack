@@ -142,6 +142,66 @@ const restartPolicyStaleUses = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "interactive-session",
+    module: "Session",
+    states: 180,
+    invariant: "NoReplay",
+    action: "ReplayStart",
+    fields: [
+      'stage = "started"',
+      "starts = 2",
+      "recorded = TRUE",
+      "intent = TRUE",
+      "capable = FALSE",
+    ],
+    additionalControls: [
+      {
+        name: "eof-retirement",
+        negative: true,
+        invariant: "RetiredWithProof",
+        action: "Retire",
+        fields: [
+          'stage = "retired"',
+          "ended = TRUE",
+          "stopped = FALSE",
+          "absent = FALSE",
+        ],
+      },
+      {
+        name: "wrong-boot",
+        negative: true,
+        invariant: "RetiredWithProof",
+        action: "Retire",
+        fields: [
+          'stage = "retired"',
+          'boot = "replacement"',
+          "replacementStopped = TRUE",
+          "stopped = FALSE",
+          "absent = FALSE",
+        ],
+      },
+    ],
+  },
+  {
+    name: "interactive-envelope",
+    module: "Envelope",
+    states: 15,
+    invariant: "NoRestoreOverPrivate",
+    action: "Fail",
+    fields: ['stage = "failed"', "pending = 2", "echo = TRUE", "ack = FALSE"],
+    alternativeWitnesses: [
+      {
+        action: "Fail",
+        fields: [
+          'stage = "failed"',
+          "pending = 1",
+          "echo = TRUE",
+          "ack = FALSE",
+        ],
+      },
+    ],
+  },
+  {
     name: "shutdown-rebase",
     module: "ShutdownRebase",
     states: 43,

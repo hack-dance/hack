@@ -33,7 +33,8 @@ checks need attention.
 
 With the Compose proxy running, the `proxy ports` check tests its published IPv4 and
 IPv6 loopback bindings independently. An IPv4-only, IPv6-only or LAN bind does not
-imply a listener on the other loopback family. HTTPS must verify against the running
+imply a listener on the other loopback family. Docker's default bind checks both
+families even on runtimes whose port-status projection lists IPv4 only. HTTPS must verify against the running
 proxy's internal CA using its
 schemas hostname; an unrelated TCP listener cannot pass. A warning names the failed
 port and any listener process visible without privilege. Check competing listeners,

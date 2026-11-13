@@ -182,6 +182,8 @@ test("unchanged CA uses exact owned running container and bounded public-certifi
     "container",
     "--format",
   ]);
+  expect(f.calls[1]?.cmd[5]).toContain(".HostConfig.PortBindings");
+  expect(f.calls[1]?.cmd[5]).not.toContain(".NetworkSettings.Ports");
   expect(f.calls[2]?.cmd).toEqual([
     "docker",
     "cp",
@@ -209,6 +211,7 @@ test("interactive diagnostics can shorten each runtime CA read without changing 
 
 test("runtime port metadata distinguishes wildcard, single-family, LAN and remapped publications", async () => {
   for (const [hosts, port, expected] of [
+    [[""], "443", ["0.0.0.0", "::"]],
     [["0.0.0.0", "::"], "443", ["0.0.0.0", "::"]],
     [["0.0.0.0"], "443", ["0.0.0.0"]],
     [["127.0.0.1"], "443", ["127.0.0.1"]],

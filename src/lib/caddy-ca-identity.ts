@@ -16,7 +16,7 @@ const SINGLE_CERTIFICATE =
   /^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----$/;
 const ROOT_PATH = "/data/caddy/pki/authorities/local/root.crt";
 const INSPECT_FORMAT =
-  '{"id":{{json .Id}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .NetworkSettings.Ports}}}';
+  '{"id":{{json .Id}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .HostConfig.PortBindings}}}';
 /**
  * Select Hack's Caddy by its Compose labels with the project fixed, never
  * through the user-writable Compose file: a file whose top-level `name:` was
@@ -38,7 +38,7 @@ export type CaddyCaIdentity = {
   readonly message: string;
   /** Present only when a current runtime CA was validated and export comparison succeeded. */
   readonly currentPem?: string;
-  /** Loopback addresses covered by the running container's actual 80/443 publications. */
+  /** Loopback addresses selected by the running container's 80/443 publication configuration. */
   readonly loopbackPorts?: Readonly<Record<80 | 443, readonly string[]>>;
 };
 
@@ -86,13 +86,24 @@ function loopbackBindings(
     if (address !== "" && !isIP(address)) {
       return undefined;
     }
-    if (address === "" || address === "0.0.0.0" || address === "::") {
-      addresses.add(address || "0.0.0.0");
-    } else if (address.startsWith("127.") || address === "::1") {
-      addresses.add(address);
+    for (const target of loopbackBindTargets(address)) {
+      addresses.add(target);
     }
   }
   return [...addresses];
+}
+
+/** Default publication intent survives a runtime's IPv4-only status projection. */
+function loopbackBindTargets(address: string): readonly string[] {
+  if (address === "") {
+    return ["0.0.0.0", "::"];
+  }
+  return address === "0.0.0.0" ||
+    address === "::" ||
+    address.startsWith("127.") ||
+    address === "::1"
+    ? [address]
+    : [];
 }
 
 function parseCa(pem: string): X509Certificate | null {

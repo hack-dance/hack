@@ -1,6 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
 import {
-  finishImplicitLegacyEnvMigration,
   mkdir,
   mkdtemp,
   readFile,
@@ -12,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
 import {
+  finishImplicitLegacyEnvMigration,
   migrateLegacyProjectEnv,
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
@@ -126,9 +126,13 @@ test("implicit migration also carries the source receipt into cleanup", async ()
   });
   expect(migrated.cleanupCandidates).toContain(options.path);
   await writeFile(options.path, `TOKEN=${SENTINEL}-new\n`);
-  await expect(
-    finishImplicitLegacyEnvMigration({ ...options, migrated })
-  ).rejects.toThrow("Retry hack doctor --migrate-env-config");
+  const report = await finishImplicitLegacyEnvMigration({
+    ...options,
+    migrated,
+  });
+  expect(report.removed).toEqual([]);
+  expect(report.lines.join("\n")).toContain("Kept remaining legacy env files");
+  expect(report.lines.join("\n")).not.toContain(SENTINEL);
   expect(await readFile(options.path, "utf8")).toBe(`TOKEN=${SENTINEL}-new\n`);
 });
 
@@ -146,6 +150,97 @@ test("cleanup rechecks current YAML delivery after confirmation", async () => {
   });
   await refused(cleanup);
   expect(await readFile(options.path, "utf8")).toBe(`TOKEN=${SENTINEL}\n`);
+});
+
+async function scopedFixture() {
+  const options = await fixture();
+  await writeFile(
+    join(options.projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [
+        {
+          key: "TOKEN",
+          source: "plain_env",
+          required: false,
+          services: ["app"],
+        },
+      ],
+    })
+  );
+  return options;
+}
+
+test("cleanup rechecks a service-scoped value after confirmation", async () => {
+  const options = await scopedFixture();
+  const cleanup = await migrate(options);
+  await setProjectEnvValue({
+    ...options,
+    envName: null,
+    scope: "app",
+    key: "TOKEN",
+    value: `${SENTINEL}-changed`,
+    secret: false,
+    local: true,
+  });
+  await refused(cleanup);
+  expect(await readFile(options.path, "utf8")).toBe(`TOKEN=${SENTINEL}\n`);
+});
+
+test("a removed contract service gets a fixed cleanup refusal", async () => {
+  const options = await scopedFixture();
+  const cleanup = await migrate(options);
+  await writeFile(
+    join(options.projectDir, "docker-compose.yml"),
+    "services:\n  other:\n    image: alpine:3.22\n"
+  );
+  await writeFile(
+    join(options.projectDir, "hack.env.local.yaml"),
+    "version: 1\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  await refused(cleanup);
+  expect(await Bun.file(options.path).exists()).toBe(true);
+});
+
+test("cleanup keeps a source when Compose re-adds its env_file reference", async () => {
+  const options = await fixture();
+  const cleanup = await migrate(options);
+  await writeFile(
+    join(options.projectDir, "docker-compose.yml"),
+    "services:\n  app:\n    image: alpine:3.22\n    env_file: .env\n"
+  );
+  await refused(cleanup);
+  expect(await Bun.file(options.path).exists()).toBe(true);
+});
+
+test("cleanup keeps a scoped key newly used for Compose interpolation", async () => {
+  const options = await scopedFixture();
+  const cleanup = await migrate(options);
+  await writeFile(
+    join(options.projectDir, "docker-compose.yml"),
+    'services:\n  app:\n    image: alpine:3.22\n    environment:\n      OTHER: "${TOKEN}"\n'
+  );
+  await refused(cleanup);
+  expect(await Bun.file(options.path).exists()).toBe(true);
+});
+
+test("a second cleanup confirmation works after the first removed untracked sources", async () => {
+  const options = await fixture();
+  const contractPath = join(options.projectDir, "hack.env.json");
+  await writeFile(
+    contractPath,
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "TOKEN", source: "plain_env", required: false }],
+    })
+  );
+  const cleanup = await migrate(options);
+  expect(await removeLegacyProjectEnvArtifacts(cleanup)).toEqual([
+    options.path,
+  ]);
+  expect(
+    await removeLegacyProjectEnvArtifacts({ ...cleanup, paths: [contractPath] })
+  ).toEqual([contractPath]);
 });
 
 test("cleanup waits for the dotenv writer lock and rechecks the completed write", async () => {

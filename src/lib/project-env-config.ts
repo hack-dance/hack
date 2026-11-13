@@ -6269,11 +6269,21 @@ export async function finishImplicitLegacyEnvMigration(opts: {
     projectRoot: opts.projectRoot,
     paths: migrated.cleanupCandidates.filter((path) => dotenvFiles.has(path)),
   });
-  const removed = await removeLegacyProjectEnvArtifacts({
-    projectRoot: opts.projectRoot,
-    paths: removable,
-    context: migrated.cleanupContext,
-  });
+  let removed: readonly string[] = [];
+  try {
+    removed = await removeLegacyProjectEnvArtifacts({
+      projectRoot: opts.projectRoot,
+      paths: removable,
+      context: migrated.cleanupContext,
+    });
+  } catch (error) {
+    if (!(error instanceof LegacyEnvCleanupRefusedError)) {
+      throw error;
+    }
+    lines.push(
+      "Kept remaining legacy env files: cleanup inventory or current delivery changed. Check the files and retry hack doctor --migrate-env-config (values omitted)."
+    );
+  }
   if (removed.length > 0) {
     lines.push(
       `Removed ${removed.map(shown).join(", ")}: env layers now hold every value ${removed.length === 1 ? "it" : "they"} set.`
@@ -8757,8 +8767,11 @@ export async function removeLegacyProjectEnvArtifacts(opts: {
   return await locked(0);
 }
 
-function legacyCleanupChanged(): ClosedCliError {
-  return new ClosedCliError(
+/** A safe cleanup refusal; implicit migration reports it without aborting the caller. */
+class LegacyEnvCleanupRefusedError extends ClosedCliError {}
+
+function legacyCleanupChanged(): LegacyEnvCleanupRefusedError {
+  return new LegacyEnvCleanupRefusedError(
     "Refusing legacy env cleanup: a source file changed, its inventory is unavailable, or current env delivery no longer preserves it. Kept remaining legacy files; earlier migration writes or cleanup removals may remain. Retry hack doctor --migrate-env-config after checking the files (values omitted)."
   );
 }
@@ -8787,7 +8800,12 @@ async function assertLegacyCleanupDelivery(opts: {
   readonly paths: readonly string[];
   readonly context: LegacyEnvCleanupContext;
 }): Promise<void> {
-  const { context } = opts;
+  const context = {
+    ...opts.context,
+    serviceNames: await discoverComposeServiceNames({
+      composeFile: resolve(opts.context.projectDir, PROJECT_COMPOSE_FILENAME),
+    }),
+  };
   const resolved = new Map<string | null, ProjectEnvResolvedConfig>();
   const preserves = async (
     key: string,
@@ -8810,12 +8828,16 @@ async function assertLegacyCleanupDelivery(opts: {
     const scopes = context.contract.vars.find((entry) => entry.key === key)
       ?.services ?? ["global"];
     for (const scope of scopes.length > 0 ? scopes : ["global"]) {
-      if (
-        selectProjectEnvValues({
+      let actual: string | undefined;
+      try {
+        actual = selectProjectEnvValues({
           resolved: modern,
           scopeName: scope.trim() || "global",
-        })[key] !== value
-      ) {
+        })[key];
+      } catch {
+        throw legacyCleanupChanged();
+      }
+      if (actual !== value) {
         throw legacyCleanupChanged();
       }
     }

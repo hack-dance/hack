@@ -525,8 +525,9 @@ Notes:
   log is private (0600), owned by you, and Hack never writes it through a symlink (a persistent
   process's shell appends with `>>`, so a same-user replacement during its session is followed
   until Hack's next record). An older log that group
-  or others could read is copied to a new private file before the next record, so a reader that
-  already had the old file open sees no new output; an older directory is tightened to 0700. If a
+  or others could read is moved aside to `<log>.before-private-<time>` (made private, with its
+  history) and a new private log is started before the next record, so a reader that already had
+  the old file open sees no new output; an older directory is tightened to 0700. If a
   hook's log cannot be written (a refused path, an I/O error), Hack writes nothing through it,
   reports that once and still runs the hook and the ones after it, showing their output; it is just
   not saved. A persistent process is not started while its log is unsafe, since its shell would

@@ -595,136 +595,72 @@ export async function ensurePrivateDirectory(path: string): Promise<void> {
  * planted FIFO fail instead of blocking.
  */
 export async function openPrivateAppend(path: string): Promise<FileHandle> {
-  const handle = await openVerifiedAppend(path);
-  const info = await handle.stat();
-  if ((info.mode & 0o077) === 0) {
-    return handle;
+  for (let attempt = 0; attempt < MIGRATION_ATTEMPTS; attempt += 1) {
+    const handle = await openVerifiedAppend(path);
+    const info = await handle.stat();
+    if ((info.mode & 0o077) === 0) {
+      return handle;
+    }
+    await handle.close();
+    // Group or other could read it, and chmod does not revoke a descriptor a
+    // reader already holds: move it aside and start a new private file, so
+    // that reader sees nothing written from now on. One migration at a time;
+    // the returned descriptor is always rechecked above.
+    await withProjectsRegistryLock({
+      lockPath: `${path}.migrate.lock`,
+      label: "private log migration",
+      run: async () => {
+        await moveAsidePublicFile({ path });
+      },
+    });
   }
-  await handle.close();
-  // Group or other could read it, and chmod does not revoke a descriptor a
-  // reader already holds: move its contents to a new private inode, so that
-  // reader sees nothing written from now on. One migration at a time.
-  await withProjectsRegistryLock({
-    lockPath: `${path}.migrate.lock`,
-    label: "private log migration",
-    run: async () => {
-      await migrateToPrivateCopy({ path, identity: info });
-    },
-  });
-  return await openVerifiedAppend(path);
+  throw new PrivatePathRefusedError(
+    path,
+    "a file that stays readable by others"
+  );
 }
 
-/** Seam for tests: one positioned write; returns the bytes written. */
-export type WriteChunk = (
-  handle: FileHandle,
-  bytes: Uint8Array
-) => Promise<number>;
-
-const writeChunk: WriteChunk = async (handle, bytes) =>
-  (await handle.write(bytes, 0, bytes.length)).bytesWritten;
+/** Broad-mode files replaced faster than this are refused, not chased. */
+const MIGRATION_ATTEMPTS = 3;
 
 /**
- * Replace the file at `path` with a private (0600) copy, if the path still
- * names the broad-mode inode `identity` (call it under the migration lock;
- * another writer may already have migrated it, and then nothing happens).
- * Every chunk is written in full or the copy fails, so a short write never
- * publishes a truncated history; on failure the original stays in place and
- * only this call's staging file is removed. Output appended to the old inode
- * while copying is carried over after the rename. Returns whether it
- * replaced the file.
+ * Move a broad-mode file out of the way (call it under the migration lock):
+ * if `path` names this user's single-link regular file that group or other
+ * can read, rename it to `<path>.before-private-<time>` and make that file
+ * 0600. Its history is kept there, never copied: nothing can interleave with
+ * a half-done copy, and a writer that still holds the old file (a shell
+ * started before the upgrade) appends to the kept file. The next open
+ * creates a new private file at `path`. Returns the kept file's path, or
+ * null when there is nothing to move (already private, or gone).
  */
-export async function migrateToPrivateCopy(opts: {
+export async function moveAsidePublicFile(opts: {
   readonly path: string;
-  readonly identity: Stats;
-  readonly write?: WriteChunk;
-}): Promise<boolean> {
-  const write = opts.write ?? writeChunk;
-  const from = await open(
-    opts.path,
+}): Promise<string | null> {
+  const current = await lstat(opts.path).catch(() => null);
+  if (
+    !current?.isFile() ||
+    current.uid !== process.getuid?.() ||
+    current.nlink !== 1 ||
+    (current.mode & 0o077) === 0
+  ) {
+    return null;
+  }
+  const kept = `${opts.path}.before-private-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`;
+  await rename(opts.path, kept);
+  // Same inode under its kept name: make it private too (no-follow).
+  const handle = await open(
+    kept,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
   );
   try {
-    const current = await from.stat();
-    if (
-      current.dev !== opts.identity.dev ||
-      current.ino !== opts.identity.ino ||
-      (current.mode & 0o077) === 0
-    ) {
-      return false;
+    const info = await handle.stat();
+    if (info.dev === current.dev && info.ino === current.ino) {
+      await handle.chmod(0o600);
     }
-    const staging = join(
-      dirname(opts.path),
-      `.${basename(opts.path)}.${randomUUID()}.private`
-    );
-    const copy = await open(
-      staging,
-      constants.O_WRONLY |
-        constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_NOFOLLOW,
-      0o600
-    );
-    let copied = 0;
-    try {
-      copied = await copyAll({ from, to: copy, start: 0, write });
-      await copy.sync();
-    } catch (error: unknown) {
-      await copy.close();
-      await unlink(staging).catch(() => undefined);
-      throw error;
-    }
-    await copy.close();
-    await rename(staging, opts.path).catch(async (error: unknown) => {
-      await unlink(staging).catch(() => undefined);
-      throw error;
-    });
-    // Carry over anything appended to the old inode while it was copied.
-    const fresh = await openVerifiedAppend(opts.path);
-    try {
-      await copyAll({ from, to: fresh, start: copied, write });
-    } finally {
-      await fresh.close();
-    }
-    return true;
   } finally {
-    await from.close();
+    await handle.close();
   }
-}
-
-/** Copy `from` (from `start` to its end) to `to`, every chunk in full. */
-async function copyAll(opts: {
-  readonly from: FileHandle;
-  readonly to: FileHandle;
-  readonly start: number;
-  readonly write: WriteChunk;
-}): Promise<number> {
-  const buffer = Buffer.alloc(64 * 1024);
-  let position = opts.start;
-  for (;;) {
-    const { bytesRead } = await opts.from.read(
-      buffer,
-      0,
-      buffer.length,
-      position
-    );
-    if (bytesRead === 0) {
-      return position;
-    }
-    let done = 0;
-    while (done < bytesRead) {
-      const written = await opts.write(
-        opts.to,
-        buffer.subarray(done, bytesRead)
-      );
-      if (written <= 0) {
-        throw Object.assign(new Error("Short write while copying a log."), {
-          code: "ENOSPC",
-        });
-      }
-      done += written;
-    }
-    position += bytesRead;
-  }
+  return kept;
 }
 
 /** Open for appending, refusing anything but this user's single-link regular file. */

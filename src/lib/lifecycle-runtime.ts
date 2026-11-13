@@ -136,7 +136,7 @@ export async function appendLifecycleLogRecord(opts: {
 /**
  * Lifecycle output is stored verbatim and unredacted, so its directory and
  * log are private (0700 and 0600, owner-checked, never through a symlink,
- * an older broadly readable log moved to a new private inode). Called before the first record and before a
+ * an older broadly readable log moved aside and a new private one started). Called before the first record and before a
  * persistent session's shell appends to the log.
  */
 export async function ensurePrivateLifecycleLog(opts: {

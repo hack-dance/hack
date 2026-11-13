@@ -157,7 +157,8 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    its journaled switch, it also keeps the file. Lifecycle logs (`.hack/.internal/lifecycle/*.log`) are
    the exception: they hold hook and lifecycle output verbatim and unredacted, so they are
    written private (directory 0700, files 0600, owner-checked, never through a symlink;
-   an older broadly readable log is copied to a new private inode before appending, so an
+   an older broadly readable log is moved aside privately (`<log>.before-private-<time>`) and a
+   new private log started before appending, so an
    already-open reader of the old file sees no new output) and persistent output passes through a
    0600 FIFO in a private `mktemp -d` directory. Staged terminal-multiplexer environments
    (`$TMPDIR/hack-mux-env-*/env.json`, 0600 in a 0700 directory) are refused after 10 minutes

@@ -9,6 +9,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   utimes,
@@ -28,7 +29,7 @@ import {
 import {
   appendPrivateFile,
   ensurePrivateDirectory,
-  migrateToPrivateCopy,
+  moveAsidePublicFile,
   PrivatePathRefusedError,
 } from "../src/lib/private-file.ts";
 import { wrapLifecyclePersistentCommand } from "../src/lib/project-lifecycle-controller.ts";
@@ -72,105 +73,95 @@ describe("private files and directories", () => {
     const file = join(dir, "out.log");
     await appendPrivateFile({ path: file, data: "one\n" });
     expect(await mode(file)).toBe(0o600);
-    // An older broad directory is tightened; an older broad log is moved to
-    // a new private inode.
+    // An older broad directory is tightened; an older broad log is moved
+    // aside (kept privately) and a new private log started.
     await chmod(dir, 0o755);
     await chmod(file, 0o644);
     await ensurePrivateDirectory(dir);
     await appendPrivateFile({ path: file, data: "two\n" });
     expect(await mode(dir)).toBe(0o700);
     expect(await mode(file)).toBe(0o600);
-    expect(await readFile(file, "utf8")).toBe("one\ntwo\n");
+    expect(await readFile(file, "utf8")).toBe("two\n");
+    const kept = (await readdir(dir)).filter((name) =>
+      name.includes(".before-private-")
+    );
+    expect(await readFile(join(dir, kept[0] as string), "utf8")).toBe("one\n");
   });
 
-  test("a reader that already had an older public log open sees nothing written after it is made private", async () => {
+  const keptFiles = async (dir: string) =>
+    (await readdir(dir)).filter((name) => name.includes(".before-private-"));
+
+  test("an older public log is moved aside privately: an open reader sees nothing new, the history is kept", async () => {
     const file = join(root, "old.log");
-    await writeFile(file, "before\n", { mode: 0o644 });
+    await writeFile(file, "history\n", { mode: 0o644 });
     await chmod(file, 0o644);
     const reader = await open(file, "r");
     try {
       await appendPrivateFile({ path: file, data: "secret after\n" });
-      // The path now names a new private file with the whole history.
+      // The path names a new private file with only the new output.
       expect(await mode(file)).toBe(0o600);
-      expect(await readFile(file, "utf8")).toBe("before\nsecret after\n");
-      // The reader's descriptor still names the old inode: no new output.
-      const old = await reader.readFile({ encoding: "utf8" });
-      expect(old).toBe("before\n");
+      expect(await readFile(file, "utf8")).toBe("secret after\n");
+      // The reader's descriptor names the old inode, which got nothing new.
+      expect(await reader.readFile({ encoding: "utf8" })).toBe("history\n");
     } finally {
       await reader.close();
     }
-    // No staging file is left behind.
-    expect(
-      (await readdir(root)).filter((name) => name.endsWith(".private"))
-    ).toEqual([]);
-  });
-
-  test("migration never publishes a short copy: the original stays and no staging file is left", async () => {
-    const file = join(root, "old.log");
-    await writeFile(file, "history\n", { mode: 0o644 });
-    await chmod(file, 0o644);
-    const identity = await lstat(file);
-    // The copy's only (and so final) chunk is written short, then refused.
-    let calls = 0;
-    await expect(
-      migrateToPrivateCopy({
-        path: file,
-        identity,
-        write: async (handle, bytes) => {
-          calls += 1;
-          return calls === 1
-            ? (await handle.write(bytes, 0, 3)).bytesWritten
-            : 0;
-        },
-      })
-    ).rejects.toThrow("Short write");
-    expect(await readFile(file, "utf8")).toBe("history\n");
-    expect((await lstat(file)).ino).toBe(identity.ino);
-    expect(
-      (await readdir(root)).filter((name) => name.endsWith(".private"))
-    ).toEqual([]);
-  });
-
-  test("a second migration from a stale view skips, so a record appended after the first survives", async () => {
-    const file = join(root, "old.log");
-    await writeFile(file, "history\n", { mode: 0o644 });
-    await chmod(file, 0o644);
-    const stale = await lstat(file);
-    // Writer A migrates and appends.
-    await appendPrivateFile({ path: file, data: "record A\n" });
-    // Writer B saw the old inode too; its migration finds it already gone.
-    expect(await migrateToPrivateCopy({ path: file, identity: stale })).toBe(
-      false
+    // The history is kept beside it, private too.
+    const kept = await keptFiles(root);
+    expect(kept).toHaveLength(1);
+    expect(await readFile(join(root, kept[0] as string), "utf8")).toBe(
+      "history\n"
     );
-    await appendPrivateFile({ path: file, data: "record B\n" });
-    expect(await readFile(file, "utf8")).toBe("history\nrecord A\nrecord B\n");
+    expect(await mode(join(root, kept[0] as string))).toBe(0o600);
   });
 
-  test("output appended to the old log while it is copied is carried over", async () => {
+  test("a log another writer already made private is never moved again", async () => {
     const file = join(root, "old.log");
     await writeFile(file, "history\n", { mode: 0o644 });
     await chmod(file, 0o644);
-    const identity = await lstat(file);
-    // A shell holding the old inode appends while the copy runs.
+    await appendPrivateFile({ path: file, data: "record A\n" });
+    // The path now names the private file A made: nothing to move.
+    expect(await moveAsidePublicFile({ path: file })).toBe(null);
+    await appendPrivateFile({ path: file, data: "record B\n" });
+    expect(await readFile(file, "utf8")).toBe("record A\nrecord B\n");
+    expect(await keptFiles(root)).toHaveLength(1);
+  });
+
+  test("a broad file that replaced the one first seen is moved aside too; nothing is appended to a broad file", async () => {
+    const file = join(root, "old.log");
+    await writeFile(file, "first\n", { mode: 0o644 });
+    await chmod(file, 0o644);
+    // Another broad file takes the path before the migration runs.
+    const other = join(root, "other.tmp");
+    await writeFile(other, "second\n", { mode: 0o644 });
+    await chmod(other, 0o644);
+    await rename(other, file);
+    await appendPrivateFile({ path: file, data: "new\n" });
+    expect(await mode(file)).toBe(0o600);
+    expect(await readFile(file, "utf8")).toBe("new\n");
+    const kept = await keptFiles(root);
+    expect(kept).toHaveLength(1);
+    expect(await readFile(join(root, kept[0] as string), "utf8")).toBe(
+      "second\n"
+    );
+  });
+
+  test("a writer that still holds the old file writes into the kept history, not the new log", async () => {
+    const file = join(root, "old.log");
+    await writeFile(file, "history\n", { mode: 0o644 });
+    await chmod(file, 0o644);
     const shell = await open(file, "a");
-    let appended = false;
     try {
-      await migrateToPrivateCopy({
-        path: file,
-        identity,
-        write: async (handle, bytes) => {
-          if (!appended) {
-            appended = true;
-            await shell.write("late line\n");
-          }
-          return (await handle.write(bytes, 0, bytes.length)).bytesWritten;
-        },
-      });
+      await appendPrivateFile({ path: file, data: "new\n" });
+      await shell.write("late line\n");
     } finally {
       await shell.close();
     }
-    expect(await readFile(file, "utf8")).toBe("history\nlate line\n");
-    expect(await mode(file)).toBe(0o600);
+    expect(await readFile(file, "utf8")).toBe("new\n");
+    const kept = await keptFiles(root);
+    expect(await readFile(join(root, kept[0] as string), "utf8")).toBe(
+      "history\nlate line\n"
+    );
   });
 
   test("a planted symlink, hard link or FIFO is refused and its target is untouched", async () => {

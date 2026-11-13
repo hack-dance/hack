@@ -33,8 +33,9 @@ it does not silently report completed cleanup.
 If both snapshots fail, Hack still attempts the owned mux stop, but retains
 descendant uncertainty. Other process-snapshot callers retain their existing
 timeout policy. For a mux that is already absent, a matching saved group number
-alone does not block cleanup: new records require a matching wrapper PID and UTC
-start time plus descendant lineage. Older records without that identity do not
+alone does not block cleanup: a matching command leader PID and UTC start time
+keeps the record even after its wrapper exits. Matching wrapper identity plus
+descendant lineage also keeps the record. Older records without that identity do not
 grant signal authority or make an unrelated live group count as retained work.
 
 ![Foreground lifecycle retirement](diagrams/compose-lifecycle-retirement.svg)

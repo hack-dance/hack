@@ -63,6 +63,7 @@ type StartedLifecycleProcess = {
   readonly panePid?: number;
   readonly paneBirth?: string;
   readonly processGroupId?: number;
+  readonly processGroupBirth?: string;
 };
 /**
  * Cleanup for what an operation started. Resolves
@@ -957,6 +958,7 @@ async function startLifecycleProcess(opts: {
   readonly panePid?: number;
   readonly paneBirth?: string;
   readonly processGroupId?: number;
+  readonly processGroupBirth?: string;
 }> {
   const windowNameRaw = sanitizeBranchSlug(opts.process.name);
   const windowName =
@@ -1010,11 +1012,6 @@ async function startLifecycleProcess(opts: {
       windowName,
     });
     const panePid = panePids[0];
-    const paneBirth =
-      panePid === undefined
-        ? undefined
-        : (await readProcessIdentities()).find((row) => row.pid === panePid)
-            ?.birth;
     let processGroupId: number | null = null;
     try {
       processGroupId = await waitForLifecycleCommandProcessGroupId({
@@ -1026,6 +1023,11 @@ async function startLifecycleProcess(opts: {
     if (!processGroupId && panePid !== undefined) {
       processGroupId = await readProcessGroupIdForPid({ pid: panePid });
     }
+    const identities = await readProcessIdentities();
+    const paneBirth = identities.find((row) => row.pid === panePid)?.birth;
+    const processGroupBirth = identities.find(
+      (row) => row.pid === processGroupId
+    )?.birth;
     await appendLifecycleLogRecord({
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
@@ -1043,6 +1045,7 @@ async function startLifecycleProcess(opts: {
       ...(panePid !== undefined ? { panePid } : {}),
       ...(paneBirth ? { paneBirth } : {}),
       ...(processGroupId ? { processGroupId } : {}),
+      ...(processGroupBirth ? { processGroupBirth } : {}),
     };
   }
 
@@ -1210,8 +1213,7 @@ async function assertAbsentSessionGroupsRetired(opts: {
     return;
   }
   const identified = opts.entry.processes.filter(
-    (process) =>
-      process.panePid !== undefined && process.paneBirth !== undefined
+    (process) => process.paneBirth || process.processGroupBirth
   );
   // Legacy records have no incarnation proof. A number alone may have been
   // reused after reboot, so it cannot veto forgetting an absent session.
@@ -1222,6 +1224,21 @@ async function assertAbsentSessionGroupsRetired(opts: {
   if (identities.length === 0) {
     throw new Error(
       "Could not inspect retained lifecycle wrapper identities; kept ownership state"
+    );
+  }
+  if (
+    identified.some(
+      (process) =>
+        process.processGroupBirth !== undefined &&
+        identities.some(
+          (row) =>
+            row.pid === process.processGroupId &&
+            row.birth === process.processGroupBirth
+        )
+    )
+  ) {
+    throw new Error(
+      "Lifecycle mux session is absent but recorded process-group retirement is unconfirmed; kept ownership state. A command group leader still matches its recorded start time."
     );
   }
   const roots = identified.flatMap((process) =>

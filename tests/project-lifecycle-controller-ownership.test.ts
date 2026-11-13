@@ -395,6 +395,60 @@ for (const related of [false, true]) {
   });
 }
 
+for (const matchesBirth of [false, true]) {
+  test(`missing wrapper ${matchesBirth ? "keeps a matching live command leader" : "does not retain an unrelated reused command PID"}`, async () => {
+    const { controller, entries, mux, projectDir, stop } = await fixture();
+    const starter = controller({ sessionOwnership: undefined });
+    await starter.startMany({ processes: [PROCESS] });
+    await starter.finalize();
+    const child = Bun.spawn(
+      [process.execPath, "--no-env-file", "-e", "setInterval(() => {}, 1000)"],
+      { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" }
+    );
+    try {
+      const entry = (await entries())[0];
+      const birth = (await readProcessIdentities()).find(
+        (row) => row.pid === child.pid
+      )?.birth;
+      if (!(entry && birth)) {
+        throw new Error("owned fixture identity unavailable");
+      }
+      await upsertLifecycleStateEntry({
+        projectDir,
+        entry: {
+          ...entry,
+          processes: entry.processes.map((process) => ({
+            ...process,
+            panePid: Number.MAX_SAFE_INTEGER,
+            paneBirth: "synthetic-gone-wrapper",
+            processGroupId: child.pid,
+            processGroupBirth: matchesBirth ? birth : "synthetic-reused-birth",
+          })),
+        },
+      });
+      mux.sessions.delete(SESSION);
+      if (matchesBirth) {
+        await expect(stop()).rejects.toThrow(
+          "command group leader still matches its recorded start time"
+        );
+        expect(await entries()).toHaveLength(1);
+      } else {
+        await stop();
+        expect(await entries()).toEqual([]);
+      }
+      expect(child.exitCode).toBeNull();
+      expect(mux.killed).toEqual([]);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+    if (matchesBirth) {
+      await stop();
+      expect(await entries()).toEqual([]);
+    }
+  });
+}
+
 test("a failed session epoch record stops the created session before removing its entry", async () => {
   const { mux, ownership, controller, entries } = await fixture();
   const starter = controller({

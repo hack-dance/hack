@@ -1,6 +1,7 @@
 import pkg from "../../package.json";
 import { agentCommand } from "../commands/agent.ts";
 import { branchCommand } from "../commands/branch.ts";
+import { commandsCommand } from "../commands/commands.ts";
 import { configCommand } from "../commands/config.ts";
 import { crashCaptureCommand } from "../commands/crash-capture.ts";
 import { daemonCommand } from "../commands/daemon.ts";
@@ -79,6 +80,7 @@ export const CLI_SPEC = defineCli({
     tuiCommand,
     runCommand,
     execCommand,
+    commandsCommand,
     logsCommand,
     openCommand,
     branchCommand,

@@ -1,5 +1,5 @@
 //! Bounded HTTPS transfers with explicit redirect admission and digest-only cache trust.
-use super::FilePin;
+use super::{FilePin, FileResult, Outcome};
 use crate::{CandidateError, provider::state};
 use reqwest::{Response, Url, header};
 use sha2::{Digest, Sha256};
@@ -302,7 +302,7 @@ pub(super) fn acquire(
     client: &Client,
     directory: &Path,
     pin: &FilePin,
-) -> Result<(), CandidateError> {
+) -> Result<FileResult, CandidateError> {
     client
         .runtime
         .block_on(acquire_inner(client, directory, pin))
@@ -312,22 +312,26 @@ async fn acquire_inner(
     client: &Client,
     directory: &Path,
     pin: &FilePin,
-) -> Result<(), CandidateError> {
+) -> Result<FileResult, CandidateError> {
     // One absolute deadline spans all redirect headers and body reads; successful
     // progress never renews it. Reqwest separately bounds each read to 60 seconds.
     let deadline = tokio::time::Instant::now() + client.file_timeout;
     state::check_private_directory(directory)?;
     let destination = directory.join(pin.name()?);
     match destination.symlink_metadata() {
-        Ok(_) => return verify_file(&destination, pin).map_err(|e| error(pin, "setup_cache_invalid", format!("{}; cached file under .hack-local/setup/downloads was preserved. Move it aside and rerun setup, or use offline inputs", e.code))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Ok(_) => {
+            verify_file(&destination, pin).map_err(|e| error(pin, "setup_cache_invalid", format!("{}; cached file under .hack-local/setup/downloads was preserved. Move it aside and rerun setup, or use offline inputs", e.code)))?;
+            return FileResult::new(pin, Outcome::Reused, 0);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(error(pin, "setup_file", e)),
     }
     let partial = directory.join(format!("{}.part", pin.name()?));
     let mut file = private_file(&partial, pin, true)?;
     let offset = file.metadata().map_err(state::io)?.len();
     if offset > 0 && hash(&mut file, pin).is_ok() {
-        return commit(file, &partial, &destination, directory, pin);
+        commit(file, &partial, &destination, directory, pin)?;
+        return FileResult::new(pin, Outcome::Reused, 0);
     }
     // A full-size invalid partial cannot be extended safely. Restart in this invocation.
     let offset = if offset >= pin.size_bytes {
@@ -433,7 +437,16 @@ async fn acquire_inner(
         file.set_len(0).map_err(state::io)?;
         return Err(e);
     }
-    commit(file, &partial, &destination, directory, pin)
+    commit(file, &partial, &destination, directory, pin)?;
+    FileResult::new(
+        pin,
+        if start > 0 {
+            Outcome::Resumed
+        } else {
+            Outcome::Downloaded
+        },
+        count,
+    )
 }
 
 fn commit(

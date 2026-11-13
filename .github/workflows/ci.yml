@@ -676,7 +676,7 @@ jobs:
         run: bun run build:config-compiler
       # Runs check:bun-version and test:preflight as `bun run test` does, then
       # verifies that the shards (and, when pooled, the two pools) cover the
-      # full test file set exactly once.
+      # full test file set, the both-pool files once on each host.
       - name: Tests (shard)
         env:
           HACK_TEST_SHARD: ${{ matrix.shard }}/8

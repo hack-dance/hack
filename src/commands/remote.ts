@@ -16,7 +16,7 @@ import {
 import type { GatewayAuditEntry } from "../control-plane/extensions/gateway/audit.ts";
 import type { GatewayProject } from "../control-plane/extensions/gateway/config.ts";
 import { resolveGatewayConfig } from "../control-plane/extensions/gateway/config.ts";
-import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts";
+import { listGatewayTokensForStatus } from "../control-plane/extensions/gateway/tokens.ts";
 import type { ControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
@@ -451,6 +451,8 @@ type RemoteStatusSnapshot = {
   readonly streamsActive?: number;
   readonly cloudflare: CloudflareStatus;
   readonly tokens: TokenSummary;
+  /** Why the token store is not used (HACK-2142), else null. */
+  readonly tokenStoreWarning: string | null;
   readonly globalConfigExists: boolean;
 };
 
@@ -475,7 +477,8 @@ async function collectRemoteStatusSnapshot(opts: {
   const daemonPaths = resolveDaemonPaths({});
   const daemonStatus = await readDaemonStatus({ paths: daemonPaths });
 
-  const tokenRecords = await listGatewayTokens({ rootDir: daemonPaths.root });
+  const { tokens: tokenRecords, untrusted: tokenStoreWarning } =
+    await listGatewayTokensForStatus({ rootDir: daemonPaths.root });
   const activeTokens = tokenRecords.filter((token) => !token.revokedAt);
   const revokedTokens = tokenRecords.filter((token) => token.revokedAt);
   const writeTokens = activeTokens.filter((token) => token.scope === "write");
@@ -508,6 +511,7 @@ async function collectRemoteStatusSnapshot(opts: {
       write: writeTokens.length,
       read: readTokens.length,
     },
+    tokenStoreWarning,
     globalConfigExists,
     ...(streamsActive !== undefined ? { streamsActive } : {}),
     cloudflare: cloudflareStatus,
@@ -537,6 +541,9 @@ function buildRemoteStatusEntries(opts: {
     ["tokens_revoked", snapshot.tokens.revoked],
     ["tokens_write", snapshot.tokens.write],
     ["tokens_read", snapshot.tokens.read],
+    ...(snapshot.tokenStoreWarning === null
+      ? []
+      : [["token_store_warning", snapshot.tokenStoreWarning] as const]),
     [
       "hackd_running",
       snapshot.daemonStatus.running
@@ -691,6 +698,9 @@ async function renderRemoteStatus(opts: {
     lines: [
       `Active: ${snapshot.tokens.active} (write ${snapshot.tokens.write}, read ${snapshot.tokens.read})`,
       `Revoked: ${snapshot.tokens.revoked}`,
+      ...(snapshot.tokenStoreWarning === null
+        ? []
+        : [`Token store not used: ${snapshot.tokenStoreWarning}`]),
       "Export token: HACK_GATEWAY_TOKEN=...",
       "Create token: hack x gateway token-create --scope write",
       "List tokens: hack x gateway token-list",

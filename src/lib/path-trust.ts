@@ -3,6 +3,7 @@ import {
   lstatSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   type Stats,
   statSync,
 } from "node:fs";
@@ -71,7 +72,11 @@ export function walkReplaceableChain(opts: {
   // first, which can name a different file). Every entry visited, links
   // included, is checked; `state.cur` is always a symlink-free directory.
   const state: ChainWalk = {
-    opts,
+    // The walk visits physical paths (symlinks followed), so the Hack home
+    // is compared in its resolved form too: under a linked path such as
+    // macOS's /var -> /private/var nothing would otherwise count as inside
+    // it (HACK-2142). A missing Hack home is compared as given.
+    opts: { ...opts, hackHome: resolvedOrSelf(opts.hackHome) },
     checked: opts.checked ?? new Set<string>(),
     queue: opts.path.split("/"),
     cur: "/",
@@ -88,6 +93,17 @@ export function walkReplaceableChain(opts: {
     }
   }
   return { existing: state.cur, complete: true };
+}
+
+function resolvedOrSelf(path: string | null): string | null {
+  if (path === null) {
+    return null;
+  }
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 type ChainWalk = {

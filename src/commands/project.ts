@@ -165,6 +165,10 @@ import {
   reportInitDiscoveryFindings,
 } from "../init/validation.ts";
 import {
+  answerExistingRequest,
+  parseBackgroundRequest,
+} from "../lib/background-command/launch.ts";
+import {
   applyBranchToHost,
   applyBranchToHosts,
   rewriteCaddyLabelForBranch,
@@ -387,6 +391,15 @@ import { readLinesFromStream } from "../ui/lines.ts";
 import type { LogStreamContext } from "../ui/log-stream.ts";
 import { logger, setLoggerBackendOverride } from "../ui/logger.ts";
 import { canReachLoki, requestLokiDelete } from "../ui/loki-logs.ts";
+import {
+  backgroundCommandOptions,
+  callerIdentity,
+  refuseDetachedCacheBootstrap,
+  refuseDetachForAuthoredProject,
+  runOrStartComposeCommand,
+  startNativeBackgroundCommand,
+  withBackgroundSweep,
+} from "./background-command-start.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import { displayNativePs } from "./native-ps-display.ts";
 import { answerNativeAlreadyRunning } from "./native-up-already-running.ts";
@@ -601,6 +614,7 @@ const runOptions = [
   optBranch,
   optWorkdir,
   optProfile,
+  ...backgroundCommandOptions,
 ] as const;
 const runPositionals = [
   { name: "service", required: true },
@@ -700,7 +714,7 @@ const upSpec = defineCommand({
   subcommands: [],
 } as const);
 
-export const upCommand = withHandler(upSpec, handleUp);
+export const upCommand = withHandler(upSpec, withBackgroundSweep(handleUp));
 
 const downSpec = defineCommand({
   name: "down",
@@ -711,7 +725,10 @@ const downSpec = defineCommand({
   subcommands: [],
 } as const);
 
-export const downCommand = withHandler(downSpec, handleDown);
+export const downCommand = withHandler(
+  downSpec,
+  withBackgroundSweep(handleDown)
+);
 
 const restartSpec = defineCommand({
   name: "restart",
@@ -810,7 +827,7 @@ export function resolveRequestedComposeServices(opts: {
   return requested;
 }
 
-async function resolveProjectForArgs(opts: {
+export async function resolveProjectForArgs(opts: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
@@ -856,7 +873,7 @@ function resolveBranchSlug(raw: string | undefined): string | null {
  * kicks in (to stderr when stdout must stay machine-readable: `--json`
  * output or run/exec command passthrough).
  */
-async function resolveEffectiveBranchForCommand(opts: {
+export async function resolveEffectiveBranchForCommand(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly branchOption: string | undefined;
   readonly noticeToStderr?: boolean;
@@ -9007,17 +9024,25 @@ async function handleRun({
   readonly args: RunArgs;
 }): Promise<number> {
   refuseEmptyNativeRunSelection(args);
-  const authored = await tryNativeComposeCommand({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
+  const background = parseBackgroundRequest(args.options);
+  const authored = await startNativeBackgroundIfRequested({
+    ctx,
+    args,
+    background,
     operation: "run",
-    instance: args.options.branch,
-    profiles: optionalCsvList(args.options.profile),
-    overlay: args.options.env,
-    service: args.positionals.service,
-    command: args.positionals.cmd,
-    workdir: args.options.workdir,
+    otherwise: () =>
+      tryNativeComposeCommand({
+        cwd: ctx.cwd,
+        path: args.options.path,
+        project: args.options.project,
+        operation: "run",
+        instance: args.options.branch,
+        profiles: optionalCsvList(args.options.profile),
+        overlay: args.options.env,
+        service: args.positionals.service,
+        command: args.positionals.cmd,
+        workdir: args.options.workdir,
+      }),
   });
   if (authored !== null) {
     return authored;
@@ -9143,6 +9168,10 @@ async function handleRun({
     targetServices: preparedServices,
     envByService: envOverrides.preflightEnvByService,
   });
+  refuseDetachedCacheBootstrap({
+    background,
+    services: cacheBootstrapServices,
+  });
   const bootstrapCode = await bootstrapDependencyCaches({
     services: cacheBootstrapServices,
     composeFiles: composeFilesWithEnv,
@@ -9169,7 +9198,7 @@ async function handleRun({
       env: envOverrides.env,
       service,
     }));
-  return await composeRuntimeBackend.run({
+  const runOptions = {
     composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
     profiles,
@@ -9179,6 +9208,14 @@ async function handleRun({
     cmdArgs,
     cwd: dirname(project.composeFile),
     env: envOverrides.env,
+  };
+  return await runOrStartComposeCommand({
+    background,
+    project,
+    branch,
+    compose: { operation: "run", options: runOptions },
+    callerOptions: args.options,
+    envOverrides,
   });
 }
 
@@ -9207,17 +9244,25 @@ async function handleExec({
   readonly args: ExecArgs;
 }): Promise<number> {
   refuseEmptyNativeExecSelection(args);
-  const authored = await tryNativeComposeCommand({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
+  const background = parseBackgroundRequest(args.options);
+  const authored = await startNativeBackgroundIfRequested({
+    ctx,
+    args,
+    background,
     operation: "exec",
-    instance: args.options.branch,
-    profiles: optionalCsvList(args.options.profile),
-    overlay: args.options.env,
-    service: args.positionals.service,
-    command: args.positionals.cmd,
-    workdir: args.options.workdir,
+    otherwise: () =>
+      tryNativeComposeCommand({
+        cwd: ctx.cwd,
+        path: args.options.path,
+        project: args.options.project,
+        operation: "exec",
+        instance: args.options.branch,
+        profiles: optionalCsvList(args.options.profile),
+        overlay: args.options.env,
+        service: args.positionals.service,
+        command: args.positionals.cmd,
+        workdir: args.options.workdir,
+      }),
   });
   if (authored !== null) {
     return authored;
@@ -9355,7 +9400,7 @@ async function handleExec({
     process.stderr.write(`WARNING: ${staleEnvWarning}\n`);
   }
 
-  return await composeRuntimeBackend.exec({
+  const execOptions = {
     composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
     profiles,
@@ -9364,6 +9409,132 @@ async function handleExec({
     cmdArgs,
     cwd: dirname(project.composeFile),
     env: envOverrides.env,
+  };
+  return await runOrStartComposeCommand({
+    background,
+    project,
+    branch,
+    compose: { operation: "exec", options: execOptions },
+    callerOptions: args.options,
+    envOverrides,
+  });
+}
+
+async function answerExistingBackgroundRequest(opts: {
+  readonly ctx: CliContext;
+  readonly args: RunArgs;
+  readonly background: NonNullable<ReturnType<typeof parseBackgroundRequest>>;
+  readonly operation: "exec" | "run";
+}): Promise<number | null> {
+  if (opts.background.requestKey === null) {
+    return null;
+  }
+  const { args } = opts;
+  const project = await resolveProjectForArgs({
+    ctx: opts.ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    touchRegistration: false,
+  });
+  return await answerExistingRequest({
+    request: opts.background,
+    projectRoot: project.projectRoot,
+    identity: callerIdentity({
+      request: opts.background,
+      operation: opts.operation,
+      projectRoot: project.projectRoot,
+      branch: await resolveEffectiveBranchForCommand({
+        project,
+        branchOption: args.options.branch,
+        noticeToStderr: true,
+      }),
+      service: args.positionals.service ?? "",
+      cmdArgs: args.positionals.cmd,
+      options: args.options,
+    }),
+  });
+}
+
+/**
+ * `--detach` on the native backend: the supervisor runs this same CLI in the
+ * foreground (see background-command-start.ts). Otherwise runs `otherwise`.
+ */
+async function startNativeBackgroundIfRequested(opts: {
+  readonly ctx: CliContext;
+  readonly args: RunArgs;
+  readonly background: ReturnType<typeof parseBackgroundRequest>;
+  readonly operation: "exec" | "run";
+  /** The ordinary authored/adopted dispatch, run when this does not apply. */
+  readonly otherwise: () => Promise<number | null>;
+}): Promise<number | null> {
+  if (!opts.background) {
+    return await opts.otherwise();
+  }
+  // Background start prints only the command id (or `--json` envelope) on
+  // stdout; Hack's own notices go to stderr.
+  setLoggerBackendOverride({ backend: "console" });
+  const { args } = opts;
+  await refuseDetachForAuthoredProject({
+    cwd: opts.ctx.cwd,
+    path: args.options.path,
+    project: args.options.project,
+  });
+  // A retried request key is answered before any runtime check, so a retry
+  // finds its command even if the service has stopped since.
+  const existing = await answerExistingBackgroundRequest({
+    ctx: opts.ctx,
+    args,
+    background: opts.background,
+    operation: opts.operation,
+  });
+  if (existing !== null) {
+    return existing;
+  }
+  if (process.env.HACK_RUNTIME_BACKEND !== "native") {
+    return await opts.otherwise();
+  }
+  // The synchronous refusals of the foreground native command, before any
+  // acceptance: runtime selection, then exec's env/profile refusal or run's
+  // selection parsing.
+  const native = resolveNativeRuntimeSelection();
+  if (
+    opts.operation === "exec" &&
+    (args.options.env !== undefined || args.options.profile !== undefined)
+  ) {
+    throw new HackCliError({
+      code: "E_USAGE",
+      message: NATIVE_EXEC_SELECTION_REFUSAL,
+    });
+  }
+  if (opts.operation === "run") {
+    runBackendSelection(Boolean(native), args);
+  }
+  const project = await resolveProjectForArgs({
+    ctx: opts.ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+    touchRegistration: false,
+  });
+  const service = (args.positionals.service ?? "").trim();
+  if (service.length === 0) {
+    throw new CliUsageError("Missing required argument: service");
+  }
+  if (opts.operation === "exec" && args.positionals.cmd.length === 0) {
+    throw new CliUsageError("Command is required.");
+  }
+  return await startNativeBackgroundCommand({
+    request: opts.background,
+    operation: opts.operation,
+    project,
+    branch: await resolveEffectiveBranchForCommand({
+      project,
+      branchOption: args.options.branch,
+      noticeToStderr: true,
+    }),
+    cwd: opts.ctx.cwd,
+    service,
+    cmdArgs: args.positionals.cmd,
+    options: args.options,
   });
 }
 

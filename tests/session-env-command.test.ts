@@ -12,7 +12,11 @@ import {
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import type { MuxBackend } from "../src/mux/mux-backend.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+
+// Staging sweeps the temp directory: never the developer's real one.
+isolateMuxTempDir();
 
 const createSessionCalls: Array<{
   readonly name: string;

@@ -5,7 +5,11 @@ import { join } from "node:path";
 
 import type { ExecOptions } from "../src/lib/shell.ts";
 import { findExecutableInPath } from "../src/lib/shell.ts";
+import { isolateMuxTempDir } from "./helpers/mux-temp.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
+
+// Staging sweeps the temp directory: never the developer's real one.
+isolateMuxTempDir();
 
 const tmux = findExecutableInPath("tmux");
 const root = await mkdtemp(join(tmpdir(), "tmux-private-test-"));

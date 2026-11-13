@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
   realpath,
@@ -15,8 +16,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runLifecycleCommandChild } from "../src/lib/lifecycle-command-child.ts";
 import {
   appendLifecycleLogRecord,
+  createLifecycleLogSink,
+  drainLifecycleOutput,
   resolveLifecycleLogPath,
   resolveLifecycleRootDir,
 } from "../src/lib/lifecycle-runtime.ts";
@@ -59,14 +63,15 @@ afterEach(async () => {
 const mode = async (path: string) => (await lstat(path)).mode & 0o777;
 
 describe("private files and directories", () => {
-  test("are created private under umask 022 and older loose modes are tightened", async () => {
+  test("are created private under umask 022 and older loose modes are made private", async () => {
     const dir = join(root, "a", "lifecycle");
     await ensurePrivateDirectory(dir);
     expect(await mode(dir)).toBe(0o700);
     const file = join(dir, "out.log");
     await appendPrivateFile({ path: file, data: "one\n" });
     expect(await mode(file)).toBe(0o600);
-    // An older log and directory with broad modes are tightened in place.
+    // An older broad directory is tightened; an older broad log is moved to
+    // a new private inode.
     await chmod(dir, 0o755);
     await chmod(file, 0o644);
     await ensurePrivateDirectory(dir);
@@ -74,6 +79,28 @@ describe("private files and directories", () => {
     expect(await mode(dir)).toBe(0o700);
     expect(await mode(file)).toBe(0o600);
     expect(await readFile(file, "utf8")).toBe("one\ntwo\n");
+  });
+
+  test("a reader that already had an older public log open sees nothing written after it is made private", async () => {
+    const file = join(root, "old.log");
+    await writeFile(file, "before\n", { mode: 0o644 });
+    await chmod(file, 0o644);
+    const reader = await open(file, "r");
+    try {
+      await appendPrivateFile({ path: file, data: "secret after\n" });
+      // The path now names a new private file with the whole history.
+      expect(await mode(file)).toBe(0o600);
+      expect(await readFile(file, "utf8")).toBe("before\nsecret after\n");
+      // The reader's descriptor still names the old inode: no new output.
+      const old = await reader.readFile({ encoding: "utf8" });
+      expect(old).toBe("before\n");
+    } finally {
+      await reader.close();
+    }
+    // No staging file is left behind.
+    expect(
+      (await readdir(root)).filter((name) => name.endsWith(".private"))
+    ).toEqual([]);
   });
 
   test("a planted symlink, hard link or FIFO is refused and its target is untouched", async () => {
@@ -168,6 +195,57 @@ describe("lifecycle log", () => {
     }
   );
 
+  test("a log refused while a hook runs never stops its output: every line still reaches the terminal and the hook ends", async () => {
+    const projectDir = join(root, "repo", ".hack");
+    await mkdir(projectDir, { recursive: true });
+    const warnings: string[] = [];
+    const sink = createLifecycleLogSink({
+      projectDir,
+      composeProject: "demo",
+      warn: (message) => warnings.push(message),
+    });
+    await sink.append({
+      timestamp: "2026-11-13T00:00:00.000Z",
+      service: "api",
+      stream: "meta",
+      message: "[start] hook",
+    });
+    // The log becomes unsafe after the start record.
+    const logPath = resolveLifecycleLogPath({
+      projectDir,
+      composeProject: "demo",
+    });
+    await rm(logPath);
+    await symlink(join(root, "elsewhere.log"), logPath);
+    const lines = 20_000;
+    let printed = 0;
+    const started = performance.now();
+    const code = await runLifecycleCommandChild({
+      // Far more than a pipe holds (about 1.2 MB).
+      command: `i=0; while [ $i -lt ${lines} ]; do echo "line $i of the hook output padded to sixty bytes"; i=$((i+1)); done`,
+      cwd: root,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+      drain: (stream, source) =>
+        drainLifecycleOutput({
+          stream,
+          output: source,
+          service: "api",
+          sink,
+          write: () => {
+            printed += 1;
+          },
+        }),
+    });
+    expect(code).toBe(0);
+    expect(printed).toBe(lines);
+    expect(performance.now() - started).toBeLessThan(30_000);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Refusing");
+    expect(
+      await lstat(join(root, "elsewhere.log")).catch(() => null)
+    ).toBeNull();
+  }, 60_000);
+
   test("a persistent command is not run when its private FIFO cannot be created", async () => {
     const marker = join(root, "ran");
     const script = wrapLifecyclePersistentCommand({
@@ -213,7 +291,7 @@ describe("staged mux environments", () => {
     expect((await lstat(fresh.path)).isFile()).toBe(true);
   });
 
-  test("the sweep leaves entries it does not own alone", async () => {
+  test("the sweep leaves open-mode and unrelated entries alone (a foreign owner needs root to test)", async () => {
     const tmp = join(root, "tmp");
     await mkdir(tmp);
     const open = join(tmp, "hack-mux-env-open");

@@ -588,11 +588,105 @@ export async function ensurePrivateDirectory(path: string): Promise<void> {
 /**
  * Open a private file for appending without following a symlink at the
  * final path: created mode 0600, refused unless it is a regular file owned
- * by this user with one link; an older file with group or other access is
- * tightened to 0600 before anything is written. `O_NONBLOCK` makes a planted
- * FIFO fail instead of blocking.
+ * by this user with one link. An older file with group or other access is
+ * replaced by a private copy (a new inode) before anything is written, so a
+ * reader that already had it open sees no new output. `O_NONBLOCK` makes a
+ * planted FIFO fail instead of blocking.
  */
 export async function openPrivateAppend(path: string): Promise<FileHandle> {
+  const handle = await openVerifiedAppend(path);
+  const info = await handle.stat();
+  if ((info.mode & 0o077) === 0) {
+    return handle;
+  }
+  // Group or other could read it, and chmod does not revoke a descriptor a
+  // reader already holds: move its contents to a new private inode, so that
+  // reader sees nothing written from now on.
+  try {
+    await replaceWithPrivateCopy({ path, identity: info });
+  } finally {
+    await handle.close();
+  }
+  return await openVerifiedAppend(path);
+}
+
+/**
+ * Copy an open file's contents into a new private (0600) file beside it and
+ * rename that over `path`. The old inode is left to whoever still holds it.
+ */
+async function replaceWithPrivateCopy(opts: {
+  readonly path: string;
+  /** The verified file: the copy reads exactly this inode. */
+  readonly identity: Stats;
+}): Promise<void> {
+  const from = await open(
+    opts.path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+  );
+  try {
+    const current = await from.stat();
+    if (
+      current.dev !== opts.identity.dev ||
+      current.ino !== opts.identity.ino
+    ) {
+      throw new PrivatePathRefusedError(
+        opts.path,
+        "a file replaced while it was checked"
+      );
+    }
+    await copyIntoPrivateFile({ path: opts.path, from });
+  } finally {
+    await from.close();
+  }
+}
+
+async function copyIntoPrivateFile(opts: {
+  readonly path: string;
+  readonly from: FileHandle;
+}): Promise<void> {
+  const staging = join(
+    dirname(opts.path),
+    `.${basename(opts.path)}.${randomUUID()}.private`
+  );
+  const copy = await open(
+    staging,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW,
+    0o600
+  );
+  try {
+    const buffer = Buffer.alloc(64 * 1024);
+    let position = 0;
+    for (;;) {
+      const { bytesRead } = await opts.from.read(
+        buffer,
+        0,
+        buffer.length,
+        position
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      await copy.write(buffer, 0, bytesRead);
+      position += bytesRead;
+    }
+    await copy.sync();
+  } catch (error: unknown) {
+    await copy.close();
+    await unlink(staging).catch(() => undefined);
+    throw error;
+  }
+  await copy.close();
+  await rename(staging, opts.path).catch(async (error: unknown) => {
+    await unlink(staging).catch(() => undefined);
+    throw error;
+  });
+}
+
+/** Open for appending, refusing anything but this user's single-link regular file. */
+async function openVerifiedAppend(path: string): Promise<FileHandle> {
   const handle = await open(
     path,
     constants.O_WRONLY |
@@ -617,9 +711,6 @@ export async function openPrivateAppend(path: string): Promise<FileHandle> {
     }
     if (info.nlink !== 1) {
       throw new PrivatePathRefusedError(path, "a file with other hard links");
-    }
-    if ((info.mode & 0o077) !== 0) {
-      await handle.chmod(0o600);
     }
     return handle;
   } catch (error: unknown) {

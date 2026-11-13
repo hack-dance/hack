@@ -522,8 +522,13 @@ Notes:
   process-group metadata to `.hack/.internal/lifecycle/state.json`, with per-hook/process output logged to
   `.hack/.internal/lifecycle/*.log`. Those logs hold hook and process output verbatim and
   unredacted, so a value a hook prints is stored there: the directory is private (0700) and each
-  log is private (0600), owned by you, never written through a symlink, and an older log or
-  directory with broader modes is tightened before the next record. Private modes do not protect
+  log is private (0600), owned by you, and Hack never writes it through a symlink (a persistent
+  process's shell appends with `>>`, so a same-user replacement during its session is followed
+  until Hack's next record). An older log that group
+  or others could read is copied to a new private file before the next record, so a reader that
+  already had the old file open sees no new output; an older directory is tightened to 0700. If a
+  hook's log cannot be written while it runs (a refused path, an I/O error), Hack reports that once
+  and keeps showing the hook's output; it is just not saved. Private modes do not protect
   them from your own tools, agents or backups. A persistent process's output reaches its log
   through a FIFO (mode 0600) in a directory that `mktemp -d` creates privately; if it cannot be
   created, the process is not started. If tmux pane state disappears before teardown, `hack down` still uses that persisted metadata to clean up any live lifecycle process groups instead of leaving orphaned host processes behind.

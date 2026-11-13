@@ -32,7 +32,7 @@ Include:
 3. Reproduction steps or proof of concept
 4. Suggested mitigation if available
 
-## Response Expectations
+## Response Targets
 
 1. Initial triage target: within 3 business days
 2. Status updates: at least weekly for confirmed issues
@@ -51,9 +51,10 @@ to encrypt it, for example:
 
 The project-key provider uses `.hack.secret.key` or the `HACK_ENV_SECRET_KEY`
 override. Keep the key out of Git, images, logs and agent transcripts. The env
-override can currently be inherited by child processes; do not treat it as
-isolated key custody. Local `hack.env*.local.yaml` layers are local-only and can
-hold plaintext; neither their filename nor Git ignore rules encrypts them.
+override and the legacy store's `HACK_SECRETS_FILE_KEY` can currently be inherited
+by child processes; do not treat them as isolated key custody. Local
+`hack.env*.local.yaml` layers are local-only and can hold plaintext; neither
+their filename nor Git ignore rules encrypts them.
 Commit only reviewed non-sensitive configuration and example placeholders.
 
 Read the [env and secrets threat model](docs/security/env-secrets-threat-model.md)

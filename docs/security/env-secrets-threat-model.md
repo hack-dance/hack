@@ -52,7 +52,8 @@ node code is listed under [open gaps](#open-gaps) so that it is not lost.
 can print injected values, and a background capture stores output before its
 partial scan. A file-backed project key is a decryption input, not an application
 value; the dashed key edge is the open environment-override inheritance gap.
-A malformed YAML diagnostic can also disclose a source-line excerpt.
+Legacy JSON diagnostics can disclose input text. The modern YAML loader also
+forwards its parser's message without filtering it; see gap 14 for the distinction.
 
 ## Trust boundaries
 
@@ -133,8 +134,12 @@ refer to `hack-dance/hack`.
 These gaps are open at the audit revision above. Each needs a merged fix; a
 planned branch or a passing documentation check is not a mitigation.
 
-1. **Crash-safe key rotation.** Rotation is manual: move the key aside and re-add each
-   secret. A crash or a partial run leaves files encrypted under two different keys,
+1. **Crash-safe key rotation.** Rotation is manual: preserve the old key in private
+   storage outside the worktree, then re-add each secret. Do not leave a
+   `.hack.secret.key.old` copy in the worktree: that name is not ignored by the
+   managed rules (`src/templates.ts`). Preserve a recoverable key/ciphertext
+   generation before changing the active key. A crash or a partial run leaves
+   files encrypted under two different keys,
    and Hack has no journal or resume step for this. There is also no command that
    rotates the `encrypted_file` store key.
 2. **Independent crypto review.** The KDF (a single SHA-256 of the key text), the
@@ -237,14 +242,20 @@ planned branch or a passing documentation check is not a mitigation.
     `HACK_ENV_SECRET_KEY` is set in the CLI environment, child-env builders copy
     it without removing it (`src/lib/shell.ts`, `src/commands/background-command-start.ts`,
     `src/mux/private-environment.ts`). Child code can read the project key as well
-    as its selected application values. Keep this open until the separate fix
+    as its selected application values. The legacy store's `HACK_SECRETS_FILE_KEY`
+    is also passed through these builders. Keep this open until the separate fix
     merges; an environment override is not isolated key custody.
-14. **Open: YAML parse diagnostics expose raw lines (HACK-2163).**
+14. **Open: unfiltered parser diagnostics (HACK-2163).**
     `parseProjectEnvConfigText` keeps the YAML parser's error message, and env
     loading includes it in a `ClosedCliError` (`src/lib/project-env-config.ts`).
-    That message can contain the malformed source line, including plaintext.
-    Do not paste raw parse errors into an agent transcript or public report.
-    The error's class name does not make the diagnostic value-free.
+    Synthetic malformed-YAML probes with pinned Bun 1.4.4 returned fixed text,
+    not source lines. That observation is not a value-free diagnostic contract:
+    the message is still forwarded without filtering. Separately, malformed
+    legacy `hack.env.json` input can appear in a JSON parser error, retained as
+    `parseError` by `src/lib/hack-env.ts` and returned by daemon env routes in
+    `src/daemon/routes/env.ts`. Do not paste raw parse errors into an agent
+    transcript or public report. Keep this open until those boundaries are fixed;
+    an error's class name does not make its message value-free.
 15. **Open: legacy overlay dotenv files are not ignored by the managed rules
     (HACK-2163).** `HACK_DIR_GITIGNORE_ENTRIES` in `src/templates.ts` includes
     `.env`, but not `.env.<overlay>`. Such files can be added to Git unless the

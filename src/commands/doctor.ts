@@ -4446,6 +4446,7 @@ async function maybeMigrateProjectEnvConfig(opts: {
     projectDir: project.projectDir,
     projectName,
     paths: cleanupCandidates,
+    context: migrated.cleanupContext,
     acceptTrackedChanges: opts.acceptTrackedChanges,
   });
   await printMigrationProtectionHint(project);
@@ -4492,6 +4493,7 @@ async function offerDoctorEnvCleanup(opts: {
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
   readonly acceptTrackedChanges: boolean;
 }): Promise<void> {
   const untracked: string[] = [];
@@ -4504,6 +4506,17 @@ async function offerDoctorEnvCleanup(opts: {
       ? tracked
       : untracked
     ).push(path);
+  }
+
+  // A key cannot be removed while its tracked store still exists. Include an
+  // untracked key in that store's later consent batch, keeping the dependency
+  // intact whether tracked cleanup is accepted, declined or refused.
+  const store = opts.context?.store;
+  if (store && tracked.includes(store.path)) {
+    const keyIndex = untracked.indexOf(store.keyPath);
+    if (keyIndex !== -1) {
+      tracked.push(...untracked.splice(keyIndex, 1));
+    }
   }
 
   if (untracked.length > 0) {
@@ -4526,6 +4539,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: untracked,
+        context: opts.context,
       });
     }
   }
@@ -4533,7 +4547,7 @@ async function offerDoctorEnvCleanup(opts: {
   if (tracked.length > 0) {
     note(
       [
-        "These legacy env files are tracked by git and can now be removed. Teammates share them, so commit the removal together with the new env layers:",
+        "These legacy env files are tracked by git, or are keys kept with a tracked store, and can now be removed. Teammates share the tracked files, so commit their removal together with the new env layers:",
         ...tracked.map((path) => `- ${path}`),
       ].join("\n"),
       "env cleanup"
@@ -4549,6 +4563,7 @@ async function offerDoctorEnvCleanup(opts: {
         projectDir: opts.projectDir,
         projectName: opts.projectName,
         paths: tracked,
+        context: opts.context,
       });
     } else {
       note(
@@ -4569,10 +4584,12 @@ async function removeDoctorEnvCleanup(opts: {
   readonly projectDir: string;
   readonly projectName: string;
   readonly paths: readonly string[];
+  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
 }): Promise<void> {
   const removed = await removeLegacyProjectEnvArtifacts({
     paths: opts.paths,
     projectRoot: opts.projectRoot,
+    context: opts.context,
   });
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");

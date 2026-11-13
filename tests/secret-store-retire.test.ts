@@ -1365,3 +1365,30 @@ test("a store another project opens through the OS keychain is not retired", asy
   }
   expect(await readFile(fixture.storePath)).toEqual(before);
 });
+
+test("an invalid worktree entry inside a valid project makes the reader scan incomplete", async () => {
+  // Codex review: the strict read counted rejected project entries but not
+  // rejected worktree entries, which were dropped silently.
+  const fixture = await setUp();
+  const registry = join(fixture.hackHome, "projects.json");
+  const parsed = JSON.parse(await readFile(registry, "utf8")) as {
+    projects: { name: string; worktrees?: unknown[] }[];
+  };
+  for (const project of parsed.projects) {
+    if (project.name === "app-a") {
+      // No lastSeenAt: the parser skips it.
+      project.worktrees = [{ path: join(root, "repos", "app-a-feature") }];
+    }
+  }
+  await writeFile(registry, JSON.stringify(parsed));
+  const finding = (await inspect(fixture.bystander, "app-b"))[0];
+  expect(finding?.message).toContain(
+    "1 registered project(s) could not be checked"
+  );
+  const outcome = await retireSecretStore({
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+    "--allow-unchecked"
+  );
+});

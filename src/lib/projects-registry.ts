@@ -203,15 +203,24 @@ export async function readProjectsRegistryStrict(opts?: {
   if (registry === null) {
     return { kind: "invalid" };
   }
-  // The best-effort parser skips invalid entries; count them, so a caller
-  // never presents a filtered list as complete.
+  // The best-effort parser skips invalid project entries, and invalid
+  // worktree entries inside a valid project; count both, so a caller never
+  // presents a filtered list as complete.
   const raw = isRecord(parsed) ? parsed.projects : undefined;
-  const total = Array.isArray(raw) ? raw.length : registry.projects.length;
-  return {
-    kind: "valid",
-    registry,
-    rejected: total - registry.projects.length,
-  };
+  const items: unknown[] = Array.isArray(raw) ? raw : [];
+  let rejected = 0;
+  for (const item of items) {
+    const project = parseProject(item);
+    if (project === null) {
+      rejected += 1;
+      continue;
+    }
+    const rawWorktrees = isRecord(item) ? item.worktrees : undefined;
+    if (Array.isArray(rawWorktrees)) {
+      rejected += rawWorktrees.length - (project.worktrees?.length ?? 0);
+    }
+  }
+  return { kind: "valid", registry, rejected };
 }
 
 type RegistrationUpsertOptions = {

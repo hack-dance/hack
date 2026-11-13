@@ -191,12 +191,33 @@ function checkPublicFields(opts: {
       return checkPublicFields({ ...opts, value });
     });
   } else if (isRecord(opts.value)) {
-    return Object.fromEntries(
-      Object.entries(opts.value).map(([key, value]) => [
-        key,
-        checkPublicFields({ ...opts, value }),
-      ])
-    );
+    const result: Record<string, unknown> = Object.create(null);
+    for (const [key, value] of Object.entries(opts.value)) {
+      // Native executes extra_hosts hostnames as well as targets. Other
+      // mapping keys keep their ordinary Compose key semantics.
+      const preparedKey =
+        opts.field === "extra_hosts"
+          ? checkPublicFields({
+              ...opts,
+              value: key,
+              field: "extra_hosts.hostname",
+            })
+          : key;
+      if (
+        typeof preparedKey !== "string" ||
+        Object.hasOwn(result, preparedKey)
+      ) {
+        throw new NativeEnvFileRefusal({
+          source: "Compose public field",
+          service: opts.service,
+          field: opts.field,
+          reason:
+            "extra_hosts hostnames must remain distinct after interpolation; values omitted",
+        });
+      }
+      result[preparedKey] = checkPublicFields({ ...opts, value });
+    }
+    return result;
   }
   return opts.value;
 }

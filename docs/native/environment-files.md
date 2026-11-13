@@ -63,9 +63,12 @@ Service-environment defaults resolve only against the project context: an env-fi
 `HOST` does not replace `${HOST:-localhost}` with its file value. Defaults that
 reference newly file-backed names are frozen before runtime private ownership.
 The same rule applies to public command, entrypoint, user, healthcheck test and
-extra-host target defaults: only authored fallback text is frozen, never file
+extra-host hostname/target defaults: only authored fallback text is frozen, never file
 values. Other runtime-bound sources in the same expression refuse rather than
 freeze a different value. Public expressions unrelated to file bindings stay intact.
+Native already evaluates `extra_hosts` hostnames in both list and map forms;
+map keys receive the same private-source admission, and duplicate frozen keys refuse.
+Other mapping keys retain Compose's ordinary key semantics.
 File-local cloud names can be used by later assignments without reading those
 names from the shell.
 

@@ -267,6 +267,16 @@ test.each([
     authored: { "relay.hack": "${HOST:-host-gateway}" },
     expected: { "relay.hack": "host-gateway" },
   },
+  {
+    field: "extra_hosts",
+    authored: { "${HOST:-relay.hack}": "host-gateway" },
+    expected: { "relay.hack": "host-gateway" },
+  },
+  {
+    field: "extra_hosts",
+    authored: { "${OTHER:+${HOST}}relay.hack": "host-gateway" },
+    expected: { "relay.hack": "host-gateway" },
+  },
 ])("public executable defaults use project context before file bindings (%s)", async ({
   field,
   authored,
@@ -282,6 +292,70 @@ test.each([
   const second = await prepareNativeProjectInput(f);
   expect(second.normalizedComposeJson).toBe(first.normalizedComposeJson);
   expect(second.shellEnvironment).toEqual({ app: { HOST: DOTENV } });
+});
+
+test("extra_hosts keys that freeze to one hostname refuse without echoing file values", async () => {
+  const f = await fixture({
+    env_file: "service.env",
+    extra_hosts: {
+      "${HOST:-relay.hack}": "host-gateway",
+      "relay.hack": "host-gateway",
+    },
+  });
+  await f.source("service.env", `HOST=${FILE}\n`);
+  const error: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(String(error)).toContain("hostnames must remain distinct");
+  expect(String(error)).not.toContain(FILE);
+});
+
+test("extra_hosts hostname interpolation refuses project values and runtime-bound compounds", async () => {
+  const f = await fixture({
+    env_file: "service.env",
+    extra_hosts: { "${HOST:-relay.hack}": "host-gateway" },
+  });
+  await f.source("service.env", `HOST=${FILE}\n`);
+  const projectError: unknown = await prepareNativeProjectInput({
+    ...f,
+    env: { HOST: SHELL },
+  }).catch((caught: unknown) => caught);
+  expect(String(projectError)).toContain("variable HOST");
+  expect(String(projectError)).not.toContain(SHELL);
+  expect(String(projectError)).not.toContain(FILE);
+  await writeFile(
+    f.composeFile,
+    JSON.stringify({
+      services: {
+        app: {
+          image: "alpine",
+          env_file: "service.env",
+          extra_hosts: {
+            "${HOST:-relay}.${COMPOSE_PROJECT_NAME}.hack": "host-gateway",
+          },
+        },
+      },
+    })
+  );
+  const runtimeError: unknown = await prepareNativeProjectInput(f).catch(
+    (caught: unknown) => caught
+  );
+  expect(String(runtimeError)).toContain("COMPOSE_PROJECT_NAME");
+  expect(String(runtimeError)).toContain("runtime-bound");
+  expect(String(runtimeError)).not.toContain(FILE);
+});
+
+test("other public mapping keys keep their ordinary Compose semantics", async () => {
+  const f = await fixture({
+    env_file: "service.env",
+    labels: { "${HOST:-literal-label}": "public" },
+  });
+  await f.source("service.env", `HOST=${FILE}\n`);
+  const input = await prepareNativeProjectInput(f);
+  expect(publicService(input).labels).toEqual({
+    "${HOST:-literal-label}": "public",
+  });
+  expect(input.normalizedComposeJson).not.toContain(FILE);
 });
 
 test.each([

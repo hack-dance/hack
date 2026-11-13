@@ -90,7 +90,10 @@ import {
   acquireNativeManagedEnvFile,
   assertNativeProjectInputRoot,
 } from "./native-project-inputs.ts";
-import { writePrivateEnvFileIfChanged } from "./private-env-file.ts";
+import {
+  readPrivateEnvFile,
+  writePrivateEnvFileIfChanged,
+} from "./private-env-file.ts";
 import {
   createPrivateFileExclusive,
   decodeCanonicalBase64,
@@ -3783,6 +3786,41 @@ async function assertMachineLocalLayerNotLinked(opts: {
 }
 
 /**
+ * Whether git tracks a file whose path matches `path` ignoring case: on a
+ * case-insensitive filesystem a write to `hack.env.qa.local.yaml` replaces a
+ * tracked `Hack.env.qa.local.yaml`, which the exact `ls-files` check misses.
+ * Null when git can't say.
+ */
+async function isGitTrackedProjectEnvPathAnyCase(opts: {
+  readonly projectRoot: string;
+  readonly path: string;
+}): Promise<boolean | null> {
+  try {
+    const proc = Bun.spawn({
+      cmd: [
+        "git",
+        "-C",
+        opts.projectRoot,
+        "ls-files",
+        "-z",
+        "--",
+        `:(icase,literal)${toGitRelativePath(opts)}`,
+      ],
+      stderr: "ignore",
+      stdin: "ignore",
+      stdout: "pipe",
+    });
+    const [listed, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    return exitCode === 0 ? listed.length > 0 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Whether git may collect a machine-local layer at `path`, failing closed
  * inside a checkout: `tracked` when git tracks it, `tracking_unknown` when
  * git can't say, `not_ignored` when no effective rule ignores it. Outside
@@ -3797,6 +3835,13 @@ async function machineLocalLayerGitProblem(opts: {
     isInsideGitCheckoutMarker({ startDir: opts.projectRoot });
   if (tracked === true) {
     return "tracked";
+  }
+  const trackedAnyCase = await isGitTrackedProjectEnvPathAnyCase(opts);
+  if (trackedAnyCase === true) {
+    return "tracked";
+  }
+  if (trackedAnyCase === null && (await inCheckout())) {
+    return "tracking_unknown";
   }
   if (tracked === null && (await inCheckout())) {
     return "tracking_unknown";
@@ -3823,9 +3868,8 @@ async function assertMachineLocalLayerWriteDestination(opts: {
   await assertMachineLocalLayerNotLinked(opts);
   let problem = await machineLocalLayerGitProblem(opts);
   if (problem === "not_ignored") {
-    await ensureHackDirGitignoreForLocalEnvWrite({
-      projectDir: dirname(opts.path),
-    });
+    // Silent: a caller has already warned about a read-only file.
+    await ensureHackDirGitignore({ projectDir: dirname(opts.path) });
     problem = await machineLocalLayerGitProblem(opts);
   }
   if (problem === "tracked") {
@@ -6914,15 +6958,20 @@ export async function findUnmigratedLegacyDotenv(opts: {
   let malformedCount = 0;
   for (const envName of [...(state.ok ? [] : [null]), ...overlayNames]) {
     const path = resolveEnvFilePath({ projectDir: opts.projectDir, envName });
-    const read = await readOptionalTextFile(path);
-    if (read.kind === "unreadable") {
+    // No-follow (HACK-2165): a linked or non-regular file is reported as
+    // unreadable and never read, so a link out of the project names no keys.
+    let text: string | null;
+    try {
+      text = await readPrivateEnvFile({ envFile: path });
+    } catch {
       unreadableFiles.push(basename(path));
+      continue;
     }
-    if (read.kind !== "text") {
+    if (text === null) {
       continue;
     }
     const delivered = await deliveredLayerValues({ ...opts, envName });
-    for (const [key, value] of Object.entries(parseDotEnv(read.text))) {
+    for (const [key, value] of Object.entries(parseDotEnv(text))) {
       if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
         malformedCount += 1;
       } else if (delivered[key] !== value) {

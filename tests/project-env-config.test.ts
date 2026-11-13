@@ -1095,6 +1095,34 @@ test("setProjectEnvValue --env qa --local refuses a tracked local overlay (HACK-
   expect(await readFile(layer, "utf8")).toBe(tracked);
 });
 
+test("setProjectEnvValue --local refuses when git tracks a case variant of the layer (HACK-2165)", async () => {
+  const repo = await createRepo();
+  await initGitRepo(repo.projectRoot);
+  const variant = resolve(repo.projectDir, "Hack.env.qa.local.yaml");
+  const tracked =
+    "version: 1\nenvironment: qa\nsecretsprovider: project_key\nvalues:\n  global: {}\n";
+  await writeFile(variant, tracked);
+  await runGit(["add", "-f", "--", variant], repo.projectRoot);
+  const layer = resolveProjectEnvLocalConfigPath({
+    projectDir: repo.projectDir,
+    envName: "qa",
+  });
+  await expect(
+    setProjectEnvValue({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: "qa",
+      scope: "global",
+      key: "QA_TOKEN",
+      value: "synthetic-case-variant",
+      secret: false,
+      local: true,
+    })
+  ).rejects.toThrow(MACHINE_LOCAL_LAYER_REFUSALS.tracked(layer));
+  expect(await readFile(variant, "utf8")).toBe(tracked);
+  expect(await Bun.file(layer).exists()).toBe(false);
+});
+
 test("materializeProjectEnv keeps .hack/.env out of git status through info/exclude", async () => {
   const repo = await createRepo();
   await initGitRepo(repo.projectRoot);

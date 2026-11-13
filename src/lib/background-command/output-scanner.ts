@@ -184,15 +184,13 @@ export function findMatches(
 }
 
 export function scanOutput(input: ScanInput): ScanResult {
-  const secrets = input.secrets.filter((secret) => secret.length > 0);
+  // Keyed by the caller's array, so a supervisor builds its matcher once.
+  const matcher = matcherFor(input.secrets);
   // Match against the raw bytes, so overlapping values are all found.
   const working = input.bytes;
   // Bytes past the capture budget are never published: scan only up to it,
   // plus enough for a value that starts inside it to finish.
-  const longest = secrets.reduce(
-    (max, secret) => Math.max(max, secret.length),
-    0
-  );
+  const longest = matcher.longest;
   const scanned = working.subarray(
     0,
     Math.min(working.length, Math.max(0, input.captureRemaining) + longest)
@@ -200,7 +198,7 @@ export function scanOutput(input: ScanInput): ScanResult {
   // One pass over the bytes finds every value (Aho-Corasick), so the work is
   // the byte count, not bytes x values.
   const union = findAllMatches({
-    matcher: matcherFor(secrets),
+    matcher,
     bytes: scanned,
     scannedPrefix: input.scannedPrefix ?? 0,
   });
@@ -208,7 +206,9 @@ export function scanOutput(input: ScanInput): ScanResult {
     offset: input.offset + match.start,
     length: match.length,
   }));
-  const holdback = input.final ? 0 : pendingPrefixLength(working, secrets);
+  const holdback = input.final
+    ? 0
+    : pendingPrefixLength(working, input.secrets);
   let end = Math.max(0, working.length - holdback);
   if (!input.final) {
     end = utf8SafeCut(working, end);
@@ -257,8 +257,10 @@ export const REDACTION_VALUES_LIMIT = 1024;
 
 /**
  * Slice length for one scan. Matching is one pass whatever the number of
- * values, so one slice's work is bounded by its length alone (a few
- * milliseconds for 256 KiB); the count is accepted for compatibility.
+ * values, so one slice's work is bounded by its length alone (8 MiB, so
+ * 32 slices, measured under 0.4 s of CPU with 1,024 values, random or
+ * adversarial; see scripts/bench-output-scanner.ts). The count is accepted
+ * for compatibility.
  */
 export function scanSliceBytes(_secretCount: number): number {
   return 256 * 1024;
@@ -294,8 +296,14 @@ type Matcher = {
   readonly depth: Int32Array;
   readonly best: Int32Array;
   readonly rootChild: Int32Array;
+  /** Per node: offset of its 256-entry table in `dense`, or -1. */
+  readonly denseAt: Int32Array;
+  readonly dense: Int32Array;
   readonly longest: number;
 };
+
+/** Nodes with more children than this get a dense table: no long sibling scans. */
+const DENSE_CHILDREN = 16;
 
 const matchers = new WeakMap<readonly Uint8Array[], Matcher>();
 
@@ -357,6 +365,12 @@ function buildMatcher(secrets: readonly Uint8Array[]): Matcher {
     best[node] = Math.max(best[node] as number, secret.length);
   }
   linkFailures({ label, firstChild, nextSibling, fail, best, nodes, child });
+  const { denseAt, dense } = denseTables({
+    label,
+    firstChild,
+    nextSibling,
+    nodes,
+  });
   return {
     label,
     firstChild,
@@ -365,6 +379,8 @@ function buildMatcher(secrets: readonly Uint8Array[]): Matcher {
     depth,
     best,
     rootChild,
+    denseAt,
+    dense,
     longest,
   };
 }
@@ -415,12 +431,59 @@ function linkFailures(opts: {
   }
 }
 
+/** A 256-entry child table for every node with many children. */
+function denseTables(opts: {
+  readonly label: Uint8Array;
+  readonly firstChild: Int32Array;
+  readonly nextSibling: Int32Array;
+  readonly nodes: number;
+}): { denseAt: Int32Array; dense: Int32Array } {
+  const { label, firstChild, nextSibling } = opts;
+  const denseAt = new Int32Array(opts.nodes).fill(-1);
+  const wide: number[] = [];
+  for (let node = 1; node < opts.nodes; node += 1) {
+    let count = 0;
+    for (
+      let c = firstChild[node] as number;
+      c !== -1;
+      c = nextSibling[c] as number
+    ) {
+      count += 1;
+    }
+    if (count > DENSE_CHILDREN) {
+      denseAt[node] = wide.length * 256;
+      wide.push(node);
+    }
+  }
+  const dense = new Int32Array(wide.length * 256).fill(-1);
+  for (const node of wide) {
+    const at = denseAt[node] as number;
+    for (
+      let c = firstChild[node] as number;
+      c !== -1;
+      c = nextSibling[c] as number
+    ) {
+      dense[at + (label[c] as number)] = c;
+    }
+  }
+  return { denseAt, dense };
+}
+
 function step(matcher: Matcher, from: number, byte: number): number {
   let state = from;
   for (;;) {
     if (state === 0) {
       const next = matcher.rootChild[byte] as number;
       return next === -1 ? 0 : next;
+    }
+    const at = matcher.denseAt[state] as number;
+    if (at !== -1) {
+      const next = matcher.dense[at + byte] as number;
+      if (next !== -1) {
+        return next;
+      }
+      state = matcher.fail[state] as number;
+      continue;
     }
     for (
       let c = matcher.firstChild[state] as number;

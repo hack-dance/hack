@@ -3,10 +3,13 @@
  * supervisor does to drain a full capture (8 MiB) against many redaction
  * values, slice by slice as the supervisor does. Prints CPU and wall time.
  *
- *   bun scripts/bench-output-scanner.ts [values=1024] [megabytes=8] [valueBytes=32]
+ *   bun scripts/bench-output-scanner.ts [values=1024] [megabytes=8] [valueBytes=32] [random|adversarial]
  *
- * Output is random lowercase text with a few real values planted, so the
- * scanner finds matches and holds back partial prefixes like real output.
+ * random: output is random lowercase text with a few real values planted, so
+ * the scanner finds matches and holds back partial prefixes like real output.
+ * adversarial: every value starts with the same two bytes and every third
+ * byte occurs, and the output keeps re-entering that shared prefix, which
+ * is the worst case for a trie node with many children.
  */
 import {
   encodeSecrets,
@@ -17,6 +20,7 @@ import {
 const valueCount = Number(Bun.argv[2] ?? 1024);
 const megabytes = Number(Bun.argv[3] ?? 8);
 const valueBytes = Number(Bun.argv[4] ?? 32);
+const adversarial = Bun.argv[5] === "adversarial";
 
 // Deterministic pseudo-random bytes (xorshift32), so runs are comparable
 // and only the planted values match.
@@ -27,14 +31,16 @@ const nextByte = (): number => {
   seed ^= seed << 5;
   return 97 + ((seed >>> 0) % 26);
 };
-const values = Array.from({ length: valueCount }, () =>
-  String.fromCharCode(...Array.from({ length: valueBytes }, nextByte))
+const values = Array.from({ length: valueCount }, (_, index) =>
+  adversarial
+    ? `QZ${String.fromCharCode(index % 256)}${String.fromCharCode(...Array.from({ length: valueBytes - 3 }, nextByte))}${index}`
+    : String.fromCharCode(...Array.from({ length: valueBytes }, nextByte))
 );
 const secrets = encodeSecrets({ values, minLength: 6 });
 const total = megabytes * 1024 * 1024;
 const output = new Uint8Array(total);
 for (let i = 0; i < total; i += 1) {
-  output[i] = nextByte();
+  output[i] = adversarial ? ([0x51, 0x5a, 0][i % 3] as number) : nextByte();
 }
 // Plant one value every 64 KiB.
 const encoder = new TextEncoder();

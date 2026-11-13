@@ -640,7 +640,8 @@ export class OutputCapture {
     // command's own supervisor, with at most CALLER_ACTIVE_LIMIT (4) per
     // caller and HOME_ACTIVE_LIMIT (16) per Hack home running. Matching is
     // one pass whatever the number of values: the worst accepted case
-    // measured about 0.9 s of CPU (scripts/bench-output-scanner.ts).
+    // measured under 0.4 s of CPU, random or adversarial values
+    // (scripts/bench-output-scanner.ts).
     const deadlineMono = final ? undefined : performance.now() + POLL_WORK_MS;
     for (const stream of ["stdout", "stderr"] as const) {
       const now = performance.now();

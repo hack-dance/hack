@@ -1,4 +1,5 @@
 import { assertPinnedInstallers } from "./installer-pin";
+import { publishedTerminology } from "./prepare";
 import { isVersionedSearchUrl } from "./version-boundary";
 import versions from "./versions.json";
 
@@ -73,7 +74,7 @@ for (const version of ["v4", "v5"] as const) {
     if (
       !text.includes(`/docs/${version}`) ||
       text.includes(`/docs/${version === "v4" ? "v5" : "v4"}/`) ||
-      /dogfooding/i.test(text)
+      publishedTerminology(text) !== text
     ) {
       throw new Error(`Export isolation failed: ${version}/${name}`);
     }
@@ -205,6 +206,7 @@ const recipeEntryPoints = new Set([
   "index",
   "env",
   "reference/configuration-fields",
+  "guides/upgrade-from-v4",
 ]);
 const v5Slugs = new Set(
   [...versions.v5.entries, ...versions.v5.editorial].map((page) => page.slug)

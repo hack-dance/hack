@@ -4320,6 +4320,13 @@
         "title": "Upgrade from v4"
       },
       {
+        "slug": "guides/upgrade-from-v4",
+        "title": "Upgrade a v4 machine to v5",
+        "sourceRevision": "26a142921c9b9aeb8821b7e0a19c2cfb3be0189f",
+        "sourceLabel": "Env migration audit (next 26a142921c)",
+        "sourceFile": "docs/env.md"
+      },
+      {
         "slug": "agent-handoff",
         "title": "Agent handoff"
       },

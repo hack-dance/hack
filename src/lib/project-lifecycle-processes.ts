@@ -222,6 +222,28 @@ export function selectLiveLifecycleGroups(opts: {
   return opts.groups.filter((group) => live.has(group));
 }
 
+/** Shared post-stop proof, including native host adapters that retain their own pins. */
+export async function assertLifecycleProcessGroupRetired(opts: {
+  readonly processGroupId: number;
+}): Promise<void> {
+  try {
+    process.kill(-opts.processGroupId, 0);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+      return;
+    }
+    throw error;
+  }
+  if (
+    selectLiveLifecycleGroups({
+      groups: [opts.processGroupId],
+      identities: await readProcessIdentities(),
+    }).length > 0
+  ) {
+    throw new Error("Lifecycle process group still has a live member");
+  }
+}
+
 export async function terminateLifecycleProcessGroups(opts: {
   readonly processGroupIds: readonly number[];
   readonly assertFresh?: () => Promise<void>;

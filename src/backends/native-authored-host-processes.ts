@@ -31,6 +31,7 @@ import {
   createLifecycleProcessController,
   stopLifecycleProcessController,
 } from "../lib/project-lifecycle-controller.ts";
+import { assertLifecycleProcessGroupRetired } from "../lib/project-lifecycle-processes.ts";
 import { inspectLifecycleSession } from "../lib/project-lifecycle-sessions.ts";
 import { getMuxBackends, resolveMux } from "../mux/mux-resolver.ts";
 import type { NativeHookFilePin } from "./native-authored-hook-journal.ts";
@@ -100,30 +101,32 @@ async function unchanged(saved: Awaited<ReturnType<typeof capture>>) {
 }
 /** An abandoned launch's groups get 5 s to exit after their session ends. */
 const GROUP_SETTLEMENT_INTERVAL_MS = 50;
-const GROUP_SETTLEMENT_ATTEMPTS = 100;
-function absentGroup(group: number): void {
+const GROUP_SETTLEMENT_TIMEOUT_MS = 5000;
+async function absentGroup(group: number): Promise<void> {
   try {
-    process.kill(-group, 0);
-  } catch (error) {
-    if (hasCode(error, "ESRCH")) {
-      return;
-    }
-    throw error;
+    await assertLifecycleProcessGroupRetired({ processGroupId: group });
+  } catch {
+    return refuse();
   }
-  refuse();
 }
 /** Bounded wait for an owned group to exit after its session was ended. */
 async function settledGroup(group: number): Promise<void> {
-  for (let attempt = 1; ; attempt++) {
+  const deadline = performance.now() + GROUP_SETTLEMENT_TIMEOUT_MS;
+  for (;;) {
     try {
-      absentGroup(group);
+      await absentGroup(group);
       return;
     } catch (error) {
-      if (attempt >= GROUP_SETTLEMENT_ATTEMPTS) {
+      if (performance.now() >= deadline) {
         throw error;
       }
     }
-    await Bun.sleep(GROUP_SETTLEMENT_INTERVAL_MS);
+    await Bun.sleep(
+      Math.min(
+        GROUP_SETTLEMENT_INTERVAL_MS,
+        Math.max(0, deadline - performance.now())
+      )
+    );
   }
 }
 function entry(value: unknown): LifecycleStateEntry | null {
@@ -383,7 +386,7 @@ async function stopKnown(opts: {
     // An absent mux session never grants PID/group-only kill authority.
     if (inspected.classification === "absent") {
       for (const process of opts.savedEntry.processes) {
-        absentGroup(process.processGroupId ?? refuse());
+        await absentGroup(process.processGroupId ?? refuse());
       }
     } else if (inspected.decision.kind !== "adopt") {
       return refuse();
@@ -398,7 +401,7 @@ async function stopKnown(opts: {
       assertFresh: current,
     });
     for (const process of opts.savedEntry.processes) {
-      absentGroup(process.processGroupId ?? refuse());
+      await absentGroup(process.processGroupId ?? refuse());
     }
   }
   if ((await currentEntry(opts.scope, opts.owner.compose_project)) !== null) {
@@ -506,7 +509,7 @@ export async function retireNativeAuthoredHostProcesses(opts: {
       return refuse();
     }
     for (const process of savedEntry?.processes ?? []) {
-      absentGroup(process.processGroupId ?? refuse());
+      await absentGroup(process.processGroupId ?? refuse());
     }
   } else {
     await stopKnown({ scope: opts.scope, owner, savedEntry, check });

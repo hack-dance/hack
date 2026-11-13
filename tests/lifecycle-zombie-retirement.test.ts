@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { readProcessIdentities } from "../src/lib/process-tree.ts";
-import { terminateLifecycleProcessGroups } from "../src/lib/project-lifecycle-processes.ts";
+import {
+  assertLifecycleProcessGroupRetired,
+  terminateLifecycleProcessGroups,
+} from "../src/lib/project-lifecycle-processes.ts";
 
 test.skipIf(process.platform !== "linux")(
   "a real zombie-only process group retires before its parent reaps it",
@@ -26,7 +29,7 @@ os.waitpid(pid, 0)
       stdout: "pipe",
       stderr: "pipe",
     });
-    const watchdog = setTimeout(() => parent.stdin.end("release\n"), 15_000);
+    const watchdog = setTimeout(() => parent.stdin.end(), 15_000);
     try {
       const reader = parent.stdout.getReader();
       let output = "";
@@ -59,6 +62,7 @@ os.waitpid(pid, 0)
         processGroupIds: [group],
         alreadySignalled: true,
       });
+      await assertLifecycleProcessGroupRetired({ processGroupId: group });
       expect(performance.now() - started).toBeLessThan(3000);
       // Retirement did not require the zombie to be reaped; parent is still waiting.
       expect(parent.exitCode).toBeNull();
@@ -68,7 +72,7 @@ os.waitpid(pid, 0)
       ).toBe(true);
     } finally {
       clearTimeout(watchdog);
-      parent.stdin.end("release\n");
+      parent.stdin.end();
       expect(await parent.exited).toBe(0);
     }
   },

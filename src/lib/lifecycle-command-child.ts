@@ -1,3 +1,5 @@
+import { childEnvironment } from "./child-environment.ts";
+
 /** SIGTERM-to-SIGKILL grace, and the output-drain bound after cancellation. */
 const CANCEL_GRACE_MS = 2000;
 
@@ -59,7 +61,7 @@ export async function runLifecycleCommandChild(opts: {
   const owned = signal !== undefined;
   const proc = Bun.spawn(["sh", "-c", opts.command], {
     cwd: opts.cwd,
-    env: opts.env,
+    env: childEnvironment(opts.env),
     stdin: owned ? "ignore" : "inherit",
     stdout: "pipe",
     stderr: "pipe",

@@ -66,6 +66,7 @@ afterEach(async () => {
 test("renders root-anchored entries with glob characters in the prefix escaped", () => {
   const block = renderHackGitInfoExcludeBlock({ prefix: "a[b]*?\\c/.hack/" });
   expect(block?.entries[0]).toBe("/a\\[b\\]\\*\\?\\\\c/.hack/.internal/");
+  expect(block?.entries).toContain("!/a\\[b\\]\\*\\?\\\\c/.hack/.env.example");
   expect(block?.beginMarker).toContain("/a[b]*?\\c/.hack/");
   expect(renderHackGitInfoExcludeBlock({ prefix: "" })).toBeNull();
   expect(renderHackGitInfoExcludeBlock({ prefix: "a\nb/.hack/" })).toBeNull();

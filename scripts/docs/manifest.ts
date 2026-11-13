@@ -31,6 +31,12 @@ export const documents = [
     "guides/macos-certificate-trust",
     "Certificate trust",
   ],
+  ["docs/guides/linux-setup.md", "guides/linux-setup", "Linux host setup"],
+  [
+    "docs/guides/linux-certificate-trust.md",
+    "guides/linux-certificate-trust",
+    "Linux certificate trust",
+  ],
   [
     "docs/guides/codex-managed-environments.md",
     "guides/codex-managed-environments",

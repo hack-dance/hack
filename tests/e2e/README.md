@@ -51,7 +51,7 @@ also requires each shard job by name. To reproduce one CI shard locally, run
 When a shard fails, the process-policy scenario keeps its fixture roots and
 writes its fixed-field capsule and startup diagnostic under `HACK_E2E_CAPSULE_DIR`
 (`$RUNNER_TEMP/process-policy-capsules` in CI). The shard uploads that directory
-as the `process-policy-capsules-<count>-shards-<i>` artifact. Those files hold counts,
+as the `process-policy-capsules-shard-<i>` artifact. Those files hold counts,
 enums and booleans only.
 
 
@@ -817,40 +817,3 @@ positive shared system link count, while every private artifact and alternate Gi
 selection remains single-link. It pins and rechecks that exact link count, owner
 IDs, physical path, mode, inode and bytes throughout the attempt. This prerequisite
 does not add engine authority or prove guest/lifecycle acceptance.
-
-### Six-shard hosted trial
-
-A non-gating `docker-e2e trial shard i/6` matrix runs the same 48 default
-scenarios and supplemental checks alongside the four-shard matrix on the same
-revision. A shared local composite action keeps both layouts aligned. The trial runs on
-`next`/`main` pushes, manual dispatch, and pull requests labeled
-`docker-e2e-trial`, always subject to the existing suite scope gate. Adding the trial label
-to an open PR starts a run; subsequent updates retain the opt-in. Unrelated label
-events skip scope classification and cannot cancel an active trial.
-
-The trial uses standard `ubuntu-24.04` runners with `fail-fast: false` and
-job-level `continue-on-error: true`. It runs in a separate workflow, so its jobs are absent from the CI run consumed
-by prerelease, the `docker-e2e` aggregate dependencies, and the exact-head
-prerelease required-job list; those
-continue to require the existing four-shard layout. No scenario or assertion
-is deferred. Duration hints remain unchanged for this comparison. Supplemental
-checks run once per layout: shard 4/4 and the lightest trial shard, 6/6. A
-regression test prevents a hint refresh from silently moving trial extras onto
-a network scenario.
-
-Each job summary reports shard elapsed seconds and allowlisted scenario names,
-durations and pass/fail only. Missing or skipped scenario results report failure.
-Explicit E2E and supplemental smoke outcomes prevent cleanup failures from
-reporting a pass. Summary publishing itself is advisory and cannot fail a shard.
-For comparisons, use the jobs' `startedAt`/`completedAt` values from
-`gh run view <id> --json jobs`: report each shard duration, elapsed time from
-the first shard start to the last shard end, and summed runner-minutes. This
-span includes staggered starts after the first runner begins, but excludes the
-initial queue before that first start. Include failed/cancelled attempts;
-one successful comparison does not justify adoption. Adoption requires
-materially lower median and p90 elapsed time under normal load without
-unexplained new failures or weakened cleanup, followed by an atomic update of
-the prerelease contract, tests and documentation.
-
-[Trial job flow](../../docs/reference/docker-e2e-trial.svg) ·
-[Mermaid source](../../docs/reference/docker-e2e-trial.mmd)

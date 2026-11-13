@@ -1,6 +1,6 @@
 import type { LogJsonEntry } from "./log-json.ts";
 
-export type LogStreamBackend = "compose" | "loki";
+export type LogStreamBackend = "compose" | "loki" | "native";
 export type LogStreamEventType =
   | "start"
   | "log"

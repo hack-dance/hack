@@ -1,0 +1,11 @@
+{
+  "scope": "0000000000000000000000000000000000000000000000000000000000000000",
+  "run": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "owner": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "namespace": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "planId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "pid": 42,
+  "version": 2,
+  "attempt": "ffffffffffffffffffffffffffffffff",
+  "httpsPort": null
+}

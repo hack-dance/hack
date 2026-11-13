@@ -62,7 +62,10 @@ mod volume_subpaths;
 pub use dependency_hosts::dependency_address;
 #[cfg(target_os = "macos")]
 pub mod foreground;
+#[cfg(any(target_os = "macos", test))]
+mod owner_loop;
 mod startup;
+pub(crate) use config::compose_start_refusals;
 mod startup_failure;
 #[cfg(any(target_os = "macos", test))]
 mod startup_logs;
@@ -86,6 +89,8 @@ pub use acknowledged_publisher::{
 };
 #[cfg(target_os = "macos")]
 mod dead_owner_cleanup;
+#[cfg(target_os = "macos")]
+mod legacy_cleanup_enrollment;
 #[cfg(target_os = "macos")]
 mod live_owner_cleanup;
 #[cfg(target_os = "macos")]
@@ -145,9 +150,11 @@ mod restore;
 pub(in crate::provider) mod retained_startup;
 #[cfg(target_os = "macos")]
 pub use retained_startup::preflight as retained_startup_preflight;
+mod log_follow;
 mod restore_history;
 mod routes;
 mod service_logs;
+pub use log_follow::{LogFollowOptions, follow_logs};
 mod shutdown;
 pub use service_logs::{
     ServiceLogOptions, ServiceLogResult, ServiceSelection, service_logs, service_selection,
@@ -777,6 +784,14 @@ pub(super) fn fault_pause(
         }
     }
     Ok(())
+}
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn publisher_recovery_fault(
+    candidate: &Candidate,
+    run: &str,
+    point: &str,
+) -> Result<(), CandidateError> {
+    fault_pause(&directory(candidate, run)?, run, point)
 }
 impl Session<'_, '_> {
     #[cfg(test)]
@@ -1689,12 +1704,31 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
     let (receipt, root) = load_at(directory(candidate, run)?, run, &owner.token)?;
     let bytes = host_pin_recovery::read_raw(&root.join("state.json"), 1024 * 1024)?;
     let publication = foreground::transport::published_owner(candidate, run)?;
-    let resumable = live_owner_cleanup::resumable_selection(
-        candidate,
-        &root,
-        &receipt,
-        publication != foreground::transport::PublishedOwner::Absent,
-    )?;
+    let running = publication == foreground::transport::PublishedOwner::Running;
+    let resumable = if running {
+        None
+    } else {
+        live_owner_cleanup::resumable_selection(
+            candidate,
+            &root,
+            &receipt,
+            publication != foreground::transport::PublishedOwner::Absent,
+        )?
+    };
+    // Recovery hints grant no authority. A malformed sidecar must not prevent
+    // authenticated cleanup by a live owner, or poison read-only discovery.
+    let hint = dead_owner_cleanup::recovery_hint(candidate, &root, &receipt, &owner, publication)
+        .and_then(|selected| {
+            let complete =
+                selected.is_some() && dead_owner_cleanup::current_completion(&root, &receipt)?;
+            Ok((selected, complete))
+        });
+    let (predecessor, predecessor_complete, predecessor_error) = match hint {
+        Ok((selected, complete)) => (selected, complete, None),
+        Err(error) => (None, false, Some(error.code)),
+    };
+    // A stopped receipt can precede the intent's completion commit. Only that
+    // exact commit lets a caller skip cleanup and resume partial retirement.
     Ok(json!({
         "version": 1,
         "run": receipt.run,
@@ -1703,6 +1737,9 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "receipt_sha256": format!("{:x}", Sha256::digest(&bytes)),
         "foreground": publication.word(),
         "live_owner_recovery": resumable,
+        "dead_owner_recovery": predecessor,
+        "dead_owner_recovery_complete": predecessor_complete,
+        "dead_owner_recovery_error": predecessor_error,
     }))
 }
 
@@ -2103,6 +2140,8 @@ fn cleanup_owned_fenced(
     };
     startup::cleanup_guest(engine, &receipt, false)?;
     fence()?;
+    #[cfg(test)]
+    fault_pause(root, &receipt.run, "cleanup-before-publisher-stop")?;
     bridges::release_run(candidate, engine, &receipt)?;
     #[cfg(test)]
     if early_intent {

@@ -11,6 +11,7 @@ import {
   resolveLaunchdAccess,
 } from "./launchd.ts";
 import { resolveDaemonPaths } from "./paths.ts";
+import { spawnDetachedDaemon } from "./spawn.ts";
 import { readDaemonStatus } from "./status.ts";
 
 type PackageJsonType = {
@@ -307,22 +308,19 @@ async function ensureLaunchdDaemonReady(opts: {
 /**
  * Starts hackd through the current CLI invocation path.
  *
- * Spawns fully detached (stdio ignored + unref) so the parent process never
- * inherits pipes held open by the daemon; readiness is verified separately
+ * Spawns fully detached (own session, stdio ignored, unref; see
+ * {@link spawnDetachedDaemon}) so the parent never inherits pipes held open
+ * by the daemon and its process group can exit without taking hackd along.
+ * On Linux, `hack daemon start` itself routes through an installed
+ * hackd.service. Readiness is verified separately
  * by {@link waitForDaemonSocket} with a bounded timeout.
  */
 async function startDaemonViaCli(): Promise<boolean> {
   const invocation = await resolveHackInvocation();
   try {
-    const proc = Bun.spawn(
-      [invocation.bin, ...invocation.args, "daemon", "start"],
-      {
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      }
-    );
-    proc.unref();
+    spawnDetachedDaemon({
+      argv: [invocation.bin, ...invocation.args, "daemon", "start"],
+    });
     return true;
   } catch {
     return false;

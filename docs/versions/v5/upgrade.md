@@ -1,5 +1,7 @@
 # Upgrade from v4
 
+For the summary of the release, read [What's new in 5.0](../guides/v5-release-notes.md).
+
 v5 keeps the v4 project model and commands. Your `.hack/` folder, encrypted env
 values, branch instances, lifecycle processes and sessions carry over. What changes
 is the runtime layer underneath and the product boundary around it.
@@ -14,7 +16,8 @@ is the runtime layer underneath and the product boundary around it.
 ## What is new
 
 - **Native backend (beta).** On Apple Silicon macOS, through the `hack-next`
-  channel, `HACK_RUNTIME_BACKEND=native` runs explicitly prepared projects without Docker. It supports a bounded command
+  channel, `HACK_RUNTIME_BACKEND=native` runs explicitly prepared projects without
+  Docker Desktop or OrbStack. It supports a bounded command
   subset and is qualified project by project. See
   [Native backend (beta)](native/overview.md).
 - **A config compiler.** `hack config validate`, `config plan`, `config import
@@ -58,3 +61,15 @@ invoked.
 
 When 5.0.0 ships, `brew upgrade hack` or the release installer moves the stable
 executable to v5. Projects need no changes to keep running on Compose.
+
+## The daemon after an upgrade
+
+Installing 5.0.0 over a running 4.x does not replace the daemon. On Linux the old
+`hackd` keeps running: `hack daemon status` reports `incompatible` and exits 1,
+while `hack status` and `hack projects --json` still work. Replace it yourself:
+
+```bash
+hack daemon restart
+```
+
+This was checked on Linux x86_64. The macOS behavior has not been checked yet.

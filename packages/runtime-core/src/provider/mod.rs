@@ -128,8 +128,10 @@ mod supervisor_loss_test;
 pub use source_job::{SourceJob, SourceJobEvent, reconcile_source_job, run_source_job};
 pub use source_probe::{ProbeReceipt, verify as verify_source};
 pub use source_sync::{SyncReceipt, SyncSession, sync_status};
+pub mod setup;
 mod socket_requests;
 mod state;
+mod tree_witness;
 pub use lifecycle::{
     PreparedBaseBuilt, build_prepared_base, check_project_share, down, prepared_base_status,
     probe_with_profile, recover, remove_prepared_base, repair_provider_trees, status, up,

@@ -1,5 +1,9 @@
 # Configuration fields
 
+For complete project files, start with [Config examples](../recipes/config-examples.md)
+or browse [Recipes](../recipes/overview.md). For overlay examples, see
+[Environments](../recipes/environments.md).
+
 This field inventory was audited against the `5.0.0-next.5` source and has not been requalified against later prereleases. The [generated command reference](../../reference/cli.md) and the pinned runtime guides take precedence where they differ.
 
 This reference describes v5 (next.5). Use [Environment and secrets](../../env.md) and [Lifecycle](../../lifecycle.md) for workflows. Fields below come from the version-pinned schema and readers, not a newer checkout.
@@ -7,6 +11,24 @@ This reference describes v5 (next.5). Use [Environment and secrets](../../env.md
 The published native launcher accepts a narrower authored project model. This legacy JSON/Compose reference does not establish native feature support. Start with [Native configuration import](../../reference/native-config-import.md) and the authored schemas linked from [Reference](overview.md).
 
 ## Project JSON
+
+A project groups service definitions and env overlay files, while a routed service
+adds host rules; these relationships span files rather than one JSON object.
+
+```mermaid
+---
+title: Configuration file relationships
+---
+erDiagram
+  PROJECT ||--o{ SERVICE : defines
+  PROJECT ||--o{ OVERLAY : groups
+  SERVICE ||--o{ ROUTE : exposes
+```
+
+This is a conceptual file map, not a database schema or a complete cardinality
+contract. Services live in Compose, env overlays in YAML, and routes in Caddy
+labels; host-only env scopes are omitted. The field audit below keeps its stated
+next.5 provenance, and this picture adds no new runtime capability.
 
 The legacy project file is `.hack/hack.config.json`. Requiredness below is relative to the containing schema object or union variant. An optional parent does not become required because a child is required. Repeated paths describe different variants. The schema requires `name` and `dev_host`; the reader has compatibility fallbacks. A schema constraint is not proof the reader validates it. No schema default is declared for these fields.
 

@@ -20,6 +20,28 @@ Canonical env state lives at the repo root:
 - `.hack/hack.env.local.yaml`
 - `.hack/hack.env.<overlay>.local.yaml`
 
+Committed config and ignored local or generated files share the `.hack/`
+directory; the encryption key stays outside the committed definition.
+
+```mermaid
+---
+title: Project configuration files
+---
+treeView-beta
+  .hack/
+    .gitignore
+    hack.config.json
+    docker-compose.yml
+    hack.env.default.yaml
+    hack.env.qa.yaml
+    hack.env.local.yaml
+    .internal/
+    .branch/
+```
+
+The default and named overlay files can be committed; local overlays and the
+generated directories are ignored, as described in the ignore rules below.
+
 Legacy compatibility note:
 
 - if an older repo already tracks `.hack/hack.env.local.yaml` as the shared `--env local` overlay, Hack keeps reading that file as the shared overlay
@@ -180,10 +202,40 @@ Hack resolves env in this order:
 4. if `--env=<name>` is selected, load the primary checkout's `.hack/hack.env.<name>.local.yaml`
 5. load this checkout's `.hack/hack.env.local.yaml`
 6. if `--env=<name>` is selected, load this checkout's `.hack/hack.env.<name>.local.yaml`
-7. merge `values.global`
-8. if a service scope is requested, merge `values.<service>` on top
 
-Worktree-local overrides win over shared repo overlays. Service values override global values.
+Within **each file layer**, apply `values.global`, then the requested service
+scope, then `host` for host execution when that name is not a Compose service.
+Later files win across scopes: a local global value can replace a service value
+from an earlier committed file. A service value wins over a global value only
+within the same layer. A `null` entry removes an earlier binding; a later value
+can introduce it again.
+
+For each ordered file, Hack applies only the scopes for the execution target,
+then continues to the next file before returning the effective values.
+
+```mermaid
+---
+title: Resolve one environment target
+---
+flowchart TD
+  Layer["Next file layer"] --> Global["Apply global values"]
+  Global --> Scoped{"Service scope selected?"}
+  Scoped -->|"yes"| Service["Apply service values"]
+  Scoped -->|"no"| HostTarget{"Host scope applies?"}
+  Service --> HostTarget
+  HostTarget -->|"yes"| Host["Apply host values"]
+  HostTarget -->|"no"| More{"More file layers?"}
+  Host --> More
+  More -->|"yes"| Layer
+  More -->|"no"| Result["Effective values"]
+```
+
+The `host` step is skipped if a Compose service is named `host`; that name then
+selects the service rather than a host-only scope. A branch instance does not add
+an env layer: overlay selection is independent, while a linked worktree can
+inherit the primary checkout's local files before its own local overrides.
+
+Worktree-local overrides win over shared repo overlays.
 Primary local overlays are read live, without copying or creating files. Checkout-local
 overrides always win over primary local overlays; `hack env set --local` writes only to
 the current checkout. Inheritance is disabled by `CI=1` or `CI=true`,
@@ -969,6 +1021,12 @@ Default behavior:
 - add `.hack.secret.key` to `.gitignore`
 - decrypt secrets from `.hack.secret.key` on the local machine
 - linked git worktrees can reuse the primary checkout's `.hack.secret.key` when the worktree copy is missing
+
+On another machine or in a fresh clone, the committed secrets are still encrypted
+with the original key. Copy `.hack.secret.key` from a machine that has it, or set
+`HACK_ENV_SECRET_KEY` to the same key. Do not run `hack env add --secret` there to
+"generate" a key: a new key cannot decrypt the existing values. When a command needs
+the key and finds none, its error says this instead of suggesting a new key.
 
 Linked worktree behavior:
 

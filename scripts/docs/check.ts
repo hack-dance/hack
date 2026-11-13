@@ -1,15 +1,19 @@
 import { resolve } from "node:path";
 import { agentCompatibilityCommands, curateCliReference } from "./curate-cli";
+import { assertPinnedInstallers } from "./installer-pin";
 import {
+  pinnedBootstrapText,
   prepare,
   repositoryRoot,
   resolveEditorialSource,
   resolvePublicSource,
   rewriteTarget,
 } from "./prepare";
+import { readmeDiagrams } from "./readme-diagrams";
 import { isVersionedSearchUrl } from "./version-boundary";
 import versions from "./versions.json";
 
+await readmeDiagrams({ check: true });
 await prepare(true);
 // Boundary checks: traversal, private evidence, untracked input must never become a link.
 const source = resolve(repositoryRoot, "docs/README.md");
@@ -22,6 +26,9 @@ for (const target of [
   "../.hack-local/evidence.md",
   "../test-execution/log.md",
   "missing-public-document.md",
+  "../example",
+  "../examples/not-a-tracked-directory",
+  "site/not-a-manifest-page.md",
 ]) {
   let rejected = false;
   try {
@@ -39,6 +46,22 @@ if (
   throw new Error("Canonical doc links must use site routes");
 }
 console.log("Public link boundaries and canonical route rewriting passed.");
+
+if (
+  (await rewriteTarget("../examples", source)) !==
+  `https://github.com/hack-dance/hack/tree/${versions.v4.revision}/examples`
+) {
+  throw new Error("Tracked directory links must use pinned repository trees");
+}
+console.log("Tracked directory links and untracked-prefix refusals passed.");
+if (
+  (await rewriteTarget(
+    "reference/cli.md",
+    resolve(repositoryRoot, "docs/site/index.md")
+  )) !== "/docs/v4/reference/cli"
+) {
+  throw new Error("Editorial links must survive replacement by snapshots");
+}
 
 // Manifest inputs are independently validated before realpath/Bun.file can read them.
 for (const file of [
@@ -315,6 +338,99 @@ if (!prerelease) {
     "v5 label must name the pinned prerelease, e.g. v5 (next.12)"
   );
 }
+// Installer artifacts and version variables must all select the release pin.
+const stagedV5 = resolve(repositoryRoot, "site/content/docs/v5");
+const installerTag = `v5.0.0-next.${prerelease}`;
+for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: stagedV5 })) {
+  assertPinnedInstallers({
+    text: await Bun.file(resolve(stagedV5, file)).text(),
+    tag: installerTag,
+    source: `Published v5 page ${file}`,
+  });
+}
+// The live install examples must name the same prerelease, so the repository
+// docs and the site never tell a reader to install different versions.
+// The `V=5.0.0-next.N` shell variable used by install and setup examples.
+const liveDocs = resolve(repositoryRoot, "docs");
+for (const file of new Bun.Glob("**/*.md").scanSync({ cwd: liveDocs })) {
+  if (file.startsWith("versions/")) {
+    continue;
+  }
+  assertPinnedInstallers({
+    text: await Bun.file(resolve(liveDocs, file)).text(),
+    tag: installerTag,
+    source: `docs/${file}`,
+  });
+}
+for (const text of [
+  "releases/download/v5.0.0-next.1/hack-next-install.sh",
+  "releases/download/v4.2.4/hack-next-install.sh?download=1",
+  "releases/download/unexpected/hack-next-manager-darwin-arm64)",
+  "releases/download/v5.0.0-next.1/INSTALLER-SHA256SUMS",
+  "V=5.0.0-next.1 # installed version",
+]) {
+  let rejected = false;
+  try {
+    assertPinnedInstallers({
+      text,
+      tag: installerTag,
+      source: "negative control",
+    });
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error(`Stale installer control accepted: ${text}`);
+  }
+}
+
+if (
+  pinnedBootstrapText(
+    "releases/download/v5.0.0-next.1/hack-next-install.sh",
+    `v5 (next.${prerelease})`
+  ) !== `releases/download/v5.0.0-next.${prerelease}/hack-next-install.sh` ||
+  pinnedBootstrapText(
+    "releases/download/v5.0.0-next.1/other.sh",
+    "v5 (next.9)"
+  ) !== "releases/download/v5.0.0-next.1/other.sh"
+) {
+  throw new Error("Bootstrap pinning control failed");
+}
+for (const artifact of [
+  "hack-next-install.sh",
+  "hack-next-manager-darwin-arm64",
+  "INSTALLER-SHA256SUMS",
+]) {
+  for (const suffix of [
+    "",
+    ")",
+    "?download=1",
+    "#checksum",
+    "<",
+    "&download",
+  ]) {
+    const input = `releases/download/v5.0.0-next.1/${artifact}${suffix}`;
+    const rewritten = pinnedBootstrapText(input, versions.v5.label);
+    if (
+      rewritten !== `releases/download/${installerTag}/${artifact}${suffix}`
+    ) {
+      throw new Error(`Installer artifact pinning failed: ${input}`);
+    }
+    assertPinnedInstallers({
+      text: rewritten,
+      tag: installerTag,
+      source: input,
+    });
+  }
+}
+if (
+  pinnedBootstrapText(
+    "V=5.0.0-next.1 # installed version",
+    `v5 (next.${prerelease})`
+  ) !== `V=5.0.0-next.${prerelease} # installed version`
+) {
+  throw new Error("Installer version-variable pinning failed");
+}
 const install = await Bun.file(resolve(v5Root, "install.md")).text();
 const bootstrapUrl = `https://github.com/hack-dance/hack/releases/download/v5.0.0-next.${prerelease}/hack-next-install.sh`;
 for (const fact of [bootstrapUrl, "sh hack-next-install.sh", "Apple Silicon"]) {
@@ -332,6 +448,52 @@ if (
 const navigation = await Bun.file(resolve(v5Root, "meta.json")).json();
 if (navigation.title !== versions.v5.label) {
   throw new Error("Stale v5 navigation label");
+}
+const recipeNavigation = await Bun.file(
+  resolve(v5Root, "recipes/meta.json")
+).json();
+const nativeNavigation = await Bun.file(
+  resolve(v5Root, "native/meta.json")
+).json();
+const nativePreflightIndex = nativeNavigation.pages.indexOf("preflight");
+if (
+  nativePreflightIndex < 1 ||
+  nativeNavigation.pages[nativePreflightIndex - 1] !== "try-it"
+) {
+  throw new Error("Native preflight must follow Try it in navigation");
+}
+for (const [file, facts] of [
+  ["architecture.md", ["proxy network", "proxy_network", "hack global up"]],
+  ["reference/cli.md", ["--native-preflight"]],
+  ["native/preflight.md", ["runtime_review.status", "ready: false"]],
+  ["guides/proxy-network-repair.md", ["hack global up", "ok: null"]],
+] as const) {
+  const text = await Bun.file(resolve(v5Root, file)).text();
+  for (const fact of facts) {
+    if (!text.includes(fact)) {
+      throw new Error(`Pinned release feature missing: ${file}/${fact}`);
+    }
+  }
+}
+if (
+  JSON.stringify(recipeNavigation.pages) !==
+  JSON.stringify([
+    "overview",
+    "cli-sign-in",
+    "tunnels",
+    "remote-database",
+    "migrations",
+    "environments",
+    "deps-service",
+    "dependency-directories",
+    "cleanup",
+    "config-examples",
+    "common-pitfalls",
+  ])
+) {
+  throw new Error(
+    "Recipe navigation must keep its reading order across source types"
+  );
 }
 for (const file of ["site/public/llms.txt", "site/public/v5/llms.txt"]) {
   const text = await Bun.file(resolve(repositoryRoot, file)).text();

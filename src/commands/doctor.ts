@@ -61,6 +61,10 @@ import {
 } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
+import {
+  resolveSystemdUnitPath,
+  SYSTEMD_READ_ONLY_ENV,
+} from "../daemon/systemd.ts";
 import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
 import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import {
@@ -96,6 +100,11 @@ import {
   type ComposeBackendReport,
   composeBackendCheckResult,
 } from "../lib/doctor-compose-backend.ts";
+import {
+  buildDaemonServiceCheck,
+  DAEMON_SERVICE_CHECK,
+  decideDaemonServiceFix,
+} from "../lib/doctor-daemon-service.ts";
 import {
   describeEnvKeyInspection,
   type EnvKeyInspection,
@@ -138,6 +147,7 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { describeProxyNetworkIssue } from "../lib/global-proxy-network.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -198,7 +208,7 @@ import {
   type NativeProcessReport,
   nativeProcessCheckFromCompose,
 } from "../lib/native-process-wrappers.ts";
-import { isMac } from "../lib/os.ts";
+import { isLinux, isMac } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -243,6 +253,7 @@ import {
   scopeRuntimeHygieneToProject,
 } from "../lib/project-runtime-hygiene.ts";
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
+import { resolveProxyBindAddress } from "../lib/proxy-bind.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
 import {
@@ -259,11 +270,18 @@ import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { getFzfPath } from "../ui/fzf.ts";
 import { getGumPath } from "../ui/gum.ts";
 import {
+  resolveSystemdSummary,
+  withSystemdIncompatibleNextStep,
+} from "./daemon-systemd.ts";
+import { runNativePreflightCommand } from "./doctor-native-preflight.ts";
+import {
   analyzeComposeNetworkHygiene,
   dnsmasqConfigHasDomain,
   resolvePreferredHostDnsTarget,
   resolverHasNameserver,
 } from "./doctor-utils.ts";
+import { inspectLinuxGlobalDns } from "./global-linux-dns.ts";
+import { inspectProxyNetwork } from "./global-proxy-network.ts";
 import { noteNativeBackendBeta } from "./native-beta-notice.ts";
 import {
   buildDoctorRecoveryGuidance,
@@ -382,6 +400,21 @@ const doctorOptions = [
   optBrowserResult,
   optBranch,
   defineOption({
+    name: "nativePreflight",
+    type: "boolean",
+    long: "--native-preflight",
+    description:
+      "List everything that would stop this Compose project from starting on the native backend, with a fix for each; read-only, with --path, --profile and --json",
+  } as const),
+  defineOption({
+    name: "profile",
+    type: "string",
+    long: "--profile",
+    valueHint: "<name[,name...]>",
+    description:
+      "Compose profiles to review with --native-preflight (comma-separated)",
+  } as const),
+  defineOption({
     name: "nativeCleanup",
     type: "string",
     long: "--native-cleanup",
@@ -424,6 +457,11 @@ const doctorSpec = defineCommand({
   subcommands: [],
 } as const);
 
+/** Linux resolver route for Hack's routed suffixes (HACK-2053). */
+const LINUX_DNS_ROUTE_CHECK = "linux dns route";
+/** Proxy containers that run without their ingress network (HACK-2056). */
+const PROXY_NETWORK_CHECK = "proxy network";
+
 /** Doctor check for a missing or outdated committed `.hack/.gitignore`. */
 const HACK_GITIGNORE_CHECK = "hack gitignore";
 
@@ -456,10 +494,12 @@ const DOCTOR_SUMMARY_GROUPS = [
       `network:${DEFAULT_INGRESS_NETWORK} subnet`,
       "global files",
       "daemon",
+      DAEMON_SERVICE_CHECK,
       "gateway config",
       "gateway tokens",
       "grafana",
       "proxy ports",
+      PROXY_NETWORK_CHECK,
       "caddy local ca",
       "host tls trust",
       SUPERSEDED_ROOTS_CHECK,
@@ -483,6 +523,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       `dnsmasq.conf:${DEFAULT_NEW_PROJECT_TLD}`,
       `dnsmasq.conf:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       "dnsmasq:53",
+      LINUX_DNS_ROUTE_CHECK,
       HACK_LOCAL_REPAIR_CHECK,
       HACK_LOCAL_ROUTE_CHECK,
       "native host dns",
@@ -613,9 +654,62 @@ async function maybeRunNativeMappingRecovery(
   return null;
 }
 
+/** The only options `--native-preflight` accepts beside itself. */
+const NATIVE_PREFLIGHT_OPTIONS = new Set([
+  "nativePreflight",
+  "path",
+  "json",
+  "profile",
+]);
+
+/** Comma-separated profile names, trimmed, unique, in the order given. */
+function preflightProfiles(value: string | undefined): string[] {
+  return [
+    ...new Set(
+      (value ?? "")
+        .split(",")
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0)
+    ),
+  ];
+}
+
+/**
+ * `--native-preflight` is its own read-only mode: it runs no other check. An
+ * allow-list, so an option added to doctor later is refused here until it is
+ * deliberately supported.
+ */
+async function runNativePreflightMode(
+  args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
+): Promise<number> {
+  const options: Readonly<Record<string, unknown>> = args.options;
+  const other = Object.entries(options).some(
+    ([name, value]) =>
+      !NATIVE_PREFLIGHT_OPTIONS.has(name) &&
+      value !== undefined &&
+      value !== false
+  );
+  if (other) {
+    throw new CliUsageError(
+      "--native-preflight accepts only --path, --profile and --json; it changes nothing and runs no other check."
+    );
+  }
+  return await runNativePreflightCommand({
+    startDir: resolveDoctorStartDir(args.options.path),
+    json: args.options.json === true,
+    profiles: preflightProfiles(args.options.profile),
+  });
+}
+
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
+  if (args.options.nativePreflight) {
+    return await runNativePreflightMode(args);
+  }
+  if (args.options.profile !== undefined) {
+    throw new CliUsageError("--profile applies only to --native-preflight.");
+  }
   const adopted = await preflightDoctorProject({
     startDir: resolveDoctorStartDir(args.options.path),
   });
@@ -766,6 +860,21 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   // Global files
   results.push(await runCheck(s, "global files", () => checkGlobalFiles()));
   results.push(await runCheck(s, "daemon", () => checkDaemonStatus()));
+  if (isLinux()) {
+    // The row is omitted when systemd management is disabled for this
+    // process (isolated HACK_HOME, HACK_SYSTEMD_DISABLE=1); a failure to
+    // read it is reported, not thrown.
+    const serviceCheck = await resolveSystemdSummary({
+      paths: resolveDaemonPaths({}),
+    }).then(buildDaemonServiceCheck, (error: unknown) => ({
+      name: DAEMON_SERVICE_CHECK,
+      status: "warn" as const,
+      message: `Could not read the hackd systemd service: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+    if (serviceCheck) {
+      results.push(await runCheck(s, DAEMON_SERVICE_CHECK, () => serviceCheck));
+    }
+  }
   results.push(await runCheck(s, "gateway config", () => checkGatewayConfig()));
   results.push(await runCheck(s, "gateway tokens", () => checkGatewayTokens()));
 
@@ -832,6 +941,14 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       })
     );
   }
+  if (isLinux()) {
+    results.push(
+      await runCheck(s, LINUX_DNS_ROUTE_CHECK, () => checkLinuxDnsRoute(), {
+        // Up to four sequential probes with 3s timeouts each.
+        timeoutMs: 13_000,
+      })
+    );
+  }
 
   results.push(
     await runCheck(
@@ -884,6 +1001,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   results.push(
     await runCheck(s, "proxy ports", () => checkProxyPortForwarding(), {
       timeoutMs: 5000,
+    })
+  );
+  results.push(
+    await runCheck(s, PROXY_NETWORK_CHECK, () => checkProxyNetwork(), {
+      timeoutMs: 12_000,
     })
   );
 
@@ -1798,13 +1920,15 @@ async function checkDaemonStatus(): Promise<CheckResult> {
     ? await probeDaemonApi({ socketPath: paths.socketPath, timeoutMs: 500 })
     : { reachable: false, compatible: false, version: null };
 
-  const report = buildDaemonStatusReport({
-    pid: status.pid,
-    processRunning: status.running,
-    socketExists: status.socketExists,
-    logExists: status.logExists,
-    apiReachable: probe.reachable,
-    apiCompatible: probe.compatible,
+  const report = await withSystemdIncompatibleNextStep({
+    report: buildDaemonStatusReport({
+      pid: status.pid,
+      processRunning: status.running,
+      socketExists: status.socketExists,
+      logExists: status.logExists,
+      apiReachable: probe.reachable,
+      apiCompatible: probe.compatible,
+    }),
   });
 
   if (report.status === "running") {
@@ -1928,13 +2052,27 @@ export async function checkCoreDnsForwarding(): Promise<CheckResult> {
 export async function checkCaddyLocalCa(): Promise<CheckResult> {
   const paths = getGlobalPaths();
   const identity = await inspectCaddyCaIdentity({
-    composeFile: paths.caddyCompose,
     certPath: paths.caddyCaCert,
   });
   return {
     name: "caddy local ca",
     status: identity.state === "current" ? "ok" : "warn",
     message: identity.message,
+  };
+}
+
+/** Linux resolver route for Hack's suffixes; see `lib/linux-dns.ts`. */
+async function checkLinuxDnsRoute(): Promise<CheckResult> {
+  const inspection = await inspectLinuxGlobalDns();
+  return {
+    name: LINUX_DNS_ROUTE_CHECK,
+    status: inspection.state === "configured" ? "ok" : "warn",
+    message: [
+      inspection.code
+        ? `${inspection.message} (code=${inspection.code})`
+        : inspection.message,
+      ...inspection.fix.map((line) => `fix: ${line}`),
+    ].join("\n"),
   };
 }
 
@@ -3898,7 +4036,8 @@ async function runDoctorFix(opts: {
     await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   }
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
-  await maybeRepairHackd();
+  const serviceWrites = await maybeInstallDaemonService();
+  await maybeRepairHackd({ serviceWrites });
   // Env migration changes project files only, so it runs before the Docker
   // gate: an unreachable Docker never skips a requested migration.
   if (opts.migrateEnvConfig) {
@@ -3933,6 +4072,7 @@ async function runDoctorFix(opts: {
     renderGlobalCaddyCompose({
       useStaticCoreDnsIp: useStaticIps,
       useStaticCaddyIp: useStaticIps,
+      bindAddress: await resolveProxyBindAddress(),
     })
   );
   await writeWithPromptIfDifferent(
@@ -5002,7 +5142,10 @@ async function dockerInfoOk(): Promise<boolean> {
  * non-interactive mode alike, before it prompts or runs anything. It notes the
  * skip with the reason and the command to run instead.
  */
-async function maybeRepairHackd(): Promise<void> {
+async function maybeRepairHackd(opts: {
+  readonly serviceWrites: DaemonServiceWrites;
+}): Promise<void> {
+  const env = daemonRepairEnv(opts.serviceWrites);
   const report = await resolveDaemonReportForDoctorFix();
   if (report.status === "running") {
     return;
@@ -5026,7 +5169,7 @@ async function maybeRepairHackd(): Promise<void> {
       initialValue: true,
     });
     if (okRestart) {
-      await runHackSubcommand({ args: ["daemon", "restart"] });
+      await runHackSubcommand({ args: ["daemon", "restart"], env });
     }
     return;
   }
@@ -5037,7 +5180,7 @@ async function maybeRepairHackd(): Promise<void> {
       initialValue: true,
     });
     if (okClear) {
-      await runHackSubcommand({ args: ["daemon", "clear"] });
+      await runHackSubcommand({ args: ["daemon", "clear"], env });
     }
   }
 
@@ -5046,8 +5189,66 @@ async function maybeRepairHackd(): Promise<void> {
     initialValue: true,
   });
   if (okStart) {
-    await runHackSubcommand({ args: ["daemon", "start"] });
+    await runHackSubcommand({ args: ["daemon", "start"], env });
   }
+}
+
+/**
+ * Linux `--fix`: offer `hack daemon install` when the hackd systemd unit is
+ * missing, drifted or disabled ({@link decideDaemonServiceFix}). It writes
+ * under `~/.config/systemd/user` and enables a login service, so it is a
+ * destructive step: confirmed interactively, skipped and listed without a
+ * TTY. Linger is reported by the check but never changed.
+ */
+async function maybeInstallDaemonService(): Promise<DaemonServiceWrites> {
+  // Owner decision (HACK-2052): without a TTY, doctor --fix may start hackd
+  // but never writes or reloads the unit; an interactive run that declines
+  // the install carries the same refusal into the hackd repair below.
+  const interactive = canPrompt();
+  if (!isLinux()) {
+    return interactive ? "allowed" : "refused";
+  }
+  const decision = decideDaemonServiceFix({
+    summary: await resolveSystemdSummary({ paths: resolveDaemonPaths({}) }),
+    autostart: resolveDaemonAutostartAccess(),
+  });
+  if (decision.kind === "none") {
+    return interactive ? "allowed" : "refused";
+  }
+  if (decision.kind === "skip") {
+    note(
+      [
+        `Skipped the hackd systemd service install: ${decision.reason}`,
+        `To install it yourself, run: ${decision.command}`,
+      ].join("\n"),
+      "doctor fix"
+    );
+    return "refused";
+  }
+  const ok = await doctorConfirm({
+    message: `Install hackd as a systemd user service (hack daemon install)?\nIt writes ${resolveSystemdUnitPath()} and starts hackd at login.`,
+    initialValue: true,
+    destructive: true,
+  });
+  if (!ok) {
+    return "refused";
+  }
+  await runHackSubcommand({ args: ["daemon", "install"] });
+  return "allowed";
+}
+
+/**
+ * Whether the hackd repair that follows may change the systemd unit.
+ * "refused" runs its `hack daemon` steps with
+ * {@link SYSTEMD_READ_ONLY_ENV}=1, so `hack daemon start` neither writes nor
+ * reloads the unit.
+ */
+type DaemonServiceWrites = "allowed" | "refused";
+
+function daemonRepairEnv(
+  writes: DaemonServiceWrites
+): Record<string, string> | undefined {
+  return writes === "refused" ? { [SYSTEMD_READ_ONLY_ENV]: "1" } : undefined;
 }
 
 /** The explicit commands that perform the {@link maybeRepairHackd} steps. */
@@ -5187,10 +5388,12 @@ async function resolveDaemonReportForDoctorFix(): Promise<
 
 async function runHackSubcommand(opts: {
   readonly args: readonly string[];
+  readonly env?: Record<string, string>;
 }): Promise<void> {
   const invocation = await resolveHackInvocation();
   await run([invocation.bin, ...invocation.args, ...opts.args], {
     stdin: "inherit",
+    ...(opts.env ? { env: opts.env } : {}),
   });
 }
 
@@ -5927,4 +6130,38 @@ async function runCheck(
     // A settled check must not keep the process alive until its deadline.
     clearTimeout(timer);
   }
+}
+
+async function checkProxyNetwork(): Promise<CheckResult> {
+  const composeFile = getGlobalPaths().caddyCompose;
+  if (!(await pathExists(composeFile))) {
+    return {
+      name: PROXY_NETWORK_CHECK,
+      status: "warn",
+      message: `Missing ${composeFile} (run: hack global install)`,
+    };
+  }
+  const issues = await inspectProxyNetwork({ composeFile });
+  if (issues === null) {
+    return {
+      name: PROXY_NETWORK_CHECK,
+      status: "warn",
+      message: "Unable to read the proxy containers from Docker",
+    };
+  }
+  if (issues.length === 0) {
+    return {
+      name: PROXY_NETWORK_CHECK,
+      status: "ok",
+      message: `Proxy containers are on ${DEFAULT_INGRESS_NETWORK}`,
+    };
+  }
+  return {
+    name: PROXY_NETWORK_CHECK,
+    status: "error",
+    message: [
+      ...issues.map(describeProxyNetworkIssue),
+      "fix: hack global up (recreates the proxy stack)",
+    ].join("\n"),
+  };
 }

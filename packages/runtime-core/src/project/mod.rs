@@ -3,6 +3,7 @@ mod adapter;
 pub mod capabilities;
 pub use adapter::{NormalizedComposeOptions, plan_normalized};
 mod compose;
+pub(crate) use compose::inert_metadata_label;
 mod enrollment;
 pub mod execution;
 mod generated;
@@ -432,6 +433,8 @@ pub struct PlanReport {
     pub plan_id: String,
     pub plan: PlanData,
     pub enrollment_diff: EnrollmentDiff,
+    /// Read-only execution admission, outside plan identity and enrollment policy.
+    pub start_refusals: Vec<CandidateError>,
 }
 
 pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
@@ -588,9 +591,11 @@ fn plan_input(
                 != previous.plan.source_selection.metadata_sha256,
         },
     };
+    let start_refusals = crate::provider::graph::compose_start_refusals(&data);
     Ok(PlanReport {
         plan_id,
         plan: data,
         enrollment_diff,
+        start_refusals,
     })
 }

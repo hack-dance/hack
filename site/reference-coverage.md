@@ -21,7 +21,7 @@ These are distinct inventories, not an overall completion percentage. A schema r
 
 Doctor diagnostic subtypes, optional provisioning reports, host telemetry, controlled project/meta and env-list/apply projections now have dedicated public field/type references. Engine-provided raw ps rows, application log maps, permissive unknown legacy keys and shared error.detail remain intentionally open. The compiler-owned plan record is opaque at its public CLI boundary; its private producer closure is excluded. Exhaustive effective handler/config fallback semantics and runtime/client qualification remain separate work. Internal daemon/guest/provider/compiler transports, retired hosted account/team/dashboard/Tickets surfaces, and unsupported gateway/node/dispatch are not promoted to public APIs. Cloud/provider executions and actual agent client loading were not performed for this editorial pass.
 
-Source recovery and editorial decisions remain in `content-decisions.md` and `versioned-content.md`; originals under each version are preserved. 
+Source recovery and editorial decisions remain in `content-decisions.md` and `versioned-content.md`; originals under each version are preserved.
 
 V5 setup-sync target/status report tables are intentionally excluded (13 field rows,
 3 object variants and 5 aliases); see the short historical agent compatibility

@@ -7,6 +7,12 @@ short editorial pages under `docs/versions/<version>/`.
 
 ## Develop and verify
 
+The [diagram type audit](diagram-types.md) records the syntax and light/dark
+legibility checked at Pele 1.9.0. README pictures use the same renderer but carry
+committed SVGs for GitHub; after changing their adjacent `.mmd` sources or the
+house theme, run `bun run docs:readme-diagrams`. `docs:check` re-renders and rejects
+stale pictures in either theme.
+
 Use the repository's pinned Bun. Site dependencies and `site/bun.lock` are
 independent of the CLI workspace; Next.js also needs Node.js 20.9 or newer.
 
@@ -51,7 +57,7 @@ with `hack down --profile docs --branch docs-preview`.
 To move v5 to a newer prerelease:
 
 ```bash
-bun run docs:pin -- --version v5 --ref v5.0.0-next.13 --label "v5 (next.13)" --dir next13
+bun run docs:pin -- --version v5 --ref v5.0.0-next.15 --label "v5 (next.15)" --dir next15
 ```
 
 Then update the release tag in `docs/versions/v5/install.md`, re-read the

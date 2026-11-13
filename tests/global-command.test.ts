@@ -24,6 +24,7 @@ import {
   GLOBAL_MANAGED_ENV_SCHEMA_FILENAME,
   GLOBAL_SCHEMAS_DIR_NAME,
 } from "../src/constants.ts";
+import { resolveGlobalConfigPath } from "../src/lib/config-paths.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
@@ -39,6 +40,7 @@ const DAEMON_AUTOSTART_DENY_ENV = [
 const originalDenyEnv = new Map<string, string | undefined>();
 const execCalls: string[][] = [];
 const runCalls: string[][] = [];
+let runExitResponder: ((cmd: readonly string[]) => number | null) | null = null;
 let execMockResponder:
   | ((
       cmd: readonly string[]
@@ -63,7 +65,7 @@ const shellMock = await registerScopedModuleMock({
     },
     run: async (cmd: readonly string[]) => {
       runCalls.push([...cmd]);
-      return 0;
+      return runExitResponder?.(cmd) ?? 0;
     },
     findExecutableInPath: (name?: string) =>
       name === "hack" ? "/usr/local/bin/hack" : "/usr/bin/mkcert",
@@ -80,9 +82,38 @@ const osMock = await registerScopedModuleMock({
   },
 });
 
+// HACK-2053: Linux runs of global install/down/status go through this fake
+// DNS host, never the real /etc, resolvectl or sudo.
+const linuxDnsPrivileged: string[][] = [];
+// Default: resolved inactive, so Linux installs take the manual (no prompt)
+// path even in a terminal. Only the sudo test opts into the apply path.
+let fakeLinuxResolvedActive = false;
+const linuxDnsHostMock = await registerScopedModuleMock({
+  importerPath: import.meta.path,
+  specifier: "../src/lib/linux-dns-host.ts",
+  overrides: {
+    createLinuxDnsHost: () => ({
+      readFile: async (path: string) =>
+        path === "/etc/resolv.conf" ? "nameserver 127.0.0.53\n" : null,
+      listDir: async () => [],
+      isResolvedActive: async () => fakeLinuxResolvedActive,
+      systemdVersion: async () => 255,
+      findLinkWithAddress: async () => "br-0123456789ab",
+      readLinkRoute: async () => ({ dns: [], domains: [], defaultRoute: null }),
+      stageFile: async ({ name }: { readonly name: string }) =>
+        join(tempDir ?? tmpdir(), name),
+      runPrivileged: async (argv: readonly string[]) => {
+        linuxDnsPrivileged.push([...argv]);
+        return 0;
+      },
+    }),
+  },
+});
+
 beforeAll(() => {
   shellMock.activate();
   osMock.activate();
+  linuxDnsHostMock.activate();
 });
 
 beforeEach(async () => {
@@ -97,7 +128,10 @@ beforeEach(async () => {
   }
   execCalls.length = 0;
   runCalls.length = 0;
+  linuxDnsPrivileged.length = 0;
+  fakeLinuxResolvedActive = false;
   execMockResponder = null;
+  runExitResponder = null;
 });
 
 afterEach(async () => {
@@ -116,6 +150,7 @@ afterEach(async () => {
 afterAll(() => {
   shellMock.deactivate();
   osMock.deactivate();
+  linuxDnsHostMock.deactivate();
 });
 
 async function writeComposeFile(path: string): Promise<void> {
@@ -641,3 +676,266 @@ test("global status --json returns summary payload", async () => {
   expect(parsed.summary.logging_ok).toBe(true);
   expect(parsed.summary.networks_ok).toBe(true);
 });
+
+test(
+  "global up recreates a proxy that runs with no network while a project holds its IP (HACK-2056)",
+  async () => {
+    const caddyCompose = join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_CADDY_DIR_NAME,
+      GLOBAL_CADDY_COMPOSE_FILENAME
+    );
+    await writeStaticCaddyCompose(caddyCompose);
+    await writeComposeFile(
+      join(
+        tempDir!,
+        GLOBAL_HACK_DIR_NAME,
+        GLOBAL_LOGGING_DIR_NAME,
+        GLOBAL_LOGGING_COMPOSE_FILENAME
+      )
+    );
+
+    // Fake Docker: caddy reports Up but is attached to no network, and a
+    // project container holds caddy's reserved address. The proxy is only
+    // reattached once the stack is taken down and brought up again.
+    let proxyDown = false;
+    let proxyUpAfterDown = false;
+    let projectReassigned = false;
+    const proxyInspect = () =>
+      JSON.stringify([
+        {
+          Name: "/hack-dev-proxy-caddy-1",
+          Config: { Labels: { "com.docker.compose.service": "caddy" } },
+          State: { Running: true },
+          NetworkSettings: {
+            Networks: proxyUpAfterDown
+              ? { [DEFAULT_INGRESS_NETWORK]: { IPAddress: DEFAULT_CADDY_IP } }
+              : {},
+          },
+        },
+      ]);
+    execMockResponder = (cmd) => {
+      const line = cmd.join(" ");
+      if (line.includes(caddyCompose) && line.includes("ps --format json")) {
+        return proxyDown && !proxyUpAfterDown
+          ? { exitCode: 0, stdout: "", stderr: "" }
+          : {
+              exitCode: 0,
+              stdout: `${JSON.stringify({ ID: "caddy1", Service: "caddy" })}\n`,
+              stderr: "",
+            };
+      }
+      if (line === "docker inspect caddy1") {
+        return { exitCode: 0, stdout: proxyInspect(), stderr: "" };
+      }
+      if (line === `docker network inspect ${DEFAULT_INGRESS_NETWORK}`) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              Containers: projectReassigned
+                ? {}
+                : {
+                    abc: {
+                      Name: "example-web-1",
+                      IPv4Address: `${DEFAULT_CADDY_IP}/16`,
+                    },
+                  },
+            },
+          ]),
+          stderr: "",
+        };
+      }
+      if (line.startsWith("docker network connect")) {
+        projectReassigned = true;
+      }
+      return null;
+    };
+    runExitResponder = (cmd) => {
+      if (cmd.includes(caddyCompose) && cmd.includes("down")) {
+        proxyDown = true;
+      }
+      if (cmd.includes(caddyCompose) && cmd.includes("up") && proxyDown) {
+        proxyUpAfterDown = true;
+      }
+      return null;
+    };
+
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up"])).toBe(0);
+
+    const downIndex = runCalls.findIndex(
+      (call) => call.includes(caddyCompose) && call.includes("down")
+    );
+    const upIndex = runCalls.findIndex(
+      (call) => call.includes(caddyCompose) && call.includes("up")
+    );
+    expect(downIndex).toBeGreaterThanOrEqual(0);
+    expect(upIndex).toBeGreaterThan(downIndex);
+    expect(projectReassigned).toBe(true);
+  },
+  { timeout: 20_000 }
+);
+
+test("global status --json reports a proxy with no network (HACK-2056)", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeStaticCaddyCompose(caddyCompose);
+  execMockResponder = (cmd) => {
+    const line = cmd.join(" ");
+    if (line.includes(caddyCompose) && line.includes("ps --format json")) {
+      return {
+        exitCode: 0,
+        stdout: `${JSON.stringify({ ID: "caddy1", Service: "caddy", Status: "Up 2 hours" })}\n`,
+        stderr: "",
+      };
+    }
+    if (line === "docker inspect caddy1") {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify([
+          {
+            Name: "/hack-dev-proxy-caddy-1",
+            Config: { Labels: { "com.docker.compose.service": "caddy" } },
+            State: { Running: true },
+            NetworkSettings: { Networks: {} },
+          },
+        ]),
+        stderr: "",
+      };
+    }
+    return null;
+  };
+  const chunks: string[] = [];
+  const stdoutSpy = spyOn(process.stdout, "write").mockImplementation(
+    (chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    }
+  );
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "status", "--json"])).toBe(0);
+  } finally {
+    stdoutSpy.mockRestore();
+  }
+  const payload = JSON.parse(chunks.join(""));
+  expect(payload.summary.proxy_network_ok).toBe(false);
+  expect(payload.summary.ok).toBe(false);
+  expect(payload.proxy_network.issues[0]).toMatchObject({
+    service: "caddy",
+    problem: "no_network",
+    expected_ip: DEFAULT_CADDY_IP,
+  });
+});
+
+async function writeInstallStubs(): Promise<void> {
+  await writeExecutable(join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "gum"));
+  await writeExecutable(join(tempDir!, GLOBAL_HACK_DIR_NAME, "bin", "mutagen"));
+  const bundle = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    "libexec",
+    "mutagen-agents.tar.gz"
+  );
+  await mkdir(dirname(bundle), { recursive: true });
+  await writeFile(bundle, "stub");
+}
+
+test(
+  "global install renders the proxy ports from proxy.bind_address (HACK-2055)",
+  async () => {
+    await writeInstallStubs();
+    const configPath = resolveGlobalConfigPath();
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      `${JSON.stringify({ proxy: { bind_address: "127.0.0.1" } })}\n`
+    );
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "install"])).toBe(0);
+    const compose = await Bun.file(
+      join(
+        tempDir!,
+        GLOBAL_HACK_DIR_NAME,
+        GLOBAL_CADDY_DIR_NAME,
+        GLOBAL_CADDY_COMPOSE_FILENAME
+      )
+    ).text();
+    expect(compose).toContain('      - "127.0.0.1:80:80"');
+    expect(compose).toContain('      - "127.0.0.1:443:443"');
+  },
+  { timeout: 20_000 }
+);
+
+test("global up names the listener holding :443 when the proxy cannot start (HACK-2055)", async () => {
+  const caddyCompose = join(
+    tempDir!,
+    GLOBAL_HACK_DIR_NAME,
+    GLOBAL_CADDY_DIR_NAME,
+    GLOBAL_CADDY_COMPOSE_FILENAME
+  );
+  await writeComposeFile(caddyCompose);
+  await writeComposeFile(
+    join(
+      tempDir!,
+      GLOBAL_HACK_DIR_NAME,
+      GLOBAL_LOGGING_DIR_NAME,
+      GLOBAL_LOGGING_COMPOSE_FILENAME
+    )
+  );
+  runExitResponder = (cmd) =>
+    cmd.includes(caddyCompose) && cmd.includes("up") ? 1 : null;
+  execMockResponder = (cmd) =>
+    cmd[0] === "ss"
+      ? {
+          exitCode: 0,
+          stdout:
+            'LISTEN 0 4096 10.8.0.2:443 0.0.0.0:* users:(("vpn-client",pid=4242,fd=7))\n',
+          stderr: "",
+        }
+      : null;
+  const errors: string[] = [];
+  const errorSpy = spyOn(process.stderr, "write").mockImplementation(
+    (chunk: string | Uint8Array) => {
+      errors.push(String(chunk));
+      return true;
+    }
+  );
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    expect(await runCli(["global", "up"])).toBe(1);
+  } finally {
+    errorSpy.mockRestore();
+  }
+  const text = errors.join("\n");
+  expect(text).toContain("10.8.0.2:443 vpn-client (pid 4242)");
+  expect(text).toContain("proxy.bind_address");
+});
+
+test(
+  "non-interactive global install on Linux never runs sudo for DNS (HACK-2053)",
+  async () => {
+    if (process.platform !== "linux") {
+      return;
+    }
+    await writeInstallStubs();
+    fakeLinuxResolvedActive = true;
+    const saved = process.env.HACK_NO_INTERACTIVE;
+    process.env.HACK_NO_INTERACTIVE = "1";
+    try {
+      const { runCli } = await import("../src/cli/run.ts");
+      expect(await runCli(["global", "install"])).toBe(0);
+    } finally {
+      restoreEnv("HACK_NO_INTERACTIVE", saved);
+    }
+    expect(linuxDnsPrivileged).toEqual([]);
+    expect(runCalls.some((call) => call[0] === "sudo")).toBe(false);
+  },
+  { timeout: 20_000 }
+);

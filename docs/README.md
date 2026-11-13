@@ -1,14 +1,17 @@
 # Hack documentation
 
-Hack runs a project's services, environment, secrets, local HTTPS and logs from
-configuration kept in the repository. Teammates, agents and parallel worktrees all
-use the same project definition. The public site is [hack.foo](https://hack.foo).
+Hack is a command-line tool that runs your whole project on your own machine. One
+command starts the project's services, loads its settings and secrets, and gives it
+a local web address with working HTTPS. The project's setup lives in a `.hack/`
+folder committed with the code, so teammates, agents and other worktrees all run it
+the same way. The public site is [hack.foo](https://hack.foo).
 
 ## Run your first project
 
-Start with [Getting started](guides/getting-started.md): install the CLI, set up
-local routing once, initialize a repository and run it with `hack up --detach`.
-The default runtime is Docker Compose. No account is required.
+Start with [Getting started](guides/getting-started.md). You install Hack, set up
+local addresses once per machine, add Hack to a repository, and start it with
+`hack up --detach`. Hack runs services with Docker Compose by default. You do not
+need an account.
 
 Already have a project? Follow [Project setup](guides/init-project.md), or use
 [Agent setup](guides/agent-first-setup.md) to let an agent configure it.
@@ -23,12 +26,15 @@ Already have a project? Follow [Project setup](guides/init-project.md), or use
 - [Side-by-side development](dev.md) — `hack dev` runs a repository's declared dev command.
 - [Managed environments](guides/codex-managed-environments.md) — reuse a project on another machine or in a cloud agent.
 - [Agent integrations](integrations.md) — the optional `hack` plugin and the separate MCP server.
+- [Recipes](recipes/README.md) — step-by-step setups for other tools and everyday workflows, and [copy-paste config examples](recipes/config-examples.md).
 
 ## Find a command or fix setup
 
 - [CLI overview](cli.md) explains which command to use; the [command reference](reference/cli.md) lists every flag.
 - [Global settings](guides/global-settings.md) covers machine-wide configuration.
 - [macOS connectivity](guides/macos-browser-network.md) and [certificate trust](guides/macos-certificate-trust.md) explain local URL problems.
+- [Linux certificate trust](guides/linux-certificate-trust.md) covers the distribution trust store and browsers on Linux.
+- [Linux host setup](guides/linux-setup.md) covers DNS, trust and the daemon on Linux.
 - [Architecture](architecture.md) explains how the pieces fit together.
 
 If something is wrong, run `hack doctor` and follow the diagnosis. Review what a
@@ -37,7 +43,7 @@ repair touches before `hack doctor --fix`.
 ## Native backend (beta)
 
 The native backend (beta, Apple Silicon macOS) is a second way to run the same
-project: Hack starts its own small Linux virtual machine instead of using a Docker
+project: Hack starts its own Linux virtual machine instead of using a Docker
 app. It is opt-in and ships only through the `hack-next` channel, not in stable
 Hack. Compose stays the default.
 

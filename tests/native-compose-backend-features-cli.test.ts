@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -34,6 +35,12 @@ const entrypoint = resolve("index.ts");
 const STACK_FRAME = /^\s+at /m;
 const SPAWN_TIMEOUT_MS = 60_000;
 const IMAGE = `sha256:${"e".repeat(64)}`;
+const ADMITTED_START_REQUESTS = [
+  "runtime check-project-share",
+  "project plan",
+  "project plan",
+  "runtime up",
+];
 const RESERVED_LABEL =
   "a label in a reserved ownership namespace (com.docker.compose.*, io.hack-local.*, io.hack.native-config.*, io.hack.native-file.* or io.hack.storage-witness.*)";
 const SELECTION =
@@ -82,6 +89,26 @@ exit 1
   await writeFile(
     join(stub, "runtime-check-project-share.out"),
     JSON.stringify({ source_admitted: true, pool_initialized: true })
+  );
+  await writeFile(
+    join(stub, "project-plan.out"),
+    JSON.stringify({
+      plan_id: "f".repeat(64),
+      start_refusals: [],
+      plan: {
+        namespace: "c".repeat(64),
+        compose_sha256: createHash("sha256")
+          .update(JSON.stringify(compose))
+          .digest("hex"),
+        enrollment_compatible: true,
+        services: Object.fromEntries(
+          Object.keys(compose.services ?? {}).map((name) => [
+            name,
+            { active: true },
+          ])
+        ),
+      },
+    })
   );
   const calls = async () =>
     (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
@@ -326,13 +353,54 @@ test(
 );
 
 test(
-  "control: ordinary labels and a basic build keep today's native refusal",
+  "plain metadata labels and a local logging block pass the check and reach native start",
+  async () => {
+    // Neither reaches the engine: the native review reports them as warnings.
+    for (const service of [
+      {
+        image: IMAGE,
+        labels: {
+          "com.example.team": "web",
+          "org.opencontainers.image.source": "synthetic",
+        },
+      },
+      { image: IMAGE, labels: ["com.example.team=web"] },
+      { image: IMAGE, logging: { driver: "json-file" } },
+      { image: IMAGE, logging: { options: { "max-size": "10m" } } },
+      { image: IMAGE, logging: { driver: "none" } },
+    ]) {
+      const f = await fixture({ services: { web: service } });
+      const result = await cli(f, ["up"]);
+      expect(result.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+      const calls = await f.calls();
+      expect(calls).toEqual(ADMITTED_START_REQUESTS);
+      expect(calls.length).toBeGreaterThan(1);
+    }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "control: router and runtime labels, external log drivers and a basic build keep today's native refusal",
   async () => {
     for (const [service, refusal] of [
       [
-        { image: IMAGE, labels: { "com.example.team": "web" } },
+        { image: IMAGE, labels: { "traefik.enable": "true" } },
         NATIVE_CONFIGURATION_REFUSAL,
       ],
+      [
+        { image: IMAGE, labels: { "hack.custom": "x" } },
+        NATIVE_CONFIGURATION_REFUSAL,
+      ],
+      [
+        { image: IMAGE, labels: { "caddy.handle": "x" } },
+        NATIVE_CONFIGURATION_REFUSAL,
+      ],
+      [
+        { image: IMAGE, logging: { driver: "syslog" } },
+        NATIVE_CONFIGURATION_REFUSAL,
+      ],
+      [{ image: IMAGE, logging: "json-file" }, NATIVE_CONFIGURATION_REFUSAL],
       // A basic build stays refused unless native builds are explicitly enabled.
       [{ build: ".." }, nativeBuildsDisabledRefusal("web")],
     ] as const) {
@@ -367,9 +435,7 @@ test(
     expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
     expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
     const calls = await f.calls();
-    expect(calls).toEqual(
-      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
-    );
+    expect(calls).toEqual(ADMITTED_START_REQUESTS);
     expect(calls.length).toBeGreaterThan(0);
   },
   SPAWN_TIMEOUT_MS
@@ -443,7 +509,10 @@ test(
     });
     const result = await cli(f, ["up"]);
     expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
-    expect(await f.calls()).toEqual(["runtime check-project-share"]);
+    // The metadata label no longer stops native start after the share check.
+    expect(result.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+    const calls = await f.calls();
+    expect(calls).toEqual(ADMITTED_START_REQUESTS);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -486,9 +555,7 @@ test(
     // after applying the adaptation in native review, to `runtime up`.
     expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
     const calls = await f.calls();
-    expect(calls).toEqual(
-      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
-    );
+    expect(calls).toEqual(ADMITTED_START_REQUESTS);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -685,9 +752,7 @@ test(
     // start reached its source preflight and then `runtime up`.
     expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
     const calls = await f.calls();
-    expect(calls).toEqual(
-      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
-    );
+    expect(calls).toEqual(ADMITTED_START_REQUESTS);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -721,9 +786,7 @@ test(
       expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
       expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
       const calls = await f.calls();
-      expect(calls).toEqual(
-        ["runtime check-project-share", "runtime up"].slice(0, calls.length)
-      );
+      expect(calls).toEqual(ADMITTED_START_REQUESTS);
     }
   },
   SPAWN_TIMEOUT_MS

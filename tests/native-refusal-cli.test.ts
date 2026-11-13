@@ -7,6 +7,7 @@ import {
   readFile,
   realpath,
   rm,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,6 +18,8 @@ import {
   type NativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { NATIVE_PROVIDER_PIN_MESSAGE } from "../src/backends/native-runtime-client.ts";
+import { installNext13Frontend } from "./helpers/native-next13-state.ts";
 import { nativeSourceSizeReceipt } from "./helpers/native-source-size.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -88,7 +91,10 @@ async function fixture(compose = COMPOSE) {
     binary,
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${stub}/calls'
-if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
+if [ -f '${stub}/'"$3-$4"'.out' ]; then
+  if [ -f '${stub}/'"$3-$4"'.after-inspect' ]; then cp '${stub}/'"$3-$4"'.after-inspect' '${stub}/graph-inspect.out'; fi
+  cat '${stub}/'"$3-$4"'.out'; exit 0
+fi
 if [ -f '${stub}/'"$3-$4"'.err' ]; then cat '${stub}/'"$3-$4"'.err' >&2; exit 1; fi
 printf '%s' '{"code":"runtime_not_running"}' >&2
 exit 1
@@ -124,7 +130,24 @@ exit 1
         ...extra,
       },
     });
-  return { root, project, projectDir, scope, compose, reply, fail, calls, env };
+  const finishOn = async (request: string, value: unknown) =>
+    await writeFile(
+      join(stub, `${request.replace(" ", "-")}.after-inspect`),
+      JSON.stringify(value)
+    );
+  return {
+    root,
+    project,
+    projectDir,
+    scope,
+    binary,
+    compose,
+    reply,
+    fail,
+    finishOn,
+    calls,
+    env,
+  };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -187,6 +210,7 @@ async function scriptUpThroughReview(
   await f.reply("runtime up", {});
   await f.reply("project plan", {
     plan_id: "f".repeat(64),
+    start_refusals: [],
     plan: {
       namespace: run.namespace,
       compose_sha256: sha,
@@ -198,6 +222,66 @@ async function scriptUpThroughReview(
 }
 
 const SHARED = { HACK_NATIVE_SHARED_SOURCE: "1" };
+
+test(
+  "detached static UDP refusal names its fix and reports no start through the source CLI",
+  async () => {
+    const f = await fixture(
+      JSON.stringify({
+        services: {
+          web: { image: `sha256:${"e".repeat(64)}`, ports: ["18080:80/udp"] },
+        },
+      })
+    );
+    const reason =
+      "Native publishes only TCP ports; keep UDP publication on the Compose backend.";
+    await f.reply("runtime check-project-share", {
+      source_admitted: true,
+      pool_initialized: false,
+    });
+    await f.reply("project plan", {
+      plan_id: "f".repeat(64),
+      plan: {
+        namespace: run.namespace,
+        compose_sha256: createHash("sha256").update(f.compose).digest("hex"),
+        enrollment_compatible: false,
+        services: { web: { active: true } },
+      },
+      start_refusals: [
+        {
+          code: "graph_port_publication",
+          message: reason,
+          message_fixed: true,
+          service: "web",
+        },
+      ],
+    });
+    const result = await cli({
+      fixture: f,
+      args: ["up", "-d", "--json"],
+      env: SHARED,
+    });
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("graph_port_publication");
+    expect(result.output).toContain("nothing was started");
+    expect(result.output).toContain(reason);
+    expect(result.output).not.toContain(
+      "retained owners and recovery evidence"
+    );
+    const calls = await f.calls();
+    expect(calls.filter((call) => call === "project plan")).toHaveLength(2);
+    expect(
+      calls.every((call) =>
+        [
+          "project source-size",
+          "project plan",
+          "runtime check-project-share",
+        ].includes(call)
+      )
+    ).toBe(true);
+  },
+  SPAWN_TIMEOUT_MS
+);
 
 /** A mapping saved by a prior start, as `ps`, `up` and `restart` find it. */
 async function savedRun(f: Fixture) {
@@ -224,6 +308,93 @@ const stoppedGraph = {
   },
   observations: { "container:web": { state: "absent" } },
 };
+
+test(
+  "provider version refusal survives ps JSON, detached up and exec through the source CLI",
+  async () => {
+    const f = await fixture();
+    const pin = {
+      code: "provider_pin_changed",
+      message: "synthetic-private-provider-path",
+    };
+    await scriptUpThroughReview(f);
+    await unlink(join(f.root, "stub/runtime-up.out"));
+    await f.fail("runtime up", pin);
+    const detached = await cli({
+      fixture: f,
+      args: ["up", "-d", "--json"],
+      env: SHARED,
+    });
+    expect(detached.code).toBe(1);
+    expect(detached.output).toContain("provider_pin_changed");
+    expect(detached.output).toContain(NATIVE_PROVIDER_PIN_MESSAGE);
+    expect(detached.output).not.toContain("synthetic-private");
+    await savedRun(f);
+    await f.fail("graph inspect", pin);
+    const ps = await cli({ fixture: f, args: ["ps", "--json"] });
+    expect(ps.code).toBe(0);
+    expect(JSON.parse(ps.stdout)).toMatchObject({
+      ok: true,
+      data: { status: "provider_pin_changed", run: run.run, items: [] },
+    });
+    await f.fail("graph refresh-dependencies", pin);
+    const exec = await cli({ fixture: f, args: ["exec", "web", "--", "true"] });
+    expect(exec.code).toBe(1);
+    expect(exec.output).toContain("provider_pin_changed");
+    expect(exec.output).toContain(NATIVE_PROVIDER_PIN_MESSAGE);
+    expect(exec.output).not.toContain("identity or outcome is unconfirmed");
+    expect(exec.output).not.toContain("synthetic-private");
+    expect(await f.calls()).not.toContain("graph exec");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "publisher identity refusal explains waiting, then the named retaining recovery works",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    await f.reply("graph inspect", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+    });
+    await f.fail("graph recover-live-owner", {
+      code: "publisher_identity_unconfirmed",
+      message: "private process metadata",
+    });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain(
+      "process holding the recorded publisher PID to exit"
+    );
+    expect(refused.output).toContain("rerun hack down --recover");
+    expect(refused.output).not.toContain("private process metadata");
+    await f.reply("graph recover-live-owner", {
+      run: run.run,
+      recovered: true,
+      data_retained: true,
+      publisher_retired: true,
+    });
+    await f.finishOn("graph recover-live-owner", stoppedGraph);
+    const rerun = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(rerun.code).toBe(0);
+    expect(rerun.output).toContain("stopped");
+  },
+  SPAWN_TIMEOUT_MS
+);
 
 test(
   "config adopt --dry-run on the native backend names the exact Compose rerun before any request",
@@ -331,6 +502,8 @@ test(
     );
     expect(await f.calls()).toEqual([
       "runtime check-project-share",
+      "project plan",
+      "project plan",
       "project source-size",
     ]);
   },
@@ -353,7 +526,11 @@ test(
       result,
       "E_CONFIG_INVALID: Native host dependencies refused: the selection must be {version: 1, dependencies: [1..128 entries]} with no other fields; listener values omitted."
     );
-    expect(await f.calls()).toEqual(["runtime check-project-share"]);
+    expect(await f.calls()).toEqual([
+      "runtime check-project-share",
+      "project plan",
+      "project plan",
+    ]);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -371,7 +548,6 @@ test(
     );
     expect(await f.calls()).toEqual([
       "runtime check-project-share",
-      "runtime up",
       "project plan",
     ]);
   },
@@ -515,12 +691,137 @@ test(
     const result = await cli({ fixture: f, args: ["up"], env: SHARED });
     expectOneClosedLine(
       result,
-      "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying. Startup diagnostic: Native graph startup was interrupted or failed (runtime_not_running). Native exit diagnostic: runtime_not_running."
+      "Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Run hack down --recover to resume this run's confirmed cleanup with data retained. Startup diagnostic: Native graph startup was interrupted or failed (runtime_not_running). Native exit diagnostic: runtime_not_running."
     );
     expect((await f.calls()).slice(-2)).toEqual([
       "graph serve",
       "graph inspect",
     ]);
+    const next = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(next.code).toBe(0);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test.each([
+  "graph_cleanup_enrollment",
+  "graph_publisher_running",
+  "publisher_stop_uncertain",
+  "graph_dead_owner_recovery",
+])(
+  "recovery refusal %s names a ps command that succeeds on the retained run",
+  async (code) => {
+    const f = await fixture();
+    await savedRun(f);
+    await f.reply("graph inspect", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+    });
+    await f.fail("graph recover-live-owner", { code });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain("Run hack ps --json");
+    const next = await cli({ fixture: f, args: ["ps", "--json"] });
+    expect(next.code).toBe(0);
+    expect((await f.calls()).at(-1)).toBe("graph inspect");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test.each(["provider_busy", "native_request_timeout"])(
+  "transient recovery refusal %s names a down retry that succeeds",
+  async (code) => {
+    const f = await fixture();
+    await savedRun(f);
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    await f.reply("graph inspect", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+    });
+    await f.fail("graph recover-live-owner", { code });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain("Run hack down --recover");
+    await f.reply("graph recover-live-owner", {
+      run: run.run,
+      recovered: true,
+      data_retained: true,
+      publisher_retired: true,
+    });
+    await f.finishOn("graph recover-live-owner", stoppedGraph);
+    const next = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(next.code).toBe(0);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "stopped-runtime recovery refusal names ps, which confirms the stopped runtime",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await f.fail("graph inspect", { code: "runtime_not_running" });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain("Run hack ps --json");
+    const next = await cli({ fixture: f, args: ["ps", "--json"] });
+    expect(next.code).toBe(0);
+    expect(JSON.parse(next.stdout).data.status).toBe("runtime_not_running");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "predecessor hint failure keeps its diagnostic and names a working inspection command",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await f.reply("graph inspect", stoppedGraph);
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "stopped-data-retained",
+      receipt_sha256: "7".repeat(64),
+      foreground: "exited",
+      live_owner_recovery: null,
+      dead_owner_recovery: null,
+      dead_owner_recovery_error: "invalid_receipt",
+    });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain(
+      "predecessor recovery selection failed (invalid_receipt)"
+    );
+    expect(refused.output).toContain("Run hack ps --json");
+    expect(await f.calls()).not.toContain("graph recover-live-owner");
+    const next = await cli({ fixture: f, args: ["ps", "--json"] });
+    expect(next.code).toBe(0);
   },
   SPAWN_TIMEOUT_MS
 );
@@ -715,6 +1016,146 @@ test(
     } finally {
       await finish();
     }
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "next.13 frontend: down --recover exits zero and plain up reaches a new ready lifetime",
+  async () => {
+    const f = await fixture();
+    const exited = Bun.spawn([process.execPath, "-e", ""], {
+      env: privateCliEnv({ root: f.root }),
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    expect(await exited.exited).toBe(0);
+    await installNext13Frontend({ scope: f.scope, exitedPid: exited.pid });
+    await f.reply("graph inspect", stoppedGraph);
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "stopped-data-retained",
+      receipt_sha256: "7".repeat(64),
+      foreground: "absent",
+      live_owner_recovery: null,
+    });
+    await f.reply("runtime managed-hostname-authority", {
+      authority: { present: false },
+    });
+    const stopped = await cli({
+      fixture: f,
+      args: ["down", "--recover"],
+      env: SHARED,
+    });
+    expect(stopped.code).toBe(0);
+    await scriptUpThroughReview(f);
+    const sha = createHash("sha256").update(f.compose).digest("hex");
+    await f.reply("project plan", {
+      plan_id: run.planId,
+      start_refusals: [],
+      plan: {
+        namespace: run.namespace,
+        compose_sha256: sha,
+        enrollment_compatible: true,
+        services: { web: { active: true } },
+      },
+    });
+    await f.reply("graph retained-preflight", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      namespace: run.namespace,
+      plan: run.planId,
+      live_resources_verified: false,
+      runtime_phase: "stopped",
+      selection: "8".repeat(64),
+    });
+    await f.reply("graph restore-selection", {
+      ...run,
+      plan: run.planId,
+      generation: "9".repeat(64),
+    });
+    await f.reply("graph dependency-plan", {
+      dependency_plan_id: "1".repeat(64),
+    });
+    await f.reply(
+      "graph serve-restore",
+      `${JSON.stringify({ kind: "graph_foreground_ready", run: run.run })}\n`
+    );
+    // This fake owner immediately finishes a retaining stop after its ready event.
+    // The frontend still checks its exact stopped graph and finalizes independently.
+    const started = await cli({ fixture: f, args: ["up"], env: SHARED });
+    expect(started).toMatchObject({ code: 0 });
+    expect(started.output).toContain("Project is ready");
+    expect(started.output).toContain("owned cleanup confirmed");
+    expect(await f.calls()).toContain("graph serve-restore");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "provider-version recovery refusal names the original release, whose down command works on the same home",
+  async () => {
+    const f = await fixture();
+    await savedRun(f);
+    await (
+      await beginNativeProjectFinalization({ scope: f.scope, run })
+    ).complete();
+    await f.fail("graph inspect", {
+      code: "provider_pin_changed",
+      message: "Provider PID file changed",
+    });
+    const refused = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(refused.code).toBe(1);
+    expect(refused.output).toContain("different provider version");
+    expect(refused.output).toContain("release that started its pool");
+    expect(refused.output).toContain("runtime down --json");
+    expect(refused.output).not.toContain("PID file changed");
+    // Select the matching release's stub against the unchanged home. This is a
+    // CLI guidance check, not qualification of a cross-version provider migration.
+    await f.reply("graph inspect", {
+      ...stoppedGraph,
+      receipt: { ...stoppedGraph.receipt, phase: "ready-observed" },
+      observations: { "container:web": { state: "running" } },
+    });
+    await f.reply("graph foreground-owner", {
+      version: 1,
+      run: run.run,
+      owner: run.owner,
+      phase: "ready-observed",
+      receipt_sha256: "7".repeat(64),
+      foreground: "running",
+      live_owner_recovery: null,
+    });
+    await f.reply("graph cleanup", {});
+    await f.finishOn("graph cleanup", stoppedGraph);
+    const recovered = await cli({ fixture: f, args: ["down", "--recover"] });
+    expect(recovered.code).toBe(0);
+    await f.reply("runtime down", { phase: "stopped" });
+    const stopped = Bun.spawn(
+      [
+        f.binary,
+        "--candidate-root",
+        f.scope.nativeHome,
+        "runtime",
+        "down",
+        "--json",
+      ],
+      {
+        cwd: f.root,
+        env: f.env(),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: SPAWN_TIMEOUT_MS - 5000,
+      }
+    );
+    expect(await stopped.exited).toBe(0);
+    expect(JSON.parse(await new Response(stopped.stdout).text())).toEqual({
+      phase: "stopped",
+    });
   },
   SPAWN_TIMEOUT_MS
 );

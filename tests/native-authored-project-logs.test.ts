@@ -13,9 +13,18 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseNativeAuthoredReceipt } from "../src/backends/native-authored-graph-protocol.ts";
 import {
+  nativeAuthoredLogsOptions,
   nativeAuthoredProjectLogs,
   parseNativeAuthoredLogs,
 } from "../src/backends/native-authored-project-logs.ts";
+
+test("zero tail is admitted for authored follow but remains invalid for finite snapshots", () => {
+  expect(nativeAuthoredLogsOptions("web", 0, true)).toBe(true);
+  expect(nativeAuthoredLogsOptions("web", 0, false)).toBe(false);
+  expect(nativeAuthoredLogsOptions("web", -1, true)).toBe(false);
+  expect(nativeAuthoredLogsOptions("web", 1001, true)).toBe(false);
+});
+
 import {
   nativeAuthoredProjectNamespace,
   saveNativeAuthoredProjectRun,
@@ -312,8 +321,6 @@ test.each([
   });
 });
 const unsupported: readonly Partial<NativeComposeCommandOptions>[] = [
-  { follow: true },
-  { follow: undefined },
   { service: undefined },
   { service: "../web" },
   { tail: 0 },
@@ -646,7 +653,7 @@ macTest.each([
       });
       if (!allowed) {
         expect(result.exitCode).toBe(1);
-        expect(result.combined).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+        expect(result.combined).toContain("E_USAGE");
         expect(await Bun.file(attempts).exists()).toBe(false);
         return;
       }

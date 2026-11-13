@@ -1,0 +1,61 @@
+---
+title: Native foreground publisher shutdown
+---
+stateDiagram-v2
+    direction TB
+    [*] --> ready
+    ready --> enrolled : Interrupt
+    ready --> enrolled : FrontendLost [lifetime watch]
+    ready --> publisher_pending : PublisherCrash
+    publisher_pending --> publisher_down : CommitExit [lease acquired]
+    publisher_pending --> enrolled : Interrupt or FrontendLost
+    publisher_pending --> intent : Recover [owner absent]
+    state "publisher-exit-pending" as publisher_pending
+    note left of publisher_pending
+        Port down; services remain running
+        Provider busy retains the zombie
+        No committed proof or notice yet
+        Retry without blocking stop control
+    end note
+    publisher_down --> enrolled : Interrupt or SIGHUP
+    publisher_down --> enrolled : FrontendLost [lifetime watch]
+    publisher_down --> intent : Recover [owner absent]
+    state "publisher-down" as publisher_down
+    note left of publisher_down
+        Exit reported; published port down
+        Services stay running and observable
+        Run hack down for confirmed cleanup
+    end note
+    enrolled --> enrolled : StopPublisher
+    ready --> intent : Recover [owner absent]
+    enrolled --> intent : Recover [owner absent]
+    intent --> intent : StopPublisher [identity matches]
+    enrolled --> enrolled : CommitExit [lease acquired]
+    enrolled --> bridge_retired : ReleaseBridge [exit proof committed]
+    intent --> bridge_retired : ReleaseBridge [proof current]
+    bridge_retired --> intent : Recover [owner absent]
+    bridge_retired --> stopped : CleanupGuest [proof current]
+    stopped --> stopped : ReleaseDependencies [proof current]
+    stopped --> retired : Retire [no reservation]
+    retired --> [*]
+    state "bridge-retired" as bridge_retired
+    note right of intent
+        Dead owner and pinned coordinator
+        Same or audited successor boot
+        Exact bridge and environment inventory
+        Changed evidence retains this intent
+    end note
+    note right of bridge_retired
+        Publisher and bridge helper absent
+        Capacity released before compute removal
+    end note
+    note right of retired
+        Compute absent, data retained
+        Foreground publication retired
+        Dependency reservations absent
+        Dead frontend finalization recovered by down --recover
+    end note
+    note left of stopped
+        Guest completion can precede reservation release
+        Retirement retries release under the same proofs
+    end note

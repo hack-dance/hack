@@ -403,7 +403,7 @@ hack logs [service] [options]
 | `--loki` | Force Loki backend (do not fall back to docker compose logs) |
 | `--services <csv>` | Filter Loki logs by service(s), comma-separated (e.g. api,www) |
 | `--query <logql>` | Raw LogQL selector/query (overrides auto selector built from project + services) |
-| `--since <time>` | Start time for Loki logs (RFC3339 or duration like 15m) |
+| `--since <time>` | Start time for Loki or native followed logs (RFC3339 or duration like 15m) |
 | `--until <time>` | End time for Loki logs (RFC3339 or duration like 15m) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -1059,7 +1059,7 @@ hack global <subcommand> [options]
 | `hack global logs [service]` | Tail global infra logs (caddy\|grafana\|loki\|alloy) |
 | `hack global ca` | Export Caddy Local CA cert (print path or PEM) |
 | `hack global cert <hosts...>` | Generate local TLS certs via mkcert (for non-Caddy services) |
-| `hack global trust` | Trust Caddy Local CA (macOS) so https://*.hack is trusted |
+| `hack global trust` | Trust Caddy Local CA (macOS keychain; Linux trust store and NSS) so https://*.hack is trusted |
 | `hack global logs-reset` | Wipe Loki, Grafana and Alloy volumes (fresh logs, dashboards and Alloy read positions) |
 | `hack global authorize` | Authorize passwordless DNS recovery commands on macOS |
 
@@ -1247,7 +1247,7 @@ Uses mkcert to generate a cert/key pair under ~/.hack/certs (or --out).
 
 ## `hack global trust`
 
-Trust Caddy Local CA (macOS) so https://*.hack is trusted
+Trust Caddy Local CA (macOS keychain; Linux trust store and NSS) so https://*.hack is trusted
 
 ### Usage
 
@@ -1452,6 +1452,8 @@ hack doctor [options]
 | `--browser-url https://app.hack` | HTTPS origin manually tested in the browser (no path or credentials) |
 | `--browser-result unknown|works|fails|permission-denied` | Your manual browser observation for --browser-url (default: unknown) |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--native-preflight` | List everything that would stop this Compose project from starting on the native backend, with a fix for each; read-only, with --path, --profile and --json |
+| `--profile <name[,name...]>` | Compose profiles to review with --native-preflight (comma-separated) |
 | `--native-cleanup inspect` | Inspect one mapped native graph's pending cleanup without recovery or stop replay |
 | `--native-run-mapping inspect|repair|release` | Inspect a native run mapping, explicitly repair it after filesystem device renumbering, or release one another native home left after a clean stop |
 | `--expect-selection <64-hex>` | Require the exact run-mapping recovery inspection selection |
@@ -1505,8 +1507,8 @@ hack daemon <subcommand> [options]
 | `hack daemon metrics` | Show hackd metrics |
 | `hack daemon logs` | Show hackd logs |
 | `hack daemon clear` | Clear stale hackd pid/socket files |
-| `hack daemon install` | Install hackd as a launchd service (macOS) |
-| `hack daemon uninstall` | Uninstall hackd launchd service (macOS) |
+| `hack daemon install` | Install hackd as a login service (launchd on macOS, systemd user unit on Linux) |
+| `hack daemon uninstall` | Uninstall the hackd login service (launchd or systemd) |
 
 ### Options
 
@@ -1647,7 +1649,7 @@ hack daemon clear [options]
 
 ## `hack daemon install`
 
-Install hackd as a launchd service (macOS)
+Install hackd as a login service (launchd on macOS, systemd user unit on Linux)
 
 ### Usage
 
@@ -1659,17 +1661,17 @@ hack daemon install [options]
 
 | Option | Description |
 | --- | --- |
-| `--run-at-load` | Start hackd automatically on login |
-| `--no-run-at-load` | Do not start hackd automatically on login |
-| `--gui-only` | Only run in GUI sessions (default) |
-| `--no-gui-only` | Run in all session types (including SSH) |
+| `--run-at-load` | Start hackd automatically on login (macOS launchd) |
+| `--no-run-at-load` | Do not start hackd automatically on login (macOS launchd) |
+| `--gui-only` | Only run in GUI sessions (macOS launchd; default) |
+| `--no-gui-only` | Run in all session types, including SSH (macOS launchd) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
 
 ## `hack daemon uninstall`
 
-Uninstall hackd launchd service (macOS)
+Uninstall the hackd login service (launchd or systemd)
 
 ### Usage
 

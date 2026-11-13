@@ -6,25 +6,24 @@ use std::{
     time::Instant,
 };
 /// Marks EVFILT_PROC registrations for host dependency listeners. Publisher
-/// child watches keep a null tag, and their exit remains fatal to the owner.
+/// child watches keep a null tag; exit wakes the owner to reap and report it.
 const LISTENER_EXIT: usize = 1;
+const FRONTEND_EXIT: usize = 2;
 /// One foreground wake. `Ready` covers every readable descriptor (control
 /// listener and dependency notices); the caller re-reads them non-blockingly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::provider::graph) enum Wake {
-    Signal,
-    Ready,
-    ListenerExit,
-    Timeout,
-}
+pub(in crate::provider::graph) use crate::provider::graph::owner_loop::Wake;
 static OWNED: AtomicBool = AtomicBool::new(false);
 static PENDING: AtomicBool = AtomicBool::new(false);
+static FRONTEND: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 extern "C" fn notified(_: libc::c_int) {
     PENDING.store(true, Ordering::Release);
 }
 /// The caller retains Events for the entire callback lifetime.
 pub(super) fn startup_pending() -> bool {
-    PENDING.load(Ordering::Acquire)
+    let frontend = FRONTEND.load(Ordering::Acquire);
+    // SAFETY: getppid is a read-only kernel observation. A dead parent is
+    // reparented, so its PID cannot be confused with a reused incarnation.
+    PENDING.load(Ordering::Acquire) || (frontend > 1 && unsafe { libc::getppid() } != frontend)
 }
 pub(in crate::provider::graph) struct Events {
     queue: OwnedFd,
@@ -32,7 +31,19 @@ pub(in crate::provider::graph) struct Events {
 }
 impl Events {
     pub(super) fn new(publication: &Publication) -> Result<Self, CandidateError> {
-        Self::new_descriptor(publication.descriptor())
+        let events = Self::new_descriptor(publication.descriptor())?;
+        events.watch_frontend()?;
+        Ok(events)
+    }
+    pub(super) fn watch_frontend(&self) -> Result<(), CandidateError> {
+        // SAFETY: read-only observation of this process's original supervisor.
+        let pid = unsafe { libc::getppid() };
+        let frontend = crate::provider::identity::observe(pid)?;
+        FRONTEND.store(pid, Ordering::Release);
+        if !self.watch_exit(&frontend, FRONTEND_EXIT)? {
+            PENDING.store(true, Ordering::Release);
+        }
+        Ok(())
     }
     /// Caller retains the exact listener for the entire signal queue lifetime.
     pub(in crate::provider::graph) fn new_descriptor(
@@ -71,6 +82,7 @@ impl Events {
             change(listener.as_raw_fd() as usize, libc::EVFILT_READ),
             change(libc::SIGTERM as usize, libc::EVFILT_SIGNAL),
             change(libc::SIGINT as usize, libc::EVFILT_SIGNAL),
+            change(libc::SIGHUP as usize, libc::EVFILT_SIGNAL),
         ];
         // Register signal filters BEFORE installing handlers. Every signal caught by
         // our handler therefore also wakes kevent; the atomic flag covers coalescing.
@@ -89,7 +101,7 @@ impl Events {
             return Err(refused());
         }
         PENDING.store(false, Ordering::Release);
-        for signal in [libc::SIGTERM, libc::SIGINT] {
+        for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
             // SAFETY: sigaction is plain C storage; mask is initialized before use.
             let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
             // SAFETY: initialized output storage for saved disposition.
@@ -138,7 +150,7 @@ impl Events {
         if result < 0 {
             let code = std::io::Error::last_os_error().raw_os_error();
             // A one-shot notification may already have been consumed.
-            if flags == libc::EV_DELETE && code == Some(libc::ENOENT) {
+            if flags == libc::EV_DELETE && matches!(code, Some(libc::ENOENT | libc::ESRCH)) {
                 return Ok(());
             }
             return Err(refused());
@@ -146,7 +158,7 @@ impl Events {
         Ok(())
     }
     pub fn pending(&self) -> bool {
-        PENDING.load(Ordering::Acquire)
+        startup_pending()
     }
     /// Watch one admitted host dependency listener for exit, without adopting or
     /// signalling it. The identity is rechecked after registration, so a PID that
@@ -155,13 +167,20 @@ impl Events {
         &self,
         identity: &crate::provider::identity::ProcessIdentity,
     ) -> Result<bool, CandidateError> {
+        self.watch_exit(identity, LISTENER_EXIT)
+    }
+    fn watch_exit(
+        &self,
+        identity: &crate::provider::identity::ProcessIdentity,
+        tag: usize,
+    ) -> Result<bool, CandidateError> {
         let change = libc::kevent {
             ident: usize::try_from(identity.pid).map_err(|_| refused())?,
             filter: libc::EVFILT_PROC,
             flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT,
             fflags: libc::NOTE_EXIT,
             data: 0,
-            udata: LISTENER_EXIT as *mut libc::c_void,
+            udata: tag as *mut libc::c_void,
         };
         // SAFETY: owned queue and initialized change remain valid for this call.
         let result = unsafe {
@@ -251,14 +270,17 @@ impl Events {
     /// loop uses [`Self::wait_until`] for its bounded refresh retries.
     #[cfg(any(test, feature = "native-config-plan"))]
     pub fn wait(&self) -> Result<bool, CandidateError> {
-        Ok(self.wait_until(None)? == Wake::Signal)
+        Ok(matches!(
+            self.wait_until(None)?,
+            Wake::Signal | Wake::FrontendExit
+        ))
     }
     /// Wait for one event, or until `deadline` (a bounded retry time; never an
     /// idle poll). Publisher child exit remains an error; a watched dependency
     /// listener's exit is reported as `ListenerExit`.
     pub fn wait_until(&self, deadline: Option<Instant>) -> Result<Wake, CandidateError> {
         loop {
-            if PENDING.load(Ordering::Acquire) {
+            if startup_pending() {
                 return Ok(Wake::Signal);
             }
             let timeout = deadline.map(|deadline| {
@@ -283,7 +305,7 @@ impl Events {
                         .map_or(std::ptr::null(), |timeout| timeout as *const libc::timespec),
                 )
             };
-            if PENDING.load(Ordering::Acquire) {
+            if startup_pending() {
                 return Ok(Wake::Signal);
             }
             if count < 0 {
@@ -302,7 +324,10 @@ impl Events {
                 if event.udata as usize == LISTENER_EXIT {
                     return Ok(Wake::ListenerExit);
                 }
-                return Err(refused());
+                if event.udata as usize == FRONTEND_EXIT {
+                    return Ok(Wake::FrontendExit);
+                }
+                return Ok(Wake::PublisherExit);
             }
             return Ok(if event.filter == libc::EVFILT_SIGNAL {
                 Wake::Signal
@@ -322,5 +347,6 @@ impl Drop for Events {
             }
         }
         OWNED.store(false, Ordering::Release);
+        FRONTEND.store(0, Ordering::Release);
     }
 }

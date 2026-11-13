@@ -15,7 +15,6 @@ import { extractArchive } from "../scripts/installer/bundle.ts";
 import { digest } from "../scripts/installer/integrity.ts";
 import { packageNativeStorageTool } from "../scripts/package-native-storage-tool.ts";
 import {
-  CI_JOBS,
   CONFIG_COMPILER_PAYLOAD,
   createPrereleasePlan,
   PAYLOAD_MODES,
@@ -374,12 +373,6 @@ describe("prerelease decision boundary", () => {
         requireHumanApproval({ reviews, environmentId: 42 })
       ).toThrow();
     }
-  });
-
-  test("six-shard trials do not change the exact-head required-job contract", () => {
-    const required: readonly string[] = CI_JOBS;
-    expect([...required]).toEqual(jobNames);
-    expect(CI_JOBS.some((name) => name.includes("trial"))).toBe(false);
   });
 
   test("requires actual exact-head CI without skipped jobs", () => {

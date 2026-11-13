@@ -956,6 +956,85 @@ const contracts: readonly ModelContract[] = [
     ],
   },
   {
+    name: "native-publisher-stop",
+    module: "PublisherStop",
+    states: 168,
+    invariant: "NoUnsafeCleanup",
+    action: "ReleaseBridge",
+    fields: [
+      'phase = "bridge-retired"',
+      "publisher = TRUE",
+      "unsafeCleanup = TRUE",
+    ],
+    alternativeWitnesses: [
+      {
+        action: "ReleaseBridge",
+        fields: [
+          'phase = "bridge-retired"',
+          "publisher = FALSE",
+          "bridge = FALSE",
+          "unsafeCleanup = TRUE",
+        ],
+      },
+    ],
+    additionalControls: [
+      {
+        name: "uncommitted-exit",
+        negative: true,
+        invariant: "NoUncommittedExit",
+        action: "ReleaseBridge",
+        fields: [
+          'phase = "bridge-retired"',
+          "owner = TRUE",
+          "exitProof = FALSE",
+          "publisher = FALSE",
+        ],
+      },
+      {
+        name: "reservation-tail",
+        negative: true,
+        invariant: "NoStrandedReservation",
+        action: "Retire",
+        fields: [
+          'phase = "retired"',
+          "reservation = TRUE",
+          "publisher = FALSE",
+        ],
+      },
+      {
+        name: "frontend-loss",
+        negative: true,
+        invariant: "NoSilentOrphan",
+        action: "FrontendLost",
+        fields: ['phase = "ready"', "frontend = FALSE", "owner = TRUE"],
+      },
+      {
+        name: "group-signal",
+        negative: true,
+        invariant: "NoInterruptRace",
+        action: "Interrupt",
+        fields: [
+          'phase = "enrolled"',
+          "publisher = FALSE",
+          "interruptedPublisher = TRUE",
+          "bridge = TRUE",
+        ],
+      },
+      {
+        name: "completion-reachable",
+        negative: true,
+        invariant: "NeverComplete",
+        action: "Retire",
+        fields: [
+          'phase = "retired"',
+          "bridge = FALSE",
+          "publisher = FALSE",
+          "unsafeCleanup = FALSE",
+        ],
+      },
+    ],
+  },
+  {
     name: "native-route-stop",
     module: "Stop",
     states: 202,

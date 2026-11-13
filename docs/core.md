@@ -4,6 +4,24 @@ Hack keeps the parts needed to run a project together: services, environment,
 secrets, local URLs, startup helpers and logs. The setup lives in `.hack/` in the
 repository, so teammates and agents can use the same definition.
 
+Developers and agents use the local CLI to control a local runtime; Hack does not
+require a hosted control service.
+
+```mermaid
+---
+title: Local runtime context
+---
+C4Context
+  Person(developer, "Developer")
+  System_Ext(agent, "Agent harness", "Optional CLI client")
+  System(hack, "Hack CLI", "Local project commands")
+  System_Ext(engine, "Local engine", "Compose by default")
+  Rel(developer, hack, "Runs commands")
+  Rel(agent, hack, "Runs commands")
+  Rel(hack, engine, "Controls services")
+  UpdateLayoutConfig($c4ShapeInRow="2", $c4BoundaryInRow="1")
+```
+
 ## Project, service and instance
 
 A **project** is a repository with Hack configuration. A **service** is one part of
@@ -35,6 +53,15 @@ state and exit-code columns. An exited one-shot with code `0` completed
 successfully; a nonzero code indicates failure. `hack ps --json` reads Compose
 directly and retains each item's `State` and `ExitCode`, including immediately
 after a failed startup. Removed containers are not retained as run history.
+When Compose cannot list containers, `hack ps --json` prints the
+`{ok: false, error}` envelope with a stable code: `E_DOCKER_UNAVAILABLE` when the
+engine is not reachable or does not answer in time, `E_PERMISSION` when the Docker
+socket (or a Compose input) refuses your user, `E_COMPOSE_OUTPUT_INVALID` when the
+output is not JSON, otherwise `E_COMPOSE_FAILED`. Only the Docker client's
+connection error is quoted, with secret-looking values redacted; other Compose
+output is left out because Compose can expand project values into it. Without
+`--json`, the engine and permission cases print the same coded line; for the
+other two, `hack ps` runs plain `docker compose ps` and shows its output.
 When finished:
 
 ```sh
@@ -76,6 +103,6 @@ Use the [CLI overview](cli.md) to choose a command and the
 
 Docker Compose is the default backend and the one every example on this page uses.
 v5 adds a native backend (beta) for Apple Silicon macOS, available through the
-`hack-next` channel and selected with `HACK_RUNTIME_BACKEND=native`, that runs explicitly prepared projects without Docker
+`hack-next` channel and selected with `HACK_RUNTIME_BACKEND=native`, that runs explicitly prepared projects without Docker Desktop or OrbStack
 and supports a bounded command subset. See [Upgrade to v5](guides/upgrade-to-v5.md)
 and [the native backend overview](native/README.md).

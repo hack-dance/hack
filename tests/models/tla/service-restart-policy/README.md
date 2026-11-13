@@ -49,6 +49,16 @@ the model can reach, and nothing else:
 
 ## Omissions
 
+Replacement readiness is scoped to the selected host child in
+`foreground/publishers.rs::publication_ready_with`; `owner_loop::PublisherReadiness`
+keeps fresh startup's all-publishers-live guard distinct. The portable guard
+regression and macOS two-real-child readiness-poll regression cover pending and
+committed sibling exits, selected-child refusal and selected-only port-busy
+classification. The native regression replaces the publication read boundary;
+it proves neither guest readiness nor full VM rebind. This one-service model
+abstracts publication readiness inside `Rebind` and does not check that
+cross-service failure path. Both port and routed sibling rebinds remain VM gates.
+
 The model does not cover transport timeouts or uncertain stop outcomes (existing
 shutdown evidence and its tests own those), several services, the engine's backoff
 timing or `on-failure` retry counting, durability of the receipt, or the real guest

@@ -1,3 +1,4 @@
+import { assertPinnedInstallers } from "./installer-pin";
 import { isVersionedSearchUrl } from "./version-boundary";
 import versions from "./versions.json";
 
@@ -45,6 +46,17 @@ for (const version of ["v4", "v5"] as const) {
     if (!html.includes(`href="https://hack.foo${route}"`)) {
       throw new Error(`Canonical missing: ${route}`);
     }
+    if (version === "v5") {
+      const prerelease = /next\.(\d+)/.exec(m.label)?.[1];
+      if (!prerelease) {
+        throw new Error("Missing v5 prerelease pin");
+      }
+      assertPinnedInstallers({
+        text: html,
+        tag: `v5.0.0-next.${prerelease}`,
+        source: route,
+      });
+    }
     total++;
   }
   const results = JSON.parse(
@@ -88,7 +100,7 @@ console.log(
 
 for (const [old, target] of [
   ["agent-guidance", "agent-handoff"],
-  ["guides/global-settings", "reference/overview"],
+  ["guides/global-settings", "guides/global-settings"],
   ["guides/getting-started", "getting-started"],
   ["guides/v5-dogfooding", "getting-started"],
 ]) {
@@ -111,6 +123,8 @@ for (const [old, target] of [
 const repositoryRoot = new URL("../../", import.meta.url).pathname;
 const mermaidFence = /^(?:```|~~~)mermaid[ \t]*$/gm;
 const diagramImage = /<img\b[^>]*>/g;
+const expandControl =
+  /<button\b[^>]*aria-label="Open diagram full size: [^"]*"[^>]*class="diagram-expand"|<button\b[^>]*class="diagram-expand"[^>]*aria-label="Open diagram full size: [^"]*"/g;
 const diagramSource = /src="(\/diagrams\/[a-f0-9]+\.(light|dark)\.svg)"/;
 let diagramBlocks = 0;
 const diagramFiles = new Set<string>();
@@ -135,7 +149,8 @@ for (const version of ["v4", "v5"] as const) {
     }
     const route = `/docs/${version}${slug === "index" ? "" : `/${slug}`}`;
     const shown = { light: 0, dark: 0 };
-    for (const tag of (await read(route)).match(diagramImage) ?? []) {
+    const html = await read(route);
+    for (const tag of html.match(diagramImage) ?? []) {
       const source = diagramSource.exec(tag);
       const variant = source?.[2] as "light" | "dark" | undefined;
       if (
@@ -150,6 +165,13 @@ for (const version of ["v4", "v5"] as const) {
     if (shown.light !== blocks || shown.dark !== blocks) {
       throw new Error(
         `${route}: ${blocks} Mermaid blocks but ${shown.light} light and ${shown.dark} dark diagram images`
+      );
+    }
+    // Each image carries the control that opens it full size.
+    const controls = (html.match(expandControl) ?? []).length;
+    if (controls !== blocks * 2) {
+      throw new Error(
+        `${route}: ${blocks * 2} diagram images but ${controls} full-size controls`
       );
     }
     diagramBlocks += blocks;
@@ -176,9 +198,67 @@ console.log(
   `Diagram smoke passed: ${diagramBlocks} Mermaid blocks shown as ${diagramFiles.size} served SVGs.`
 );
 
-// v5 pages that moved into the native section keep their old routes, with and
-// without the version prefix.
+// Recipe pages contain copy-paste examples, so check their rendered links too:
+// a multiline Markdown link can escape the preparation step's line-based rewrite.
+const recipeLinks = new Map<string, string>();
+const recipeEntryPoints = new Set([
+  "index",
+  "env",
+  "reference/configuration-fields",
+]);
+const v5Slugs = new Set(
+  [...versions.v5.entries, ...versions.v5.editorial].map((page) => page.slug)
+);
+for (const slug of v5Slugs) {
+  if (!(slug.startsWith("recipes/") || recipeEntryPoints.has(slug))) {
+    continue;
+  }
+  const route = `/docs/v5${slug === "index" ? "" : `/${slug}`}`;
+  const html = await read(route);
+  if (html.includes("language-mermaid")) {
+    throw new Error(`Unrendered Mermaid source: ${route}`);
+  }
+  for (const match of html.matchAll(/href="([^"<>]+)"/g)) {
+    const url = new URL(match[1] ?? "", new URL(route, base));
+    if (
+      (url.origin === base.origin || url.origin === "https://hack.foo") &&
+      (url.pathname === "/docs/v5" || url.pathname.startsWith("/docs/v5/"))
+    ) {
+      recipeLinks.set(`${url.pathname}${url.hash}`, route);
+    }
+  }
+}
+for (const [target, source] of recipeLinks) {
+  const url = new URL(target, base);
+  const html = await read(url.pathname);
+  const id = decodeURIComponent(url.hash.slice(1)).replaceAll("&", "&amp;");
+  if (id && !html.includes(`id="${id}"`)) {
+    throw new Error(`Missing recipe link anchor: ${source} -> ${target}`);
+  }
+}
+console.log(
+  `Recipe smoke passed: ${recipeLinks.size} local links and anchors.`
+);
+
+// Section roots must reach the overview, including through the legacy redirect.
+for (const prefix of ["/docs/v5/", "/docs/"]) {
+  const response = await fetch(new URL(`${prefix}recipes`, base), {
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (
+    response.status !== 200 ||
+    new URL(response.url).pathname !== "/docs/v5/recipes/overview" ||
+    !(await response.text()).includes(
+      'href="https://hack.foo/docs/v5/recipes/overview"'
+    )
+  ) {
+    throw new Error(`Recipes section root failed: ${prefix}recipes`);
+  }
+}
+
+// v5 aliases keep their old routes, with and without the version prefix.
 for (const [old, target] of [
+  ["recipes", "recipes/overview"],
   ["guides/native-candidate", "native/full-reference"],
   ["guides/candidate-install", "native/install"],
   ["reference/native-authored-commands", "native/authored-commands"],

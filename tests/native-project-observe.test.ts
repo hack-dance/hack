@@ -22,6 +22,7 @@ import {
 } from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -91,6 +92,76 @@ test("missing mapping gives native not-started without any runtime call", async 
     })
   ).rejects.toThrow("not been started");
 });
+test("ps reports provider pin mismatch as its own closed status without service claims", async () => {
+  const opts = await fixture();
+  const result = await nativeProjectPs({
+    ...opts,
+    invoke: async () => {
+      throw new NativeRuntimeRequestError({
+        nativeCode: "provider_pin_changed",
+        message: "untrusted text",
+      });
+    },
+  });
+  expect(result).toEqual({
+    backend: "native",
+    status: "provider_pin_changed",
+    run: run.run,
+    phase: null,
+    items: [],
+  });
+});
+
+test("a lease-busy ps still reports an authenticated pending publisher exit without guest claims", async () => {
+  const opts = await fixture();
+  const owner = {
+    ok: true,
+    run: run.run,
+    plan: run.planId,
+    phase: "ready-observed",
+    foreground_alive: true,
+    runtime_verified: false,
+    runtime_error: "publisher_exit_pending",
+    publisher_ports: [
+      { service: "web", port: 18_080, target: 8080, state: "down" },
+      { service: "healthy", port: 18_081, target: 8081, state: "observed" },
+    ],
+  };
+  let response: unknown = owner;
+  const invoke: typeof import("../src/backends/native-runtime-client.ts").invokeNativeRuntime =
+    async (request) => {
+      if (request.args[1] === "inspect") {
+        throw new NativeRuntimeRequestError({
+          nativeCode: "provider_busy",
+          message: "busy",
+        });
+      }
+      expect(request.args[1]).toBe("owner-status");
+      return response;
+    };
+  expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+    status: "runtime_degraded",
+    items: [],
+    ports: [
+      { service: "web", port: 18_080, state: "down" },
+      { service: "healthy", port: 18_081, state: "unconfirmed" },
+    ],
+  });
+  for (const changed of [
+    { run: "f".repeat(32) },
+    { plan: "f".repeat(64) },
+    { foreground_alive: false },
+    { runtime_verified: true },
+    { runtime_error: "unrelated" },
+    { publisher_ports: [{ ...owner.publisher_ports[0], target: -1 }] },
+  ]) {
+    response = { ...owner, ...changed };
+    expect(await nativeProjectPs({ ...opts, invoke })).toMatchObject({
+      status: "runtime_busy",
+      items: [],
+    });
+  }
+}, 20_000);
 test("ps returns current native observations and refuses each ownership mismatch", async () => {
   const opts = await fixture();
   expect(
@@ -165,6 +236,123 @@ test("ps distinguishes a live foreground owner from historical ready containers"
     })
   ).toMatchObject({ status: "owner_unconfirmed" });
 });
+
+test("ps keeps current service rows and marks the reaped publisher's port down", async () => {
+  const opts = await fixture();
+  const current = snapshot(true);
+  const value = {
+    ...current,
+    receipt: {
+      ...current.receipt,
+      readiness: { web: "started" },
+      resources: {
+        "container:web": {
+          ...current.receipt.resources["container:web"],
+          loopback_ports: [{ host_port: 18_080, target: 8080 }],
+        },
+      },
+    },
+  };
+  const result = await nativeProjectPs({
+    ...opts,
+    includeReadiness: true,
+    invoke: async (request) =>
+      request.args[1] === "inspect"
+        ? value
+        : {
+            ok: true,
+            run: run.run,
+            plan: run.planId,
+            phase: "ready-observed",
+            foreground_alive: true,
+            runtime_verified: false,
+            runtime_error: "publisher_exited",
+            publisher_ports: [{ port: 18_080, state: "down" }],
+          },
+  });
+  expect(result).toMatchObject({
+    status: "runtime_degraded",
+    items: [{ service: "web", state: "running", readiness: "started" }],
+    ports: [{ service: "web", port: 18_080, target: 8080, state: "down" }],
+  });
+});
+
+test.each([
+  "ps",
+  "status",
+])("plain native %s shows the failed port and a working stop command", async (command) => {
+  const opts = await fixture();
+  await writeFile(
+    join(opts.scope.projectDir, "hack.config.json"),
+    '{"name":"native-observe"}'
+  );
+  await writeFile(
+    join(opts.scope.projectDir, "docker-compose.yml"),
+    "services:\n  web:\n    image: example:public\n"
+  );
+  const current = snapshot(true);
+  const inspected = {
+    ...current,
+    receipt: {
+      ...current.receipt,
+      resources: {
+        "container:web": {
+          ...current.receipt.resources["container:web"],
+          loopback_ports: [{ host_port: 18_080, target: 8080 }],
+        },
+      },
+    },
+  };
+  const owner = {
+    ok: true,
+    run: run.run,
+    plan: run.planId,
+    phase: "ready-observed",
+    foreground_alive: true,
+    runtime_verified: false,
+    publisher_ports: [{ port: 18_080, state: "down" }],
+  };
+  const binary = join(opts.scope.projectRoot, "runtime");
+  await writeFile(
+    binary,
+    `#!${process.execPath}\nconst value = process.argv.includes("owner-status") ? ${JSON.stringify(owner)} : ${JSON.stringify(inspected)}; console.log(JSON.stringify(value));`,
+    { mode: 0o700 }
+  );
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      new URL("../index.ts", import.meta.url).pathname,
+      command,
+      ...(command === "ps" ? ["--path", opts.scope.projectRoot] : []),
+    ],
+    {
+      cwd: opts.scope.projectRoot,
+      env: privateCliEnv({
+        root: opts.scope.projectRoot,
+        env: {
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_NATIVE_HOME: opts.scope.nativeHome,
+          HACK_NATIVE_BINARY: binary,
+          HACK_LOGGER: "console",
+        },
+      }),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 10_000,
+    }
+  );
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(code).toBe(0);
+  expect(stdout + stderr).toContain("web");
+  expect(stdout + stderr).toContain("127.0.0.1:18080");
+  expect(stdout + stderr).toContain("down");
+  expect(stdout + stderr).toContain("Run hack down");
+}, 20_000);
 test("bounded logs verify current container before and after using exact CLI contract", async () => {
   const opts = await fixture();
   const calls: string[][] = [];
@@ -737,4 +925,34 @@ test("startup completion preserves a substituted observation marker", async () =
   expect(await readFile(path, "utf8")).toBe(
     "replacement owned by another writer\n"
   );
+});
+
+test("internal readiness admission reads only closed goals from the owned receipt; ordinary ps output stays unchanged", async () => {
+  const opts = await fixture();
+  for (const readiness of [
+    "completed",
+    "started",
+    "healthy",
+    "unknown",
+    undefined,
+  ] as const) {
+    const observed = snapshot();
+    const reply = {
+      ...observed,
+      receipt: { ...observed.receipt, readiness: { web: readiness } },
+    };
+    const ordinary = await nativeProjectPs({
+      ...opts,
+      invoke: async () => reply,
+    });
+    expect(ordinary.items[0]).not.toHaveProperty("readiness");
+    const internal = await nativeProjectPs({
+      ...opts,
+      includeReadiness: true,
+      invoke: async () => reply,
+    });
+    expect(internal.items[0]?.readiness).toBe(
+      readiness === "unknown" ? undefined : readiness
+    );
+  }
 });

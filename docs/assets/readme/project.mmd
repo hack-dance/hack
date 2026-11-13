@@ -1,0 +1,25 @@
+---
+title: What Hack runs
+---
+architecture-beta
+  %% README generator applies live to compose/services and idle to native.
+  group machine[Your machine]
+  service cli[Hack CLI] in machine
+  service daemon(disk)[Optional daemon] in machine
+  group routing[Local routing] in machine
+  service dns(internet)[Dev host DNS] in routing
+  service proxy(server)[Proxy with HTTPS] in routing
+  group engine[Project engine] in machine
+  service compose(server)[Compose default] in engine
+  service services(server)[Project services] in engine
+  service native(server)[Native VM beta] in engine
+  cli:R -[Reads cache]-> L:daemon
+  cli:B --> T:compose
+  compose:B --> T:services
+  native:L --> R:services
+  dns:B -[Resolves names to]-> T:proxy
+  proxy:R --> L:services
+  align row cli daemon
+  align column cli compose services
+  align column dns proxy
+  align row proxy services native

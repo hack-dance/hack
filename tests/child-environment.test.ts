@@ -134,23 +134,59 @@ test("lifecycle hook cannot read keys even when its explicit env contains them",
   expect(output.join("")).not.toContain("HACK_ENV_SECRET_KEY=");
 });
 
-test("rendered Compose config cannot interpolate either Hack decryption key", async () => {
+async function isolatedComposeAvailable(): Promise<boolean> {
+  if (!Bun.which("docker")) {
+    return false;
+  }
   const root = await fixture();
-  const compose = join(root, ".hack", "docker-compose.yml");
-  await writeFile(
-    compose,
-    'services:\n  app:\n    image: alpine:3.22\n    environment:\n      PROJECT_KEY: "${HACK_ENV_SECRET_KEY-unset}"\n      FILE_KEY: "${HACK_SECRETS_FILE_KEY-unset}"\n'
-  );
-  const env = privateCliEnv({ root, env: values });
-  const result = await exec(
-    ["docker", "compose", "--project-directory", root, "-f", compose, "config"],
-    { cwd: root, env, unsetEnvKeys: Object.keys(process.env), stdin: "ignore" }
-  );
-  expect(result.exitCode).toBe(0);
-  expect(result.stdout).toContain("PROJECT_KEY: unset");
-  expect(result.stdout).toContain("FILE_KEY: unset");
-  expect(result.stdout + result.stderr).not.toContain(SENTINEL);
-});
+  try {
+    const probe = await exec(["docker", "compose", "version"], {
+      cwd: root,
+      env: privateCliEnv({ root }),
+      unsetEnvKeys: Object.keys(process.env),
+      stdin: "ignore",
+      timeoutMs: 5000,
+    });
+    return probe.exitCode === 0;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    roots.splice(roots.indexOf(root), 1);
+  }
+}
+
+test.skipIf(!(await isolatedComposeAvailable()))(
+  "rendered Compose config cannot interpolate either Hack decryption key",
+  async () => {
+    const root = await fixture();
+    const compose = join(root, ".hack", "docker-compose.yml");
+    await writeFile(
+      compose,
+      'services:\n  app:\n    image: alpine:3.22\n    environment:\n      PROJECT_KEY: "${HACK_ENV_SECRET_KEY-unset}"\n      FILE_KEY: "${HACK_SECRETS_FILE_KEY-unset}"\n'
+    );
+    const env = privateCliEnv({ root, env: values });
+    const result = await exec(
+      [
+        "docker",
+        "compose",
+        "--project-directory",
+        root,
+        "-f",
+        compose,
+        "config",
+      ],
+      {
+        cwd: root,
+        env,
+        unsetEnvKeys: Object.keys(process.env),
+        stdin: "ignore",
+      }
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("PROJECT_KEY: unset");
+    expect(result.stdout).toContain("FILE_KEY: unset");
+    expect(result.stdout + result.stderr).not.toContain(SENTINEL);
+  }
+);
 
 test("an explicit Hack re-exec retains its key and filters the eventual host child", async () => {
   const root = await fixture();
@@ -181,3 +217,42 @@ test("an explicit Hack re-exec retains its key and filters the eventual host chi
     )
   ).toBe(0);
 });
+
+const compiledCli = process.env.HACK_TEST_COMPILED_CLI;
+test.skipIf(!compiledCli)(
+  "compiled re-exec with keys ignores project bunfig preload and dotenv autoload",
+  async () => {
+    if (!compiledCli) {
+      throw new Error(
+        "Set HACK_TEST_COMPILED_CLI to the freshly built executable"
+      );
+    }
+    const root = await fixture();
+    const marker = join(root, "preload-ran");
+    await writeFile(
+      join(root, "preload.ts"),
+      `await Bun.write(${JSON.stringify(marker)}, process.env.HACK_ENV_SECRET_KEY ? "key-visible" : "executed");\n`
+    );
+    await writeFile(join(root, "bunfig.toml"), 'preload = ["./preload.ts"]\n');
+    await writeFile(join(root, ".env"), `AUTOLOAD_SENTINEL=${SENTINEL}\n`);
+    const result = await run(
+      [
+        compiledCli,
+        "host",
+        "exec",
+        "--",
+        "sh",
+        "-c",
+        'test -z "${AUTOLOAD_SENTINEL-}" && test -z "${HACK_ENV_SECRET_KEY-}"',
+      ],
+      {
+        cwd: root,
+        ...privateCliRunEnv({ root, env: values }),
+        hackReexec: true,
+        stdin: "ignore",
+      }
+    );
+    expect(await Bun.file(marker).exists()).toBe(false);
+    expect(result).toBe(0);
+  }
+);

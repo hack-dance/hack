@@ -443,9 +443,74 @@ test("legacy dotenv overlays are reported when tracked or unignored and existing
         projectRoot: repoRoot,
         projectDirName: ".hack",
       })
-    )?.trackedPaths
+    )?.trackedOverlayPaths
   ).toContain(".hack/.env.qa");
   expect(await readFile(overlay, "utf8")).toBe(
     "TOKEN=synthetic-overlay-sentinel\n"
   );
+});
+
+test("doctor preserves tracked overlays and templates and keeps new templates visible", async () => {
+  const repoRoot = await createLeakedRepo();
+  const projectDir = join(repoRoot, ".hack");
+  const shared = [".env.qa", ".env.example", ".env.bak"];
+  for (const name of shared) {
+    await writeFile(join(projectDir, name), "TOKEN=synthetic-shared-value\n");
+  }
+  await runGit(
+    ["add", "-f", ...shared.map((name) => `.hack/${name}`)],
+    repoRoot
+  );
+  await runGit(["commit", "-m", "shared fixture env files"], repoRoot);
+  const inspection = await inspectTrackedGeneratedFiles({
+    projectRoot: repoRoot,
+    projectDirName: ".hack",
+  });
+  expect(inspection?.trackedOverlayPaths).toEqual([".hack/.env.qa"]);
+  for (const name of shared) {
+    expect(inspection?.trackedPaths).not.toContain(`.hack/${name}`);
+  }
+  expect(
+    await untrackGeneratedFiles({
+      projectRoot: repoRoot,
+      paths: inspection?.trackedPaths ?? [],
+    })
+  ).toEqual({ ok: true, error: null });
+  await ensureHackDirGitignore({ projectDir });
+  await ensureHackGitInfoExclude({ projectDir });
+  const tracked = await runGit(["ls-files", "--", ".hack/.env.*"], repoRoot);
+  expect(tracked.split("\n")).toEqual(
+    shared.map((name) => `.hack/${name}`).sort()
+  );
+  expect(
+    (await checkTrackedGeneratedFiles({ startDir: repoRoot })).message
+  ).toContain("hack doctor --migrate-env-config");
+  for (const name of shared) {
+    const refused = await untrackGeneratedFiles({
+      projectRoot: repoRoot,
+      paths: [`.hack/${name}`],
+    });
+    expect(refused.ok).toBe(false);
+  }
+  for (const name of ["sample", "template", "dist"]) {
+    await writeFile(join(projectDir, `.env.${name}`), "TOKEN=\n");
+  }
+  await writeFile(
+    join(projectDir, ".env.untracked"),
+    "TOKEN=synthetic-untracked-value\n"
+  );
+  const status = await runGit(
+    ["status", "--porcelain", "--untracked-files=all"],
+    repoRoot
+  );
+  for (const name of ["sample", "template", "dist"]) {
+    expect(status).toContain(`?? .hack/.env.${name}`);
+  }
+  expect(status).not.toContain(".env.untracked");
+  const after = await inspectTrackedGeneratedFiles({
+    projectRoot: repoRoot,
+    projectDirName: ".hack",
+  });
+  expect(after?.unignoredOverlayPaths).toEqual([]);
+  expect(after?.trackedOverlayPaths).toEqual([".hack/.env.qa"]);
 });

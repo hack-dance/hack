@@ -3469,6 +3469,7 @@ async function checkTrackedGeneratedFilesAt(ctx: {
   }
   if (
     inspection.trackedPaths.length === 0 &&
+    inspection.trackedOverlayPaths.length === 0 &&
     inspection.unignoredOverlayPaths.length === 0
   ) {
     return {
@@ -3483,14 +3484,21 @@ async function checkTrackedGeneratedFilesAt(ctx: {
     return {
       name,
       status: "error",
-      message: `${PROJECT_ENV_KEY_FILENAME} is committed to git — it is a secret. Run 'hack doctor --fix' to untrack it (file stays on disk), rewrite or rotate the key ('hack env' secrets encrypted with it should be re-encrypted), and commit the removal. Tracked generated files: ${offenders}. Unignored legacy env files: ${inspection.unignoredOverlayPaths.join(", ") || "none"}`,
+      message: `${PROJECT_ENV_KEY_FILENAME} is committed to git — it is a secret. Run 'hack doctor --fix' to untrack it (file stays on disk), rewrite or rotate the key ('hack env' secrets encrypted with it should be re-encrypted), and commit the removal. Tracked generated files: ${offenders}. Unignored legacy env files: ${inspection.unignoredOverlayPaths.join(", ") || "none"}. Tracked legacy overlays: ${inspection.trackedOverlayPaths.join(", ") || "none"}; migrate those with 'hack doctor --migrate-env-config' before considering removal.`,
     };
   }
   if (inspection.unignoredOverlayPaths.length > 0) {
     return {
       name,
       status: "warn",
-      message: `Unignored legacy env files: ${inspection.unignoredOverlayPaths.join(", ")}. Add .env.* to ${ctx.projectDirName}/.gitignore. Tracked generated files: ${inspection.trackedPaths.join(", ") || "none"}. Run 'hack doctor --fix' and commit the ignore rules and any index removals.`,
+      message: `Unignored legacy env files: ${inspection.unignoredOverlayPaths.join(", ")}. Run 'hack doctor --fix' to maintain ignore rules. Shared legacy overlays remain tracked; use 'hack doctor --migrate-env-config' before considering their removal. Tracked legacy overlays: ${inspection.trackedOverlayPaths.join(", ") || "none"}. Tracked generated files: ${inspection.trackedPaths.join(", ") || "none"}.`,
+    };
+  }
+  if (inspection.trackedOverlayPaths.length > 0) {
+    return {
+      name,
+      status: "warn",
+      message: `Shared legacy env overlays are tracked in git: ${inspection.trackedOverlayPaths.join(", ")}. Run 'hack doctor --migrate-env-config' to preserve their values before considering removal. 'hack doctor --fix' leaves these overlays in the index. Tracked generated files: ${offenders || "none"}.`,
     };
   }
   return {

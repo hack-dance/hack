@@ -171,8 +171,12 @@ export async function readNativeComposeBytes(path: string): Promise<Buffer> {
   }
 }
 
-function environment(value: unknown, service: string): Record<string, unknown> {
-  if (value === undefined) {
+/** Parse Compose environment syntax without resolving values; null is an empty declaration. */
+export function nativeServiceEnvironment(
+  value: unknown,
+  service: string
+): Record<string, unknown> {
+  if (value === undefined || value === null) {
     return {};
   }
   if (isRecord(value)) {
@@ -232,7 +236,7 @@ function normalizeManagedEnvironment(
     if (Object.keys(managed).length === 0) {
       continue;
     }
-    const normalized = environment(service.environment, name);
+    const normalized = nativeServiceEnvironment(service.environment, name);
     for (const key of Object.keys(managed)) {
       if (!KEY.test(key)) {
         throw refused(
@@ -277,7 +281,7 @@ function resolveServiceShellEnvironment(opts: {
     }
     const resolution = resolveShellEnvironment({
       service: name,
-      environment: environment(service.environment, name),
+      environment: nativeServiceEnvironment(service.environment, name),
       env: opts.env,
       managed: new Set(Object.keys(opts.managedEnvironment[name] ?? {})),
     });

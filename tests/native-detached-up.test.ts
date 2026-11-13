@@ -218,3 +218,85 @@ for (const phase of ["static-preflight", "after-start"] as const) {
     }
   });
 }
+
+test("detached immediate exit drains its fixed failure before reporting an unconfirmed start", async () => {
+  const modes = [
+    "exit-first-failure",
+    ...new Array<string>(8).fill("immediate-failure"),
+  ];
+  for (const mode of modes) {
+    const root = await mkdtemp(join(tmpdir(), "native-detached-exit-"));
+    const launcher = Bun.spawn(
+      [process.execPath, fixture, "launcher", root, mode],
+      {
+        env: fixtureEnv(root),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    try {
+      const [code, stdout, stderr] = await Promise.all([
+        launcher.exited,
+        new Response(launcher.stdout).text(),
+        new Response(launcher.stderr).text(),
+      ]);
+      expect(code).toBe(1);
+      expect(JSON.parse(stdout)).toMatchObject({
+        ok: false,
+        error: { code: "E_STARTUP_INCOMPLETE" },
+      });
+      expect(stdout).toContain("graph_port_publication");
+      expect(stdout).toContain("Native publishes only TCP ports");
+      expect(stdout).not.toContain("startup was not confirmed");
+      expect(stdout + stderr).not.toContain("synthetic-private-value");
+      expect(stderr).toBe("");
+    } finally {
+      if (launcher.exitCode === null) {
+        launcher.kill("SIGTERM");
+        await launcher.exited;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+}, 30_000);
+
+test("detached owner exit has a short grace even when its descendant holds the IPC descriptor", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-detached-channel-"));
+  const started = performance.now();
+  const launcher = Bun.spawn(
+    [process.execPath, fixture, "launcher", root, "held-channel"],
+    {
+      env: fixtureEnv(root),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 6000,
+    }
+  );
+  try {
+    await waitForFile(join(root, "holder-ready"));
+    const code = await launcher.exited;
+    expect(code).toBe(1);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(1000);
+    expect(performance.now() - started).toBeLessThan(5000);
+    // The descendant still owns its endpoint when the launcher has returned.
+    const held = await fetch("http://localhost/stop", {
+      unix: join(root, "holder.sock"),
+    });
+    expect(await held.text()).toBe("held");
+    await waitForFile(join(root, "holder-stopped"));
+  } finally {
+    if (launcher.exitCode === null) {
+      launcher.kill("SIGTERM");
+      await launcher.exited;
+    }
+    await fetch("http://localhost/stop", {
+      unix: join(root, "holder.sock"),
+    }).catch(() => undefined);
+    if (await Bun.file(join(root, "holder-ready")).exists()) {
+      await waitForFile(join(root, "holder-stopped"));
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}, 12_000);

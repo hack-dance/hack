@@ -22,10 +22,43 @@ function command(root: string, args = ["up", "--detach", "--json"]) {
 // timeout or unconfirmed child retains its fixture and refuses further calls.
 let coldLifetimeUnknown = false;
 let activeColdCases = 0;
+const engines = new Map<
+  string,
+  { readonly server: Bun.Server<undefined>; readonly reads: () => number }
+>();
+/** Keep each engine fence fresh through the production Unix transport. The
+ * CLI-only command() cases retain fallback coverage without paying for an
+ * extra stand-in process at every fence in the long carrier sequences. */
+function engine(root: string) {
+  let selected = engines.get(root);
+  if (!selected) {
+    let reads = 0;
+    const server = Bun.serve({
+      unix: join(root, "engine.sock"),
+      fetch(request) {
+        if (
+          request.method !== "GET" ||
+          new URL(request.url).pathname !== "/info"
+        ) {
+          return new Response(null, { status: 404 });
+        }
+        reads++;
+        return Response.json({ ID: "fixture-engine" });
+      },
+    });
+    selected = { server, reads: () => reads };
+    engines.set(root, selected);
+  }
+  return selected;
+}
 afterEach(() => {
   if (activeColdCases > 0) {
     coldLifetimeUnknown = true;
   }
+  for (const { server } of engines.values()) {
+    server.stop(true);
+  }
+  engines.clear();
 });
 async function ownedColdCase(
   body: (owner: {
@@ -69,6 +102,7 @@ async function ownedColdCase(
           ReturnType<typeof captureCompletedJobFixtureCommand>
         >;
         try {
+          engine(root);
           result = await captureCompletedJobFixtureCommand({
             argv: [
               process.execPath,
@@ -96,6 +130,7 @@ async function ownedColdCase(
                 ),
                 CI: "1",
                 HACK_EXECUTION_MODE: "non_interactive",
+                DOCKER_HOST: `unix://${join(root, "engine.sock")}`,
               },
             }),
             captures: join(root, `storage-capture-${capture++}`),
@@ -417,21 +452,38 @@ test(
         (await Bun.file(eventsFile).exists())
           ? (await Bun.file(eventsFile).text()).trim().split("\n")
           : [];
-      const counted = async (args: readonly string[]) => {
+      const counted = async (
+        args: readonly string[],
+        opts: { readonly cliIdentityCalls?: number } = {}
+      ) => {
         const before = (await events()).length;
+        const direct = engine(root).reads();
+        const calls = (await Bun.file(join(root, "requests")).exists())
+          ? (await requests(root)).length
+          : 0;
         const result = await owner.invoke(root, args);
         expect(result.code, await disposition(root, result.code)).toBe(0);
+        expect(engine(root).reads()).toBeGreaterThan(direct);
+        // Warm commands keep two file-engine reads and one CLI admission.
+        // Cold provisioning also keeps its eight CLI identity observations.
+        expect(
+          (await requests(root))
+            .slice(calls)
+            .filter(
+              (call) =>
+                call.length === 3 &&
+                call[0] === "info" &&
+                call[1] === "--format" &&
+                call[2] === "{{json .ID}}"
+            )
+        ).toHaveLength(opts.cliIdentityCalls ?? 3);
         return (await events()).slice(before);
       };
       const proofs = (count: number) =>
         Array.from({ length: count }, () => ["root", "verify", "root"]).flat();
-      expect(await counted(["up", "--detach", "--json"])).toEqual([
-        "root",
-        "seed",
-        ...proofs(3),
-        "workload",
-        ...proofs(1),
-      ]);
+      expect(
+        await counted(["up", "--detach", "--json"], { cliIdentityCalls: 11 })
+      ).toEqual(["root", "seed", ...proofs(3), "workload", ...proofs(1)]);
       expect(await counted(["up", "--detach", "--json"])).toEqual([
         ...proofs(3),
         "workload",

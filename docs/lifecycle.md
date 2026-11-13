@@ -54,12 +54,10 @@ keeps the record even after its wrapper exits. Matching wrapper identity plus
 descendant lineage also keeps the record. Older records without that identity do not
 grant signal authority or make an unrelated live group count as retained work.
 
-Zellij does not yet record pane process identities. Its foreground mux cleanup
-does not wait for process-group retirement and can remove state before commands
-finish; use tmux when confirmed retirement is required. Zellij process tracking
-is a follow-up on HACK-2184. Retrying missing launch-time identity observations
-during owned foreground cleanup is also a follow-up: a missing start time can
-currently leave cleanup unconfirmed.
+Zellij does not await process-group retirement; it is scheduled for removal in v5.0.0.
+
+Retrying missing launch-time identity observations during owned foreground cleanup
+remains a follow-up: a missing start time can currently leave cleanup unconfirmed.
 
 ![Foreground lifecycle retirement](diagrams/compose-lifecycle-retirement.svg)
 

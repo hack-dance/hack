@@ -63,6 +63,7 @@ fn scripted_server(
     };
     let replies = replies(listener.local_addr().unwrap().port());
     let handle = thread::spawn(move || {
+        let mut redirect_connections = Vec::new();
         for (expected, reply) in replies {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             let mut stream = loop {
@@ -82,7 +83,19 @@ fn scripted_server(
                     .to_ascii_lowercase()
                     .contains(&expected)
             );
+            // This script handles one request per TCP connection. HTTP/1.1
+            // otherwise permits pooling a redirect's socket while we close it.
+            let reply = if reply.contains("\r\nConnection: close\r\n") {
+                reply
+            } else {
+                reply.replacen("\r\n", "\r\nConnection: close\r\n", 1)
+            };
             stream.write_all(reply.as_bytes()).unwrap();
+            if reply.starts_with("HTTP/1.1 3") {
+                // The next hop must connect before this socket reaches EOF.
+                // This makes redirect coverage independent of FIN scheduling.
+                redirect_connections.push(stream);
+            }
         }
     });
     (pin, handle)
@@ -430,7 +443,7 @@ fn offline_setup_and_partial_manual_install_preservation() {
     assert_eq!(result.status, "installed");
     assert_eq!(result.files.len(), files.len());
     for file in result.files {
-        assert_eq!(file.outcome, Outcome::Reused);
+        assert_eq!(file.outcome, Outcome::Offline);
         assert_eq!(file.downloaded_bytes, 0);
         assert_eq!(file.reused_bytes, file.size_bytes);
     }
@@ -461,6 +474,8 @@ fn offline_setup_and_partial_manual_install_preservation() {
 
 #[test]
 fn same_host_redirect_succeeds() {
+    // The fixture retains the first socket until the target request completes.
+    // Without Connection: close, a pooled request stalls on that retained socket.
     let root = Fixture::new();
     let (pin, server) = server(vec![
         (
@@ -715,12 +730,8 @@ fn json_accounts_for_download_resume_cache_and_complete_reuse() {
     )
     .unwrap()
     .with_probe(serde_json::json!({"supported": true}));
-    assert_eq!(reused["files"].as_array().unwrap().len(), files.len());
-    for file in reused["files"].as_array().unwrap() {
-        assert_eq!(file["outcome"], "reused");
-        assert_eq!(file["downloaded_bytes"], 0);
-        assert_eq!(file["reused_bytes"], 5);
-    }
+    assert_eq!(reused["status"], "reused");
+    assert_eq!(reused["files"], serde_json::json!([]));
 }
 
 #[test]
@@ -861,7 +872,10 @@ fn killed_preparation_and_publication_rerun_without_network_or_partial_install()
                 "installed"
             }
         );
-        assert_eq!(result.files.len(), 3);
+        assert_eq!(
+            result.files.len(),
+            if phase == "after_rename" { 0 } else { 3 }
+        );
         assert!(
             result
                 .files

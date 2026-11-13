@@ -512,8 +512,10 @@ published only in the global advisory database. It never changes a pin; bumps ar
 hand. The workflow also checks every pinned download URL, including guest
 packages, with bounded unauthenticated HEAD requests and a comparison of a 200
 reply's `Content-Length` with `size_bytes`. A size disagreement must repeat on a
-second HEAD from the original pinned URL, requesting cache revalidation under the
-same deadline, before it can reopen an issue. Only 404 and 410 mean the pinned file
+one-byte GET from the original pinned URL, requesting cache revalidation under the
+same deadline, before it can reopen an issue. A valid single-byte 206 and Content-Range
+must confirm the same total; ignored or failed ranges stay transient. Only an initial
+HEAD returning 404 or 410 means the pinned file
 is no longer served and can reopen an issue closed as not planned. Timeouts,
 other HTTP errors (including 403, 429 and 5xx), and a missing `Content-Length`
 are transient failures: they are reported but never create or reopen

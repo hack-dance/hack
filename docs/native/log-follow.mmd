@@ -3,24 +3,32 @@ sequenceDiagram
     participant CLI as Frontend
     participant Reader as Read-only child
     participant Engine as Owned Engine relay
-    participant Down as Lifecycle owner
-    CLI->>Reader: Exact saved selection + lifetime pipe
-    Reader->>Engine: Inspect identity and start generation
-    Reader->>Engine: GET logs (follow, tail, since)
-    loop Bounded output, consumer backpressure
-        Engine-->>Reader: Multiplexed log bytes
-        Reader-->>CLI: At most 4 KiB per envelope
+    participant Owner as Lifecycle owner
+    CLI->>Reader: Fresh Ready selection + lifetime pipe
+    Reader->>Engine: Inspect exact container and generation
+    Reader->>Engine: GET logs (tail, since, optional timestamps)
+    Engine-->>Reader: HTTP admission
+    Reader-->>CLI: Attached (one marker on reattach)
+    loop Bounded output and consumer backpressure
+        Engine-->>Reader: Multiplexed bytes
+        Reader-->>CLI: Payload and timestamp metadata
     end
-    Note over Reader,Down: Reader holds no mutation lease
-    Down->>Engine: Stop or remove owned container
-    Engine-->>Reader: EOF or idle after service stop
-    Reader->>Engine: Check exact selected generation
+    Note over Reader,Owner: No mutation lease while following
+    Owner->>Engine: Stop or remove owned container
+    Engine-->>Reader: EOF or idle after stop
+    Reader->>Engine: Verify selected generation
     alt Real EOF and confirmed stopped or absent
         Reader-->>CLI: Exit 0
-    else Five idle seconds without EOF after stop
+        alt Restart intent or fresh replacement
+            CLI->>CLI: Fresh admission within 30 seconds
+            CLI->>Reader: New reader, bounded 1000-line backlog
+        else Down or stopped service
+            CLI->>CLI: Stopped notice and named end, exit 0
+        end
+    else Five idle seconds without EOF
         Reader-->>CLI: native_log_stopped_idle, exit 1
-    else Changed identity or unexplained EOF
+    else Changed generation or unexplained EOF
         Reader-->>CLI: Named refusal
     end
-    Note over CLI,Reader: Ctrl-C stops and reaps reader
-    Note over CLI,Reader: Frontend death closes lifetime pipe
+    Note over CLI,Reader: Closed stdout exits quietly. Ctrl-C reaps reader.
+    Note over CLI,Reader: Frontend loss closes lifetime pipe

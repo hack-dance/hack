@@ -373,16 +373,8 @@ fn run() -> Result<(), CandidateError> {
             let code = interactive_exec_cli::command(&discover_candidate(&requested)?, arguments)?;
             std::process::exit(code);
         }
-        [
-            "graph",
-            "interactive-sessions",
-            "--run-id",
-            run,
-            "--service",
-            service,
-            "--json",
-        ] => {
-            interactive_exec_cli::sessions(&discover_candidate(&requested)?, run, service)?;
+        ["graph", "interactive-sessions", arguments @ ..] => {
+            interactive_exec_cli::sessions(&discover_candidate(&requested)?, arguments)?;
         }
         ["graph", arguments @ ..] => {
             let candidate = discover_candidate(&requested)?;

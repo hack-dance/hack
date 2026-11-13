@@ -1,8 +1,18 @@
-import { nativeInteractiveExec } from "../../src/backends/native-interactive-exec.ts";
+import {
+  nativeInteractiveExec,
+  nativeInteractiveRequested,
+} from "../../src/backends/native-interactive-exec.ts";
 
 const [root, mode] = process.argv.slice(2);
 if (!(root && mode)) {
   throw new Error("fixture arguments");
+}
+if (mode.startsWith("selection-")) {
+  await Bun.write(
+    `${root}/selection.json`,
+    JSON.stringify(nativeInteractiveRequested())
+  );
+  process.exit(0);
 }
 process.exitCode = await nativeInteractiveExec({
   runtime: { binary: `${root}/runtime`, home: root },

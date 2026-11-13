@@ -3,6 +3,7 @@ use crate::{Candidate, CandidateError};
 use std::os::fd::OwnedFd;
 
 pub struct Options<'a> {
+    pub session: &'a str,
     pub run: &'a str,
     pub service: &'a str,
     pub owner: &'a str,
@@ -22,7 +23,8 @@ fn refused() -> CandidateError {
 }
 impl Options<'_> {
     pub fn validate(&self) -> Result<(), CandidateError> {
-        if !super::hex(self.run, 32)
+        if !crate::provider::environment_recovery::uuid(self.session)
+            || !super::hex(self.run, 32)
             || !super::hex(self.owner, 32)
             || !super::hex(self.plan, 64)
             || !super::hex(self.namespace, 64)
@@ -158,13 +160,14 @@ fn native(
                 timeout: Duration::from_secs(30),
             },
             console_size,
+            options.session,
             managed.as_ref(),
             &|| leash.check(),
         )
     };
     let mut attached = admission?;
     let receipt = &attached.receipt;
-    let result = (|| {
+    let result: Result<(i32, bool), CandidateError> = (|| {
         leash.check()?;
         if let Some(managed) = &managed {
             interactive_exec::deliver(
@@ -186,19 +189,21 @@ fn native(
                 })
             },
         )?;
-        observer.interactive_exit(receipt)
+        let exit = observer.interactive_exit(receipt)?;
+        // A known command status survives bookkeeping failures. Retained
+        // evidence is reported separately and can be reconciled with this proof.
+        let retained = interactive_session::retire_completed(candidate, receipt).is_err();
+        Ok((exit, retained))
     })();
-    terminal.restore()?;
+    terminal
+        .restore()
+        .map_err(|error| error.with_session(&receipt.session))?;
     drop(attached.stream);
-    let _ = interactive_session::reconcile_observed(candidate);
-    let remains = interactive_session::retained(candidate)?
-        .iter()
-        .any(|r| r.session == receipt.session);
     result
-        .map(|exit_code| Completion {
+        .map(|(exit_code, retained)| Completion {
             exit_code,
             session: receipt.session.clone(),
-            retained: remains,
+            retained,
         })
         .map_err(|error| error.with_session(&receipt.session))
 }

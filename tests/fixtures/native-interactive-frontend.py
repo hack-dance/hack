@@ -15,6 +15,9 @@ import time
 def hold_session():
     """Stand in for the shell, keeping Darwin's controlling tty alive."""
     control = socket.socket(fileno=int(sys.argv[2]))
+    terminal = os.open("/dev/tty", os.O_RDWR)
+    background = sys.argv[3] == "--background"
+    command_index = 4 if background else 3
     gate_read, gate_write = os.pipe()
     child = os.fork()
     if child == 0:
@@ -24,18 +27,22 @@ def hold_session():
         assert os.read(gate_read, 1) == b"G"
         os.close(gate_read)
         try:
-            os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
+            os.execvpe(sys.argv[command_index], sys.argv[command_index:], os.environ)
         except BaseException:
             os._exit(127)
     os.close(gate_read)
     os.setpgid(child, child)
     previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
-    os.tcsetpgrp(0, child)
+    if not background:
+        os.tcsetpgrp(terminal, child)
     signal.signal(signal.SIGTTOU, previous)
     control.sendall(b"P" + child.to_bytes(4, "big"))
     os.write(gate_write, b"G")
     os.close(gate_write)
     _, status = os.waitpid(child, 0)
+    previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    os.tcsetpgrp(terminal, os.getpgrp())
+    signal.signal(signal.SIGTTOU, previous)
     code = os.waitstatus_to_exitcode(status)
     control.sendall(b"E" + code.to_bytes(4, "big", signed=True))
     control.settimeout(15)
@@ -84,8 +91,8 @@ root = sys.argv[1]
 protected_keys = json.loads(sys.argv[2])
 command = sys.argv[3:]
 assert all(os.environ.get(key) == "synthetic-parent-key-canary" for key in protected_keys)
-for mode in ("normal", "child-kill", "frontend-kill", "cancel"):
-    for name in ("reader.pid", "reader.closed"):
+for mode in ("normal", "child-kill", "frontend-kill", "cancel", "refused", "old-launcher", "retained", "cleared"):
+    for name in ("reader.pid", "reader.closed", "session.queried", "session.cleared"):
         try:
             os.unlink(os.path.join(root, name))
         except FileNotFoundError:
@@ -124,7 +131,7 @@ for mode in ("normal", "child-kill", "frontend-kill", "cancel"):
         elif mode == "cancel":
             os.kill(frontend, signal.SIGTERM)
         code = record(control, master, output, b"E", 10, mode)
-        if mode == "normal":
+        if mode in ("normal", "retained", "cleared"):
             assert code == 7, code
         else:
             assert code != 0, code
@@ -156,8 +163,19 @@ for mode in ("normal", "child-kill", "frontend-kill", "cancel"):
             output.extend(os.read(master, 8192))
         assert b"synthetic-private-envelope-canary" not in output
         assert b"synthetic-parent-key-canary" not in output
-        if mode != "frontend-kill":
-            assert b"session_cleanup_uncertain: session 00000000-0000-4000-8000-000000000001" in output, repr(output)
+        if mode in ("normal", "refused", "old-launcher"):
+            assert not os.path.exists(os.path.join(root, "session.queried"))
+            if mode == "old-launcher":
+                assert b"HACK_NO_INTERACTIVE=1" in output and b"restart the service" in output
+            assert b"session_cleanup_uncertain" not in output, repr(output)
+        elif mode == "cleared":
+            assert b"No receipt is currently retained for session" in output
+            assert b"without a result" not in output
+            assert b"session_cleanup_uncertain" not in output
+        elif mode != "frontend-kill":
+            with open(os.path.join(root, "session.id")) as file:
+                session_id = file.read().encode()
+            assert b"session_cleanup_uncertain: session " + session_id in output, repr(output)
             assert b"hack down --path" in output and b"--branch 'topic'" in output
     finally:
         body_failed = sys.exc_info()[0] is not None
@@ -192,4 +210,32 @@ for mode in ("normal", "child-kill", "frontend-kill", "cancel"):
                 raise cleanup_error
             print(f"session cleanup also failed ({mode}): {type(cleanup_error).__name__}",
                   file=sys.stderr)
-print("Frontend PTY: four cases passed")
+for selection, expected in (("foreground", True), ("disabled", False),
+                            ("redirected", False), ("piped", False), ("background", False)):
+    master, slave = pty.openpty()
+    control, holder_control = socket.socketpair()
+    env = dict(os.environ)
+    env["HACK_NO_INTERACTIVE"] = "1" if selection == "disabled" else "0"
+    process = subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--hold-session", str(holder_control.fileno()),
+         *(["--background"] if selection == "background" else []), *command, root, "selection-" + selection],
+        cwd=root, stdin=subprocess.DEVNULL if selection == "piped" else slave,
+        stdout=subprocess.DEVNULL if selection == "redirected" else slave, stderr=slave,
+        preexec_fn=session, pass_fds=(holder_control.fileno(), slave), env=env)
+    holder_control.close()
+    output = bytearray()
+    try:
+        record(control, master, output, b"P", 10, selection)
+        assert record(control, master, output, b"E", 10, selection) == 0, repr(output)
+        with open(os.path.join(root, "selection.json")) as file:
+            assert json.load(file) == expected, selection
+        control.sendall(b"F")
+        assert wait_draining(process, master, output, 5, selection) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            wait_draining(process, master, output, 5, selection)
+        control.close()
+        os.close(master)
+        os.close(slave)
+print("Frontend PTY: eight lifetime and five selection cases passed")

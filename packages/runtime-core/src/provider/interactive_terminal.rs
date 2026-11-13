@@ -98,6 +98,8 @@ impl Signals {
             libc::SIGHUP,
             libc::SIGQUIT,
             libc::SIGTSTP,
+            libc::SIGTTIN,
+            libc::SIGTTOU,
         ] {
             // SAFETY: these C structs have valid zero representations; the
             // handler touches only a lock-free atomic and retains no pointers.
@@ -319,6 +321,10 @@ impl Terminal {
     }
     pub fn restore(&mut self) -> Result<(), CandidateError> {
         if self.raw {
+            // The shell may reclaim the foreground after the frontend dies.
+            // POSIX permits a background tcsetattr when SIGTTOU is blocked.
+            // Restore this thread's exact mask even when tcsetattr fails.
+            let _background = BackgroundRestore::new()?;
             // SAFETY: saved came from this terminal; no pointers are retained.
             if unsafe { libc::tcsetattr(self.file.as_raw_fd(), libc::TCSANOW, &self.saved) } != 0 {
                 return Err(CandidateError::new(
@@ -436,6 +442,29 @@ impl Terminal {
                 write_queue(stream, &mut input)?;
             }
         }
+    }
+}
+
+struct BackgroundRestore(libc::sigset_t);
+impl BackgroundRestore {
+    fn new() -> Result<Self, CandidateError> {
+        // SAFETY: initialized signal sets, scoped to the terminal I/O thread.
+        let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+        let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut blocked);
+            libc::sigaddset(&mut blocked, libc::SIGTTOU);
+        }
+        if unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous) } != 0 {
+            return Err(refused());
+        }
+        Ok(Self(previous))
+    }
+}
+impl Drop for BackgroundRestore {
+    fn drop(&mut self) {
+        // SAFETY: restores the calling thread's mask captured by this guard.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut()) };
     }
 }
 impl Drop for Terminal {
@@ -557,7 +586,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "Native terminal: flood, resize, idle leash and signal restoration passed\n"
+            "Native terminal: flood, resize, idle leash, signal and background restoration passed\n"
         );
     }
 

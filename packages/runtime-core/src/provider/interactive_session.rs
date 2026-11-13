@@ -1,19 +1,27 @@
 //! Value-free write-ahead interactive intents. They authorize no replay. Even a
-//! completed exec may have descendants, so only exact container absence retires
-//! these records; transport EOF and a changed VM boot are never cleanup proof.
+//! validated Engine exit retires a known exec; surviving descendants belong to
+//! the user. EOF alone and a changed VM boot are never cleanup proof.
 use super::{engine::log_follow::valid_timestamp, environment_recovery, state};
 use crate::{Candidate, CandidateError};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::Read,
     os::unix::fs::MetadataExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 const LIMIT: usize = 1024;
+pub fn valid_session(value: &str) -> bool {
+    environment_recovery::uuid(value)
+}
+fn changed() -> CandidateError {
+    CandidateError::new(
+        "session_store_changed",
+        "Interactive session evidence changed during observation; retry hack exec-sessions. Nothing was cleared or replayed.",
+    )
+}
 fn refused() -> CandidateError {
     CandidateError::new(
         "session_receipt_refused",
@@ -84,9 +92,9 @@ impl Receipt {
 struct Store {
     root: PathBuf,
     identity: (u64, u64),
-    lock: state::Lock,
+    lock: Option<state::Lock>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoppedBoot {
     owner: String,
@@ -103,7 +111,50 @@ impl StoppedBoot {
         self.owner == binding.owner && self.boot == binding.boot
     }
 }
+type Snapshot = (Vec<Receipt>, Vec<StoppedBoot>);
 impl Store {
+    /// No creation, lease, pending-file pruning or other writes.
+    fn observe(candidate: &Candidate) -> Result<Option<Self>, CandidateError> {
+        let root = candidate.state_root.join("run/exec-sessions");
+        let metadata = match fs::symlink_metadata(&root) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(refused()),
+            Ok(metadata) => metadata,
+        };
+        let store = Self {
+            root,
+            identity: (metadata.dev(), metadata.ino()),
+            lock: None,
+        };
+        store.check()?;
+        Ok(Some(store))
+    }
+    fn retire(&self, receipt: &Receipt) -> Result<bool, CandidateError> {
+        if self.lock.is_none() {
+            return Err(refused());
+        }
+        let current = self.list()?;
+        match current.iter().find(|r| r.session == receipt.session) {
+            None => return Ok(false), // Another exact-proof reconciliation won.
+            Some(found) if found != receipt => return Err(refused()),
+            Some(_) => (),
+        }
+        self.check()?;
+        if receipt.exec.is_some() {
+            fs::remove_file(self.path(&receipt.session, true)).map_err(|_| refused())?;
+            File::open(&self.root)
+                .and_then(|f| f.sync_all())
+                .map_err(|_| refused())?;
+        }
+        // A crash between these removals retains an intent requiring absence or
+        // a stopped boot. Never infer completion from a missing exec record.
+        fs::remove_file(self.path(&receipt.session, false)).map_err(|_| refused())?;
+        File::open(&self.root)
+            .and_then(|f| f.sync_all())
+            .map_err(|_| refused())?;
+        self.check()?;
+        Ok(true)
+    }
     fn open(candidate: &Candidate, create: bool) -> Result<Option<Self>, CandidateError> {
         let root = candidate.state_root.join("run/exec-sessions");
         if !create {
@@ -138,7 +189,7 @@ impl Store {
         let value = Self {
             root,
             identity: (metadata.dev(), metadata.ino()),
-            lock,
+            lock: Some(lock),
         };
         value.check()?;
         if create {
@@ -155,7 +206,11 @@ impl Store {
         Ok(Some(value))
     }
     fn check(&self) -> Result<(), CandidateError> {
-        self.lock.verify_path(&self.root).map_err(|_| refused())?;
+        if let Some(lock) = &self.lock {
+            lock.verify_path(&self.root).map_err(|_| refused())?;
+        } else {
+            state::check_private_directory(&self.root).map_err(|_| refused())?;
+        }
         let metadata = fs::symlink_metadata(&self.root).map_err(|_| refused())?;
         if !metadata.is_dir() || (metadata.dev(), metadata.ino()) != self.identity {
             return Err(refused());
@@ -184,7 +239,63 @@ impl Store {
         absent()?;
         state::write_before_rename(&path, receipt, &absent).map_err(|_| refused())
     }
-    fn snapshot(&self) -> Result<(Vec<Receipt>, Vec<StoppedBoot>), CandidateError> {
+    fn snapshot(&self) -> Result<Snapshot, CandidateError> {
+        if self.lock.is_some() {
+            return self.snapshot_once();
+        }
+        self.observe_snapshot(&mut || self.snapshot_once())
+    }
+    // Coarse-timestamp filesystems can still yield a stale/refused presentation;
+    // these stamps never grant mutation or absence authority.
+    fn stamp(&self) -> Result<(i64, i64, i64, i64), CandidateError> {
+        self.check()?;
+        let metadata = fs::symlink_metadata(&self.root).map_err(|_| refused())?;
+        Ok((
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        ))
+    }
+    fn observe_snapshot(
+        &self,
+        read: &mut dyn FnMut() -> Result<Snapshot, CandidateError>,
+    ) -> Result<Snapshot, CandidateError> {
+        for _ in 0..3 {
+            let before = self.stamp()?;
+            let snapshot = read();
+            let after = self.stamp()?;
+            if before == after
+                && !snapshot
+                    .as_ref()
+                    .is_err_and(|e| e.code == "session_store_changed")
+            {
+                return snapshot;
+            }
+        }
+        Err(changed())
+    }
+    fn entry_error(&self, error: std::io::Error) -> CandidateError {
+        if self.lock.is_none() && error.kind() == std::io::ErrorKind::NotFound {
+            changed()
+        } else {
+            refused()
+        }
+    }
+    fn read_record<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &Path,
+    ) -> Result<T, CandidateError> {
+        state::read_bounded(path, 4096).map_err(|_| {
+            // read_bounded redacts I/O errors. Only a proven vanished entry is
+            // transitional; malformed, aliased or inaccessible final files refuse.
+            match fs::symlink_metadata(path) {
+                Err(error) => self.entry_error(error),
+                Ok(_) => refused(),
+            }
+        })
+    }
+    fn snapshot_once(&self) -> Result<Snapshot, CandidateError> {
         self.check()?;
         let mut intents = BTreeMap::new();
         let mut execs = BTreeMap::new();
@@ -200,8 +311,7 @@ impl Store {
                 continue;
             }
             if name.starts_with("stopped-") && name.ends_with(".json") {
-                let proof: StoppedBoot =
-                    state::read_bounded(&entry.path(), 4096).map_err(|_| refused())?;
+                let proof: StoppedBoot = self.read_record(&entry.path())?;
                 if proof.name()? != name {
                     return Err(refused());
                 }
@@ -222,7 +332,8 @@ impl Store {
                 if !receipt_name && !proof_name {
                     return Err(refused());
                 }
-                let metadata = fs::symlink_metadata(entry.path()).map_err(|_| refused())?;
+                let metadata =
+                    fs::symlink_metadata(entry.path()).map_err(|e| self.entry_error(e))?;
                 // These are our unpublished value-free writes. No effect may
                 // follow until the final rename and directory fsync return.
                 if !metadata.is_file()
@@ -236,8 +347,7 @@ impl Store {
                 // paths prune these files under the lock before publishing.
                 continue;
             }
-            let receipt: Receipt =
-                state::read_bounded(&entry.path(), 4096).map_err(|_| refused())?;
+            let receipt: Receipt = self.read_record(&entry.path())?;
             if !receipt.valid()
                 || entry.path() != self.path(&receipt.session, receipt.exec.is_some())
             {
@@ -327,8 +437,12 @@ impl Intent {
     }
 }
 
-pub fn admit(candidate: &Candidate, binding: Binding) -> Result<Intent, CandidateError> {
-    if !binding.valid() {
+pub fn admit(
+    candidate: &Candidate,
+    binding: Binding,
+    session: &str,
+) -> Result<Intent, CandidateError> {
+    if !binding.valid() || !environment_recovery::uuid(session) {
         return Err(refused());
     }
     let store = Store::open(candidate, true)?.ok_or_else(refused)?;
@@ -336,27 +450,12 @@ pub fn admit(candidate: &Candidate, binding: Binding) -> Result<Intent, Candidat
     if store.list()?.len() >= LIMIT {
         return Err(CandidateError::new(
             "session_receipt_limit",
-            "The native home has 1024 retained interactive sessions. Run hack down for a project with retained sessions before opening another session.",
+            "The native home has 1024 retained interactive sessions. List with hack exec-sessions; try hack exec-sessions --reconcile to clear proven exits, or hack down for the affected project.",
         ));
     }
-    let mut random = [0u8; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut random))
-        .map_err(|_| refused())?;
-    random[6] = (random[6] & 0x0f) | 0x40;
-    random[8] = (random[8] & 0x3f) | 0x80;
-    let text: String = random.iter().map(|b| format!("{b:02x}")).collect();
-    let session = format!(
-        "{}-{}-{}-{}-{}",
-        &text[..8],
-        &text[8..12],
-        &text[12..16],
-        &text[16..20],
-        &text[20..]
-    );
     let receipt = Receipt {
         version: 1,
-        session,
+        session: session.into(),
         binding,
         exec: None,
     };
@@ -364,12 +463,29 @@ pub fn admit(candidate: &Candidate, binding: Binding) -> Result<Intent, Candidat
     Ok(Intent { receipt })
 }
 pub fn retained(candidate: &Candidate) -> Result<Vec<Receipt>, CandidateError> {
-    Store::open(candidate, false)?.map_or(Ok(Vec::new()), |s| s.list())
+    Store::observe(candidate)?.map_or(Ok(Vec::new()), |s| s.list())
+}
+
+/// Caller has observed normal stream closure and validated this exact exec's
+/// exit against the same container generation, owner and boot.
+#[cfg(any(target_os = "macos", test))]
+pub(in crate::provider) fn retire_completed(
+    candidate: &Candidate,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    if receipt.exec.is_none() {
+        return Err(refused());
+    }
+    Store::open(candidate, false)?
+        .ok_or_else(refused)?
+        .retire(receipt)?;
+    Ok(())
 }
 
 pub(crate) enum RetirementProof {
     Unknown,
     ContainerAbsent,
+    ExecExitedValidated,
     BootStopped,
 }
 
@@ -406,22 +522,31 @@ pub(crate) fn after_boot_stopped(candidate: &Candidate, owner: &state::Owner) {
 
 #[cfg(target_os = "macos")]
 fn cleanup_warning() {
-    eprintln!(
+    cleanup_notice(format_args!(
         "session_cleanup_uncertain: interactive receipts were retained; container cleanup was not rolled back. Retry hack down for this project and instance."
-    );
+    ));
 }
 
-/// Only exact same-boot absence or the existing clean-stop receipt retires a
+#[cfg(target_os = "macos")]
+fn cleanup_notice(message: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    // The foreground reader may already be gone. Diagnostics must not turn
+    // successfully completed cleanup into a panic on a broken stderr pipe.
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+}
+
+/// Exact validated exit, same-boot absence or a clean-stop receipt retires a
 /// session. A new boot cannot establish absence in an earlier boot's Engine.
 #[cfg(target_os = "macos")]
-pub(crate) fn reconcile_observed(candidate: &Candidate) -> Result<usize, CandidateError> {
+pub fn reconcile_observed(candidate: &Candidate) -> Result<usize, CandidateError> {
     if retained(candidate)?.is_empty() {
         return Ok(0);
     }
     let owner = state::Owner::load(candidate)?;
     let observer = super::engine::Observer::connect(candidate);
     let deadline = Instant::now() + Duration::from_secs(2);
-    reconcile(candidate, &|binding| {
+    reconcile(candidate, &|receipt| {
+        let binding = &receipt.binding;
         if binding.owner != owner.token {
             return Ok(RetirementProof::Unknown);
         }
@@ -445,6 +570,12 @@ pub(crate) fn reconcile_observed(candidate: &Candidate) -> Result<usize, Candida
             deadline,
         ) {
             Err(error) if error.code == "engine_not_found" => Ok(RetirementProof::ContainerAbsent),
+            Ok(_) if receipt.exec.is_some() => {
+                match observer.interactive_finished(receipt, deadline) {
+                    Ok(Some(_)) => Ok(RetirementProof::ExecExitedValidated),
+                    _ => Ok(RetirementProof::Unknown),
+                }
+            }
             Ok(_) => Ok(RetirementProof::Unknown),
             Err(error) => Err(error),
         }
@@ -454,8 +585,22 @@ pub(crate) fn reconcile_observed(candidate: &Candidate) -> Result<usize, Candida
 /// Bookkeeping never prevents the container cleanup that resolves uncertainty.
 #[cfg(target_os = "macos")]
 pub(crate) fn after_cleanup(candidate: &Candidate) {
-    if reconcile_observed(candidate).is_err() {
-        cleanup_warning();
+    let _ = reconcile_observed(candidate);
+    match retained(candidate) {
+        Ok(records) if records.is_empty() => (),
+        Ok(records) => {
+            cleanup_notice(format_args!(
+                "session_cleanup_uncertain: {} interactive session receipts remain in the native home; run hack exec-sessions --reconcile, or hack down for their projects.",
+                records.len()
+            ));
+            for record in records {
+                cleanup_notice(format_args!(
+                    "session {} run {} service {}",
+                    record.session, record.binding.run, record.binding.service
+                ));
+            }
+        }
+        Err(_) => cleanup_warning(),
     }
 }
 
@@ -464,7 +609,7 @@ pub(crate) fn after_cleanup(candidate: &Candidate) {
 /// performs no Engine effects and does not turn malformed receipts into absence.
 pub(crate) fn reconcile(
     candidate: &Candidate,
-    proof: &dyn Fn(&Binding) -> Result<RetirementProof, CandidateError>,
+    proof: &dyn Fn(&Receipt) -> Result<RetirementProof, CandidateError>,
 ) -> Result<usize, CandidateError> {
     let Some(store) = Store::open(candidate, false)? else {
         return Ok(0);
@@ -479,7 +624,7 @@ pub(crate) fn reconcile(
             break;
         }
         if !stopped.iter().any(|p| p.covers(&receipt.binding))
-            && matches!(proof(&receipt.binding)?, RetirementProof::Unknown)
+            && matches!(proof(&receipt)?, RetirementProof::Unknown)
         {
             continue;
         }
@@ -492,20 +637,7 @@ pub(crate) fn reconcile(
         if !current.contains(&receipt) {
             continue;
         }
-        store.check()?;
-        if receipt.exec.is_some() {
-            fs::remove_file(store.path(&receipt.session, true)).map_err(|_| refused())?;
-            File::open(&store.root)
-                .and_then(|f| f.sync_all())
-                .map_err(|_| refused())?;
-        }
-        // Exec removed first: a crash here retains a valid intent. It still
-        // requires the absence proof on a later reconciliation.
-        fs::remove_file(store.path(&receipt.session, false)).map_err(|_| refused())?;
-        File::open(&store.root)
-            .and_then(|f| f.sync_all())
-            .map_err(|_| refused())?;
-        store.check()?;
+        store.retire(&receipt)?;
         count += 1;
     }
     // Keep a stopped-boot proof across partial reconciliation. Remove it only
@@ -535,6 +667,18 @@ pub(crate) fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn admit(candidate: &Candidate, binding: Binding) -> Result<Intent, CandidateError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        super::admit(
+            candidate,
+            binding,
+            &format!(
+                "00000000-0000-4000-8000-{:012x}",
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        )
+    }
     fn fixture() -> (PathBuf, Candidate, Binding) {
         let root = crate::private_test_root(&std::env::temp_dir(), "interactive-session");
         let candidate = Candidate::discover(&root).unwrap();
@@ -566,10 +710,10 @@ mod tests {
         assert_eq!(
             reconcile(&candidate, &|_| Ok(RetirementProof::Unknown)).unwrap(),
             0
-        ); // EOF/exit is not proof.
+        ); // EOF alone is not proof.
         assert_eq!(
             reconcile(&candidate, &|b| {
-                assert_eq!(b, &binding);
+                assert_eq!(&b.binding, &binding);
                 Ok(RetirementProof::ContainerAbsent)
             })
             .unwrap(),
@@ -578,6 +722,100 @@ mod tests {
         assert!(retained(&candidate).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn completed_receipt_retirement_is_exact_and_does_not_accumulate() {
+        let (root, candidate, binding) = fixture();
+        let unknown = admit(&candidate, binding.clone()).unwrap();
+        let receipt = admit(&candidate, binding.clone())
+            .unwrap()
+            .record_exec(&candidate, &"e".repeat(64))
+            .unwrap();
+        let mut changed = receipt.clone();
+        changed.exec = Some("f".repeat(64));
+        assert!(retire_completed(&candidate, &changed).is_err());
+        assert!(retire_completed(&candidate, unknown.receipt()).is_err());
+        retire_completed(&candidate, &receipt).unwrap();
+        retire_completed(&candidate, &receipt).unwrap(); // Concurrent reconciliation is idempotent.
+        assert_eq!(retained(&candidate).unwrap(), vec![unknown.receipt.clone()]);
+        for _ in 0..8 {
+            let receipt = admit(&candidate, binding.clone())
+                .unwrap()
+                .record_exec(&candidate, &"e".repeat(64))
+                .unwrap();
+            retire_completed(&candidate, &receipt).unwrap();
+        }
+        assert_eq!(retained(&candidate).unwrap().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn listing_never_takes_mutation_lock_and_duplicate_id_never_overwrites() {
+        let (root, candidate, binding) = fixture();
+        let intent = admit(&candidate, binding.clone()).unwrap();
+        assert!(super::admit(&candidate, binding, &intent.receipt.session).is_err());
+        let store = Store::open(&candidate, false).unwrap().unwrap();
+        let before = fs::metadata(&store.root).unwrap().mtime_nsec();
+        assert_eq!(retained(&candidate).unwrap(), vec![intent.receipt.clone()]);
+        assert_eq!(fs::metadata(&store.root).unwrap().mtime_nsec(), before);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn observation_retries_renames_and_retirement_but_never_masks_corruption() {
+        let (root, candidate, binding) = fixture();
+        let intent = admit(&candidate, binding).unwrap();
+        let store = Store::observe(&candidate).unwrap().unwrap();
+        let receipt = intent.receipt.clone();
+        let mut intent = Some(intent);
+        let mut reads = 0;
+        let snapshot = store
+            .observe_snapshot(&mut || {
+                reads += 1;
+                if let Some(intent) = intent.take() {
+                    intent.withdraw(&candidate).unwrap();
+                    return store
+                        .read_record::<Receipt>(&store.path(&receipt.session, false))
+                        .map(|r| (vec![r], vec![]));
+                }
+                store.snapshot_once()
+            })
+            .unwrap();
+        assert_eq!(reads, 2);
+        assert!(snapshot.0.is_empty());
+        let mut reads = 0;
+        let error = store
+            .observe_snapshot(&mut || {
+                reads += 1;
+                Err(changed())
+            })
+            .unwrap_err();
+        assert_eq!(reads, 3);
+        assert_eq!(error.code, "session_store_changed");
+        let error = store.observe_snapshot(&mut || Err(refused())).unwrap_err();
+        assert_eq!(error.code, "session_receipt_refused");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_reconciliation_can_clear_a_proven_exit_without_container_removal() {
+        let (root, candidate, binding) = fixture();
+        admit(&candidate, binding)
+            .unwrap()
+            .record_exec(&candidate, &"e".repeat(64))
+            .unwrap();
+        assert_eq!(
+            reconcile(&candidate, &|receipt| {
+                assert!(receipt.exec.is_some());
+                Ok(RetirementProof::ExecExitedValidated)
+            })
+            .unwrap(),
+            1
+        );
+        assert!(retained(&candidate).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn corrupt_or_foreign_evidence_refuses_without_deletion() {
         let (root, candidate, binding) = fixture();

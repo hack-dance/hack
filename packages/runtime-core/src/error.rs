@@ -205,7 +205,16 @@ pub struct CandidateError {
 
 impl CandidateError {
     pub fn with_session(mut self, session: &str) -> Self {
-        if crate::provider::environment_recovery::uuid(session) {
+        // This file is also compiled by the guest, which has no host provider.
+        if session.len() == 36
+            && session.bytes().enumerate().all(|(i, c)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    c == b'-'
+                } else {
+                    c.is_ascii_digit() || (b'a'..=b'f').contains(&c)
+                }
+            })
+        {
             self.refusals.get_or_insert_default().session = Some(session.into());
         }
         self

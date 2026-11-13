@@ -35,6 +35,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<i32, CandidateErr
             continue;
         }
         if ![
+            "--session-id",
             "--run-id",
             "--service",
             "--expect-owner",
@@ -56,6 +57,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<i32, CandidateErr
     }
     let get = |key| values.get(key).copied().ok_or_else(invalid);
     let options = Options {
+        session: get("--session-id")?,
         run: get("--run-id")?,
         service: get("--service")?,
         owner: get("--expect-owner")?,
@@ -94,33 +96,76 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<i32, CandidateErr
     Ok(code)
 }
 
-pub fn sessions(candidate: &Candidate, run: &str, service: &str) -> Result<(), CandidateError> {
-    if run.len() != 32
-        || !run
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || service.is_empty()
-        || service.len() > 128
-        || !service
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+pub fn sessions(candidate: &Candidate, args: &[&str]) -> Result<(), CandidateError> {
+    let mut values = BTreeMap::new();
+    let mut reconcile = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        let key = args[index];
+        index += 1;
+        match key {
+            "--reconcile" if !reconcile => reconcile = true,
+            "--json" if !json => json = true,
+            "--run-id" | "--service" | "--session" => {
+                let value = *args.get(index).ok_or_else(invalid)?;
+                index += 1;
+                if values.insert(key, value).is_some() {
+                    return Err(invalid());
+                }
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    let run = values.get("--run-id").copied();
+    let service = values.get("--service").copied();
+    let session = values.get("--session").copied();
+    if !json
+        || run.is_some_and(|v| v.len() != 32 || !v.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        || service.is_some_and(|v| v.is_empty() || v.len() > 128 || !v.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)))
+        // Reconciliation is native-home wide; filters are presentation only.
+        || (reconcile && !values.is_empty())
     {
         return Err(invalid());
     }
     #[cfg(target_os = "macos")]
     {
-        let records = hack_runtime_core::provider::interactive_session::retained(candidate)?;
-        let sessions: Vec<_> = records
+        use hack_runtime_core::provider::interactive_session;
+        if session.is_some_and(|v| !interactive_session::valid_session(v)) {
+            return Err(invalid());
+        }
+        let reconciled = if reconcile {
+            // Report current evidence even when inspection or the deadline refuses.
+            Some(interactive_session::reconcile_observed(candidate).is_ok())
+        } else {
+            None
+        };
+        let records: Vec<_> = interactive_session::retained(candidate)?
             .into_iter()
-            .filter(|r| r.binding.run == run && r.binding.service == service)
-            .map(|r| r.session)
+            .filter(|r| {
+                run.is_none_or(|v| r.binding.run == v)
+                    && service.is_none_or(|v| r.binding.service == v)
+                    && session.is_none_or(|v| r.session == v)
+            })
+            .map(|r| {
+                serde_json::json!({
+                    "session":r.session, "run":r.binding.run,
+                    "service":r.binding.service, "has_exec":r.exec.is_some()
+                })
+            })
             .collect();
-        println!("{}", serde_json::json!({"version":1,"sessions":sessions}));
+        println!(
+            "{}",
+            serde_json::json!({"version":1,"sessions":records,"reconciled":reconciled})
+        );
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (candidate, run, service);
-        Err(invalid())
+        let _ = (candidate, session);
+        Err(CandidateError::new(
+            "interactive_exec_platform",
+            "Native interactive sessions require macOS.",
+        ))
     }
 }

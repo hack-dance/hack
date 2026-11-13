@@ -421,6 +421,10 @@ jobs:
           (cd "$destination" && echo "$checksum  $archive" | shasum -a 256 --check)
           tar -xf "$destination/$archive" -C "$destination"
           echo "$destination/zig-${platform}-0.15.2" >> "$GITHUB_PATH"
+      - name: Build and verify bundle guest
+        run: |
+          rustup target add aarch64-unknown-linux-musl
+          sh scripts/check-native-guest.sh
       - name: Test interactive guest launcher on a real Linux PTY
         if: runner.os == 'Linux'
         shell: bash

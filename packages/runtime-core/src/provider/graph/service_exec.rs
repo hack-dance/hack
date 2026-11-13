@@ -72,6 +72,7 @@ pub(super) fn interactive(
     candidate: &Candidate,
     options: &ServiceExecOptions<'_>,
     console_size: [u16; 2],
+    session: &str,
     managed: Option<&crate::provider::managed_environment::Managed>,
     live: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<crate::provider::engine::interactive_exec::Attached, CandidateError> {
@@ -120,7 +121,10 @@ pub(super) fn interactive(
             {
                 return Err(refused());
             }
-            require_current_launcher(&container, &super::launcher::current_source())?;
+            require_current_launcher(&container, &super::launcher::current_source()).map_err(|_| error(
+                "graph_service_exec_launcher",
+                "Interactive exec needs the current verified launcher. Use HACK_NO_INTERACTIVE=1 hack exec for finite exec, or restart the service with the matching candidate.",
+            ))?;
             let mut argv = vec![
                 "/run/hack-environment-launcher".into(),
                 "--exec-environment-tty-v2".into(),
@@ -176,6 +180,7 @@ pub(super) fn interactive(
             argv: &argv,
             workdir: options.workdir,
             console_size,
+            session,
         },
         deadline,
         &fresh,
@@ -354,7 +359,7 @@ fn interactive_environment_slot(
     if slot.is_some() && !fresh {
         return Err(error(
             "interactive_exec_environment_required",
-            "Interactive exec requires fresh selected-service environment delivery; no startup-environment fallback was attempted.",
+            "Interactive exec requires fresh selected-service environment delivery. Use HACK_NO_INTERACTIVE=1 hack exec for finite exec, or restart the service with the current candidate.",
         ));
     }
     Ok(slot)

@@ -1,6 +1,6 @@
-//! Deadline-bounded exec handshake I/O without changing shared descriptor flags.
+//! Deadline-bounded exec handshake I/O, restoring descriptor flags after writes.
 //! macOS can reject SO_RCVTIMEO after peer closure even with bytes still queued.
-//! Poll plus per-call nonblocking I/O preserves those bytes and never reads ahead.
+//! Poll plus nonblocking I/O preserves those bytes and never reads ahead.
 use std::{
     io,
     os::{fd::AsRawFd, unix::net::UnixStream},
@@ -52,6 +52,16 @@ pub(super) fn read(stream: &UnixStream, bytes: &mut [u8], deadline: Instant) -> 
 
 pub(super) fn write(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> io::Result<usize> {
     wait(stream, deadline, libc::POLLOUT)?;
+    // Darwin can block a large send despite MSG_DONTWAIT. Handshake callers own
+    // this socket exclusively until attachment; use O_NONBLOCK for the syscall
+    // and restore its exact flags before returning or handing the stream off.
+    // SAFETY: the borrowed stream retains this descriptor throughout.
+    let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
     // SAFETY: readable slice and live socket. Suppress SIGPIPE on peer closure.
     let result = unsafe {
         libc::send(
@@ -61,7 +71,12 @@ pub(super) fn write(stream: &UnixStream, bytes: &[u8], deadline: Instant) -> io:
             libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
         )
     };
-    count(result)
+    let result = count(result);
+    // Capture send's errno before restoring flags, and refuse a failed restore.
+    if unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_SETFL, flags) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    result
 }
 
 fn count(result: isize) -> io::Result<usize> {
@@ -109,7 +124,7 @@ mod tests {
         let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
         let deadline = Instant::now() + Duration::from_millis(50);
         loop {
-            match write(&stream, &[0; 65536], deadline) {
+            match write(&stream, &[0; 87384], deadline) {
                 Ok(n) => assert!(n > 0),
                 Err(error) if retry(&error) => continue,
                 Err(error) => {
@@ -123,6 +138,28 @@ mod tests {
             unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) },
             flags
         );
+    }
+
+    #[test]
+    fn failed_send_restores_blocking_and_nonblocking_flags() {
+        for nonblocking in [false, true] {
+            let (stream, peer) = UnixStream::pair().unwrap();
+            stream.set_nonblocking(nonblocking).unwrap();
+            let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+            drop(peer);
+            assert!(
+                write(
+                    &stream,
+                    &[0; 87384],
+                    Instant::now() + Duration::from_secs(1)
+                )
+                .is_err()
+            );
+            assert_eq!(
+                unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) },
+                flags
+            );
+        }
     }
 
     #[test]

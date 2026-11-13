@@ -522,7 +522,7 @@ installed native exec or live application behavior.
 
 ## Interactive service exec
 
-When both stdin and stdout are terminals, `hack exec SERVICE -- /bin/sh` opens a
+When stdin and stdout are terminals and Hack is in the foreground, `hack exec SERVICE -- /bin/sh` opens a
 TTY session. `HACK_NO_INTERACTIVE=1` selects the finite path instead. The shell is
 explicit: Hack never inserts one. Authored commands inherit the service's startup
 environment. The authenticated owner checks the same service and generation,
@@ -530,11 +530,19 @@ creates and starts the exec, then hands its connected Engine stream to the nativ
 terminal child. The owner remains available for `down` and `restart`; no mutation
 lease is held during the session.
 
-The native home holds at most 1024 retained sessions across all projects.
-`session_receipt_limit` refuses further admission without discarding evidence;
-run `hack down` for a project with retained sessions to release its receipts.
-This includes normally exited commands whose background descendants remain
-unproven. The command's known exit status is still preserved.
+The native home holds at most 1024 **uncertain** sessions across all projects.
+A normally closed stream plus a validated Engine exit retires its receipt silently
+and returns the command's exit code. Successful commands do not accumulate receipts.
+If retirement bookkeeping fails, the validated exit code is preserved and the
+remaining receipt is reported for reconciliation.
+Use `hack exec-sessions` for a read-only, lock-free listing of service names, run IDs
+and session IDs; it retries a changing directory snapshot at most three times,
+then names `session_store_changed` instead of claiming corruption. It creates no state and prints no command or environment values.
+Use `hack exec-sessions --reconcile` to clear only proven exits, exact container
+absence or stopped-boot evidence. It prints the current count and IDs remaining,
+including when its bounded reconciliation cannot finish. An intent without an
+exec ID needs exact container absence or stopped-boot proof. `hack down` for the
+affected project is the fallback. A full home names both listing and reconciliation.
 
 The initial terminal size is supplied before the guest command starts.
 If the host reports an unknown (zero) dimension, Hack uses 24 rows or 80 columns
@@ -549,12 +557,19 @@ child failure. If restoration fails, Hack names `stty sane` as the repair.
 Before create, Hack durably records a value-free session UUID bound to the exact
 owner, run, boot, container and start generation; it records the exec ID before
 start. A known refusal before create dispatch withdraws only its own intent;
-uncertain dispatch retains it. Neither operation is replayed. An exec exit code is returned when
-known, but EOF or process exit cannot retire the session receipt because background
-descendants may remain. Retained evidence produces `session_cleanup_uncertain`,
-the UUID and an exact project/branch `hack down` command. Only same-incarnation
-container absence or a proven stop of the bound VM boot retires it. A new boot
-alone is not proof. Receipt bookkeeping failures do not block container cleanup.
+uncertain dispatch retains it. Neither operation is replayed. Normal stream
+closure and a validated exit for the exact exec, container generation, owner and
+boot retire the receipt. EOF alone, a failed inspect, frontend/native process
+loss and uncertain create/start outcomes retain evidence. The diagnostic queries
+only the attempted session UUID; pre-intent refusals do not list old sessions.
+Late errors preserve that UUID, and reports use the current evidence after
+reconciliation. A changed boot alone is never proof. Receipt bookkeeping failures
+do not block container cleanup; cleanup reports any evidence remaining in the
+native home.
+
+Terminal restoration blocks SIGTTOU on the restoring thread so it can finish after
+the shell reclaims the foreground. If the shell immediately starts another raw-mode
+job, a late restoration can still race that job's termios change.
 
 A malformed or truncated descriptor handoff also retains the receipt and refuses
 without replay. The receiver closes only descriptors present in the copied reply.

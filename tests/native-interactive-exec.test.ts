@@ -122,7 +122,9 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
         ]);
         expect(code, err + out).toBe(0);
         if (cmd[0] === python) {
-          expect(out).toBe("Frontend PTY: four cases passed\n");
+          expect(out).toBe(
+            "Frontend PTY: eight lifetime and five selection cases passed\n"
+          );
         }
       }
     } finally {
@@ -131,3 +133,16 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
   },
   240_000
 );
+
+test("finite exec tests explicitly opt out of the developer terminal", async () => {
+  for (const path of [
+    "tests/native-project-exec.test.ts",
+    "tests/native-authored-project-exec.test.ts",
+  ]) {
+    const source = await readFile(path, "utf8");
+    expect(source).toContain('process.env.HACK_NO_INTERACTIVE = "1"');
+    expect(source).toContain(
+      'restoreEnv("HACK_NO_INTERACTIVE", interactiveEnvironment)'
+    );
+  }
+});

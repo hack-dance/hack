@@ -73,12 +73,21 @@ struct Request {
     one_off: Option<runtime::RunSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     console_size: Option<[u16; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
 }
 impl Request {
     fn validate(&self, review: &native_input::Review) -> Result<(), CandidateError> {
         if self.version != 2
             || self.run != review.scope().run
             || self.review != review.review_id()
+            || match self.session.as_deref() {
+                Some(id) => {
+                    self.action != Action::InteractiveExec
+                        || !crate::provider::environment_recovery::uuid(id)
+                }
+                None => self.action == Action::InteractiveExec,
+            }
             || match self.console_size {
                 Some(size) => self.action != Action::InteractiveExec || size.contains(&0),
                 None => self.action == Action::InteractiveExec,
@@ -421,6 +430,7 @@ pub fn serve_with_storage_tool(
                     &receipt,
                     selected,
                     request.console_size.ok_or_else(refused)?,
+                    request.session.as_deref().ok_or_else(refused)?,
                     &check,
                 ) {
                     Ok(session) => {
@@ -628,6 +638,7 @@ pub(in crate::provider) fn interactive(
         review: review.review_id().into(),
         action: Action::InteractiveExec,
         console_size: Some(console_size),
+        session: Some(options.session.into()),
         logs: None,
         exec: Some(selected.clone()),
         one_off: None,
@@ -646,7 +657,7 @@ pub(in crate::provider) fn interactive(
         None,
     )?;
     match reply.result {
-        Outcome::Interactive { session, .. } => {
+        Outcome::Interactive { session, .. } if session.session == options.session => {
             let result = (|| {
                 journal::read_control(candidate, review)?.check_binding(&expected)?;
                 pin.verify()?;
@@ -655,7 +666,7 @@ pub(in crate::provider) fn interactive(
             })();
             result.map_err(|_: CandidateError| CandidateError::new("session_cleanup_uncertain", "Interactive session handoff changed; the session was retained and no start was replayed.").with_session(&session.session))
         }
-        Outcome::InteractiveRefused { session } => Err(CandidateError::new("session_cleanup_uncertain", "Interactive admission ended after its durable intent; the session was retained and no start was replayed.").with_session(&session)),
+        Outcome::InteractiveRefused { session } if session == options.session => Err(CandidateError::new("session_cleanup_uncertain", "Interactive admission ended after its durable intent; the session was retained and no start was replayed.").with_session(&session)),
         Outcome::Refused { code, .. } => Err(refused().with_cause_code(code)),
         _ => Err(refused()),
     }
@@ -679,6 +690,7 @@ fn request_selected(
         review: review.review_id().into(),
         action,
         console_size: None,
+        session: None,
         logs: selected.clone(),
         exec: exec_selected.clone(),
         one_off: one_off_selected.clone(),

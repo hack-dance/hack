@@ -34,6 +34,7 @@ pub(in crate::provider) struct Attached {
 
 #[cfg(target_os = "macos")]
 pub(in crate::provider) struct Command<'a> {
+    pub session: &'a str,
     pub argv: &'a [String],
     pub workdir: Option<&'a str>,
     pub console_size: [u16; 2],
@@ -55,7 +56,7 @@ impl Engine<'_> {
         fresh()?;
         self.guest.verify()?;
         self.guest.before_effect()?;
-        let intent = interactive_session::admit(candidate, binding.clone())?;
+        let intent = interactive_session::admit(candidate, binding.clone(), command.session)?;
         let session = intent.receipt().session.clone();
         let mut intent = Some(intent);
         let mut dispatched = false;
@@ -251,14 +252,25 @@ impl Observer<'_> {
         }
         Ok(exec)
     }
+    pub(in crate::provider) fn interactive_finished(
+        &self,
+        receipt: &Receipt,
+        deadline: Instant,
+    ) -> Result<Option<i32>, CandidateError> {
+        let value = self.interactive_binding(receipt, deadline)?;
+        self.guest.verify()?;
+        exit_status(&value)
+    }
     pub(in crate::provider) fn interactive_exit(
         &self,
         receipt: &Receipt,
     ) -> Result<i32, CandidateError> {
         let deadline = Instant::now() + Duration::from_secs(2);
-        wait_exit(deadline, &mut || {
+        let exit = wait_exit(deadline, &mut || {
             self.interactive_binding(receipt, deadline)
-        })
+        })?;
+        self.guest.verify()?;
+        Ok(exit)
     }
 }
 
@@ -270,17 +282,22 @@ fn wait_exit(
         remaining(deadline)?;
         let value = inspect()?;
         remaining(deadline)?;
-        if value["Running"] == false {
-            return value["ExitCode"]
-                .as_i64()
-                .filter(|c| (0..=255).contains(c))
-                .map(|c| c as i32)
-                .ok_or_else(uncertain);
-        }
-        if value["Running"] != true {
-            return Err(uncertain());
+        if let Some(code) = exit_status(&value)? {
+            return Ok(code);
         }
         std::thread::sleep(remaining(deadline)?.min(Duration::from_millis(50)));
+    }
+}
+
+fn exit_status(value: &serde_json::Value) -> Result<Option<i32>, CandidateError> {
+    match value["Running"].as_bool() {
+        Some(true) => Ok(None),
+        Some(false) => value["ExitCode"]
+            .as_i64()
+            .filter(|code| (0..=255).contains(code))
+            .map(|code| Some(code as i32))
+            .ok_or_else(uncertain),
+        None => Err(uncertain()),
     }
 }
 
@@ -320,6 +337,71 @@ mod tests {
         );
         assert_eq!(calls, 1);
     }
+    #[test]
+    fn exit_inspection_requires_a_known_status() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"Running":false}),
+            serde_json::json!({"Running":false,"ExitCode":-1}),
+            serde_json::json!({"Running":false,"ExitCode":256}),
+            serde_json::json!({"Running":false,"ExitCode":"0"}),
+        ] {
+            assert!(exit_status(&value).is_err());
+        }
+        assert_eq!(
+            exit_status(&serde_json::json!({"Running":true})).unwrap(),
+            None
+        );
+        assert_eq!(
+            exit_status(&serde_json::json!({"Running":false,"ExitCode":7})).unwrap(),
+            Some(7)
+        );
+    }
+    #[test]
+    fn cancellation_during_large_envelope_write_is_bounded() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let capacity: libc::c_int = 4096;
+        use std::os::fd::AsRawFd;
+        // SAFETY: live socket, initialized integer and matching length.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    client.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&capacity as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&capacity) as _,
+                )
+            },
+            0
+        );
+        server.write_all(b"HKEE2 123\n").unwrap();
+        let checks = std::cell::Cell::new(0);
+        let start = Instant::now();
+        let flags = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_GETFL) };
+        let error = deliver(
+            &mut client,
+            &BTreeMap::from([("TOKEN".into(), "x".repeat(60000))]),
+            start + Duration::from_secs(3),
+            &|| {
+                checks.set(checks.get() + 1);
+                if start.elapsed() > Duration::from_millis(150) {
+                    Err(CandidateError::new("cancelled", "Cancelled."))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(checks.get() > 1);
+        assert_eq!(
+            unsafe { libc::fcntl(client.as_raw_fd(), libc::F_GETFL) },
+            flags
+        );
+    }
+
     #[test]
     fn private_handshake_preserves_coalesced_command_output() {
         for ack in [b"HKEE2 OK\n".as_slice(), b"HKEE2 OK\r\n"] {

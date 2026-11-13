@@ -20,11 +20,22 @@ function refused(): never {
 
 /** Match Compose's terminal-driven exec selection; pipes retain finite exec. */
 export function nativeInteractiveRequested(): boolean {
-  return Boolean(
-    process.stdin.isTTY &&
-      process.stdout.isTTY &&
-      process.env.HACK_NO_INTERACTIVE !== "1"
-  );
+  if (
+    !(process.stdin.isTTY && process.stdout.isTTY) ||
+    process.env.HACK_NO_INTERACTIVE === "1"
+  ) {
+    return false;
+  }
+  try {
+    const terminal = openTerminalControl();
+    try {
+      return terminal.foreground() === terminal.group();
+    } finally {
+      terminal.close();
+    }
+  } catch {
+    return false;
+  }
 }
 
 type Report = {
@@ -108,7 +119,8 @@ export async function nativeInteractiveExec(
   ) {
     return refused();
   }
-  const remedy = `hack down --path ${quote(opts.projectRoot)}${opts.branch ? ` --branch ${quote(opts.branch)}` : ""}`;
+  const session = crypto.randomUUID();
+  const remedy = `hack exec-sessions --reconcile; if still retained, hack down --path ${quote(opts.projectRoot)}${opts.branch ? ` --branch ${quote(opts.branch)}` : ""}`;
   // Cancellation closes the child leash; it must not suppress the subsequent
   // read-only receipt query that reports an uncertain admission.
   return await withPinnedRuntimeBinary(
@@ -129,7 +141,7 @@ export async function nativeInteractiveExec(
           return refused();
         }
         ({ report, exit } = await runInteractiveChild(
-          spawnInteractiveChild(opts),
+          spawnInteractiveChild(opts, session),
           opts
         ));
       } finally {
@@ -144,7 +156,9 @@ export async function nativeInteractiveExec(
       }
       return await finishInteractiveReport({
         opts,
-        report,
+        report:
+          report?.session && report.session !== session ? undefined : report,
+        session,
         exit,
         restorationFailed,
         remedy,
@@ -154,7 +168,10 @@ export async function nativeInteractiveExec(
   );
 }
 
-function spawnInteractiveChild(opts: InteractiveOptions): ChildProcess {
+function spawnInteractiveChild(
+  opts: InteractiveOptions,
+  session: string
+): ChildProcess {
   const env: Record<string, string> = {};
   for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"]) {
     const value = process.env[key];
@@ -169,6 +186,8 @@ function spawnInteractiveChild(opts: InteractiveOptions): ChildProcess {
       opts.runtime.home,
       "graph",
       "exec-interactive",
+      "--session-id",
+      session,
       "--run-id",
       opts.run,
       "--service",
@@ -286,7 +305,8 @@ async function runInteractiveChild(
 async function reportRetainedSessions(
   opts: InteractiveOptions,
   check: () => void,
-  remedy: string
+  remedy: string,
+  session: string
 ): Promise<void> {
   const retained = await (async () => {
     check();
@@ -296,6 +316,8 @@ async function reportRetainedSessions(
       args: [
         "graph",
         "interactive-sessions",
+        "--session",
+        session,
         "--run-id",
         opts.run,
         "--service",
@@ -307,27 +329,32 @@ async function reportRetainedSessions(
   })().catch(() => null);
   if (
     isRecord(retained) &&
-    keys(retained, "sessions,version") &&
+    keys(retained, "reconciled,sessions,version") &&
     retained.version === 1 &&
+    retained.reconciled === null &&
     Array.isArray(retained.sessions) &&
-    retained.sessions.length <= 1024 &&
+    retained.sessions.length <= 1 &&
     retained.sessions.every(
-      (id: unknown) => typeof id === "string" && UUID.test(id)
+      (r: unknown) =>
+        isRecord(r) &&
+        keys(r, "has_exec,run,service,session") &&
+        r.session === session &&
+        r.run === opts.run &&
+        r.service === opts.service &&
+        typeof r.has_exec === "boolean"
     )
   ) {
-    if (retained.sessions.length > 0) {
-      process.stderr.write(
-        "Retained sessions for this service (the interrupted session may be among them):\n"
-      );
-    }
-    for (const id of retained.sessions) {
-      process.stderr.write(
-        `session_cleanup_uncertain: session ${id}; cleanup: ${remedy}\n`
-      );
-    }
+    process.stderr.write(
+      retained.sessions.length === 0
+        ? `No receipt is currently retained for session ${session}.
+`
+        : `session_cleanup_uncertain: session ${session}; cleanup: ${remedy}
+`
+    );
   } else {
     process.stderr.write(
-      `session_cleanup_uncertain: session evidence unavailable; cleanup: ${remedy}\n`
+      `session_cleanup_uncertain: evidence unavailable for session ${session}; cleanup: ${remedy}
+`
     );
   }
 }
@@ -335,6 +362,7 @@ async function reportRetainedSessions(
 async function finishInteractiveReport({
   opts,
   report,
+  session,
   exit,
   restorationFailed,
   remedy,
@@ -342,6 +370,7 @@ async function finishInteractiveReport({
 }: {
   opts: InteractiveOptions;
   report?: Report;
+  session: string;
   exit: number;
   restorationFailed: boolean;
   remedy: string;
@@ -349,30 +378,31 @@ async function finishInteractiveReport({
 }): Promise<number> {
   if (report?.failure === "session_receipt_limit") {
     process.stderr.write(
-      "session_receipt_limit: the native home has 1024 retained interactive sessions; run hack down for a project with retained sessions before opening another.\n"
+      "session_receipt_limit: the native home has 1024 retained interactive sessions; list with hack exec-sessions, then try hack exec-sessions --reconcile. Use hack down for the affected project if evidence remains.\n"
     );
     return 1;
   }
-  if (!report || (report.failure && !report.session)) {
+  if (!report) {
     // SIGKILL cannot send a final report. Query only value-free receipts after
     // the child is reaped; never replay its start to recover an outcome.
-    await reportRetainedSessions(opts, check, remedy);
-    if (report?.failure) {
-      process.stderr.write(
-        `Native interactive exec ended (${report.failure}).\n`
-      );
-    }
+    await reportRetainedSessions(opts, check, remedy, session);
     return exit === 0 ? 1 : exit;
   }
   if (report.retained) {
-    process.stderr.write(
-      `session_cleanup_uncertain: session ${report.session}; cleanup: ${remedy}\n`
-    );
+    await reportRetainedSessions(opts, check, remedy, session);
   }
   if (report.failure) {
-    process.stderr.write(
-      `Native interactive exec ended (${report.failure}).\n`
-    );
+    process.stderr.write(`${interactiveRefusalMessage(report.failure)}\n`);
   }
   return restorationFailed && report.code === 0 ? 1 : report.code;
+}
+
+function interactiveRefusalMessage(code: string): string {
+  if (
+    code === "interactive_exec_environment_required" ||
+    code === "graph_service_exec_launcher"
+  ) {
+    return `Interactive exec needs the current managed-environment launcher (${code}). Use HACK_NO_INTERACTIVE=1 hack exec for finite exec, or restart the service.`;
+  }
+  return `Interactive exec could not confirm admission or completion (${code}); no request was replayed. Check hack ps, or use HACK_NO_INTERACTIVE=1 hack exec for a new finite invocation.`;
 }

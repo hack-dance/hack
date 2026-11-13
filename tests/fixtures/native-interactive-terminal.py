@@ -12,6 +12,62 @@ import fcntl
 import struct
 
 
+def wait_draining(process, master, timeout):
+    deadline = time.monotonic() + timeout
+    drained = 0
+    while process.poll() is None:
+        assert time.monotonic() < deadline, "native terminal child exit deadline"
+        if select.select([master], [], [], .05)[0]:
+            drained += len(os.read(master, 8192))
+            assert drained <= 1024 * 1024, "native terminal fixture output bound"
+    return process.returncode
+
+
+def control_draining(control, master, expected):
+    deadline = time.monotonic() + 10
+    while True:
+        assert time.monotonic() < deadline, "terminal control deadline"
+        ready, _, _ = select.select([control, master], [], [], .05)
+        if master in ready:
+            os.read(master, 8192)
+        if control in ready:
+            assert control.recv(1) == expected
+            return
+
+
+def hold_native():
+    """A shell process with a different group takes back the foreground."""
+    gate = socket.socket(fileno=int(sys.argv[2]))
+    ready_read, ready_write = os.pipe()
+    child = os.fork()
+    if child == 0:
+        gate.close()
+        os.close(ready_write)
+        os.setpgid(0, 0)
+        assert os.read(ready_read, 1) == b"G"
+        os.close(ready_read)
+        os.execv(sys.argv[3], sys.argv[3:])
+    os.close(ready_read)
+    os.setpgid(child, child)
+    previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    os.tcsetpgrp(0, child)
+    os.write(ready_write, b"G")
+    os.close(ready_write)
+    gate.settimeout(15)
+    assert gate.recv(1) == b"B"
+    os.tcsetpgrp(0, os.getpgrp())
+    assert os.tcgetpgrp(0) == os.getpgrp()
+    signal.signal(signal.SIGTTOU, previous)
+    gate.sendall(b"B")
+    _, status = os.waitpid(child, 0)
+    sys.exit(os.waitstatus_to_exitcode(status))
+
+
+if sys.argv[1] == "--hold-native":
+    hold_native()
+    sys.exit(0)
+
+
 def run(mode):
     master, slave = pty.openpty()
     # Unknown dimensions must produce a usable default before admission.
@@ -20,6 +76,7 @@ def run(mode):
     control, child_control = socket.socketpair()
     engine, child_engine = socket.socketpair()
     finish, child_finish = socket.socketpair()
+    reclaim, child_reclaim = socket.socketpair()
     env = {"PATH": "/usr/bin:/bin", "HACK_INTERACTIVE_CHILD": mode,
            "HACK_INTERACTIVE_CONTROL": str(child_control.fileno()),
            "HACK_INTERACTIVE_ENGINE": str(child_engine.fileno()),
@@ -29,16 +86,21 @@ def run(mode):
         os.setsid()
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
 
+    command = [sys.argv[1], "--exact", "provider::interactive_terminal::tests::child_session",
+               "--nocapture", "--test-threads=1"]
+    if mode == "background":
+        command = [sys.executable, os.path.abspath(__file__), "--hold-native",
+                   str(child_reclaim.fileno()), *command]
     process = subprocess.Popen(
-        [sys.argv[1], "--exact", "provider::interactive_terminal::tests::child_session",
-         "--nocapture", "--test-threads=1"],
+        command,
         stdin=slave, stdout=slave, stderr=slave, env=env,
-        pass_fds=(child_control.fileno(), child_engine.fileno(), child_finish.fileno(), slave),
+        pass_fds=(child_control.fileno(), child_engine.fileno(), child_finish.fileno(), child_reclaim.fileno(), slave),
         preexec_fn=session,
     )
     child_control.close()
     child_engine.close()
     child_finish.close()
+    child_reclaim.close()
     control.sendall(bytes(4))
     try:
         deadline = time.monotonic() + 10
@@ -74,15 +136,19 @@ def run(mode):
                     got_input.extend(engine.recv(8192))
             assert got_input == incoming and got_output == outgoing
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 43, 91, 0, 0))
-            assert control.recv(1) == b"R", "resize was not observed"
+            control_draining(control, master, b"R")
             engine.shutdown(socket.SHUT_WR)
+        elif mode == "background":
+            reclaim.sendall(b"B")
+            control_draining(reclaim, master, b"B")
+            control.shutdown(socket.SHUT_WR)
         elif mode == "leash":
             control.shutdown(socket.SHUT_WR)
         elif mode == "signal":
             process.send_signal(signal.SIGTERM)
         else:
             raise AssertionError("unknown scenario")
-        assert control.recv(1) == b"D", "child did not finish and restore"
+        control_draining(control, master, b"D")
         before_read = termios.tcgetattr(slave)
         # Darwin sets PENDIN when TIOCSETA restores ICANON. The next tty read
         # processes it, as the shell would. Keep full equality after that read;
@@ -105,18 +171,19 @@ def run(mode):
         )
         # Keep the session leader alive until the tty read and comparison finish.
         finish.sendall(b"F")
-        assert process.wait(timeout=5) == 0
+        assert wait_draining(process, master, 5) == 0
     finally:
         if process.poll() is None:
             process.kill()
-        process.wait(timeout=5)
+        wait_draining(process, master, 5)
         control.close()
         engine.close()
         finish.close()
+        reclaim.close()
         os.close(master)
         os.close(slave)
 
 
-for mode in ("flood", "leash", "signal"):
+for mode in ("flood", "leash", "signal", "background"):
     run(mode)
-print("Native terminal: flood, resize, idle leash and signal restoration passed")
+print("Native terminal: flood, resize, idle leash, signal and background restoration passed")

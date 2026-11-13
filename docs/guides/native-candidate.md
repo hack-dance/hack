@@ -4089,7 +4089,7 @@ refuse before execution; restart with the matching candidate to adopt this path.
 Services without managed values use ordinary exec. The native live qualification
 of this fresh-delivery path remains separate from its unit and transport tests.
 
-With terminal stdin and stdout, `hack exec SERVICE -- /bin/sh` selects interactive
+With terminal stdin and stdout in the foreground, `hack exec SERVICE -- /bin/sh` selects interactive
 exec. It streams both guest output channels through the terminal, forwards resize
 and terminal control bytes, and releases the provider mutation lease after attach.
 `down` and `restart` can proceed while the session is open. Authored projects use
@@ -4100,7 +4100,8 @@ and enters raw mode before announcing readiness. Hack then sends a bounded base6
 private envelope, waits for the launcher's acknowledgement after terminal
 restoration, and only then forwards user input. The envelope cannot contain Docker
 detach-control bytes. Old launcher mounts refuse before any value is sent; restart
-the service with the matching runtime to enable this mode. The launcher returns
+the service with the matching runtime to enable this mode, or use
+`HACK_NO_INTERACTIVE=1 hack exec SERVICE -- COMMAND` for finite exec. The launcher returns
 125 if admission or exec fails, including an exec failure after acknowledgement.
 This does not isolate values from other processes running as the same container
 user, which already share access to the command's environment.
@@ -4110,21 +4111,43 @@ not reuse mounted startup values. This requirement applies only to the selected
 service: a peer service with no managed values still uses ordinary interactive exec.
 Finite exec retains its existing behavior.
 
-An interactive command's exit code does not prove its descendants are gone. Hack
-retains a value-free session receipt and prints `session_cleanup_uncertain` with
-its UUID and exact `hack down` remedy until the same container incarnation is
-absent or its VM boot is proven stopped. EOF, detach, a dead exec process and a
-changed boot alone are not cleanup proof. No uncertain command is replayed.
+Normal stream closure plus a validated Engine exit returns the exit code and
+silently retires the session receipt. Surviving background processes are the
+user's responsibility, as with Docker. Lost connections or processes before a
+known outcome, uncertain create/start dispatch and failed inspection retain a
+value-free receipt and `session_cleanup_uncertain` with the attempted session ID.
+No uncertain command is replayed.
+
+| stdin | stdout | Foreground group | `HACK_NO_INTERACTIVE` | Selection |
+| --- | --- | --- | --- | --- |
+| TTY | TTY | Yes | unset or not `1` | Interactive |
+| TTY | TTY | No (`&` job) | any | Existing finite exec |
+| TTY | redirected | any | any | Existing finite exec |
+| pipe or file | any | any | any | Existing finite exec |
+| any | any | any | `1` | Existing finite exec |
+
+`hack exec-sessions` lists current service names and run/session IDs without
+taking a mutation lock or writing state. It works after project mappings are
+retired because it selects the native home. `hack exec-sessions --reconcile`
+clears only a validated known exec exit, exact same-boot container absence or
+proven stopped-boot evidence; intents without an exec ID require one of the
+latter two proofs. It reports the exact remaining count and IDs after its bounded
+pass. Use `hack down` for an affected project if uncertainty remains. A new boot
+alone is not proof. Ordinary successful exec does not consume the 1024 retained
+session limit.
 
 ### Interactive exec acceptance
 
 On the built current-branch runtime and CLI, exercise authored and adopted services:
 
 - A shell with foreground/background jobs; Ctrl-C, Ctrl-Z, `fg` and resize.
+- A 2000-line burst and exit 7, followed by finite exec, second and third terminal
+  sessions, `down` and `up -d`; ordinary exits leave no retained receipts.
 - `hack exec SERVICE -- stty size` reports the host terminal's dimensions on its
   first output, before any subsequent window resize.
 - Ctrl-P Ctrl-Q disconnect, retaining its UUID and cleanup remedy.
-- A background process that survives shell exit; receipt remains until `down`.
+- A background process that survives shell exit; a validated shell exit is silent
+  and retires its receipt under the Docker-compatible policy.
 - `down` and restart from another terminal while the session is active; the owner
   stays responsive and the old session never attaches to the new generation.
 - Native child death and frontend death, including an idle terminal; attributes

@@ -1236,3 +1236,46 @@ test("malformed secret-store JSON diagnostic has coordinates and no source text"
   expect(String(error)).toMatch(/Invalid JSON syntax at line \d+, column \d+/);
   expect(String(error)).not.toContain(STORE_SENTINEL);
 });
+
+test("the key-tracking git child never receives Hack's key material (#756, HACK-2169)", async () => {
+  // A fresh process: Bun resolves a spawned command against the PATH it
+  // started with, so the recording git must be first on that PATH.
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  const storePath = join(tempDir, "k.enc.json");
+  const keyPath = join(tempDir, "k.key");
+  await encryptedFileConfig({ storePath, keyPath });
+  await privateKey(keyPath, "store-key-child");
+  // A `.git` above the key, so the tracking check runs git.
+  await mkdir(join(tempDir, ".git"));
+  const bin = join(tempDir, "bin");
+  await mkdir(bin);
+  const record = join(tempDir, "git-env.txt");
+  await writeFile(
+    join(bin, "git"),
+    `#!/bin/sh\nenv | sed -n 's/^\\(HACK_[A-Z_]*\\)=.*/\\1/p' | sort > '${record}'\nexit 1\n`,
+    { mode: 0o755 }
+  );
+  const script = join(tempDir, "child.ts");
+  await writeFile(
+    script,
+    `import { resolveSecretStore } from ${JSON.stringify(join(import.meta.dir, "..", "src", "lib", "secret-store.ts"))};\nawait resolveSecretStore({ projectName: "app" }).catch(() => undefined);\n`
+  );
+  const child = Bun.spawn([process.execPath, script], {
+    cwd: tempDir,
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      HACK_ENV_SECRET_KEY: "synthetic-project-key-sentinel",
+      HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "1",
+    },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  expect(await child.exited).toBe(0);
+  const seen = (await readFile(record, "utf8")).split("\n").filter(Boolean);
+  expect(seen).not.toContain("HACK_ENV_SECRET_KEY");
+  expect(seen).not.toContain("HACK_SECRETS_FILE_KEY");
+});

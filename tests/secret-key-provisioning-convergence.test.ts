@@ -286,7 +286,14 @@ test("concurrent first use of an encrypted_file store converges on one key and l
   expect(keyInfo.mode & 0o777).toBe(0o600);
   expect(keyInfo.nlink).toBe(1);
   expect((await readFile(keyPath, "utf8")).trim().length).toBeGreaterThan(0);
-  expect(await readdir(join(base, "keys"))).toEqual(["secrets-file.key"]);
+  expect((await readdir(join(base, "keys"))).sort()).toEqual([
+    ".hack-staging",
+    "secrets-file.key",
+  ]);
+  // The staging directory keeps only its self-ignoring .gitignore.
+  expect(await readdir(join(base, "keys", ".hack-staging"))).toEqual([
+    ".gitignore",
+  ]);
 
   // Every worker's values decrypt with the key on disk (keychain disabled).
   const store = await resolveSecretStore({ projectName: "app" });

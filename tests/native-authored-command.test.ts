@@ -21,6 +21,7 @@ import {
 } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
 import { refuseUnsupportedNativeUpOptions } from "../src/lib/native-up-refusals.ts";
+import { withOwnedProcessListeners } from "./helpers/owned-process-listeners.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -360,42 +361,46 @@ macTest(
   }
 );
 
-macTest(
-  "recovery cancellation awaits the selected owner and restores command signal listeners",
-  async () => {
-    const selected = await fixture();
-    const before = [
-      process.listenerCount("SIGINT"),
-      process.listenerCount("SIGTERM"),
-    ];
-    const entered = Promise.withResolvers<void>();
-    let aborted = false;
-    const pending = tryNativeAuthoredCommand({
-      ...selected,
-      options: { ...selected.options, operation: "down", recover: true },
-      nothingToRecover: () => Promise.resolve(false),
-      recover: (value) =>
-        new Promise((_, reject) => {
-          value.signal?.addEventListener(
-            "abort",
-            () => {
-              aborted = true;
-              reject(new Error("Retained selected recovery."));
-            },
-            { once: true }
-          );
-          entered.resolve();
-        }),
-    }).catch((error: unknown) => error);
-    await entered.promise;
-    process.emit("SIGINT");
-    expect(await pending).toHaveProperty("code", "E_LIFECYCLE_FAILED");
-    expect(aborted).toBe(true);
-    expect([
-      process.listenerCount("SIGINT"),
-      process.listenerCount("SIGTERM"),
-    ]).toEqual(before);
-  }
+macTest.each([
+  { signal: "SIGINT", code: 130 },
+  { signal: "SIGTERM", code: 143 },
+] as const)(
+  "recovery $signal cancellation preserves exit $code and restores command signal listeners",
+  async ({ signal, code }) =>
+    withOwnedProcessListeners(signal, async () => {
+      const selected = await fixture();
+      const before = [
+        process.listenerCount("SIGINT"),
+        process.listenerCount("SIGTERM"),
+      ];
+      const entered = Promise.withResolvers<void>();
+      let aborted = false;
+      const pending = tryNativeAuthoredCommand({
+        ...selected,
+        options: { ...selected.options, operation: "down", recover: true },
+        nothingToRecover: () => Promise.resolve(false),
+        recover: (value) =>
+          new Promise((_, reject) => {
+            value.signal?.addEventListener(
+              "abort",
+              () => {
+                aborted = true;
+                reject(new Error("Retained selected recovery."));
+              },
+              { once: true }
+            );
+            entered.resolve();
+          }),
+      }).catch((error: unknown) => error);
+      await entered.promise;
+      process.emit(signal);
+      expect(await pending).toBe(code);
+      expect(aborted).toBe(true);
+      expect([
+        process.listenerCount("SIGINT"),
+        process.listenerCount("SIGTERM"),
+      ]).toEqual(before);
+    })
 );
 macTest(
   "foreground dispatch captures exact selection and delegates to the lifetime owner",

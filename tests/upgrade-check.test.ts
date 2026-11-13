@@ -1070,6 +1070,51 @@ test("the snapshot covers the configured default overlay with a keychain backend
   );
 });
 
+test("store-only overlays are found under a name set in the legacy hack.toml", async () => {
+  // Codex review: the snapshot read the name from hack.config.json only.
+  const project = entry("checkout-dir");
+  await mkdir(project.projectDir, { recursive: true });
+  await writeFile(
+    join(project.projectDir, "hack.toml"),
+    'name = "toml-named"\n'
+  );
+  await writeFile(
+    join(project.projectDir, "docker-compose.yml"),
+    "services: {}\n"
+  );
+  await writeRegistry([project]);
+  // A global store holding a staging-only value for "toml-named".
+  const storePath = join(hackHome, "secrets.enc.json");
+  const keyPath = join(hackHome, "secrets-file.key");
+  await writeFile(
+    process.env.HACK_GLOBAL_CONFIG_PATH ?? "",
+    `${JSON.stringify({
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath, keyPath },
+        },
+      },
+    })}\n`
+  );
+  await writeFile(
+    join(project.projectDir, "hack.env.json"),
+    `${JSON.stringify({ version: 1, vars: [{ key: "TOKEN", source: "keychain" }] })}\n`
+  );
+  await writeFile(keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
+  await chmod(keyPath, 0o600);
+  await (
+    await resolveSecretStore({
+      projectName: "toml-named",
+      projectDir: project.projectDir,
+    })
+  ).set({ key: "env.staging.TOKEN", value: SENTINEL });
+  const collected = await collectUpgradeSnapshotTargets();
+  expect(collected.targets.map((t) => t.label)).toContain(
+    "project checkout-dir: .hack/hack.env.staging.yaml"
+  );
+});
+
 test("a config path that is a FIFO is refused at once, never waited on", async () => {
   const project = entry("app-fifo");
   await mkdir(project.projectDir, { recursive: true });

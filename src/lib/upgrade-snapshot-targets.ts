@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 
 import {
@@ -11,6 +11,7 @@ import {
 } from "../constants.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { resolveEnvKeyCandidates } from "./doctor-env-key.ts";
+import { findProjectContext, readProjectConfig } from "./project.ts";
 import {
   discoverLegacyMigrationOverlays,
   previewLegacyMigrationOverlayNames,
@@ -314,23 +315,22 @@ async function migrationOverlays(opts: {
   return { overlays: [...new Set([...fromFiles, ...preview])], gap: null };
 }
 
-/** The name the migration scopes store entries by: the config name, else the checkout directory. */
+/**
+ * The name the migration scopes store entries by, resolved as doctor does:
+ * the project config's name (`hack.config.json` or the legacy `hack.toml`),
+ * else the checkout directory's name.
+ */
 async function projectName(opts: {
   readonly root: string;
   readonly projectDir: string;
 }): Promise<string> {
   try {
-    const parsed: unknown = JSON.parse(
-      await readFile(resolve(opts.projectDir, PROJECT_CONFIG_FILENAME), "utf8")
-    );
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "name" in parsed &&
-      typeof parsed.name === "string" &&
-      parsed.name.trim() !== ""
-    ) {
-      return parsed.name.trim();
+    const project = await findProjectContext(opts.root);
+    if (project !== null) {
+      const name = (await readProjectConfig(project)).name?.trim();
+      if (name) {
+        return name;
+      }
     }
   } catch {
     // Fall back to the directory name, as the migration does.

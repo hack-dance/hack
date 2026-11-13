@@ -306,7 +306,7 @@ The section 2 template already saves the key privately as
 for explicit Doctor cleanup is merged in
 [#769](https://github.com/hack-dance/hack/pull/769), intended for next.17.
 In a build containing that fix, project/shared env keys and current config/YAML
-inputs are not cleanup targets, even when an old backend configuration names
+inputs, including filesystem aliases, are not cleanup targets, even when an old backend configuration names
 one; cleanup refuses instead. Eligible obsolete contract/dotenv files, stores
 and separate backend keys still need the documented delivery and consent
 checks before removal. This does not repair an installed next.16 bundle
@@ -545,6 +545,7 @@ Use normal `up`; a successful bridge connection is still required within the
 startup deadline. Do not add a fixed sleep as a substitute for that check.
 
 Source: [reviewed route probe and whole-graph budget](https://github.com/hack-dance/hack/blob/31339c7b64a0fde1ce7615a14ce8bfd21189cf89/docs/guides/native-candidate.md#native-http-readiness-probe).
+The bridge wait is implemented in [the merged bridge startup code](https://github.com/hack-dance/hack/blob/ceb3e233221bdc4e57de3c80787aca60b0483e4a/packages/runtime-core/src/provider/bridge.rs).
 
 ## 6. Try native, then return to Compose
 
@@ -703,7 +704,7 @@ next.16 bundle.
 | Symptom | What to check or do |
 | --- | --- |
 | `up` stops with `E_LIFECYCLE_FAILED` and a pre-up hook's message | In one trial, the hook needed its project's cloud credentials refreshed. Check that hook's own dependency and credentials privately, then retry. A failing `up.before` hook blocks startup; do not suppress it to continue. |
-| `up -d` or `restart` exits 1 with `E_STARTUP_INCOMPLETE` although services are up | next.16 can misclassify a one-shot service that finishes in under a second. Check the reported service states and actual exit codes first. In the observed case, rerunning `up -d` succeeded. Open PR [#758](https://github.com/hack-dance/hack/pull/758) addresses short one-shot observation and is intended for the next prerelease; do not assume every incomplete start is this bug. |
+| `up -d` or `restart` exits 1 with `E_STARTUP_INCOMPLETE` although services are up | next.16 can misclassify a one-shot service that finishes in under a second. Check the reported service states and actual exit codes first. In the observed case, rerunning `up -d` succeeded. Merged [#758](https://github.com/hack-dance/hack/pull/758), intended for next.17, addresses short one-shot observation; it does not change next.16, and not every incomplete start is this bug. |
 | HTTP on port 80 works but routed HTTPS on 443 times out | On one Mac, another program listened on 443 on all addresses, including loopback; affected project hostnames resolved to `127.0.0.1`. Check listener ownership and hostname resolution. Hostnames resolving to the proxy container's address were not affected in that trial. next.16 Doctor did not detect this case. Merged [#773](https://github.com/hack-dance/hack/pull/773) adds a `proxy ports` warning for failed published loopback paths; inspect competing listeners, VPN serve/runtime HTTPS settings and DNS/bind configuration. There is no automatic repair. |
 | next.16 candidate Doctor suggests `hack daemon start` | That command names the stable CLI. Keep the stable daemon and its launchd service stopped during the shared-home candidate run. Merged [#776](https://github.com/hack-dance/hack/pull/776) treats the daemon as optional for newer candidate Compose trials. |
 | `env list --json` reveals plain values | This is next.16 behavior. Review the breaking listing changes in [#767](https://github.com/hack-dance/hack/pull/767) before updating scripts for the next prerelease. |

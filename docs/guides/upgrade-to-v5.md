@@ -102,8 +102,8 @@ Keep these manual checks too:
 `.hack.secret.key` before `doctor --migrate-env-config`.** HACK-2172 lets
 explicit cleanup delete that key when a legacy store's `keyPath` names it.
 The live-input protection fix is merged for next.17: current project/shared
-keys, config and YAML inputs are not cleanup targets, and cleanup refuses a
-request that names one. It cannot recover a key already removed by an older
+keys, config and YAML inputs are not cleanup targets, including filesystem
+aliases, and cleanup refuses a request that names one. It cannot recover a key already removed by an older
 build. Back up original keys and env state before migration on any version.
 
 The broader Doctor secrets-hygiene report and repairs (HACK-2165, #764) are a

@@ -24,10 +24,10 @@ its original behavior.
 | --- | --- |
 | **Native plain `logs SERVICE --follow` output changes.** It now prints application-text lines, matching a finite snapshot, instead of adding a `SERVICE \| ` prefix. Both service streams go to stdout; Hack notices go to stderr. | Stop parsing the old plain prefix. Use `--json` and the log event's `entry.service`, `entry.stream` and `entry.message` when a script needs those fields. Use `--timestamps` to request Engine timestamps. |
 | **Env listings hide values by default, including migrated plaintext.** Ordinary `env` / `env list` text and JSON output are metadata. JSON omits `value` and reports `has_value`. | Use `has_value` for availability checks. For a value a script actually needs, call `hack env get KEY` with the same `--env` and `--service`; that command prints plaintext. Bulk `--show-values` requires interactive stdin and stdout; `--show-secrets` remains an alias. |
-| **Migration cleanup preserves live keys (HACK-2172).** A legacy store's `keyPath` can no longer make the current project/shared key a cleanup target. Current config and YAML inputs are protected too. | Keep key and env backups before migration. On next.16 or an earlier prerelease, do not run `doctor --migrate-env-config` without a private readable copy of `.hack.secret.key`. The fix does not recover a key already removed. |
+| **Migration cleanup preserves live keys (HACK-2172).** A legacy store's `keyPath` can no longer make the current project/shared key a cleanup target. Current config and YAML inputs are protected too, including filesystem aliases. | Keep key and env backups before migration. On next.16 or an earlier prerelease, do not run `doctor --migrate-env-config` without a private readable copy of `.hack.secret.key`. The fix does not recover a key already removed. |
 | **Doctor fails when an env layer cannot be used by the runtime.** Unreadable, invalid or undecryptable layers no longer get an apparent all-clear. | Run `hack doctor` after upgrading. Fix the reported layer or recover the original key before starting; keep the encrypted file rather than generating a replacement key over it. |
 | **Doctor checks the Compose proxy's loopback ports.** A reachable container address no longer hides a broken published loopback path. | Read the `proxy ports` warning, check competing listeners and DNS/bind settings, then retry. HTTP success on port 80 is not HTTPS success on 443; the check applies no automatic repair. |
-| **Native route readiness can be inferred.** A complete standard Caddy route with no authored healthcheck gets a reviewed HTTP probe and 240 seconds of initial grace. | Review the route port and startup logs. Keep explicit healthchecks; they are not replaced. The grace does not extend the whole graph's deadline or prove the application works. |
+| **Native route readiness can be inferred.** A complete standard Caddy route with no authored healthcheck gets a reviewed HTTP probe and 240 seconds of initial grace. A complete HTTP 200–499 response establishes endpoint readiness, not application correctness. | Review the route port and startup logs. Explicit healthchecks are not replaced, and inferred readiness does not satisfy `depends_on: condition: service_healthy`. The grace does not extend the whole graph's deadline. |
 | **Native start waits for bridge sockets after a stopped pool resumes.** An immediate start no longer fails merely because provider readiness preceded the bridge listener. | Use normal native `up`; startup still requires a successful bridge connection within its deadline. Do not replace readiness checks with a fixed sleep. |
 
 ### Env scripts and migrated plaintext
@@ -45,11 +45,11 @@ values. Encrypting a YAML entry does not erase legacy dotenv or store copies.
 
 Secret writes now use `--secret --value-stdin` or the hidden terminal prompt;
 positional values with `--secret` are refused. Continue using `--secret` when
-updating an encrypted entry. Review legacy lifecycle hooks that depended on a
-service's values: they now receive only global contract values. Put only the
-values a hook needs into global scope. For text parsers, prefer JSON metadata
+updating an encrypted entry. Review legacy lifecycle hooks and processes that
+depended on a service's values: they now receive only global contract values.
+Put only the values they need into global scope. For text parsers, prefer JSON metadata
 or explicit single-key reads over the old tab column positions. YAML projects'
-legacy daemon set/unset routes refuse with HTTP 409
+daemon `GET /v1/env` returns names-only metadata. Their legacy set/unset routes refuse with HTTP 409
 `yaml_env_mutation_unsupported`; use the canonical CLI env commands.
 
 See [the env command and script migration guidance](../env.md#common-commands)

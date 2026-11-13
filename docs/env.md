@@ -1294,7 +1294,7 @@ prerelease, do not run `doctor --migrate-env-config` without a copy of
 `.hack.secret.key`: explicit cleanup can remove it when a legacy store's
 `keyPath` names the same file (HACK-2172). The merged live-input protection fix,
 intended for next.17, refuses cleanup of current project/shared keys, config and
-YAML inputs. It does not recover keys already removed. Keep the old encrypted
+YAML inputs, including filesystem aliases. It does not recover keys already removed. Keep the old encrypted
 files until their original key is recovered; creating a replacement key is not
 recovery.
 

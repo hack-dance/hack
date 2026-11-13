@@ -3739,14 +3739,25 @@ export async function inspectProjectEnvLayerKeys(opts: {
     string,
     { readonly envName: string | null; readonly local: boolean }
   >();
+  // The first label for a path wins: the default layers come first, so an
+  // overlay whose committed path is also a default layer (an overlay named
+  // `local` beside a non-legacy hack.env.local.yaml) never relabels it.
+  const addLayer = (
+    path: string,
+    layer: { readonly envName: string | null; readonly local: boolean }
+  ) => {
+    if (!layers.has(path)) {
+      layers.set(path, layer);
+    }
+  };
   for (const envName of [null, ...overlays]) {
-    layers.set(
+    addLayer(
       resolveProjectEnvConfigPath({ projectDir: opts.projectDir, envName }),
       { envName, local: false }
     );
     // The file `hack env set/unset --local` acts on, including a
     // legacy-compatible local default layer.
-    layers.set(
+    addLayer(
       await resolveProjectEnvEffectiveLocalConfigPath({
         ...opts,
         envName,

@@ -242,6 +242,41 @@ test("an overlay that exists only as its machine-local layer is inspected", asyn
   expect(findings[0]?.message).toContain("SECOND (--env staging --local)");
 });
 
+test("an overlay named local never relabels the local default layer", async () => {
+  // hack.env.local.local.yaml makes `local` an overlay name whose committed
+  // path is this project's local default layer.
+  const repo = await createRepo();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "FIRST",
+    value: "synthetic-first-5d17",
+    secret: true,
+    local: true,
+  });
+  const localPath = resolve(repo.projectDir, "hack.env.local.yaml");
+  await writeFile(
+    resolve(repo.projectDir, "hack.env.local.local.yaml"),
+    "version: 1\nenvironment: local\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  const other = await createRepo();
+  await setSecret(other, "SECOND", "synthetic-second-a3c8");
+  const parsed = YAML.parse(await readFile(localPath, "utf8")) as {
+    values: { global: Record<string, unknown> };
+  };
+  parsed.values.global.SECOND = globalValues(
+    await readFile(other.envFile, "utf8")
+  ).SECOND;
+  await writeFile(localPath, YAML.stringify(parsed));
+
+  const findings = await inspect(repo);
+  expect(findings).toHaveLength(1);
+  expect(findings[0]?.message).toContain("SECOND (--local)");
+  expect(findings[0]?.message).not.toContain("--env local");
+});
+
 test("a layer whose key is missing, or the wrong one, is reported", async () => {
   const repo = await createRepo();
   await setSecret(repo, "FIRST", "synthetic-first-0b4e");

@@ -4,8 +4,12 @@ flowchart TD
   guard -->|No| pr[Light or labeled tiers]
   guard -->|Yes or unavailable policy| heavy[Full ready-PR tiers]
   heavy --> linux
-  pr --> linux[Linux checks and deferral report]
+  pr --> linux[Linux qualification]
+  pr -->|Mac deferred| deferred[Report deferred macOS files]
+  deferred --> linux
   linux --> ready[Lead readiness]
+  event -->|Draft PR| draft[Linux and deferral report]
+  draft --> draftfail[Fan-ins fail: skipped draft]
   event -->|Next push| integration[Selected or full platform and Docker jobs]
   integration --> fanins[Integration fan-ins]
   fanins --> selected[Selected evidence only]
@@ -20,4 +24,4 @@ flowchart TD
   class pr,linux,integration,full live
   class selected wait
   class ready,proof ok
-  class reject,failed fail
+  class reject,failed,draftfail fail

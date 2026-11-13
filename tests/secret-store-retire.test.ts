@@ -176,6 +176,7 @@ async function runRetire(opts: {
   readonly fixture: Fixture;
   readonly path: string;
   readonly yes: boolean;
+  readonly allowUnchecked?: boolean;
 }) {
   const child = Bun.spawn(
     [
@@ -186,6 +187,7 @@ async function runRetire(opts: {
       "--path",
       opts.path,
       ...(opts.yes ? ["--yes"] : []),
+      ...(opts.allowUnchecked ? ["--allow-unchecked"] : []),
     ],
     {
       cwd: root,
@@ -255,11 +257,24 @@ test("retire-store refuses without --yes when it cannot prompt, then retires, an
   const fixture = await setUp();
   const before = await readFile(fixture.storePath);
 
+  // No project has a key file: any may set HACK_SECRETS_FILE_KEY in another
+  // shell, which cannot be checked, so this refuses without the flag.
+  const envOnly = await runRetire({
+    fixture,
+    path: fixture.bystander.projectRoot,
+    yes: true,
+  });
+  expect(envOnly.code).not.toBe(0);
+  expect(envOnly.output).toContain("HACK_SECRETS_FILE_KEY");
+  expect(envOnly.output).toContain("--allow-unchecked");
+  expect(await readFile(fixture.storePath)).toEqual(before);
+
   // Non-interactive and no --yes: refused, nothing moved.
   const refused = await runRetire({
     fixture,
     path: fixture.bystander.projectRoot,
     yes: false,
+    allowUnchecked: true,
   });
   expect(refused.code).not.toBe(0);
   expect(refused.output).toContain("E_INTERACTIVE_REQUIRED");
@@ -271,6 +286,7 @@ test("retire-store refuses without --yes when it cannot prompt, then retires, an
     fixture,
     path: fixture.bystander.projectRoot,
     yes: true,
+    allowUnchecked: true,
   });
   expect(retired.code).toBe(0);
   expectValueFree(retired.output);
@@ -374,6 +390,7 @@ test("retire re-checks the store under its lock: a key restored meanwhile is not
       retire = retireSecretStore({
         projectName: "app-b",
         projectDir: fixture.bystander.projectDir,
+        allowUnchecked: true,
       });
       await Bun.sleep(300);
       // Still waiting for the lock: the key comes back now.
@@ -458,6 +475,7 @@ test("printed restore commands quote a store path that holds a quote", async () 
   const outcome = await retireSecretStore({
     projectName: "app-b",
     projectDir: fixture.bystander.projectDir,
+    allowUnchecked: true,
   });
   expect(outcome.kind).toBe("retired");
   const info = (await inspect(fixture.bystander, "app-b")).find(
@@ -942,11 +960,15 @@ test("a store reached through a symlinked directory is named and retired by its 
   );
   // The confirmation names the real file, and the configured alias.
   expect(
-    await describeRetireTarget({ projectDir: fixture.bystander.projectDir })
+    await describeRetireTarget({
+      projectDir: fixture.bystander.projectDir,
+      allowUnchecked: true,
+    })
   ).toBe(`${fixture.storePath} (configured as ${configured})`);
   const outcome = await retireSecretStore({
     projectName: "app-b",
     projectDir: fixture.bystander.projectDir,
+    allowUnchecked: true,
     now: new Date("2026-11-13T12:00:00Z"),
   });
   expect(outcome.kind).toBe("retired");
@@ -1009,6 +1031,7 @@ test("a target retargeted after confirmation is not retired", async () => {
   const { before, storeB, retargetToB } = await aliasedStores(fixture);
   const planned = await planSecretStoreRetire({
     projectDir: fixture.bystander.projectDir,
+    allowUnchecked: true,
   });
   expect(planned.kind).toBe("plan");
   if (planned.kind !== "plan") {
@@ -1020,6 +1043,7 @@ test("a target retargeted after confirmation is not retired", async () => {
   const outcome = await retireSecretStore({
     projectDir: fixture.bystander.projectDir,
     approved: planned.plan,
+    allowUnchecked: true,
   });
   expect(outcome.kind === "refused" ? outcome.message : "").toContain(
     "changed after it was confirmed"
@@ -1036,6 +1060,7 @@ test("the locked eligibility check reads the pinned store, not the alias", async
   const { before, storeB, retargetToB } = await aliasedStores(fixture);
   const planned = await planSecretStoreRetire({
     projectDir: fixture.bystander.projectDir,
+    allowUnchecked: true,
   });
   if (planned.kind !== "plan") {
     throw new Error("expected a plan");
@@ -1043,6 +1068,7 @@ test("the locked eligibility check reads the pinned store, not the alias", async
   const outcome = await retireSecretStore({
     projectDir: fixture.bystander.projectDir,
     approved: planned.plan,
+    allowUnchecked: true,
     beforeEligibility: async () => {
       // After the path check: A's key comes back, and the alias moves to B.
       await writeFile(fixture.keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
@@ -1099,6 +1125,7 @@ test("control characters in a configured store path are shown, never sent to the
     fixture,
     path: fixture.bystander.projectRoot,
     yes: true,
+    allowUnchecked: true,
   });
   expect(retired.code).toBe(0);
   expect(retired.output).toContain("lin\\x0d\\x1b[2Kked");
@@ -1277,6 +1304,43 @@ test("a store another registered project's key still opens is not retired", asyn
     }
     expect(await readFile(fixture.storePath)).toEqual(before);
   }
+});
+
+test("a project with a wrong key file may still open the store through HACK_SECRETS_FILE_KEY: not retired without --allow-unchecked", async () => {
+  // Codex security review: HACK_SECRETS_FILE_KEY overrides key files and the
+  // keychain at runtime, and may be set in another project's shell. A key
+  // file that does not open the store is no proof that project cannot.
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  const appAKey = join(fixture.reader.projectRoot, ".hack-store.key");
+  await writeFile(appAKey, "synthetic-wrong-key-file\n", { mode: 0o600 });
+  await chmod(appAKey, 0o600);
+  await writeFile(
+    join(fixture.reader.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-a",
+      dev_host: "app-a.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: fixture.storePath, keyPath: appAKey },
+        },
+      },
+    })}\n`
+  );
+  const refused = await retireSecretStore({
+    projectDir: fixture.bystander.projectDir,
+  });
+  const message = refused.kind === "refused" ? refused.message : "";
+  expect(message).toContain("HACK_SECRETS_FILE_KEY overrides both");
+  expect(message).toContain("app-a");
+  expect(message).toContain("--allow-unchecked");
+  expect(await readFile(fixture.storePath)).toEqual(before);
+  const allowed = await retireSecretStore({
+    projectDir: fixture.bystander.projectDir,
+    allowUnchecked: true,
+  });
+  expect(allowed.kind).toBe("retired");
 });
 
 test("retire refuses when registered projects could not be checked, unless --allow-unchecked", async () => {

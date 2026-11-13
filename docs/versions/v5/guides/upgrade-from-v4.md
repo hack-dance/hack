@@ -400,7 +400,10 @@ entries.
      Hack encrypted store, and refuses one that another registered project's
      key still opens. If some registered projects could not be checked (for
      example a worktree on an unmounted volume), it refuses unless you pass
-     `--allow-unchecked`.
+     `--allow-unchecked`. The same flag confirms that no shell running a
+     project that selects the store sets `HACK_SECRETS_FILE_KEY` to its key.
+     That variable overrides key files and the keychain and cannot be checked
+     from the command, so in practice retiring needs `--allow-unchecked`.
    - It prints the `mv` command that puts the store back.
    - Afterwards Doctor lists the retired file as information, and the project
      check no longer fails.

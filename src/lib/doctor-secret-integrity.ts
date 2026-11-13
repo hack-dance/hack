@@ -164,7 +164,7 @@ async function keylessStoreFinding(opts: {
   ].join(" ");
   return {
     status: usedHere ? "error" : "warn",
-    message: `${state} Its entries cannot be counted or read without that key. ${usage} Choose one: restore the key (put the key file back at ${opts.key} with mode 600 from a backup or another machine, or set HACK_SECRETS_FILE_KEY to the same key); or, if the key is gone for good, run \`${retireStoreCommand(opts.projectRoot)}\`, which moves the store aside to a timestamped name beside it, deletes nothing, and prints how to put it back. Do not provision a new key: it cannot open these entries.`,
+    message: `${state} Its entries cannot be counted or read without that key. ${usage} Choose one: restore the key (put the key file back at ${opts.key} with mode 600 from a backup or another machine, or set HACK_SECRETS_FILE_KEY to the same key); or, if the key is gone for good, run \`${retireStoreCommand(opts.projectRoot)}\`, which moves the store aside to a timestamped name beside it, deletes nothing, and prints how to put it back. Add --allow-unchecked once you have confirmed that no shell running a project that selects the store sets HACK_SECRETS_FILE_KEY to its key: that variable overrides key files and cannot be checked from here, so the command refuses without the flag. Do not provision a new key: it cannot open these entries.`,
   };
 }
 

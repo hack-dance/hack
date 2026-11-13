@@ -230,6 +230,7 @@ async function otherOpenersRefusal(input: {
   });
   openers.push(...evidence.openers);
   const unknownKeys = evidence.unknown;
+  const envOnly = [...new Set(evidence.envOnly)].sort();
   if (openers.length > 0) {
     return `The encrypted secret store at ${input.canonical} still opens with a configured key file (${[...new Set(openers)].sort().join(", ")}), so it is not retired; nothing was moved. Check HACK_SECRETS_FILE_KEY and this project's key configuration instead.`;
   }
@@ -241,6 +242,9 @@ async function otherOpenersRefusal(input: {
   }
   if (unknownKeys > 0) {
     return `${unknownKeys} configured key(s) for ${input.canonical} (a key file, or the OS keychain) could not be read, so whether one still opens it is unknown; nothing was moved. Fix their permissions and run hack doctor, or pass --allow-unchecked to retire it anyway.`;
+  }
+  if (envOnly.length > 0) {
+    return `No configured key file or keychain entry opens ${input.canonical}, but HACK_SECRETS_FILE_KEY overrides both, and ${envOnly.join(", ")} may still open it with that variable set in another shell, which cannot be checked from here; nothing was moved. If you have confirmed none does, pass --allow-unchecked to retire it.`;
   }
   if (found.unchecked > 0) {
     return `${found.unchecked} registered project(s) could not be checked (not available, or their Hack config or store file could not be read), so whether one still opens ${input.canonical} is unknown; nothing was moved. Run hack doctor to see them, or pass --allow-unchecked to retire it anyway.`;
@@ -257,9 +261,19 @@ async function otherOpenersRefusal(input: {
 async function keyEvidence(input: {
   readonly storePath: string;
   readonly keyFiles: ReadonlyMap<string, readonly string[]>;
-}): Promise<{ readonly openers: readonly string[]; readonly unknown: number }> {
+}): Promise<{
+  readonly openers: readonly string[];
+  readonly unknown: number;
+  /**
+   * Checkouts whose key file and keychain do not open the store. At
+   * runtime HACK_SECRETS_FILE_KEY overrides both, and it may be set in
+   * their own shell, which cannot be checked from here.
+   */
+  readonly envOnly: readonly string[];
+}> {
   const openers: string[] = [];
   const keychainUsers: string[] = [];
+  const wrongKeyFile: string[] = [];
   let keychainReader = false;
   let unknown = 0;
   for (const [keyPath, names] of input.keyFiles) {
@@ -274,10 +288,12 @@ async function keyEvidence(input: {
     } else if (state === "absent") {
       keychainReader = true;
       keychainUsers.push(...names);
+    } else {
+      wrongKeyFile.push(...names);
     }
   }
   if (!keychainReader) {
-    return { openers, unknown };
+    return { openers, unknown, envOnly: envOnlyNames(wrongKeyFile) };
   }
   const keychainState = await keychainKeyOpensStore({
     storePath: input.storePath,
@@ -288,10 +304,21 @@ async function keyEvidence(input: {
         ? keychainUsers.map((name) => `${name}, through the OS keychain`)
         : ["the OS keychain"])
     );
-  } else if (keychainState === "unknown") {
+    return { openers, unknown, envOnly: [] };
+  }
+  if (keychainState === "unknown") {
     unknown += 1;
   }
-  return { openers, unknown };
+  return {
+    openers,
+    unknown,
+    envOnly: envOnlyNames([...wrongKeyFile, ...keychainUsers]),
+  };
+}
+
+/** Names for the env-override refusal; "this project" when none is registered. */
+function envOnlyNames(names: readonly string[]): readonly string[] {
+  return names.length > 0 ? names : ["this project"];
 }
 
 /** A registered project's primary checkout and each of its linked worktrees. */
@@ -623,6 +650,7 @@ async function eligibilityRefusal(input: {
  */
 export async function describeRetireTarget(opts: {
   readonly projectDir?: string;
+  readonly allowUnchecked?: boolean;
 }): Promise<string | null> {
   const planned = await planSecretStoreRetire(opts);
   return planned.kind === "plan" ? planned.plan.display : null;

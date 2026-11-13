@@ -1686,7 +1686,10 @@ Some older surfaces are still compatibility-oriented:
   directory `<store>.retired-<UTC time>/` beside it, deletes and prints nothing, and says
   how to move it back. It needs `--yes` without a terminal. It refuses a store that
   another registered project's key still opens, and, unless `--allow-unchecked` is
-  passed, a store some registered projects could not be checked for. Doctor then lists
+  passed, a store some registered projects could not be checked for. Because
+  `HACK_SECRETS_FILE_KEY` overrides key files and may be set in another shell for a
+  project that selects the store, the command cannot rule it out and also needs
+  `--allow-unchecked` as confirmation that none does. Doctor then lists
   retired files as information. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
   key paths or immediate parent directories. A key generated on first use is

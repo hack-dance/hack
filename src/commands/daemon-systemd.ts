@@ -1,6 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { GLOBAL_DAEMON_DIR_NAME } from "../constants.ts";
 import type { DaemonPaths } from "../daemon/paths.ts";
 import {
   type DaemonProcessProof,
@@ -449,6 +450,11 @@ export async function stopViaSystemdIfInstalled(opts: {
   readonly hackHome: string;
   readonly deps?: SystemdDeps;
   readonly isPidInUnit?: (pid: number) => Promise<boolean | null>;
+  /**
+   * Proves the unit's main process is this home's hackd; defaults to
+   * {@link proveOwnedDaemonProcess} on `<hackHome>/daemon`. Tests pin it.
+   */
+  readonly proveDaemon?: (pid: number) => Promise<DaemonProcessProof>;
 }): Promise<{
   readonly handled: boolean;
   readonly ownedPid: boolean;
@@ -474,35 +480,12 @@ export async function stopViaSystemdIfInstalled(opts: {
     return none;
   }
   if (!status.installed) {
-    // A failed read is not evidence that nothing runs: a pending
-    // Restart=on-failure may remain, so it is refused, not reported as
-    // stopped (HACK-2052). An observed inactive or not-found unit is
-    // nothing to do.
-    if (status.stateError !== null) {
-      return {
-        ...none,
-        refused: `Not stopping ${SYSTEMD_UNIT_NAME}: there is no unit file at ${unitPath}, but systemd could not report whether it still runs or will restart (${status.stateError}). Check: systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it by hand, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
-      };
-    }
-    if (
-      status.activeState === null ||
-      !MANAGER_STOPPABLE_STATES.has(status.activeState)
-    ) {
-      return none;
-    }
-    // Another home's unit, loaded from its own directory: not this shell's
-    // to stop or refuse over; this shell's direct hackd is still stopped.
-    const loadedHome = await readSystemdUnitHackHome({ deps });
-    if (
-      loadedHome.kind === "home" &&
-      loadedHome.path !== resolve(opts.hackHome)
-    ) {
-      return none;
-    }
-    return {
-      ...none,
-      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: systemd has it ${status.activeState}, but not from ${unitPath}, the unit Hack manages (it was removed or is loaded from another directory), so it cannot be checked. Review it with systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
-    };
+    return await stopWithoutUnitFile({
+      status,
+      unitPath,
+      hackHome: opts.hackHome,
+      deps,
+    });
   }
   // An unknown state (the unit-specific `systemctl show` failed) does not
   // prove the unit is stopped: stop it anyway, which is harmless when it is
@@ -514,20 +497,35 @@ export async function stopViaSystemdIfInstalled(opts: {
     return none;
   }
   // The unit is a per-user singleton: stopping it from a shell with another
-  // Hack home would stop someone else's daemon (HACK-2052). Another home's
-  // unit is left alone (this shell's own direct hackd is still stopped
-  // through the proven-ownership path); an unreadable home is refused.
-  const unitHome = await checkUnitServesHome({
-    hackHome: opts.hackHome,
-    deps,
-    action: "stopping",
+  // Hack home would stop someone else's daemon (HACK-2052). With a live main
+  // process, what it serves is proven from the process itself (its socket
+  // in this home's daemon directory), not from the loaded configuration,
+  // which a reload without a restart can change under a running daemon.
+  const mainProcess = await checkMainProcessServesHome({
+    status,
+    daemonRoot: resolve(opts.hackHome, GLOBAL_DAEMON_DIR_NAME),
+    prove: opts.proveDaemon,
   });
-  if (unitHome.kind === "foreign") {
-    logger.info({ message: unitHome.message });
-    return none;
+  if (mainProcess.kind === "refused") {
+    return { ...none, refused: mainProcess.message };
   }
-  if (unitHome.kind === "unknown") {
-    return { ...none, refused: unitHome.message };
+  if (mainProcess.kind === "none") {
+    // No live process (a pending restart, or starting up): only the loaded
+    // configuration says whose it is. Another home's unit is left alone
+    // (this shell's own direct hackd is still stopped through the
+    // proven-ownership path); an unreadable home is refused.
+    const unitHome = await checkUnitServesHome({
+      hackHome: opts.hackHome,
+      deps,
+      action: "stopping",
+    });
+    if (unitHome.kind === "foreign") {
+      logger.info({ message: unitHome.message });
+      return none;
+    }
+    if (unitHome.kind === "unknown") {
+      return { ...none, refused: unitHome.message };
+    }
   }
   const ownedPid =
     opts.pid !== null &&
@@ -552,6 +550,100 @@ export async function stopViaSystemdIfInstalled(opts: {
     return { handled: false, ownedPid, failed: stopped.error, refused: null };
   }
   return { handled: true, ownedPid, failed: null, refused: null };
+}
+
+/**
+ * `stop` when no unit file is at the managed path (HACK-2052): see the
+ * comments below. Never runs `systemctl stop`; it reports nothing to do or
+ * refuses with the manual steps.
+ */
+async function stopWithoutUnitFile(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly unitPath: string;
+  readonly hackHome: string;
+  readonly deps: SystemdDeps;
+}): Promise<{
+  readonly handled: false;
+  readonly ownedPid: false;
+  readonly failed: null;
+  readonly refused: string | null;
+}> {
+  const { status, unitPath, deps } = opts;
+  const none = {
+    handled: false,
+    ownedPid: false,
+    failed: null,
+    refused: null,
+  } as const;
+  // A failed read is not evidence that nothing runs: a pending
+  // Restart=on-failure may remain, so it is refused, not reported as
+  // stopped (HACK-2052). An observed inactive or not-found unit is
+  // nothing to do.
+  if (status.stateError !== null) {
+    return {
+      ...none,
+      refused: `Not stopping ${SYSTEMD_UNIT_NAME}: there is no unit file at ${unitPath}, but systemd could not report whether it still runs or will restart (${status.stateError}). Check: systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it by hand, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
+    };
+  }
+  if (
+    status.activeState === null ||
+    !MANAGER_STOPPABLE_STATES.has(status.activeState)
+  ) {
+    return none;
+  }
+  // Another home's unit, loaded from its own directory, with no live
+  // process (a pending restart): not this shell's to stop or refuse over.
+  // A live process is refused below either way: it cannot be checked
+  // without the unit file (HACK-2052).
+  const loadedHome = await readSystemdUnitHackHome({ deps });
+  if (
+    status.mainPid === null &&
+    loadedHome.kind === "home" &&
+    loadedHome.path !== resolve(opts.hackHome)
+  ) {
+    return none;
+  }
+  return {
+    ...none,
+    refused: `Not stopping ${SYSTEMD_UNIT_NAME}: systemd has it ${status.activeState}, but not from ${unitPath}, the unit Hack manages (it was removed or is loaded from another directory), so it cannot be checked. Review it with systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
+  };
+}
+
+/**
+ * Whether the unit's live main process is this home's hackd, from evidence
+ * tied to that process ({@link proveOwnedDaemonProcess}: a hackd image
+ * holding a socket in `daemonRoot`), never from configuration (HACK-2052).
+ * `none`: no live main process (none reported, or it exited meanwhile).
+ * `refused`: a live process that is not proven to be this home's, with the
+ * manual status and stop steps.
+ */
+async function checkMainProcessServesHome(opts: {
+  readonly status: SystemdServiceStatus;
+  readonly daemonRoot: string;
+  readonly prove?: (pid: number) => Promise<DaemonProcessProof>;
+}): Promise<
+  | { readonly kind: "ours" | "none" }
+  | { readonly kind: "refused"; readonly message: string }
+> {
+  const pid = opts.status.mainPid;
+  if (pid === null) {
+    return { kind: "none" };
+  }
+  const proof = await (
+    opts.prove ??
+    ((candidate: number) =>
+      proveOwnedDaemonProcess({ pid: candidate, daemonRoot: opts.daemonRoot }))
+  )(pid);
+  if (proof.kind === "owned") {
+    return { kind: "ours" };
+  }
+  if (proof.reason === "not-running") {
+    return { kind: "none" };
+  }
+  return {
+    kind: "refused",
+    message: `Not stopping ${SYSTEMD_UNIT_NAME}: its main process (pid ${pid}) is not proven to be the hackd of this Hack home (${opts.daemonRoot}): ${describeDaemonProcessRefusal(proof.reason)}. It may serve another Hack home (a reload changes the unit's configuration, not the running process). Check: systemctl --user status ${SYSTEMD_UNIT_NAME}; to stop it anyway, run: systemctl --user stop ${SYSTEMD_UNIT_NAME}`,
+  };
 }
 
 /**

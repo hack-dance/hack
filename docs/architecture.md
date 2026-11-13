@@ -374,7 +374,14 @@ failed query whose only message names `hackd.service` itself as absent
 ("Unit hackd.service could not be found."), counts as nothing to do. `start` and `stop` act on the unit only when its effective environment
 serves the shell's Hack home. A unit that serves another Hack home is left alone:
 `start` starts this home's hackd directly (its socket, pid file and lock live in
-this home's `daemon/` directory), and `stop` stops only this home's own hackd.
+this home's `daemon/` directory), and `stop` stops only this home's own hackd. When the unit has a live main
+process, `stop` proves from that process which Hack home it serves (a hackd
+holding a socket in this home's `daemon/` directory), not from the loaded
+configuration: a reload without a restart changes the configuration, not the
+running daemon. A main process that is not proven to be this home's hackd is
+refused, with the `systemctl --user status` and `stop` commands. With no live
+process (a pending restart), the configuration decides, and `stop` still
+cancels the restart.
 When the Hack home cannot be read with certainty (for example an
 `EnvironmentFile=`, an `ExecSearchPath=`, a `PassEnvironment=` naming
 `HACK_HOME`, `HOME` or `PATH`, a relative `HOME`, or an escaped quote or

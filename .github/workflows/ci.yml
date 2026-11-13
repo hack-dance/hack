@@ -818,3 +818,18 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Run process and terminal regressions
         run: bun test tests/daemon-command.test.ts tests/daemon-orphan.test.ts tests/host-exec-lifetime.test.ts tests/host-exec-tty.test.ts tests/shell-observation.test.ts tests/shared-host-lifecycle.test.ts tests/project-shared-helpers.test.ts
+      # The daemon install flows run the real CLI, which checks the host's own
+      # system PATH (and what /usr/bin links into). GitHub's Ubuntu image
+      # leaves trees under /usr and /opt writable by everyone, so this one
+      # job makes them owner-writable, as on a stock install, and requires
+      # the flows to run: the protected system directory decision then has a
+      # hosted Linux check (HACK-2052). The regular test shards skip them.
+      - name: Harden runner system trees for the daemon install flows
+        run: |
+          sudo find /usr /opt -xdev -perm /022 \( -type f -o \( -type d ! -perm -1000 \) \) -print0 > "$RUNNER_TEMP/writable.list"
+          echo "removing group/other write from $(tr -cd '\0' < "$RUNNER_TEMP/writable.list" | wc -c) entries"
+          sudo xargs -0 -r chmod go-w < "$RUNNER_TEMP/writable.list"
+      - name: Run daemon install flows
+        env:
+          HACK_TEST_REQUIRE_INSTALL_FLOWS: "1"
+        run: bun test tests/daemon-systemd-cli.test.ts

@@ -148,50 +148,12 @@ function countHints(text: string): number {
   return text.split(LOCAL_NETWORK_HINT_MESSAGE).length - 1;
 }
 
-/**
- * The payload is `{ url }`, plus the documented DNS notice (`dns` and `hint`
- * together) when the machine running the test has no address for the host.
- * Whether it does depends on that machine's resolver, so both shapes pass;
- * any other key fails.
- */
-function expectOpenPayload(stdout: string, url: string): void {
-  // The Local Network hint belongs on stderr only, never in any payload field.
-  expect(stdout).not.toContain(LOCAL_NETWORK_HINT_MESSAGE);
-  expect(stdout).not.toContain("Local Network");
-  const payload = JSON.parse(stdout) as Record<string, unknown>;
-  expect(payload.url).toBe(url);
-  const extra = Object.keys(payload)
-    .filter((key) => key !== "url")
-    .sort();
-  if (extra.length > 0) {
-    expect(extra).toEqual(["dns", "hint"]);
-    expect(["unresolved", "unconfigured"]).toContain(payload.dns as string);
-    expect(typeof payload.hint).toBe("string");
-  }
-}
-
-test("the open payload check rejects a leaked hint and unknown keys", () => {
-  const url = "https://name-fixture.hack.gy";
-  const rejects = (payload: Record<string, unknown>) => {
-    expect(() => expectOpenPayload(JSON.stringify(payload), url)).toThrow();
-  };
-  rejects({ url, dns: "unresolved", hint: LOCAL_NETWORK_HINT_MESSAGE });
-  rejects({ url, dns: "unresolved" });
-  rejects({ url, hint: "text" });
-  rejects({ url, dns: "other", hint: "text" });
-  rejects({ url, extra: true });
-  rejects({ url: "https://other.example" });
-  expectOpenPayload(JSON.stringify({ url }), url);
-  expectOpenPayload(
-    JSON.stringify({ url, dns: "unresolved", hint: "No address found." }),
-    url
-  );
-});
-
 test("open --json keeps the hint out of the JSON payload", async () => {
   const result = await openJson(null);
   expect(result.code, result.stderr).toBe(0);
-  expectOpenPayload(result.stdout, "https://name-fixture.hack.local");
+  expect(JSON.parse(result.stdout)).toEqual({
+    url: "https://name-fixture.hack.local",
+  });
   expect(result.stdout).not.toContain("Local Network");
   // Shown once on macOS, never elsewhere.
   expect(countHints(result.stderr)).toBe(process.platform === "darwin" ? 1 : 0);
@@ -200,6 +162,8 @@ test("open --json keeps the hint out of the JSON payload", async () => {
 test("open --json does not hint for a non-.local host", async () => {
   const result = await openJson("name-fixture.hack.gy");
   expect(result.code, result.stderr).toBe(0);
-  expectOpenPayload(result.stdout, "https://name-fixture.hack.gy");
+  expect(JSON.parse(result.stdout)).toEqual({
+    url: "https://name-fixture.hack.gy",
+  });
   expect(countHints(result.stderr)).toBe(0);
 }, 15_000);

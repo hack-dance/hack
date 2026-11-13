@@ -49,7 +49,6 @@ import {
   HACK_PROJECT_DIR_PRIMARY,
   LEGACY_GRAFANA_HOST,
   PROJECT_ENV_CONTRACT_FILENAME,
-  PROJECT_ENV_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
   PROJECT_ENV_STATE_FILENAME,
 } from "../constants.ts";
@@ -146,6 +145,11 @@ import {
 } from "../lib/doctor-worktree.ts";
 import { parseDotEnv } from "../lib/env.ts";
 import {
+  applyEnvMigration,
+  previewEnvMigration,
+} from "../lib/env-migration.ts";
+import { envMigrationSnapshots } from "../lib/env-migration-snapshot.ts";
+import {
   ensureDir,
   ensureGitignoreEntry,
   pathExists,
@@ -226,28 +230,20 @@ import {
 import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   canMigrateCheckoutLegacyDotenv,
-  describeKeptSecretStorePointer,
-  describeRetainedLegacyEnvFile,
   discoverComposeServiceNames,
   dropRemovedLegacySecretStorePointer,
   ensureHackDirGitignore,
   HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   HACK_DIR_GITIGNORE_REFUSAL,
   HackDirGitignoreRefusalError,
-  inspectLegacyComposeEnvFileReferences,
   inspectProjectEnvMaterialization,
-  isGitTrackedOrUnknownProjectPath,
-  type LegacyComposeEnvFileReference,
   LegacyDotenvMigrationRefusalError,
   LegacyEnvCleanupError,
   type LegacyProjectEnvMigration,
   listProjectEnvPlaintextEntries,
-  migrateLegacyProjectEnv,
   ProjectEnvLayerPathConflictError,
-  planTrackedEnvMigrationChanges,
   projectEnvConfigExistsForMutation,
   removeLegacyProjectEnvArtifacts,
-  repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
   type TrackedEnvMigrationChange,
 } from "../lib/project-env-config.ts";
@@ -4173,11 +4169,18 @@ export async function assertTrackedEnvMigrationConsent(opts: {
   if (!project) {
     return;
   }
-  const changes = await planTrackedEnvMigrationChanges({
+  const config = await readProjectConfig(project);
+  const preview = await previewEnvMigration({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
-    composeFile: project.composeFile,
+    projectName: config.name ?? "project",
+    serviceNames: await discoverComposeServiceNames({
+      composeFile: project.composeFile,
+    }),
   });
+  const changes: TrackedEnvMigrationChange[] = preview.files
+    .filter((file) => file.tracked && file.action !== "removable")
+    .map((file) => ({ path: file.path, change: "edit" }));
   if (changes.length === 0) {
     return;
   }
@@ -4203,85 +4206,6 @@ async function confirmTrackedEnvChange(opts: {
 }
 
 /** Confirms the Compose env_file repair, as a tracked change when git tracks the file. */
-async function confirmComposeEnvRepair(opts: {
-  readonly projectRoot: string;
-  readonly composeFile: string;
-  readonly acceptTrackedChanges: boolean;
-}): Promise<boolean> {
-  const message =
-    "Remove legacy .hack/.env* env_file references from compose now?";
-  if (
-    await isGitTrackedOrUnknownProjectPath({
-      projectRoot: opts.projectRoot,
-      path: opts.composeFile,
-    })
-  ) {
-    return await confirmTrackedEnvChange({
-      message: `${message} (git tracks ${relative(opts.projectRoot, opts.composeFile)}; commit the change for teammates)`,
-      accept: opts.acceptTrackedChanges,
-    });
-  }
-  return await doctorConfirm({ message, initialValue: true });
-}
-
-function buildEnvMigrationNote(opts: {
-  readonly migrated: LegacyProjectEnvMigration;
-  readonly projectRoot: string;
-  /** Only the migration without a contract makes every value global. */
-  readonly globalDelivery: boolean;
-}): string {
-  const { migrated } = opts;
-  const notes = [`Wrote ${migrated.wroteFiles.join(", ")}`];
-  for (const moved of migrated.movedPlainValues) {
-    notes.push(
-      `Moved ${moved.key} to ${relative(opts.projectRoot, moved.path)} (values omitted).`
-    );
-  }
-  if (migrated.updatedProjectConfig) {
-    notes.push("Updated .hack/hack.config.json for the modern env format.");
-  }
-  if (opts.globalDelivery) {
-    notes.push(
-      "Migrated values are global: every service, including one added later, and every host lifecycle hook now receives them."
-    );
-  }
-  return notes.join("\n");
-}
-
-/** Describes the env migration and asks whether to run it. */
-async function confirmProjectEnvMigration(opts: {
-  readonly projectRoot: string;
-  readonly projectDir: string;
-  readonly contractPath: string;
-  readonly hasContract: boolean;
-  readonly trackedChanges: readonly TrackedEnvMigrationChange[];
-}): Promise<boolean> {
-  const { projectDir, contractPath, hasContract } = opts;
-  note(
-    [
-      "Detected legacy project env files.",
-      hasContract
-        ? `- source: ${contractPath} and current local env state`
-        : `- source: ${resolve(projectDir, PROJECT_ENV_FILENAME)} and its overlays (no ${PROJECT_ENV_CONTRACT_FILENAME}; secret-backend values are not migrated)`,
-      hasContract
-        ? `- target: ${resolve(projectDir, "hack.env.default.yaml")}`
-        : `- target: values go to the gitignored ${resolve(projectDir, "hack.env.local.yaml")} (and hack.env.<overlay>.local.yaml); ${resolve(projectDir, "hack.env.default.yaml")} is written with no values`,
-      "- runtime: direct env injection by default; .hack/.env becomes compatibility-only",
-      ...(opts.trackedChanges.length > 0
-        ? [
-            `- git-tracked files that may change (deletes and Compose edits ask first): ${describeTrackedEnvMigrationChanges({ projectRoot: opts.projectRoot, changes: opts.trackedChanges })}`,
-          ]
-        : []),
-    ].join("\n"),
-    "env migration"
-  );
-  return await doctorConfirm({
-    message:
-      "Migrate project env from .hack/hack.env.json/.hack/.env to hack.env.*.yaml now?",
-    initialValue: true,
-  });
-}
-
 async function maybeMigrateProjectEnvConfig(opts: {
   readonly startDir: string;
   readonly acceptTrackedChanges: boolean;
@@ -4290,171 +4214,44 @@ async function maybeMigrateProjectEnvConfig(opts: {
   if (!project) {
     return;
   }
-
-  // The migration writes env layers, so it decides the format like
-  // `hack env set`: a symlinked layer counts as an env layer (never written
-  // through), and a dangling or non-file layer entry refuses closed with
-  // E_PATH_CONFLICT instead of being replaced.
-  if (
-    (await projectEnvConfigExistsForMutation({
-      projectDir: project.projectDir,
-    })) &&
-    // A checkout whose legacy files hold values its layers don't deliver still
-    // needs migrating, for example after a teammate's migration was committed.
-    !(await canMigrateCheckoutLegacyDotenv({
-      projectRoot: project.projectRoot,
-      projectDir: project.projectDir,
-      serviceNames: await discoverComposeServiceNames({
-        composeFile: project.composeFile,
-      }),
-    }))
-  ) {
-    note("Project already uses the new env config files.", "doctor");
-    await maybeRepairModernProjectComposeEnvReferences({
-      projectRoot: project.projectRoot,
-      composeFile: project.composeFile,
-      projectDir: project.projectDir,
-      acceptTrackedChanges: opts.acceptTrackedChanges,
-    });
-    await printMigrationProtectionHint(project);
-    return;
-  }
-
-  // A project without the hack.env.json contract keeps its values only in
-  // .hack/.env and .hack/.env.<overlay>; it is migrated from those files.
-  // `hack env set`/`unset --service` refusals in such a project point here.
-  const contractPath = resolve(
-    project.projectDir,
-    PROJECT_ENV_CONTRACT_FILENAME
-  );
-  const contract = await readHackEnvContract({
-    projectDir: project.projectDir,
-  });
-  const hasContract = contract.exists;
-
-  const cfg = await readProjectConfig(project);
-  const projectName = (
-    cfg.name ??
-    project.projectRoot.split("/").at(-1) ??
-    "project"
-  ).trim();
-  const serviceNames = await discoverComposeServiceNames({
-    composeFile: project.composeFile,
-  });
-  // The migration refuses this contract, so don't describe it or ask first.
-  if (
-    contract.parseError === undefined &&
-    !(await confirmProjectEnvMigration({
-      projectRoot: project.projectRoot,
-      projectDir: project.projectDir,
-      contractPath,
-      hasContract,
-      trackedChanges: await planTrackedEnvMigrationChanges({
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        composeFile: project.composeFile,
-      }),
-    }))
-  ) {
-    return;
-  }
-
-  const migrated = await migrateLegacyProjectEnv({
+  const config = await readProjectConfig(project);
+  const migrationProject = {
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
-    projectName,
-    serviceNames,
-    materialize: false,
-    migrateUndeclaredDotenv: true,
-    composeRepairFollows: true,
-  });
-  if (migrated.wroteFiles.length === 0) {
-    note("Legacy env migration found nothing to write.", "doctor");
-    await printMigrationProtectionHint(project);
-    return;
-  }
-  note(
-    buildEnvMigrationNote({
-      migrated,
-      projectRoot: project.projectRoot,
-      globalDelivery: !hasContract,
+    projectName: config.name ?? "project",
+    serviceNames: await discoverComposeServiceNames({
+      composeFile: project.composeFile,
     }),
-    "doctor"
+  };
+  const preview = await previewEnvMigration(migrationProject);
+  const tracked = preview.files.filter(
+    (file) => file.tracked && file.action !== "removable"
   );
-
-  for (const retained of migrated.retainedEnvFiles) {
-    note(
-      describeRetainedLegacyEnvFile({ shownPath: retained.path, retained }),
-      "env cleanup"
-    );
+  const accept =
+    opts.acceptTrackedChanges ||
+    tracked.length === 0 ||
+    (await confirmTrackedEnvChange({
+      message: "Apply the previewed env migration changes to tracked files?",
+      accept: false,
+    }));
+  if (!accept) {
+    return;
   }
-  if (migrated.keptSecretStorePointer) {
-    note(
-      describeKeptSecretStorePointer({
-        shownConfigPath: migrated.keptSecretStorePointer.configPath,
-        shownStorePath: migrated.keptSecretStorePointer.storePath,
-        pointer: migrated.keptSecretStorePointer,
-      }),
-      "env cleanup"
-    );
-  }
-
-  let composeRepaired = false;
-  if (migrated.composeEnvFileReferences.length > 0) {
-    note(
-      buildComposeEnvRepairNote({
-        references: migrated.composeEnvFileReferences,
-      }),
-      "compose env repair"
-    );
-    const shouldRepairCompose = await confirmComposeEnvRepair({
-      projectRoot: project.projectRoot,
-      composeFile: project.composeFile,
-      acceptTrackedChanges: opts.acceptTrackedChanges,
-    });
-    if (shouldRepairCompose) {
-      const repaired = await repairLegacyComposeEnvFileReferences({
-        composeFile: project.composeFile,
-        projectDir: project.projectDir,
-      });
-      if (repaired.changed) {
-        note(
-          [
-            `Updated ${project.composeFile}.`,
-            ...repaired.removed.map(
-              (reference) =>
-                `- ${reference.service}: removed env_file ${reference.configuredPath}`
-            ),
-          ].join("\n"),
-          "compose env repair"
-        );
-        composeRepaired = true;
-      } else {
-        note(
-          "No compose env_file updates were needed; legacy compatibility files remain blocked from cleanup.",
-          "compose env repair"
-        );
-      }
-    } else {
-      note(
-        "Leaving legacy .hack/.env* files in place because compose still references them.",
-        "compose env repair"
-      );
-    }
-  }
-
-  const cleanupCandidates = doctorEnvCleanupCandidates({
-    migrated,
-    composeRepaired,
+  const result = await applyEnvMigration({
+    project: migrationProject,
+    acceptTrackedChanges: accept,
+    snapshots: await envMigrationSnapshots(),
   });
-  await offerDoctorEnvCleanup({
-    projectRoot: project.projectRoot,
-    projectDir: project.projectDir,
-    projectName,
-    paths: cleanupCandidates,
-    context: migrated.cleanupContext,
-    acceptTrackedChanges: opts.acceptTrackedChanges,
-  });
+  note(
+    result.status === "already_complete"
+      ? "Env migration already completed; no files were changed."
+      : "Env migration completed. Legacy files were kept for a separate cleanup step.",
+    "env migration"
+  );
+  note(
+    `Journal: ${result.journalPath}\nRollback snapshot: ${result.manifestPath}\nAfter validating the project, preview cleanup with: hack env migrate --cleanup --path ${JSON.stringify(project.projectRoot)}`,
+    "env migration"
+  );
   await printMigrationProtectionHint(project);
 }
 
@@ -4487,97 +4284,6 @@ async function printMigrationProtectionHint(project: {
     ].join("\n"),
     "env protection"
   );
-}
-
-/**
- * Offers the legacy env files a migration left for removal. Untracked files
- * keep doctor's usual prompt; git-tracked ones get their own prompt and,
- * without one, are removed only with `--accept-tracked-env-changes`.
- */
-async function offerDoctorEnvCleanup(opts: {
-  readonly projectRoot: string;
-  readonly projectDir: string;
-  readonly projectName: string;
-  readonly paths: readonly string[];
-  readonly context?: LegacyProjectEnvMigration["cleanupContext"];
-  readonly acceptTrackedChanges: boolean;
-}): Promise<void> {
-  const untracked: string[] = [];
-  const tracked: string[] = [];
-  for (const path of opts.paths) {
-    ((await isGitTrackedOrUnknownProjectPath({
-      projectRoot: opts.projectRoot,
-      path,
-    }))
-      ? tracked
-      : untracked
-    ).push(path);
-  }
-
-  // A key cannot be removed while its tracked store still exists. Include an
-  // untracked key in that store's later consent batch, keeping the dependency
-  // intact whether tracked cleanup is accepted, declined or refused.
-  const store = opts.context?.store;
-  if (store && tracked.includes(store.path)) {
-    const keyIndex = untracked.indexOf(store.keyPath);
-    if (keyIndex !== -1) {
-      tracked.push(...untracked.splice(keyIndex, 1));
-    }
-  }
-
-  if (untracked.length > 0) {
-    note(
-      [
-        "Legacy env artifacts still exist and can now be removed:",
-        ...untracked.map((path) => `- ${path}`),
-      ].join("\n"),
-      "env cleanup"
-    );
-    if (
-      await doctorConfirm({
-        message:
-          "Remove legacy env files and obsolete project env config entries now?",
-        initialValue: true,
-      })
-    ) {
-      await removeDoctorEnvCleanup({
-        projectRoot: opts.projectRoot,
-        projectDir: opts.projectDir,
-        projectName: opts.projectName,
-        paths: untracked,
-        context: opts.context,
-      });
-    }
-  }
-
-  if (tracked.length > 0) {
-    note(
-      [
-        "These legacy env files are tracked by git, or are keys kept with a tracked store, and can now be removed. Teammates share the tracked files, so commit their removal together with the new env layers:",
-        ...tracked.map((path) => `- ${path}`),
-      ].join("\n"),
-      "env cleanup"
-    );
-    if (
-      await confirmTrackedEnvChange({
-        message: "Remove these git-tracked legacy env files now?",
-        accept: opts.acceptTrackedChanges,
-      })
-    ) {
-      await removeDoctorEnvCleanup({
-        projectRoot: opts.projectRoot,
-        projectDir: opts.projectDir,
-        projectName: opts.projectName,
-        paths: tracked,
-        context: opts.context,
-      });
-    } else {
-      note(
-        "Kept the git-tracked legacy env files. Remove them with `git rm` when teammates have migrated.",
-        "env cleanup"
-      );
-    }
-  }
 }
 
 /**
@@ -4653,73 +4359,6 @@ export function doctorEnvCleanupCandidates(opts: {
     ...opts.migrated.cleanupCandidates,
     ...(opts.composeRepaired ? opts.migrated.blockedCleanupCandidates : []),
   ].sort((left, right) => left.localeCompare(right));
-}
-
-function buildComposeEnvRepairNote(opts: {
-  readonly references: readonly LegacyComposeEnvFileReference[];
-}): string {
-  return [
-    "Compose still references legacy Hack compatibility env files:",
-    ...opts.references.map(
-      (reference) =>
-        `- ${reference.service}: ${reference.configuredPath} (${reference.resolvedPath})`
-    ),
-    "Hack now injects env directly at runtime by default, so these env_file entries should usually be removed.",
-  ].join("\n");
-}
-
-async function maybeRepairModernProjectComposeEnvReferences(opts: {
-  readonly projectRoot: string;
-  readonly composeFile: string;
-  readonly projectDir: string;
-  readonly acceptTrackedChanges: boolean;
-}): Promise<void> {
-  const references = await inspectLegacyComposeEnvFileReferences({
-    composeFile: opts.composeFile,
-    projectDir: opts.projectDir,
-  });
-  if (references.length === 0) {
-    return;
-  }
-
-  note(
-    buildComposeEnvRepairNote({
-      references,
-    }),
-    "compose env repair"
-  );
-  const shouldRepairCompose = await confirmComposeEnvRepair({
-    projectRoot: opts.projectRoot,
-    composeFile: opts.composeFile,
-    acceptTrackedChanges: opts.acceptTrackedChanges,
-  });
-  if (!shouldRepairCompose) {
-    note(
-      "Leaving legacy .hack/.env* files in place because compose still references them.",
-      "compose env repair"
-    );
-    return;
-  }
-
-  const repaired = await repairLegacyComposeEnvFileReferences({
-    composeFile: opts.composeFile,
-    projectDir: opts.projectDir,
-  });
-  if (!repaired.changed) {
-    note("No compose env_file updates were needed.", "compose env repair");
-    return;
-  }
-
-  note(
-    [
-      `Updated ${opts.composeFile}.`,
-      ...repaired.removed.map(
-        (reference) =>
-          `- ${reference.service}: removed env_file ${reference.configuredPath}`
-      ),
-    ].join("\n"),
-    "compose env repair"
-  );
 }
 
 export async function buildDoctorRemediationPlanLines(opts: {

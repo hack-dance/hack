@@ -29,6 +29,10 @@ import {
   readEnvHydrateInput,
 } from "../lib/env-hydrate-input.ts";
 import {
+  hasPendingEnvMigration,
+  migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
+} from "../lib/env-migration.ts";
+import {
   assertEnvValueStdinUsage,
   readEnvValueFromStdin,
 } from "../lib/env-value-stdin.ts";
@@ -88,7 +92,6 @@ import {
   hydrateProjectEnvLocalLayer,
   listProjectEnvPlaintextEntries,
   materializeProjectEnv,
-  migrateLegacyProjectEnv,
   type ProjectEnvResolvedMetadata,
   parseProjectEnvTarget,
   projectEnvConfigExists,
@@ -112,6 +115,7 @@ import {
 import { run } from "../lib/shell.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
+import { envMigrateCommand } from "./env-migrate.ts";
 import { hostPsCommand } from "./host-ps.ts";
 
 const optShowSecrets = defineOption({
@@ -992,9 +996,10 @@ async function maybeMigrateLegacyProjectEnv(input: {
   readonly reason: "mutation" | "runtime";
 }): Promise<boolean> {
   if (
-    await projectEnvConfigExists({
+    !(await hasPendingEnvMigration(input.project)) &&
+    (await projectEnvConfigExists({
       projectDir: input.project.projectDir,
-    })
+    }))
   ) {
     return false;
   }
@@ -2879,6 +2884,7 @@ export const envCommand = defineCommand({
   options: [],
   positionals: [],
   subcommands: [
+    envMigrateCommand,
     withHandler(listSpec, handleEnvList),
     withHandler(protectSpec, handleEnvProtect),
     withHandler(getSpec, handleEnvGet),

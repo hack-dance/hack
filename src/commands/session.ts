@@ -14,6 +14,10 @@ import {
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPretty } from "../cli/options.ts";
 import {
+  hasPendingEnvMigration,
+  migrateLegacyEnvForCommand as migrateLegacyProjectEnv,
+} from "../lib/env-migration.ts";
+import {
   readHackEnvContract,
   resolveHackEnv,
   selectHackEnvValues,
@@ -31,7 +35,6 @@ import {
   assertValidProjectEnvScopeName,
   discoverComposeServiceNames,
   finishImplicitLegacyEnvMigration,
-  migrateLegacyProjectEnv,
   projectEnvConfigExists,
   resolveProjectEnvConfig,
   selectProjectEnvValues,
@@ -1047,9 +1050,10 @@ async function maybeMigrateLegacySessionEnv(opts: {
   readonly projectName: string;
 }): Promise<void> {
   if (
-    await projectEnvConfigExists({
+    !(await hasPendingEnvMigration(opts.project)) &&
+    (await projectEnvConfigExists({
       projectDir: opts.project.projectDir,
-    })
+    }))
   ) {
     return;
   }

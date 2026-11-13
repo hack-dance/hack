@@ -272,3 +272,194 @@ fn project_plan_reports_shared_start_refusals_without_runtime_effects() {
         assert_eq!(std::fs::read_dir(&candidate).unwrap().count(), 0);
     }
 }
+
+#[test]
+fn preflight_readiness_and_cli_plan_fields_match_shared_fixtures() {
+    use hack_runtime_core::{
+        Candidate,
+        project::{self, PlanOptions},
+    };
+    let fixture = Fixture::new();
+    let project = fixture.directory("project");
+    let candidate_root = fixture.directory("candidate");
+    let candidate = Candidate::discover(&candidate_root).unwrap();
+    let cases: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/native-start-readiness.json"
+    ))
+    .unwrap();
+    let image = format!("sha256:{}", "a".repeat(64));
+    for case in cases {
+        let mut compose = case["compose"].clone();
+        for service in compose["services"].as_object_mut().unwrap().values_mut() {
+            service["image"] = image.clone().into();
+        }
+        std::fs::write(
+            project.join("compose.json"),
+            serde_json::to_vec(&compose).unwrap(),
+        )
+        .unwrap();
+        let profiles: Vec<String> = serde_json::from_value(
+            case["profiles"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into(),
+        )
+        .unwrap();
+        let report = project::plan(
+            &candidate,
+            PlanOptions {
+                branch: None,
+                project: &project,
+                compose_file: Path::new("compose.json"),
+                profiles: &profiles,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&report.start_readiness).unwrap(),
+            case["goals"],
+            "{}",
+            case["name"]
+        );
+        // Snapshot exactly the reviewed fields the CLI's readiness/cache/route
+        // helpers consume. The Bun suite feeds this same snapshot to those
+        // helpers, so neither job needs the other language's toolchain.
+        let snapshot: serde_json::Map<String, Value> = report.plan.services.iter().map(|(name, service)| {
+            (name.clone(), serde_json::json!({
+                "active": service.active,
+                "one_shot": service.one_shot,
+                "dependency_cache": service.dependency_cache.as_ref().map(|_| serde_json::json!({})),
+                "routing": service.routing.as_ref().map(|route| serde_json::json!({"port": route.port})),
+                "healthcheck": service.healthcheck.as_ref().map(|health| serde_json::json!({
+                    "disabled": health.disabled,
+                    "native_http": health.native_http.as_ref().map(|probe| serde_json::json!({"port": probe.port})),
+                })),
+            }))
+        }).collect();
+        assert_eq!(
+            Value::Object(snapshot),
+            case["reviewed_services"],
+            "{}",
+            case["name"]
+        );
+        assert_eq!(std::fs::read_dir(&candidate_root).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn plan_delivery_context_is_names_only_action_scoped_and_outside_identity() {
+    let fixture = Fixture::new();
+    let project = fixture.directory("project");
+    let candidate = fixture.directory("candidate");
+    let binary = Path::new(env!("CARGO_BIN_EXE_hack-native"));
+    fs::write(project.join("compose.json"), serde_json::to_vec(&serde_json::json!({"services": {
+        "app": {"image": format!("sha256:{}", "a".repeat(64)), "restart": "always", "environment": {"TOKEN": null}},
+        "worker": {"image": format!("sha256:{}", "a".repeat(64)), "profiles": ["worker"], "restart": "always"}
+    }})).unwrap()).unwrap();
+    let base = [
+        "project",
+        "plan",
+        "--project",
+        project.to_str().unwrap(),
+        "--file",
+        "compose.json",
+        "--json",
+    ];
+    let plain = invoke(binary, &candidate, &project, &base);
+    assert!(plain.status.success());
+    let plain: Value = serde_json::from_slice(&plain.stdout).unwrap();
+    assert_eq!(plain["start_refusals"], serde_json::json!([]));
+    let mut flags = base.to_vec();
+    flags.extend([
+        "--start-managed-service",
+        "app",
+        "--start-managed-service",
+        "worker",
+    ]);
+    let reviewed = invoke(binary, &candidate, &project, &flags);
+    assert!(
+        reviewed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reviewed.stderr)
+    );
+    let reviewed: Value = serde_json::from_slice(&reviewed.stdout).unwrap();
+    assert_eq!(reviewed["plan_id"], plain["plan_id"]);
+    assert_eq!(reviewed["plan"], plain["plan"]);
+    let refusals = reviewed["start_refusals"].as_array().unwrap();
+    assert_eq!(refusals.len(), 1);
+    assert_eq!(refusals[0]["code"], "graph_restart_policy");
+    assert_eq!(refusals[0]["service"], "app");
+    flags.extend(["--start-managed-service", "not-a-service"]);
+    let unknown = invoke(binary, &candidate, &project, &flags);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("invalid_start_review_context"));
+    flags[1] = "capture";
+    let capture = invoke(binary, &candidate, &project, &flags);
+    assert!(!capture.status.success());
+    assert!(String::from_utf8_lossy(&capture.stderr).contains("invalid_arguments"));
+    assert_eq!(fs::read_dir(&candidate).unwrap().count(), 0);
+}
+
+#[test]
+fn delivery_context_admits_the_full_compose_budget_and_oversized_files_refuse_before_context() {
+    let fixture = Fixture::new();
+    let project = fixture.directory("project");
+    let candidate = fixture.directory("candidate");
+    let image = format!("sha256:{}", "a".repeat(64));
+    for count in [hack_runtime_core::project::MAX_COMPOSE_SERVICES, 130] {
+        let services: serde_json::Map<String, Value> = (0..count)
+        .map(|index| {
+            (
+                format!("service-{index}"),
+                serde_json::json!({
+                    "image": image, "profiles": if index == 0 { vec![] } else { vec!["optional"] },
+                    "environment": {"TOKEN": null}
+                }),
+            )
+        })
+        .collect();
+        fs::write(
+            project.join("compose.json"),
+            serde_json::to_vec(&serde_json::json!({"services": services})).unwrap(),
+        )
+        .unwrap();
+        let mut args = vec![
+            "project",
+            "plan",
+            "--project",
+            project.to_str().unwrap(),
+            "--file",
+            "compose.json",
+            "--json",
+        ];
+        // The CLI's first review has no delivery context. An over-budget project
+        // stops there before the normalized review and cannot hit the context cap.
+        if count == hack_runtime_core::project::MAX_COMPOSE_SERVICES {
+            for name in services.keys() {
+                args.extend(["--start-managed-service", name.as_str()]);
+            }
+        }
+        let output = invoke(
+            Path::new(env!("CARGO_BIN_EXE_hack-native")),
+            &candidate,
+            &project,
+            &args,
+        );
+        if count == hack_runtime_core::project::MAX_COMPOSE_SERVICES {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["start_refusals"], serde_json::json!([]));
+            assert_eq!(report["plan"]["services"].as_object().unwrap().len(), count);
+        } else {
+            assert!(!output.status.success());
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(error["code"], "service_budget");
+        }
+        assert_eq!(fs::read_dir(&candidate).unwrap().count(), 0);
+    }
+}

@@ -5,6 +5,7 @@ import {
   lstat,
   open,
   readFile,
+  rename,
   unlink,
 } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -33,8 +34,12 @@ import { readReplaceablePrivateFile } from "../private-file.ts";
  * - `reserve`: preallocated bytes released only to write `command.ended`.
  * - `cancel.json`: a cancel request, written before any signal is sent.
  * - `expired.json`: tombstone left when retention removed the output.
- * - `end-unsynced`: empty marker; the final record's fsync reported a full
- *   disk or quota, so its durability was not confirmed.
+ * - `end-unsynced`: empty marker; the final record's fsync failed, so its
+ *   durability was not confirmed. `end-unsynced.pending` is the same file
+ *   reserved at acceptance, so marking is a rename.
+ * - `output-cut`: empty marker; a takeover cut output nobody scanned (placed
+ *   before the cut, so the end still reports `truncated`). Reserved as
+ *   `output-cut.pending`. Markers are best effort and not fsynced.
  * - `lock`: empty file, flocked as the journal lock. `lock.owner` is the
  *   owner receipt of the file-based fallback used when flock is unavailable.
  *
@@ -235,6 +240,11 @@ export type JournalPaths = {
   readonly fallbackLock: string;
   /** Present when the final record's fsync reported a full disk or quota. */
   readonly endUnsynced: string;
+  /** Empty file reserved at acceptance; renamed to `endUnsynced` to mark. */
+  readonly endUnsyncedPending: string;
+  /** Present once a takeover cut unscanned output; reserved like `endUnsynced`. */
+  readonly outputCut: string;
+  readonly outputCutPending: string;
 };
 
 export function journalPaths(opts: {
@@ -266,6 +276,9 @@ export function journalPaths(opts: {
     lock: resolve(dir, "lock"),
     fallbackLock: resolve(dir, "lock.owner"),
     endUnsynced: resolve(dir, "end-unsynced"),
+    endUnsyncedPending: resolve(dir, "end-unsynced.pending"),
+    outputCut: resolve(dir, "output-cut"),
+    outputCutPending: resolve(dir, "output-cut.pending"),
   };
 }
 
@@ -574,14 +587,12 @@ export async function reconcileTail(
     ) {
       // With its newline written the record is published: an unlocked reader
       // may already hold it and its cursor, so it is never cut and its
-      // sequence never reused. Some filesystems report a full disk only at
-      // fsync; then a final record stays the command's end and the marker
-      // records that its durability was not confirmed (a later fsync of a
-      // final record covers an earlier record, so only a final one needs it).
-      if (
-        !(await syncUnlessNoSpace(handle, io)) &&
-        next.type === "command.ended"
-      ) {
+      // sequence never reused. If its fsync fails for any reason (a full
+      // disk reported only at fsync, an I/O error), a final record stays the
+      // command's end and the marker records that its durability was not
+      // confirmed (a later fsync of a final record covers an earlier record,
+      // so only a final one needs it).
+      if (!(await syncConfirmed(handle, io)) && next.type === "command.ended") {
         await markEndUnsynced(paths);
       }
       return [...committed, next];
@@ -599,21 +610,63 @@ export async function reconcileTail(
 }
 
 /**
- * Note that the final record's fsync reported a full disk or quota. Best
- * effort: creating the marker can itself need space.
+ * Note that the final record's fsync failed. Acceptance reserves the marker
+ * as an empty `end-unsynced.pending` file, so marking is a rename in the
+ * same directory, which normally needs no new space on a full disk. A
+ * journal without the reserved file (older, or already marked) creates the
+ * marker instead, best effort. An absent marker therefore proves nothing:
+ * it means no failure was recorded, not that the fsync was confirmed.
  */
 async function markEndUnsynced(paths: JournalPaths): Promise<void> {
+  await placeReservedMarker({
+    pending: paths.endUnsyncedPending,
+    marker: paths.endUnsynced,
+  });
+}
+
+/**
+ * Put an empty marker file in place: rename the copy reserved at
+ * acceptance (normally no new space needed), else create it, best effort.
+ */
+export async function placeReservedMarker(opts: {
+  readonly pending: string;
+  readonly marker: string;
+}): Promise<void> {
+  try {
+    await rename(opts.pending, opts.marker);
+    return;
+  } catch {
+    // Not reserved: fall back to creating it.
+  }
   const handle = await open(
-    paths.endUnsynced,
+    opts.marker,
     constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW,
     0o600
   ).catch(() => null);
   await handle?.close();
 }
 
+/** True when a takeover cut unscanned output (see `cutUnscannedOutput`). */
+export async function outputWasCut(paths: JournalPaths): Promise<boolean> {
+  return (await lstat(paths.outputCut).catch(() => null)) !== null;
+}
+
 /** True when the final record's fsync was not confirmed (see `reconcileTail`). */
 export async function endUnsynced(paths: JournalPaths): Promise<boolean> {
   return (await lstat(paths.endUnsynced).catch(() => null)) !== null;
+}
+
+/**
+ * fsync of a published record: false on any error. The record is already
+ * visible to readers, so a failed fsync is recorded, never thrown.
+ */
+async function syncConfirmed(handle: FileHandle, io: TailIo): Promise<boolean> {
+  try {
+    await io.sync(handle);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** fsync; false on a full disk or quota, other errors propagate. */
@@ -733,16 +786,14 @@ export class JournalWriter {
       await this.append(this.paths.events, line);
     }
     this.seq += 1;
-    // The final record is published once appended; a full disk reported
-    // only at fsync never takes it back, it is marked instead (as in
-    // `reconcileTail`). Other fsync errors are ignored: the line is written.
+    // The final record is published once appended; a failed fsync (a full
+    // disk reported only at fsync, an I/O error) never takes it back, it is
+    // marked instead (as in `reconcileTail`).
     if (type === "command.ended") {
       try {
         await this.syncEvents(this.paths.events);
-      } catch (error: unknown) {
-        if (isNoSpace(error)) {
-          await markEndUnsynced(this.paths);
-        }
+      } catch {
+        await markEndUnsynced(this.paths);
       }
     }
     return envelope;

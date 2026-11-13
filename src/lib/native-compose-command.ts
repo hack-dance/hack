@@ -112,6 +112,7 @@ import {
   nativeComposeStopChildReserveMs,
   nativeComposeStopOwnershipTimeoutMs,
   observeSavedNativeComposeOwned,
+  waitForNativeComposeNetworkMembers,
   waitNativeComposeStartupOwned,
 } from "./native-compose-ownership.ts";
 import {
@@ -310,7 +311,12 @@ function preparedEffectOwnership(opts: {
   return {
     ...storage,
     assertOwned: async () => {
-      storage.observeStorage(await assertNativeComposeOwned(opts.selection));
+      storage.observeStorage(
+        await waitForNativeComposeNetworkMembers({
+          read: () => assertNativeComposeOwned(opts.selection),
+          signal: opts.selection.signal,
+        })
+      );
       if (completed) {
         await opts.assertFilesAfterCompletion?.();
       } else {
@@ -498,6 +504,7 @@ async function waitReady(opts: {
     restartingServices: nativeComposeOnFailureServices(opts.document),
     deadline: opts.deadline,
     observed: opts.observeStorage,
+    settleNetworkMembers: true,
     ready: (state) => ready(opts.document, state, opts.generation),
   });
 }

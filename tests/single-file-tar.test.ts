@@ -157,8 +157,9 @@ function entry(name: string, type: string, data: Buffer): Buffer {
 const END = Buffer.alloc(1024);
 
 test("reads the file after pax extended headers with binary xattr records", async () => {
-  // As libarchive writes them: raw (binary) and base64 xattr values, an
-  // mtime with a fraction, a path record and a header name that differs.
+  // As libarchive writes them: raw (binary) and base64 xattr values and an
+  // mtime with a fraction; plus path and size records that override the
+  // regular header's own name and size.
   const xattr = Buffer.from([0x00, 0xff, 0x3d, 0x0a, 0x20, 0x7f, 0x80]);
   const records = Buffer.concat([
     paxRecord("mtime", Buffer.from("1731400000.123456789")),
@@ -168,10 +169,14 @@ test("reads the file after pax extended headers with binary xattr records", asyn
       Buffer.from(xattr.toString("base64"))
     ),
     paxRecord("path", Buffer.from("root.crt")),
+    // The regular header below says size 0 and names another file: the
+    // reader must take both from these records.
+    paxRecord("size", Buffer.from(String(Buffer.byteLength(CURRENT_CA_PEM)))),
   ]);
   const archive = Buffer.concat([
     entry("PaxHeader/root.crt", "x", records),
-    entry("root.crt", "0", Buffer.from(CURRENT_CA_PEM)),
+    tarHeader({ name: "other-name", size: 0, type: "0" }),
+    padded(Buffer.from(CURRENT_CA_PEM)),
     END,
   ]);
   const content = readSingleRegularFileFromTar({

@@ -29,13 +29,34 @@ const PLAINTEXT_DOTENV = PLAINTEXT_DOTENV_NAME;
 
 const reported = new Set<string>();
 
-/** The warning for one loose file; names the file and its mode, never a value. */
+// Control and formatting characters a terminal could act on: C0, DEL, C1,
+// line/paragraph separators and bidirectional overrides.
+const UNPRINTABLE =
+  /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * A file name or path for terminal output: every control or formatting
+ * character is shown as `\u{…}`, so a name a repository chose can neither
+ * inject terminal sequences nor fake extra lines (HACK-2165).
+ */
+export function displayPath(path: string): string {
+  return path.replace(
+    UNPRINTABLE,
+    (char) => `\\u{${(char.codePointAt(0) ?? 0).toString(16)}}`
+  );
+}
+
+/**
+ * The warning for one loose file; names the file and its mode, never a
+ * value. It offers no copyable shell command: the name may come from a
+ * repository, so the remedy is `hack doctor --fix`.
+ */
 export function looseEnvLayerWarning(opts: {
   readonly name: string;
   readonly mode: number;
 }): string {
   const mode = (opts.mode & 0o777).toString(8).padStart(4, "0");
-  return `WARN: .hack/${opts.name} holds machine-local env values and is readable by other users (mode ${mode}). Hack makes it 0600 on its next write; to fix it now, run 'hack doctor --fix' or 'chmod 600 .hack/${opts.name}'.\n`;
+  return `WARN: .hack/${displayPath(opts.name)} holds machine-local env values and is readable by other users (mode ${mode}). Hack makes it 0600 on its next write; to fix it now, run 'hack doctor --fix'.\n`;
 }
 
 /**

@@ -487,3 +487,21 @@ test("a configured path with a line break never becomes an ignore entry", async 
     before
   );
 });
+
+test("names in findings are shell-quoted in commands and never printed with control characters", async () => {
+  const f = await fixture();
+  const quoted = join(f.projectDir, "hack.env.it's;x.local.yaml");
+  const escaped = join(f.projectDir, "hack.env.\u001b]0;t\u0007.local.yaml");
+  for (const path of [quoted, escaped]) {
+    await writeFile(path, "x: 1\n", { mode: 0o600 });
+    await git(f.projectRoot, ["add", "-f", "--", path]);
+  }
+  const findings = await inspectSecretsHygiene(f.scope);
+  const text = findings.map((finding) => finding.message).join("\n");
+  expect(text).toContain(
+    "git rm --cached -- '.hack/hack.env.it'\\''s;x.local.yaml'"
+  );
+  expect(text).not.toContain("\u001b");
+  expect(text).not.toContain("\u0007");
+  expect(text).toContain("no command is printed");
+});

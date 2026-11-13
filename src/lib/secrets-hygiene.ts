@@ -17,6 +17,7 @@ import {
   type StaleMuxEnvironment,
 } from "../mux/private-environment.ts";
 import {
+  displayPath,
   MACHINE_LOCAL_LAYER_NAME,
   PLAINTEXT_DOTENV_NAME,
 } from "./env-layer-modes.ts";
@@ -196,11 +197,36 @@ const GITIGNORE_GLOB = /[\\*?[\]]/g;
 const GITIGNORE_LEADING = /^[#!]/;
 const GITIGNORE_TRAILING_SPACE = / $/;
 
+/** POSIX shell single-quoting. */
+function shellQuote(text: string): string {
+  return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * How to untrack a file: a `git rm --cached` command with the name
+ * shell-quoted, or, when the name holds characters no command should carry
+ * to a terminal, the instruction without a command.
+ */
+function untrackAdvice(path: string, projectRoot: string): string {
+  const rel = relative(projectRoot, path);
+  return displayPath(rel) === rel
+    ? `untrack it with git rm --cached -- ${shellQuote(rel)} (from the project root)`
+    : "untrack it with git rm --cached (its name holds control characters, so no command is printed)";
+}
+
 function octal(mode: number): string {
   return (mode & 0o777).toString(8).padStart(4, "0");
 }
 
+/** A path for messages: project-relative when inside, never with control characters. */
 function shown(path: string, project: SecretsHygieneScope["project"]): string {
+  return displayPath(rawShown(path, project));
+}
+
+function rawShown(
+  path: string,
+  project: SecretsHygieneScope["project"]
+): string {
   if (!project) {
     return path;
   }
@@ -320,7 +346,7 @@ async function gitFindings(opts: {
       {
         status: "error",
         path: candidate.path,
-        message: `git tracks ${name} (or cannot say whether it does), and it holds ${candidate.holds}: untrack it with 'git rm --cached -- ${name}', then treat what it held as exposed.`,
+        message: `git tracks ${name} (or cannot say whether it does), and it holds ${candidate.holds}: ${untrackAdvice(candidate.path, ignore.projectRoot)}, then treat what it held as exposed.`,
         fix: null,
       },
     ];
@@ -340,7 +366,7 @@ async function gitFindings(opts: {
         {
           status: "warn",
           path: candidate.path,
-          message: `git does not ignore ${name}, which holds ${candidate.holds}; its name has a line break, a control character or a trailing space, so add an ignore entry for it to ${where} by hand.`,
+          message: `git does not ignore ${name}, which holds ${candidate.holds}; its name has a line break, a control character or a trailing space, so add an ignore entry for it to ${displayPath(where)} by hand.`,
           fix: null,
         },
       ];
@@ -349,7 +375,7 @@ async function gitFindings(opts: {
       {
         status: "warn",
         path: candidate.path,
-        message: `git does not ignore ${name}, which holds ${candidate.holds}; --fix adds '${ignore.entry}' to ${where}.`,
+        message: `git does not ignore ${name}, which holds ${candidate.holds}; --fix adds '${displayPath(ignore.entry)}' to ${displayPath(where)}.`,
         fix: {
           kind: "ignore",
           gitignorePath: ignore.gitignorePath,
@@ -497,7 +523,7 @@ async function storeFindings(opts: {
     findings.push({
       status: keychainMayHoldKey ? "warn" : "error",
       path: storePath,
-      message: `Encrypted secret store ${storePath}: store present, key missing, cannot be read (no key file at ${keyPath}; HACK_SECRETS_FILE_KEY is not set).${keychain} Restore the key file to read it. Hack never deletes a store or a key; remove the store yourself once you no longer need its values.`,
+      message: `Encrypted secret store ${displayPath(storePath)}: store present, key missing, cannot be read (no key file at ${displayPath(keyPath)}; HACK_SECRETS_FILE_KEY is not set).${keychain} Restore the key file to read it. Hack never deletes a store or a key; remove the store yourself once you no longer need its values.`,
       fix: null,
     });
   }
@@ -649,7 +675,7 @@ export async function inspectSecretsHygiene(
     findings.push({
       status: "warn",
       path: stale.root,
-      message: `${stale.root} holds env values staged for a terminal session that never ran (older than ${MUX_ENV_TTL_MS / 60_000} minutes); --fix removes it.`,
+      message: `${displayPath(stale.root)} holds env values staged for a terminal session that never ran (older than ${MUX_ENV_TTL_MS / 60_000} minutes); --fix removes it.`,
       fix: { kind: "remove_mux", stale },
     });
   }
@@ -783,7 +809,7 @@ export async function applySecretsHygieneFixes(opts: {
     } else {
       skipped += 1;
       opts.report(
-        `Left unchanged (it changed or could not be updated): ${finding.path}`
+        `Left unchanged (it changed or could not be updated): ${displayPath(finding.path)}`
       );
     }
   }
@@ -797,12 +823,12 @@ function describeApplied(opts: {
   const { fix } = opts;
   switch (fix.kind) {
     case "chmod":
-      return `Set mode ${octal(fix.mode)} on ${opts.path}`;
+      return `Set mode ${octal(fix.mode)} on ${displayPath(opts.path)}`;
     case "ignore":
-      return `Added '${fix.entry}' to ${fix.gitignorePath}`;
+      return `Added '${displayPath(fix.entry)}' to ${displayPath(fix.gitignorePath)}`;
     case "remove_leftover":
-      return `Removed leftover staging copy ${opts.path}`;
+      return `Removed leftover staging copy ${displayPath(opts.path)}`;
     default:
-      return `Removed stale terminal-session env payload ${opts.path}`;
+      return `Removed stale terminal-session env payload ${displayPath(opts.path)}`;
   }
 }

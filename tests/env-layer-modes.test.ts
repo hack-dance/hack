@@ -46,3 +46,23 @@ test("loose machine-local env files are reported once, by name and mode only (HA
   await reportLooseEnvLayerModes({ projectDir, write });
   expect(written).toHaveLength(2);
 });
+
+test("a loose layer's name never reaches a copyable command or the terminal raw (HACK-2165)", async () => {
+  const projectDir = await mkdtemp(join(tmpdir(), "hack-layer-modes-names-"));
+  dirs.push(projectDir);
+  const shell = "hack.env.;printf PWNED>proof;.local.yaml";
+  const withEscape = "hack.env.\u001b[31mred.local.yaml";
+  for (const name of [shell, withEscape]) {
+    await writeFile(join(projectDir, name), "x: 1\n", { mode: 0o644 });
+  }
+  const written: string[] = [];
+  await reportLooseEnvLayerModes({
+    projectDir,
+    write: (text) => written.push(text),
+  });
+  const output = written.join("");
+  expect(output).not.toContain("chmod");
+  expect(output).toContain("hack doctor --fix");
+  expect(output).not.toContain("\u001b");
+  expect(output).toContain("\\u{1b}[31mred");
+});

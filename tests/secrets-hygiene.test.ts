@@ -534,3 +534,23 @@ test("an in-checkout store and key that do not exist yet are ignored before firs
   await writeFile(keyPath, `${SENTINEL}\n`, { mode: 0o600 });
   expect(await inspectSecretsHygiene(scope)).toEqual([]);
 });
+
+test("a project-configured store path not created yet keeps its ignore fix (fix roots)", async () => {
+  const f = await fixture();
+  const storePath = join(f.projectRoot, "secrets", "s.enc.json");
+  const keyPath = join(f.projectRoot, "secrets", "s.key");
+  const scope: SecretsHygieneScope = {
+    ...f.scope,
+    stores: [{ storePath, keyPath, fixRoots: [f.projectRoot, f.home] }],
+  };
+  const findings = await inspectSecretsHygiene(scope);
+  expect(findings.map((finding) => finding.fix?.kind)).toEqual([
+    "ignore",
+    "ignore",
+  ]);
+  for (const finding of findings) {
+    expect(finding.message).not.toContain("outside the project");
+  }
+  await applySecretsHygieneFixes({ findings, report: () => undefined });
+  expect(await inspectSecretsHygiene(scope)).toEqual([]);
+});

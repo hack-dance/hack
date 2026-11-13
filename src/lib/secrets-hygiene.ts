@@ -166,7 +166,9 @@ async function fixAllowed(opts: {
   if (!opts.roots) {
     return true;
   }
-  const dir = await realpath(dirname(opts.path)).catch(() => null);
+  // Through the nearest existing ancestor, so a store path whose directory
+  // does not exist yet is judged by where it will be created.
+  const dir = await resolveExisting(dirname(opts.path));
   if (!dir) {
     return false;
   }

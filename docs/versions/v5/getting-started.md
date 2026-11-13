@@ -90,6 +90,13 @@ The first command prints a snapshot. The second keeps watching. Ctrl-C stops
 watching the logs; it does not stop the project. Logs may contain secret values.
 Do not paste raw logs into a public issue.
 
+For foreground `hack up`, Ctrl-C stops the project instead. With tmux, Hack also
+waits for lifecycle commands: they get five seconds to finish handling TERM
+before one forced stop. Hack reports unconfirmed cleanup; repeated Ctrl-C does
+not skip that wait. Ctrl-C does not run `down.before` or `down.after` hooks;
+use explicit `hack down` for those hooks. Attached `up.after` runs only after
+Compose returns successfully, so it does not run while the project stays attached.
+
 ```sh
 hack down
 ```

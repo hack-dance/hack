@@ -49,6 +49,44 @@ correctness.
 
 ## Branch rename contract
 
+An illustrative Git fork gives the primary checkout and a linked review worktree
+different source histories, while their Hack instances keep separate runtime names.
+
+```mermaid
+---
+title: Example branch histories
+---
+gitGraph
+  commit id: "base"
+  branch review
+  checkout review
+  commit id: "change"
+  checkout main
+  commit id: "work"
+```
+
+The shared proxy routes to each instance independently; a branch name does not
+merge containers or give one checkout ownership of the other's runtime.
+
+```mermaid
+---
+title: Side by side instances
+---
+architecture-beta
+  group main[Primary checkout]
+  service base[Base services] in main
+  group review[Linked worktree]
+  service branch[Review services] in review
+  service proxy[Shared proxy]
+  proxy:L --> R:base
+  proxy:R --> L:branch
+  align row base proxy branch
+```
+
+The base and review instances use different Compose project names and hostnames.
+Explicitly shared dependency caches can still be shared; this diagram does not
+promise a security boundary between equally trusted worktrees.
+
 An implicit `hack down` in a linked worktree uses Docker's Compose labels and exact
 `com.docker.compose.project.working_dir` evidence:
 

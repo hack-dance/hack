@@ -59,7 +59,8 @@ process.exit(0);
 function composeEnv(dir: string): Record<string, string> {
   return {
     PATH: `${dir}:/usr/bin:/bin`,
-    GLOBAL_FLAG: "kept",
+    GLOBAL_FLAG: CANARY,
+    DOCKER_CONTEXT: "fixture-context",
     HACK_ENV_0123456789AB_SECRET: CANARY,
     HACK_ENV_0123456789AB: CANARY,
   };
@@ -68,7 +69,8 @@ function composeEnv(dir: string): Record<string, string> {
 function expectNoReferenceValues(calls: readonly Recorded[]): void {
   expect(calls.length).toBeGreaterThan(0);
   for (const call of calls) {
-    expect(call.env.GLOBAL_FLAG).toBe("kept");
+    expect(call.env.GLOBAL_FLAG).toBeUndefined();
+    expect(call.env.DOCKER_CONTEXT).toBe("fixture-context");
     expect(
       Object.keys(call.env).filter((key) => key.startsWith("HACK_ENV_"))
     ).toEqual([]);

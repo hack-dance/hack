@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
+import { runPrivateTtyCli } from "./helpers/private-cli-tty.ts";
 
 type RunResult = {
   readonly exitCode: number;
@@ -330,7 +331,13 @@ test(
     );
 
     const setResult = await runHack({
-      args: ["env", "set", "--secret", "API_KEY=super-secret"],
+      args: [
+        "env",
+        "set",
+        "--secret",
+        "--allow-secret-argv",
+        "API_KEY=super-secret",
+      ],
       env: {
         HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
@@ -396,7 +403,7 @@ test(
     };
     expect(
       redactedListJson.vars.find((entry) => entry.key === "API_KEY")?.value
-    ).toBe("***");
+    ).toBeUndefined();
 
     const listTextResult = await runHack({
       args: ["env", "list", "--show-secrets"],
@@ -1517,6 +1524,20 @@ async function runHack(input: {
 }): Promise<RunResult> {
   if (!tempDir) {
     throw new Error("Missing temp directory state");
+  }
+  if (input.args.includes("--show-secrets")) {
+    return await runPrivateTtyCli({
+      args: input.args,
+      cwd: input.cwd ?? resolve(import.meta.dir, ".."),
+      env: privateCliEnv({
+        root: tempDir,
+        env: {
+          HACK_SECRETS_FILE_KEY: process.env.HACK_SECRETS_FILE_KEY,
+          ...input.env,
+          HACK_NO_INTERACTIVE: undefined,
+        },
+      }),
+    });
   }
   const proc = Bun.spawn(
     [process.execPath, resolve(import.meta.dir, "../index.ts"), ...input.args],

@@ -2444,6 +2444,7 @@ hack env <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack env list` | List resolved env values for the selected overlay |
+| `hack env protect [keys...]` | List plaintext keys, or encrypt chosen keys in their existing layers |
 | `hack env get <key>` | Print one resolved env value without an added newline |
 | `hack env explain <key>` | Explain a resolved env value without revealing it |
 | `hack env apply` | Recreate one service with its resolved env |
@@ -2482,8 +2483,40 @@ hack env list [options]
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--json` | Output JSON (machine-readable) |
-| `--show-secrets` | Print secret values (keychain) in plaintext |
+| `--show-values` | Reveal resolved values only in an interactive terminal |
+| `--show-secrets` | Alias for --show-values (interactive terminal only) |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack env protect [keys...]`
+
+List plaintext keys, or encrypt chosen keys in their existing layers
+
+### Usage
+
+```bash
+hack env protect [keys...] [options]
+```
+
+With no keys, list names, scopes and layers only. With keys, encrypt each matching plaintext entry in this checkout without moving it. An unqualified key selects every scope; scope.KEY or --service selects one scope. Omit --env to cover all overlays. Files commit independently, so retry after a partial failure.
+
+### Arguments
+
+| Arg | Description |
+| --- | --- |
+| `keys` |  |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--service <global|service>` | Target scope (global or a discovered service name) |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2598,6 +2631,7 @@ Non-secret values may be passed as arguments. For secrets, pipe the value with -
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--secret` | Store value as an encrypted secure entry |
+| `--allow-secret-argv` | Unsafe compatibility: allow secret values in process arguments and shell history |
 | `--value-stdin` | Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
@@ -2632,6 +2666,7 @@ Same value rules as `hack env add`: pipe secrets with --value-stdin or use the h
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--secret` | Store value as an encrypted secure entry |
+| `--allow-secret-argv` | Unsafe compatibility: allow secret values in process arguments and shell history |
 | `--value-stdin` | Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |

@@ -683,6 +683,8 @@ for (const docker of [
     expect(await readFile(layerPath, "utf8")).not.toContain(value);
     const notes = noteCalls.join("\n");
     expect(notes).toContain(`Wrote ${localPath}, ${layerPath}`);
+    expect(notes).toContain("Plaintext env keys remain (values omitted)");
+    expect(notes).toContain("hack env protect LEGACY_SETTING");
     expect(notes).not.toContain(value);
     expect(notes.includes("Docker is not reachable")).toBe(
       docker.exitCode !== 0

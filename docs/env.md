@@ -504,7 +504,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses a named overlay recorded for the running stack, else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
 | `hack run` | `--env` | Per invocation, for the new one-off container. | Each run resolves again. | The native runtime backend refuses `--env`; restart with the selection first. |
 | `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose exec and native-runtime exec (Compose-file and authored native projects) warn on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`); native projects restart as a whole with `hack restart` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
-| `hack env list` | `--env`, `--service` | Per invocation, read-only; secret values are masked unless `--show-secrets`. | Not needed. | Reads files; no runtime required. |
+| `hack env list` | `--env`, `--service` | Per invocation, read-only metadata; values require `--show-values` in a terminal. | Not needed. | Reads files; no runtime required. |
 | `hack env get` | `--env`, `--service` | Per invocation; prints exactly one plaintext value to stdout. | Not needed. | Reads files; refuses native project inputs. |
 | `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
 | `hack env apply` | `--env`, `--service` | Runs `hack restart <service>` with the same `--env`, recreating one service. | This is the refresh path for one service. | `--service` is required. |
@@ -579,7 +579,7 @@ hack env list
 hack env list --env qa
 hack env list --env qa --service api
 hack env list --json
-hack env list --show-secrets
+hack env list --show-values
 hack env explain GITHUB_TOKEN --env runner --service installer --target compose
 ```
 
@@ -591,7 +591,9 @@ lifecycle code or Compose. Recreate just one service after an env change with:
 hack env apply --service api --env qa
 ```
 
-`--show-secrets` prints secret values in plaintext instead of the masked default; use it deliberately.
+`env list` prints names, scopes, source layers and whether each value is set. It hides **all** values, including plaintext entries migrated from legacy dotenv files. JSON omits the `value` field and includes `has_value`. Modern listings do not acquire a decryption key. Legacy backend inspection may require backend access to determine availability.
+
+`--show-values` reveals resolved values only when both stdin and stdout are terminals and interaction is enabled. The older `--show-secrets` spelling is an alias. Redirecting or piping the output refuses the reveal, including with `--json`; ordinary `--json` is metadata only. Use `env get KEY` for an explicit single-value read in a script.
 
 Read one value explicitly:
 
@@ -656,6 +658,8 @@ hack env add SERVICE_TOKEN --service api --secret --value-stdin < token.txt
 # In an interactive terminal, omit the value to use the hidden prompt.
 hack env add SERVICE_TOKEN --service api --secret
 ```
+
+Secret positional values are refused before any write, with guidance for `--value-stdin`. The explicitly unsafe `--allow-secret-argv` compatibility flag exists for controlled test/script fixtures that cannot supply stdin; it puts the value in process arguments and shell history and should never be used with real secrets.
 
 `--value-stdin` works on `hack env add` and `hack env set`, with or without `--secret`.
 It reads all of stdin, up to 64 KiB, and strips exactly one trailing newline (`\n` or
@@ -823,6 +827,37 @@ hack env unset API_BASE_URL
 hack env unset SERVICE_TOKEN --service api --env qa
 hack env unset API_BASE_URL --local
 ```
+
+## Encrypt existing plaintext entries
+
+List plaintext key names and their scopes/layers without revealing values:
+
+```bash
+hack env protect
+hack env protect --json
+```
+
+Encrypt chosen keys in place:
+
+```bash
+hack env protect API_TOKEN DATABASE_URL
+hack env protect api.API_TOKEN --env qa
+hack env protect API_TOKEN --service api
+```
+
+An unqualified key covers every matching scope and overlay in this checkout.
+`--env default` selects base layers; omitting `--env` covers all overlays.
+The value, scope and overlay remain the same; only its YAML representation changes
+to an encrypted entry. Already encrypted entries and null removals are unchanged.
+The command re-reads each layer under its write lock and refuses conflicting edits.
+Files commit independently: if a later file fails, retry to finish the remaining
+entries. Inventory and conversion do not require typing or copying values.
+
+Only this checkout's files are mutation targets. Run the command in the primary
+checkout to encrypt inherited primary-local entries. Legacy `.env` compatibility
+copies remain until migration cleanup or explicit removal; encrypting a YAML entry
+does not erase those copies. `doctor --migrate-env-config` prints the remaining
+plaintext key names and a `hack env protect` command after migration.
 
 ### Concurrent writes to one env file
 
@@ -1518,9 +1553,7 @@ Some older surfaces are still compatibility-oriented:
   envelope and legacy `v1:` values authenticate no associated data: they are not
   bound to a path, project or variable name beyond the scoped key inside the
   encrypted store plaintext
-- the daemon's env HTTP route (used by the macOS app) reads and writes the legacy dotenv-shaped
-  contract (`source: 'plain_env'|'keychain'`, `resolvedFrom: 'dotenv'/'process'/'keychain'/'portable_backend'`),
-  not the modern YAML `hack env list --json` shape; there is no web dashboard surface anymore
+- the daemon env GET response identifies the format. For YAML projects it returns names, scopes, encryption flags and availability without decrypting or presenting legacy state. Legacy projects keep the dotenv-shaped metadata response. Legacy set/unset mutations refuse YAML projects until those endpoints use canonical YAML mutation helpers; use the CLI instead.
 
 If you are writing new docs or new project setup flows, document the YAML overlay model first and treat `.hack/hack.env.json` as legacy migration context.
 

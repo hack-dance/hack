@@ -649,6 +649,78 @@ fn committed_intent_keeps_original_hash_and_inventory_through_cleanup_progress()
 }
 
 #[test]
+fn pre_ready_origins_resume_monotonic_cleanup_with_exact_original_and_never_created_members() {
+    for phase in [
+        Phase::ReadyObserved,
+        Phase::FailedRetained,
+        Phase::StopIntent,
+        Phase::Stopped,
+        Phase::RemovalIntent,
+        Phase::Removed,
+    ] {
+        let fixture = Fixture::new();
+        fixture.dead();
+        let mut original = fixture.receipt();
+        original.phase = phase.clone();
+        if phase != Phase::ReadyObserved {
+            let resource = original.resources.get_mut("container:web").unwrap();
+            resource.id = None;
+            resource.phase = "reserved".into();
+        }
+        if phase == Phase::Removed {
+            for resource in original.resources.values_mut() {
+                resource.phase = "removed".into();
+            }
+        }
+        journal::save(&fixture.journal_root(), &original).unwrap();
+        let selected = select(&fixture.candidate, RUN).unwrap();
+        cleanup::recover_using(
+            &fixture.candidate,
+            recovery_options(&selected),
+            |context, _| {
+                let intent: Intent =
+                    serde_json::from_slice(&fs::read(fixture.journal_root().join(FILE)).unwrap())
+                        .unwrap();
+                assert_eq!(intent.version, 2);
+                assert_eq!(intent.receipt_progress, receipt_progress(&original)?);
+                assert_eq!(intent.original(RUN)?.phase, phase);
+                if original.resources["container:web"].phase == "reserved" {
+                    let mut created = original.clone();
+                    created.phase = Phase::StopIntent;
+                    created.resources.get_mut("container:web").unwrap().phase = "created".into();
+                    let bytes = serde_json::to_string(&created).unwrap();
+                    assert!(
+                        intent
+                            .current(&fixture.journal_root(), &original, &created, &bytes)
+                            .is_err()
+                    );
+                }
+                for next in [Phase::StopIntent, Phase::Stopped, Phase::RemovalIntent] {
+                    let mut current = fixture.receipt();
+                    current.phase = next;
+                    if receipt_progress(&current)? < receipt_progress(&original)? {
+                        continue;
+                    }
+                    journal::save(&fixture.journal_root(), &current)?;
+                    context.guard()?;
+                }
+                let receipt = removed(&fixture);
+                context.finish_using(&absent_snapshot(receipt.clone()), &|_| Ok(()))?;
+                Ok(receipt)
+            },
+        )
+        .unwrap();
+        let again = select(&fixture.candidate, RUN).unwrap();
+        assert_eq!(again.receipt.phase, phase);
+        assert_eq!(again.receipt_sha256, selected.receipt_sha256);
+        assert_eq!(
+            again.receipt.resources["container:web"].id,
+            original.resources["container:web"].id
+        );
+    }
+}
+
+#[test]
 fn changed_inventory_and_regressed_resource_progress_refuse_under_original_intent() {
     for case in ["id", "owner", "boot", "resource-regression"] {
         let fixture = Fixture::new();

@@ -203,6 +203,23 @@ impl Receipt {
     }
     #[cfg(target_os = "macos")]
     pub(super) fn require_recovery_ready(&self) -> Result<(), CandidateError> {
+        self.require_recovery_settled()?;
+        if self.phase != Phase::ReadyObserved
+            || self.failure.is_some()
+            || self
+                .resources
+                .values()
+                .any(|resource| resource.id.is_none())
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    /// Cleanup admission, never readiness evidence. A missing ID is settled only
+    /// for a never-created or already-removed resource; every pending effect
+    /// remains a refusal. The cleanup backend rechecks exact ownership/absence.
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn require_recovery_settled(&self) -> Result<(), CandidateError> {
         self.validate(self.review.scope().run, &self.owner)?;
         // Source/topology recovery remains separate. Storage recovery may stop
         // compute only with complete saved verifier and independently enrolled
@@ -214,12 +231,27 @@ impl Receipt {
                 .is_some_and(|tool| tool.root.is_some() && tool.helper.is_some())
             && self.data.values().all(|reference| reference.enrolled());
         if !(self.version == 2 || storage)
-            || self.phase != Phase::ReadyObserved
-            || self.failure.is_some()
-            || self
-                .resources
-                .values()
-                .any(|resource| resource.id.is_none())
+            || self.phase == Phase::Preparing
+            || (self.phase == Phase::ReadyObserved && self.failure.is_some())
+            || self.resources.values().any(|resource| {
+                if self.phase == Phase::Removed && resource.phase != "removed" {
+                    return true;
+                }
+                if resource.id.is_none() {
+                    return !matches!(resource.phase.as_str(), "reserved" | "removed");
+                }
+                match resource.kind {
+                    Kind::Container => !matches!(
+                        resource.phase.as_str(),
+                        "created" | "started" | "stopped" | "removed"
+                    ),
+                    Kind::Network => !matches!(
+                        resource.phase.as_str(),
+                        "created" | "remove-intent" | "removed"
+                    ),
+                    Kind::Volume => true,
+                }
+            })
         {
             return Err(refused());
         }

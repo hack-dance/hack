@@ -316,13 +316,19 @@ test("already-stopped unacknowledged frontend refuses without replaying compute"
     ...opts,
     invoke: async (request) => {
       calls.push(request.args[1]!);
+      if (request.args[1] === "foreground-owner") {
+        return ownerSelection("uncertain", "stopped-data-retained");
+      }
       return snapshot(true);
     },
   });
-  await expectClosedRefusal(result, "frontend finalization is unconfirmed");
-  await expectClosedRefusal(result, "hack down --recover");
+  await expectClosedRefusal(result, "foreground owner");
   expect(performance.now() - started).toBeLessThan(10_000);
-  expect(calls).toEqual(["inspect"]);
+  expect(calls).toEqual([
+    "inspect",
+    "foreground-owner",
+    "retire-unadmitted-owner",
+  ]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
@@ -1070,7 +1076,7 @@ function ownerSelection(foreground: string, phase = "ready-observed") {
   };
 }
 
-test("down without --recover names the recovery when the foreground owner is gone", async () => {
+test("plain down refuses missing owner recovery proof without replaying cleanup", async () => {
   const opts = await fixture();
   const calls: string[] = [];
   await expectClosedRefusal(
@@ -1087,9 +1093,9 @@ test("down without --recover names the recovery when the foreground owner is gon
         return snapshot();
       },
     }),
-    "run hack down --recover"
+    "cannot confirm this run's foreground owner state"
   );
-  expect(calls).toEqual(["inspect", "inspect", "cleanup"]);
+  expect(calls).toEqual(["inspect", "inspect", "cleanup", "foreground-owner"]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
@@ -1364,7 +1370,10 @@ test("down --recover names a refused unadmitted owner retirement without hooks o
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
-test("down --recover retires the dead frontend in one command and admits a fresh plain start", async () => {
+test.each([
+  false,
+  true,
+])("down retires the dead frontend in one command and admits a fresh plain start (recover=%s)", async (recover) => {
   const opts = await fixture();
   // A frontend that began its finalization and exited without completing it.
   const module = join(
@@ -1389,7 +1398,7 @@ test("down --recover retires the dead frontend in one command and admits a fresh
   const started = performance.now();
   const result = await nativeProjectDown({
     ...opts,
-    recover: true,
+    recover,
     invoke: async (request) => {
       if (request.args[1] === "foreground-owner") {
         return ownerSelection("exited");
@@ -1815,3 +1824,51 @@ for (const predecessor of [false, true]) {
     await next.complete();
   });
 }
+
+test.each([
+  { phase: "ready-observed", original: null },
+  { phase: "failed-retained", original: null },
+  { phase: "cleanup-intent", original: "1".repeat(64) },
+])("plain down resumes exact dead-owner cleanup after $phase without replaying the refused stop", async ({
+  phase,
+  original,
+}) => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  let recovered = false;
+  const result = await nativeProjectDown({
+    ...opts,
+    invoke: async (request) => {
+      const command = request.args[1]!;
+      calls.push(command);
+      if (command === "cleanup") {
+        throw new NativeRuntimeRequestError({
+          nativeCode: "graph_owner_recovery",
+          message: "owner unavailable",
+        });
+      }
+      if (command === "foreground-owner") {
+        return {
+          ...ownerSelection("exited", phase),
+          live_owner_recovery: original,
+          failed_start_recoverable: phase === "failed-retained",
+        };
+      }
+      if (command === "recover-live-owner") {
+        expect(request.args).toContain(original ?? receiptSha);
+        recovered = true;
+        return {
+          run: run.run,
+          recovered: true,
+          data_retained: true,
+          publisher_retired: true,
+        };
+      }
+      return snapshot(recovered);
+    },
+  });
+  expect(result.status).toBe("stopped");
+  expect(calls.filter((call) => call === "cleanup")).toHaveLength(1);
+  expect(calls.filter((call) => call === "recover-live-owner")).toHaveLength(1);
+  expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
+});

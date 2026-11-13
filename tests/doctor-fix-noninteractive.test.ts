@@ -706,18 +706,50 @@ test("doctor keeps completed repairs when the optional plaintext inventory is un
     `broken: [${sentinel}`
   );
   const { runCli } = await import("../src/cli/run.ts");
-  expect(
-    await runCli([
+  // Everything doctor prints, so no output can echo the malformed file.
+  const printed: string[] = [];
+  const capture =
+    (write: typeof process.stdout.write) =>
+    (chunk: unknown, ...rest: unknown[]): boolean => {
+      printed.push(String(chunk));
+      return (write as (...args: unknown[]) => boolean)(chunk, ...rest);
+    };
+  const stdoutWrite = process.stdout.write.bind(process.stdout);
+  const stderrWrite = process.stderr.write.bind(process.stderr);
+  process.stdout.write = capture(stdoutWrite) as typeof process.stdout.write;
+  process.stderr.write = capture(stderrWrite) as typeof process.stderr.write;
+  let code: number;
+  try {
+    code = await runCli([
       "doctor",
       "--migrate-env-config",
       "--no-interactive",
       "--path",
       projectRoot,
-    ])
-  ).toBe(0);
+    ]);
+  } finally {
+    process.stdout.write = stdoutWrite;
+    process.stderr.write = stderrWrite;
+  }
+  // A layer the runtime refuses is a failing check (HACK-2169): doctor
+  // exits non-zero, while the completed repairs are kept and the optional
+  // plaintext inventory still says it could not inspect names.
+  expect(code).not.toBe(0);
   const notes = noteCalls.join("\n");
   expect(notes).toContain("Could not inspect plaintext env names");
-  expect(notes).not.toContain(sentinel);
+  // The repairs completed before the failing check are kept.
+  expect(
+    await readFile(resolve(projectDir, "docker-compose.yml"), "utf8")
+  ).not.toContain("env_file");
+  expect(await readFile(resolve(projectDir, ".gitignore"), "utf8")).not.toBe(
+    ""
+  );
+  const output = printed.join("");
+  expect(output).toContain("secret integrity");
+  expect(output).toContain(".hack/hack.env.qa.yaml exists but could not");
+  for (const text of [notes, output]) {
+    expect(text).not.toContain(sentinel);
+  }
 }, 30_000);
 
 test("doctor --migrate-env-config refuses a symlinked overlay with undelivered values and never writes through it (HACK-1370)", async () => {

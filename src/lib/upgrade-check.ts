@@ -530,10 +530,12 @@ async function inspectMachine(opts: {
     probe(probes.linuxDns, undefined, deadline),
     probe(() => inspectGlobalSecretStore({ env: opts.env }), null, deadline),
   ]);
+  // Skipped while global services do not run; an attempted probe that
+  // fails or runs out of time is reported, never omitted.
   const proxy =
     infra?.running === true
-      ? await probe(probes.proxyPorts, null, deadline)
-      : null;
+      ? await probe(probes.proxyPorts, "failed" as const, deadline)
+      : ("skipped" as const);
   const findings: UpgradeFinding[] = [];
   if (probes.disabled === true) {
     findings.push({
@@ -633,7 +635,10 @@ function infraFindings(opts: {
   readonly unperformed: UpgradeFindingStatus;
   readonly docker: "reachable" | "unreachable" | "missing";
   readonly infra: Awaited<ReturnType<UpgradeCheckProbes["globalInfra"]>> | null;
-  readonly proxy: Awaited<ReturnType<UpgradeCheckProbes["proxyPorts"]>> | null;
+  readonly proxy:
+    | Awaited<ReturnType<UpgradeCheckProbes["proxyPorts"]>>
+    | "failed"
+    | "skipped";
 }): UpgradeFinding[] {
   const findings: UpgradeFinding[] = [];
   const docker = dockerFinding(opts.docker);
@@ -641,7 +646,15 @@ function infraFindings(opts: {
     findings.push(docker);
   }
   findings.push(globalInfraFinding(opts.infra, opts.unperformed));
-  if (opts.proxy !== null) {
+  if (opts.proxy === "failed") {
+    findings.push({
+      id: "proxy-ports",
+      status: opts.unperformed,
+      summary: "Not checked: the proxy ports probe failed or ran out of time.",
+      args: ["doctor"],
+      action: null,
+    });
+  } else if (opts.proxy !== "skipped") {
     findings.push({
       id: "proxy-ports",
       status: opts.proxy.status === "ok" ? "ok" : "warn",

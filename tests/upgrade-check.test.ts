@@ -404,6 +404,18 @@ test("probes that are disabled or fail report not checked, never a pass", async 
       },
     })
   );
+  // A proxy ports probe that fails while global services run is reported.
+  const proxyFailed = await check(
+    healthyProbes({
+      proxyPorts: async () => {
+        throw new Error("boom");
+      },
+    })
+  );
+  expect(proxyFailed.machine.find((f) => f.id === "proxy-ports")?.status).toBe(
+    "incomplete"
+  );
+  expect(proxyFailed.ready).toBe(false);
   const daemon = failing.machine.find((f) => f.id === "daemon");
   expect(daemon?.summary).toContain("Not checked");
   // A probe that failed (not one disabled on purpose) leaves the check

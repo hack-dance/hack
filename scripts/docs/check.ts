@@ -576,6 +576,37 @@ console.log(
   "Pinned installer, navigation and release-export contracts passed."
 );
 
+// A guide present at the release pin still needs an explicit publication entry.
+for (const slug of ["linux-setup", "linux-certificate-trust"]) {
+  const entry = versions.v5.entries.find(
+    (page) => page.slug === `guides/${slug}`
+  );
+  if (!(entry && guideNavigation.pages.includes(slug))) {
+    throw new Error(
+      `Linux guide missing from publication or navigation: ${slug}`
+    );
+  }
+  const guide = await Bun.file(resolve(v5Root, `guides/${slug}.md`)).text();
+  if (
+    !guide.includes(
+      `https://github.com/hack-dance/hack/blob/${versions.v5.revision}/${entry.file}`
+    )
+  ) {
+    throw new Error(`Linux guide lost pinned source footer: ${slug}`);
+  }
+  for (const file of [
+    "index.md",
+    "install.md",
+    "reference/configuration-fields.md",
+  ]) {
+    const text = await Bun.file(resolve(v5Root, file)).text();
+    if (!text.includes(`](/docs/v5/guides/${slug})`)) {
+      throw new Error(`Linux guide discovery link missing: ${file}/${slug}`);
+    }
+  }
+}
+console.log("Linux guide publication, discovery and provenance passed.");
+
 function assertNoObsoleteInstallRecipe(text: string): void {
   if (
     /(?:python3?\s+[^\n]*(?:install-prerelease\.py|hack-next-install\.py|manager\.py)|--version\s+5\.0\.0-next\.1(?:\s|$))/m.test(

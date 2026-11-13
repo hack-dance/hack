@@ -1642,7 +1642,11 @@ includes one, because migrated values may still depend on it. While a store exis
 every route, including implicit ones such as `hack env add`, so entries it still holds stay
 readable through the secret store without hand edits; Hack reports the kept pointer with the
 key names still in the store, never values. The pointer is dropped only after doctor's
-cleanup has removed the store, so a declined or failed removal leaves it in place. A `cloud`
+cleanup has removed the store. If a later removal fails, doctor drops the pointer
+for that confirmed store removal before reporting the cleanup error. If the config
+cannot be updated, doctor warns about the pointer and still reports the original
+cleanup failure and confirmed removals. If the store remains, its pointer stays
+in place. A `cloud`
 backend reads the same pointer, so it always keeps it, and its store and key file are never
 offered for cleanup. The keychain backend can't list its entries, so with it an overlay
 that has no legacy file and isn't the default overlay isn't found; its keychain items are left

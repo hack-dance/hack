@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeDoctorEnvCleanup } from "../src/commands/doctor.ts";
 import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
 import {
   finishImplicitLegacyEnvMigration,
@@ -261,6 +262,66 @@ test.skipIf(process.getuid?.() === 0)(
     });
   }
 );
+
+for (const configWritable of [true, false]) {
+  test.skipIf(process.getuid?.() === 0)(
+    `doctor surfaces partial cleanup with a removed store (config writable: ${configWritable}, HACK-2179)`,
+    async () => {
+      await withMigratedStore(async (options) => {
+        const configPath = join(options.projectDir, "hack.config.json");
+        const key = await readFile(options.keyPath, "utf8");
+        const store = await readFile(options.storePath, "utf8");
+        const printed: string[] = [];
+        const stdoutWrite = process.stdout.write;
+        const stderrWrite = process.stderr.write;
+        const capture = (chunk: unknown): boolean => {
+          printed.push(String(chunk));
+          return true;
+        };
+        await chmod(configPath, configWritable ? 0o600 : 0o400);
+        await chmod(options.projectDir, 0o500);
+        let error: unknown;
+        try {
+          process.stdout.write = capture as typeof process.stdout.write;
+          process.stderr.write = capture as typeof process.stderr.write;
+          error = await removeDoctorEnvCleanup({
+            ...options,
+            paths: [options.storePath, options.contractPath, options.keyPath],
+          }).catch((caught: unknown) => caught);
+        } finally {
+          process.stdout.write = stdoutWrite;
+          process.stderr.write = stderrWrite;
+          await chmod(options.projectDir, 0o700);
+          await chmod(configPath, 0o600);
+        }
+        expect(error).toBeInstanceOf(LegacyEnvCleanupError);
+        if (!(error instanceof LegacyEnvCleanupError)) {
+          throw new Error("Expected doctor to surface the cleanup failure");
+        }
+        expect(error.removedPaths).toEqual([options.storePath]);
+        expect(await Bun.file(options.storePath).exists()).toBe(false);
+        expect(await Bun.file(options.contractPath).exists()).toBe(true);
+        expect(await readFile(options.keyPath, "utf8")).toBe(key);
+        const config = JSON.parse(await readFile(configPath, "utf8"));
+        expect(config.name).toBe("fixture");
+        if (configWritable) {
+          expect(config.controlPlane).toBeUndefined();
+        } else {
+          expect(config.controlPlane.secrets.encryptedFile.path).toBe(
+            options.storePath
+          );
+          expect(printed.join("")).toContain(
+            "Could not reconcile the legacy secret store pointer"
+          );
+        }
+        for (const value of [SENTINEL, key.trim(), store]) {
+          expect(printed.join("")).not.toContain(value);
+          expect(error.message).not.toContain(value);
+        }
+      });
+    }
+  );
+}
 
 test("cleanup uses store/key owner locks without a root .internal directory", async () => {
   await withMigratedStore(async (options) => {

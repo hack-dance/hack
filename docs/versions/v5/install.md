@@ -82,4 +82,8 @@ hack global install
 ```
 
 This configures shared local routing, DNS and certificate trust. Read its prompts.
+On Linux, see [Linux host setup](../guides/linux-setup.md) for DNS and daemon setup
+and [Linux certificate trust](../guides/linux-certificate-trust.md) for distribution
+and browser trust stores. These guides do not extend the prerelease bundle's
+platform support described above.
 Continue with [Getting started](getting-started.md).

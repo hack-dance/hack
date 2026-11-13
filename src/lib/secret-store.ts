@@ -289,9 +289,11 @@ export class SecretStoreRetireError extends Error {
  *
  * Every rename target, and the only name ever removed, is inside the
  * directory this call created; nothing outside it is replaced or removed.
- * The one window left is a file planted at the unpredictable source name
- * between its check and the rename, by a process writing into that
- * private (0700) directory.
+ * This assumes no other process writes into that fresh private (0700)
+ * directory: one that does could plant a file at the unpredictable source
+ * name between its check and the rename, or swap that name between the
+ * same-file check and its removal. It is not a guarantee against such a
+ * process.
  * On a failure before step 5 the directory is removed with rmdir, which
  * refuses unless it is empty. Nothing is read or decrypted; the key file
  * is not touched.
@@ -412,9 +414,24 @@ async function linkIntoRetireDirectory(input: {
     const archived = await lstat(input.to);
     return { dev: archived.dev, ino: archived.ino };
   } catch (error: unknown) {
-    await rmdir(input.dir).catch(() => undefined);
+    const code = errorCode(error);
+    if (code === "EEXIST") {
+      // Something appeared at the archive name: leave it and the directory
+      // as they are, and suggest no move that could overwrite it.
+      throw new SecretStoreRetireError(
+        `A file appeared at ${input.to} while retiring; it and ${input.storePath} were left as they are, and nothing was moved. Inspect ${quoteShellWord(input.dir)}, then retry (a new directory name is used).`
+      );
+    }
+    // The directory is still empty unless something else wrote into it;
+    // rmdir refuses otherwise.
+    const removed = await rmdir(input.dir).then(
+      () => true,
+      () => false
+    );
     throw new SecretStoreRetireError(
-      `Could not link ${input.storePath} into ${input.dir} (${errorCode(error)}); nothing was moved. To retire it by hand: mv ${quoteShellWord(input.storePath)} ${quoteShellWord(input.dir)}/`
+      removed
+        ? `Could not link ${input.storePath} into ${input.dir} (${code}; this filesystem may not support hard links); nothing was moved. To retire it by hand without overwriting anything: mkdir ${quoteShellWord(input.dir)} && mv -n ${quoteShellWord(input.storePath)} ${quoteShellWord(input.dir)}/`
+        : `Could not link ${input.storePath} into ${input.dir} (${code}), and ${input.dir} is no longer empty, so it was left as it is; nothing was moved. Inspect it before retrying.`
     );
   }
 }

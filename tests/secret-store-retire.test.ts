@@ -591,9 +591,36 @@ test("a store replaced at the moment of the move is archived, never deleted, and
         await writeFile(planted, "synthetic-planted\n");
       },
     })
-  ).rejects.toThrow("nothing was moved");
+  ).rejects.toThrow("left as they are");
   expect(await readFile(planted, "utf8")).toBe("synthetic-planted\n");
   expect(await readFile(third, "utf8")).toBe("synthetic-third-store\n");
+  // That refusal suggests no move that could overwrite the planted file.
+  const collision = await retireEncryptedStoreFile({
+    storePath: third,
+    now: new Date("2026-11-13T12:00:01Z"),
+    afterDirectory: async (made) => {
+      await writeFile(join(made, "third.enc.json"), "synthetic-planted\n");
+    },
+  }).catch((error: unknown) => String(error));
+  expect(collision).not.toContain("mv ");
+
+  // Any other link failure: the empty directory is removed, and the manual
+  // step makes a fresh one and moves without overwriting (mv -n).
+  const fourth = join(fixture.hackHome, "fourth.enc.json");
+  await writeFile(fourth, "synthetic-fourth-store\n");
+  const fourthDir = `${fourth}.retired-20261113T120000Z`;
+  const other = await retireEncryptedStoreFile({
+    storePath: fourth,
+    now: new Date("2026-11-13T12:00:00Z"),
+    afterDirectory: async () => {
+      // The store vanishes, so the link fails with ENOENT, not EEXIST.
+      await rename(fourth, `${fourth}.away`);
+    },
+  }).catch((error: unknown) => String(error));
+  expect(other).toContain(
+    `mkdir ${fourthDir} && mv -n ${fourth} ${fourthDir}/`
+  );
+  expect(await lstat(fourthDir).catch(() => null)).toBeNull();
 });
 
 test("a store that is its own key file is not retired, through any spelling", async () => {
@@ -856,4 +883,32 @@ test('a malformed registry, or a store identity that cannot be read, is never "n
   } finally {
     await chmod(hidden, 0o755);
   }
+});
+
+test("registry entries that are not valid projects make the reader scan incomplete", async () => {
+  // Second-family review: the strict read still skipped invalid project
+  // entries silently, so a filtered list read as complete.
+  const fixture = await setUp();
+  const registry = join(fixture.hackHome, "projects.json");
+  const text = await readFile(registry, "utf8");
+  const parsed = JSON.parse(text) as { projects: unknown[] };
+  // Mixed: the valid entries plus one that is not a project.
+  await writeFile(
+    registry,
+    JSON.stringify({ ...parsed, projects: [...parsed.projects, { id: 5 }] })
+  );
+  const mixed = (await inspect(fixture.bystander, "app-b"))[0];
+  expect(mixed?.message).toContain("Registered projects that read it: app-a.");
+  expect(mixed?.message).toContain(
+    "1 registered project(s) could not be checked"
+  );
+  // Only an invalid entry: never "No registered project reads it."
+  await writeFile(
+    registry,
+    JSON.stringify({ ...parsed, projects: [{ id: 5 }] })
+  );
+  const only = (await inspect(fixture.bystander, "app-b"))[0];
+  expect(only?.message).toContain("could not be checked");
+  expect(only?.message).not.toContain("No registered project reads it.");
+  await writeFile(registry, text);
 });

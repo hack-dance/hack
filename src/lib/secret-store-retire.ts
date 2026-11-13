@@ -105,18 +105,21 @@ export async function listProjectsUsingSecretStore(opts: {
     readonly name: string;
     readonly projectDir: string;
   }[];
+  // Registry entries that are not valid projects: unknown, so unchecked.
+  let rejected = 0;
   try {
     const read = await readProjectsRegistryStrict();
     if (read.kind === "invalid") {
       return { names: [], registryRead: false, unchecked: 0 };
     }
     projects = read.kind === "valid" ? read.registry.projects : [];
+    rejected = read.kind === "valid" ? read.rejected : 0;
   } catch {
     return { names: [], registryRead: false, unchecked: 0 };
   }
   const target = await identity(opts.storePath);
   const names = new Set<string>();
-  let unchecked = 0;
+  let unchecked = rejected;
   for (const project of projects) {
     let location: Awaited<ReturnType<typeof resolveFileSecretStorePaths>>;
     try {

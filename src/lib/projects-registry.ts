@@ -182,7 +182,12 @@ export async function readProjectsRegistryStrict(opts?: {
   readonly registryPath?: string;
 }): Promise<
   | { readonly kind: "absent" | "invalid" }
-  | { readonly kind: "valid"; readonly registry: ProjectsRegistry }
+  | {
+      readonly kind: "valid";
+      readonly registry: ProjectsRegistry;
+      /** Project entries the registry holds that are not valid (skipped). */
+      readonly rejected: number;
+    }
 > {
   const text = await readRegistryText(opts?.registryPath ?? getRegistryPath());
   if (text === null) {
@@ -195,7 +200,18 @@ export async function readProjectsRegistryStrict(opts?: {
     return { kind: "invalid" };
   }
   const registry = parseRegistry(parsed);
-  return registry === null ? { kind: "invalid" } : { kind: "valid", registry };
+  if (registry === null) {
+    return { kind: "invalid" };
+  }
+  // The best-effort parser skips invalid entries; count them, so a caller
+  // never presents a filtered list as complete.
+  const raw = isRecord(parsed) ? parsed.projects : undefined;
+  const total = Array.isArray(raw) ? raw.length : registry.projects.length;
+  return {
+    kind: "valid",
+    registry,
+    rejected: total - registry.projects.length,
+  };
 }
 
 type RegistrationUpsertOptions = {

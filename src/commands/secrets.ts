@@ -16,6 +16,7 @@ import {
   planSecretStoreRetire,
   retireSecretStore,
 } from "../lib/secret-store-retire.ts";
+import { escapeTerminalControls } from "../lib/terminal-text.ts";
 import { logger } from "../ui/logger.ts";
 
 const DEFAULT_SECRETS_SERVICE = "hack-cli" as const;
@@ -278,13 +279,14 @@ async function handleSecretsRetireStore({
     projectDir: project?.projectDir,
   });
   if (planned.kind === "refused") {
-    logger.error({ message: planned.message });
+    logger.error({ message: escapeTerminalControls(planned.message) });
     return 1;
   }
   const ok =
     args.options.yes === true ||
     (await confirmSafe({
-      message: `Move the encrypted secret store ${planned.plan.display} aside? Its entries stay in the moved file, which can be put back.`,
+      // Paths are project input: show control characters, never send them.
+      message: `Move the encrypted secret store ${escapeTerminalControls(planned.plan.display)} aside? Its entries stay in the moved file, which can be put back.`,
       initialValue: false,
       nonInteractive: "fail",
       hint: "Pass --yes to confirm (`hack secrets retire-store --yes`), or run it in a terminal.",
@@ -297,10 +299,11 @@ async function handleSecretsRetireStore({
     approved: planned.plan,
   });
   if (outcome.kind === "refused") {
-    logger.error({ message: outcome.message });
+    logger.error({ message: escapeTerminalControls(outcome.message) });
     return 1;
   }
   logger.success({
+    // Each line escaped on its own: the newlines between them are intended.
     message: [
       outcome.configured === outcome.from
         ? `Moved the encrypted secret store ${outcome.from} to ${outcome.to}.`
@@ -312,7 +315,9 @@ async function handleSecretsRetireStore({
         : [
             `A different file appeared at ${outcome.from} while moving; it was kept at ${outcome.replacement}.`,
           ]),
-    ].join("\n"),
+    ]
+      .map(escapeTerminalControls)
+      .join("\n"),
   });
   return 0;
 }

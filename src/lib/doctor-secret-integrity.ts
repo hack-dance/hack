@@ -19,6 +19,7 @@ import {
   projectUsesSecretStore,
   type SecretStoreUsers,
 } from "./secret-store-retire.ts";
+import { escapeTerminalControls } from "./terminal-text.ts";
 
 /**
  * `hack doctor`'s secret integrity findings (HACK-2169): stores and env
@@ -382,5 +383,12 @@ export async function inspectSecretIntegrity(opts: {
   ];
   const rank = (finding: SecretIntegrityFinding) =>
     ({ error: 0, warn: 1, info: 2 })[finding.status];
-  return findings.sort((a, b) => rank(a) - rank(b));
+  // Messages carry project-configured paths: control characters are shown,
+  // never sent to the terminal (HACK-2177).
+  return findings
+    .sort((a, b) => rank(a) - rank(b))
+    .map((finding) => ({
+      ...finding,
+      message: escapeTerminalControls(finding.message),
+    }));
 }

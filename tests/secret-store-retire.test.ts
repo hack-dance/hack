@@ -38,6 +38,7 @@ import {
   planSecretStoreRetire,
   retireSecretStore,
 } from "../src/lib/secret-store-retire.ts";
+import { escapeTerminalControls } from "../src/lib/terminal-text.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
@@ -1060,4 +1061,46 @@ test("the locked eligibility check reads the pinned store, not the alias", async
       name.includes(".retired-")
     )
   ).toEqual([]);
+});
+
+test("control characters in a configured store path are shown, never sent to the terminal", async () => {
+  // Codex security review: a symlinked directory named with CR and an
+  // erase-line sequence could rewrite the confirmation on screen.
+  expect(escapeTerminalControls("a\r\u001b[2Kb\nc\td\u009b")).toBe(
+    "a\\x0d\\x1b[2Kb\\x0ac\\x09d\\x9b"
+  );
+  const fixture = await setUp();
+  const alias = join(fixture.bystander.projectRoot, "lin\r\u001b[2Kked");
+  await symlink(fixture.hackHome, alias);
+  await writeFile(
+    join(fixture.bystander.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-b",
+      dev_host: "app-b.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: {
+            path: join(alias, "secrets.enc.json"),
+            keyPath: fixture.keyPath,
+          },
+        },
+      },
+    })}\n`
+  );
+  const raw = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
+  // Doctor's finding names the path with its controls escaped.
+  const findings = await inspect(fixture.bystander, "app-b");
+  for (const finding of findings) {
+    expect(raw.test(finding.message)).toBe(false);
+  }
+  // The real command's output (the moved paths) is escaped too.
+  const retired = await runRetire({
+    fixture,
+    path: fixture.bystander.projectRoot,
+    yes: true,
+  });
+  expect(retired.code).toBe(0);
+  expect(retired.output).toContain("lin\\x0d\\x1b[2Kked");
+  expect(raw.test(retired.output.replaceAll("\u001b[", "ESC["))).toBe(false);
 });

@@ -705,8 +705,22 @@ The provider's guest-ready signal can arrive before its bridge threads bind. Nat
 rechecks the same provider identity around each observation; it never accepts an unsafe
 socket, changes its permissions or removes it to make startup pass. Existing running-pool
 audits do not wait. A socket timeout or identity refusal takes the verified failed-boot
-stop path and names the recovery command: run the selected native executor's
-`--candidate-root "$HACK_NATIVE_HOME" runtime down --recover --json`, then retry. This preserves
+stop path and names the recovery command. Use the same selected executor and identical
+`--candidate-root` argument as the failed start, followed by `runtime recover --json`.
+If you explicitly selected an installed executor with `HACK_NATIVE_BINARY` and
+`HACK_NATIVE_HOME`, use those same non-empty values:
+
+```sh
+"$HACK_NATIVE_BINARY" --candidate-root "$HACK_NATIVE_HOME" runtime recover --json
+```
+
+Otherwise use the bundled executor path and the selected home from the failed
+invocation; do not run this variable-based example with either variable unset.
+
+For a checkout-local executor, `--candidate-root` is the source checkout, not the native
+home or `.hack-local` directory; from that checkout run `./hack-local runtime recover --json`.
+Provider-verification failures during the wait carry this guidance too; recovery still
+independently proves ownership before stopping anything. Then retry. This preserves
 retained disks and records an unclean stop; it does not claim the guest shut down cleanly.
 `hack down` may say the project was not started because no project mapping was published.
 

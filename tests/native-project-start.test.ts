@@ -426,7 +426,7 @@ test("foreground saves after readiness and retains mapping after confirmed stop"
 test("a pool bridge boot failure reaches foreground up with recovery guidance before any project mapping", async () => {
   const { opts, events } = await fixture(false);
   const message =
-    "Native bridge sockets did not become private and owned before the startup deadline. Run the selected native executor with --candidate-root set to this native home and runtime down --recover --json before retrying.";
+    "Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.";
   await writeFile(
     opts.runtime.binary,
     `#!/usr/bin/env bun
@@ -446,7 +446,7 @@ process.exit(2);
     (error: unknown) => error
   );
   expect(failure).toBeInstanceOf(ClosedCliError);
-  expect(String(failure)).toContain("runtime down --recover --json");
+  expect(String(failure)).toContain("runtime recover --json");
   expect(String(failure)).toContain("--candidate-root");
   expect(String(failure)).not.toContain("synthetic-secret");
   expect(nativeRuntimeFailure(failure)?.code).toBe("bridge_socket_timeout");

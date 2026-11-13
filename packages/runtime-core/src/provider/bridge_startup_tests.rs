@@ -127,7 +127,12 @@ fn missing_or_never_private_sockets_expire_without_changing_them_and_name_recove
         .unwrap_err();
         assert_eq!(failure.code, "bridge_socket_timeout");
         assert!(failure.message_fixed);
-        assert!(failure.message.contains("runtime down --recover --json"));
+        assert!(failure.message.contains("runtime recover --json"));
+        assert!(
+            failure
+                .message
+                .contains("identical --candidate-root argument")
+        );
         assert_eq!(clock.now(), BUDGET);
         if present {
             assert_eq!(
@@ -165,7 +170,7 @@ fn unsafe_type_alias_and_link_count_refuse_even_when_an_earlier_slot_is_missing(
         .unwrap_err();
         assert_eq!(failure.code, "bridge_socket_identity");
         assert!(failure.message_fixed);
-        assert!(failure.message.contains("runtime down --recover --json"));
+        assert!(failure.message.contains("runtime recover --json"));
         let after = fs::symlink_metadata(fixture.path(1)).unwrap();
         assert_eq!(
             (before.dev(), before.ino(), before.mode(), before.nlink()),
@@ -215,6 +220,14 @@ fn provider_loss_before_or_after_observation_is_not_readiness_or_retry_authority
         )
         .unwrap_err();
         assert_eq!(failure.code, "process_identity_mismatch");
+        assert!(failure.message_fixed);
+        assert!(failure.message.contains("runtime recover --json"));
+        assert!(
+            failure
+                .message
+                .contains("identical --candidate-root argument")
+        );
+        assert!(!failure.message.contains("Provider changed."));
         assert_eq!(checks.get(), fail_on);
         assert_eq!(clock.now(), Duration::ZERO);
     }

@@ -1604,7 +1604,7 @@ fn start_pool(
         if cleanup.is_ok() {
             phase(candidate, &mut owner, "failed-boot-stopped")?;
         }
-        cleanup?;
+        cleanup.map_err(failed_boot_stop_error)?;
     }
     result
 }
@@ -1694,28 +1694,81 @@ fn verify_disk_allocation(
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "lifecycle/boot_sequence_tests.rs"]
+mod boot_sequence_tests;
+
+fn failed_boot_stop_error(failure: CandidateError) -> CandidateError {
+    CandidateError::new(
+        failure.code,
+        "Failed-boot provider cleanup could not be confirmed. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
+    )
+}
+
 fn finish_boot(
     candidate: &Candidate,
     owner: &mut Owner,
     previous_boot: Option<&str>,
     lock: &state::Lock,
 ) -> Result<RuntimeStatus, CandidateError> {
-    // Before any disk is adopted: a refusal here takes the caller's failed-boot path.
-    verify_templates(
-        candidate,
+    finish_boot_with(
         owner,
-        lock,
-        super::disk_template::Stage::AfterFirstStart,
-    )?;
+        |owner| {
+            verify_templates(
+                candidate,
+                owner,
+                lock,
+                super::disk_template::Stage::AfterFirstStart,
+            )?;
+            owner
+                .application_bridge
+                .map(|bridge| {
+                    owner
+                        .real_data_dir(candidate)
+                        .map(|directory| (directory, bridge))
+                })
+                .transpose()
+        },
+        |owner| verify_live(candidate, owner),
+        |owner| audit_boot(candidate, owner),
+        |owner| adopt_boot(candidate, owner, previous_boot, lock),
+        &process::MonotonicClock::new(),
+    )
+}
+
+/// Fresh boot's ordering boundary. Only effectful host/guest operations are
+/// injected: the real complete-set socket wait always precedes audit/adoption.
+fn finish_boot_with<S, T>(
+    owner: &mut S,
+    prepare: impl FnOnce(
+        &S,
+    ) -> Result<
+        Option<(std::path::PathBuf, super::bridge::BridgeIntent)>,
+        CandidateError,
+    >,
+    mut verify_provider: impl FnMut(&S) -> Result<(), CandidateError>,
+    audit: impl FnOnce(&S) -> Result<(), CandidateError>,
+    adopt: impl FnOnce(&mut S) -> Result<T, CandidateError>,
+    clock: &impl process::Clock,
+) -> Result<T, CandidateError> {
+    // Before any disk is adopted: a refusal here takes the caller's failed-boot path.
+    let bridge = prepare(owner)?;
     // The provider's agent-ready signal can precede expose-thread socket binds.
     // Wait before adoption, without weakening the immediate audit used by
     // running-pool commands. Failure keeps the existing verified-stop path.
-    if let Some(bridge) = owner.application_bridge {
-        super::bridge::wait_for_sockets(&owner.real_data_dir(candidate)?, bridge, || {
-            verify_live(candidate, owner)
-        })?;
+    if let Some((directory, bridge)) = bridge {
+        super::bridge::wait_for_sockets(&directory, bridge, || verify_provider(owner), clock)?;
     }
-    audit_boot(candidate, owner)?;
+    audit(owner)?;
+    adopt(owner)
+}
+
+fn adopt_boot(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    previous_boot: Option<&str>,
+    lock: &state::Lock,
+) -> Result<RuntimeStatus, CandidateError> {
     let dir = owner.real_data_dir(candidate)?;
     let storage = identity::disk(&dir.join("storage.raw"))?;
     let overlay = identity::disk(&dir.join("overlay.raw"))?;

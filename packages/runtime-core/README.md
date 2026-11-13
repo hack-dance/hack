@@ -595,10 +595,16 @@ type, user, link count or unreadable identity refuses immediately. Only a comple
 socket set observed before the deadline succeeds. The wait never chmods, removes or connects
 to sockets. Running-pool audits remain immediate. The existing failed-boot path stops only
 the verified provider, records its absence and retains `failed-boot-stopped`, without
-claiming a clean guest shutdown. Socket failures name the selected executor's
-`runtime down --recover --json` on the same native home before retry; a project may not yet
+claiming a clean guest shutdown. Socket failures and provider-verification failures during
+the wait name `runtime recover --json`, using the same executor and identical
+`--candidate-root` argument as the failed start. For an installed executor this argument is
+the private `HACK_NATIVE_HOME`; for the checkout-local executor it is the source checkout
+(the `hack-local` launcher supplies it). Do not substitute the `.hack-local` state directory.
+A project may not yet
 have a mapping for ordinary `hack down`. The clock-driven real-socket regression reproduces
-the ready-before-bind ordering without a VM, but cannot qualify actual provider scheduling.
+the ready-before-bind ordering without a VM. A fresh-boot sequence regression runs the
+actual waiter before audit/adoption and refuses timeout, unsafe sockets and provider loss
+without adopting disks; host effects are injected and actual provider scheduling is not qualified.
 HACK-2175's live gate is ten consecutive Mac Ctrl-C scenarios including pool stop/start.
 The wait adds no signal handler: interruption retains the existing `booting` receipt
 and stop/recovery rules, so that live gate also qualifies the extended startup window.

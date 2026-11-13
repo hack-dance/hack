@@ -146,7 +146,7 @@ const BOOT_SOCKET_POLL: std::time::Duration = std::time::Duration::from_millis(5
 fn startup_socket_timeout() -> CandidateError {
     CandidateError::new(
         "bridge_socket_timeout",
-        "Native bridge sockets did not become private and owned before the startup deadline. Run the selected native executor with --candidate-root set to this native home and runtime down --recover --json before retrying.",
+        "Native bridge sockets did not become private and owned before the startup deadline. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
     )
 }
 
@@ -159,14 +159,9 @@ pub(super) fn wait_for_sockets(
     directory: &std::path::Path,
     intent: BridgeIntent,
     verify_provider: impl FnMut() -> Result<(), CandidateError>,
+    clock: &impl super::process::Clock,
 ) -> Result<(), CandidateError> {
-    wait_for_sockets_with(
-        directory,
-        intent,
-        verify_provider,
-        &super::process::MonotonicClock::new(),
-        BOOT_SOCKET_WAIT,
-    )
+    wait_for_sockets_with(directory, intent, verify_provider, clock, BOOT_SOCKET_WAIT)
 }
 
 fn wait_for_sockets_with(
@@ -181,14 +176,14 @@ fn wait_for_sockets_with(
         if clock.now() >= deadline {
             return Err(startup_socket_timeout());
         }
-        verify_provider()?;
+        verify_provider().map_err(startup_provider_failure)?;
         let ready = sockets_ready(directory, intent).map_err(|_| {
             CandidateError::new(
                 "bridge_socket_identity",
-                "Bridge socket identity is unsafe; startup was refused. Run the selected native executor with --candidate-root set to this native home and runtime down --recover --json before retrying.",
+                "Bridge socket identity is unsafe; startup was refused. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
             )
         })?;
-        verify_provider()?;
+        verify_provider().map_err(startup_provider_failure)?;
         let remaining = deadline.saturating_sub(clock.now());
         if remaining.is_zero() {
             return Err(startup_socket_timeout());
@@ -198,6 +193,15 @@ fn wait_for_sockets_with(
         }
         clock.sleep(remaining.min(BOOT_SOCKET_POLL));
     }
+}
+
+/// Keep the failed identity boundary's code, but never expose its dynamic text.
+/// Recovery still independently proves the recorded provider before any stop.
+fn startup_provider_failure(failure: CandidateError) -> CandidateError {
+    CandidateError::new(
+        failure.code,
+        "The retained provider could not be verified while waiting for bridge sockets; startup was refused. Run the same selected executor with the identical --candidate-root argument used for the failed start, followed by runtime recover --json before retrying.",
+    )
 }
 
 #[cfg(test)]

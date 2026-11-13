@@ -65,13 +65,13 @@ integration run qualifies its selected evidence, not an unrun full release suite
 Docker scenarios run on four `docker-e2e shard i/4` runners via
 `bun tests/e2e/run.ts --shard=i/4`. `tests/e2e/shard.ts` partitions the default scenario
 set deterministically, longest first into the lightest shard using checked-in
-hints. Every scenario runs exactly once, as `tests/e2e-shard.`test`.ts` verifies.
+hints. Every scenario runs exactly once, as `tests/e2e-shard.test.ts` verifies.
 The custom-network qualification has three parts with independent three-checkout
 startup and cleanup; the planner keeps them on separate shards. The slowest shard
 sets integration wall time.
 
 Prerelease preparation and publication require stronger exact-source evidence:
-freeze `next`, run `gh workflow run ci.yml --ref `next` -f full=true`, wait for success,
+freeze `next`, run `gh workflow run ci.yml --ref next -f full=true`, wait for success,
 then dispatch the prerelease. Both gates require executed `selection_mode=full` and
 `ci_evidence=release-full` markers, every required job (including eight unit shards,
 four Docker shards and all four compiler hosts) and every observed job successful,

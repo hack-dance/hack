@@ -43,6 +43,8 @@ therefore remains part of the threat model even after rotation.
 | `encrypted_file` store | One authenticated encrypted map; project scoping is inside plaintext | Private by default; a public-copy decision requires reviewing envelope metadata, custody and retained history |
 | `cloud` shim | Uses encrypted local storage; a provider label is not proof of a managed KMS | Apply the encrypted-file policy; qualify actual provider behavior separately |
 | Native keychain backend | Delegates storage/access to Bun and the OS | Never export credentials to qualify tests; preserve native approval boundaries |
+| Local YAML layers (`hack.env*.local.yaml`) | Can hold plaintext, including migrated v4 values; new files are 0600 but existing modes are preserved | Local-only; inspect ownership, permissions and Git tracking |
+| Mux temporary env files and background output stores | `$TMPDIR/hack-mux-env-*/env.json` and `<HACK_HOME>/commands/<id>/` can hold plaintext | Private custody; delayed/partial redaction is not erasure |
 | Materialized dotenv/Compose files and runtime injection | May contain plaintext by design | Private only; inspect synthetic fixtures for leakage, not production values |
 | Backups, session archives, application output and private ledgers | May contain plaintext, keys or historical disclosures | Private only until independently reviewed; no complete-redaction claim |
 
@@ -61,11 +63,15 @@ A synthetic-sentinel scan (`tests/env-secret-sentinel-scan.test.ts`, CI `test`
 job) enforces the artifact policy above for one primary checkout and one linked
 worktree: after env set, materialize, exec, Compose generation, env apply, logs and
 doctor and a careless `git add -A` commit, no value or key appears in tracked files,
-Git objects, output, child argv, HACK_HOME or caches; plaintext exists only in the
-private, ignored, mode-0600 `.hack/.env`. The generated
+Git objects, output, child argv, HACK_HOME or caches for that encrypted-entry
+fixture. Its plaintext allowance is the private, ignored, mode-0600 `.hack/.env`;
+that is a fixture boundary, not a product-wide inventory. Local YAML layers can
+also hold plaintext, as can mux temporary payloads and captured background
+output. Existing local YAML modes are preserved, so check them explicitly. The generated
 `.hack/.internal/compose.env.override.yml` must hold `${HACK_ENV_...}` references and no
-value (HACK-1273), and must also be private and ignored. Values reach a child process
-environment only for the exec'd command and the `docker compose` client. The
+value (HACK-1273), and must also be private and ignored. The fixture checks value
+delivery to the exec'd command and the `docker compose` client; it does not
+prove arbitrary output or project-key environment overrides are contained. The
 per-service `HACK_ENV_*` values go only to `docker compose` invocations that read the
 override; the `docker inspect`, `logs` and `events` children Hack starts around Compose
 get the same environment without them.

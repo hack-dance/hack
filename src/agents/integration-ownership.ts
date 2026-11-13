@@ -122,6 +122,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "e909706034f2780434920b9b", // next: lifecycle ignores via info/exclude (HACK-1278)
     "32d67ad37d8e43883c0febb7", // next: doctor --fix creates a missing .hack/.gitignore (HACK-1278)
     "f86b0f8e139cc45f518a8998", // af71a840: explicit integrations, no automatic freshness guidance
+    "6dafad529aaf5b1b8b31496e", // HACK-2167: accurate env/output security guidance
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -167,6 +168,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "2255a7c877b17397c1a96a85", // next: lifecycle ignores via info/exclude (HACK-1278)
     "d09a7518bb0d26cdbbfaba52", // next: doctor --fix creates a missing .hack/.gitignore (HACK-1278)
     "653d1069201bf4e1d3095257", // af71a840: retained legacy rule renderer without freshness guidance
+    "6669bc4f42a5bd9942631946", // HACK-2167: accurate env/output security guidance
   ]),
 };
 

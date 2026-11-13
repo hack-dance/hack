@@ -275,7 +275,8 @@ test("hack-env keeps secret values out of argv and treats get as a plaintext sin
   expect(body).toContain(
     "A secret value never goes in command arguments or agent prompts"
   );
-  expect(body).toContain("are plaintext sinks");
+  expect(body).toContain("print plaintext");
+  expect(body).toContain("`hack secrets get`");
   expect(body).toContain("`hack env explain <KEY>");
   // No rendered example passes a secret-looking value as an argument or
   // assignment.

@@ -319,9 +319,10 @@ A per-call flag wins over the project default, which wins over the global one.
 
 **Redaction is partial.** Before output is announced, Hack replaces values it
 had already resolved to inject into that command's Compose environment with
-`*`, in place in the stored file. Values shorter than 6 bytes are not redacted
-(too many false matches). The values reach the supervisor over an inherited
-pipe; they are never written to disk or put in an environment variable. The command writes to the
+`*`, in place in the stored file. Values shorter than 6 UTF-8 bytes are never redacted
+(too many false matches). The redaction matcher list reaches the supervisor over
+an inherited pipe; Hack does not persist that list or put it in an environment
+variable. The command writes to the
 file directly, so a value is on disk unredacted until the supervisor's next
 scan (about 200 ms), and the start of a value stays unredacted until the rest
 arrives or the command ends. It matches across separate writes, so a value split between
@@ -330,6 +331,14 @@ the command transforms (encodes, splits across lines, prints in parts), or
 values printed after the supervisor was lost (such output is withheld from reads
 with `withheld: "redaction_unavailable"`). Hack never loads or decrypts secrets
 only to redact. Treat stored output as sensitive.
+
+If the supervisor dies before scanning bytes, those bytes stay unredacted on
+disk, along with later output that it never scans. Withholding them from reads
+does not erase them. They can remain for the whole result retention period,
+and physical deletion waits for a later sweep; a command whose end cannot be
+confirmed can retain its files longer. The native backend performs no output
+redaction. Neither a short value nor native output gains protection by being
+read through MCP instead of the CLI.
 
 - Full capture supports at most 1,024 distinct values to redact (values of
   6 bytes or more from the command's environment). A command with more is

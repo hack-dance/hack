@@ -28,6 +28,7 @@ Use `hack` as the primary interface for local-first development.
 - When the exit status matters, do not pipe `hack` output through `| tail` or `| grep`: the pipeline reports the filter's status, and filtered text can hide failures. Check the `hack` exit status or `--json` envelope first, and use finite reads such as `hack logs --no-follow --tail 100`.
 - Scripted/agent runs: pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) so commands never block on prompts — they apply documented defaults or fail fast with E_INTERACTIVE_REQUIRED.
 - Use MCP only when shell access is unavailable.
+- Treat `hack logs`, MCP run/exec results and background-command reads as secret-bearing output: applications can print injected values. Do not paste or persist raw output in prompts, replies, logs or reports without reviewing it; redaction is partial and native background output is not redacted.
 - A task request authorizes its stated scope, not unrelated service, global config, or production changes. Preserve native credential/trust approvals and destructive-cleanup gates; do not ask again for the same authorized action.
 - Cleanup must prove resource ownership. Successful one-shot containers may exit with code 0; adopted external processes must remain running when Hack stops its own services.
 - If runtime state looks wrong, inspect with `hack doctor`; apply `hack doctor --fix` only for repairs covered by the request. Warnings do not authorize broader changes.
@@ -146,8 +147,10 @@ Use `hack` as the primary interface for local-first development.
 ## Env composition
 
 - Layer order: `.hack/hack.env.default.yaml`, the selected `.hack/hack.env.<overlay>.yaml`, then worktree-local `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`; service values override `global`, and host commands apply `host` values last.
+- `hack.env*.local.yaml` files are local-only, can contain plaintext and must not be committed. Check existing file permissions and Git tracking; ignore rules do not untrack a file already in Git.
+- `hack env list` masks only entries stored as secrets (for example with `--secret`); plaintext values, including values migrated from a v4 `.hack/.env`, are shown. Prefer variable names and `hack env explain` when checking configuration without exposing values.
 - Omit `--env` to use the configured default overlay; `--env base` (or `default`/`none`) selects base layers only, the same on every command. An overlay name grants no production authority and no network or instance isolation.
-- Use `hack env explain <KEY> --env <overlay> --service <service>` for provenance without the value; use `hack env get <KEY>` only when a plaintext value is explicitly needed, and treat its output as secret.
+- Use `hack env explain <KEY> --env <overlay> --service <service>` for provenance without the value; `hack env get <KEY>` and `hack secrets get <name>` print plaintext. Use them only when the value itself is explicitly needed, and treat their output as secret.
 - Store a secret by piping it: `<secret-source> | hack env add <KEY> --service <service> --secret --value-stdin` (or the hidden prompt in a terminal); never pass secret values as command arguments, where shell history and process listings expose them.
 - Running containers keep the env they were created with; after an env change, refresh with `hack env apply --service <service>` or `hack restart`.
 - Accepted flags, injection timing and refresh path per command: the command and delivery matrix in Hack's env guide (`docs/env.md` in the Hack repository).

@@ -46,9 +46,17 @@ const optRetireYes = defineOption({
     "Confirm moving the store aside without prompting (required without a TTY or with HACK_NO_INTERACTIVE)",
 } as const);
 
+const optAllowUnchecked = defineOption({
+  name: "allowUnchecked",
+  type: "boolean",
+  long: "--allow-unchecked",
+  description:
+    "Retire even when some registered projects could not be checked for another key that opens the store",
+} as const);
+
 const secretsOptions = [optService] as const;
 const deleteOptions = [optService, optYes] as const;
-const retireStoreOptions = [optPath, optRetireYes] as const;
+const retireStoreOptions = [optPath, optRetireYes, optAllowUnchecked] as const;
 type RetireStoreArgs = CommandArgs<typeof retireStoreOptions, readonly []>;
 const secretsPositionals = [{ name: "name", required: false }] as const;
 
@@ -102,7 +110,8 @@ const retireStoreSpec = defineCommand({
     "Moves the store into a new directory <store>.retired-<UTC time>/ beside it: nothing is deleted, read or printed,",
     "and the key file is left alone. It prints how to put the store back. The store is the one this project",
     "selects (--path or the current directory), or the global one outside a project. Refused for a store that",
-    "opens with the key in use, or that is unreadable for another reason. Without a TTY (or with",
+    "opens with the key in use, that another registered project's key still opens, or that is unreadable for",
+    "another reason; when some registered projects could not be checked, pass --allow-unchecked. Without a TTY (or with",
     "HACK_NO_INTERACTIVE / --no-interactive) it is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.",
   ].join("\n"),
   options: retireStoreOptions,
@@ -275,8 +284,10 @@ async function handleSecretsRetireStore({
   // Plan once: the confirmation names this exact target (its real path; the
   // configured path is project input and may go through a symlinked
   // directory), and the retirement refuses if the target changed since.
+  const allowUnchecked = args.options.allowUnchecked === true;
   const planned = await planSecretStoreRetire({
     projectDir: project?.projectDir,
+    allowUnchecked,
   });
   if (planned.kind === "refused") {
     logger.error({ message: escapeTerminalControls(planned.message) });
@@ -297,6 +308,7 @@ async function handleSecretsRetireStore({
   const outcome = await retireSecretStore({
     projectDir: project?.projectDir,
     approved: planned.plan,
+    allowUnchecked,
   });
   if (outcome.kind === "refused") {
     logger.error({ message: escapeTerminalControls(outcome.message) });

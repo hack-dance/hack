@@ -2442,7 +2442,8 @@ For an encrypted_file (or cloud shim) store that hack doctor reports with a miss
 Moves the store into a new directory <store>.retired-<UTC time>/ beside it: nothing is deleted, read or printed,
 and the key file is left alone. It prints how to put the store back. The store is the one this project
 selects (--path or the current directory), or the global one outside a project. Refused for a store that
-opens with the key in use, or that is unreadable for another reason. Without a TTY (or with
+opens with the key in use, that another registered project's key still opens, or that is unreadable for
+another reason; when some registered projects could not be checked, pass --allow-unchecked. Without a TTY (or with
 HACK_NO_INTERACTIVE / --no-interactive) it is refused with E_INTERACTIVE_REQUIRED unless --yes is passed.
 
 ### Options
@@ -2451,6 +2452,7 @@ HACK_NO_INTERACTIVE / --no-interactive) it is refused with E_INTERACTIVE_REQUIRE
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--yes` | Confirm moving the store aside without prompting (required without a TTY or with HACK_NO_INTERACTIVE) |
+| `--allow-unchecked` | Retire even when some registered projects could not be checked for another key that opens the store |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

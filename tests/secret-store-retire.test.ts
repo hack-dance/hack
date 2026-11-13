@@ -1213,3 +1213,67 @@ test("a registered checkout that is not available counts as unchecked", async ()
     "1 registered project(s) could not be checked"
   );
 });
+
+test("a store another registered project's key still opens is not retired", async () => {
+  // Codex security review: retire asked only whether this project's key
+  // opens the store; another project with its own key still used it.
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  const appAKey = join(fixture.reader.projectRoot, ".hack-store.key");
+  await writeFile(appAKey, `${STORE_KEY}\n`, { mode: 0o600 });
+  await chmod(appAKey, 0o600);
+  await writeFile(
+    join(fixture.reader.projectDir, "hack.config.json"),
+    `${JSON.stringify({
+      name: "app-a",
+      dev_host: "app-a.hack",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: fixture.storePath, keyPath: appAKey },
+        },
+      },
+    })}\n`
+  );
+  const outcome = await retireSecretStore({
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+    "still opens with another registered project's key (app-a)"
+  );
+  expect(await readFile(fixture.storePath)).toEqual(before);
+});
+
+test("retire refuses when registered projects could not be checked, unless --allow-unchecked", async () => {
+  // The store may be another checkout's that could not be checked.
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  const registry = join(fixture.hackHome, "projects.json");
+  const parsed = JSON.parse(await readFile(registry, "utf8")) as {
+    projects: { name: string; worktrees?: unknown[] }[];
+  };
+  for (const project of parsed.projects) {
+    if (project.name === "app-a") {
+      project.worktrees = [
+        {
+          path: join(root, "unmounted", "app-a-feature"),
+          branch: "feature",
+          lastSeenAt: "2026-11-13T12:00:00.000Z",
+        },
+      ];
+    }
+  }
+  await writeFile(registry, JSON.stringify(parsed));
+  const refused = await retireSecretStore({
+    projectDir: fixture.bystander.projectDir,
+  });
+  expect(refused.kind === "refused" ? refused.message : "").toContain(
+    "--allow-unchecked"
+  );
+  expect(await readFile(fixture.storePath)).toEqual(before);
+  const allowed = await retireSecretStore({
+    projectDir: fixture.bystander.projectDir,
+    allowUnchecked: true,
+  });
+  expect(allowed.kind).toBe("retired");
+});

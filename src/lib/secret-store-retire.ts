@@ -92,57 +92,48 @@ export type SecretStoreUsers = {
   readonly unchecked: number;
 };
 
+/** Registered checkouts that select one store file, and what could not be checked. */
+type StoreContexts = {
+  readonly contexts: readonly {
+    readonly name: string;
+    readonly projectDir: string;
+    readonly keyPath: string;
+  }[];
+  readonly registryRead: boolean;
+  readonly unchecked: number;
+};
+
 /**
- * Registered projects whose configuration selects the store at `storePath`
- * and whose runtime reads it, from configuration only: no store is opened.
- * A project selects the same store when its configured path is the same,
- * or names the same file (device and inode, so aliases through symlinked
- * directories match). What could not be checked is counted, never taken as
- * "does not read it".
+ * Every registered checkout (each project's primary checkout and each of
+ * its linked worktrees) whose configuration selects the store file at
+ * `storePath`: the same configured path, or the same file (device and
+ * inode, so aliases through symlinked directories match). From
+ * configuration only. A checkout that is not there, whose config is unsure,
+ * or whose store identity cannot be read is counted as unchecked, never
+ * taken as "does not select it".
  */
-export async function listProjectsUsingSecretStore(opts: {
+async function storeContexts(opts: {
   readonly storePath: string;
-}): Promise<SecretStoreUsers> {
+}): Promise<StoreContexts> {
   let projects: readonly RegisteredProject[];
   // Registry entries that are not valid projects: unknown, so unchecked.
   let rejected = 0;
   try {
     const read = await readProjectsRegistryStrict();
     if (read.kind === "invalid") {
-      return { names: [], registryRead: false, unchecked: 0 };
+      return { contexts: [], registryRead: false, unchecked: 0 };
     }
     projects = read.kind === "valid" ? read.registry.projects : [];
     rejected = read.kind === "valid" ? read.rejected : 0;
   } catch {
-    return { names: [], registryRead: false, unchecked: 0 };
+    return { contexts: [], registryRead: false, unchecked: 0 };
   }
   const target = await identity(opts.storePath);
-  const names = new Set<string>();
+  const contexts: StoreContexts["contexts"][number][] = [];
   let unchecked = rejected;
-  // A project's linked worktrees are registered under it, not as projects
-  // of their own, and each can have its own env contract and store config:
-  // every checkout is a context of its own.
-  for (const project of projects.flatMap(registeredCheckouts)) {
-    // A checkout that is not there (an unmounted volume, a moved repo) has
-    // no config or contract to read, which is not "does not read it".
-    if (!(await stat(project.projectDir).catch(() => null))?.isDirectory()) {
-      unchecked += 1;
-      continue;
-    }
-    let location: Awaited<ReturnType<typeof resolveFileSecretStorePaths>>;
-    try {
-      if (
-        (await secretStoreSelectionProblem({
-          projectDir: project.projectDir,
-        })) !== null
-      ) {
-        unchecked += 1;
-        continue;
-      }
-      location = await resolveFileSecretStorePaths({
-        projectDir: project.projectDir,
-      });
-    } catch {
+  for (const checkout of projects.flatMap(registeredCheckouts)) {
+    const location = await checkoutStoreLocation(checkout.projectDir);
+    if (location === null) {
       unchecked += 1;
       continue;
     }
@@ -156,14 +147,104 @@ export async function listProjectsUsingSecretStore(opts: {
     });
     if (same === "unknown") {
       unchecked += 1;
-    } else if (
-      same === "same" &&
-      (await projectUsesSecretStore({ projectDir: project.projectDir }))
-    ) {
-      names.add(project.name);
+    } else if (same === "same") {
+      contexts.push({ ...checkout, keyPath: location.keyPath });
     }
   }
-  return { names: [...names].sort(), registryRead: true, unchecked };
+  return { contexts, registryRead: true, unchecked };
+}
+
+/**
+ * A checkout's store location from its configuration, or null when that
+ * cannot be established: the checkout is not there (an unmounted volume, a
+ * moved repo; absent files there are not "unconfigured"), or its selecting
+ * config is unsure.
+ */
+async function checkoutStoreLocation(
+  projectDir: string
+): Promise<Awaited<ReturnType<typeof resolveFileSecretStorePaths>> | null> {
+  if (!(await stat(projectDir).catch(() => null))?.isDirectory()) {
+    return null;
+  }
+  try {
+    if ((await secretStoreSelectionProblem({ projectDir })) !== null) {
+      return null;
+    }
+    return await resolveFileSecretStorePaths({ projectDir });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Registered checkouts whose configuration selects the store at
+ * `storePath` and whose runtime reads it ({@link projectUsesSecretStore}).
+ * No store is opened. What could not be checked is counted, never taken as
+ * "does not read it".
+ */
+export async function listProjectsUsingSecretStore(opts: {
+  readonly storePath: string;
+}): Promise<SecretStoreUsers> {
+  const found = await storeContexts(opts);
+  const names = new Set<string>();
+  for (const context of found.contexts) {
+    if (await projectUsesSecretStore({ projectDir: context.projectDir })) {
+      names.add(context.name);
+    }
+  }
+  return {
+    names: [...names].sort(),
+    registryRead: found.registryRead,
+    unchecked: found.unchecked,
+  };
+}
+
+/**
+ * Why retiring this store would take it from another registered checkout
+ * that can still open it, or null when none can (HACK-2177). A checkout
+ * selecting the same store file with a different key file is asked whether
+ * its key opens the store (read-only, at the pinned real path). Incomplete
+ * coverage refuses unless `allowUnchecked`: the store may be another
+ * checkout's that could not be checked.
+ */
+async function otherOpenersRefusal(input: {
+  readonly canonical: string;
+  readonly keyPath: string;
+  readonly allowUnchecked: boolean;
+}): Promise<string | null> {
+  const found = await storeContexts({ storePath: input.canonical });
+  const openers: string[] = [];
+  const otherKeys = new Map<string, string[]>();
+  for (const context of found.contexts) {
+    if (resolve(context.keyPath) !== resolve(input.keyPath)) {
+      otherKeys.set(context.keyPath, [
+        ...(otherKeys.get(context.keyPath) ?? []),
+        context.name,
+      ]);
+    }
+  }
+  for (const [keyPath, names] of otherKeys) {
+    const state = await classifyEncryptedStoreAt({
+      storePath: input.canonical,
+      keyPath,
+    });
+    if (state.kind === "opens") {
+      openers.push(...names);
+    }
+  }
+  if (openers.length > 0) {
+    return `The encrypted secret store at ${input.canonical} still opens with another registered project's key (${[...new Set(openers)].sort().join(", ")}), so it is not retired; nothing was moved. Fix this project's key configuration instead.`;
+  }
+  if (input.allowUnchecked) {
+    return null;
+  }
+  if (!found.registryRead) {
+    return `The projects registry could not be read or is not valid, so whether another project still opens ${input.canonical} is unknown; nothing was moved. Fix the registry, or pass --allow-unchecked to retire it anyway.`;
+  }
+  if (found.unchecked > 0) {
+    return `${found.unchecked} registered project(s) could not be checked (not available, or their Hack config or store file could not be read), so whether one still opens ${input.canonical} is unknown; nothing was moved. Run hack doctor to see them, or pass --allow-unchecked to retire it anyway.`;
+  }
+  return null;
 }
 
 /** A registered project's primary checkout and each of its linked worktrees. */
@@ -265,6 +346,8 @@ export type SecretStoreRetirePlan = {
  */
 export async function planSecretStoreRetire(opts: {
   readonly projectDir?: string;
+  /** Retire even when some registered checkouts could not be checked. */
+  readonly allowUnchecked?: boolean;
 }): Promise<
   | { readonly kind: "plan"; readonly plan: SecretStoreRetirePlan }
   | { readonly kind: "refused"; readonly message: string }
@@ -295,10 +378,16 @@ export async function planSecretStoreRetire(opts: {
       message: `There is no encrypted secret store with entries at ${location.storePath}; nothing was moved.`,
     };
   }
-  const refusal = await eligibilityRefusal({
-    storePath: canonical,
-    keyPath: location.keyPath,
-  });
+  const refusal =
+    (await eligibilityRefusal({
+      storePath: canonical,
+      keyPath: location.keyPath,
+    })) ??
+    (await otherOpenersRefusal({
+      canonical,
+      keyPath: location.keyPath,
+      allowUnchecked: opts.allowUnchecked === true,
+    }));
   if (refusal !== null) {
     return { kind: "refused", message: refusal };
   }
@@ -331,6 +420,8 @@ export async function retireSecretStore(opts: {
   readonly projectDir?: string;
   readonly now?: Date;
   readonly approved?: SecretStoreRetirePlan;
+  /** Retire even when some registered checkouts could not be checked. */
+  readonly allowUnchecked?: boolean;
   /** Test seam: runs under the lock after the path checks, before eligibility. */
   readonly beforeEligibility?: () => Promise<void>;
 }): Promise<SecretStoreRetireOutcome> {
@@ -388,6 +479,7 @@ function samePlan(a: SecretStoreRetirePlan, b: SecretStoreRetirePlan): boolean {
 async function lockedRecheck(input: {
   readonly opts: {
     readonly projectDir?: string;
+    readonly allowUnchecked?: boolean;
     readonly beforeEligibility?: () => Promise<void>;
   };
   readonly plan: SecretStoreRetirePlan;
@@ -414,10 +506,17 @@ async function lockedRecheck(input: {
     return `${plan.configured} no longer leads to ${plan.canonical}; nothing was moved.`;
   }
   await opts.beforeEligibility?.();
-  return await eligibilityRefusal({
-    storePath: plan.canonical,
-    keyPath: plan.keyPath,
-  });
+  return (
+    (await eligibilityRefusal({
+      storePath: plan.canonical,
+      keyPath: plan.keyPath,
+    })) ??
+    (await otherOpenersRefusal({
+      canonical: plan.canonical,
+      keyPath: plan.keyPath,
+      allowUnchecked: opts.allowUnchecked === true,
+    }))
+  );
 }
 
 /**

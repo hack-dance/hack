@@ -397,7 +397,10 @@ entries.
    - It moves the store into a new directory `<store>.retired-<UTC time>/`
      beside it, keeping its name. It deletes nothing, reads and prints no
      entry, and leaves the key file alone. It only retires a file that is a
-     Hack encrypted store.
+     Hack encrypted store, and refuses one that another registered project's
+     key still opens. If some registered projects could not be checked (for
+     example a worktree on an unmounted volume), it refuses unless you pass
+     `--allow-unchecked`.
    - It prints the `mv` command that puts the store back.
    - Afterwards Doctor lists the retired file as information, and the project
      check no longer fails.

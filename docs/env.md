@@ -1662,7 +1662,9 @@ Some older surfaces are still compatibility-oriented:
   projects that read the store, and offers two ways forward: restore the key, or
   run `hack secrets retire-store`. That command moves the store into a new
   directory `<store>.retired-<UTC time>/` beside it, deletes and prints nothing, and says
-  how to move it back. It needs `--yes` without a terminal. Doctor then lists
+  how to move it back. It needs `--yes` without a terminal. It refuses a store that
+  another registered project's key still opens, and, unless `--allow-unchecked` is
+  passed, a store some registered projects could not be checked for. Doctor then lists
   retired files as information. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
   key paths or immediate parent directories. A key generated on first use is

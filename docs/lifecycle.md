@@ -32,6 +32,10 @@ and process-identity queries). The capture allows two 1-second group snapshots
 alongside a 2-second identity read; each escalation checks identities again with
 bounded queries. Explicit `hack down` uses the same command-before-wrapper order
 after interrupting its owned lifecycle panes.
+`hack doctor --fix` also captures groups before mux teardown and waits for
+commands before wrappers when repairing an ownership-proven orphan. An
+unconfirmed retirement keeps that entry and is reported while repair continues
+with other candidates.
 Signal delivery and FIFO EOF alone do not confirm group exit. If confirmation
 fails, Hack reports it and retains the ownership record and dependent helpers;
 it does not silently report completed cleanup.

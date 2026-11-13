@@ -10,12 +10,11 @@ import {
   removeLifecycleStateEntryIfMatching,
 } from "./lifecycle-runtime.ts";
 import {
+  createLifecycleSessionRetirement,
   type ProcessSnapshotRow,
   readProcessSnapshot,
   resolveLeaderlessPersistedLifecycleProcessGroupIds,
-  resolveLifecycleStopProcessGroupIds,
   resolvePersistedLifecycleProcessGroupIds,
-  terminateLifecycleProcessGroups,
 } from "./project-lifecycle-processes.ts";
 import {
   inspectLifecycleSession,
@@ -209,13 +208,28 @@ export function classifyLifecycleSessionHygiene(opts: {
 export async function repairProjectLifecycleSessions(opts: {
   readonly projectDir: string;
   readonly projectRoot: string;
+  /** Platform boundaries for repair ordering and failure regressions. */
+  readonly boundary?: {
+    readonly inspect?: typeof inspectProjectLifecycleHygiene;
+    readonly backends?: typeof getMuxBackends;
+    readonly inspectSession?: typeof inspectLifecycleSession;
+    readonly retireSession?: ReturnType<
+      typeof createLifecycleSessionRetirement
+    >;
+  };
 }): Promise<LifecycleHygieneRepairResult> {
-  const initial = await inspectProjectLifecycleHygiene(opts);
+  const {
+    inspect = inspectProjectLifecycleHygiene,
+    backends = getMuxBackends,
+    inspectSession = inspectLifecycleSession,
+    retireSession,
+  } = opts.boundary ?? {};
+  const initial = await inspect(opts);
   const repairedSessions: string[] = [];
   const failures: string[] = [];
 
   for (const candidate of initial.orphanedSessions) {
-    const current = await inspectProjectLifecycleHygiene(opts);
+    const current = await inspect(opts);
     const orphan = current.orphanedSessions.find(
       (item) => item.entry.composeProject === candidate.entry.composeProject
     );
@@ -225,12 +239,12 @@ export async function repairProjectLifecycleSessions(opts: {
       );
       continue;
     }
-    const backend = getMuxBackends().get(orphan.entry.backend);
+    const backend = backends().get(orphan.entry.backend);
     if (!backend?.available) {
       failures.push(`${orphan.entry.sessionName}: mux backend unavailable`);
       continue;
     }
-    const inspection = await inspectLifecycleSession({
+    const inspection = await inspectSession({
       backend,
       entry: orphan.entry,
       expectedSessionName: orphan.entry.sessionName,
@@ -246,20 +260,28 @@ export async function repairProjectLifecycleSessions(opts: {
       );
       continue;
     }
-    const processGroupIds = resolveLifecycleStopProcessGroupIds({
-      matchedLiveSession: true,
-      lifecycleEntry: orphan.entry,
-      snapshot: await readProcessSnapshot(),
-    });
-    const killed = await killInspectedLifecycleSession({
-      backend,
-      inspection,
-    });
+    let killed: boolean;
+    try {
+      killed = await (retireSession ?? createLifecycleSessionRetirement())({
+        processes: orphan.entry.processes,
+        stopSession: () =>
+          killInspectedLifecycleSession({ backend, inspection }),
+        assertFresh: () =>
+          assertRepairEntryCurrent({
+            projectDir: opts.projectDir,
+            entry: orphan.entry,
+          }),
+      });
+    } catch (error: unknown) {
+      failures.push(
+        `${orphan.entry.sessionName}: ${error instanceof Error ? error.message : "process-group retirement unconfirmed"}; kept ownership state`
+      );
+      continue;
+    }
     if (!killed) {
       failures.push(`${orphan.entry.sessionName}: mux teardown failed`);
       continue;
     }
-    await terminateLifecycleProcessGroups({ processGroupIds });
     const stateRemoved = await removeLifecycleStateEntryIfMatching({
       projectDir: opts.projectDir,
       expectedEntry: orphan.entry,
@@ -274,6 +296,25 @@ export async function repairProjectLifecycleSessions(opts: {
   }
 
   return { repairedSessions, failures };
+}
+
+/** Retained group identities cannot authorize signals after their owner changes. */
+async function assertRepairEntryCurrent(opts: {
+  readonly projectDir: string;
+  readonly entry: LifecycleStateEntry;
+}): Promise<void> {
+  const current = (await readLifecycleState(opts)).find(
+    (entry) => entry.composeProject === opts.entry.composeProject
+  );
+  if (
+    !current ||
+    current.sessionName !== opts.entry.sessionName ||
+    current.backend !== opts.entry.backend ||
+    current.updatedAt !== opts.entry.updatedAt ||
+    current.ownershipToken !== opts.entry.ownershipToken
+  ) {
+    throw new Error("Lifecycle ownership changed before repair retirement");
+  }
 }
 
 async function inspectOwnedLifecycleSessions(opts: {

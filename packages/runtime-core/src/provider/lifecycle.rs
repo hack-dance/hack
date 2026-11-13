@@ -327,7 +327,7 @@ pub(super) struct ObservedGuest<'a> {
 }
 
 impl<'a> ObservedGuest<'a> {
-    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+    #[cfg(target_os = "macos")]
     pub(super) fn boot_id(&self) -> Result<&str, CandidateError> {
         self.owner.guest_boot_id.as_deref().ok_or_else(|| {
             CandidateError::new("runtime_changed", "Observed guest boot is unavailable.")

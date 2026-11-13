@@ -582,8 +582,8 @@ impl<'a> Engine<'a> {
         )
     }
 
-    /// One live-owner command keeps its original budget through every engine query.
-    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+    /// One service command keeps its original budget through every engine query.
+    #[cfg(target_os = "macos")]
     pub(in crate::provider) fn connect_command_until(
         candidate: &'a Candidate,
         deadline: Instant,

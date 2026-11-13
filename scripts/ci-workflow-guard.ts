@@ -11,7 +11,7 @@ export function requiresWorkflowFull(paths: readonly string[] | null): boolean {
           "src/lib/cli-result.ts",
           "mise.toml",
         ].includes(path) ||
-        /(?:^|\/)(?:package\.json|bun\.lockb?|Cargo\.(?:toml|lock)|bunfig\.toml|tsconfig[^/]*\.json)$/.test(
+        /(?:^|\/)(?:package\.json|bun\.lockb?|Cargo\.(?:toml|lock)|rust-toolchain(?:\.toml)?|bunfig\.toml|tsconfig[^/]*\.json)$/.test(
           path
         )
     )

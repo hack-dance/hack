@@ -59,9 +59,11 @@ state counts and incomplete positive exploration.
 | ConfirmHostExit / Retire | Await host stop/close before retiring hook/start/source bindings. Unknown host completion cannot establish removal. The unconfirmed-host-exit model control checks this gap; an equivalent injected executable host-close control remains a required coverage follow-up. |
 | Crash / Recover | Retain uncertain intent, never reconstruct authority from a missing path/PID. Full durable recovery is delegated to native-frontend-recovery and real crash/ownership tests; this model omits filesystems, PIDs, boot epochs and resource observations. |
 
-Executable regression cases are in `tests/native-authored-project-start.test.ts` on
-local 5c4ae64c/537f0c26, currently unpublished. Link those exact revisions and their
-receipts during integration; do not imply the tests are already on protected next.
+Executable regressions span `tests/native-authored-project-start.test.ts`,
+`tests/native-authored-project-start-recovery.test.ts` and
+`tests/native-authored-project-start-lifecycle.test.ts`. The split is recorded in
+commit `635f1eb3` on `next`. Executable results, hosted platform qualification and
+finite model results remain separate evidence.
 
 ## Conditional liveness
 

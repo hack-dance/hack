@@ -51,6 +51,10 @@ jobs:
       - name: Validate immutable plan
         id: plan
         run: bun scripts/prerelease-plan.ts plan
+      - name: Require release-full CI on the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/prerelease-plan.ts verify-ci
       - name: Verify publication prerequisites before scheduling approval
         if: ${{ inputs.publish }}
         env:

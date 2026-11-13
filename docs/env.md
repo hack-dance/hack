@@ -602,6 +602,35 @@ hack env apply --service api --env qa
 
 `--show-values` reveals resolved values only when both stdin and stdout are terminals and interaction is enabled. The older `--show-secrets` spelling is an alias. Redirecting or piping the output refuses the reveal, including with `--json`; ordinary `--json` is metadata only. Use `env get KEY` for an explicit single-value read in a script.
 
+This prevents accidental exposure in logs and transcripts; it is **not an access
+control against a local process**. A process can open a pseudo-terminal or call
+`env get` for each key. Both commands run with the caller's filesystem and key
+access. Treat explicit reads as plaintext sinks.
+
+### Updating scripts and lifecycle hooks
+
+- Replace non-interactive `env list --json --show-secrets` with explicit
+  `hack env get KEY` reads for the keys the script needs. Keep the same `--env`
+  and `--service` selection; do not log the resulting plaintext. For availability
+  checks, use ordinary `env list --json` and `has_value` instead of `value`.
+- Send secret writes through `--value-stdin` or the hidden terminal prompt;
+  positional values with `--secret` are refused.
+- Legacy lifecycle hooks and processes now receive **only global contract
+  values**, rather than every service's values. Put only the values those hooks
+  actually need in global scope. Service-scoped values remain with their service.
+- Stop parsing the old tab column positions. Modern text rows are
+  `KEY<TAB>SCOPE<TAB>set<TAB>LAYER`, with a fifth value column only on explicit
+  reveal. Legacy rows keep their metadata columns, replace the seventh value
+  column with `set`/`unset` by default, and add the source layer as column eight.
+  Prefer JSON metadata or an explicit single-key read to positional parsing.
+- Run `hack env protect` to list plaintext names, then choose keys to encrypt in
+  place. This covers all overlays unless `--env` narrows it; it does not erase
+  legacy compatibility copies or make ordinary config entries secret by itself.
+
+The existing `env set KEY value` path can still replace an encrypted entry with
+plaintext when `--secret` is omitted; [HACK-2173](https://linear.app/hackdance/issue/HACK-2173)
+tracks that follow-up. Use `--secret --value-stdin` when updating secrets.
+
 Read one value explicitly:
 
 ```bash

@@ -209,6 +209,43 @@ Migration entry points: [up prompt](https://github.com/hack-dance/hack/blob/26a1
 
 ## 4. What changes for a project
 
+### Env command changes: what to change
+
+These changes apply to builds containing HACK-2163/HACK-2166, after the next.16
+snapshot used above. Check the chosen binary's help before changing scripts.
+
+- Replace `env list --json --show-secrets` in noninteractive scripts with
+  explicit `hack env get KEY` reads for the keys needed, using the same `--env`
+  and `--service`. Those reads return plaintext; do not log it. Use ordinary
+  `env list --json` and `has_value` for availability checks; `value` is absent
+  by default even for migrated plaintext entries.
+- Pipe secret writes through `hack env add KEY --secret --value-stdin` or
+  `hack env set KEY --secret --value-stdin`, or use the hidden terminal prompt.
+  Positional secret values are refused. The unsafe argv compatibility flag is
+  for controlled fixtures, not real values.
+- Legacy lifecycle hooks and processes now receive only global contract values.
+  Review hooks that previously depended on another service's values; put only
+  the values they need into global scope. Service values remain service-scoped.
+- Update text parsers: modern rows are `KEY`, `SCOPE`, `set`, `LAYER` separated
+  by tabs (a fifth value column appears only with explicit reveal). Legacy rows
+  replace the seventh value column with set state by default and add layer as
+  column eight. Prefer JSON metadata or explicit single-key reads.
+- Run `hack env protect` for a names-only inventory of plaintext entries, then
+  `hack env protect KEY...` for chosen entries. Values, scopes and overlays stay
+  in place; omitted `--env` covers all overlays. Protecting YAML does not erase
+  legacy copies. Back up existing keys and values first; never replace a missing
+  recovery key with a newly generated key. A legacy store without its key must
+  stay intact until its original key is recovered.
+- YAML projects now return HTTP 409 `yaml_env_mutation_unsupported` from the
+  legacy daemon `POST /v1/env/set` and `/unset` routes. Use canonical CLI env
+  commands instead of writing a second legacy store through those endpoints.
+
+The terminal reveal gate reduces accidental logging and transcript exposure;
+it is not access control against a local process that can open a pseudo-terminal
+or use `env get`. Updating an existing encrypted key without `--secret` can still
+downgrade it to plaintext; HACK-2173 tracks that follow-up. Continue using
+`--secret --value-stdin` for secret updates.
+
 ### Config and env migration
 
 The project still uses `.hack/`, but this does **not** mean legacy env files are

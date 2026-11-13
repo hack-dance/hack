@@ -56,59 +56,51 @@ fn a_route_first_answering_at_120_seconds_starts_under_the_graph_budget() {
         },
     )]))
     .unwrap();
-    // The old grace is a negative control: the same delayed success must fail
-    // early with it. The reviewed default must reach graph readiness at 120 s.
-    for grace in [60_000, HttpProbe::inferred_route(3000).start_period_ms] {
-        let mut config = HttpProbe::inferred_route(3000);
-        config.start_period_ms = grace;
-        let output = Command::new(concat!(env!("OUT_DIR"), "/http-probe-clock-host"))
-            .args([
-                grace.to_string(),
-                config.interval_ms.to_string(),
-                config.timeout_ms.to_string(),
-                config.retries.to_string(),
-                "120000".into(),
-            ])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert!(output.stderr.is_empty());
-        let samples = String::from_utf8(output.stdout)
-            .unwrap()
-            .lines()
-            .map(|line| {
-                let fields: Vec<u64> = line
-                    .split(' ')
-                    .map(|field| field.parse().unwrap())
-                    .collect();
-                (fields[0], fields[1], fields[2])
-            })
-            .collect();
-        let clock = Cell::new(Duration::ZERO);
-        let base = Instant::now();
-        let mut driver = Probed {
-            clock: &clock,
-            config,
-            samples,
-            started: false,
-            ready: false,
-        };
-        let result = run_with_clock(
-            &graph,
-            &mut driver,
-            Duration::from_secs(300),
-            |delay| clock.set(clock.get() + delay),
-            || base + clock.get(),
-        );
-        assert!(driver.started);
-        if grace == 60_000 {
-            assert_eq!(result.unwrap_err().code, "graph_service_failed");
-            assert!(!driver.ready);
-            assert!(clock.get() < Duration::from_secs(120));
-        } else {
-            result.unwrap();
-            assert!(driver.ready);
-            assert_eq!(clock.get(), Duration::from_secs(120));
-        }
-    }
+    // Use the production default unchanged, and always require readiness.
+    // Restoring its grace to 60 s must fail this test, not select a passing
+    // branch that expects the service to become unhealthy.
+    let config = HttpProbe::inferred_route(3000);
+    let output = Command::new(concat!(env!("OUT_DIR"), "/http-probe-clock-host"))
+        .args([
+            config.start_period_ms.to_string(),
+            config.interval_ms.to_string(),
+            config.timeout_ms.to_string(),
+            config.retries.to_string(),
+            "120000".into(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let samples = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let fields: Vec<u64> = line
+                .split(' ')
+                .map(|field| field.parse().unwrap())
+                .collect();
+            (fields[0], fields[1], fields[2])
+        })
+        .collect();
+    let clock = Cell::new(Duration::ZERO);
+    let base = Instant::now();
+    let mut driver = Probed {
+        clock: &clock,
+        config,
+        samples,
+        started: false,
+        ready: false,
+    };
+    let result = run_with_clock(
+        &graph,
+        &mut driver,
+        Duration::from_secs(300),
+        |delay| clock.set(clock.get() + delay),
+        || base + clock.get(),
+    );
+    assert!(driver.started);
+    result.expect("the production inferred probe must allow readiness at 120 s");
+    assert!(driver.ready);
+    assert_eq!(clock.get(), Duration::from_secs(120));
 }

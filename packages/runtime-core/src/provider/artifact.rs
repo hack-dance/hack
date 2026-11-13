@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const ARCHIVE_SHA256: &str = "8ebda502e332c739fdfc13b059be982cca66da9253c5229b4586af02c92781d9";
+// Bridge freshness relies on the pinned launcher's unlink-before-guest-ready
+// ordering for expose paths (src/agent/launcher.rs:1955-1972 at v1.34.1).
+// A pin upgrade must re-check that contract as well as the archive digest.
 pub const VERSION: &str = "1.34.1";
 const DIRECTORY: &str = "smolvm-1.34.1-darwin-arm64";
 

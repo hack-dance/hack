@@ -147,7 +147,7 @@ async function inspectEnvLayers(opts: {
     // An inherited layer lives in the primary checkout: say so, since
     // `hack env` here does not change it.
     const path = layer.inherited
-      ? `${shown} (in the primary checkout, which this worktree inherits; run the hack env steps below there)`
+      ? `${shown} (in the primary checkout, which this worktree inherits; run the hack env steps below there. If this worktree's project env key differs from the primary's, the "worktree keys" check reports it: keep one key first, since values re-entered in the primary would still not open here)`
       : shown;
     const n = layer.secretCount;
     if (layer.openCount === null) {

@@ -446,6 +446,7 @@ test("a linked worktree's inherited primary local layer is inspected", async () 
   expect(findings[0]?.message).toContain(
     "(in the primary checkout, which this worktree inherits"
   );
+  expect(findings[0]?.message).toContain('the "worktree keys" check');
   expect(findings[0]?.message).toContain("more than one key: 1 of 3");
   expect(findings[0]?.message).toContain("SECOND (--local), THIRD (--local)");
 });

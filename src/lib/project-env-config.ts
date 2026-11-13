@@ -3726,8 +3726,9 @@ async function writeProjectEnvConfigFile(opts: {
   readonly expectedExisting?: string | null;
   /**
    * A machine-local layer, which may hold plaintext values: when this write
-   * creates it, it is private (0600) from creation. An existing layer keeps
-   * its mode.
+   * creates it, it is private (0600) from creation, and an existing layer
+   * that predates that rule (or was made by hand) loses its group and other
+   * permission bits when this write changes it (HACK-2165).
    */
   readonly machineLocal?: boolean;
 }): Promise<boolean> {
@@ -3739,7 +3740,9 @@ async function writeProjectEnvConfigFile(opts: {
       ...(opts.expectedExisting === undefined
         ? {}
         : { expectedExisting: opts.expectedExisting }),
-      ...(opts.machineLocal === true ? { createMode: 0o600 } : {}),
+      ...(opts.machineLocal === true
+        ? { createMode: 0o600, tightenExisting: true }
+        : {}),
       validatePath: async (path) =>
         await assertProjectEnvLayerPath({
           projectRoot: opts.projectRoot,

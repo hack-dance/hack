@@ -386,7 +386,8 @@ export class AtomicWriteConflictError extends ClosedCliError {
  * account belongs to), so keeping group-readable mode bits under a different
  * group could widen who can read the file.
  *
- * An existing target keeps its permission bits, owner and group, and an
+ * An existing target keeps its permission bits (less group and other bits
+ * with `tightenExisting`), owner and group, and an
  * existing symlink keeps pointing where it did: the replacement lands at the
  * link's resolved path, as a plain write through the link would. A new file
  * gets the umask default, or `createMode` (still narrowed by the umask) when
@@ -414,6 +415,12 @@ export async function writeTextFileAtomicIfChanged(
     readonly validatePath?: (path: string) => Promise<void>;
     /** Permission bits for a file this write creates; an existing file keeps its own. */
     readonly createMode?: number;
+    /**
+     * Private file: an existing target that changes loses its group and
+     * other permission bits (a 0644 file becomes 0600); owner and special
+     * bits are kept. Without it an existing file keeps its mode exactly.
+     */
+    readonly tightenExisting?: boolean;
   } = {}
 ): Promise<{ readonly changed: boolean }> {
   await options.validatePath?.(absolutePath);
@@ -423,6 +430,12 @@ export async function writeTextFileAtomicIfChanged(
     throw new AtomicWriteConflictError();
   }
   if (existing.kind === "existing" && existing.text === content) {
+    if (options.tightenExisting === true && (existing.mode & 0o077) !== 0) {
+      await tightenUnchangedTarget({
+        path: absolutePath,
+        validatePath: options.validatePath,
+      });
+    }
     return { changed: false };
   }
   const target =
@@ -456,7 +469,11 @@ export async function writeTextFileAtomicIfChanged(
     if (existing.kind === "existing") {
       // chown can clear set-id bits, so the mode is applied after it.
       await preserveOwnership({ file, existing, path: absolutePath });
-      await file.chmod(existing.mode);
+      await file.chmod(
+        options.tightenExisting === true
+          ? existing.mode & ~0o077
+          : existing.mode
+      );
     }
     await file.writeFile(content, "utf8");
     await file.sync();
@@ -483,6 +500,28 @@ export async function writeTextFileAtomicIfChanged(
   }
   await syncDirectoryBestEffort(dirname(target));
   return { changed: true };
+}
+
+/**
+ * `tightenExisting` for a write that changes nothing: drops the group and
+ * other bits of the resolved target in place, through a no-follow handle on
+ * the path the policy check admitted. The contents are not rewritten.
+ */
+async function tightenUnchangedTarget(opts: {
+  readonly path: string;
+  readonly validatePath?: (path: string) => Promise<void>;
+}): Promise<void> {
+  const target = await realpath(opts.path);
+  await opts.validatePath?.(target);
+  const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await file.stat();
+    if (info.isFile() && (info.mode & 0o077) !== 0) {
+      await file.chmod(info.mode & 0o7700);
+    }
+  } finally {
+    await file.close();
+  }
 }
 
 /**

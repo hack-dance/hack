@@ -27,6 +27,7 @@ import {
   parseEnvHydrateInputFormat,
   readEnvHydrateInput,
 } from "../lib/env-hydrate-input.ts";
+import { reportLooseEnvLayerModes } from "../lib/env-layer-modes.ts";
 import {
   assertEnvValueStdinUsage,
   readEnvValueFromStdin,
@@ -740,12 +741,15 @@ async function loadModernProjectEnv(input: {
   const serviceNames = await discoverComposeServiceNames({
     composeFile: input.project.composeFile,
   });
-  return await resolveProjectEnvConfig({
+  const resolved = await resolveProjectEnvConfig({
     projectRoot: input.project.projectRoot,
     projectDir: input.project.projectDir,
     envName: input.envName,
     serviceNames,
   });
+  // After a successful read, so a refusal stays one line.
+  await reportLooseEnvLayerModes({ projectDir: input.project.projectDir });
+  return resolved;
 }
 
 async function resolveEnvInjection(input: {

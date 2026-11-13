@@ -555,6 +555,36 @@ turn on no features and do not need Zig. Root `mise.toml` and `.tool-versions` p
 Zig 0.15.2. The toolchain image installs the `mise.toml` pins and runs its tasks
 under `mise exec`. CI downloads a checksum-verified 0.15.2 archive.
 
+### Rust test processes
+
+Both Candidate core CI hosts use **cargo-nextest 0.9.151**, downloaded from its
+pinned release and SHA-256 verified, for default and all-feature tests. Each test
+runs in its own process: on macOS the two-call close-on-exec setup briefly permits
+another test's spawned child to inherit a socket and delay EOF. Retries are zero.
+The admission-pool test group retains the old mutex's serialization of whole-host
+`lsof` scans. Ignored helpers remain ignored and their owning tests still invoke
+them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
+
+`bun run test:local` uses the same runner when installed. Install its exact pin with
+`cargo install --locked --version 0.9.151 cargo-nextest`. Without nextest the command
+prints that instruction and retains stock `cargo test`; the macOS fallback sets
+one libtest thread to prevent cross-test descriptor inheritance. CI requires the
+pin and never silently falls back. `bun run test:local --all-features` retains the
+Zig prerequisite above. The toolchain container's existing `rust` task continues
+to use stock Cargo on Linux, where the descriptor creation primitives are atomic.
+
+For bounded hosted qualification, dispatch `ci.yml` at the exact branch/commit
+with `full=true` and `rust_repetitions=20`. Only macOS repeats: 20 default suites
+and 20 all-feature suites, each followed by doctests. A failed iteration stops
+the job immediately; this is a consecutive-pass experiment, not retry policy.
+The `candidate-rust-results-*` artifacts retain each pass's counts and duration.
+Discovery JSON and stock libtest lists retain ignored-test counts separately:
+nextest's JUnit report contains executed tests, not ignored fixtures. The CI profile
+terminates a hung test after ten 60-second intervals, above the existing 500-second
+fixture budgets, so a hang fails with evidence. Qualification dispatches allow up
+to 300 minutes; ordinary Candidate jobs keep their 45-minute limit. Record measured
+test-step times as well as the pass count before treating the loop as qualified.
+
 Source binaries embed their build checkout. If a copied Cargo target directory
 retains a different checkout identity, use a fresh `--target-dir` for checks and
 tests; Cargo reporting a cached binary as fresh does not qualify that identity.

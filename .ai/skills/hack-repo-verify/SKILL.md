@@ -63,6 +63,16 @@ CI also lints those scripts and runs their transport tests; lint changed ones ex
 Rust default gates are `bun run check:local` and `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 
+Candidate CI on Linux and macOS runs pinned cargo-nextest 0.9.151, one process per
+test and zero retries, then `cargo test --doc` with the same feature selection.
+This prevents another test's spawned child from inheriting a briefly non-CLOEXEC
+macOS descriptor and delaying EOF. `bun run test:local` uses that pin when present;
+otherwise it prints `cargo install --locked --version 0.9.151 cargo-nextest` and
+retains `cargo test` (one libtest thread on macOS). The nextest test group preserves
+the admission-pool tests' serialized host-wide disk probes. A manual CI dispatch
+with `rust_repetitions=20` runs 20 consecutive default and 20 all-feature Mac suites,
+stopping at the first failure, and preserves per-pass JUnit counts/timings.
+
 `bun run test:local` does not enable `native-stream-relay`, so
 `stream_relay_contract` reports zero tests. This default pass does not qualify the
 relay contract. With Zig 0.15.2 available, run the local all-features equivalent:

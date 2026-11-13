@@ -286,7 +286,8 @@ export function encodeSecrets(opts: {
  * byte, first child, next sibling, failure link, depth and the length of the
  * longest value that ends at it or at a node on its failure chain. The root's
  * children are also kept in a dense table, since most bytes return there.
- * Memory is about 22 bytes per byte of value text.
+ * Memory is about 22 bytes per byte of value text, plus a 1 KiB table for
+ * each node with more than 16 children (at most about 80 bytes per byte).
  */
 type Matcher = {
   readonly label: Uint8Array;

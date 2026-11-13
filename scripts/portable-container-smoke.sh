@@ -51,8 +51,10 @@ docker run \
     hack env list --json > "${env_json}"
     grep -q "\"PORTABLE_PLAIN\"" "${env_json}"
     grep -q "\"PORTABLE_SECRET\"" "${env_json}"
-    ! grep -q "\"value\"" "${env_json}"
-    ! grep -q -e portable-ready -e portable-secret "${env_json}"
+    if grep -q -e "\"value\"" -e portable-ready -e portable-secret "${env_json}"; then
+      echo "env list --json exposed values" >&2
+      exit 1
+    fi
     test "$(hack env get PORTABLE_PLAIN)" = "portable-ready"
     test "$(hack env get PORTABLE_SECRET)" = "portable-secret"
     test "$(hack host exec -- printenv PORTABLE_PLAIN)" = "portable-ready"

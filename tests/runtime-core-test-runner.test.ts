@@ -123,6 +123,57 @@ test("process runner executes nextest with zero retries then retains doctests fo
     expect(command).toContain("--all-features");
   }
 });
+test("explicit targets run only the selected nextest suite without conflicting doctest selectors", async () => {
+  for (const args of [
+    ["--lib"],
+    ["--bins"],
+    ["--bin", "hack-native"],
+    ["--bin=hack-native"],
+    ["--tests"],
+    ["--test", "stream_relay_contract", "--all-features"],
+    ["--test=stream_relay_contract", "--all-features"],
+    ["--examples"],
+    ["--example", "fixture"],
+    ["--example=fixture"],
+    ["--benches"],
+    ["--bench", "fixture"],
+    ["--bench=fixture"],
+    ["--all-targets"],
+  ]) {
+    const r = await (await fixture()).run(args);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.commands).toHaveLength(1);
+    expect(r.commands[0]).toStartWith("nextest run");
+    for (const argument of args) {
+      expect(r.commands[0]).toContain(argument);
+    }
+  }
+});
+test("explicit documentation selection stays with Cargo and never invokes nextest", async () => {
+  const r = await (await fixture()).run(["--doc", "--all-features"]);
+  expect(r.code, r.stderr).toBe(0);
+  expect(r.commands).toHaveLength(1);
+  expect(r.commands[0]).toStartWith("test --locked");
+  expect(r.commands[0]).toContain("--doc --all-features");
+});
+test("documentation-only selection cannot claim qualification repetitions or nextest reports", async () => {
+  for (const opts of [{ repeats: "20" }, { report: true }]) {
+    const r = await (await fixture(opts)).run(["--doc"]);
+    expect(r.code).toBe(2);
+    expect(r.commands).toEqual([]);
+    expect(r.stderr).toContain("cannot produce nextest qualification evidence");
+  }
+});
+test("arguments after the separator cannot suppress the separate doctest step", async () => {
+  const r = await (await fixture()).run(["--", "--lib"]);
+  expect(r.code, r.stderr).toBe(0);
+  expect(r.commands).toHaveLength(2);
+  expect(r.commands[0]).toStartWith("nextest run");
+  expect(r.commands[1]).toStartWith("test --doc");
+  for (const command of r.commands) {
+    expect(command).toEndWith("-- --lib");
+  }
+});
 for (const fail of ["nextest", "doc"]) {
   test(`20-pass qualification stops at first ${fail} failure without retry or fallback`, async () => {
     const r = await (await fixture({ fail, repeats: "20" })).run();

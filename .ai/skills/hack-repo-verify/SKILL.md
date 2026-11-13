@@ -65,6 +65,10 @@ changes; the toolchain Rust tasks already enable all features. Keep default cove
 
 Candidate CI on Linux and macOS runs pinned cargo-nextest 0.9.151, one process per
 test and zero retries, then `cargo test --doc` with the same feature selection.
+Explicit target selections (`--lib`, `--test <name>`, etc.) skip doctests, matching
+Cargo; explicit `--doc` uses Cargo alone.
+Pass Cargo build, feature and target options through this wrapper; use
+`cargo nextest` directly for nextest-specific options such as `-E`.
 This prevents another test's spawned child from inheriting a briefly non-CLOEXEC
 macOS descriptor and delaying EOF. `bun run test:local` uses that pin when present;
 otherwise it prints `cargo install --locked --version 0.9.151 cargo-nextest` and

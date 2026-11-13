@@ -564,6 +564,11 @@ another test's spawned child to inherit a socket and delay EOF. Retries are zero
 The admission-pool test group retains the old mutex's serialization of whole-host
 `lsof` scans. Ignored helpers remain ignored and their owning tests still invoke
 them explicitly; `cargo test --doc` runs separately because nextest omits doctests.
+Focused target selections such as `bun run test:local --lib` or `--test <name>`
+skip doctests, matching Cargo; explicit `--doc` selection runs through Cargo alone.
+The wrapper accepts Cargo build, feature and target options; nextest-specific
+options such as `-E` need a direct `cargo nextest` invocation. Documentation-only
+selection refuses repetition or report settings intended for nextest qualification.
 
 `bun run test:local` uses the same runner when installed. Install its exact pin with
 `cargo install --locked --version 0.9.151 cargo-nextest`. Without nextest the command

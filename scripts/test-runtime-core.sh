@@ -25,9 +25,25 @@ case "$actual" in
   *) echo "Pinned cargo-nextest $version is required. Install: $install" >&2; exit 2 ;;
 esac
 mode=default
+run_doctests=true
+doc_only=false
 for argument in "$@"; do
-  if [[ "$argument" == --all-features ]]; then mode=all-features; fi
+  case "$argument" in
+    --) break ;;
+    --all-features) mode=all-features ;;
+    --doc) doc_only=true ;;
+    --lib|--bins|--bin|--bin=*|--tests|--test|--test=*|--examples|--example|--example=*|--benches|--bench|--bench=*|--all-targets)
+      run_doctests=false ;;
+  esac
 done
+# Documentation-only selection has no libtest process for nextest to isolate.
+if [[ "$doc_only" == true ]]; then
+  if [[ "$repetitions" != 1 || -n "${HACK_RUST_TEST_REPORT_DIR:-}" ]]; then
+    echo 'Documentation-only selection cannot produce nextest qualification evidence.' >&2
+    exit 2
+  fi
+  exec cargo test "${common[@]}" --jobs 2 "$@"
+fi
 if [[ -n "${HACK_RUST_TEST_REPORT_DIR:-}" ]]; then
   mkdir -p "$HACK_RUST_TEST_REPORT_DIR"
   # JUnit contains executed tests; keep discovery separately to count ignored
@@ -70,6 +86,7 @@ for ((iteration=1; iteration<=repetitions; iteration++)); do
   fi
   # Never reset a failing streak, retry, or continue to another suite after failure.
   if [[ "$status" != 0 ]]; then exit "$status"; fi
-  # Nextest excludes doctests; preserve cargo test's documentation coverage.
-  cargo test --doc "${common[@]}" --jobs 2 "$@"
+  # Nextest excludes doctests. Cargo excludes them for explicit target selection
+  # too, and rejects --doc combined with those selectors.
+  if [[ "$run_doctests" == true ]]; then cargo test --doc "${common[@]}" --jobs 2 "$@"; fi
 done

@@ -840,6 +840,7 @@ uses the default 50.
 ![Endpoint settlement](../../docs/diagrams/compose-endpoint-settlement.svg)
 
 [Diagram source](../../docs/diagrams/compose-endpoint-settlement.mmd).
+
 ### Short Compose initializer
 
 `compose-short-oneshot` runs an unlabelled `restart: "no"` initializer behind

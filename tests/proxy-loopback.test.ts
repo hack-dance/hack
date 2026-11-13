@@ -1,9 +1,14 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { X509Certificate } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer as createTcpServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSecureContext, createServer as createTlsServer } from "node:tls";
+import {
+  connect as connectTls,
+  createSecureContext,
+  createServer as createTlsServer,
+} from "node:tls";
 import { LEGACY_SCHEMAS_HOST } from "../src/constants.ts";
 import {
   inspectProxyLoopback,
@@ -436,6 +441,9 @@ beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "proxy-loopback-tls-"));
   await openssl([
     "req",
+    "-config",
+    "/dev/null",
+    "-sha256",
     "-x509",
     "-newkey",
     "ec",
@@ -452,9 +460,18 @@ beforeAll(async () => {
     "/CN=Fixture Root",
     "-addext",
     "basicConstraints=critical,CA:TRUE",
+    "-addext",
+    "keyUsage=critical,keyCertSign,cRLSign",
+    "-addext",
+    "subjectKeyIdentifier=hash",
+    "-addext",
+    "authorityKeyIdentifier=keyid:always",
   ]);
   await openssl([
     "req",
+    "-config",
+    "/dev/null",
+    "-sha256",
     "-new",
     "-newkey",
     "ec",
@@ -474,10 +491,11 @@ beforeAll(async () => {
   ]) {
     await Bun.write(
       join(root, `${name}.ext`),
-      `subjectAltName=DNS:${host}\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n`
+      `subjectAltName=DNS:${host}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n`
     );
     await openssl([
       "x509",
+      "-sha256",
       "-req",
       "-in",
       "leaf.csr",
@@ -543,6 +561,53 @@ async function listen(
   return address.port;
 }
 
+/** Include only synthetic certificate metadata and TLS codes when a CI platform fails. */
+async function explainTlsFixture(host: string, port: number): Promise<string> {
+  const ca = new X509Certificate(rootPem);
+  const leaf = new X509Certificate(certificate);
+  const tls = await new Promise((resolve) => {
+    let settled = false;
+    const socket = connectTls({
+      host,
+      port,
+      servername: LEGACY_SCHEMAS_HOST,
+      ca: rootPem,
+      rejectUnauthorized: true,
+    });
+    const timer = setTimeout(() => done({ event: "timeout" }), 1000);
+    function done(value: unknown) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(value);
+    }
+    socket.once("secureConnect", () =>
+      done({
+        event: "secureConnect",
+        authorized: socket.authorized,
+        authorizationError: socket.authorizationError,
+      })
+    );
+    socket.once("error", (error: NodeJS.ErrnoException) =>
+      done({ event: "error", code: error.code })
+    );
+  });
+  return JSON.stringify({
+    platform: process.platform,
+    bun: Bun.version,
+    host,
+    now: new Date().toISOString(),
+    rootCa: ca.ca,
+    signatureValid: leaf.verify(ca.publicKey),
+    leafValidFrom: leaf.validFrom,
+    leafValidTo: leaf.validTo,
+    tls,
+  });
+}
+
 test("real TLS accepts only the pinned root and own hostname, on IPv4 and IPv6", async () => {
   for (const host of ["127.0.0.1", "::1"]) {
     const names: string[] = [];
@@ -556,13 +621,15 @@ test("real TLS accepts only the pinned root and own hostname, on IPv4 and IPv6",
       },
     });
     const port = await listen(server, host);
+    const result = await probeProxyLoopback({
+      address: host,
+      port,
+      protocol: "https",
+      caPem: rootPem,
+    });
     expect(
-      await probeProxyLoopback({
-        address: host,
-        port,
-        protocol: "https",
-        caPem: rootPem,
-      })
+      result,
+      result === "ok" ? host : await explainTlsFixture(host, port)
     ).toBe("ok");
     expect(
       await probeProxyLoopback({

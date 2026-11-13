@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -12,6 +14,7 @@ import { join } from "node:path";
 import { withEnvLayerLock } from "../src/lib/env-layer-lock.ts";
 import {
   finishImplicitLegacyEnvMigration,
+  LegacyEnvCleanupError,
   migrateLegacyProjectEnv,
   removeLegacyProjectEnvArtifacts,
   repairLegacyComposeEnvFileReferences,
@@ -64,6 +67,7 @@ async function migrate(options: Awaited<ReturnType<typeof fixture>>) {
     projectRoot: options.projectRoot,
     paths: [options.path],
     context: migrated.cleanupContext,
+    migrated,
   };
 }
 
@@ -75,7 +79,9 @@ async function refused(
     (caught: unknown) => caught
   );
   expect(error).toBeInstanceOf(Error);
-  expect(String(error)).toContain("Retry hack doctor --migrate-env-config");
+  expect(String(error)).toContain(
+    "Reconcile chosen values with hack env set KEY --value-stdin"
+  );
   expect(String(error)).not.toContain(SENTINEL);
 }
 
@@ -86,6 +92,177 @@ test("unchanged sources are removed only after current delivery and Compose refe
     options.path,
   ]);
   expect(await Bun.file(options.path).exists()).toBe(false);
+});
+
+test("implicit cleanup reports a real writer lock timeout without failing the command", async () => {
+  const options = await fixture();
+  await writeFile(
+    join(options.projectDir, "docker-compose.yml"),
+    "services:\n  app:\n    image: alpine:3.22\n"
+  );
+  await writeFile(
+    join(options.projectDir, "hack.env.json"),
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "TOKEN", source: "plain_env", required: false }],
+    })
+  );
+  const migrated = await migrateLegacyProjectEnv({
+    ...options,
+    materialize: false,
+  });
+  expect(migrated.cleanupCandidates).toContain(options.path);
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const writer = withEnvLayerLock({
+    layerPath: options.path,
+    run: async () => {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  await entered.promise;
+  try {
+    const report = await finishImplicitLegacyEnvMigration({
+      ...options,
+      migrated,
+    });
+    expect(report.removed).toEqual([]);
+    expect(report.lines.join("\n")).toContain("writer may still hold a lock");
+    expect(report.lines.join("\n")).not.toContain(SENTINEL);
+    expect(await Bun.file(options.path).exists()).toBe(true);
+  } finally {
+    release.resolve();
+    await writer;
+  }
+}, 20_000);
+
+async function withMigratedStore(
+  run: (options: Awaited<ReturnType<typeof migratedStore>>) => Promise<void>
+) {
+  const savedKey = process.env.HACK_SECRETS_FILE_KEY;
+  const savedFallback = process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK;
+  process.env.HACK_SECRETS_FILE_KEY = "synthetic-cleanup-encryption-key";
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
+  try {
+    await run(await migratedStore());
+  } finally {
+    restoreEnv("HACK_SECRETS_FILE_KEY", savedKey);
+    restoreEnv("HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK", savedFallback);
+  }
+}
+
+async function migratedStore() {
+  const options = await fixture();
+  const storePath = join(options.projectRoot, "legacy-store.json");
+  const keyPath = join(options.projectRoot, "legacy-store.key");
+  const contractPath = join(options.projectDir, "hack.env.json");
+  await writeFile(keyPath, "synthetic-cleanup-encryption-key\n");
+  await writeFile(
+    join(options.projectDir, "hack.config.json"),
+    JSON.stringify({
+      name: "fixture",
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath, keyPath },
+        },
+      },
+    })
+  );
+  await writeFile(
+    contractPath,
+    JSON.stringify({
+      version: 1,
+      vars: [{ key: "TOKEN", source: "keychain", required: false }],
+    })
+  );
+  const store = await resolveSecretStore(options);
+  await store.set({ key: "TOKEN", value: SENTINEL });
+  const cleanup = await migrate(options);
+  return { ...options, ...cleanup, storePath, keyPath, contractPath };
+}
+
+test("a changed YAML store value keeps the unchanged encrypted store and key", async () => {
+  await withMigratedStore(async (options) => {
+    const bytes = await readFile(options.storePath, "utf8");
+    await setProjectEnvValue({
+      ...options,
+      envName: null,
+      scope: "global",
+      key: "TOKEN",
+      value: `${SENTINEL}-changed`,
+      secret: true,
+      local: true,
+    });
+    await refused({ ...options, paths: [options.storePath, options.keyPath] });
+    expect(await readFile(options.storePath, "utf8")).toBe(bytes);
+    expect(await Bun.file(options.keyPath).exists()).toBe(true);
+  });
+});
+
+test.skipIf(process.getuid?.() === 0)(
+  "an unreadable store is kept with its key",
+  async () => {
+    await withMigratedStore(async (options) => {
+      await chmod(options.storePath, 0o000);
+      try {
+        await expect(readFile(options.storePath)).rejects.toThrow();
+        await refused({
+          ...options,
+          paths: [options.storePath, options.keyPath],
+        });
+        expect(await Bun.file(options.keyPath).exists()).toBe(true);
+      } finally {
+        await chmod(options.storePath, 0o600);
+      }
+      expect(await Bun.file(options.storePath).exists()).toBe(true);
+    });
+  }
+);
+
+test.skipIf(process.getuid?.() === 0)(
+  "partial cleanup reports confirmed removals and retains the key",
+  async () => {
+    await withMigratedStore(async (options) => {
+      await chmod(options.projectDir, 0o500);
+      try {
+        const error = await removeLegacyProjectEnvArtifacts({
+          ...options,
+          paths: [options.storePath, options.contractPath, options.keyPath],
+        }).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(LegacyEnvCleanupError);
+        if (!(error instanceof LegacyEnvCleanupError)) {
+          throw new Error("Expected a safe cleanup outcome");
+        }
+        expect(error.removedPaths).toEqual([options.storePath]);
+        expect(error.message).toContain(JSON.stringify(options.storePath));
+        expect(error.message).not.toContain(SENTINEL);
+        expect(await Bun.file(options.storePath).exists()).toBe(false);
+        expect(await Bun.file(options.contractPath).exists()).toBe(true);
+        expect(await Bun.file(options.keyPath).exists()).toBe(true);
+      } finally {
+        await chmod(options.projectDir, 0o700);
+      }
+    });
+  }
+);
+
+test("cleanup uses the store lock for its legacy key without a root .internal directory", async () => {
+  await withMigratedStore(async (options) => {
+    await expect(
+      lstat(join(options.projectRoot, ".internal"))
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(
+      await removeLegacyProjectEnvArtifacts({
+        ...options,
+        paths: [options.keyPath, options.storePath],
+      })
+    ).toEqual([options.storePath, options.keyPath]);
+    await expect(
+      lstat(join(options.projectRoot, ".internal"))
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });
 
 test("cleanup preserves a source updated while confirmation was pending", async () => {
@@ -131,7 +308,7 @@ test("implicit migration also carries the source receipt into cleanup", async ()
     migrated,
   });
   expect(report.removed).toEqual([]);
-  expect(report.lines.join("\n")).toContain("Kept remaining legacy env files");
+  expect(report.lines.join("\n")).toContain("kept remaining legacy env files");
   expect(report.lines.join("\n")).not.toContain(SENTINEL);
   expect(await readFile(options.path, "utf8")).toBe(`TOKEN=${SENTINEL}-new\n`);
 });

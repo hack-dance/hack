@@ -900,8 +900,14 @@ plaintext key names and a `hack env protect` command after migration.
 Migration cleanup keeps content and file-identity receipts from its source
 inventory. After confirmation, it takes the source writer locks, checks those
 receipts and rechecks current YAML delivery and Compose references before
-removing anything. Changed sources or delivery refuse cleanup with a retry
-message; migration writes already completed remain. Editors and older writers
+removing anything. Changed sources or delivery refuse cleanup with reconciliation
+advice; migration writes already completed remain. Confirmed removals before a
+failure are named. Implicit cleanup warns and lets the original command continue
+even if a lock times out, a key is unavailable or a file is unreadable.
+Once YAML layers exist, rerunning migration does not import changed legacy
+values. Keep the copies and keys, reconcile chosen values with `env set KEY
+--value-stdin` (add `--secret` for secrets and preserve scope/overlay), check
+delivery, then remove only copies confirmed obsolete. Editors and older writers
 that do not take Hack's locks can still race a filesystem operation.
 
 ### Concurrent writes to one env file

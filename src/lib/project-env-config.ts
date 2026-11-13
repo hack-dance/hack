@@ -6266,24 +6266,24 @@ export async function finishImplicitLegacyEnvMigration(opts: {
       resolve(opts.projectDir, `${PROJECT_ENV_FILENAME}.${overlay}`)
     ),
   ]);
-  const removable = await filterUntrackedLegacyCleanupCandidates({
-    projectRoot: opts.projectRoot,
-    paths: migrated.cleanupCandidates.filter((path) => dotenvFiles.has(path)),
-  });
   let removed: readonly string[] = [];
   try {
+    const removable = await filterUntrackedLegacyCleanupCandidates({
+      projectRoot: opts.projectRoot,
+      paths: migrated.cleanupCandidates.filter((path) => dotenvFiles.has(path)),
+    });
     removed = await removeLegacyProjectEnvArtifacts({
       projectRoot: opts.projectRoot,
       paths: removable,
       context: migrated.cleanupContext,
     });
   } catch (error) {
-    if (!(error instanceof LegacyEnvCleanupRefusedError)) {
-      throw error;
-    }
-    lines.push(
-      "Kept remaining legacy env files: cleanup inventory or current delivery changed. Check the files and retry hack doctor --migrate-env-config (values omitted)."
-    );
+    const failure =
+      error instanceof LegacyEnvCleanupError
+        ? error
+        : new LegacyEnvCleanupError({ reason: "unverified" });
+    removed = failure.removedPaths;
+    lines.push(`Warning: kept remaining legacy env files. ${failure.message}`);
   }
   if (removed.length > 0) {
     lines.push(
@@ -8788,9 +8788,7 @@ async function assertLegacyCleanupDoesNotRemoveLiveInputs(opts: {
   });
   for (const path of opts.paths) {
     if (await legacyCleanupIsLiveInput({ path, live })) {
-      throw new ClosedCliError(
-        "Refusing legacy env cleanup: a target is a current project env key, configuration or YAML layer. Keep live env inputs; migrated values still need them (values omitted)."
-      );
+      throw new LegacyEnvCleanupError({ reason: "live_input" });
     }
   }
 }
@@ -8799,6 +8797,28 @@ export async function removeLegacyProjectEnvArtifacts(opts: {
   readonly projectRoot: string;
   readonly paths: readonly string[];
   readonly context?: LegacyEnvCleanupContext;
+}): Promise<readonly string[]> {
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  const removed: string[] = [];
+  try {
+    return await removeLegacyProjectEnvArtifactsUnderLocks({
+      ...opts,
+      removed,
+    });
+  } catch (error) {
+    throw new LegacyEnvCleanupError({
+      reason:
+        error instanceof LegacyEnvCleanupError ? error.reason : "unverified",
+      removedPaths: removed,
+    });
+  }
+}
+
+async function removeLegacyProjectEnvArtifactsUnderLocks(opts: {
+  readonly projectRoot: string;
+  readonly paths: readonly string[];
+  readonly context?: LegacyEnvCleanupContext;
+  readonly removed: string[];
 }): Promise<readonly string[]> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   await assertLegacyCleanupDoesNotRemoveLiveInputs(opts);
@@ -8815,6 +8835,12 @@ export async function removeLegacyProjectEnvArtifacts(opts: {
     ...opts.paths,
     ...context.receipts.map((receipt) => receipt.path),
   ]);
+  // Legacy key material belongs to the store's mutation boundary, not an env
+  // layer lock beside the key (which would create .internal at the repo root).
+  if (context.store && layers.has(context.store.keyPath)) {
+    layers.delete(context.store.keyPath);
+    layers.add(context.store.path);
+  }
   for (const envName of [null, ...context.overlayNames]) {
     layers.add(
       resolveProjectEnvConfigPath({ projectDir: context.projectDir, envName })
@@ -8844,7 +8870,6 @@ export async function removeLegacyProjectEnvArtifacts(opts: {
       await assertLegacyCleanupDoesNotRemoveLiveInputs(opts);
       await assertLegacyCleanupReceipts({ paths: opts.paths, context });
       await assertLegacyCleanupDelivery({ ...opts, context });
-      const removed: string[] = [];
       // Keep a store readable if unlinking it fails: its key is always last.
       const targets = [
         ...opts.paths.filter((path) => path !== context.store?.keyPath),
@@ -8863,9 +8888,9 @@ export async function removeLegacyProjectEnvArtifacts(opts: {
           paths: [target],
         });
         await rm(target, { recursive: false, force: false });
-        removed.push(target);
+        opts.removed.push(target);
       }
-      return removed;
+      return opts.removed;
     }
     const run = () => locked(index + 1);
     return path === context.store?.path
@@ -8875,13 +8900,39 @@ export async function removeLegacyProjectEnvArtifacts(opts: {
   return await locked(0);
 }
 
-/** A safe cleanup refusal; implicit migration reports it without aborting the caller. */
-class LegacyEnvCleanupRefusedError extends ClosedCliError {}
+const LEGACY_CLEANUP_RECOVERY =
+  "Keep the remaining legacy copies and existing keys. Once YAML layers exist, rerunning migration does not import changed legacy values. Reconcile chosen values with hack env set KEY --value-stdin (add --secret for secrets and preserve --env/--service), check delivery, then remove only copies confirmed obsolete. Values omitted.";
 
-function legacyCleanupChanged(): LegacyEnvCleanupRefusedError {
-  return new LegacyEnvCleanupRefusedError(
-    "Refusing legacy env cleanup: a source file changed, its inventory is unavailable, or current env delivery no longer preserves it. Kept remaining legacy files; earlier migration writes or cleanup removals may remain. Retry hack doctor --migrate-env-config after checking the files (values omitted)."
-  );
+/** A value-free cleanup outcome, including every removal confirmed before failure. */
+export class LegacyEnvCleanupError extends ClosedCliError {
+  readonly removedPaths: readonly string[];
+  readonly reason: "changed" | "live_input" | "unverified";
+
+  constructor(opts: {
+    readonly reason: "changed" | "live_input" | "unverified";
+    readonly removedPaths?: readonly string[];
+  }) {
+    const removedPaths = [...(opts.removedPaths ?? [])];
+    const reasons = {
+      changed:
+        "Refusing legacy env cleanup: source inventory or current delivery changed.",
+      live_input:
+        "Refusing legacy env cleanup: a target is a current project env key, configuration or YAML layer.",
+      unverified:
+        "Legacy env cleanup could not be confirmed; a writer may still hold a lock, or an input may be unreadable.",
+    };
+    const outcome =
+      removedPaths.length > 0
+        ? `Confirmed removals: ${removedPaths.map((path) => JSON.stringify(path)).join(", ")}.`
+        : "No removals were confirmed.";
+    super(`${reasons[opts.reason]} ${outcome} ${LEGACY_CLEANUP_RECOVERY}`);
+    this.removedPaths = removedPaths;
+    this.reason = opts.reason;
+  }
+}
+
+function legacyCleanupChanged(): LegacyEnvCleanupError {
+  return new LegacyEnvCleanupError({ reason: "changed" });
 }
 
 async function assertLegacyCleanupReceipts(opts: {

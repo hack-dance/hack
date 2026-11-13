@@ -1089,6 +1089,7 @@ const MACHINE_ORDER = [
 const PROJECT_ORDER = [
   "project-config",
   "project-store",
+  "env-secrets",
   "env-format",
   "env-key",
   "tracked-files",

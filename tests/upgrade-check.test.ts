@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import {
   runUpgradeCheck,
@@ -287,6 +288,8 @@ test("the plan starts with the snapshot, then blockers, then machine and project
   ).toEqual([
     ["snapshot", "machine", false],
     ["env-format", "app-blocked", true],
+    // Its dangling layer link cannot be inspected for secrets either.
+    ["env-secrets", "app-blocked", false],
     ["registry-dead", "machine", false],
     ["global-infra", "machine", false],
     ["env-format", "app-legacy", false],
@@ -301,12 +304,20 @@ test("the plan starts with the snapshot, then blockers, then machine and project
 
 test("a host with nothing to do is ready, with no plan and no next command", async () => {
   const current = await liveProject("app-current");
-  await writeFile(
-    join(current.projectDir, "hack.env.default.yaml"),
-    "vars: {}\n"
-  );
+  // A YAML env layer written the way Hack writes it (no legacy env files).
+  await setProjectEnvValue({
+    projectRoot: current.repoRoot,
+    projectDir: current.projectDir,
+    envName: null,
+    scope: "global",
+    key: "PORT",
+    value: "3000",
+    secret: false,
+  });
   await writeRegistry([current]);
   const report = await check(healthyProbes());
+  expect(report.blockers).toEqual([]);
+  expect(report.incomplete).toEqual([]);
   expect(report.ready).toBe(true);
   expect(report.plan).toEqual([]);
   expect(report.next_command).toBeNull();
@@ -1132,6 +1143,41 @@ test("a project directory that cannot be listed is a snapshot gap, not an empty 
     });
   } finally {
     await chmod(project.projectDir, 0o755);
+  }
+});
+
+test("env layer secrets must open under the project env key", async () => {
+  // Codex review: a missing or wrong env key passed as "none needed yet".
+  const project = await liveProject("app-env-secrets");
+  await setProjectEnvValue({
+    projectRoot: project.repoRoot,
+    projectDir: project.projectDir,
+    envName: null,
+    scope: "global",
+    key: "TOKEN",
+    value: SENTINEL,
+    secret: true,
+  });
+  await writeRegistry([project]);
+  const finding = (r: UpgradeCheckReport) =>
+    r.projects[0]?.findings.find((f) => f.id === "env-secrets");
+  const good = await check(healthyProbes());
+  expect(finding(good)?.status).toBe("ok");
+
+  const keyFile = join(project.repoRoot, ".hack.secret.key");
+  const key = await readFile(keyFile, "utf8");
+  await rm(keyFile);
+  const missing = await check(healthyProbes());
+  expect(finding(missing)?.status).toBe("blocker");
+  expect(missing.ready).toBe(false);
+
+  await writeFile(keyFile, `${"A".repeat(43)}\n`, { mode: 0o600 });
+  await chmod(keyFile, 0o600);
+  const wrong = await check(healthyProbes());
+  expect(finding(wrong)?.status).toBe("blocker");
+  for (const report of [good, missing, wrong]) {
+    expect(JSON.stringify(report)).not.toContain(SENTINEL);
+    expect(JSON.stringify(report)).not.toContain(key.trim());
   }
 });
 

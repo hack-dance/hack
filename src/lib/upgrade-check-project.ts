@@ -23,6 +23,7 @@ import {
 } from "./doctor-generated-files.ts";
 import { withProcessDeadline } from "./process-deadline.ts";
 import {
+  inspectProjectEnvLayerKeys,
   ProjectEnvLayerPathConflictError,
   projectEnvConfigExistsForMutation,
 } from "./project-env-config.ts";
@@ -73,6 +74,7 @@ export type UpgradeFinding = {
 /** Checks the upgrade's safety depends on; a failure there is `incomplete`. */
 const REQUIRED_CHECKS = new Set([
   "project-store",
+  "env-secrets",
   "env-format",
   "env-key",
   "tracked-files",
@@ -332,7 +334,7 @@ async function envKeyFinding(opts: {
       status: "ok",
       summary: present
         ? "Env key present, private and untracked."
-        : "No env key (none needed yet).",
+        : "No env key file (whether one is needed is the env-secrets check).",
       args: null,
       action: null,
     };
@@ -504,6 +506,68 @@ function nativeFinding(
 }
 
 /**
+ * Whether the secrets already in this checkout's env layers open under the
+ * key readers would use (read-only {@link inspectProjectEnvLayerKeys}:
+ * counts only, never a value). Secrets with no key available, or that do
+ * not all open, block; a layer that cannot be inspected is incomplete.
+ */
+async function envSecretsFinding(opts: {
+  readonly root: string;
+  readonly projectDir: string;
+}): Promise<UpgradeFinding> {
+  const inspected = await inspectProjectEnvLayerKeys({
+    projectRoot: opts.root,
+    projectDir: opts.projectDir,
+  });
+  const args = ["doctor", "--path", opts.root];
+  const missing = inspected.reports.filter((r) => r.openCount === null);
+  const mismatched = inspected.reports.filter(
+    (r) => r.openCount !== null && r.openCount < r.secretCount
+  );
+  const count = (reports: typeof inspected.reports) =>
+    reports.reduce((sum, r) => sum + r.secretCount, 0);
+  if (missing.length > 0) {
+    return {
+      id: "env-secrets",
+      status: "blocker",
+      summary: `${count(missing)} env layer secret(s) are stored, but no project env key is available here, so they cannot be read or migrated.`,
+      args,
+      action:
+        "Copy .hack.secret.key (mode 600, untracked) from a checkout that has it, or set HACK_ENV_SECRET_KEY to the same key. A new key cannot open these values.",
+    };
+  }
+  if (mismatched.length > 0) {
+    return {
+      id: "env-secrets",
+      status: "blocker",
+      summary: `Some env layer secrets do not open under this checkout's project env key (${mismatched.length} layer(s)).`,
+      args,
+      action: null,
+    };
+  }
+  if (inspected.failures.length > 0) {
+    return {
+      id: "env-secrets",
+      status: "incomplete",
+      summary: `${inspected.failures.length} env layer(s) could not be inspected, so whether their secrets open is unknown.`,
+      args,
+      action: null,
+    };
+  }
+  const total = count(inspected.reports);
+  return {
+    id: "env-secrets",
+    status: "ok",
+    summary:
+      total === 0
+        ? "No secrets in env layers."
+        : `All ${total} env layer secret(s) open under the project env key.`,
+    args: null,
+    action: null,
+  };
+}
+
+/**
  * The encrypted store this checkout selects for itself, when it is not the
  * global one (the machine check covers that) and the checkout reads it:
  * the key its configuration selects must open it. Read-only and
@@ -672,6 +736,9 @@ export async function inspectUpgradeProject(opts: {
     ),
     guarded("agent-integrations", limits, () =>
       agentFinding({ root, homeDir: opts.homeDir })
+    ),
+    guarded("env-secrets", limits, () =>
+      envSecretsFinding({ root, projectDir })
     ),
     guarded("project-store", limits, () =>
       projectStoreFinding({ root, projectDir })

@@ -480,6 +480,8 @@ async function writeClaim(
     directories: [spec.stateDir],
     refusal: () => new ClaimRefusal(),
     text: `${JSON.stringify(claim)}\n`,
+    // Store directories hold only their own files; stage beside them.
+    staging: "sibling",
   });
 }
 

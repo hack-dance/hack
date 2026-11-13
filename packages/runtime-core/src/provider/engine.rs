@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+pub(in crate::provider) mod inspection;
 #[cfg(any(target_os = "macos", test))]
 mod exec_io;
 #[cfg(any(target_os = "macos", test))]
@@ -388,53 +389,7 @@ impl<'a> Engine<'a> {
         Ok(events)
     }
     pub(super) fn probe_status(&self, id: &str) -> Result<Option<String>, CandidateError> {
-        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(failure("Invalid probe container identity."));
-        }
-        self.guest.verify()?;
-        let bytes = match self.transport.request_bytes(
-            Method::GET,
-            &format!("/v1.53/containers/{id}/archive?path=/run/hack-http-probe-state/status"),
-            None,
-        ) {
-            Ok(bytes) => bytes,
-            Err(e) if e.code == "engine_not_found" => {
-                self.guest.verify()?;
-                return Ok(None);
-            }
-            Err(e) => return Err(e),
-        };
-        if bytes.len() > 32_768 {
-            return Err(failure("Probe archive exceeds its budget."));
-        }
-        let mut archive = tar::Archive::new(bytes.as_slice());
-        let mut entries = archive
-            .entries()
-            .map_err(|_| failure("Invalid probe archive."))?;
-        let mut entry = entries
-            .next()
-            .ok_or_else(|| failure("Empty probe archive."))?
-            .map_err(|_| failure("Invalid probe archive."))?;
-        if entry
-            .path()
-            .map_err(|_| failure("Invalid probe path."))?
-            .as_ref()
-            != Path::new("status")
-            || !entry.header().entry_type().is_file()
-            || entry.size() > 256
-        {
-            return Err(failure("Unexpected probe archive entry."));
-        }
-        let mut raw = String::new();
-        entry
-            .read_to_string(&mut raw)
-            .map_err(|_| failure("Invalid probe status."))?;
-        drop(entry);
-        if entries.next().is_some() {
-            return Err(failure("Multiple probe archive entries."));
-        }
-        self.guest.verify()?;
-        Ok(Some(raw))
+        read_probe_status(&self.transport, id, || self.guest.verify())
     }
     #[cfg(target_os = "macos")]
     pub(in crate::provider) fn job_logs(
@@ -543,6 +498,7 @@ impl<'a> Engine<'a> {
         deadline: std::time::Instant,
         cancelled: impl Fn() -> bool,
     ) -> Result<Self, CandidateError> {
+        let mut holder = None;
         loop {
             if cancelled() {
                 return Err(CandidateError::new(
@@ -552,13 +508,16 @@ impl<'a> Engine<'a> {
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                return Err(CandidateError::new(
-                    "provider_busy",
-                    "Provider lease acquisition expired before admission.",
-                ));
+                return Err(holder.unwrap_or_else(|| {
+                    CandidateError::new(
+                        "provider_busy",
+                        "Provider lease acquisition expired before admission.",
+                    )
+                }));
             }
             match Self::connect(candidate) {
                 Err(error) if error.code == "provider_busy" => {
+                    holder = Some(error);
                     std::thread::sleep(remaining.min(Duration::from_millis(50)))
                 }
                 result => return result,
@@ -1023,6 +982,60 @@ fn bounded_log_text(bytes: &[u8], truncated: &mut bool) -> String {
 
 pub fn info(candidate: &Candidate) -> Result<EngineInfo, CandidateError> {
     Observer::connect(candidate)?.info()
+}
+
+fn read_probe_status(
+    transport: &Transport,
+    id: &str,
+    verify: impl Fn() -> Result<(), CandidateError>,
+) -> Result<Option<String>, CandidateError> {
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(failure("Invalid probe container identity."));
+    }
+    verify()?;
+    let bytes = match transport.request_bytes(
+        Method::GET,
+        &format!("/v1.53/containers/{id}/archive?path=/run/hack-http-probe-state/status"),
+        None,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) if e.code == "engine_not_found" => {
+            verify()?;
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    if bytes.len() > 32_768 {
+        return Err(failure("Probe archive exceeds its budget."));
+    }
+    let mut archive = tar::Archive::new(bytes.as_slice());
+    let mut entries = archive
+        .entries()
+        .map_err(|_| failure("Invalid probe archive."))?;
+    let mut entry = entries
+        .next()
+        .ok_or_else(|| failure("Empty probe archive."))?
+        .map_err(|_| failure("Invalid probe archive."))?;
+    if entry
+        .path()
+        .map_err(|_| failure("Invalid probe path."))?
+        .as_ref()
+        != Path::new("status")
+        || !entry.header().entry_type().is_file()
+        || entry.size() > 256
+    {
+        return Err(failure("Unexpected probe archive entry."));
+    }
+    let mut raw = String::new();
+    entry
+        .read_to_string(&mut raw)
+        .map_err(|_| failure("Invalid probe status."))?;
+    drop(entry);
+    if entries.next().is_some() {
+        return Err(failure("Multiple probe archive entries."));
+    }
+    verify()?;
+    Ok(Some(raw))
 }
 
 #[cfg(test)]

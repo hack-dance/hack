@@ -266,16 +266,20 @@ fn operation_lease<T>(
     deadline: Option<Instant>,
     verify: impl FnOnce() -> Result<T, CandidateError>,
 ) -> Result<(state::Lock, T), CandidateError> {
+    let mut holder = None;
     let lock = loop {
         if deadline.is_some_and(|limit| Instant::now() >= limit) {
-            return Err(CandidateError::new(
-                "provider_busy",
-                "Provider lease acquisition deadline expired; no operation was admitted.",
-            ));
+            return Err(holder.unwrap_or_else(|| {
+                CandidateError::new(
+                    "provider_busy",
+                    "Provider lease acquisition deadline expired; no operation was admitted.",
+                )
+            }));
         }
         match state::Lock::acquire(root) {
             Ok(lock) => break lock,
             Err(error) if error.code == "provider_busy" && deadline.is_some() => {
+                holder = Some(error);
                 let remaining = deadline
                     .expect("bounded acquisition")
                     .saturating_duration_since(Instant::now());
@@ -289,14 +293,14 @@ fn operation_lease<T>(
 }
 
 /// How long owned cleanup and recovery wait for a provider lease that another operation
-/// holds, such as the `graph inspect` behind a polling `hack ps`. Acquisition admits nothing,
+/// holds, such as a finite `graph inspect`. Acquisition admits nothing,
 /// and a foreground owner that gives up its cleanup exits with its publication and services
 /// still bound, so this waits longer than startup does.
 #[cfg(target_os = "macos")]
 pub(super) const OWNED_CLEANUP_LEASE_WAIT: Duration = Duration::from_secs(30);
 
 /// How long ordinary startup waits for a provider lease that another operation holds, such as
-/// the `graph inspect` behind `hack ps`.
+/// a finite `graph inspect` (presentation `ps` takes no provider lease).
 pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
 
 /// Startup's provider lease. Everything `start_pool` does before taking it is read-only

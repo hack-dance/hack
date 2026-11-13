@@ -16,6 +16,7 @@ import {
 } from "./secret-store.ts";
 import {
   listProjectsUsingSecretStore,
+  missingRegisteredProjectsHint,
   projectUsesSecretStore,
   type SecretStoreUsers,
 } from "./secret-store-retire.ts";
@@ -181,7 +182,7 @@ function describeStoreUsers(users: SecretStoreUsers): string {
     return "The projects registry could not be read or is not valid, so which registered projects read it is unknown.";
   }
   if (users.unchecked > 0) {
-    const gap = `${users.unchecked} registered project(s) could not be checked (their Hack config or store file could not be read), so the list may be incomplete.`;
+    const gap = `${users.unchecked} registered project(s) could not be checked (not there, or their Hack config or store file could not be read), so the list may be incomplete.${missingRegisteredProjectsHint(users.missing)}`;
     return named === null
       ? `No checked registered project reads it, but ${gap}`
       : `${named} ${gap}`;

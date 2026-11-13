@@ -1549,3 +1549,26 @@ fn finite_exec_request_closes_argv_workdir_and_action_without_reusing_logs_autho
             .is_err()
     );
 }
+
+#[test]
+fn presentation_observation_never_satisfies_readiness_status() {
+    let fixture = Fixture::new();
+    let receipt = fixture.receipt();
+    let verified = status(receipt.clone());
+    assert!(
+        verified
+            .validate(&receipt, Action::Observe, None, None, None)
+            .is_err()
+    );
+    let mut encoded = serde_json::to_value(verified).unwrap();
+    encoded["result"]["outcome"] = json!("observed");
+    let observed: Reply = serde_json::from_value(encoded).unwrap();
+    observed
+        .validate(&receipt, Action::Observe, None, None, None)
+        .unwrap();
+    assert!(
+        observed
+            .validate(&receipt, Action::Status, None, None, None)
+            .is_err()
+    );
+}

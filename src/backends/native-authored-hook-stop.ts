@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { connect, createServer, type Socket } from "node:net";
 import { isRecord } from "../lib/guards.ts";
+import { NativeAuthoredStopUnavailableError } from "./native-authored-stop-errors.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
 const RUN = /^[a-f0-9]{32}$/;
@@ -165,15 +166,17 @@ export async function requestNativeHookStop(input: {
     };
     opts.signal?.addEventListener("abort", fail, { once: true });
     let text = "";
-    socket.on("connect", () =>
+    let connected = false;
+    socket.on("connect", () => {
+      connected = true;
       socket.end(
         `${JSON.stringify({
           kind: "native-authored-stop",
           run: opts.run,
           token: opts.token,
         })}\n`
-      )
-    );
+      );
+    });
     socket.on("data", (bytes) => {
       try {
         text = appendAscii(text, bytes);
@@ -181,7 +184,14 @@ export async function requestNativeHookStop(input: {
         fail();
       }
     });
-    socket.on("error", fail);
+    socket.on("error", (error) => {
+      if (!connected && "code" in error && error.code === "ECONNREFUSED") {
+        socket.destroy();
+        reject(new NativeAuthoredStopUnavailableError());
+      } else {
+        fail();
+      }
+    });
     socket.on("end", () => {
       try {
         const value: unknown = JSON.parse(text);

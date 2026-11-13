@@ -26,6 +26,13 @@ Out of scope: the retired hosted account, dashboard and ticket flows, and the
 unsupported remote, gateway, node and dispatch surfaces. One residual risk in retained
 node code is listed under [open gaps](#open-gaps) so that it is not lost.
 
+Attacker model for values and keys at rest (HACK-2165): Hack protects machine-local env
+values and keys against accidental collection by Git and against other users of the
+machine, and binds each check to the file it actually opens or replaces. A process
+already running as the same user is out of scope: it can read the key and every
+machine-local file directly, so Hack adds no machinery whose only purpose is to defeat
+such a process racing its checks.
+
 ## Assets
 
 | Asset | Where it lives | What it protects |
@@ -109,11 +116,11 @@ HACK-2163 hardens three boundaries found in the env audit:
 | --- | --- |
 | A repository's contract names a variable exported in the developer's shell, so the migration saves it to disk. | `migrateLegacyProjectEnv` refuses, naming the key only, when a `plain_env` value resolves from the process environment (HACK-1688). A value in a regular `.hack/.env` migrates to the gitignored machine-local layer, never a tracked one (HACK-1712). |
 | A repository plants `.hack.secret.key` as a symlink (dangling or not) so that Hack reads or writes a file it should not. | Key reads go through `readBoundedPrivateFile` (`lstat`, `O_NOFOLLOW`, descriptor and path identity checks, 1 MiB bound, fatal UTF-8). New keys are created with `createPrivateFileExclusive` (`O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, `fchmod`, `fsync`). Both are in `src/lib/private-file.ts`, used by `resolveProjectEnvKey`, `ensureProjectEnvSecretKey` and `resolveInheritedProjectEnvKey` in `src/lib/project-env-config.ts` (#288). |
-| A symlinked `.hack/.env`, overlay file or `.hack` directory redirects a write, or a reader sees a partial file. | `src/lib/private-env-file.ts` (`readPrivateEnvFile`, `writePrivateEnvFileIfChanged`) and `replacePrivateFileAtomic` in `src/lib/private-file.ts`: a private sibling is written and fsynced, then renamed over the target; symlinks and non-regular entries are refused with one fixed message (#302). Used by mutation paths in `src/lib/hack-env.ts` and `materializeProjectEnv`. Legacy inspection still follows links through `readTextFile`; see gap 18. |
-| A world-readable env file or store. | `.hack/.env`, overlays and the `encrypted_file` store are written 0600, and a same-content file with group or other access is tightened (#302). The `hack doctor` env key check reports `env-key-weak-permissions` and `env-key-wrong-owner` (#309). |
+| A symlinked `.hack/.env`, overlay file or `.hack` directory redirects a write, or a reader sees a partial file. | `src/lib/private-env-file.ts` (`readPrivateEnvFile`, `writePrivateEnvFileIfChanged`) and `replacePrivateFileAtomic` in `src/lib/private-file.ts`: a private staging file is written and fsynced, then renamed over the target; symlinks and non-regular entries are refused with one fixed message (#302). Used by mutation paths in `src/lib/hack-env.ts` and `materializeProjectEnv`. Dotenv reads in `src/lib/hack-env.ts` use the no-follow private-file reader (#762; gap 18). Staging copies of these files and of keys live in `.hack-staging/` next to the target, a private (0700) directory whose `.gitignore` of `*` keeps git from listing a copy a crash leaves. Writers never remove anything there, since a file configured at a staging-shaped path could be live; `hack doctor --fix` removes copies older than 10 minutes and never a path current resolution reads: configured stores and keys, the shared key and the project inputs legacy cleanup also keeps (`projectEnvLiveInputPaths`), each as given and resolved; the same holds for stale terminal-session payloads. Just before each unlink the configuration is resolved again and the target must be live in neither it nor the inspected one; if either cannot be resolved nothing is removed. The automatic pre-staging mux sweep (HACK-2170) does not consult configuration (`src/lib/private-staging.ts`, `src/lib/secrets-hygiene.ts`, HACK-2165). |
+| A world-readable env file or store. | `.hack/.env`, overlays and the `encrypted_file` store are written 0600, and a same-content file with group or other access is tightened (#302). Machine-local layers are created 0600, and a write, even one that changes nothing, drops the group and other bits of an existing one; commands that read layers warn about a loose one (HACK-2165). The `hack doctor` env key check reports `env-key-weak-permissions` and `env-key-wrong-owner` (#309), and its "secrets hygiene" section reports loose, linked, tracked or unignored secret-bearing files, staging leftovers, stale terminal-session payloads and a store whose key is missing; `--fix` tightens modes, adds ignore entries and removes Hack's own leftovers, never a store, key or user file (`src/lib/secrets-hygiene.ts`, HACK-2165). |
 | The Compose backend leaves decrypted values at rest in `.hack/.internal/compose.env.override.yml` after `up`, `down`, a failed `up` or an interrupted one. | The override holds only `${HACK_ENV_<digest>_<KEY>}` references; each value reaches `docker compose` through its process environment, so the generated override does not persist resolved values (command output can still contain them) (`renderComposeEnvReferenceOverride` in `src/lib/compose-managed-env.ts`). The file keeps its path because Compose records it in each container's `config_files` label. It is written with `replacePrivateFileAtomic` (mode 0600, symlink refused), and a literal value is refused before any write (`writeComposeEnvOverride` in `src/lib/compose-env-at-rest.ts`). A file left by an earlier version is replaced by the next Compose command that renders the override, removed by one that renders none and by `hack down` (before its hooks, remote target and Compose down, so none of them can skip it), and reported by the `hack doctor` "compose env at rest" check by counts only; `hack doctor --fix` removes it. Removal moves the file aside atomically and classifies what it moved, so a value-free file written concurrently is put back rather than deleted (the path is absent for that moment; see gap 4). An aside left by a crash between the move and the delete is reported by the doctor check by count and removed by a later removal, `hack doctor --fix` or a Compose command that renders the override, once it is more than a minute old. The doctor check, every removal and the aside sweep apply the writer's no-follow check to `.hack` and `.hack/.internal` first (and recheck them before each move or delete): a symlinked or non-directory `.hack` or `.hack/.internal`, or a symlinked or non-regular override, is a closed, value-free refusal, and nothing behind it is listed, read, moved or deleted (HACK-1316). Legacy adoption gives the reference values only to its Compose config-hash probe at preview and preparation; a saved recheck runs without values and binds each container's config-hash label to the hash proven at preparation. `hack config adopt` (with or without `--stop`) and its preview refuse a literal override before preparation, because an adoption pins the file's bytes and inode for its life. Recovery acts on an existing preparation, so the store refuses instead: publication (`--recover --stop`) and switch completion (`--recover`) refuse a generation bound to a literal override before any original moves, and name `hack config adopt --recover --rollback` (HACK-1318). Rollback stays allowed. While a prepared, active or pending adoption exists, no removal touches the file (removal would make the adoption unloadable); an adoption that an earlier version made over a literal file therefore keeps its values at rest until `hack config adopt --rollback`, and the doctor check names that next step (see gap 4). The `HACK_ENV_*` references, shared for global scope and distinct for service overrides, go only to `docker compose` invocations that read the override; the `docker inspect`, `logs` and `events` children for dependency cache progress and reuse get the environment without them (`withoutComposeEnvReferences`). Proven with a stub `docker` by `tests/compose-env-at-rest-cli.test.ts`, `tests/compose-env-at-rest.test.ts`, `tests/compose-env-reference-least-privilege.test.ts`, `tests/doctor-fix-noninteractive.test.ts`, `tests/native-compose-adoption-generation-managed.test.ts`, `tests/native-compose-adoption-generation-recovery.test.ts` and the sentinel scan `tests/env-secret-sentinel-scan.test.ts` (HACK-1273, HACK-1318). |
 | Two writers of the `encrypted_file` store lose an update. | An in-process queue plus a cooperative `<store>.lock` using the owner protocol from `src/lib/projects-registry-lock.ts`; a symlinked store path is refused for writes (`src/lib/secret-store.ts`, #302). |
-| Concurrent first users of the `encrypted_file` store each generate a key; the last key file wins and the store, already encrypted under another key, can no longer be decrypted. | The generated key is published with `publishPrivateFileExclusive` (`src/lib/private-file.ts`): a fsynced 0600 sibling is linked into place only when no key file exists, so losers adopt the published key. A store found non-empty after the first key read re-reads the key file before the keychain fallback. Proven across eight worker processes by `tests/secret-key-provisioning-convergence.test.ts`. This does not cover the process-global cache and explicit provisioning gaps in gap 17. |
+| Concurrent first users of the `encrypted_file` store each generate a key; the last key file wins and the store, already encrypted under another key, can no longer be decrypted. | The generated key is published with `publishPrivateFileExclusive` (`src/lib/private-file.ts`): a fsynced 0600 staging file (in `.hack-staging/` next to the key) is linked into place only when no key file exists, so losers adopt the published key. A store found non-empty after the first key read re-reads the key file before the keychain fallback. Proven across eight worker processes by `tests/secret-key-provisioning-convergence.test.ts`. The process-global cache and explicit provisioning are covered separately (gap 17, narrowed by #766). |
 | Concurrent first secrets in the primary checkout and a linked worktree create two different project keys (checkout-local and shared), so values do not decrypt across checkouts; or a reader refuses a key file that another process is still publishing. | When no key exists, `ensureProjectEnvSecretKey` (`src/lib/project-env-config.ts`) creates it under a cooperative lock at `<git common dir>/.hack.secret.key.lock` and repeats the lookup under the lock. Key files are published complete with `publishPrivateFileExclusive`, and a key read that overlaps a publication is retried for about a quarter second while the entry is a regular file. Proven by `tests/secret-key-provisioning-convergence.test.ts`. Hack v4 writers do not take the lock. |
 
 ### Malformed or hostile ciphertext
@@ -289,7 +296,8 @@ planned branch or a passing documentation check is not a mitigation.
     session's shell appends with `>>`, so a same-user replacement during the
     session is followed until Hack's next record; ancestors of `.hack/.internal/`
     are not checked for other writers; staged multiplexer payloads are removed by
-    the next staging, not by an independent reaper.
+    the next staging or `hack doctor --fix` (which also reports them), not by an
+    independent reaper.
 17. **Narrowed: secret-store and key integrity (HACK-2169, #766).** Unreadable or
     malformed stores refuse mutation instead of becoming an empty store. Configured
     file-key lookup does not borrow a cached key from another path; provisioning
@@ -297,12 +305,21 @@ planned branch or a passing documentation check is not a mitigation.
     is retained without creating a shadowing file key. Shared key-writer locks
     serialize provisioning and cleanup. These are preservation checks, not a
     rotation or recovery mechanism for keys already lost.
-18. **Narrowed: local-layer symlinks and Git privacy (HACK-2165, #762).**
-    Machine-local writes refuse linked or tracked destinations, unknown tracking
-    inside a checkout and ineffective ignore rules. Legacy dotenv inspection uses
-    no-follow reads. Local naming and ignores still do not prove private historical
-    permissions or erase earlier copies; inspect Doctor's findings and retain the
-    remaining filesystem-race limits described above.
+18. **Narrowed: local-layer symlinks, Git privacy and modes (HACK-2165, #762,
+    #764).** Machine-local writes refuse linked or tracked destinations, unknown
+    tracking inside a checkout and ineffective ignore rules. Legacy dotenv
+    inspection uses no-follow reads. Machine-local layers are created 0600, an
+    existing loose one is tightened by the next write or `hack doctor --fix`, and
+    commands that read layers warn about a loose one (#764). Local naming and
+    ignores still do not prove private historical permissions or erase earlier
+    copies; only permission bits are checked (macOS extended ACLs are not), so
+    inspect Doctor's findings and retain the remaining filesystem-race limits
+    described above. Git is found the way git finds it: a `.git` entry at or
+    above the path, or `GIT_DIR` in Hack's environment (both fail closed when git
+    cannot answer). A work tree used only through `--git-dir`/`--work-tree`
+    flags or an alias (a bare dotfiles repository, say) leaves neither, so Hack,
+    like plain `git`, cannot see it and neither refuses a write there nor reports
+    one; keep stores and keys out of such a tree, or ignore them in it.
 19. **Mitigated: stale migration cleanup decisions (HACK-2171).** Cleanup carries
     content and file-identity receipts from before migration, then rechecks them
     and current scoped delivery under writer locks after consent. Each unlink
@@ -315,9 +332,12 @@ planned branch or a passing documentation check is not a mitigation.
 ### Plaintext on disk outside materialization
 
 Local YAML can hold plain values, including values migrated from a v4 dotenv
-file. `writeProjectEnvConfigFile` creates new local layers mode 0600 but keeps an
-existing layer's mode (`src/lib/project-env-config.ts`). Check older files by
-hand; a local filename is not proof of encryption or private permissions.
+file. `writeProjectEnvConfigFile` creates new local layers mode 0600 and drops the
+group and other bits of an existing one on every write, even one that changes
+nothing (`src/lib/project-env-config.ts`); `hack doctor --fix` does the same for
+layers no write has touched since. Until then an older layer keeps the mode it
+was created with, and commands that read it warn. A local filename is not proof
+of encryption.
 
 `stageMuxEnvironment` writes resolved values to `$TMPDIR/hack-mux-env-*/env.json`
 with mode 0600; the pane wrapper consumes and removes that payload
@@ -326,7 +346,8 @@ backup or temp-file collector can read it. A payload older than 10 minutes is
 refused by the wrapper, and each new staging sweeps this user's stale private
 payloads (an ownership-aware check, not a blanket temp-directory deletion). A
 payload left by a crash stays until the next staging; there is no independent
-reaper.
+reaper, but `hack doctor` reports it and `hack doctor --fix` removes it
+(HACK-2165).
 
 Background output reaches `<HACK_HOME>/commands/<id>/stdout` and `stderr` before
 the supervisor scans it (`src/lib/background-command/journal.ts`,

@@ -442,6 +442,42 @@ or `docker compose down` run, so a failed hook, a remote target or a failed Comp
 does not keep it. `hack doctor` reports such a file in its "compose env at rest" check
 (counts only, never values), and `hack doctor --fix` removes it.
 
+### Secrets at rest: the "secrets hygiene" check
+
+`hack doctor` checks the files that hold env values or keys, for the project and for the
+global Hack home, in its "secrets hygiene" section. It names files, never values:
+
+- machine-local layers (`hack.env.local.yaml`, `hack.env.<overlay>.local.yaml`),
+  `.hack/.env` files, the project key (checkout-local and shared) and the encrypted
+  store and its key, when other users can read them, when they are links, or when they
+  belong to another user;
+- those files when git tracks them (an error, except for the encrypted store: it holds
+  only ciphertext, so a tracked store is a warning while its key stays out of git), or
+  when git does not ignore them. Inside the project `--fix` adds the ignore entry; a
+  store or key in another git work tree (a home directory kept in git, say) is
+  checked there and reported for you to ignore by hand, and one in a checkout git
+  cannot name is an error;
+- staging copies an interrupted write left behind, and env values staged for a terminal
+  session that never ran (older than 10 minutes);
+- an encrypted store whose key file is missing: "store present, key missing, cannot be
+  read".
+
+`hack doctor --fix` removes group and other permission bits from eligible files it reports, adds missing ignore
+entries, and removes Hack's own leftovers, and prints each change. It never deletes a
+store, a key or a file you wrote, and never untracks a file.
+
+Hack writes a file that holds a secret by staging the complete contents first. Those
+staging copies live in a private directory next to the file, `.hack-staging/`, which
+holds a `.gitignore` of `*`, so git never lists anything in it. `hack doctor --fix`
+removes copies older than 10 minutes, and stale terminal-session payloads, but never a
+file env resolution reads (a configured store or key, the project or shared key,
+`hack.config.json` or a YAML layer, by its own path or where it resolves), and never
+anything in a retired store (`<store>.retired-<stamp>/`). Before each
+removal it reads the configuration again, so an edit made since the check counts, and
+it removes nothing it cannot confirm; writes themselves remove nothing there. A machine-local layer that a write changes, or
+leaves unchanged, is set to 0600 if other users could read it. Commands that read env
+layers warn on stderr about a machine-local file other users can read.
+
 A legacy adoption (`hack config adopt`) pins the override's exact bytes and file
 identity for as long as the adoption exists, and adopted commands never rewrite it. So:
 
@@ -728,9 +764,10 @@ hosts, use the `encrypted_file` secrets backend with its key file in place or
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit. A machine-local layer that `hack env set --local`,
 `hack env unset --local` or `hack env hydrate` creates is private (mode 0600) from creation,
-whatever your umask, because it can hold plaintext values. An existing layer keeps its mode;
-tighten it yourself with `chmod 600` if it was created by an older version. Tracked layers
-keep the umask default. These commands create no new directory for values: the layers live
+whatever your umask, because it can hold plaintext values. An existing layer that other users
+can read (made by an older version or by hand) is set to 0600 by the next of these writes,
+even one that changes nothing; `hack doctor --fix` does it at once. Tracked layers keep the
+umask default. These commands create no new directory for values: the layers live
 in the existing `.hack` directory, whose mode they don't change.
 
 With no env layers yet, `hack env set --local` writes legacy `.hack/.env` (or
@@ -880,7 +917,8 @@ never sees a partial file. If Hack is killed between those two steps, an empty
 `.hack.secret.key` or lock file is left behind. Hack refuses it rather than use or
 replace it; remove it and run the command again. ExFAT and FAT do not store Unix
 permissions, so on such a drive the key file is not limited to your user the way mode
-`0600` limits it elsewhere.
+`0600` limits it elsewhere. The private staging directory (`.hack-staging/`) is the same: Hack still refuses one
+that is a link or belongs to another user, but accepts the drive's mount-wide mode.
 
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the

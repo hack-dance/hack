@@ -1,6 +1,9 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
 pub mod interactive_exec;
 pub mod one_off;
+#[cfg(any(target_os = "macos", test))]
+pub mod status;
+use super::engine::inspection::Inspection;
 mod service_exec;
 pub use service_exec::{
     ServiceExecOptions, ServiceExecResult, service_exec, service_exec_generation,
@@ -360,7 +363,7 @@ fn directory(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError
     Ok(candidate.state_root.join("run/graphs").join(run))
 }
 fn inspect_resource(
-    engine: &Engine<'_>,
+    engine: &impl Inspection,
     receipt: &Receipt,
     resource: &Resource,
 ) -> Result<Option<Value>, CandidateError> {
@@ -374,7 +377,7 @@ fn inspect_resource(
             ""
         }
     );
-    let value = match engine.request(Method::GET, &path, None) {
+    let value = match engine.get(&path) {
         Ok(v) => v,
         Err(e) if e.code == "engine_not_found" => return Ok(None),
         Err(e) => return Err(e),
@@ -1747,6 +1750,7 @@ pub fn foreground_owner(candidate: &Candidate, run: &str) -> Result<Value, Candi
         "receipt_sha256": format!("{:x}", Sha256::digest(&bytes)),
         "foreground": publication.word(),
         "live_owner_recovery": resumable,
+        "failed_start_recoverable": !running && live_owner_cleanup::failed_start_recoverable(&root, &receipt),
         "dead_owner_recovery": predecessor,
         "dead_owner_recovery_complete": predecessor_complete,
         "dead_owner_recovery_error": predecessor_error,
@@ -1959,10 +1963,10 @@ pub fn source_compatibility(
 }
 fn inspect_using(
     candidate: &Candidate,
-    engine: &Engine<'_>,
+    engine: &impl Inspection,
     run: &str,
 ) -> Result<Snapshot, CandidateError> {
-    let (receipt, root) = load(candidate, engine, run)?;
+    let (receipt, root) = load_at(directory(candidate, run)?, run, engine.incarnation())?;
     let mut observations = BTreeMap::new();
     let journal_incomplete = root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()
@@ -2007,7 +2011,7 @@ fn inspect_using(
                             probe.config.port,
                             &endpoints::EndpointScope {
                                 receipt: &receipt,
-                                boot: engine.guest().boot_id(),
+                                boot: engine.boot_id()?,
                                 service: &resource.key,
                             },
                         )?,
@@ -2034,7 +2038,7 @@ fn inspect_using(
                                 port.target,
                                 &endpoints::EndpointScope {
                                     receipt: &receipt,
-                                    boot: engine.guest().boot_id(),
+                                    boot: engine.boot_id()?,
                                     service: &resource.key,
                                 },
                             )?,

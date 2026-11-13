@@ -25,6 +25,16 @@ pub(super) use run::execute as service_run;
 #[cfg(any(target_os = "macos", test))]
 type OneOffCompletion = (String, i32, Vec<u8>, Vec<u8>, bool);
 
+/// Status has no mutation, guest-program or storage-witness capability.
+trait ReadBackend {
+    fn get(&self, path: &str) -> Result<Value, CandidateError>;
+}
+impl<B: Backend> ReadBackend for B {
+    fn get(&self, path: &str) -> Result<Value, CandidateError> {
+        self.request(Method::GET, path, None)
+    }
+}
+
 trait Backend {
     #[cfg(any(target_os = "macos", test))]
     fn exec(
@@ -493,25 +503,21 @@ pub(super) fn ownership(
     Ok(())
 }
 
-fn inspected<B: Backend>(
+fn inspected<B: ReadBackend>(
     backend: &B,
     receipt: &Receipt,
     resource: &Resource,
 ) -> Result<Option<Value>, CandidateError> {
-    let value = match backend.request(
-        Method::GET,
-        &format!(
-            "/v1.53/{}/{}{}",
-            resource.kind.collection(),
-            resource.id.as_deref().unwrap_or(&resource.name),
-            if resource.kind == Kind::Container {
-                "/json"
-            } else {
-                ""
-            }
-        ),
-        None,
-    ) {
+    let value = match backend.get(&format!(
+        "/v1.53/{}/{}{}",
+        resource.kind.collection(),
+        resource.id.as_deref().unwrap_or(&resource.name),
+        if resource.kind == Kind::Container {
+            "/json"
+        } else {
+            ""
+        }
+    )) {
         Ok(value) => value,
         Err(error) if error.code == "engine_not_found" => return Ok(None),
         Err(error) => return Err(error),
@@ -649,7 +655,7 @@ fn verify_data_mounts(
 
 // A network receipt grants no authority over an unknown endpoint. Recheck all
 // members before container effects and require a running container's exact endpoint.
-fn project_network<B: Backend>(
+fn project_network<B: ReadBackend>(
     backend: &B,
     receipt: &Receipt,
     logical: &str,
@@ -743,7 +749,7 @@ fn network_keys(receipt: &Receipt) -> Vec<String> {
         |topology| topology.networks.keys().cloned().collect(),
     )
 }
-fn project_networks<B: Backend>(
+fn project_networks<B: ReadBackend>(
     backend: &B,
     receipt: &Receipt,
     container: Option<&Value>,
@@ -1347,12 +1353,25 @@ fn snapshot_until<B: Backend>(
     verify_source()?;
     let data_deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(40));
     backend.verify_data(&receipt, data_deadline, &|| Ok(()))?;
+    let observations = service_observations(backend, &receipt)?;
+    verify_source()?;
+    backend.verify_data(&receipt, data_deadline, &|| Ok(()))?;
+    Ok(Snapshot {
+        receipt,
+        observations,
+    })
+}
+
+fn service_observations(
+    backend: &impl ReadBackend,
+    receipt: &Receipt,
+) -> Result<BTreeMap<String, Option<Observation>>, CandidateError> {
     let mut observations = BTreeMap::new();
     if receipt.phase == Phase::Removed {
-        for logical in network_keys(&receipt) {
+        for logical in network_keys(receipt) {
             if inspected(
                 backend,
-                &receipt,
+                receipt,
                 &receipt.resources[&format!("network:{logical}")],
             )?
             .is_some()
@@ -1361,28 +1380,52 @@ fn snapshot_until<B: Backend>(
             }
         }
     } else {
-        project_networks(backend, &receipt, None)?;
+        project_networks(backend, receipt, None)?;
     }
     for resource in receipt
         .resources
         .values()
         .filter(|r| r.kind == Kind::Container)
     {
-        let observed = inspected(backend, &receipt, resource)?;
+        let observed = inspected(backend, receipt, resource)?;
         if let Some(value) = &observed {
-            verify_attachment(&receipt, &resource.key, value)?;
-            project_networks(backend, &receipt, Some(value))?;
+            verify_attachment(receipt, &resource.key, value)?;
+            project_networks(backend, receipt, Some(value))?;
         }
         observations.insert(
             resource.key.clone(),
             observed.as_ref().map(observation).transpose()?,
         );
     }
-    verify_source()?;
-    backend.verify_data(&receipt, data_deadline, &|| Ok(()))?;
-    Ok(Snapshot {
-        receipt,
-        observations,
+    Ok(observations)
+}
+
+/// Point-in-time service status. Source and storage continuity remain checked
+/// by locked inspection and mutation, never inferred from service health here.
+#[cfg(target_os = "macos")]
+pub(super) fn status(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
+    use crate::provider::engine::inspection::Inspection;
+    struct StatusBackend<'a>(crate::provider::engine::Observer<'a>);
+    impl ReadBackend for StatusBackend<'_> {
+        fn get(&self, path: &str) -> Result<Value, CandidateError> {
+            self.0.get(path)
+        }
+    }
+    let backend = StatusBackend(crate::provider::engine::Observer::connect(candidate)?);
+    let root = journal::directory(candidate, run)?;
+    super::super::status::stable(&root, || {
+        let (receipt, _) = journal::load(
+            candidate,
+            run,
+            backend.0.incarnation(),
+            backend.0.boot_id()?,
+        )?;
+        let observations = service_observations(&backend, &receipt)?;
+        backend.0.verify()?;
+        Ok(Snapshot {
+            receipt,
+            observations,
+        })
     })
 }
 

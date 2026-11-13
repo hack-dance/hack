@@ -9,6 +9,10 @@ import {
   type serveNativeAuthoredProject,
 } from "../src/backends/native-authored-project-start.ts";
 import { NativeAuthoredProjectNotStartedError } from "../src/backends/native-authored-runtime-binary.ts";
+import {
+  NativeAuthoredReservedStartError,
+  NativeAuthoredStopUnavailableError,
+} from "../src/backends/native-authored-stop-errors.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import {
@@ -17,6 +21,7 @@ import {
 } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
 import { refuseUnsupportedNativeUpOptions } from "../src/lib/native-up-refusals.ts";
+import { withOwnedProcessListeners } from "./helpers/owned-process-listeners.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -356,42 +361,46 @@ macTest(
   }
 );
 
-macTest(
-  "recovery cancellation awaits the selected owner and restores command signal listeners",
-  async () => {
-    const selected = await fixture();
-    const before = [
-      process.listenerCount("SIGINT"),
-      process.listenerCount("SIGTERM"),
-    ];
-    const entered = Promise.withResolvers<void>();
-    let aborted = false;
-    const pending = tryNativeAuthoredCommand({
-      ...selected,
-      options: { ...selected.options, operation: "down", recover: true },
-      nothingToRecover: () => Promise.resolve(false),
-      recover: (value) =>
-        new Promise((_, reject) => {
-          value.signal?.addEventListener(
-            "abort",
-            () => {
-              aborted = true;
-              reject(new Error("Retained selected recovery."));
-            },
-            { once: true }
-          );
-          entered.resolve();
-        }),
-    }).catch((error: unknown) => error);
-    await entered.promise;
-    process.emit("SIGINT");
-    expect(await pending).toHaveProperty("code", "E_LIFECYCLE_FAILED");
-    expect(aborted).toBe(true);
-    expect([
-      process.listenerCount("SIGINT"),
-      process.listenerCount("SIGTERM"),
-    ]).toEqual(before);
-  }
+macTest.each([
+  { signal: "SIGINT", code: 130 },
+  { signal: "SIGTERM", code: 143 },
+] as const)(
+  "recovery $signal cancellation preserves exit $code and restores command signal listeners",
+  async ({ signal, code }) =>
+    withOwnedProcessListeners(signal, async () => {
+      const selected = await fixture();
+      const before = [
+        process.listenerCount("SIGINT"),
+        process.listenerCount("SIGTERM"),
+      ];
+      const entered = Promise.withResolvers<void>();
+      let aborted = false;
+      const pending = tryNativeAuthoredCommand({
+        ...selected,
+        options: { ...selected.options, operation: "down", recover: true },
+        nothingToRecover: () => Promise.resolve(false),
+        recover: (value) =>
+          new Promise((_, reject) => {
+            value.signal?.addEventListener(
+              "abort",
+              () => {
+                aborted = true;
+                reject(new Error("Retained selected recovery."));
+              },
+              { once: true }
+            );
+            entered.resolve();
+          }),
+      }).catch((error: unknown) => error);
+      await entered.promise;
+      process.emit(signal);
+      expect(await pending).toBe(code);
+      expect(aborted).toBe(true);
+      expect([
+        process.listenerCount("SIGINT"),
+        process.listenerCount("SIGTERM"),
+      ]).toEqual(before);
+    })
 );
 macTest(
   "foreground dispatch captures exact selection and delegates to the lifetime owner",
@@ -722,6 +731,83 @@ macTest(
     expect(code).toBe(0);
     expect(calls).toBe(1);
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "plain down and explicit recovery share proven pre-Ready cleanup without startup",
+  async () => {
+    for (const recover of [false, true]) {
+      const selected = await fixture();
+      const calls: string[] = [];
+      const code = await tryNativeAuthoredCommand({
+        ...selected,
+        options: { ...selected.options, operation: "down", recover },
+        stop: async () => {
+          calls.push("stop");
+          throw new NativeAuthoredStopUnavailableError();
+        },
+        unreservedSelected: async () => true,
+        retireUnreserved: async () => {
+          calls.push("unreserved");
+          throw new NativeAuthoredReservedStartError();
+        },
+        nothingToRecover: async () => false,
+        recover: async () => {
+          calls.push("recover");
+          return {} as Awaited<ReturnType<typeof recoverNativeAuthoredProject>>;
+        },
+        serve: async () => {
+          throw new Error("Must not replay startup");
+        },
+      });
+      expect(code).toBe(0);
+      expect(calls).toEqual(
+        recover ? ["unreserved", "recover"] : ["stop", "unreserved", "recover"]
+      );
+    }
+  }
+);
+
+macTest(
+  "down preserves cancellation, uncertain dispatch and busy unreserved outcomes without recovery",
+  async () => {
+    for (const failure of ["SIGINT", "SIGTERM", "uncertain", "busy"] as const) {
+      const selected = await fixture();
+      let recoveries = 0;
+      const result = tryNativeAuthoredCommand({
+        ...selected,
+        options: {
+          ...selected.options,
+          operation: "down",
+          recover: failure === "busy",
+        },
+        stop: async () => {
+          if (failure === "SIGINT" || failure === "SIGTERM") {
+            process.emit(failure);
+            throw new NativeAuthoredStopUnavailableError();
+          }
+          throw new Error("stop dispatched; outcome uncertain");
+        },
+        unreservedSelected: async () => true,
+        retireUnreserved: async () => {
+          throw new Error("admission busy");
+        },
+        nothingToRecover: async () => false,
+        recover: async () => {
+          recoveries++;
+          throw new Error("must not recover");
+        },
+      });
+      if (failure === "SIGINT" || failure === "SIGTERM") {
+        expect(await result).toBe(failure === "SIGINT" ? 130 : 143);
+      } else {
+        await expect(result).rejects.toThrow(
+          failure === "busy" ? "recovery is incomplete" : "stop is unconfirmed"
+        );
+      }
+      expect(recoveries).toBe(0);
+    }
   }
 );
 

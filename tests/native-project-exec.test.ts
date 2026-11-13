@@ -86,7 +86,7 @@ test("native exec preserves literal argv, binary output and nonzero completion",
       if (request.args[1] === "refresh-dependencies") {
         return refreshed();
       }
-      if (request.args[1] === "inspect") {
+      if (request.args[1] === "status") {
         return snapshot();
       }
       expect(request.args.slice(-4)).toEqual(["--", ...argv]);
@@ -135,7 +135,7 @@ test("dead foreground owner refuses one-off exec before command effects", async 
         if (request.args[1] === "refresh-dependencies") {
           return refreshed();
         }
-        if (request.args[1] === "inspect") {
+        if (request.args[1] === "status") {
           const value = snapshot();
           return {
             ...value,
@@ -254,7 +254,7 @@ test("malformed exec output refuses without replay", async () => {
           if (request.args[1] === "refresh-dependencies") {
             return refreshed();
           }
-          if (request.args[1] === "inspect") {
+          if (request.args[1] === "status") {
             return snapshot();
           }
           executions++;
@@ -316,7 +316,7 @@ test("fresh exec sends environment only through private stdin and clears its buf
         expect(request.privateInput).toBeUndefined();
         return { ...refreshed(), changed_slots: [0, 3] };
       }
-      if (request.args[1] === "inspect") {
+      if (request.args[1] === "status") {
         return snapshot();
       }
       if (request.args[1] === "exec-selection") {
@@ -341,10 +341,10 @@ test("fresh exec sends environment only through private stdin and clears its buf
   expect(executions).toBe(1);
   expect(calls).toEqual([
     "refresh-dependencies",
-    "inspect",
+    "status",
     "exec-selection",
     "exec",
-    "inspect",
+    "status",
   ]);
   expect(payload?.every((byte) => byte === 0)).toBe(true);
 });
@@ -358,7 +358,7 @@ test("empty managed environment uses ordinary exec without a private launcher", 
       if (request.args[1] === "refresh-dependencies") {
         return refreshed();
       }
-      if (request.args[1] === "inspect") {
+      if (request.args[1] === "status") {
         return snapshot();
       }
       if (request.args[1] === "exec-selection") {
@@ -389,7 +389,7 @@ test("fresh exec clears private input on transport failure and never retries", a
         if (request.args[1] === "refresh-dependencies") {
           return refreshed();
         }
-        if (request.args[1] === "inspect") {
+        if (request.args[1] === "status") {
           return snapshot();
         }
         if (request.args[1] === "exec-selection") {
@@ -417,7 +417,7 @@ test("changed exec selection refuses before private environment delivery", async
         if (request.args[1] === "refresh-dependencies") {
           return refreshed();
         }
-        if (request.args[1] === "inspect") {
+        if (request.args[1] === "status") {
           return snapshot();
         }
         if (request.args[1] === "exec-selection") {
@@ -469,7 +469,7 @@ test("exec names an inactive service before sending any command", async () => {
       argv: ["true"],
       invoke: async (request) => {
         calls.push(request.args[1]!);
-        return request.args[1] === "inspect" ? snapshot() : refreshed();
+        return request.args[1] === "status" ? snapshot() : refreshed();
       },
     })
   ).rejects.toThrow(

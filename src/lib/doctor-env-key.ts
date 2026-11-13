@@ -220,8 +220,47 @@ async function lstatOrNull(path: string): Promise<EntryStats | null> {
   }
 }
 
+/**
+ * Where a rotation keeps the retired key: outside every worktree, in a
+ * private directory, so git can never collect it and values encrypted with
+ * it stay recoverable until every secret is re-added (HACK-2165).
+ */
+const RETIRED_KEY_DIR = "~/.hack/retired-keys";
+
+/** How a secret is re-added without its value in argv or shell history. */
+const READD_SECRET =
+  "re-add each secret with '<value-source> | hack env add KEY --secret --value-stdin' (or omit the value in a terminal for a hidden prompt)";
+
+/**
+ * Copies the key to a new private file under {@link RETIRED_KEY_DIR}, then
+ * removes it, but only once no directory from the resolved retired-key
+ * directory up to `/` holds a `.git` entry (a directory, a file or a link,
+ * readable or not). Inside a checkout (a home directory kept in git, say) it
+ * stops before copying anything. The check looks for the marker itself
+ * rather than asking git: git cannot tell a checkout whose metadata it cannot
+ * read, or one hidden by a stale `GIT_DIR`, from no checkout at all. Every
+ * resolved ancestor was just traversed by `cd`, so testing an entry in it
+ * is reliable. mktemp gives each copy its own name
+ * (0600), so a later rotation never overwrites an earlier one; the key is
+ * removed only once its copy is written.
+ */
+export function retiredKeyCopyCommand(key: string): string {
+  return `install -d -m 700 ${RETIRED_KEY_DIR} && d="$(cd ${RETIRED_KEY_DIR} && pwd -P)" && while [ ! -e "$d/.git" ] && [ ! -L "$d/.git" ] && [ "$d" != / ]; do d="$(dirname "$d")"; done && [ ! -e "$d/.git" ] && [ ! -L "$d/.git" ] && k="$(mktemp ${RETIRED_KEY_DIR}/hack-secret-key.XXXXXXXX)" && cat ${key} > "$k" && rm ${key}`;
+}
+
+/**
+ * Replaces a key symlink with a private regular copy of its target, with no
+ * intermediate file (a `<key>.new` left by an interruption would not be
+ * ignored): the target is resolved, the link removed, and the bytes copied
+ * in under umask 077. If the copy fails the key's bytes are still at the
+ * printed target.
+ */
+export function symlinkKeyRepairCommand(key: string): string {
+  return `t="$(readlink -f ${key})" && [ -f "$t" ] && rm ${key} && (umask 077 && cp "$t" ${key}) && chmod 600 ${key}`;
+}
+
 function rotateRemedy(path: (suffix?: string) => string): string {
-  return `mv ${path()} ${path(".old")}, then re-add each secret with 'hack env add --secret KEY VALUE' (Hack generates a new 256-bit key).`;
+  return `keep a recoverable copy of the old key outside every git checkout, then remove it: '${retiredKeyCopyCommand(path())}' (it stops without copying if ${RETIRED_KEY_DIR} or any directory above it holds a .git entry; then copy the key to a private directory outside any checkout yourself). Then ${READD_SECRET}; Hack generates a new 256-bit key. Delete the retired copy only once every secret decrypts under the new key.`;
 }
 
 async function inspectCandidate(opts: {
@@ -259,7 +298,7 @@ async function inspectCandidate(opts: {
           remedy: remedyFor(
             role,
             (p) =>
-              `after confirming the link target is your key: cp -L ${p()} ${p(".new")} && mv -f ${p(".new")} ${p()} && chmod 600 ${p()}`
+              `after confirming the link target is your key: ${symlinkKeyRepairCommand(p())}`
           ),
         },
       ],
@@ -578,7 +617,7 @@ export async function inspectProjectEnvKey(
           code: strength,
           status: "warn",
           subject: `$${ENV_KEY_ENV_NAME}`,
-          remedy: `set ${ENV_KEY_ENV_NAME} to a 256-bit key such as the output of 'openssl rand -base64 32', then re-add each secret with 'hack env add --secret KEY VALUE'.`,
+          remedy: `keep the current value somewhere private until every secret is re-added, set ${ENV_KEY_ENV_NAME} to a 256-bit key such as the output of 'openssl rand -base64 32', then ${READD_SECRET}.`,
         });
       }
     }

@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
+  readdir,
+  readFile,
   rm,
   symlink,
   writeFile,
@@ -24,6 +27,8 @@ import {
   gitListTrackedKeyPaths,
   type InspectEnvKeyOptions,
   inspectProjectEnvKey,
+  retiredKeyCopyCommand,
+  symlinkKeyRepairCommand,
 } from "../src/lib/doctor-env-key.ts";
 import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 
@@ -144,9 +149,11 @@ describe("env key doctor diagnostic", () => {
 
     expect(inspection.status).toBe("error");
     expect(codes(inspection)).toEqual(["env-key-symlink"]);
+    // HACK-2165: no `.new` intermediate, which git could collect.
     expect(inspection.findings[0]?.remedy).toContain(
-      `cp -L ${KEY_FILE} ${KEY_FILE}.new && mv -f ${KEY_FILE}.new ${KEY_FILE} && chmod 600 ${KEY_FILE}`
+      symlinkKeyRepairCommand(KEY_FILE)
     );
+    expect(inspection.findings[0]?.remedy).not.toContain(".new");
     expectValueFree({
       output: serialized(inspection),
       root,
@@ -178,9 +185,17 @@ describe("env key doctor diagnostic", () => {
     const inspection = await inspect(root);
 
     expect(codes(inspection)).toEqual(["env-key-wrong-length"]);
-    expect(inspection.findings[0]?.remedy).toContain(
-      `mv ${KEY_FILE} ${KEY_FILE}.old`
+    // HACK-2165: the old key leaves the worktree (never a committable
+    // `.old` sibling) and secrets are re-added without argv values.
+    const remedy = inspection.findings[0]?.remedy ?? "";
+    // A unique, private copy (mktemp), so a later rotation never overwrites
+    // it, and the key is removed only after the copy is written.
+    expect(remedy).toContain(
+      `k="$(mktemp ~/.hack/retired-keys/hack-secret-key.XXXXXXXX)" && cat ${KEY_FILE} > "$k" && rm ${KEY_FILE}`
     );
+    expect(remedy).toContain("--value-stdin");
+    expect(remedy).not.toContain(".old");
+    expect(remedy).not.toContain("KEY VALUE");
     expectValueFree({ output: serialized(inspection), root, secrets: [key] });
   });
 
@@ -793,4 +808,246 @@ describe("gitIsLocalKeyIgnored", () => {
       expect(await gitIsLocalKeyIgnored({ projectRoot: repo })).toBe(true);
     });
   });
+});
+
+describe("printed key recovery commands leave nothing git can collect (HACK-2165)", () => {
+  const KEY = "synthetic-recovery-key-material\n";
+
+  async function sandbox() {
+    const root = await mkdtemp(join(tmpdir(), "hack-key-recovery-"));
+    dirsForRecovery.push(root);
+    const home = join(root, "home");
+    const project = join(root, "project");
+    await mkdir(home);
+    await mkdir(project);
+    await git(project, ["init", "-q", "-b", "main"]);
+    await writeFile(join(project, ".gitignore"), ".hack.secret.key\n");
+    return { root, home, project };
+  }
+
+  async function git(cwd: string, args: readonly string[]): Promise<string> {
+    const proc = Bun.spawn(["git", ...args], {
+      cwd,
+      env: fixtureGitEnv(),
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    return out;
+  }
+
+  async function run(cwd: string, home: string, command: string) {
+    const proc = Bun.spawn(["sh", "-c", command], {
+      cwd,
+      env: fixtureGitEnv({ env: { HOME: home } }),
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    return await proc.exited;
+  }
+
+  const untracked = async (dir: string) =>
+    (await git(dir, ["status", "--porcelain", "--untracked-files=all"]))
+      .split("\n")
+      .filter(Boolean);
+
+  test("rotation copies the key outside the checkout, then removes it", async () => {
+    const box = await sandbox();
+    await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+    expect(
+      await run(box.project, box.home, retiredKeyCopyCommand(KEY_FILE))
+    ).toBe(0);
+    expect(
+      await lstat(join(box.project, KEY_FILE)).catch(() => null)
+    ).toBeNull();
+    const retired = await readdir(join(box.home, ".hack", "retired-keys"));
+    expect(retired).toHaveLength(1);
+    expect(
+      await readFile(
+        join(box.home, ".hack", "retired-keys", retired[0] ?? ""),
+        "utf8"
+      )
+    ).toBe(KEY);
+    expect(await untracked(box.project)).toEqual(["?? .gitignore"]);
+  });
+
+  test("rotation stops without copying when the retired-key directory is in a git checkout", async () => {
+    const box = await sandbox();
+    await git(box.home, ["init", "-q", "-b", "main"]);
+    await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+    expect(
+      await run(box.project, box.home, retiredKeyCopyCommand(KEY_FILE))
+    ).not.toBe(0);
+    expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+    expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual([]);
+    expect(await untracked(box.home)).toEqual([]);
+  });
+
+  test("rotation stops for a .git file (a linked worktree or submodule) above the directory", async () => {
+    const box = await sandbox();
+    await writeFile(join(box.home, ".git"), "gitdir: /elsewhere/.git\n");
+    await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+    expect(
+      await run(box.project, box.home, retiredKeyCopyCommand(KEY_FILE))
+    ).not.toBe(0);
+    expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+    expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual([]);
+  });
+
+  test("rotation checks the resolved directory: a ~/.hack linked into a checkout stops it", async () => {
+    const box = await sandbox();
+    const checkout = join(box.root, "dotfiles");
+    await mkdir(checkout);
+    await git(checkout, ["init", "-q", "-b", "main"]);
+    await mkdir(join(checkout, "hack"));
+    await symlink(join(checkout, "hack"), join(box.home, ".hack"));
+    await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+    expect(
+      await run(box.project, box.home, retiredKeyCopyCommand(KEY_FILE))
+    ).not.toBe(0);
+    expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+    expect(await readdir(join(checkout, "hack", "retired-keys"))).toEqual([]);
+    expect(await untracked(checkout)).toEqual([]);
+  });
+
+  for (const [label, override] of [
+    [
+      "a stale GIT_DIR",
+      (root: string) => ({ GIT_DIR: join(root, "gone.git") }),
+    ],
+    [
+      "a discovery ceiling",
+      (root: string) => ({ GIT_CEILING_DIRECTORIES: join(root, "home") }),
+    ],
+    [
+      "a stale GIT_OBJECT_DIRECTORY",
+      (root: string) => ({ GIT_OBJECT_DIRECTORY: join(root, "gone-objects") }),
+    ],
+    [
+      "a stale GIT_DIR and GIT_OBJECT_DIRECTORY together",
+      (root: string) => ({
+        GIT_DIR: join(root, "gone.git"),
+        GIT_OBJECT_DIRECTORY: join(root, "gone-objects"),
+      }),
+    ],
+    ["a stray GIT_WORK_TREE", (root: string) => ({ GIT_WORK_TREE: root })],
+  ] as const) {
+    test(`rotation finds a home checkout despite ${label} in the shell`, async () => {
+      const box = await sandbox();
+      await git(box.home, ["init", "-q", "-b", "main"]);
+      await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+      const proc = Bun.spawn(["sh", "-c", retiredKeyCopyCommand(KEY_FILE)], {
+        cwd: box.project,
+        env: {
+          ...fixtureGitEnv({ env: { HOME: box.home } }),
+          ...override(box.root),
+        },
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(await proc.exited).not.toBe(0);
+      expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+      expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual(
+        []
+      );
+      expect(await untracked(box.home)).toEqual([]);
+    });
+  }
+
+  // The command is printed for a person to paste into their own shell; zsh
+  // (the macOS default) does not word-split a parameter the way sh does.
+  for (const shell of [["sh"], ["bash"], ["zsh", "-f"]] as const) {
+    const name = shell.join(" ");
+    const runIn = async (
+      box: { project: string; home: string; root: string },
+      extra: Record<string, string>
+    ) => {
+      const proc = Bun.spawn(
+        [...shell, "-c", retiredKeyCopyCommand(KEY_FILE)],
+        {
+          cwd: box.project,
+          env: { ...fixtureGitEnv({ env: { HOME: box.home } }), ...extra },
+          stdout: "ignore",
+          stderr: "ignore",
+        }
+      );
+      return await proc.exited;
+    };
+    test.skipIf(Bun.which(shell[0]) === null)(
+      `rotation under ${name} retires the key when the directory is outside every checkout`,
+      async () => {
+        const box = await sandbox();
+        await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+        expect(await runIn(box, {})).toBe(0);
+        expect(
+          await lstat(join(box.project, KEY_FILE)).catch(() => null)
+        ).toBeNull();
+        expect(
+          await readdir(join(box.home, ".hack", "retired-keys"))
+        ).toHaveLength(1);
+      }
+    );
+    test.skipIf(Bun.which(shell[0]) === null || process.getuid?.() === 0)(
+      `rotation under ${name} stops for a home checkout whose .git cannot be read`,
+      async () => {
+        const box = await sandbox();
+        await git(box.home, ["init", "-q", "-b", "main"]);
+        await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+        await chmod(join(box.home, ".git"), 0o000);
+        try {
+          expect(await runIn(box, {})).not.toBe(0);
+        } finally {
+          await chmod(join(box.home, ".git"), 0o755);
+        }
+        expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+        expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual(
+          []
+        );
+      }
+    );
+    test.skipIf(Bun.which(shell[0]) === null)(
+      `rotation under ${name} stops for a home checkout despite a stale GIT_DIR and GIT_OBJECT_DIRECTORY`,
+      async () => {
+        const box = await sandbox();
+        await git(box.home, ["init", "-q", "-b", "main"]);
+        await writeFile(join(box.project, KEY_FILE), KEY, { mode: 0o600 });
+        expect(
+          await runIn(box, {
+            GIT_DIR: join(box.root, "gone.git"),
+            GIT_OBJECT_DIRECTORY: join(box.root, "gone-objects"),
+          })
+        ).not.toBe(0);
+        expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+        expect(await readdir(join(box.home, ".hack", "retired-keys"))).toEqual(
+          []
+        );
+      }
+    );
+  }
+
+  test("the symlink repair leaves a private regular key and no intermediate copy", async () => {
+    const box = await sandbox();
+    const target = join(box.root, "elsewhere.key");
+    await writeFile(target, KEY, { mode: 0o600 });
+    await symlink(target, join(box.project, KEY_FILE));
+    expect(
+      await run(box.project, box.home, symlinkKeyRepairCommand(KEY_FILE))
+    ).toBe(0);
+    const key = await lstat(join(box.project, KEY_FILE));
+    expect(key.isFile()).toBe(true);
+    expect(key.mode & 0o777).toBe(0o600);
+    expect(await readFile(join(box.project, KEY_FILE), "utf8")).toBe(KEY);
+    expect((await readdir(box.project)).sort()).toEqual(
+      [".git", ".gitignore", KEY_FILE].sort()
+    );
+    expect(await untracked(box.project)).toEqual(["?? .gitignore"]);
+  });
+});
+
+const dirsForRecovery: string[] = [];
+afterEach(async () => {
+  for (const dir of dirsForRecovery.splice(0)) {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

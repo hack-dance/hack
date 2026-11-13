@@ -137,13 +137,16 @@ async function readTrustedTokenStore(opts: {
     if (code === "ENOENT") {
       return null;
     }
-    if (code === "ELOOP") {
-      throw new GatewayTokenStoreUntrustedError({
-        path: opts.path,
-        detail: "is not a plain file",
-      });
-    }
-    throw error;
+    // A link, or an entry this user cannot open (another account's file):
+    // not usable, so refused like any other untrusted store, which status
+    // output reports as a warning (HACK-2142).
+    throw new GatewayTokenStoreUntrustedError({
+      path: opts.path,
+      detail:
+        code === "ELOOP"
+          ? "is not a plain file"
+          : `could not be opened (${typeof code === "string" ? code : String(error)})`,
+    });
   }
   try {
     const detail = untrustedStoreDetail(await handle.stat());

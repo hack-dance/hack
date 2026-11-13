@@ -218,3 +218,27 @@ test("status output reports an untrusted token store instead of failing (HACK-21
     "cannot be trusted"
   );
 });
+
+test("a token store this user cannot open is reported, not thrown, in status (HACK-2142)", async () => {
+  // Codex review: an unreadable store (another account's 0600 file) failed
+  // the open with EACCES before the ownership check, and the raw error
+  // aborted hack global status.
+  rootDir = await mkdtemp(join(tmpdir(), "hack-gateway-"));
+  await createGatewayToken({ rootDir, label: "phone" });
+  const store = join(rootDir, "gateway", "tokens.json");
+  // Unreadable for this user (root would still read it; skip there).
+  await chmod(store, 0o000);
+  try {
+    if (process.getuid?.() === 0) {
+      return;
+    }
+    const status = await listGatewayTokensForStatus({ rootDir });
+    expect(status.tokens).toEqual([]);
+    expect(status.untrusted).toContain("could not be opened (EACCES)");
+    await expect(listGatewayTokens({ rootDir })).rejects.toThrow(
+      "cannot be trusted"
+    );
+  } finally {
+    await chmod(store, 0o600);
+  }
+});

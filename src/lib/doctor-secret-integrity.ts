@@ -182,6 +182,13 @@ function storeFindings(opts: {
           message: `The encrypted secret store ${store} is a symlink, not a regular file, or too large, so Hack refuses to read or change it. Replace it with a regular file this user owns (for a symlink: copy the target's contents to ${store} with mode 600), then re-run hack doctor.`,
         },
       ];
+    case "key_unreadable":
+      return [
+        {
+          status: "error",
+          message: `The key ${key} for ${store} exists but cannot be read by this user. Fix its owner and permissions (chmod 600 ${key}, owned by this user), then re-run hack doctor. Do not retire the store or provision a new key: the existing key may still open it.`,
+        },
+      ];
     case "key_refused":
       return [
         {

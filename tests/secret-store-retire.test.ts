@@ -484,3 +484,35 @@ test("printed restore commands quote a store path that holds a quote", async () 
     "`hack secrets retire-store --path '/srv/it'\\''s here'`"
   );
 });
+
+test("a key file that exists but cannot be read is not missing: the store is not retired", async () => {
+  // Codex review: an unreadable key file was classified as missing, so a
+  // store that fixing the key's permissions would recover was retired.
+  if (process.getuid?.() === 0) {
+    return;
+  }
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  await writeFile(fixture.keyPath, `${STORE_KEY}\n`, { mode: 0o600 });
+  await chmod(fixture.keyPath, 0o000);
+  try {
+    const findings = await inspect(fixture.bystander, "app-b");
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.status).toBe("error");
+    expect(findings[0]?.message).toContain("exists but cannot be read");
+    expect(findings[0]?.message).not.toContain("hack secrets retire-store");
+    const outcome = await retireSecretStore({
+      projectName: "app-b",
+      projectDir: fixture.bystander.projectDir,
+    });
+    expect(outcome.kind).toBe("refused");
+    expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+      "key unreadable"
+    );
+    expect(await readFile(fixture.storePath)).toEqual(before);
+  } finally {
+    await chmod(fixture.keyPath, 0o600);
+  }
+  // Readable again: the store opens; nothing was lost.
+  expect(await inspect(fixture.bystander, "app-b")).toEqual([]);
+});

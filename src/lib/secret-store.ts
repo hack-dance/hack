@@ -4,7 +4,15 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { link, lstat, readdir, realpath, stat, unlink } from "node:fs/promises";
+import {
+  link,
+  lstat,
+  readdir,
+  readFile,
+  realpath,
+  stat,
+  unlink,
+} from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
 import type {
@@ -194,6 +202,7 @@ export type FileSecretStoreListing = {
         | "store_refused"
         | "key_missing"
         | "key_refused"
+        | "key_unreadable"
         | "wrong_key_or_corrupt"
         | "incomplete_config";
     }
@@ -422,7 +431,11 @@ async function openListedStore(input: {
 }): Promise<
   | { readonly entries: Record<string, string> }
   | {
-      readonly reason: "key_missing" | "key_refused" | "wrong_key_or_corrupt";
+      readonly reason:
+        | "key_missing"
+        | "key_refused"
+        | "key_unreadable"
+        | "wrong_key_or_corrupt";
     }
 > {
   let key: string;
@@ -435,11 +448,16 @@ async function openListedStore(input: {
       })
     ).key;
   } catch (error: unknown) {
+    if (error instanceof SecretStoreKeyRefusedError) {
+      return { reason: "key_refused" };
+    }
+    // Missing only when there is no key file, or it is empty. A key file
+    // that exists but cannot be read is not missing (HACK-2177): fixing its
+    // permissions may recover the store, which must not be retired.
     return {
-      reason:
-        error instanceof SecretStoreKeyRefusedError
-          ? "key_refused"
-          : "key_missing",
+      reason: (await keyFileUnreadable(input.keyPath))
+        ? "key_unreadable"
+        : "key_missing",
     };
   }
   try {
@@ -452,6 +470,20 @@ async function openListedStore(input: {
     };
   } catch {
     return { reason: "wrong_key_or_corrupt" };
+  }
+}
+
+/** True when the key file exists but this user cannot read it. */
+async function keyFileUnreadable(keyPath: string): Promise<boolean> {
+  try {
+    await readFile(keyPath);
+    return false;
+  } catch (error: unknown) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+    return code !== "ENOENT" && code !== "ENOTDIR";
   }
 }
 

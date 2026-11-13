@@ -18,6 +18,7 @@ const ARGUMENT_LIMIT = 16 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
 /** The most {@link createNativeComposeProbe} accepts for one acquisition. */
 const MAX_PROBE_TIMEOUT_MS = 60_000;
+const NETWORK_MEMBER_SETTLE_MS = 2000;
 const PROJECT_LABEL = "com.docker.compose.project";
 const PREFIX = "io.hack.native-config";
 
@@ -420,6 +421,52 @@ export async function assertNativeComposeOwned(
 }
 
 /**
+ * A post-Compose read can straddle Docker's endpoint attachment (`ep-...`).
+ * Retry only the owner-issued member-ID refusal in a two-second window, with
+ * each acquisition retaining its own probe bound (one final acquisition may
+ * finish after the retry window). Every returned observation
+ * must pass the original ownership policy; placeholders never grant authority.
+ * Persistent or foreign members preserve their original refusal. Other errors
+ * (including probe failure, cancellation and foreign labels) are not retried.
+ */
+export async function waitForNativeComposeNetworkMembers<T>(opts: {
+  readonly read: () => Promise<T>;
+  readonly deadline?: number;
+  readonly signal?: AbortSignal;
+  readonly now?: () => number;
+  readonly sleep?: (ms: number) => Promise<unknown>;
+}): Promise<T> {
+  const now = opts.now ?? (() => performance.now());
+  const sleep = opts.sleep ?? ((ms) => Bun.sleep(ms));
+  let deadline: number | undefined;
+  for (;;) {
+    try {
+      return await opts.read();
+    } catch (error: unknown) {
+      if (
+        nativeComposeTopologyPredicate(error) !== "network-member-id" ||
+        opts.signal?.aborted
+      ) {
+        throw error;
+      }
+      deadline ??=
+        now() +
+        Math.min(
+          NETWORK_MEMBER_SETTLE_MS,
+          opts.deadline === undefined
+            ? Number.POSITIVE_INFINITY
+            : Math.max(0, opts.deadline - Date.now())
+        );
+      const remaining = deadline - now();
+      if (remaining <= 0) {
+        throw error;
+      }
+      await sleep(Math.min(100, remaining));
+    }
+  }
+}
+
+/**
  * How startup readiness treats an exact owned on-failure container that was inspected
  * `running` while its bridge membership was missing or an `ep-` placeholder. `transient`
  * keeps it unready while its restart can still be in flight. `settled` is the check after
@@ -475,6 +522,8 @@ export async function waitNativeComposeStartupOwned(opts: {
   readonly deadline: number;
   readonly ready: (state: NativeComposeOwnershipObservation) => boolean;
   readonly observed?: (state: NativeComposeOwnershipObservation) => void;
+  /** Post-Compose callers may re-acquire a refused member-ID observation; never admits a placeholder. */
+  readonly settleNetworkMembers?: boolean;
 }): Promise<NativeComposeOwnershipObservation | null> {
   const selected = startupSelection(opts.ownership, opts.restartingServices);
   let transient = false;
@@ -482,12 +531,15 @@ export async function waitNativeComposeStartupOwned(opts: {
     deadline: opts.deadline,
     signal: opts.ownership.signal,
     observe: async () => {
-      const result = await queryNativeComposeOwned(
-        opts.ownership,
-        "startup",
-        selected,
-        true
-      );
+      const read = () =>
+        queryNativeComposeOwned(opts.ownership, "startup", selected, true);
+      const result = opts.settleNetworkMembers
+        ? await waitForNativeComposeNetworkMembers({
+            read,
+            deadline: opts.deadline,
+            signal: opts.ownership.signal,
+          })
+        : await read();
       transient = result.restarting && result.transient;
       if (result.restarting) {
         return null;

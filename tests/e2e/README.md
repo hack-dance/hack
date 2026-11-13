@@ -817,3 +817,26 @@ positive shared system link count, while every private artifact and alternate Gi
 selection remains single-link. It pins and rechecks that exact link count, owner
 IDs, physical path, mode, inode and bytes throughout the attempt. This prerequisite
 does not add engine authority or prove guest/lifecycle acceptance.
+
+After Compose startup, the readiness caller and prepared effect guard re-read an
+owner-issued `network-member-id` refusal in a two-second retry window (HACK-2141).
+Each acquisition keeps its normal probe timeout, so a final acquisition may finish
+later. Every returned result still passes the original complete ownership policy;
+an unresolved placeholder never authorizes an effect or readiness. A placeholder
+that persists, or resolves to a foreign container, remains refused. Other ownership
+and probe failures are returned immediately. The existing strict/saved observation
+functions retain their immediate refusal semantics.
+
+`native-compose-endpoint-settlement` complements the full process-policy scenario
+with 50 fresh image-only `--profile exercise up`/`down` cycles in CI. Each cycle
+starts three ordinary services plus one service that exits 17 twice before
+staying running. Independent Docker inspections require four new immutable IDs,
+the exact fixture owner, running state, and a retry count of two; cleanup must
+leave no selected containers or networks. No ports, shared networks, persistent
+storage, host mounts, DNS or trust are declared. Locally,
+`HACK_E2E_ENDPOINT_SETTLE_RUNS=1..50` bounds a shorter debugging run; acceptance
+uses the default 50.
+
+![Endpoint settlement](../../docs/diagrams/compose-endpoint-settlement.svg)
+
+[Diagram source](../../docs/diagrams/compose-endpoint-settlement.mmd).

@@ -38,6 +38,9 @@ RequestCleanup == /\ phase = "idle" /\ complete /\ runProof /\ snapshot /\ ~live
 RemoveLegacy == /\ phase = "cleanup" /\ snapshot /\ runProof /\ ~live
                 /\ legacy' = FALSE /\ phase' = "idle"
                 /\ UNCHANGED <<published, recorded, snapshot, complete, runProof, separate, live>>
+RefuseCleanup == /\ phase = "cleanup" /\ legacy
+                 /\ phase' = "idle"
+                 /\ UNCHANGED <<published, recorded, snapshot, legacy, complete, runProof, separate, live>>
 UnsafeRemoveDuringApply == /\ UnsafeCleanup /\ phase = "apply" /\ legacy /\ published = 0
                            /\ legacy' = FALSE
                            /\ UNCHANGED <<phase, published, recorded, snapshot, complete, runProof, separate, live>>
@@ -47,7 +50,8 @@ Rollback == /\ phase = "idle" /\ snapshot
             /\ separate' = FALSE /\ UNCHANGED <<snapshot, live>>
 
 Next == Prepare \/ Publish \/ Record \/ Crash \/ Resume \/ Finish \/ SuccessfulRun
-        \/ DamageBackup \/ RequestCleanup \/ RemoveLegacy \/ UnsafeRemoveDuringApply \/ Rollback
+        \/ DamageBackup \/ RequestCleanup \/ RemoveLegacy \/ RefuseCleanup
+        \/ UnsafeRemoveDuringApply \/ Rollback
 Spec == Init /\ [][Next]_vars
 TypeOK == /\ phase \in {"preview", "apply", "idle", "cleanup", "rolled_back"}
           /\ published \in 0..Steps /\ recorded \in 0..Steps

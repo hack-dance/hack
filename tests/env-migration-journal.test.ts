@@ -426,6 +426,28 @@ test("explicit preserve-changes rollback recovers from an edited pending migrati
   ).toContain(edited);
 });
 
+test("a damaged journal names its recovery location without exposing its contents", async () => {
+  const result = await apply({
+    project,
+    snapshots: fixtureEnvSnapshots(root),
+    acceptTrackedChanges: true,
+  });
+  await writeFile(result.journalPath, SENTINEL);
+  let failure: unknown;
+  try {
+    await resolveProjectEnvConfig({ ...project, envName: null });
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(Error);
+  if (!(failure instanceof Error)) {
+    throw new Error("Fixture expected damaged-journal refusal");
+  }
+  expect(failure.message).toContain(result.journalPath);
+  expect(failure.message).toContain("Keep this file and the upgrade snapshots");
+  expect(failure.message).not.toContain(SENTINEL);
+});
+
 test("incomplete rollback leaves its journal resumable and skips already restored files", async () => {
   const before = await projectFiles();
   const base = fixtureEnvSnapshots(root);
@@ -576,6 +598,89 @@ async function addLegacySecret() {
   await store.set({ key: "SEC", value: SENTINEL });
 }
 
+test("fresh delivery refusal before unlink keeps migration complete and cleanup retryable", async () => {
+  await addLegacySecret();
+  const snapshots = fixtureEnvSnapshots(root);
+  const result = await apply({
+    project,
+    snapshots,
+    acceptTrackedChanges: true,
+  });
+  await recordEnvMigrationProjectRun(project);
+  const preview = await previewEnvCleanup(project);
+  let failure: unknown;
+  try {
+    await cleanupEnvMigration({
+      project,
+      acceptTrackedChanges: true,
+      snapshots: {
+        ...snapshots,
+        assertCoverage: async (input) => {
+          await snapshots.assertCoverage(input);
+          await setProjectEnvValue({
+            ...project,
+            envName: null,
+            scope: "global",
+            key: "TOKEN",
+            value: QA,
+            secret: false,
+            local: true,
+          });
+        },
+      },
+    });
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(LegacyEnvCleanupError);
+  if (!(failure instanceof LegacyEnvCleanupError)) {
+    throw new Error("Fixture expected a delivery refusal");
+  }
+  expect(failure.reason).toBe("changed");
+  expect(failure.removedPaths).toEqual([]);
+  expect(failure.message).toContain("--cleanup");
+  expect(failure.message).not.toContain("--rollback-manifest");
+  expect(failure.message).not.toContain("remove only copies");
+  expect(failure.message).not.toContain(SENTINEL);
+  expect(failure.message).not.toContain(QA);
+  const journal = JSON.parse(await readFile(result.journalPath, "utf8"));
+  expect(journal.state).toBe("complete");
+  expect(journal.cleanupConfig).toBeUndefined();
+  expect(journal.removed).toEqual([]);
+  expect(
+    (await readdir(dirname(result.journalPath))).filter((name) =>
+      name.startsWith("payloads-")
+    )
+  ).toEqual([]);
+  for (const file of preview.files.filter(
+    (entry) => entry.action === "removable"
+  )) {
+    expect(await Bun.file(file.path).exists()).toBe(true);
+  }
+  expect(
+    await readFile(join(project.projectDir, "hack.config.json"), "utf8")
+  ).toContain("encryptedFile");
+  await setProjectEnvValue({
+    ...project,
+    envName: null,
+    scope: "global",
+    key: "TOKEN",
+    value: SENTINEL,
+    secret: false,
+    local: true,
+  });
+  await recordEnvMigrationProjectRun(project);
+  expect(
+    (
+      await cleanupEnvMigration({
+        project,
+        snapshots,
+        acceptTrackedChanges: true,
+      })
+    ).status
+  ).toBe("cleaned");
+});
+
 test("a failed cleanup receipt preserves confirmed removals and repairs the removed store pointer without exposing the cause", async () => {
   await addLegacySecret();
   const snapshots = fixtureEnvSnapshots(root);
@@ -610,6 +715,7 @@ test("a failed cleanup receipt preserves confirmed removals and repairs the remo
   expect([...failure.removedPaths].sort()).toEqual(expectedRemoved);
   expect(failure.message).toContain("--rollback-manifest");
   expect(failure.message).toContain(result.manifestPath);
+  expect(failure.message).not.toContain("remove only copies");
   expect(failure.message).not.toContain(SENTINEL);
   const journal = await readFile(result.journalPath, "utf8");
   expect(JSON.parse(journal).state).toBe("cleaning");

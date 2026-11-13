@@ -10329,6 +10329,7 @@ export class LegacyEnvCleanupError extends ClosedCliError {
   constructor(opts: {
     readonly reason: "changed" | "live_input" | "unverified";
     readonly removedPaths?: readonly string[];
+    readonly recovery?: string;
   }) {
     const removedPaths = [...(opts.removedPaths ?? [])];
     const reasons = {
@@ -10343,7 +10344,9 @@ export class LegacyEnvCleanupError extends ClosedCliError {
       removedPaths.length > 0
         ? `Confirmed removals: ${removedPaths.map((path) => JSON.stringify(path)).join(", ")}.`
         : "No removals were confirmed.";
-    super(`${reasons[opts.reason]} ${outcome} ${LEGACY_CLEANUP_RECOVERY}`);
+    super(
+      `${reasons[opts.reason]} ${outcome} ${opts.recovery ?? LEGACY_CLEANUP_RECOVERY}`
+    );
     this.removedPaths = removedPaths;
     this.reason = opts.reason;
   }

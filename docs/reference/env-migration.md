@@ -116,6 +116,9 @@ config pointer. A partial cleanup preserves confirmed removals in the journal an
 reports every confirmed removal even if pointer repair or snapshot receipt
 recording fails. Pointer repair is attempted before recording removal receipts;
 if repair cannot be confirmed, the error warns about a possible stale pointer.
+When a delivery or live-input refusal happens before any unlink or pointer
+publication, the migration stays complete and cleanup remains retryable after
+correcting the inputs. Uncertain or partial removals require snapshot rollback.
 If cleanup is interrupted, use its rollback manifest before
 retrying; it does not infer fresh deletion authority from an old receipt.
 

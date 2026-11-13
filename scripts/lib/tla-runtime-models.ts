@@ -144,7 +144,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "env-migration",
     module: "Migration",
-    states: 35,
+    states: 37,
     invariant: "NoSameRunCleanup",
     action: "UnsafeRemoveDuringApply",
     fields: [

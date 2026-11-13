@@ -903,15 +903,18 @@ function migrationCleanupFailure(input: {
   readonly error: unknown;
   readonly removed: readonly string[];
   readonly journal: Journal;
+  readonly recoveryRequired: boolean;
 }): LegacyEnvCleanupError {
   const { error, removed, journal } = input;
-  const failure =
-    error instanceof LegacyEnvCleanupError
-      ? error
-      : new LegacyEnvCleanupError({
-          reason: "unverified",
-          removedPaths: removed,
-        });
+  const recovery = input.recoveryRequired
+    ? `Cleanup or its receipts are incomplete. Restore originals with hack env migrate --rollback-manifest ${JSON.stringify(journal.manifestPath)} before retrying cleanup (values omitted).`
+    : "No legacy files were removed. Review the refused inputs, run hack up again if env layers changed, then preview cleanup with hack env migrate --cleanup before retrying (values omitted).";
+  const failure = new LegacyEnvCleanupError({
+    reason:
+      error instanceof LegacyEnvCleanupError ? error.reason : "unverified",
+    removedPaths: removed,
+    recovery,
+  });
   if (
     journal.cleanupConfig &&
     journal.store &&
@@ -921,18 +924,93 @@ function migrationCleanupFailure(input: {
     failure.message +=
       " Could not reconcile the legacy secret store pointer; check hack.config.json before using the legacy store.";
   }
-  failure.message += ` Cleanup or its receipts are incomplete. Restore originals with hack env migrate --rollback-manifest ${JSON.stringify(journal.manifestPath)} before retrying cleanup (values omitted).`;
   return failure;
 }
 
-async function cleanupLocked(
-  input: {
-    readonly acceptTrackedChanges: boolean;
-    readonly snapshots: EnvMigrationSnapshots;
-  },
+function cleanupRefusedBeforeRemoval(
+  error: unknown,
+  journal: Journal
+): boolean {
+  return (
+    error instanceof LegacyEnvCleanupError &&
+    error.removedPaths.length === 0 &&
+    (error.reason === "changed" || error.reason === "live_input") &&
+    !journal.cleanupConfig?.done
+  );
+}
+
+/** A refusal before unlink can discard its staged repair and retry later. */
+async function resetRefusedCleanup(input: {
+  readonly path: string;
+  readonly selected: Journal;
+}): Promise<boolean> {
+  try {
+    await writeMetadata(input.path, input.selected);
+  } catch {
+    return false;
+  }
+  await purgeMigrationPayloads({
+    journalPath: input.path,
+    projectRoot: input.selected.project.projectRoot,
+    retain: [],
+  }).catch(() => false);
+  return true;
+}
+
+/** Keep confirmed effects reportable even if pointer or receipt writes fail. */
+async function recordMigrationCleanup(input: {
+  readonly path: string;
+  readonly project: EnvMigrationProject;
+  readonly snapshots: EnvMigrationSnapshots;
+  readonly journal: Journal;
+  readonly removed: readonly string[];
+}): Promise<{ readonly journal: Journal; readonly recorded: boolean }> {
+  let journal: Journal = {
+    ...input.journal,
+    removed: [...new Set([...input.journal.removed, ...input.removed])],
+  };
+  let pointerRepairFailed = false;
+  if (
+    journal.cleanupConfig &&
+    journal.store &&
+    journal.removed.includes(journal.store.path)
+  ) {
+    try {
+      await publishEntry(input.project, journal.cleanupConfig);
+      journal = {
+        ...journal,
+        cleanupConfig: { ...journal.cleanupConfig, done: true },
+      };
+    } catch {
+      pointerRepairFailed = true;
+    }
+  }
+  try {
+    // The cleaning journal already owns the repair's before/after images.
+    // Try pointer repair even if recording the removal receipt will fail.
+    await writeMetadata(input.path, journal);
+    await input.snapshots.recordAfter({
+      manifestPath: journal.manifestPath,
+      files: [
+        ...journal.removed.map((removed) => ({
+          path: removed,
+          sha256: null,
+          mode: null,
+          size: 0,
+        })),
+        ...(journal.cleanupConfig?.done ? [journal.cleanupConfig] : []),
+      ],
+    });
+    return { journal, recorded: !pointerRepairFailed };
+  } catch {
+    return { journal, recorded: false };
+  }
+}
+
+async function readCleanupJournal(
   project: EnvMigrationProject,
   path: string
-) {
+): Promise<Journal> {
   const selected = await readJournal(path, project);
   if (
     !selected ||
@@ -944,6 +1022,38 @@ async function cleanupLocked(
       "Finish the env migration before requesting cleanup; no legacy files were removed."
     );
   }
+  if (selected.state === "cleaned") {
+    return selected;
+  }
+  if (selected.state === "cleaning") {
+    throw new ClosedCliError(
+      "Previous legacy cleanup was interrupted. Restore its snapshot with hack env migrate --rollback-manifest before retrying; remaining files were kept."
+    );
+  }
+  if (!selected.validated) {
+    throw new ClosedCliError(
+      "Start the complete project successfully with hack up before requesting legacy cleanup; no files were removed."
+    );
+  }
+  for (const validated of selected.validated) {
+    if (!same((await readState(validated.path)).state, validated)) {
+      throw new ClosedCliError(
+        "Env layers changed since the successful project run. Start the project again before cleanup; no files were removed."
+      );
+    }
+  }
+  return selected;
+}
+
+async function cleanupLocked(
+  input: {
+    readonly acceptTrackedChanges: boolean;
+    readonly snapshots: EnvMigrationSnapshots;
+  },
+  project: EnvMigrationProject,
+  path: string
+) {
+  const selected = await readCleanupJournal(project, path);
   let journal: Journal = selected;
   if (journal.state === "cleaned") {
     return {
@@ -952,23 +1062,6 @@ async function cleanupLocked(
       manifestPath: journal.manifestPath,
       removed: journal.removed,
     };
-  }
-  if (journal.state === "cleaning") {
-    throw new ClosedCliError(
-      "Previous legacy cleanup was interrupted. Restore its snapshot with hack env migrate --rollback-manifest before retrying; remaining files were kept."
-    );
-  }
-  if (!journal.validated) {
-    throw new ClosedCliError(
-      "Start the complete project successfully with hack up before requesting legacy cleanup; no files were removed."
-    );
-  }
-  for (const validated of journal.validated) {
-    if (!same((await readState(validated.path)).state, validated)) {
-      throw new ClosedCliError(
-        "Env layers changed since the successful project run. Start the project again before cleanup; no files were removed."
-      );
-    }
   }
   const repair =
     journal.store && journal.removable.includes(journal.store.path)
@@ -1025,46 +1118,6 @@ async function cleanupLocked(
   await assertSources(journal, true);
   journal = { ...journal, state: "cleaning" };
   await writeMetadata(path, journal);
-  const recordCleanup = async (removed: readonly string[]) => {
-    journal = {
-      ...journal,
-      removed: [...new Set([...journal.removed, ...removed])],
-    };
-    let pointerRepairFailed = false;
-    if (
-      journal.cleanupConfig &&
-      journal.store &&
-      journal.removed.includes(journal.store.path)
-    ) {
-      try {
-        await publishEntry(project, journal.cleanupConfig);
-        journal = {
-          ...journal,
-          cleanupConfig: { ...journal.cleanupConfig, done: true },
-        };
-      } catch {
-        pointerRepairFailed = true;
-      }
-    }
-    // Repair the pointer even if recording the removal receipt will fail.
-    // The cleaning journal already owns the repair's before/after images.
-    await writeMetadata(path, journal);
-    await input.snapshots.recordAfter({
-      manifestPath: journal.manifestPath,
-      files: [
-        ...journal.removed.map((removed) => ({
-          path: removed,
-          sha256: null,
-          mode: null,
-          size: 0,
-        })),
-        ...(journal.cleanupConfig?.done ? [journal.cleanupConfig] : []),
-      ],
-    });
-    if (pointerRepairFailed) {
-      throw refuse();
-    }
-  };
   let removed: readonly string[] = [];
   try {
     removed = await removeLegacyProjectEnvArtifacts({
@@ -1072,19 +1125,52 @@ async function cleanupLocked(
       paths: journal.removable,
       context,
     });
-    await recordCleanup(removed);
+    const receipt = await recordMigrationCleanup({
+      ...input,
+      project,
+      path,
+      journal,
+      removed,
+    });
+    journal = receipt.journal;
+    if (!receipt.recorded) {
+      throw refuse();
+    }
     await writeMetadata(path, {
       ...journal,
       state: "cleaned",
       removed: [...new Set([...journal.removed, ...removed])],
     });
   } catch (error) {
+    let recoveryRequired = true;
     if (error instanceof LegacyEnvCleanupError) {
       removed = error.removedPaths;
-      // Preserve the original failure and confirmed removals even if repair fails.
-      await recordCleanup(removed).catch(() => undefined);
     }
-    throw migrationCleanupFailure({ error, removed, journal });
+    if (cleanupRefusedBeforeRemoval(error, journal)) {
+      // These refusals precede unlink. Keep a safe retry possible without
+      // undoing completed migration; unknown removal outcomes still require recovery.
+      recoveryRequired = !(await resetRefusedCleanup({ path, selected }));
+      if (!recoveryRequired) {
+        journal = selected;
+      }
+    } else if (error instanceof LegacyEnvCleanupError) {
+      // Preserve confirmed removals even if repair or its receipt fails.
+      journal = (
+        await recordMigrationCleanup({
+          ...input,
+          project,
+          path,
+          journal,
+          removed,
+        })
+      ).journal;
+    }
+    throw migrationCleanupFailure({
+      error,
+      removed,
+      journal,
+      recoveryRequired,
+    });
   }
   await purgeMigrationPayloads({
     journalPath: path,

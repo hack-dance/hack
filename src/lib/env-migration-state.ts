@@ -40,6 +40,12 @@ async function canonicalRoot(path: string): Promise<string> {
   }
 }
 
+function journalRefusal(path: string): ClosedCliError {
+  return new ClosedCliError(
+    `Env migration journal could not be verified at ${JSON.stringify(path)}. Keep this file and the upgrade snapshots for recovery; no env data was used (values omitted).`
+  );
+}
+
 /** Central admission: native, Compose, daemon, metadata and value readers all use it. */
 export async function assertEnvMigrationReadable(input: {
   readonly projectRoot: string;
@@ -49,23 +55,27 @@ export async function assertEnvMigrationReadable(input: {
     return;
   }
   const path = migrationJournalPath(projectRoot);
-  const file = await readMigrationFile(path);
+  const file = await readMigrationFile(path).catch(() => {
+    throw journalRefusal(path);
+  });
   if (file.text === null) {
     return;
   }
-  const info = await lstat(path);
+  const info = await lstat(path).catch(() => {
+    throw journalRefusal(path);
+  });
   if (
     info.uid !== process.getuid?.() ||
     info.nlink !== 1 ||
     (info.mode & 0o077) !== 0
   ) {
-    throw migrationRefusal();
+    throw journalRefusal(path);
   }
   let raw: unknown;
   try {
     raw = JSON.parse(file.text);
   } catch {
-    throw migrationRefusal();
+    throw journalRefusal(path);
   }
   if (
     !(
@@ -84,7 +94,7 @@ export async function assertEnvMigrationReadable(input: {
       ].includes(String(raw.state))
     )
   ) {
-    throw migrationRefusal();
+    throw journalRefusal(path);
   }
   if (raw.state === "applying" || raw.state === "rolling_back") {
     throw new EnvMigrationPendingError(raw.state);

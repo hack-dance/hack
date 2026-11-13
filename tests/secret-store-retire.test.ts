@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
   chmod,
   lstat,
@@ -25,6 +25,7 @@ import {
   PROJECT_ENV_CONTRACT_FILENAME,
 } from "../src/constants.ts";
 import { inspectSecretIntegrity } from "../src/lib/doctor-secret-integrity.ts";
+import { keychain } from "../src/lib/keychain.ts";
 import { findProjectContext } from "../src/lib/project.ts";
 import { upsertProjectRegistration } from "../src/lib/projects-registry.ts";
 import { withProjectsRegistryLock } from "../src/lib/projects-registry-lock.ts";
@@ -502,8 +503,11 @@ test("a key file that exists but cannot be read is not missing: the store is not
   try {
     const findings = await inspect(fixture.bystander, "app-b");
     expect(findings).toHaveLength(1);
-    expect(findings[0]?.status).toBe("error");
+    // Machine-wide: a warning here, an error where the store is read.
+    expect(findings[0]?.status).toBe("warn");
     expect(findings[0]?.message).toContain("exists but cannot be read");
+    expect(findings[0]?.message).toContain("This project does not read it.");
+    expect((await inspect(fixture.reader, "app-a"))[0]?.status).toBe("error");
     expect(findings[0]?.message).not.toContain("hack secrets retire-store");
     const outcome = await retireSecretStore({
       projectName: "app-b",
@@ -640,4 +644,51 @@ test("doctor says when the reader scan is incomplete, and finds readers through 
     "No checked registered project reads it, but 1 registered project(s) could not be checked"
   );
   expect(partial[0]?.message).not.toContain("No registered project reads it.");
+});
+
+test("a keychain that cannot be asked is not a missing key: the store is not retired", async () => {
+  // Codex review: with no key file and the keychain locked, denied or
+  // timed out, the key's existence is unknown, but it was classified as
+  // missing and the store could be retired.
+  const fixture = await setUp();
+  const before = await readFile(fixture.storePath);
+  process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
+  // The keychain answers "no such item": the key is missing (retirable).
+  const empty = spyOn(keychain, "get").mockImplementation(async () => null);
+  try {
+    const missing = await inspect(fixture.bystander, "app-b");
+    expect(missing[0]?.message).toContain("is missing");
+    expect(missing[0]?.message).toContain("hack secrets retire-store");
+  } finally {
+    empty.mockRestore();
+  }
+  // The keychain cannot be asked: unknown, not retirable.
+  const denied = spyOn(keychain, "get").mockImplementation(async () => {
+    throw new Error("synthetic keychain access denied");
+  });
+  try {
+    const unknown = await inspect(fixture.bystander, "app-b");
+    expect(unknown).toHaveLength(1);
+    expect(unknown[0]?.message).toContain("could not be looked up");
+    expect(unknown[0]?.message).not.toContain("hack secrets retire-store");
+    // The failure cooldown that follows is unknown too, never missing.
+    const outcome = await retireSecretStore({
+      projectName: "app-b",
+      projectDir: fixture.bystander.projectDir,
+    });
+    expect(outcome.kind === "refused" ? outcome.message : "").toContain(
+      "key access failed"
+    );
+    expect(await readFile(fixture.storePath)).toEqual(before);
+  } finally {
+    denied.mockRestore();
+    // A successful resolution ends the module's failure cooldown, so no
+    // later test inherits it.
+    process.env.HACK_SECRETS_FILE_KEY = STORE_KEY;
+    await resolveSecretStore({
+      projectName: "app-b",
+      projectDir: fixture.bystander.projectDir,
+    });
+    Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  }
 });

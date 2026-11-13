@@ -120,6 +120,18 @@ export class SecretStoreKeyUnavailableError extends Error {
 }
 
 /**
+ * The OS keychain could not be asked for the encrypted_file key (access
+ * denied, locked, timed out, or the failure cooldown): whether the key
+ * exists is unknown, which is not the same as missing (HACK-2177).
+ */
+export class SecretStoreKeyAccessError extends SecretStoreKeyUnavailableError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecretStoreKeyAccessError";
+  }
+}
+
+/**
  * The key file exists but is refused (HACK-2036): a link or non-regular
  * file, readable or writable by other users, or tracked by git.
  */
@@ -204,6 +216,7 @@ export type FileSecretStoreListing = {
         | "key_missing"
         | "key_refused"
         | "key_unreadable"
+        | "key_access_failed"
         | "wrong_key_or_corrupt"
         | "incomplete_config";
     }
@@ -549,6 +562,7 @@ async function openListedStore(input: {
         | "key_missing"
         | "key_refused"
         | "key_unreadable"
+        | "key_access_failed"
         | "wrong_key_or_corrupt";
     }
 > {
@@ -565,14 +579,22 @@ async function openListedStore(input: {
     if (error instanceof SecretStoreKeyRefusedError) {
       return { reason: "key_refused" };
     }
-    // Missing only when there is no key file, or it is empty. A key file
-    // that exists but cannot be read is not missing (HACK-2177): fixing its
+    // A key file that exists but cannot be read is not missing: fixing its
     // permissions may recover the store, which must not be retired.
-    return {
-      reason: (await keyFileUnreadable(input.keyPath))
-        ? "key_unreadable"
-        : "key_missing",
-    };
+    if (await keyFileUnreadable(input.keyPath)) {
+      return { reason: "key_unreadable" };
+    }
+    // Missing only when every place the key could be has answered "none":
+    // no (or an empty) key file, and the keychain says no item or is turned
+    // off. A keychain that could not be asked, or any other failure, leaves
+    // it unknown (HACK-2177).
+    if (
+      !(error instanceof SecretStoreKeyUnavailableError) ||
+      error instanceof SecretStoreKeyAccessError
+    ) {
+      return { reason: "key_access_failed" };
+    }
+    return { reason: "key_missing" };
   }
   try {
     return {
@@ -1331,7 +1353,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     cachedKeychainEncryptedFileKey === null &&
     nowMs < encryptedFileKeyFailureCooldownUntilMs
   ) {
-    throw new SecretStoreKeyUnavailableError(
+    throw new SecretStoreKeyAccessError(
       buildEncryptedBackendKeyRecoveryMessage({
         keyPath: configuredKeyPath,
         storePath: input?.storePath,
@@ -1427,7 +1449,7 @@ function keychainKeyAccessError(input: {
   if (input.error instanceof NativeKeychainTimeoutError) {
     return input.error;
   }
-  return new SecretStoreKeyUnavailableError(
+  return new SecretStoreKeyAccessError(
     buildEncryptedBackendKeyRecoveryMessage({
       keyPath: input.keyPath,
       storePath: input.storePath,

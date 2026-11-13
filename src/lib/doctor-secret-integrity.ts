@@ -97,7 +97,23 @@ async function inspectSecretStore(opts: {
       ...retired,
     ];
   }
-  return [...storeFindings({ reason: listing.reason, store, key }), ...retired];
+  // The store is machine-wide: an error only in a project whose runtime
+  // reads it, a warning elsewhere (HACK-2177).
+  const usedHere = await projectUsesSecretStore({
+    projectDir: opts.projectDir,
+  });
+  return [
+    ...storeFindings({ reason: listing.reason, store, key }).map(
+      (finding): SecretIntegrityFinding =>
+        usedHere || finding.status !== "error"
+          ? finding
+          : {
+              status: "warn",
+              message: `${finding.message} This project does not read it.`,
+            }
+    ),
+    ...retired,
+  ];
 }
 
 /**
@@ -200,6 +216,13 @@ function storeFindings(opts: {
         {
           status: "error",
           message: `The encrypted secret store ${store} is a symlink, not a regular file, or too large, so Hack refuses to read or change it. Replace it with a regular file this user owns (for a symlink: copy the target's contents to ${store} with mode 600), then re-run hack doctor.`,
+        },
+      ];
+    case "key_access_failed":
+      return [
+        {
+          status: "error",
+          message: `The key for ${store} could not be looked up: there is no key file at ${key}, and the OS keychain could not be asked (it is locked, denied access, or timed out). Unlock the keychain or allow access, then re-run hack doctor. Do not retire the store or provision a new key: the keychain may still hold its key.`,
         },
       ];
     case "key_unreadable":

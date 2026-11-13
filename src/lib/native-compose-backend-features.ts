@@ -10,6 +10,11 @@ import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import { HACK_OWNERSHIP_LABEL_NAMESPACES } from "./hack-ownership-labels.ts";
 import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
+import {
+  duplicateHackComposeNetworks,
+  foreignComposeNetworkNames,
+  isHackExternalNetwork,
+} from "./native-hack-compose-conventions.ts";
 
 /**
  * Compose features that keep an unchanged Compose project on the Compose
@@ -18,8 +23,8 @@ import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
  * before any runtime request, storage preparation, lifecycle hook or stop.
  *
  * The set is closed and ordered; it is part of the refusal and the doctor
- * report contract. Messages and reports name only these features, never a
- * network, volume, label, path, platform or other authored value.
+ * report contract. Refusals name bounded foreign network identifiers. Label values, host paths
+ * and environment values are never included.
  *
  * Only `.hack/docker-compose.yml` itself is classified, after the explicit
  * `HACK_NATIVE_ADAPTATION` selection. Compose override files, `extends`,
@@ -30,8 +35,9 @@ import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
  */
 export const COMPOSE_BACKEND_FEATURES = [
   "external_network",
+  "duplicate_hack_network",
   "external_volume",
-  "reserved_label",
+  "reserved_label", // Older reports only; authored metadata no longer emits this feature.
   "unsupported_build",
   "foreign_platform",
 ] as const;
@@ -40,8 +46,8 @@ export const COMPOSE_BACKEND_FEATURES = [
 export type ComposeBackendFeature = (typeof COMPOSE_BACKEND_FEATURES)[number];
 
 /**
- * Label namespaces that prove resource ownership. A project must not declare
- * them, because their consumers trust them as ownership evidence:
+ * Engine label namespaces that prove resource ownership. Authored Compose
+ * declarations are ignored metadata and never copied to native Engine resources:
  *
  * - `com.docker.compose.*`: Docker Compose's own project, service and one-off
  *   labels, which the Compose backend reads to find a project's containers.
@@ -51,7 +57,7 @@ export type ComposeBackendFeature = (typeof COMPOSE_BACKEND_FEATURES)[number];
  * Other labels, including Hack's routing (`caddy*`), dependency cache
  * (`hack.dependencies.*`) and one-shot (`hack.service.one-shot`) markers, are not
  * reserved: native `up` reviews them itself. The native review accepts only the
- * exact one-shot key, as a completion role, and still refuses other `hack.*` keys.
+ * exact one-shot key as a completion role; unsupported semantic service/cache keys still refuse.
  */
 export const RESERVED_OWNERSHIP_LABEL_PREFIXES = [
   "com.docker.compose.",
@@ -76,6 +82,7 @@ const COMPOSE_LIMIT = 256 * 1024;
 
 const FEATURE_PHRASES: Readonly<Record<ComposeBackendFeature, string>> = {
   external_network: "an external Compose network",
+  duplicate_hack_network: "multiple logical aliases of one Hack shared network",
   external_volume: "an external Compose volume",
   reserved_label: `a label in a reserved ownership namespace (${reservedNamespaceList()})`,
   unsupported_build:
@@ -101,24 +108,6 @@ export type ComposeBackendFeatureOptions = {
    */
   readonly buildsEnabled?: boolean;
 };
-
-function labelKeys(labels: unknown): readonly string[] {
-  if (isRecord(labels)) {
-    return Object.keys(labels);
-  }
-  if (Array.isArray(labels)) {
-    return labels
-      .filter((label): label is string => typeof label === "string")
-      .map((label) => label.split("=", 1)[0] ?? "");
-  }
-  return [];
-}
-
-function hasReservedLabel(labels: unknown): boolean {
-  return labelKeys(labels).some((key) =>
-    RESERVED_OWNERSHIP_LABEL_PREFIXES.some((prefix) => key.startsWith(prefix))
-  );
-}
 
 /**
  * Compose treats `external: true` and the legacy `external: {name: ...}` form
@@ -249,6 +238,9 @@ export function findComposeBackendFeatures(
     return [];
   }
   const found = new Set<ComposeBackendFeature>();
+  if (duplicateHackComposeNetworks(compose).length) {
+    found.add("duplicate_hack_network");
+  }
   const services = topLevelEntries(compose, "services").filter(isRecord);
   const isolated = opts?.isolatedNetworks ?? new Set<string>();
   const networks = isRecord(compose.networks)
@@ -256,23 +248,15 @@ export function findComposeBackendFeatures(
     : [];
   if (
     networks.some(
-      ([name, network]) => !isolated.has(name) && isExternalNetwork(network)
+      ([name, network]) =>
+        !(isolated.has(name) || isHackExternalNetwork(name, network)) &&
+        isExternalNetwork(network)
     )
   ) {
     found.add("external_network");
   }
   if (topLevelEntries(compose, "volumes").some(isExternalVolume)) {
     found.add("external_volume");
-  }
-  const resources = [
-    ...topLevelEntries(compose, "networks"),
-    ...topLevelEntries(compose, "volumes"),
-  ].filter(isRecord);
-  if (
-    services.some((service) => hasReservedLabel(service.labels)) ||
-    resources.some((resource) => hasReservedLabel(resource.labels))
-  ) {
-    found.add("reserved_label");
   }
   const buildsEnabled = opts?.buildsEnabled === true;
   if (services.some((service) => isUnsupportedBuild(service, buildsEnabled))) {
@@ -622,12 +606,16 @@ export function composeBackendRefusal(
   opts: {
     readonly features: readonly ComposeBackendFeature[];
     readonly restart: boolean;
+    readonly foreignNetworks?: readonly string[];
   } & ComposeBackendFeatureOptions
 ): HackCliError {
   const command = opts.restart ? "hack restart" : "hack up";
+  const names = opts.foreignNetworks?.length
+    ? ` Foreign external networks: ${opts.foreignNetworks.join(", ")}.`
+    : "";
   return new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. ${COMPOSE_BACKEND_SELECTION} and run the command again. Nothing was started or stopped.`,
+    message: `Native \`${command}\` does not support ${describeComposeBackendFeatures(opts.features, opts)}; this project runs on the Compose backend. ${COMPOSE_BACKEND_SELECTION} and run the command again. Nothing was started or stopped.${names}`,
     detail: { backend: "compose", features: [...opts.features] },
   });
 }
@@ -653,6 +641,11 @@ export async function refuseNativeComposeBackendFeatures(
     buildsEnabled: opts.buildsEnabled,
   });
   if (features.length > 0) {
-    throw composeBackendRefusal({ ...opts, features });
+    const foreignNetworks = features.includes("external_network")
+      ? foreignComposeNetworkNames(
+          await readNativeComposeDocument(opts.composeFile)
+        )
+      : [];
+    throw composeBackendRefusal({ ...opts, features, foreignNetworks });
   }
 }

@@ -95,7 +95,7 @@ test("the reserved set is Compose's namespace plus every Hack ownership namespac
   ]);
 });
 
-test("each reserved ownership namespace is blocking in map and list labels", () => {
+test("authored ownership metadata is ignored in map and list labels", () => {
   for (const key of [
     "com.docker.compose.project",
     "io.hack-local.owner",
@@ -108,18 +108,18 @@ test("each reserved ownership namespace is blocking in map and list labels", () 
       findComposeBackendFeatures(
         services({ image: IMAGE, labels: { [key]: "x" } })
       )
-    ).toEqual(["reserved_label"]);
+    ).toEqual([]);
     expect(
       findComposeBackendFeatures(
         services({ image: IMAGE, labels: [`${key}=x`] })
       )
-    ).toEqual(["reserved_label"]);
+    ).toEqual([]);
     expect(
       findComposeBackendFeatures({
         ...services({ image: IMAGE }),
         volumes: { data: { labels: { [key]: "x" } } },
       })
-    ).toEqual(["reserved_label"]);
+    ).toEqual([]);
   }
 });
 
@@ -265,7 +265,6 @@ test("features come back once each in closed order across services", () => {
   ).toEqual([
     "external_network",
     "external_volume",
-    "reserved_label",
     "unsupported_build",
     "foreign_platform",
   ]);
@@ -295,7 +294,8 @@ test("the refusal is one coded line with closed detail and no values", async () 
     "Native `hack up` does not support an external Compose network and a service platform other than linux/arm64; this project runs on the Compose backend. Set HACK_RUNTIME_BACKEND=compose"
   );
   expect(error.message).not.toContain("\n");
-  for (const value of ["private-net", "secret-tag", "linux/amd64", root]) {
+  expect(error.message).toContain("Foreign external networks: private-net.");
+  for (const value of ["secret-tag", "linux/amd64", root]) {
     expect(error.message).not.toContain(value);
   }
   expect(error.detail).toEqual({
@@ -485,7 +485,7 @@ test("the Compose file is classified after a valid HACK_NATIVE_ADAPTATION select
   const composeFile = join(root, "docker-compose.yml");
   await writeFile(
     composeFile,
-    "services:\n  web:\n    image: app\n    networks: [hack-dev]\nnetworks:\n  hack-dev:\n    external: true\n"
+    "services:\n  web:\n    image: app\n    networks: [foreign-dev]\nnetworks:\n  foreign-dev:\n    external: true\n"
   );
   const selection = async (name: string, value: unknown) => {
     const path = join(root, name);
@@ -494,7 +494,7 @@ test("the Compose file is classified after a valid HACK_NATIVE_ADAPTATION select
   };
   const isolating = await selection("isolating.json", {
     version: 1,
-    isolatedNetworks: ["hack-dev"],
+    isolatedNetworks: ["foreign-dev"],
   });
   expect(
     await readComposeBackendFeatures(composeFile, { adaptationFile: isolating })
@@ -520,15 +520,15 @@ test("an invalid adaptation refuses as native start does, and is read only for a
   const root = await mkdtemp(join(tmpdir(), "compose-backend-"));
   roots.push(root);
   const external = join(root, "external.yml");
-  await writeFile(external, "networks:\n  hack-dev:\n    external: true\n");
+  await writeFile(external, "networks:\n  foreign-dev:\n    external: true\n");
   const owned = join(root, "owned.yml");
   await writeFile(owned, "services:\n  web:\n    image: app\n");
   const invalid: unknown[] = [
-    { version: 2, isolatedNetworks: ["hack-dev"] },
-    { version: 1, isolatedNetworks: "hack-dev" },
-    { version: 1, isolatedNetworks: ["hack-dev", "hack-dev"] },
+    { version: 2, isolatedNetworks: ["foreign-dev"] },
+    { version: 1, isolatedNetworks: "foreign-dev" },
+    { version: 1, isolatedNetworks: ["foreign-dev", "foreign-dev"] },
     { version: 1, isolatedNetworks: [7] },
-    ["hack-dev"],
+    ["foreign-dev"],
   ];
   for (const [index, value] of invalid.entries()) {
     const path = join(root, `invalid-${index}.json`);
@@ -547,7 +547,7 @@ test("an invalid adaptation refuses as native start does, and is read only for a
       adaptNativeProject({
         input: adaptationInput({
           services: { web: { image: IMAGE } },
-          networks: { "hack-dev": { external: true } },
+          networks: { "foreign-dev": { external: true } },
         }),
         selection: value,
       })

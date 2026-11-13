@@ -85,7 +85,7 @@ async function rustMirrorNamespaces(): Promise<readonly string[]> {
   return literals;
 }
 
-test("runtime-core's label review rejects exactly the declared ownership namespaces", async () => {
+test("runtime-core recognizes exactly the declared Engine ownership namespaces", async () => {
   expect(await rustMirrorNamespaces()).toEqual([
     ...HACK_OWNERSHIP_LABEL_NAMESPACES,
   ]);

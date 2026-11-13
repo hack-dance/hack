@@ -176,18 +176,11 @@ async function main({ args }: { readonly args: BuildArgs }): Promise<number> {
   await Bun.write(slimInstallScriptPath, renderCodexSlimInstallScript());
   await chmodExecutable({ path: slimInstallScriptPath });
 
-  const checksumPath = resolve(releaseDir, "SHA256SUMS");
-  await Bun.write(checksumPath, await renderChecksums({ root: releaseDir }));
-
-  const tarballName = `hack-${version}-${target.platform}-${target.arch}.tar.gz`;
-  const tarballPath = resolve(releaseRoot, tarballName);
-  const tarExit = await run({
-    cmd: ["tar", "-czf", tarballPath, "-C", releaseRoot, releaseDirName],
-    cwd: repoRoot,
+  const tarballPath = await writeReleaseArchive({
+    releaseRoot,
+    version,
+    target,
   });
-  if (tarExit !== 0) {
-    return tarExit;
-  }
 
   const downloadScriptName = `hack-${version}-install.sh`;
   const downloadScriptPath = resolve(releaseRoot, downloadScriptName);
@@ -715,6 +708,44 @@ function resolveTarget(): ReleaseTarget | null {
   return { platform, arch };
 }
 
+/** Preserve the archive contract used by installed v4 updaters. Tests exercise
+ * this exact producer with synthetic executable/assets bytes. */
+export async function writeReleaseArchive(opts: {
+  readonly releaseRoot: string;
+  readonly version: string;
+  readonly target: ReleaseTarget;
+}): Promise<string> {
+  const directoryName = `hack-${opts.version}-release`;
+  const directory = resolve(opts.releaseRoot, directoryName);
+  await Bun.write(
+    resolve(directory, "SHA256SUMS"),
+    await renderChecksums({ root: directory })
+  );
+  const archive = resolve(
+    opts.releaseRoot,
+    `hack-${opts.version}-${opts.target.platform}-${opts.target.arch}.tar.gz`
+  );
+  const child = Bun.spawn(
+    ["tar", "-czf", archive, "-C", opts.releaseRoot, directoryName],
+    {
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 30_000,
+    }
+  );
+  const [code] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  if (code !== 0) {
+    throw new Error("Unable to create checksummed release archive.");
+  }
+  return archive;
+}
+
 async function renderChecksums({
   root,
 }: {
@@ -725,6 +756,9 @@ async function renderChecksums({
 
   for (const file of files) {
     const rel = relative(root, file);
+    if (rel === "SHA256SUMS") {
+      continue;
+    }
     const data = await Bun.file(file).arrayBuffer();
     const hasher = new Bun.CryptoHasher("sha256");
     hasher.update(new Uint8Array(data));

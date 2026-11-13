@@ -250,30 +250,22 @@ planned branch or a passing documentation check is not a mitigation.
     or the native runtime backend. A zero-hit result is evidence for those paths and
     encodings only; it is not a complete-redaction claim.
 
-13. **Open: project key inherited by child processes (HACK-2163).** When
-    `HACK_ENV_SECRET_KEY` is set in the CLI environment, child-env builders copy
-    it without removing it (`src/lib/shell.ts`, `src/commands/background-command-start.ts`,
-    `src/mux/private-environment.ts`). Child code can read the project key as well
-    as its selected application values. The legacy store's `HACK_SECRETS_FILE_KEY`
-    is also passed through these builders. Keep this open until the separate fix
-    merges; an environment override is not isolated key custody.
-14. **Open: unfiltered parser diagnostics (HACK-2163).**
-    `parseProjectEnvConfigText` keeps the YAML parser's error message, and env
-    loading includes it in a `ClosedCliError` (`src/lib/project-env-config.ts`).
-    Synthetic malformed-YAML probes with pinned Bun 1.4.4 returned fixed text,
-    not source lines. That observation is not a value-free diagnostic contract:
-    the message is still forwarded without filtering. Separately, malformed
-    legacy `hack.env.json` input can appear in a JSON parser error, retained as
-    `parseError` by `src/lib/hack-env.ts` and returned by daemon env routes in
-    `src/daemon/routes/env.ts`. Do not paste raw parse errors into an agent
-    transcript or public report. Keep this open until those boundaries are fixed;
-    an error's class name does not make its message value-free.
-15. **Open: legacy overlay dotenv files are not ignored by the managed rules
-    (HACK-2163).** `HACK_DIR_GITIGNORE_ENTRIES` in `src/templates.ts` includes
-    `.env`, but not `.env.<overlay>`. Such files can be added to Git unless the
-    project has its own matching rule. Local YAML ignore patterns also cannot
-    protect files already tracked. Check actual tracking and ignore behavior;
-    keep this open until the separate ignore fix merges.
+13. **Mitigated: project keys inherited by child processes (HACK-2163).**
+    Shared child-environment filtering removes Hack key material, including
+    `HACK_ENV_SECRET_KEY` and `HACK_SECRETS_FILE_KEY`, from ordinary children and
+    the Compose client. Deliberate Hack re-execs retain keys and filter their own
+    user children. Already-running multiplexer servers can retain their earlier
+    environment; filtering a new child does not erase previously copied keys.
+14. **Mitigated: parser diagnostics reflecting values (HACK-2163).** Env-layer,
+    legacy contract and secret-store diagnostics use fixed error kinds and numeric
+    locations rather than raw parser messages. CLI, JSON and daemon regressions
+    check sentinel omission. Do not extend that contract to arbitrary application
+    output or unrelated parsers.
+15. **Mitigated: legacy dotenv copies offered for commit (HACK-2163).** Managed
+    rules ignore `.env.*` with template exceptions. Doctor reports tracked or
+    unignored overlays and directs migration; it does not automatically untrack
+    shared overlays or templates. Ignore rules cannot remove already-tracked
+    plaintext from Git history or another copy.
 16. **Open: lifecycle log and FIFO custody (HACK-2170).** Hooks and persistent
     processes copy unredacted output to `.hack/.internal/lifecycle/<project>.log`
     (`src/commands/project.ts`, `src/lib/lifecycle-runtime.ts`). Log creation uses

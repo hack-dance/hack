@@ -4,6 +4,55 @@ Hack is a local CLI. An agent with shell access can use it directly, with `--jso
 for structured results and `--no-interactive` to avoid prompts. Everything below is
 optional and none of it installs Hack or prepares its runtime.
 
+An agent can drive the CLI through shell access or an explicitly installed MCP
+server, then inspect the result before choosing its next action.
+
+```mermaid
+---
+title: Agent tool feedback
+---
+agentflow-beta TB
+  request["Project task"]@{ shape: input }
+  flow harness["Agent harness"]
+    shell["Shell available?"]@{ shape: decision }
+    cli["Hack CLI"]@{ shape: tool }
+    mcp["Opt-in MCP"]@{ shape: tool }
+    check["Inspect result"]@{ shape: task }
+    shell -- yes --> cli
+    shell -- no --> mcp
+    cli --> check
+    mcp --> check
+  end
+  request --> shell
+```
+
+Without shell access or an approved MCP server, report the missing capability;
+the diagram does not install one or grant authority to run a command.
+
+Developers, agent harnesses and CI can use the local CLI for project work,
+diagnostics and commands when their runner has the required runtime and inputs.
+
+```mermaid
+---
+title: Local CLI clients
+---
+usecase-beta
+  direction LR
+  actor developer("Developer")
+  actor agent("Agent harness")
+  actor ci("CI")
+  systemBoundary "Local CLI"
+    operate("Run project")
+    inspect("Read diagnostics")
+    command("Execute commands")
+  end
+  developer --> operate
+  agent --> inspect
+  ci --> command
+```
+
+These are example goals, not exclusive permissions or a hosted CI integration.
+
 v5 retired automatic instruction injection. Hack no longer writes `AGENTS.md` or
 `CLAUDE.md` sections, Cursor rules, session hooks or global skill copies, and
 `hack setup sync`, `hack setup cursor|claude|agents` and `hack agent prime` refuse

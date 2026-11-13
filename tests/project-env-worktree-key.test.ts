@@ -305,6 +305,7 @@ function envAddSecretArgs(projectRoot: string): readonly string[] {
     "API_TOKEN",
     VALUE_SENTINEL,
     "--secret",
+    "--allow-secret-argv",
     "--path",
     projectRoot,
   ];

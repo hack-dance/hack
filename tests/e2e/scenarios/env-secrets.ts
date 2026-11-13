@@ -22,12 +22,12 @@ const SECRET_VALUE = "s3cret-roundtrip-value";
 /**
  * `hack env add <key> <value> --secret` must store the value encrypted in
  * .hack/hack.env.default.yaml (v1: prefix, no plaintext), mask it in
- * `env list --json`, and decrypt it with `--show-secrets`.
+ * `env list --json`, and decrypt it with an explicit `env get` read.
  */
 export const envSecretsScenario: Scenario = {
   name: "env-secrets",
   tier: "local",
-  summary: "secret add is encrypted at rest and decrypts via env list --json",
+  summary: "secret add is encrypted at rest and decrypts via env get",
   run: async (ctx) => {
     const fixture = await createMonorepoFixture({
       parentDir: ctx.tempRoot,
@@ -35,7 +35,14 @@ export const envSecretsScenario: Scenario = {
     });
 
     const add = await ctx.cli({
-      args: ["env", "add", SECRET_KEY, SECRET_VALUE, "--secret"],
+      args: [
+        "env",
+        "add",
+        SECRET_KEY,
+        SECRET_VALUE,
+        "--secret",
+        "--allow-secret-argv",
+      ],
       cwd: fixture.root,
     });
     expectExit({
@@ -94,40 +101,33 @@ export const envSecretsScenario: Scenario = {
       result: masked,
     });
     expect({
-      that: maskedVar !== undefined && maskedVar.value !== SECRET_VALUE,
+      that: maskedVar !== undefined && !("value" in maskedVar),
       message: "env list --json without --show-secrets must mask the value",
       result: masked,
     });
 
     const revealed = await ctx.cli({
-      args: ["env", "list", "--json", "--show-secrets"],
+      args: ["env", "get", SECRET_KEY],
       cwd: fixture.root,
     });
     expectExit({
       result: revealed,
       codes: [0],
-      message: "hack env list --json --show-secrets should succeed",
+      message: "explicit env get should succeed",
     });
-    const revealedPayload = extractJsonObject<EnvListPayload>({
-      text: revealed.stdout,
-    });
-    const revealedVar = revealedPayload?.vars?.find(
-      (entry) => entry.key === SECRET_KEY
-    );
     expect({
-      that: revealedVar?.value === SECRET_VALUE,
-      message:
-        "env list --json --show-secrets should decrypt the secret back to the original value",
+      that: revealed.stdout === SECRET_VALUE,
+      message: "explicit env get decrypts the secret",
       result: revealed,
     });
-
-    const plainVar = revealedPayload?.vars?.find(
-      (entry) => entry.key === "E2E_PLAIN"
-    );
+    const plain = await ctx.cli({
+      args: ["env", "get", "E2E_PLAIN"],
+      cwd: fixture.root,
+    });
     expect({
-      that: plainVar?.value === "plain-value",
-      message: "pre-seeded plaintext env value should resolve unchanged",
-      result: revealed,
+      that: plain.stdout === "plain-value",
+      message: "pre-seeded plaintext value resolves unchanged",
+      result: plain,
     });
   },
 };

@@ -79,6 +79,8 @@ test("every consumer surface names local plaintext and output disclosure", () =>
     expect(rendered).toContain("background-command reads");
     expect(rendered).toContain("`hack secrets get <name>` print plaintext");
     expect(rendered).toContain("plaintext values");
+    expect(rendered).toContain("hides every value by default");
+    expect(rendered).not.toContain("masks only entries stored as secrets");
     expect(rendered).toContain("JSON is formatting, not redaction");
     expect(rendered).toContain("Background metadata stores caller argv");
     expect(rendered).not.toContain("with secret values masked");

@@ -115,9 +115,13 @@ async function runAuthoredLogs(input: {
       service,
       tail: options.tail,
       since: options.since,
+      timestamps: options.timestamps,
       json: options.json,
       project: options.project,
     });
+  }
+  if (options.timestamps) {
+    throw new CliUsageError("Native --timestamps currently requires --follow.");
   }
   if (options.since !== undefined) {
     throw new CliUsageError("Native --since currently requires --follow.");

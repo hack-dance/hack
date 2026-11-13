@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { readHackHomeOverride } from "../src/lib/home-dir.ts";
-import { createMcpServer } from "../src/mcp/server.ts";
+import { createMcpServer, MCP_REFUSALS } from "../src/mcp/server.ts";
 import { captureMcpSessionContext } from "../src/mcp/session-context.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -136,12 +136,12 @@ test("MCP path authorization uses only that session's registry", async () => {
   });
   expect(denied.isError).toBe(true);
   expect(denied.structuredContent).toMatchObject({
-    stderr: "Path is outside registered hack projects.",
+    stderr: MCP_REFUSALS.path_not_registered.message,
     spawned: false,
     error: {
       code: "E_PROJECT_NOT_FOUND",
       reason: "path_not_registered",
-      message: "Path is outside registered hack projects.",
+      message: MCP_REFUSALS.path_not_registered.message,
     },
   });
   const accepted = await second.client.callTool({

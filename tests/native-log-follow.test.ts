@@ -216,3 +216,33 @@ test("unsupported flags and bounds are refused explicitly", () => {
     })
   ).toEqual({ service: "web", tail: 20, since: 1_767_225_600 });
 });
+
+test("Engine timestamp metadata does not consume the payload line limit", async () => {
+  const lines: { text: string; timestamp?: string; truncated: boolean }[] = [];
+  const decoder = nativeLogLineDecoder({
+    service: "web",
+    onLine: async (_stream, text, flags) => {
+      lines.push({ text, ...flags });
+    },
+  });
+  const chunk = (text: string) =>
+    JSON.stringify({
+      version: 2,
+      kind: "native-log-chunk",
+      service: "web",
+      container,
+      stream: "stdout",
+      timestamp: "2026-01-01T00:00:00.123456789Z",
+      data: Buffer.from(text).toString("base64"),
+    });
+  for (let i = 0; i < 16; i++) {
+    await decoder.accept(chunk("x".repeat(4096)));
+  }
+  await decoder.accept(chunk("\n"));
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toMatchObject({
+    text: "x".repeat(65_536),
+    timestamp: "2026-01-01T00:00:00.123456789Z",
+    truncated: false,
+  });
+});

@@ -67,10 +67,11 @@ directory contains it. When registrations are nested, the deepest one wins. Two
 different registrations at the same root are refused as `ambiguous_project`. A
 project that has a `.hack/` directory but no registration is refused; run
 a registering command in it, for example `hack status`, `hack projects` or
-`hack init` (`hack up`, `down`, `ps`, `run`, `exec`, `logs`, `open` and
-`commands` do not register). With no selection the server's working directory
-is used, so check that it is the project you mean before a destructive call. A `repoRoot` or `path` outside
-every registered project is refused as `path_not_registered`.
+`hack init` (`hack down`, `ps`, `run`, `exec`, `logs`, `open` and `commands`
+do not register; `hack up` registers on the Compose backend only). A
+`repoRoot` or `path` outside every registered project is refused as
+`path_not_registered`. With no selection the server's working directory is
+used, so check that it is the project you mean before a destructive call.
 
 ## Inputs and identifiers
 

@@ -36,6 +36,7 @@ import {
   isInsideGitCheckoutMarker,
   projectEnvLiveInputPaths,
 } from "./project-env-config.ts";
+import { RETIRED_STORE_INFIX } from "./secret-store.ts";
 
 /**
  * `hack doctor`'s "secrets hygiene" section (HACK-2165): files at rest that
@@ -1080,7 +1081,19 @@ async function isLive(opts: {
     return true;
   }
   const real = await realpath(opts.path).catch(() => null);
-  return real !== null && opts.live.has(real);
+  if (real !== null && opts.live.has(real)) {
+    return true;
+  }
+  // A retired store (HACK-2177) is kept on purpose: it may hold the only
+  // copy of values its key still opens. Nothing in or under one is removed.
+  return [resolve(opts.path), real].some(
+    (spelling) => spelling !== null && inRetiredStore(spelling)
+  );
+}
+
+/** Whether a path component is a retired-store name (`<store>.retired-…`). */
+function inRetiredStore(path: string): boolean {
+  return path.split(sep).some((part) => part.includes(RETIRED_STORE_INFIX));
 }
 
 /** The directory a fix changes. */
@@ -1296,6 +1309,14 @@ async function removalStillSafe(opts: {
     scopes.push(current);
   }
   const path = removalTarget(opts.fix);
+  // Whatever the scopes say, a retired store is never removed.
+  const real = await realpath(path).catch(() => null);
+  if (
+    inRetiredStore(resolve(path)) ||
+    (real !== null && inRetiredStore(real))
+  ) {
+    return false;
+  }
   for (const scope of scopes) {
     if (await isLive({ path, live: await livePaths(scope) })) {
       return false;

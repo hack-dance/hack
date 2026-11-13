@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { STAGING_LEFTOVER_MIN_AGE_MS } from "../src/lib/private-staging.ts";
 import { projectEnvLiveInputPaths } from "../src/lib/project-env-config.ts";
+import { retireEncryptedStoreFile } from "../src/lib/secret-store.ts";
 import {
   applySecretsHygieneFixes,
   inspectSecretsHygiene,
@@ -1218,4 +1219,55 @@ test("a configured key in a stale payload reached through a linked temp director
   });
   expect(await readFile(payload.path, "utf8")).toContain("synthetic-linked");
   await payload.cleanup();
+});
+
+test("a retired store (HACK-2177) is never removed by hygiene, whatever offers it", async () => {
+  const f = await fixture();
+  const storePath = join(f.home, "secrets.enc.json");
+  const keyPath = join(f.home, "secrets-file.key");
+  await writeFile(storePath, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  const retired = await retireEncryptedStoreFile({ storePath, keyPath });
+  const archive = retired.to;
+  expect(archive).toContain(".retired-");
+  await backdate(archive);
+  // Ordinary inspection and --fix leave it alone.
+  const scope = { ...f.scope, stores: [{ storePath, keyPath }] };
+  const findings = await inspectSecretsHygiene(scope);
+  expect(paths(findings)).not.toContain(archive);
+  await applySecretsHygieneFixes({
+    findings,
+    report: () => undefined,
+    currentScope: async () => scope,
+  });
+  expect(await readFile(archive, "utf8")).toContain(SENTINEL);
+  // A removal offered for it (by any detector, with or without a scope)
+  // is refused at the unlink.
+  const stats = await lstat(archive);
+  // A guard that holds, so only the removal check can refuse it.
+  const directory = await lstat(dirname(archive));
+  const guard = {
+    path: dirname(archive),
+    dev: directory.dev,
+    ino: directory.ino,
+  };
+  for (const withScope of [true, false]) {
+    const result = await applySecretsHygieneFixes({
+      findings: [
+        {
+          status: "warn",
+          path: archive,
+          message: "synthetic",
+          guard,
+          fix: {
+            kind: "remove_leftover",
+            leftover: { path: archive, stats },
+            ...(withScope ? { scope } : {}),
+          },
+        },
+      ],
+      report: () => undefined,
+    });
+    expect(result).toEqual({ applied: 0, skipped: 1 });
+  }
+  expect(await readFile(archive, "utf8")).toContain(SENTINEL);
 });

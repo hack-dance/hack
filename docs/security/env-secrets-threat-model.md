@@ -300,12 +300,14 @@ planned branch or a passing documentation check is not a mitigation.
     outside the project (`src/lib/hack-env.ts`); mutation checks do not protect
     that read path. Keep these gaps open until the hygiene fixes merge; an
     in-project target or local filename is not proof of private storage.
-19. **Open: migration cleanup recheck (HACK-2171).** Cleanup removes the current
-    path after an earlier migration/consent decision without rechecking the
-    selected file's current bytes and identity under a lock
-    (`removeLegacyProjectEnvArtifacts` in `src/lib/project-env-config.ts`,
-    cleanup callers in `src/commands/doctor.ts`). Edits made between that decision
-    and removal can be lost. Keep this open until cleanup revalidation merges.
+19. **Mitigated: stale migration cleanup decisions (HACK-2171).** Cleanup carries
+    content and file-identity receipts from before migration, then rechecks them
+    and current scoped delivery under writer locks after consent. Each unlink
+    rechecks its target. Refusals preserve remaining files and report confirmed
+    removals; automatic cleanup warns and continues the original command. Writers
+    outside Hack's cooperative locks can still race the final unlink. The daemon
+    also reports unconfirmed secret deletion as HTTP 500 `partial_failure`,
+    retaining the completed dotenv result instead of claiming success.
 
 ### Plaintext on disk outside materialization
 

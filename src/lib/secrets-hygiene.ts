@@ -1080,7 +1080,12 @@ async function isLive(opts: {
   if (opts.live === "unknown" || opts.live.has(resolve(opts.path))) {
     return true;
   }
-  const real = await realpath(opts.path).catch(() => null);
+  // Only a missing target has no resolved spelling; one that cannot be
+  // resolved for another reason might be live (or retired), so it is.
+  const real = await realpathOrMissing(opts.path);
+  if (real === "unknown") {
+    return true;
+  }
   if (real !== null && opts.live.has(real)) {
     return true;
   }
@@ -1309,9 +1314,11 @@ async function removalStillSafe(opts: {
     scopes.push(current);
   }
   const path = removalTarget(opts.fix);
-  // Whatever the scopes say, a retired store is never removed.
-  const real = await realpath(path).catch(() => null);
+  // Whatever the scopes say, a retired store is never removed, and neither
+  // is a target whose resolved path (so its membership) is unknown.
+  const real = await realpathOrMissing(path);
   if (
+    real === "unknown" ||
     inRetiredStore(resolve(path)) ||
     (real !== null && inRetiredStore(real))
   ) {

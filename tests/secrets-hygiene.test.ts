@@ -1271,3 +1271,54 @@ test("a retired store (HACK-2177) is never removed by hygiene, whatever offers i
   }
   expect(await readFile(archive, "utf8")).toContain(SENTINEL);
 });
+
+test("a removal whose target cannot be resolved is refused, even through an alias to a retired store", async () => {
+  const f = await fixture();
+  const storePath = join(f.home, "secrets.enc.json");
+  const keyPath = join(f.home, "secrets-file.key");
+  await writeFile(storePath, `{"sentinel":"${SENTINEL}"}\n`, { mode: 0o600 });
+  const archive = (await retireEncryptedStoreFile({ storePath, keyPath })).to;
+  // An alias with no retired marker in its spelling, whose resolution fails
+  // for a reason other than absence.
+  const alias = join(f.root, "alias");
+  await symlink(dirname(archive), alias);
+  const target = join(alias, basename(archive));
+  const stats = await lstat(target);
+  const directory = await fsPromises.stat(alias);
+  const guard = { path: alias, dev: directory.dev, ino: directory.ino };
+  const scope = { ...f.scope, stores: [{ storePath, keyPath }] };
+  const original = fsPromises.realpath;
+  const spy = spyOn(fsPromises, "realpath").mockImplementation((async (
+    path: Parameters<typeof original>[0],
+    ...rest: unknown[]
+  ) => {
+    if (String(path) === target) {
+      throw Object.assign(new Error("synthetic EIO"), { code: "EIO" });
+    }
+    return await Reflect.apply(original, fsPromises, [path, ...rest]);
+  }) as typeof original);
+  try {
+    for (const withScope of [true, false]) {
+      const result = await applySecretsHygieneFixes({
+        findings: [
+          {
+            status: "warn",
+            path: target,
+            message: "synthetic",
+            guard,
+            fix: {
+              kind: "remove_leftover",
+              leftover: { path: target, stats },
+              ...(withScope ? { scope } : {}),
+            },
+          },
+        ],
+        report: () => undefined,
+      });
+      expect(result).toEqual({ applied: 0, skipped: 1 });
+    }
+  } finally {
+    spy.mockRestore();
+  }
+  expect(await readFile(archive, "utf8")).toContain(SENTINEL);
+});

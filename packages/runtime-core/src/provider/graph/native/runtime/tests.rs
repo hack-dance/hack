@@ -3139,3 +3139,44 @@ fn finite_native_logs_share_one_deadline_with_all_source_and_data_checks() {
     );
     assert_eq!(session.backend.state.borrow().log_reads.len(), 2);
 }
+
+#[test]
+fn project_start_waits_for_a_legacy_status_holder_then_runs_without_replaying_admission() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let pool = fixture.candidate.state_root.join("run/smolvm");
+    let reader = state::Lock::acquire(&pool).unwrap();
+    fs::write(pool.join("operation.lock"), b"v1 123 inspection\n").unwrap();
+    assert!(matches!(state::Lock::acquire(&pool), Err(e) if e.code == "provider_busy"));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        drop(reader);
+    });
+    let _start = crate::provider::lifecycle::startup_lease(&pool, Duration::from_secs(2)).unwrap();
+    release.join().unwrap();
+    execution::run(&graph, &mut session, RUN_BUDGET).unwrap();
+    assert_eq!(session.receipt.phase, Phase::ReadyObserved);
+    assert_eq!(session.backend.state.borrow().containers.len(), 1);
+    // The new lease is still exclusive: another mutation is never admitted.
+    assert!(matches!(state::Lock::acquire(&pool), Err(e) if e.code == "provider_busy"));
+}
+
+#[test]
+fn lasting_status_holder_is_named_at_the_acquisition_deadline_without_starting_services() {
+    let fixture = Fixture::new(basic());
+    let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let pool = fixture.candidate.state_root.join("run/smolvm");
+    let _reader = state::Lock::acquire(&pool).unwrap();
+    fs::write(pool.join("operation.lock"), b"v1 123 inspection\n").unwrap();
+    let started = Instant::now();
+    let error = crate::provider::lifecycle::startup_lease(&pool, Duration::from_millis(75))
+        .err()
+        .unwrap();
+    assert_eq!(error.code, "provider_busy");
+    assert!(error.message.contains("holder: inspection"));
+    assert!(error.message_fixed);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(session.backend.state.borrow().effects.is_empty());
+    assert!(session.backend.state.borrow().containers.is_empty());
+}

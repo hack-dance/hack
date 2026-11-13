@@ -4460,15 +4460,24 @@
       },
       {
         "slug": "install",
-        "title": "Install"
+        "title": "Install v5",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
+        "sourceFile": "docs/reference/cli.md"
       },
       {
         "slug": "getting-started",
-        "title": "Getting started"
+        "title": "First project on Compose",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
+        "sourceFile": "docs/reference/cli.md"
       },
       {
         "slug": "upgrade",
-        "title": "Upgrade from v4"
+        "title": "Upgrade from v4",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
+        "sourceFile": "docs/reference/cli.md"
       },
       {
         "slug": "guides/upgrade-from-v4",
@@ -4636,6 +4645,20 @@
         "sourceRevision": "b21c3b189841c1a3cbb8af2b76414fa347dc7057",
         "sourceLabel": "v5.0.0-next.16 under verification",
         "sourceFile": "docs/reference/native-authored-commands.md"
+      },
+      {
+        "slug": "native/start",
+        "title": "Try native on Apple Silicon",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
+        "sourceFile": "docs/guides/native-candidate.md"
+      },
+      {
+        "slug": "troubleshooting",
+        "title": "Troubleshooting",
+        "sourceRevision": "2c1f665157e8645f79fe09812aca84448552e07a",
+        "sourceLabel": "Current command audit (next 2c1f6651)",
+        "sourceFile": "docs/env.md"
       }
     ]
   }

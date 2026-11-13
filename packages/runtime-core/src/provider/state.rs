@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 pub fn io(error: std::io::Error) -> CandidateError {
@@ -45,8 +45,27 @@ pub fn check_private_directory(path: &Path) -> Result<(), CandidateError> {
     Ok(())
 }
 
-pub struct Lock(File);
+pub struct Lock(File, bool);
 impl Lock {
+    /// Advisory diagnostics only, on the provider pool's lock inode. Never
+    /// interpreted as ownership or recovery authority; crashes may leave it stale.
+    fn describe_holder(mut self, root: &Path) -> Result<Self, CandidateError> {
+        if provider_lock(root) {
+            // A diagnostic must never turn an acquired stop/start lease into a
+            // refusal. Partial or stale bytes are ignored by the closed reader.
+            let label = operation_label();
+            self.1 = self
+                .0
+                .set_len(0)
+                .and_then(|()| {
+                    self.0
+                        .write_all(format!("v1 {} {label}\n", std::process::id()).as_bytes())
+                })
+                .is_ok();
+        }
+        Ok(self)
+    }
+
     /// Verify that the retained cooperative lock still names this exact private inode.
     /// Holding an unlinked predecessor cannot serialize a replacement pathname.
     pub(crate) fn verify_path(&self, root: &Path) -> Result<(), CandidateError> {
@@ -96,7 +115,7 @@ impl Lock {
             .custom_flags(libc::O_NOFOLLOW)
             .open(root.join("operation.lock"))
             .map_err(io)?;
-        Self::from_file(file)
+        Self::from_file(file)?.describe_holder(root)
     }
 
     /// Observe existing state without initializing a directory or lock file.
@@ -104,10 +123,11 @@ impl Lock {
         check_private_directory(root)?;
         let file = OpenOptions::new()
             .read(true)
+            .write(provider_lock(root))
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(root.join("operation.lock"))
             .map_err(io)?;
-        Self::from_file(file)
+        Self::from_file(file)?.describe_holder(root)
     }
 
     #[cfg(target_os = "macos")]
@@ -152,18 +172,75 @@ impl Lock {
         }
         // SAFETY: file is a live owned descriptor; flock does not retain pointers.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(CandidateError::new(
-                "provider_busy",
-                "Another candidate operation holds the provider lock.",
-            ));
+            return Err(CandidateError::new("provider_busy", holder_message(&file)));
         }
-        Ok(Self(file))
+        Ok(Self(file, false))
     }
 }
 impl Drop for Lock {
     fn drop(&mut self) {
+        if self.1 {
+            let _ = self.0.set_len(0);
+        }
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn provider_lock(root: &Path) -> bool {
+    root.ends_with("run/smolvm")
+}
+
+fn operation_label() -> &'static str {
+    // Only closed command words enter diagnostics, never user arguments or paths.
+    for argument in std::env::args_os().skip(1) {
+        match argument.to_str() {
+            Some("cleanup" | "down" | "stop") => return "cleanup",
+            Some("recover" | "recover-live-owner" | "recover-cleanup") => return "recovery",
+            Some("run" | "serve" | "start" | "restore" | "restart") => return "start",
+            Some("inspect" | "status") => return "inspection",
+            _ => {}
+        }
+    }
+    "operation"
+}
+
+fn holder_message(file: &File) -> &'static str {
+    let mut bytes = [0; 64];
+    let kind = file.read_at(&mut bytes, 0).ok().and_then(|count| {
+        let text = std::str::from_utf8(&bytes[..count]).ok()?;
+        let mut fields = text.split_whitespace();
+        if fields.next()? != "v1" {
+            return None;
+        }
+        fields.next()?.parse::<u32>().ok().filter(|pid| *pid > 0)?;
+        let kind = fields.next()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        Some(kind)
+    });
+    // Closed literal messages survive the frontend's value-free diagnostic
+    // boundary. The record is advisory; no process identity is inferred from it.
+    match kind {
+        Some("cleanup") => {
+            "Provider lease acquisition refused; recorded holder: cleanup; no operation was admitted."
+        }
+        Some("recovery") => {
+            "Provider lease acquisition refused; recorded holder: recovery; no operation was admitted."
+        }
+        Some("start") => {
+            "Provider lease acquisition refused; recorded holder: start; no operation was admitted."
+        }
+        Some("inspection") => {
+            "Provider lease acquisition refused; recorded holder: inspection; no operation was admitted."
+        }
+        Some("operation") => {
+            "Provider lease acquisition refused; recorded holder: native operation; no operation was admitted."
+        }
+        _ => {
+            "Another candidate operation holds the provider lock; holder identity is unavailable; no operation was admitted."
         }
     }
 }
@@ -793,6 +870,28 @@ impl Owner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn advisory_write_failure_does_not_refuse_the_acquired_provider_lease() {
+        let fixture = fixture();
+        let root = fixture.join("run/smolvm");
+        super::private_directory(&root).unwrap();
+        let path = root.join("operation.lock");
+        std::fs::write(&path, b"diagnostic-canary").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // An actual read-only descriptor injects EBADF in the advisory write,
+        // while flock itself can still acquire exclusive ownership.
+        let lock = super::Lock::from_file(std::fs::File::open(&path).unwrap())
+            .unwrap()
+            .describe_holder(&root)
+            .unwrap();
+        assert!(matches!(super::Lock::acquire(&root), Err(error) if error.code == "provider_busy"));
+        drop(lock);
+        assert_eq!(std::fs::read(&path).unwrap(), b"diagnostic-canary");
+        drop(super::Lock::acquire(&root).unwrap());
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 

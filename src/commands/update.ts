@@ -1,12 +1,11 @@
 import { access, rm } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 import { confirm, isCancel } from "@clack/prompts";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { defineCommand, defineOption, withHandler } from "../cli/command.ts";
 import { optJson } from "../cli/options.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
-import { ensureDir } from "../lib/fs.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import {
   ensureBundledMutagenInstalled,
@@ -161,7 +160,7 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
       json: args.options.json === true,
       result: {
         ok: false,
-        error: `Missing release asset for ${target.platform}/${target.arch} (v${latestVersion})`,
+        error: `Release assets incomplete; retry later (missing ${target.platform}/${target.arch} for v${latestVersion}).`,
       },
     });
   }
@@ -214,12 +213,10 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
     });
   }
 
-  await ensureDir(dirname(bin.path));
-  await ensureDir(assetsDir);
-
   const extracted = await downloadAndExtractRelease({
     url: asset.url,
     version: latestVersion,
+    sha256: asset.sha256,
   });
   if (!extracted.ok) {
     return writeResult({
@@ -228,8 +225,10 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
     });
   }
 
+  let backupManifest: string | undefined;
   try {
     const install = await installExtractedRelease({
+      version: latestVersion,
       extractedReleaseDir: extracted.extractedReleaseDir,
       binaryPath: bin.path,
       assetsDir,
@@ -240,6 +239,7 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
         result: { ok: false, error: install.error },
       });
     }
+    backupManifest = install.backupManifest;
   } finally {
     // Best-effort cleanup; avoid failing the update after a successful install.
     await rm(extracted.tmpDir, { recursive: true, force: true }).catch(
@@ -261,8 +261,9 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
       binaryPath: bin.path,
       assetsDir,
       mutagen: mutagenProvision,
+      backupManifest,
     },
-    human: `Updated to v${latestVersion}.`,
+    human: `Updated to v${latestVersion}. Backup manifest: ${backupManifest}`,
   });
 };
 
@@ -437,6 +438,7 @@ type UpdateOutput =
       readonly binaryPath: string;
       readonly assetsDir: string;
       readonly mutagen?: MutagenProvisionResult;
+      readonly backupManifest?: string;
     }
   | {
       readonly ok: false;

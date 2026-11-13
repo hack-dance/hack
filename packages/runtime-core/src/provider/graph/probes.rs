@@ -253,7 +253,7 @@ fn attach(config: &mut Value, p: &Probe) {
     mounts.push(json!({"Type":"bind","Source":format!("{}/state",path(p)),"Target":"/run/hack-http-probe-state","ReadOnly":false}));
 }
 fn exec(
-    engine: &Engine<'_>,
+    engine: &impl super::Inspection,
     receipt: &Receipt,
     name: &str,
 ) -> Result<Option<Value>, CandidateError> {
@@ -261,7 +261,7 @@ fn exec(
     let Some(id) = &p.exec_id else {
         return Ok(None);
     };
-    let value = match engine.request(Method::GET, &format!("/v1.53/exec/{id}/json"), None) {
+    let value = match engine.get(&format!("/v1.53/exec/{id}/json")) {
         Ok(v) => v,
         Err(e) if e.code == "engine_not_found" => return Ok(None),
         Err(e) => return Err(e),
@@ -286,7 +286,7 @@ fn exec(
     Ok(Some(value))
 }
 pub(super) fn observe(
-    engine: &Engine<'_>,
+    engine: &impl super::Inspection,
     receipt: &Receipt,
     name: &str,
     value: &Value,

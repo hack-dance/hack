@@ -66,8 +66,8 @@ or opened, because it is the right URL; text output adds one warning, and `--jso
 Either is the usual sign of a machine set up by an earlier version that only resolves the
 older suffix: run `hack global install`, or give the project a host under a suffix that
 already resolves with `hack config set dev_host <name>.<suffix>`. A lookup that fails or
-times out is never reported as unresolved, and hosts outside Hack's own suffixes are left
-alone.
+times out is never reported as unresolved. The macOS `unconfigured` hint applies only
+to Hack-managed suffixes; an unknown result for another host is left alone.
 
 Saved native origins retain their own routing behavior: opening them does not invoke
 the Compose proxy's system resolver, Docker inspections or CA-pinned TLS probe.

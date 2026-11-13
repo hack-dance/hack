@@ -67,9 +67,9 @@ function runtimeNotRunning(): HackCliError {
  * Native ps result. `pending` reports frontend startup intent before a run mapping
  * exists; it grants no readiness or live-process authority. `runtime_not_running` means the project has an owned run
  * mapping but the candidate runtime is stopped: nothing was observed, so
- * `phase` is null and `items` is empty. `runtime_busy` means another operation
- * held the exclusive provider lease for the whole bounded read (a starting
- * foreground `up` holds it until its graph is ready): nothing was observed either.
+ * `phase` is null and `items` is empty. `runtime_busy` means the journal changed
+ * during presentation, so no consistent snapshot is returned. Presentation
+ * takes no provider lease; legacy lease-busy responses remain transitional.
  */
 export type NativeProjectPsStatus =
   | "not_started"
@@ -178,16 +178,27 @@ function containerItem(
     exitCode: typeof observation.code === "number" ? observation.code : null,
   };
 }
-/** Read-only inspection retries brief provider lease contention, never effects. */
-async function inspect(opts: Options, run: NativeProjectRun) {
+/** Presentation is lease-free; finite log inspection keeps its bounded lease retry. */
+async function inspect(
+  opts: Options,
+  run: NativeProjectRun,
+  statusOnly = false
+) {
   return inspected(
-    await inspectNativeProjectGraph({
-      runtime: opts.runtime,
-      projectRoot: opts.scope.projectRoot,
-      run: run.run,
-      invoke: opts.invoke,
-      busyWaitMs: OBSERVER_BUSY_WAIT_MS,
-    }),
+    statusOnly
+      ? await (opts.invoke ?? invokeNativeRuntime)({
+          runtime: opts.runtime,
+          cwd: opts.scope.projectRoot,
+          args: ["graph", "status", "--run-id", run.run, "--json"],
+          timeoutMs: 30_000,
+        })
+      : await inspectNativeProjectGraph({
+          runtime: opts.runtime,
+          projectRoot: opts.scope.projectRoot,
+          run: run.run,
+          invoke: opts.invoke,
+          busyWaitMs: OBSERVER_BUSY_WAIT_MS,
+        }),
     run,
     opts.includeReadiness
   );
@@ -205,7 +216,11 @@ function unobservedStatus(
   if (isNativeRuntimeNotRunning(error)) {
     return "runtime_not_running";
   }
-  if (isNativeProviderBusy(error)) {
+  if (
+    isNativeProviderBusy(error) ||
+    (error instanceof NativeRuntimeRequestError &&
+      error.nativeCode === "graph_status_changed")
+  ) {
     return "runtime_busy";
   }
   throw error;
@@ -270,6 +285,14 @@ async function unobservedProject(
  * A stopped candidate runtime is an ordinary state for this read: it reports
  * `runtime_not_running` instead of failing. Every other refusal still throws.
  */
+function ownerJournalChanged(owner: unknown): boolean {
+  return (
+    isRecord(owner) &&
+    owner.ok === false &&
+    owner.code === "graph_status_changed"
+  );
+}
+
 export async function nativeProjectPs(
   opts: Options
 ): Promise<NativeProjectPsResult> {
@@ -287,7 +310,7 @@ export async function nativeProjectPs(
   }
   let snapshot: Awaited<ReturnType<typeof inspect>>;
   try {
-    snapshot = await inspect(opts, run);
+    snapshot = await inspect(opts, run, true);
   } catch (error: unknown) {
     return await unobservedProject(opts, run, error);
   }
@@ -302,6 +325,15 @@ export async function nativeProjectPs(
         args: ["graph", "owner-status", "--run-id", run.run, "--json"],
         timeoutMs: 15_000,
       });
+      if (ownerJournalChanged(owner)) {
+        return {
+          backend: "native",
+          status: "runtime_busy",
+          run: run.run,
+          phase: null,
+          items: [],
+        };
+      }
       if (
         !isRecord(owner) ||
         owner.ok !== true ||

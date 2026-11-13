@@ -1,9 +1,9 @@
 # Native backend reference
 
 This is the detailed reference for the native backend (beta). It is long and
-precise. For a short introduction, read the [overview](../native/README.md),
-[try it](../native/try-it.md) and
-[what works and known limits](../native/limits.md). The
+precise. For the first run, use [Try native on Apple Silicon](https://hack.foo/docs/v5/native/start).
+The [overview](../native/README.md) and
+[known limits](../native/limits.md) explain its scope. The
 [reference map](../native/reference.md) lists this page's sections by topic.
 
 The native backend is beta. `hack-native` is an opt-in Apple Silicon macOS executor installed alongside
@@ -108,40 +108,17 @@ for this stable home; `channel` reports `installed-candidate`. State remains und
 child processes bind to its identity. Moving an executable is supported; moving
 an active home or adopting another installation's state is not.
 
-Run the normal project CLI through the bundle's `hack-v5` entrypoint:
-
-```sh
-export HACK_NATIVE_HOME=/absolute/private/candidate-home
-/absolute/copied/hack-native-bundle/hack-v5 ps --path /absolute/project
-```
-
-Keep the bundle together and invoke this entrypoint by its full path (do not copy
-or symlink only the script). With `HACK_RUNTIME_BACKEND` unset (or `native`) it
-selects the native backend and the adjacent executor, even if an inherited
-`HACK_NATIVE_BINARY` selects another binary. An explicit
-`HACK_RUNTIME_BACKEND=compose` runs the same bundled CLI on the Compose backend
-with your own Hack home and existing global routing services. It needs no
-`HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
-code 64. The [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends)
-describes Compose testing and its shared-state limits: run stable `hack global up`,
-then any stable `hack doctor` or `hack doctor --fix`, then stable `hack daemon stop`,
-confirm `pgrep -fl "hack daemon start"` prints nothing, and run no stable `hack`
-command while the candidate uses your Hack home. Stable `hack global up` (v4.2.0)
-starts a stopped `hackd` again, and so does stable `hack doctor --fix` (it asks
-first only in a terminal). If the check lists a process, the guide gives the
-launchd remedy. The entrypoint turns off daemon autostart in newer builds, so the
-candidate does not start the stable `hackd` on its own: a candidate
-`hack doctor --fix` skips its `hackd` repair without asking and prints the
-command to run yourself, which runs the stable CLI. Do not commit the
-project's generated `.hack/.internal/` directory; newer generators rewrite files
-such as `compose.override.yml`. The entrypoint preserves arguments, exit codes and
-signals through `exec`, and never replaces the installed `hack`. Project-specific
-native adaptation, dependency and routing selections remain explicit; this entrypoint
-does not prepare a provider or migrate existing projects. An unversioned local
-build reports the repository package version. A versioned prerelease build reports
-its explicit candidate version and includes source provenance. The `hack-v5`
-entrypoint alone does not identify a published release. Unsupported native workflows still
-report their existing refusal rather than falling back to Docker.
+For normal project commands, follow the short
+[native start page](https://hack.foo/docs/v5/native/start). Manual bundle users
+use the adjacent `hack-v5` entrypoint with an explicit `HACK_NATIVE_HOME`;
+keep the bundle together. The [candidate installer guide](candidate-install.md#test-both-backends)
+defines backend selectors, private versus shared homes, stable-daemon quiescence
+and returning to Compose. Neither entrypoint prepares the provider, migrates a
+project or falls back to Docker for an unsupported native command. An unversioned
+local build reports its repository version; only a versioned bundle includes
+candidate version provenance. The entrypoint alone does not identify a release.
+`hack-v5` passes arguments, exit codes and signals through `exec`; it never replaces
+the installed stable executable.
 
 Native `up` accepts an explicit branch or the branch inferred from a linked Git
 worktree when its exact source root can be shared with a fresh or matching pool.
@@ -599,11 +576,11 @@ HTTPS frontend it says that routes are not served on this host. Ctrl-C prints th
 stop sequence and, once owned cleanup is confirmed, one stopped line that says
 whether named volumes and the stopped run mapping were kept (`Native project
 stopped.` when no run mapping was published). Until the ready line,
-startup holds the runtime's exclusive provider lease, so graph admission cannot
-interleave with another operation. A `hack ps` from another terminal during that
-window waits briefly, then reports that the runtime is busy (`runtime_busy`,
-exit 0) instead of failing. After the ready line, `hack ps` and `hack logs` run
-alongside the foreground command.
+startup uses the runtime's exclusive provider lease for its effect stages.
+`hack ps` observes without that lease, including when another project is starting
+in the same pool. If the journal changes during its read, it reports
+`runtime_busy` (exit 0); retry for a current snapshot. After the ready line,
+`hack ps` and `hack logs` run alongside the foreground command.
 
 While the project runs, foreground `up` reports each service container that stops,
 as attached Compose `up` does (`SERVICE exited with code N`), including one-shot
@@ -934,20 +911,16 @@ compatibility. V4 and candidate homes remain separate; this procedure does not
 migrate V4 data into the candidate or replace the installed `hack`. DNS, trust and
 client configuration are outside this bundle-selection procedure.
 
-Provider setup is separate and explicit. Prepare the native runtime with:
-
-```sh
-./hack-native --candidate-root /absolute/private/candidate-home runtime setup
-```
-
-`runtime setup` lists the pinned SmolVM, Docker engine and four Alpine guest
-packages with their exact compressed byte lengths, source hosts, SHA-256 hashes, private cache and
-install destination, then asks once when preparation is needed. `--no-interactive` (or
+For ordinary setup and consent, use the short
+[native start page](https://hack.foo/docs/v5/native/start#prepare-the-runtime).
+The remainder describes the setup and recovery contract. `--no-interactive` (or
 truthy `HACK_NO_INTERACTIVE` values `1`, `true`, `yes` or `on`, ignoring case and
 surrounding whitespace) refuses with `E_INTERACTIVE_REQUIRED` unless
 `--accept-downloads` explicitly consents. No provider download happens from `up`,
 the installer, the probe or any other implicit path. The optional BuildKit client
 is still prepared separately below.
+Setup lists the pinned SmolVM, Docker engine and four Alpine guest packages,
+including exact compressed sizes, hosts, hashes, private cache and destinations.
 
 The executable embeds `provider-pins.json` and checks its hashes against the
 manual preparation pins. HTTPS redirects may use only the original host and the
@@ -1906,9 +1879,11 @@ owner could not be authenticated, while `runtime_degraded` means its runtime che
 failed. A stopped candidate runtime is an ordinary state for `ps`: with a mapping
 present it exits 0 and reports `runtime_not_running` (no phase, no service rows),
 and text output prints "Native runtime is not running; no services are running."
-A provider lease held for the whole bounded read, for example by a starting
-foreground `up`, is also an ordinary state: `ps` exits 0 and reports
-`runtime_busy` (no phase, no service rows). Reads retry brief lease contention.
+Status reads take no provider lease and never reap publishers or write journals.
+A journal change during a read is an ordinary transitional state: `ps` exits 0
+and reports `runtime_busy` (no phase, no service rows). Status is presentation,
+not a storage-witness or source-continuity proof; mutating commands keep their
+locked verification.
 `hack ps --json` prints the standard `{ok: true, data}` envelope; `data` holds
 `backend: "native"`, `status` (`not_started`, `pending`, `runtime_not_running`,
 `runtime_busy`, `observed`, `owner_unconfirmed` or `runtime_degraded`), `run`,
@@ -3777,7 +3752,7 @@ owner as dead or bypass its cleanup checks.
 `hack up` and `hack restart` refuse a run whose foreground publication is still
 present and name the next step: a running owner must be stopped with Ctrl-C or
 `hack down`; an owner that exited while its services were running is stopped by
-`hack down --recover`. That command selects the run's exact receipt with the
+plain `hack down` (or `hack down --recover`). That command selects the run's exact receipt with the
 read-only `graph foreground-owner --run-id RUN --json` and then uses the
 same-boot `graph recover-live-owner` described below, retaining data and
 retiring the stale publication. If its recorded frontend also exited before
@@ -3805,11 +3780,54 @@ and data is retained. Then `hack up` restores the run. An owner that exited
 after its restore was admitted is still reported without a supported
 retirement.
 
-Read-only `hack ps` and `hack logs` hold the provider lease only briefly. Native
-startup, retained-start eligibility, restore admission, inspections inside
-mutating commands and owned foreground cleanup wait out such a holder within a
-bound instead of failing, so polling status during `up` or `restart` does not
-make them fail or strand a foreground publication.
+`hack ps` uses lock-free reads for both adopted and authored projects. Finite
+`hack logs` and inspections used by mutating commands retain their existing
+lease behavior. Startup's initial bounded wait preserves its deadline and
+names the recorded holder kind when it expires. That advisory record grants no
+authority. A second concurrent mutation still refuses under the existing rules.
+Authored `up` readiness still uses locked `status`; only authored `ps` uses the
+presentation-only `observe` action. Contention between two starts is unchanged.
+
+For adopted projects, plain `down` also selects exact-proof recovery of a
+`failed-retained` start when every startup binding is settled (`released` or
+`completed`), initializers are resolved, and the journal has no pending effect.
+Recovery rechecks owner death, boot, incarnation, selected receipt and resource
+inventories under its lease. Unsettled bindings, uncertain owners, corrupt or
+partial journals and changed identities still refuse by name; they grant no
+cleanup authority.
+
+For authored projects, plain `down` and `down --recover` use the same recovery
+proof when the frontend never saved Ready. A saved start and source envelope,
+an absent Ready mapping, an exact dead admission owner (or a freshly held
+admission), and a settled native receipt are required. Runtime Ready, failed,
+and cleanup phases may be selected; `preparing`, pending writes and uncertain
+resource effects refuse. Never-created resources must have no ID and must be
+proved absent by exact name and labels before cleanup marks them removed.
+Existing host-process and hook records require proof of settlement; recovery
+does not signal saved PIDs. The original receipt and resource identities stay
+fixed, cleanup progress only advances, and files retire only after authenticated
+Removed with null observations. A version 3 frontend intent keeps incomplete
+recovery blocking startup, including the gap between admission release and
+completion. Graph2 and fully enrolled Graph4 receipts are supported; source and
+topology recovery remain outside this proof. Nothing recompiles or replays startup.
+
+Failure evidence is retained by startup and effectful verification, and by owned
+cleanup for listeners that exited before cleanup stops them. The first recorded
+failure wins. Cleanup captures in memory and includes it in the required cleanup
+journal commit, so an extra diagnostic write cannot obstruct stopping. Settling
+an exited listener may add up to ten seconds per inspected listener to cleanup.
+Incomplete-rebind cleanup does not capture new listener-exit evidence; restore
+cleanup admits no listener children. Status reports live classifications but
+never writes them. If an owner crashes after a post-ready listener exit and
+before cleanup, dead-owner recovery can observe container state but cannot
+reconstruct that host child's exit. This was also unguaranteed when recording
+depended on an incidental `ps` call.
+
+HACK-2110 live acceptance remains a lead-owned Mac check: poll `ps` every 0.5 s
+across ten starts, require all starts and polls to succeed, and verify plain
+`down` after an injected post-service startup failure. Also poll project A while
+project B starts in the same pool. Portable tests and the interleaving model do
+not qualify that VM behavior.
 
 For a fully ready graph whose foreground owner died while its pool remains on the
 same boot, `graph recover-live-owner --run-id RUN --expect-receipt SHA256` selects

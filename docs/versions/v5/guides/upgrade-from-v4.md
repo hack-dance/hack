@@ -420,19 +420,20 @@ entries.
    - Afterwards Doctor lists the retired file as information, and the project
      check no longer fails.
 
-For example, after those key and project checks, use the selected candidate:
+For example, after those key and project checks, use the selected candidate
+with the same Compose home as the Doctor finding:
 
 ```sh
-"$V5" secrets retire-store --path /absolute/project --allow-unchecked
+HACK_RUNTIME_BACKEND=compose "$V5" secrets retire-store --path /absolute/project --allow-unchecked
 ```
 
 Review the store path in the confirmation prompt. Retirement keeps the encrypted
 entries for recovery; it does not make them readable with a replacement key.
 It is separate from migration cleanup and is not available in next.16.
 
-Sources: [Doctor's store finding](https://github.com/hack-dance/hack/blob/91c311e4d9/src/lib/doctor-secret-integrity.ts),
-[retirement command and confirmation](https://github.com/hack-dance/hack/blob/91c311e4d9/src/commands/secrets.ts),
-[retirement checks](https://github.com/hack-dance/hack/blob/91c311e4d9/src/lib/secret-store-retire.ts).
+Sources: [Doctor's store finding](https://github.com/hack-dance/hack/blob/91c311e4d9540ea3ca32113a61458a26db90c704/src/lib/doctor-secret-integrity.ts),
+[retirement command and confirmation](https://github.com/hack-dance/hack/blob/91c311e4d9540ea3ca32113a61458a26db90c704/src/commands/secrets.ts),
+[retirement checks](https://github.com/hack-dance/hack/blob/91c311e4d9540ea3ca32113a61458a26db90c704/src/lib/secret-store-retire.ts).
 
 Sources for next.16 behavior: [env list and get](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/commands/env.ts),
 [project key checks](https://github.com/hack-dance/hack/blob/b21c3b189841c1a3cbb8af2b76414fa347dc7057/src/lib/doctor-env-key.ts).

@@ -520,6 +520,50 @@ export async function classifyEncryptedStoreAt(input: {
 }
 
 /**
+ * Whether the key in the file at `keyPath` alone opens the store at
+ * `storePath` (HACK-2177): the key file is read directly, without the
+ * `HACK_SECRETS_FILE_KEY` override or the keychain, so a wrong override in
+ * the calling shell cannot hide a key file that works. `unknown` when the
+ * key file or the store exists but cannot be read; an absent or empty key
+ * file opens nothing.
+ */
+export async function keyFileOpensStore(input: {
+  readonly storePath: string;
+  readonly keyPath: string;
+}): Promise<"opens" | "does_not_open" | "unknown"> {
+  const store = await readEncryptedStoreText(input.storePath);
+  if (store.kind !== "text" || store.text.length === 0) {
+    return store.kind === "absent" ? "does_not_open" : "unknown";
+  }
+  let key: string;
+  try {
+    key =
+      (
+        await readReplaceablePrivateFile({
+          path: input.keyPath,
+          directories: [],
+          refusal: () => new Error("not a regular key file"),
+        })
+      )?.text.trim() ?? "";
+  } catch {
+    return "unknown";
+  }
+  if (key.length === 0) {
+    return "does_not_open";
+  }
+  try {
+    decryptEncryptedEntriesText({
+      filePath: input.storePath,
+      text: store.text,
+      encryptionKey: key,
+    });
+    return "opens";
+  } catch {
+    return "does_not_open";
+  }
+}
+
+/**
  * Whether the file at `storePath` is a Hack encrypted secret store: a
  * regular file (read without following a link) holding the store's JSON
  * envelope. Nothing is decrypted. A configured store path is project

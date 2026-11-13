@@ -1239,9 +1239,44 @@ test("a store another registered project's key still opens is not retired", asyn
     projectDir: fixture.bystander.projectDir,
   });
   expect(outcome.kind === "refused" ? outcome.message : "").toContain(
-    "still opens with another registered project's key (app-a)"
+    "still opens with a configured key file (app-a)"
   );
   expect(await readFile(fixture.storePath)).toEqual(before);
+
+  // A wrong HACK_SECRETS_FILE_KEY in this shell does not hide app-a's key
+  // file: key files are read directly, not through the override.
+  process.env.HACK_SECRETS_FILE_KEY = "synthetic-wrong-override";
+  try {
+    const masked = await retireSecretStore({
+      projectDir: fixture.bystander.projectDir,
+    });
+    expect(masked.kind === "refused" ? masked.message : "").toContain(
+      "still opens with a configured key file (app-a)"
+    );
+  } finally {
+    Reflect.deleteProperty(process.env, "HACK_SECRETS_FILE_KEY");
+  }
+  expect(await readFile(fixture.storePath)).toEqual(before);
+
+  // app-a's key file cannot be read: not tested, so --allow-unchecked is
+  // needed rather than taking it as "does not open".
+  if (process.getuid?.() !== 0) {
+    await chmod(appAKey, 0o000);
+    try {
+      const unknown = await retireSecretStore({
+        projectDir: fixture.bystander.projectDir,
+      });
+      expect(unknown.kind === "refused" ? unknown.message : "").toContain(
+        "configured key file(s)"
+      );
+      expect(unknown.kind === "refused" ? unknown.message : "").toContain(
+        "--allow-unchecked"
+      );
+    } finally {
+      await chmod(appAKey, 0o600);
+    }
+    expect(await readFile(fixture.storePath)).toEqual(before);
+  }
 });
 
 test("retire refuses when registered projects could not be checked, unless --allow-unchecked", async () => {

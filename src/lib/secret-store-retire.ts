@@ -13,6 +13,7 @@ import {
 import {
   classifyEncryptedStoreAt,
   isEncryptedStoreFile,
+  keyFileOpensStore,
   resolveFileSecretStorePaths,
   retireEncryptedStoreFile,
   SecretStoreRetireError,
@@ -214,32 +215,38 @@ async function otherOpenersRefusal(input: {
 }): Promise<string | null> {
   const found = await storeContexts({ storePath: input.canonical });
   const openers: string[] = [];
-  const otherKeys = new Map<string, string[]>();
+  // Every key file that selects this store, this project's own included,
+  // read directly (no HACK_SECRETS_FILE_KEY override, no keychain), so a
+  // wrong override in this shell cannot hide a key file that works.
+  const keyFiles = new Map<string, string[]>([[resolve(input.keyPath), []]]);
   for (const context of found.contexts) {
-    if (resolve(context.keyPath) !== resolve(input.keyPath)) {
-      otherKeys.set(context.keyPath, [
-        ...(otherKeys.get(context.keyPath) ?? []),
-        context.name,
-      ]);
-    }
+    const keyPath = resolve(context.keyPath);
+    keyFiles.set(keyPath, [...(keyFiles.get(keyPath) ?? []), context.name]);
   }
-  for (const [keyPath, names] of otherKeys) {
-    const state = await classifyEncryptedStoreAt({
+  let unknownKeys = 0;
+  for (const [keyPath, names] of keyFiles) {
+    const state = await keyFileOpensStore({
       storePath: input.canonical,
       keyPath,
     });
-    if (state.kind === "opens") {
-      openers.push(...names);
+    if (state === "opens") {
+      openers.push(...(names.length > 0 ? names : [`its key file ${keyPath}`]));
+    } else if (state === "unknown") {
+      // A key file that cannot be read was not tested: not "does not open".
+      unknownKeys += 1;
     }
   }
   if (openers.length > 0) {
-    return `The encrypted secret store at ${input.canonical} still opens with another registered project's key (${[...new Set(openers)].sort().join(", ")}), so it is not retired; nothing was moved. Fix this project's key configuration instead.`;
+    return `The encrypted secret store at ${input.canonical} still opens with a configured key file (${[...new Set(openers)].sort().join(", ")}), so it is not retired; nothing was moved. Check HACK_SECRETS_FILE_KEY and this project's key configuration instead.`;
   }
   if (input.allowUnchecked) {
     return null;
   }
   if (!found.registryRead) {
     return `The projects registry could not be read or is not valid, so whether another project still opens ${input.canonical} is unknown; nothing was moved. Fix the registry, or pass --allow-unchecked to retire it anyway.`;
+  }
+  if (unknownKeys > 0) {
+    return `${unknownKeys} configured key file(s) for ${input.canonical} could not be read, so whether one still opens it is unknown; nothing was moved. Fix their permissions and run hack doctor, or pass --allow-unchecked to retire it anyway.`;
   }
   if (found.unchecked > 0) {
     return `${found.unchecked} registered project(s) could not be checked (not available, or their Hack config or store file could not be read), so whether one still opens ${input.canonical} is unknown; nothing was moved. Run hack doctor to see them, or pass --allow-unchecked to retire it anyway.`;

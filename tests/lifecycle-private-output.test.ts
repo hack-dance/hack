@@ -140,30 +140,33 @@ describe("lifecycle log", () => {
     expect(await readFile(outside, "utf8")).toBe("");
   });
 
-  test("a persistent command's output passes through a private FIFO that is removed afterwards", async () => {
-    const tmp = join(root, "tmp");
-    await mkdir(tmp);
-    const logPath = join(root, "lifecycle.log");
-    await appendPrivateFile({ path: logPath, data: "" });
-    const script = wrapLifecyclePersistentCommand({
-      // The command reports the mode of its own stdout (the FIFO) and of the
-      // FIFO's directory.
-      command:
-        'f="$(readlink /proc/$$/fd/1)"; stat -c %a "$f"; stat -c %a "$(dirname "$f")"',
-      commandPidPath: null,
-      logPath,
-      serviceName: "api",
-    });
-    const run = Bun.spawnSync(["sh", "-c", script], {
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", TMPDIR: tmp },
-    });
-    expect(run.exitCode).toBe(0);
-    expect(run.stdout.toString().trim().split("\n")).toEqual(["600", "700"]);
-    expect(await readdir(tmp)).toEqual([]);
-    const log = await readFile(logPath, "utf8");
-    expect(log).toContain("\tapi\tstdout\t600");
-    expect(await mode(logPath)).toBe(0o600);
-  });
+  test.skipIf(process.platform !== "linux")(
+    "a persistent command's output passes through a private FIFO that is removed afterwards",
+    async () => {
+      const tmp = join(root, "tmp");
+      await mkdir(tmp);
+      const logPath = join(root, "lifecycle.log");
+      await appendPrivateFile({ path: logPath, data: "" });
+      const script = wrapLifecyclePersistentCommand({
+        // The command reports the mode of its own stdout (the FIFO) and of the
+        // FIFO's directory.
+        command:
+          'f="$(readlink /proc/$$/fd/1)"; stat -c %a "$f"; stat -c %a "$(dirname "$f")"',
+        commandPidPath: null,
+        logPath,
+        serviceName: "api",
+      });
+      const run = Bun.spawnSync(["sh", "-c", script], {
+        env: { PATH: process.env.PATH ?? "/usr/bin:/bin", TMPDIR: tmp },
+      });
+      expect(run.exitCode).toBe(0);
+      expect(run.stdout.toString().trim().split("\n")).toEqual(["600", "700"]);
+      expect(await readdir(tmp)).toEqual([]);
+      const log = await readFile(logPath, "utf8");
+      expect(log).toContain("\tapi\tstdout\t600");
+      expect(await mode(logPath)).toBe(0o600);
+    }
+  );
 
   test("a persistent command is not run when its private FIFO cannot be created", async () => {
     const marker = join(root, "ran");
@@ -181,6 +184,10 @@ describe("lifecycle log", () => {
     });
     expect(run.exitCode).not.toBe(0);
     expect(await lstat(marker).catch(() => null)).toBeNull();
+    // The refusal is recorded in the log, since the pane closes unseen.
+    expect(await readFile(join(root, "lifecycle.log"), "utf8")).toContain(
+      "\tapi\tmeta\t[refused] could not create a private temporary directory"
+    );
   });
 });
 

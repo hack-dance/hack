@@ -11,6 +11,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { ClosedCliError } from "./cli-result.ts";
 import { publishFileExclusive } from "./exclusive-publish.ts";
 import { closedFileWriteError } from "./fs.ts";
 import { isRecord } from "./guards.ts";
@@ -547,7 +548,7 @@ export function decodeCanonicalBase64(opts: {
  * another owner, or more than one hard link. The message names the path
  * only; contents are never read.
  */
-export class PrivatePathRefusedError extends Error {
+export class PrivatePathRefusedError extends ClosedCliError {
   readonly path: string;
 
   constructor(path: string, reason: string) {

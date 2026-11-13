@@ -949,11 +949,12 @@ async function startLifecycleProcess(opts: {
     projectDir: opts.projectDir,
     composeProject: opts.composeProject,
   });
+  // The session's shell appends to this log on every backend: it must
+  // already exist as a private file (the pid file lives in the same private
+  // directory).
+  await ensurePrivateLifecycleLog({ root: dirname(logPath), logPath });
   if (opts.backend === "tmux") {
     const commandPidPath = `${logPath}.${windowName}.pid`;
-    // The session's shell appends to this log: it must already exist as a
-    // private file (the pid file lives in the same private directory).
-    await ensurePrivateLifecycleLog({ root: dirname(logPath), logPath });
     await rm(commandPidPath, { force: true });
     const wrappedCommand = wrapLifecyclePersistentCommand({
       command: opts.process.command,
@@ -1354,9 +1355,15 @@ export function wrapLifecyclePersistentCommand(opts: {
     // privately (mktemp -d makes it 0700), never a reserved name in the
     // shared temp dir; any failure stops before the command runs. The
     // command's own umask is left as it was.
-    `fifo_dir="$(mktemp -d "\${TMPDIR:-/tmp}/hack-lifecycle.XXXXXX")" || exit 1`,
+    // A refusal is recorded in the (already private) log, since the pane
+    // closes before anyone reads its stderr.
+    "lifecycle_refused() {",
+    `  printf '%s\\t%s\\tmeta\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HACK_LIFECYCLE_SERVICE" "[refused] $1; the process was not started" >> "$HACK_LIFECYCLE_LOG"`,
+    "  exit 1",
+    "}",
+    `fifo_dir="$(mktemp -d "\${TMPDIR:-/tmp}/hack-lifecycle.XXXXXX")" || lifecycle_refused "could not create a private temporary directory"`,
     'fifo="$fifo_dir/output"',
-    'mkfifo -m 600 "$fifo" || { rmdir "$fifo_dir"; exit 1; }',
+    'mkfifo -m 600 "$fifo" || { rmdir "$fifo_dir"; lifecycle_refused "could not create the output FIFO"; }',
     "cleanup_lifecycle() {",
     "  trap - EXIT INT TERM HUP",
     `  if [ -n "\${cmd_pid:-}" ]; then`,

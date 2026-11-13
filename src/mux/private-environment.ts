@@ -21,6 +21,9 @@ const MAX_BYTES = 1024 * 1024;
  * the values on disk. Generous, because a busy pane runs sent keys late.
  */
 export const MUX_ENVIRONMENT_TTL_MS = 10 * 60 * 1000;
+// The sweep ages a payload by its directory's mtime, the consumer by the
+// file's: both are set within moments of each other at staging. A payload
+// whose mtime is in the future (clock skew) never counts as expired.
 
 /**
  * Remove this user's staged payloads older than the TTL from `parent`

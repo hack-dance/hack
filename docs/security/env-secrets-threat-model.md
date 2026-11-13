@@ -160,7 +160,10 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    older broad modes are tightened before appending) and persistent output passes through a
    0600 FIFO in a private `mktemp -d` directory. Staged terminal-multiplexer environments
    (`$TMPDIR/hack-mux-env-*/env.json`, 0600 in a 0700 directory) are refused after 10 minutes
-   and removed by the next staging if no session ran them. Other generated files under
+   and removed by the next staging if no session ran them. Remaining gaps: a persistent
+   session's shell appends with `>>`, so a same-user process that replaces the log during
+   the session can redirect or recreate it (the next Hack record tightens it again), and
+   ancestors of `.hack/.internal/` are not checked for other writers. Other generated files under
    `.hack/.internal/` and `.hack/.branch/` are written with the process umask; the scan shows
    they hold no values today.
 5. **YAML env layer TOCTOU (narrowed, HACK-1685).** Base and overlay YAML layers,

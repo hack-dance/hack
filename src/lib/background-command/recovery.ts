@@ -385,9 +385,12 @@ export async function cutUnscannedOutput(opts: {
   readonly events: readonly EventEnvelope[];
   readonly writer: JournalWriter;
 }): Promise<boolean> {
-  // The durable record comes first: if the event below cannot be written
-  // (full disk) or the process dies after the cut, a later takeover still
-  // reports the capture as truncated.
+  // The marker comes first: if the event below cannot be written (full
+  // disk) or the process is interrupted after the cut, a later takeover
+  // still finds it, publishes the event and reports the capture truncated.
+  // Program order only: the marker, the cut and the directory are not
+  // fsynced, so this does not hold across power loss and is not a
+  // guarantee of durable erasure.
   const dropped = await dropUnscannedOutput({
     paths: opts.paths,
     events: opts.events,

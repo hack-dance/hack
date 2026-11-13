@@ -31,22 +31,28 @@ integration/full tiers. Unit-test preflight still prepares its matching compiler
 
 PRs use the light tier by default: selected Linux unit files, static checks,
 secret scan and relevant docs checks. No macOS, Docker E2E, native compiler/
-candidate qualification, state-model job or build smoke runs, regardless of paths
-changed. Shard 8 lists selected macOS files as **deferred to the integration run**
-before typecheck. A green PR `test` check qualifies Linux only; those macOS files
-run nowhere on that PR.
+candidate qualification, state-model job or build smoke runs on a light PR.
+Ready PRs changing protected CI inputs (workflows, scripts, selectors, suite
+helpers, manifests or lockfiles) automatically run full ordinary PR tiers.
+Ready PRs into `main` retain the full tier, including Intel. Missing/empty diffs
+or an unavailable base policy also fall back to full tiers. On light runs, shard 8
+lists selected macOS files as **deferred to the integration run** before typecheck.
+A green light-PR `test` check qualifies Linux only; those macOS files run nowhere
+on that PR.
 
 Add `ci:mac` to opt into selected macOS/native jobs, or `ci:e2e` to opt into the
 Docker/runtime-image/lifetime tier under their usual input gates. Labels combine.
 `ci:full` selects every unit file and every ordinary native/Docker tier, state
-models and build smoke. Intel compiler qualification remains on `main` pushes and
-explicit release-full dispatches. Drafts keep the light deferrals even when
+models and build smoke. Ordinary `next` runs and PRs into `next` omit the Intel
+compiler; `main` PRs/pushes and explicit release-full dispatches retain it.
+Drafts keep the light deferrals even when
 labeled and both `test` and `docker-e2e` fail with `skipped: draft`. Marking ready or
 changing a tier label recomputes scope.
 
 The unit selector follows import dependencies plus its conservative always-run
-set. Unknown/protected inputs and unavailable diffs widen the selected file set,
-without opting PRs into expensive tiers. Light files retain their platform pools;
+set. Selector uncertainty widens the selected file set within the chosen tier;
+the independent protected-input/diff guard also enables full tiers on ready PRs.
+Light files retain their platform pools;
 they are not redistributed from macOS onto Linux. See
 [selection and deferral rules](../../docs/reference/ci-test-selection.md).
 
@@ -77,7 +83,9 @@ then dispatch the prerelease. Both gates require executed `selection_mode=full` 
 four Docker shards and all four compiler hosts) and every observed job successful,
 without skips. Required CI check IDs must belong to that run's suite and latest
 attempt jobs. Newer failed/cancelled/unfinished evidence cannot expose an older
-green run. Missing full evidence prints the dispatch recipe. Stable release
+green run. Missing full evidence prints the dispatch recipe. A blocking scoped
+push at the same SHA also prints wait/rerun guidance with its run ID. An older
+full run cannot supersede it; a new successful full dispatch can. Stable release
 preparation remains exact-main-head push-only. PR checks and selected integration
 checks alone cannot qualify a release; see the
 [prerelease runbook](../../docs/guides/prereleases.md).

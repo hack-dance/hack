@@ -1,6 +1,9 @@
 flowchart TD
   event{CI event}
-  event -->|PR| pr[Light or labeled tiers]
+  event -->|Ready PR| guard{Main or protected inputs?}
+  guard -->|No| pr[Light or labeled tiers]
+  guard -->|Yes or unavailable policy| heavy[Full ready-PR tiers]
+  heavy --> linux
   pr --> linux[Linux checks and deferral report]
   linux --> ready[Lead readiness]
   event -->|Next push| integration[Selected or full platform and Docker jobs]

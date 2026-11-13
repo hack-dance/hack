@@ -1,6 +1,34 @@
 const std = @import("std");
 const allocator = std.heap.page_allocator;
 
+// Closed wire types avoid bringing a general-purpose JSON number converter into
+// the bounded publication artifact. Zig's ordinary integer/string parsers also
+// accept coercions (quoted numbers and byte arrays) which this protocol refuses.
+const String = struct {
+    bytes: []const u8,
+    pub fn jsonParse(alloc: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        return .{ .bytes = switch (try source.nextAllocMax(alloc, options.allocate.?, options.max_value_len.?)) {
+            .string, .allocated_string => |bytes| bytes,
+            else => return error.UnexpectedToken,
+        } };
+    }
+};
+const Values = std.json.ArrayHashMap(String);
+const Integer = struct {
+    value: i64,
+    pub fn jsonParse(alloc: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const token = try source.nextAllocMax(alloc, .alloc_if_needed, options.max_value_len.?);
+        const text = switch (token) {
+            .number => |text| text,
+            .allocated_number => |text| text,
+            else => return error.UnexpectedToken,
+        };
+        defer if (token == .allocated_number) alloc.free(text);
+        return .{ .value = try std.fmt.parseInt(i64, text, 10) };
+    }
+};
+const Fresh = struct { version: Integer, expires: Integer, values: Values };
+
 fn privateFile(path: []const u8, max: usize) ![]u8 {
     const fd = try std.posix.open(path, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true }, 0);
     const file = std.fs.File{ .handle = fd };
@@ -23,19 +51,15 @@ fn bootSeconds() !u64 {
     if (now.sec < 0) return error.Expired;
     return @intCast(now.sec);
 }
-fn freshValues(value: std.json.Value, started: u64, now: u64) !std.json.ObjectMap {
-    if (value != .object or value.object.count() != 3) return error.Payload;
-    const version = value.object.get("version") orelse return error.Payload;
-    const expires = value.object.get("expires") orelse return error.Payload;
-    const values = value.object.get("values") orelse return error.Payload;
-    if (version != .integer or version.integer != 1 or expires != .integer or expires.integer <= 0 or values != .object or values.object.count() == 0 or values.object.count() > 256) return error.Payload;
-    const deadline: u64 = @intCast(expires.integer);
+fn freshValues(value: Fresh, started: u64, now: u64) !std.StringArrayHashMapUnmanaged(String) {
+    if (value.version.value != 1 or value.expires.value <= 0 or value.values.map.count() == 0 or value.values.map.count() > 256) return error.Payload;
+    const deadline: u64 = @intCast(value.expires.value);
     if (deadline > (std.math.add(u64, started, 300) catch return error.Expired) or now >= deadline) return error.Expired;
-    var entries = values.object.iterator();
+    var entries = value.values.map.iterator();
     while (entries.next()) |entry| {
-        if (!keyValid(entry.key_ptr.*) or entry.value_ptr.* != .string or std.mem.indexOfScalar(u8, entry.value_ptr.string, 0) != null) return error.Payload;
+        if (!keyValid(entry.key_ptr.*) or std.mem.indexOfScalar(u8, entry.value_ptr.bytes, 0) != null) return error.Payload;
     }
-    return values.object;
+    return value.values.map;
 }
 /// Exec the selected process in this container after applying its environment,
 /// as Docker does: a name containing `/` is executed as given (relative to the
@@ -95,14 +119,14 @@ fn freshExec(args: []const [:0]u8) !void {
         used += n;
         if (used > 65536) return error.Payload;
     }
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input[0..used], .{ .duplicate_field_behavior = .@"error" });
+    const parsed = try std.json.parseFromSlice(Fresh, allocator, input[0..used], .{ .duplicate_field_behavior = .@"error" });
     defer parsed.deinit();
     const values = try freshValues(parsed.value, started, try bootSeconds());
     var env = try std.process.getEnvMap(allocator);
     var entries = values.iterator();
     while (entries.next()) |entry| {
-        if (!keyValid(entry.key_ptr.*) or entry.value_ptr.* != .string or std.mem.indexOfScalar(u8, entry.value_ptr.string, 0) != null) return error.Payload;
-        try env.put(entry.key_ptr.*, entry.value_ptr.string);
+        if (!keyValid(entry.key_ptr.*) or std.mem.indexOfScalar(u8, entry.value_ptr.bytes, 0) != null) return error.Payload;
+        try env.put(entry.key_ptr.*, entry.value_ptr.bytes);
     }
     _ = try freshValues(parsed.value, started, try bootSeconds());
     // stdin was fully consumed to EOF; the command receives no secret input bytes.
@@ -201,13 +225,13 @@ fn interactiveEnvelope(started: u64) !std.process.EnvMap {
         allocator.free(storage);
     }
     var fixed = std.heap.FixedBufferAllocator.init(storage);
-    const parsed = try std.json.parseFromSlice(std.json.Value, fixed.allocator(), decoded[0..decoded_length], .{ .duplicate_field_behavior = .@"error" });
+    const parsed = try std.json.parseFromSlice(Fresh, fixed.allocator(), decoded[0..decoded_length], .{ .duplicate_field_behavior = .@"error" });
     defer parsed.deinit();
     const values = try freshValues(parsed.value, started, try bootSeconds());
     var env = try std.process.getEnvMap(allocator);
     errdefer env.deinit();
     var entries = values.iterator();
-    while (entries.next()) |entry| try env.put(entry.key_ptr.*, entry.value_ptr.string);
+    while (entries.next()) |entry| try env.put(entry.key_ptr.*, entry.value_ptr.bytes);
     // The host is still gating keystrokes. Pending bytes mean a bad envelope,
     // not command input; never restore echo over them.
     var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
@@ -234,13 +258,13 @@ fn run() !void {
     const payload = try privateFile(args[1], 32768);
     const expiry = try privateFile(args[2], 32);
     const deadline = try std.fmt.parseInt(u64, expiry, 10);
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{ .duplicate_field_behavior = .@"error" });
-    if (parsed.value != .object or parsed.value.object.count() == 0 or parsed.value.object.count() > 256) return error.Payload;
+    const parsed = try std.json.parseFromSlice(Values, allocator, payload, .{ .duplicate_field_behavior = .@"error" });
+    if (parsed.value.map.count() == 0 or parsed.value.map.count() > 256) return error.Payload;
     var env = try std.process.getEnvMap(allocator);
-    var entries = parsed.value.object.iterator();
+    var entries = parsed.value.map.iterator();
     while (entries.next()) |entry| {
-        if (!keyValid(entry.key_ptr.*) or entry.value_ptr.* != .string or std.mem.indexOfScalar(u8, entry.value_ptr.string, 0) != null) return error.Payload;
-        try env.put(entry.key_ptr.*, entry.value_ptr.string);
+        if (!keyValid(entry.key_ptr.*) or std.mem.indexOfScalar(u8, entry.value_ptr.bytes, 0) != null) return error.Payload;
+        try env.put(entry.key_ptr.*, entry.value_ptr.bytes);
     }
     const now = try std.posix.clock_gettime(.BOOTTIME);
     if (now.sec < 0 or @as(u64, @intCast(now.sec)) >= deadline) return error.Expired;
@@ -264,7 +288,10 @@ test "fresh envelope refuses expired invalid and extra fields" {
         "{\"version\":1,\"expires\":130,\"values\":{},\"extra\":true}",
     };
     for (fixtures, 0..) |fixture, i| {
-        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, fixture, .{ .duplicate_field_behavior = .@"error" });
+        const parsed = std.json.parseFromSlice(Fresh, std.testing.allocator, fixture, .{ .duplicate_field_behavior = .@"error" }) catch |err| {
+            if (i == 0) return err;
+            continue;
+        };
         defer parsed.deinit();
         if (i == 0) {
             _ = try freshValues(parsed.value, 100, 101);
@@ -272,4 +299,53 @@ test "fresh envelope refuses expired invalid and extra fields" {
             if (freshValues(parsed.value, 100, 101)) |_| return error.ExpectedRefusal else |_| {}
         }
     }
+}
+
+test "wire schema refuses numeric coercions duplicate fields and non-string values" {
+    const bad_numbers = [_][]const u8{ "\"1\"", "1.0", "1e0", "true", "null", "9223372036854775808", "-9223372036854775809" };
+    for (bad_numbers) |number| {
+        for ([_][]const u8{ "version", "expires" }) |field| {
+            const other = if (std.mem.eql(u8, field, "version")) "\"expires\":130" else "\"version\":1";
+            const input = try std.fmt.allocPrint(std.testing.allocator, "{{\"{s}\":{s},{s},\"values\":{{\"TOKEN\":\"synthetic\"}}}}", .{ field, number, other });
+            defer std.testing.allocator.free(input);
+            if (std.json.parseFromSlice(Fresh, std.testing.allocator, input, .{ .duplicate_field_behavior = .@"error" })) |parsed| {
+                parsed.deinit();
+                return error.ExpectedRefusal;
+            } else |_| {}
+        }
+    }
+    for ([_][]const u8{
+        "{\"TOKEN\":[97]}",                           "{\"TOKEN\":{}}", "{\"TOKEN\":null}",
+        "{\"TOKEN\":true}",                           "{\"TOKEN\":1}",  "{\"TOKEN\":1.0}",
+        "{\"TOKEN\":\"first\",\"TOKEN\":\"second\"}", "[]",
+    }) |input| {
+        if (std.json.parseFromSlice(Values, std.testing.allocator, input, .{ .duplicate_field_behavior = .@"error" })) |parsed| {
+            parsed.deinit();
+            return error.ExpectedRefusal;
+        } else |_| {}
+    }
+    for ([_][]const u8{
+        "{\"version\":1,\"version\":1,\"expires\":130,\"values\":{\"TOKEN\":\"synthetic\"}}",
+        "{\"version\":1,\"expires\":130,\"values\":{\"TOKEN\":\"synthetic\"},\"extra\":0}",
+        "{\"version\":1,\"values\":{\"TOKEN\":\"synthetic\"}}",
+    }) |input| {
+        if (std.json.parseFromSlice(Fresh, std.testing.allocator, input, .{ .duplicate_field_behavior = .@"error" })) |parsed| {
+            parsed.deinit();
+            return error.ExpectedRefusal;
+        } else |_| {}
+    }
+}
+
+test "mounted and fresh schemas preserve empty escaped and unicode strings" {
+    const values = "{\"EMPTY\":\"\",\"TOKEN\":\"synthetic\\n\\u0010\\u0011\\u00e9\"}";
+    const expected = "synthetic\n\x10\x11\xc3\xa9";
+    const mounted = try std.json.parseFromSlice(Values, std.testing.allocator, values, .{ .duplicate_field_behavior = .@"error" });
+    defer mounted.deinit();
+    try std.testing.expectEqualStrings("", mounted.value.map.get("EMPTY").?.bytes);
+    try std.testing.expectEqualStrings(expected, mounted.value.map.get("TOKEN").?.bytes);
+    const fresh = try std.json.parseFromSlice(Fresh, std.testing.allocator, "{\"version\":1,\"expires\":130,\"values\":" ++ values ++ "}", .{ .duplicate_field_behavior = .@"error" });
+    defer fresh.deinit();
+    const checked = try freshValues(fresh.value, 100, 101);
+    try std.testing.expectEqualStrings("", checked.get("EMPTY").?.bytes);
+    try std.testing.expectEqualStrings(expected, checked.get("TOKEN").?.bytes);
 }

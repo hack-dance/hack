@@ -318,6 +318,7 @@ jobs:
           set -euo pipefail
           test "$(zig version)" = '0.15.2'
           command -v python3
+          zig test packages/runtime-core/guest/environment-launcher.zig
           zig build-exe packages/runtime-core/guest/environment-launcher.zig -target x86_64-linux-musl -O ReleaseSmall -femit-bin="$RUNNER_TEMP/interactive-environment-launcher"
           python3 tests/fixtures/environment-launcher-tty.py "$RUNNER_TEMP/interactive-environment-launcher"
       - name: Check candidate formatting

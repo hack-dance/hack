@@ -27,6 +27,7 @@ import {
 import { inspectUpgradeProject } from "../src/lib/upgrade-check-project.ts";
 import { collectUpgradeSnapshotTargets } from "../src/lib/upgrade-snapshot-targets.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { fixtureGitEnv } from "./helpers/fixture-git.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 // Values that must never appear in any report, plan or output.
@@ -412,15 +413,7 @@ test("tracked machine-local files and a missing .hack/.gitignore are steps, a tr
   const project = await liveProject("app-git");
   const git = (args: string[]) =>
     Bun.spawnSync(["git", "-C", project.repoRoot, ...args], {
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: home,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_AUTHOR_NAME: "t",
-        GIT_AUTHOR_EMAIL: "t@example.invalid",
-        GIT_COMMITTER_NAME: "t",
-        GIT_COMMITTER_EMAIL: "t@example.invalid",
-      },
+      env: fixtureGitEnv({ env: { HOME: home } }),
     });
   git(["init", "-q"]);
   await writeFile(join(project.projectDir, ".env"), `TOKEN=${SENTINEL}\n`);
@@ -567,15 +560,7 @@ test("the global key is audited with the runtime's rules, not only by decrypting
   await chmod(trackedKey, 0o600);
   const git = (args: string[]) =>
     Bun.spawnSync(["git", "-C", repo, ...args], {
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: home,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_AUTHOR_NAME: "t",
-        GIT_AUTHOR_EMAIL: "t@example.invalid",
-        GIT_COMMITTER_NAME: "t",
-        GIT_COMMITTER_EMAIL: "t@example.invalid",
-      },
+      env: fixtureGitEnv({ env: { HOME: home } }),
     });
   git(["init", "-q"]);
   git(["add", "-f", "secrets-file.key"]);

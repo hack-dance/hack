@@ -108,6 +108,80 @@ test("each Compose start refusal has a preflight entry", async () => {
   ).toEqual([]);
 });
 
+/** Select validator boundaries by their producers, rather than by error-code spelling. */
+function sourceRange(text: string, from: string, until: string): string {
+  const start = text.indexOf(from);
+  const end = text.indexOf(until, start);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return text.slice(start, end);
+}
+
+test("file-local producers match preflight entries exactly and acquired producers match the boundary list", async () => {
+  const sources = new Map<string, string>();
+  for (const path of ADMISSION_SOURCES) {
+    sources.set(
+      path,
+      productionSource(
+        await readFile(`packages/runtime-core/src/${path}`, "utf8")
+      )
+    );
+  }
+  const fileSources = [
+    sourceRange(
+      sources.get("provider/graph/config.rs") ?? "",
+      "fn unsupported()",
+      "pub(super) fn prepare_delivery("
+    ),
+    sources.get("provider/graph/routes.rs") ?? "",
+    sourceRange(
+      sources.get("provider/graph/restart_policy.rs") ?? "",
+      "pub enum RestartPolicy",
+      "fn observed_name("
+    ),
+    sourceRange(
+      sources.get("project/execution.rs") ?? "",
+      "impl Graph {",
+      "fn inspect("
+    ),
+    sources.get("project/capabilities.rs") ?? "",
+    sourceRange(
+      sources.get("provider/http_probe.rs") ?? "",
+      "fn invalid()",
+      "    /// Samples must"
+    ),
+  ];
+  const fileCodes = new Set(fileSources.flatMap(refusalCodes));
+  expect([...fileCodes].sort()).toEqual(
+    Object.keys(NATIVE_START_REFUSAL_ENTRIES).sort()
+  );
+  const acquiredCodes = new Set(
+    [...sources.values()]
+      .flatMap(refusalCodes)
+      .filter((code) => !fileCodes.has(code))
+  );
+  expect([...acquiredCodes].sort()).toEqual(
+    Object.keys(NATIVE_START_RUNTIME_BOUNDARIES).sort()
+  );
+  // Both entry points must call the single collector. A new inline check in
+  // prepare_delivery also enters the inventory and cannot acquire a false entry.
+  const config = sources.get("provider/graph/config.rs") ?? "";
+  expect(
+    sourceRange(
+      config,
+      "pub(crate) fn compose_start_refusals(",
+      "fn validate_disposable_cache("
+    )
+  ).toContain("file_local_admission(");
+  expect(
+    sourceRange(
+      config,
+      "pub(super) fn prepare_delivery(",
+      "pub(super) fn network_config("
+    )
+  ).toContain("file_local_admission(");
+});
+
 test("the admission walk detects a new unregistered start refusal", () => {
   expect(
     missingEntries(

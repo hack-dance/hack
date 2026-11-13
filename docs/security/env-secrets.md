@@ -72,7 +72,13 @@ output. Existing local YAML modes are preserved, so check them explicitly. The g
 value (HACK-1273), and must also be private and ignored. The fixture checks value
 delivery to the exec'd command and the `docker compose` client; it does not
 prove arbitrary output or project-key environment overrides are contained. The
-per-service `HACK_ENV_*` values go only to `docker compose` invocations that read the
+`HACK_ENV_*` references share global values across services and keep distinct
+references for service-scoped overrides. Global values also reach Compose under
+their own names for interpolation. Hack checks the merged shell and managed
+environment before writing the override or launching Compose and refuses an
+oversized environment with `E_ENV_TOO_LARGE` and byte counts only
+(`src/lib/compose-managed-env.ts`, `src/lib/spawn-env-limit.ts`); see
+[Runtime behavior](../env.md#runtime-behavior). The reference values go only to `docker compose` invocations that read the
 override; the `docker inspect`, `logs` and `events` children Hack starts around Compose
 get the same environment without them.
 Its limits are listed in the threat model.

@@ -37,6 +37,8 @@ node code is listed under [open gaps](#open-gaps) so that it is not lost.
 | Local YAML layers | `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml` | May hold plaintext; these are local-only, not safe to commit. New local files use 0600; an existing file keeps its mode. |
 | Multiplexer input | `$TMPDIR/hack-mux-env-*/env.json` (the OS temp directory when TMPDIR is unset) | A private plaintext env payload, consumed and removed by the pane wrapper or owned cleanup; it exists on disk before that cleanup. |
 | Background command output | `<HACK_HOME>/commands/<id>/stdout` and `stderr` | Output can contain injected values. Redaction is partial and delayed; withholding a read does not erase disk bytes. |
+| Background command arguments | `<HACK_HOME>/commands/<id>/meta.json` and `launch.json` | Automatic env maps are omitted, but caller argv is retained, including with metadata-only capture. Expanded values in argv are not redacted. |
+| Lifecycle output | `.hack/.internal/lifecycle/<project>.log` and `${TMPDIR:-/tmp}/hack-lifecycle.*` FIFOs | Hooks and persistent processes can emit injected values. Log and FIFO privacy gaps remain open (HACK-2170). |
 | Decrypted values in flight | Process environments of the `docker compose` client, Compose containers, host commands, lifecycle processes and session shells; `.hack/.env` | The resolved plaintext, after decryption. `.hack/.internal/compose.env.override.yml` holds only `${HACK_ENV_...}` references (HACK-1273). |
 
 ## Where values travel
@@ -92,11 +94,11 @@ refer to `hack-dance/hack`.
 | --- | --- |
 | A repository's contract names a variable exported in the developer's shell, so the migration saves it to disk. | `migrateLegacyProjectEnv` refuses, naming the key only, when a `plain_env` value resolves from the process environment (HACK-1688). A value in a regular `.hack/.env` migrates to the gitignored machine-local layer, never a tracked one (HACK-1712). |
 | A repository plants `.hack.secret.key` as a symlink (dangling or not) so that Hack reads or writes a file it should not. | Key reads go through `readBoundedPrivateFile` (`lstat`, `O_NOFOLLOW`, descriptor and path identity checks, 1 MiB bound, fatal UTF-8). New keys are created with `createPrivateFileExclusive` (`O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, `fchmod`, `fsync`). Both are in `src/lib/private-file.ts`, used by `resolveProjectEnvKey`, `ensureProjectEnvSecretKey` and `resolveInheritedProjectEnvKey` in `src/lib/project-env-config.ts` (#288). |
-| A symlinked `.hack/.env`, overlay file or `.hack` directory redirects a write, or a reader sees a partial file. | `src/lib/private-env-file.ts` (`readPrivateEnvFile`, `writePrivateEnvFileIfChanged`) and `replacePrivateFileAtomic` in `src/lib/private-file.ts`: a private sibling is written and fsynced, then renamed over the target; symlinks and non-regular entries are refused with one fixed message (#302). Used by `src/lib/hack-env.ts` and `materializeProjectEnv`. |
+| A symlinked `.hack/.env`, overlay file or `.hack` directory redirects a write, or a reader sees a partial file. | `src/lib/private-env-file.ts` (`readPrivateEnvFile`, `writePrivateEnvFileIfChanged`) and `replacePrivateFileAtomic` in `src/lib/private-file.ts`: a private sibling is written and fsynced, then renamed over the target; symlinks and non-regular entries are refused with one fixed message (#302). Used by mutation paths in `src/lib/hack-env.ts` and `materializeProjectEnv`. Legacy inspection still follows links through `readTextFile`; see gap 18. |
 | A world-readable env file or store. | `.hack/.env`, overlays and the `encrypted_file` store are written 0600, and a same-content file with group or other access is tightened (#302). The `hack doctor` env key check reports `env-key-weak-permissions` and `env-key-wrong-owner` (#309). |
-| The Compose backend leaves decrypted values at rest in `.hack/.internal/compose.env.override.yml` after `up`, `down`, a failed `up` or an interrupted one. | The override holds only `${HACK_ENV_<digest>_<KEY>}` references; each value reaches `docker compose` through its process environment, so no Compose command writes a value to disk, whatever way it ends (`renderComposeEnvReferenceOverride` in `src/lib/compose-managed-env.ts`). The file keeps its path because Compose records it in each container's `config_files` label. It is written with `replacePrivateFileAtomic` (mode 0600, symlink refused), and a literal value is refused before any write (`writeComposeEnvOverride` in `src/lib/compose-env-at-rest.ts`). A file left by an earlier version is replaced by the next Compose command that renders the override, removed by one that renders none and by `hack down` (before its hooks, remote target and Compose down, so none of them can skip it), and reported by the `hack doctor` "compose env at rest" check by counts only; `hack doctor --fix` removes it. Removal moves the file aside atomically and classifies what it moved, so a value-free file written concurrently is put back rather than deleted (the path is absent for that moment; see gap 4). An aside left by a crash between the move and the delete is reported by the doctor check by count and removed by a later removal, `hack doctor --fix` or a Compose command that renders the override, once it is more than a minute old. The doctor check, every removal and the aside sweep apply the writer's no-follow check to `.hack` and `.hack/.internal` first (and recheck them before each move or delete): a symlinked or non-directory `.hack` or `.hack/.internal`, or a symlinked or non-regular override, is a closed, value-free refusal, and nothing behind it is listed, read, moved or deleted (HACK-1316). Legacy adoption gives the reference values only to its Compose config-hash probe at preview and preparation; a saved recheck runs without values and binds each container's config-hash label to the hash proven at preparation. `hack config adopt` (with or without `--stop`) and its preview refuse a literal override before preparation, because an adoption pins the file's bytes and inode for its life. Recovery acts on an existing preparation, so the store refuses instead: publication (`--recover --stop`) and switch completion (`--recover`) refuse a generation bound to a literal override before any original moves, and name `hack config adopt --recover --rollback` (HACK-1318). Rollback stays allowed. While a prepared, active or pending adoption exists, no removal touches the file (removal would make the adoption unloadable); an adoption that an earlier version made over a literal file therefore keeps its values at rest until `hack config adopt --rollback`, and the doctor check names that next step (see gap 4). The per-service `HACK_ENV_*` values go only to `docker compose` invocations that read the override; the `docker inspect`, `logs` and `events` children for dependency cache progress and reuse get the environment without them (`withoutComposeEnvReferences`). Proven with a stub `docker` by `tests/compose-env-at-rest-cli.test.ts`, `tests/compose-env-at-rest.test.ts`, `tests/compose-env-reference-least-privilege.test.ts`, `tests/doctor-fix-noninteractive.test.ts`, `tests/native-compose-adoption-generation-managed.test.ts`, `tests/native-compose-adoption-generation-recovery.test.ts` and the sentinel scan `tests/env-secret-sentinel-scan.test.ts` (HACK-1273, HACK-1318). |
+| The Compose backend leaves decrypted values at rest in `.hack/.internal/compose.env.override.yml` after `up`, `down`, a failed `up` or an interrupted one. | The override holds only `${HACK_ENV_<digest>_<KEY>}` references; each value reaches `docker compose` through its process environment, so the generated override does not persist resolved values (command output can still contain them) (`renderComposeEnvReferenceOverride` in `src/lib/compose-managed-env.ts`). The file keeps its path because Compose records it in each container's `config_files` label. It is written with `replacePrivateFileAtomic` (mode 0600, symlink refused), and a literal value is refused before any write (`writeComposeEnvOverride` in `src/lib/compose-env-at-rest.ts`). A file left by an earlier version is replaced by the next Compose command that renders the override, removed by one that renders none and by `hack down` (before its hooks, remote target and Compose down, so none of them can skip it), and reported by the `hack doctor` "compose env at rest" check by counts only; `hack doctor --fix` removes it. Removal moves the file aside atomically and classifies what it moved, so a value-free file written concurrently is put back rather than deleted (the path is absent for that moment; see gap 4). An aside left by a crash between the move and the delete is reported by the doctor check by count and removed by a later removal, `hack doctor --fix` or a Compose command that renders the override, once it is more than a minute old. The doctor check, every removal and the aside sweep apply the writer's no-follow check to `.hack` and `.hack/.internal` first (and recheck them before each move or delete): a symlinked or non-directory `.hack` or `.hack/.internal`, or a symlinked or non-regular override, is a closed, value-free refusal, and nothing behind it is listed, read, moved or deleted (HACK-1316). Legacy adoption gives the reference values only to its Compose config-hash probe at preview and preparation; a saved recheck runs without values and binds each container's config-hash label to the hash proven at preparation. `hack config adopt` (with or without `--stop`) and its preview refuse a literal override before preparation, because an adoption pins the file's bytes and inode for its life. Recovery acts on an existing preparation, so the store refuses instead: publication (`--recover --stop`) and switch completion (`--recover`) refuse a generation bound to a literal override before any original moves, and name `hack config adopt --recover --rollback` (HACK-1318). Rollback stays allowed. While a prepared, active or pending adoption exists, no removal touches the file (removal would make the adoption unloadable); an adoption that an earlier version made over a literal file therefore keeps its values at rest until `hack config adopt --rollback`, and the doctor check names that next step (see gap 4). The `HACK_ENV_*` references, shared for global scope and distinct for service overrides, go only to `docker compose` invocations that read the override; the `docker inspect`, `logs` and `events` children for dependency cache progress and reuse get the environment without them (`withoutComposeEnvReferences`). Proven with a stub `docker` by `tests/compose-env-at-rest-cli.test.ts`, `tests/compose-env-at-rest.test.ts`, `tests/compose-env-reference-least-privilege.test.ts`, `tests/doctor-fix-noninteractive.test.ts`, `tests/native-compose-adoption-generation-managed.test.ts`, `tests/native-compose-adoption-generation-recovery.test.ts` and the sentinel scan `tests/env-secret-sentinel-scan.test.ts` (HACK-1273, HACK-1318). |
 | Two writers of the `encrypted_file` store lose an update. | An in-process queue plus a cooperative `<store>.lock` using the owner protocol from `src/lib/projects-registry-lock.ts`; a symlinked store path is refused for writes (`src/lib/secret-store.ts`, #302). |
-| Concurrent first users of the `encrypted_file` store each generate a key; the last key file wins and the store, already encrypted under another key, can no longer be decrypted. | The generated key is published with `publishPrivateFileExclusive` (`src/lib/private-file.ts`): a fsynced 0600 sibling is linked into place only when no key file exists, so losers adopt the published key. A store found non-empty after the first key read re-reads the key file before the keychain fallback. Proven across eight worker processes by `tests/secret-key-provisioning-convergence.test.ts`. |
+| Concurrent first users of the `encrypted_file` store each generate a key; the last key file wins and the store, already encrypted under another key, can no longer be decrypted. | The generated key is published with `publishPrivateFileExclusive` (`src/lib/private-file.ts`): a fsynced 0600 sibling is linked into place only when no key file exists, so losers adopt the published key. A store found non-empty after the first key read re-reads the key file before the keychain fallback. Proven across eight worker processes by `tests/secret-key-provisioning-convergence.test.ts`. This does not cover the process-global cache and explicit provisioning gaps in gap 17. |
 | Concurrent first secrets in the primary checkout and a linked worktree create two different project keys (checkout-local and shared), so values do not decrypt across checkouts; or a reader refuses a key file that another process is still publishing. | When no key exists, `ensureProjectEnvSecretKey` (`src/lib/project-env-config.ts`) creates it under a cooperative lock at `<git common dir>/.hack.secret.key.lock` and repeats the lookup under the lock. Key files are published complete with `publishPrivateFileExclusive`, and a key read that overlaps a publication is retried for about a quarter second while the entry is a regular file. Proven by `tests/secret-key-provisioning-convergence.test.ts`. Hack v4 writers do not take the lock. |
 
 ### Malformed or hostile ciphertext
@@ -150,13 +152,17 @@ planned branch or a passing documentation check is not a mitigation.
    enforces that. It still holds decrypted values by design, so backups, file sync and
    anything running as the user can read it. `.hack/.internal/compose.env.override.yml`
    no longer holds values (HACK-1273), but the `docker compose` client process now
-   carries one `HACK_ENV_*` variable per service and key. Like every injected env, it is
-   readable by the same user (for example `ps eww`) for the life of that process. Each
-   service gets its own copy of each value, so the size grows with services times keys.
-   A project whose resolved values exceed the platform's argument and environment limit
-   (about 1 MiB in total on macOS; on Linux also 128 KiB, `MAX_ARG_STRLEN`, for one
-   `NAME=value` string such as a large PEM bundle) cannot start through Compose; the
-   start fails with `E2BIG`. Existing containers keep their values in `docker inspect`
+   carries `HACK_ENV_*` references shared by services whose winning scope is global.
+   Service-scoped overrides keep distinct references. The renderer uses scope metadata,
+   with a separate reference if inconsistent input gives a service a different value
+   (`src/lib/compose-managed-env.ts`). Global values also reach Compose under their own
+   names for interpolation. These values are readable by the same user for the life of
+   the process. Hack preflights the merged shell and managed environment, reserving
+   space for arguments, before writing the override or launching Compose. An oversized
+   environment is refused with `E_ENV_TOO_LARGE` and byte counts, not names or values
+   (`src/lib/spawn-env-limit.ts`). See the maintained
+   [Compose delivery and size contract](../env.md#runtime-behavior).
+   Existing containers keep their values in `docker inspect`
    (gap 9). A direct `docker compose -f` run of the override outside Hack gets blank
    values. Legacy adoption resolves the values at preview and preparation and checks
    each container's config-hash label against Compose's hash computed with them; a
@@ -173,8 +179,9 @@ planned branch or a passing documentation check is not a mitigation.
    check names rollback, `hack up` and adopting again as the way to drop the values.
    A preparation that an earlier version made over a literal override is never
    published now (HACK-1318); until `hack config adopt --recover --rollback` releases
-   its journaled switch, it also keeps the file. Other generated files under `.hack/.internal/` and `.hack/.branch/` are
-   written with the process umask; the scan shows they hold no values today.
+   its journaled switch, it also keeps the file. Other internal files are not
+   value-free by definition: lifecycle logs can hold plaintext output, with
+   umask-dependent permissions (gap 16). The sentinel fixture does not prove otherwise.
 5. **YAML env layer TOCTOU (narrowed, HACK-1685).** Base and overlay YAML layers,
    including local layers and init scaffold writes, may follow links only when the whole chain resolves inside
    `realpath(projectRoot)`. Component-aware resolution handles relative targets,
@@ -244,6 +251,44 @@ planned branch or a passing documentation check is not a mitigation.
     project has its own matching rule. Local YAML ignore patterns also cannot
     protect files already tracked. Check actual tracking and ignore behavior;
     keep this open until the separate ignore fix merges.
+16. **Open: lifecycle log and FIFO custody (HACK-2170).** Hooks and persistent
+    processes copy unredacted output to `.hack/.internal/lifecycle/<project>.log`
+    (`src/commands/project.ts`, `src/lib/lifecycle-runtime.ts`). Log creation uses
+    the process umask, and appending follows a final-path symlink; with umask 022,
+    a new log can be 0644. Persistent output also crosses a FIFO named with
+    `mktemp -u` and then created with `mkfifo` in `${TMPDIR:-/tmp}`, without a private
+    directory, explicit private mode or checked creation failure
+    (`src/lib/project-lifecycle-controller.ts`). Name reservation is racy, and
+    other readers may access output when ancestor permissions allow it. Keep this
+    open until the log and FIFO fix merges.
+17. **Open: secret-store and key integrity (HACK-2169).** In
+    `src/lib/secret-store.ts`, an unreadable encrypted store can be treated as empty
+    by `readEncryptedEntries`; a later mutation can replace it with only the new
+    entry. The process-global key cache is not bound to a store/key path, so a
+    cached key can be reused for another store whose key is absent. Explicit key
+    provisioning can replace an existing key without authenticating and re-encrypting
+    the store under the new one. Separately, project env add/set can create a file
+    key despite a working environment-only project key; file precedence then hides
+    that environment key from reads (`src/lib/project-env-config.ts`,
+    `src/commands/env.ts`). These are integrity and recoverability gaps, not safe
+    rotation paths. Keep them open until the corresponding fixes merge.
+18. **Open: local-layer symlinks, ignores and modes (HACK-2165).** Hydration checks
+    whether the logical local path is tracked before resolving an allowed
+    in-project symlink; the writer can then replace its tracked shared target.
+    Ordinary local add/set and hydrate can warn about failed ignore setup and
+    still write, and named local layers can already be tracked
+    (`src/lib/project-env-config.ts`, `src/lib/project-env-layer-path.ts`,
+    `src/lib/fs.ts`). Existing local-layer modes are preserved. Legacy dotenv
+    inspection also follows symlinks through `readTextFile`, including links
+    outside the project (`src/lib/hack-env.ts`); mutation checks do not protect
+    that read path. Keep these gaps open until the hygiene fixes merge; an
+    in-project target or local filename is not proof of private storage.
+19. **Open: migration cleanup recheck (HACK-2171).** Cleanup removes the current
+    path after an earlier migration/consent decision without rechecking the
+    selected file's current bytes and identity under a lock
+    (`removeLegacyProjectEnvArtifacts` in `src/lib/project-env-config.ts`,
+    cleanup callers in `src/commands/doctor.ts`). Edits made between that decision
+    and removal can be lost. Keep this open until cleanup revalidation merges.
 
 ### Plaintext on disk outside materialization
 
@@ -265,6 +310,14 @@ never redacted. If the supervisor dies, unscanned bytes can remain plaintext for
 the whole retention period or longer until a sweep; reads withholding those
 bytes do not delete them. Native background output has no redaction. See
 [background output custody](../guides/background-commands.md#stored-output-retention-and-redaction).
+
+Background metadata is not an env-value-free store: `meta.json` and `launch.json`
+retain caller argv, and `commands show` returns it, even with `--capture metadata`
+(`src/lib/background-command/launch.ts`, `src/lib/background-command/store.ts`,
+`src/lib/background-command/reader.ts`). Output redaction does not sanitize argv.
+Foreground MCP command audit records also retain formatted command arguments
+(`src/mcp/server.ts`). Keep sensitive values out of arguments; managed env
+injection does not require putting them there.
 
 ## Cross-context substitution accepted under v1
 

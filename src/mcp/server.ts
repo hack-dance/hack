@@ -1567,7 +1567,7 @@ function registerBackgroundCommandTools(opts: {
     name: "hack.project.command.inspect",
     title: "Inspect a background command",
     description:
-      "Show a background command's state, limits, capture and redaction settings, output sizes, supervisor and child identity, cursors and final outcome (hack commands show --json). Never returns environment values. Read-only.",
+      "Show a background command's state, stored argv, limits, capture and redaction settings, output sizes, supervisor and child identity, cursors and final outcome (hack commands show --json). Automatic env maps are omitted, but caller-supplied argv can contain sensitive expanded values and is not redacted. Read-only.",
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     inputSchema: { ...scopeInput, commandId: COMMAND_ID_INPUT },
     handler: async (input, extra) => {

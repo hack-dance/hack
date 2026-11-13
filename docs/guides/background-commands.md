@@ -192,7 +192,8 @@ hack commands cancel <id> --json
 
 `show` prints the request (service, argv, workdir), state, limits, capture and
 redaction settings, output sizes, the supervisor and child process ids, the
-cursors and the final record. It never prints environment values.
+cursors and the final record. Automatic env maps are omitted, but argv is retained
+and shown as supplied. Caller-expanded values in arguments are not redacted.
 
 `cancel` first records the request, then signals the supervisor and the
 command's process group, each only after re-checking its pid, start time and
@@ -304,7 +305,12 @@ user that can select the project can read it, and backups can copy it.
   their 7 days are up: when a Hack home already holds 4096 tombstones, a new
   start is refused with `E_ADMISSION_LIMIT` until older ones age out, rather
   than forgetting a key early.
-- Metadata never contains environment values.
+- Automatic env maps are not serialized into command metadata. Raw caller argv
+  is stored in `meta.json` and `launch.json`, including with `--capture metadata`,
+  and returned by `show`. A shell-expanded value or token-bearing URL in argv
+  therefore stays on disk and can reach agent context. Output redaction does not
+  sanitize these records; metadata capture is not an argument-redaction mode.
+  Keep sensitive values out of arguments and use managed env injection instead.
 
 Settings, in the global `~/.hack/hack.config.json` or the project's
 `.hack/hack.config.json`, under `backgroundCommands`:

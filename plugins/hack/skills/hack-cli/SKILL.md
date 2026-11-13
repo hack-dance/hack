@@ -29,6 +29,7 @@ Use `hack` as the primary interface for local-first development.
 - Scripted/agent runs: pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) so commands never block on prompts — they apply documented defaults or fail fast with E_INTERACTIVE_REQUIRED.
 - Use MCP only when shell access is unavailable.
 - Treat `hack logs`, MCP run/exec results and background-command reads as secret-bearing output: applications can print injected values. Do not paste or persist raw output in prompts, replies, logs or reports without reviewing it; redaction is partial and native background output is not redacted.
+- Assess output sensitivity before reading it into agent context. JSON is formatting, not redaction. Background metadata stores caller argv even with metadata-only capture; expanded values in arguments are not redacted. Keep sensitive values out of argv.
 - A task request authorizes its stated scope, not unrelated service, global config, or production changes. Preserve native credential/trust approvals and destructive-cleanup gates; do not ask again for the same authorized action.
 - Cleanup must prove resource ownership. Successful one-shot containers may exit with code 0; adopted external processes must remain running when Hack stops its own services.
 - If runtime state looks wrong, inspect with `hack doctor`; apply `hack doctor --fix` only for repairs covered by the request. Warnings do not authorize broader changes.
@@ -109,6 +110,7 @@ Use `hack` as the primary interface for local-first development.
 
 ## Logs (default is compose)
 
+- Before reading logs, assess whether application output may contain sensitive values. Logs are not redacted; JSON is formatting, not redaction. Do not automatically ingest sensitive output into agent context.
 - Fast tail: `hack logs --pretty`
 - Per-service tail: `hack logs <service>`
 - Machine snapshot: `hack logs --json --no-follow`
